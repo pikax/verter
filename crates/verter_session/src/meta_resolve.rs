@@ -487,6 +487,16 @@ pub(crate) fn project_prepared_type_surface_shape_via_host(
     Some(projected_surface_to_expanded_shape(&surface))
 }
 
+pub(crate) fn project_prepared_type_surface_expr_via_host_threaded<'host>(
+    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'host>,
+    scope_canonical_id: &str,
+    symbol_name: &str,
+) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+    use crate::resolver_core::projected_surface_to_type_expr;
+    let surface = engine.cached_prepared_root_surface(scope_canonical_id, symbol_name)?;
+    projected_surface_to_type_expr(&surface)
+}
+
 pub(crate) fn project_prepared_type_surface_shape_via_host_threaded<'host>(
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'host>,
     scope_canonical_id: &str,
@@ -588,6 +598,64 @@ pub(crate) fn lower_and_project_to_expanded_via_host_threaded<'host>(
         && type_expr_is_expanded_surface(&reduced)
         && reduced != *expr)
         .then_some(reduced)
+}
+
+/// Phase 5l — direct equivalent of the deleted
+/// `ComponentMetaQueryEngine::project_expr_surface_expr` engine method:
+/// the registry-route fast-path falls through to
+/// `lower_and_project_to_expanded_via_host_threaded`, then to a
+/// pure-dispatch `ProjectPath { empty, Expanded }` against the lowered
+/// expression. Distinct from `project_expr_class_a_via_dispatch_threaded`
+/// in that this bridge does NOT decompose IndexedAccess chains —
+/// matching the engine method's "lower the whole expr, dispatch with
+/// empty path" semantics for callers that depend on it (e.g.
+/// `solve_or_project_leaf_expr_until_stable`).
+pub(crate) fn project_expr_surface_expr_via_host_threaded<'host>(
+    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'host>,
+    scope_canonical_id: &str,
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::resolver_core::component_meta_registry::{
+        component_meta_registry_public_indexed_access_route,
+        component_meta_registry_public_utility_route,
+    };
+    use crate::resolver_core::{type_expr_contains_semantic_miss, type_expr_is_expanded_surface};
+    use crate::semantic_query::{
+        PathSegment, ProjectionMode, QueryResult, SemanticQueryApi, SemanticQueryKey,
+    };
+
+    if engine.projection_op_budget_exhausted() {
+        return None;
+    }
+    if let Some((root_symbol, route)) = component_meta_registry_public_indexed_access_route(expr)
+        .or_else(|| component_meta_registry_public_utility_route(expr))
+    {
+        if let Some(projected) =
+            project_route_surface_expr_via_host_threaded(engine, scope_canonical_id, &root_symbol, &route)
+        {
+            return Some(projected);
+        }
+        if let Some(solved) =
+            lower_and_project_to_expanded_via_host_threaded(engine, scope_canonical_id, expr)
+        {
+            return Some(solved);
+        }
+    }
+    let host = engine.host();
+    let dispatch = ProjectSemanticDispatch::new(host);
+    let base = dispatch.lower_type_expr_in_scope(scope_canonical_id, expr)?;
+    let read = dispatch.execute_to_type_expr(&SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        mode: ProjectionMode::Expanded,
+    });
+    let projected = match read.value {
+        QueryResult::Value(expr) => expr,
+        QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
+    };
+    (!type_expr_contains_semantic_miss(&projected) && type_expr_is_expanded_surface(&projected))
+        .then_some(projected)
 }
 
 pub(crate) fn project_expr_surface_expr_with_compound_objects_via_host_threaded<'host>(

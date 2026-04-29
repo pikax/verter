@@ -1990,9 +1990,12 @@ fn registry_decl_materialization_skips_raw_snapshot_fallback_for_snapshotless_im
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(&host);
     // D-Cutover §5.8: `CMQE::solve_scoped` retired; dispatch's
     // `project_type_surface_expr` is the sole scoped-lookup entry point.
-    let materialized = query_engine
-        .project_type_surface_expr("/src/types.ts", "Props")
-        .expect("registry decl materialization should resolve Props through dispatch");
+    let materialized = crate::meta_resolve::project_type_surface_expr_via_host_threaded(
+        &mut query_engine,
+        "/src/types.ts",
+        "Props",
+    )
+    .expect("registry decl materialization should resolve Props through dispatch");
 
     assert_eq!(
         materialized, decl.body,
@@ -3056,9 +3059,12 @@ defineProps<DashboardSidebarCollapseProps>()
 
     let _store_view = project.host().resolver_store_view();
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(project.host());
-    let button_projected = query_engine
-        .project_type_surface_expr("/components/Button.vue", "ButtonProps")
-        .expect("ButtonProps should project through the shared type-surface DB path");
+    let button_projected = crate::meta_resolve::project_type_surface_expr_via_host_threaded(
+        &mut query_engine,
+        "/components/Button.vue",
+        "ButtonProps",
+    )
+    .expect("ButtonProps should project through the shared type-surface DB path");
     let button_projected_debug = format!("{:?}", button_projected);
     assert!(
         button_projected_debug.contains("icon")
@@ -7550,7 +7556,7 @@ fn produce_one_macro_object_shape_real_nuxt_ui_color_mode_select_stays_off_solve
         !listbox_root_decl.canonical_source.is_empty(),
         "real ListboxRootProps should resolve to a prepared declaration source",
     );
-    let listbox_root_prepared = direct_query_engine.project_prepared_type_surface_expr(
+    let listbox_root_prepared = crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(&mut direct_query_engine,
         &listbox_root_decl.canonical_source,
         &listbox_root_decl.resolved_name,
     );
@@ -7567,7 +7573,7 @@ fn produce_one_macro_object_shape_real_nuxt_ui_color_mode_select_stays_off_solve
             combobox_root_decl.canonical_source.clone(),
             combobox_root_decl.resolved_name.clone(),
         ));
-    let combobox_root_prepared = direct_query_engine.project_prepared_type_surface_expr(
+    let combobox_root_prepared = crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(&mut direct_query_engine,
         &combobox_root_target_source,
         &combobox_root_target_name,
     );
@@ -7581,7 +7587,7 @@ fn produce_one_macro_object_shape_real_nuxt_ui_color_mode_select_stays_off_solve
         !button_html_decl.canonical_source.is_empty(),
         "real ButtonHTMLAttributes should resolve to a prepared declaration source",
     );
-    let button_html_prepared = direct_query_engine.project_prepared_type_surface_expr(
+    let button_html_prepared = crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(&mut direct_query_engine,
         &button_html_decl.canonical_source,
         &button_html_decl.resolved_name,
     );
@@ -7589,14 +7595,17 @@ fn produce_one_macro_object_shape_real_nuxt_ui_color_mode_select_stays_off_solve
         button_html_prepared.is_some(),
         "real ButtonHTMLAttributes should have a prepared-only root surface projection available",
     );
-    let select_menu_prepared = direct_query_engine
-        .project_prepared_type_surface_expr(&select_menu_component, "SelectMenuProps");
+    let select_menu_prepared = crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(
+        &mut direct_query_engine,
+        &select_menu_component,
+        "SelectMenuProps",
+    );
     assert!(
         select_menu_prepared.is_some(),
         "real SelectMenuProps should have a prepared-only root surface projection available",
     );
     let prepared_only =
-        direct_query_engine.project_prepared_type_surface_expr(&component, "ColorModeSelectProps");
+        crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(&mut direct_query_engine,&component, "ColorModeSelectProps");
     assert!(
         prepared_only.is_some(),
         "real ColorModeSelectProps should have a prepared-only root surface projection available",
@@ -7699,7 +7708,11 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_reuses_authoritati
     // prepared-decl fallback that handles overlay-backed types is
     // engine-internal. Migrate atomically with the engine retirement.
     let prepared_overlay_surface =
-        query_engine.project_prepared_type_surface_expr(&component, "ColorModeSelectProps");
+        crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(
+            &mut query_engine,
+            &component,
+            "ColorModeSelectProps",
+        );
     assert!(
         prepared_overlay_surface.is_some(),
         "overlay-backed ColorModeSelectProps should still have a prepared-only root surface available",
@@ -7817,8 +7830,11 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_overlay_upsert_sta
         &mut parts.tracked_dependencies,
         &mut query_engine,
     );
-    let prepared_overlay_shape = query_engine
-        .project_prepared_type_surface_shape(&component, "ColorModeSelectProps")
+    let prepared_overlay_shape = crate::meta_resolve::project_prepared_type_surface_shape_via_host_threaded(
+        &mut query_engine,
+        &component,
+        "ColorModeSelectProps",
+    )
         .expect("overlay-backed prepared root surface should still materialize a shape after registry append");
     assert!(
         has_prop_shape_surface(&prepared_overlay_shape),
@@ -9378,18 +9394,25 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
     let _store_view = host.resolver_store_view();
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
 
-    let _ = query_engine
-        .project_prepared_type_surface_expr("/src/App.vue", "ColorModeSelectProps")
-        .expect("generic inherited omit surface should project");
+    let _ = crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(
+        &mut query_engine,
+        "/src/App.vue",
+        "ColorModeSelectProps",
+    )
+    .expect("generic inherited omit surface should project");
 
     let route = crate::resolver_core::RouteDemand::Pick(vec![
         "open".to_string(),
         "defaultOpen".to_string(),
         "disabled".to_string(),
     ]);
-    let _ = query_engine
-        .project_route_surface_expr("/src/base.ts", "Props", &route)
-        .expect("prepared pick route should project");
+    let _ = crate::meta_resolve::project_route_surface_expr_via_host_threaded(
+        &mut query_engine,
+        "/src/base.ts",
+        "Props",
+        &route,
+    )
+    .expect("prepared pick route should project");
 }
 
 // ===========================================================================

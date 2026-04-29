@@ -1657,10 +1657,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     fn deep_resolve_type_refs(&mut self, scope_canonical_id: &str, expr: &TypeExpr) -> TypeExpr {
         match expr {
             TypeExpr::Ref { .. } => {
-                let host_ref = self.host;
-                crate::meta_resolve::project_expr_class_a_via_dispatch_threaded(
-                    host_ref,
-                    Some(self),
+                crate::meta_resolve::project_expr_surface_expr_via_host_threaded(
+                    self,
                     scope_canonical_id,
                     expr,
                 )
@@ -1702,10 +1700,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             | TypeExpr::Mapped { .. }
             | TypeExpr::KeyOf(_)
             | TypeExpr::TypeOf(_) => {
-                let host_ref = self.host;
-                crate::meta_resolve::project_expr_class_a_via_dispatch_threaded(
-                    host_ref,
-                    Some(self),
+                crate::meta_resolve::project_expr_surface_expr_via_host_threaded(
+                    self,
                     scope_canonical_id,
                     expr,
                 )
@@ -2352,89 +2348,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// without embedding a separate resolver). Callers migrate off
     /// this method in 5d-5f; the method retires in 5g along with the
     /// prepared-projection helpers per §F call-graph closure.
-    #[deprecated(note = "Phase 5l deletion target: project_type_surface — \
-                migrate via dispatch.execute(SemanticQueryKey::ProjectPath{..., Expanded})")]
-    pub fn project_type_surface(
-        &mut self,
-        scope_canonical_id: &str,
-        symbol_name: &str,
-    ) -> Option<verter_semantic::analysis::type_solver::query_engine::ProjectedSurface> {
-        if self
-            .fuse_state
-            .check_projection_op_count(&self.fuse_budgets)
-        {
-            return None;
-        }
-        self.dispatch_projected_surface(scope_canonical_id, symbol_name)
-            .or_else(|| self.cached_prepared_root_surface(scope_canonical_id, symbol_name))
-    }
-
-    /// **Phase 5c trampoline.** Composes [`Self::project_type_surface`]
-    /// (itself a dispatch trampoline) with the projection → `TypeExpr`
-    /// raise. Callers migrate off in 5d-5f.
-    #[deprecated(note = "Phase 5l deletion target: project_type_surface_expr — \
-                migrate via dispatch.execute_to_type_expr(SemanticQueryKey::ProjectPath{..., Expanded})")]
-    pub fn project_type_surface_expr(
-        &mut self,
-        scope_canonical_id: &str,
-        symbol_name: &str,
-    ) -> Option<TypeExpr> {
-        self.project_type_surface(scope_canonical_id, symbol_name)
-            .and_then(|surface| projected_surface_to_type_expr(&surface))
-    }
-
-    /// **Phase 5c trampoline.** Composes [`Self::project_type_surface`]
-    /// with the projection → `ExpandedObjectShape` raise. Callers
-    /// migrate off in 5d-5f.
-    #[deprecated(note = "Phase 5l deletion target: project_type_surface_shape — \
-                migrate via dispatch.execute(SemanticQueryKey::ProjectPath{..., Expanded}) + projected_surface_to_expanded_shape")]
-    pub fn project_type_surface_shape(
-        &mut self,
-        scope_canonical_id: &str,
-        symbol_name: &str,
-    ) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
-        self.project_type_surface(scope_canonical_id, symbol_name)
-            .map(|surface| projected_surface_to_expanded_shape(&surface))
-    }
-
-    /// **Phase 5c trampoline (sub-plan §4.2 line 441).** Body uses
-    /// the prepared-decl projection (`cached_prepared_root_surface`),
-    /// which is itself a dispatch consumer that reduces the prepared
-    /// decl body via the host's prepared-decl store without an
-    /// embedded resolver. Method retires in 5g per §F call-graph
-    /// closure; the §4.2 rewrite to
-    /// `dispatch.execute_to_type_expr(Instantiate { .. })` lands once
-    /// the prepared-decl Instantiate path subsumes the surface-side
-    /// barrel-routing helpers.
-    #[deprecated(
-        note = "Phase 5l deletion target: project_prepared_type_surface_expr — \
-                migrate via dispatch.execute_to_type_expr(SemanticQueryKey::Instantiate{..., body_mode: Expanded})"
-    )]
-    pub fn project_prepared_type_surface_expr(
-        &mut self,
-        scope_canonical_id: &str,
-        symbol_name: &str,
-    ) -> Option<TypeExpr> {
-        self.cached_prepared_root_surface(scope_canonical_id, symbol_name)
-            .and_then(|surface| projected_surface_to_type_expr(&surface))
-    }
-
-    /// **Phase 5c trampoline (sub-plan §4.2 line 441).** Sibling to
-    /// [`Self::project_prepared_type_surface_expr`] but raises to an
-    /// `ExpandedObjectShape`. Callers migrate off in 5d-5f.
-    #[deprecated(
-        note = "Phase 5l deletion target: project_prepared_type_surface_shape — \
-                migrate via dispatch.execute(SemanticQueryKey::Instantiate{..., body_mode: Expanded}) + projected_surface_to_expanded_shape"
-    )]
-    pub fn project_prepared_type_surface_shape(
-        &mut self,
-        scope_canonical_id: &str,
-        symbol_name: &str,
-    ) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
-        self.cached_prepared_root_surface(scope_canonical_id, symbol_name)
-            .map(|surface| projected_surface_to_expanded_shape(&surface))
-    }
-
     pub(crate) fn cached_prepared_root_surface(
         &mut self,
         scope_canonical_id: &str,
@@ -3633,22 +3546,19 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             )
             .unwrap_or_else(|| expr.clone());
         if matches!(projected_expr, TypeExpr::Unknown { .. }) {
-            // Phase 5l: re-export chain semantics now travel through
-            // the dispatch helper `instantiate_local_generic_ref_via_dispatch`.
-            let host_ref = self.host;
-            if let Some(expanded) = crate::meta_resolve::instantiate_local_generic_ref_via_dispatch(
-                host_ref,
-                resolution_scope_canonical_id,
-                expr,
-            )
-            .or_else(|| {
-                crate::meta_resolve::instantiate_local_generic_ref_via_dispatch(
-                    host_ref,
-                    active_scope_canonical_id,
-                    expr,
-                )
-            })
-            .filter(|expanded| expanded != expr)
+            // Phase 5l: preserve the re-export chain walk that the
+            // deleted `instantiate_local_generic_ref` engine method
+            // performed via `resolve_final_prepared_type_target`.
+            if let Some(expanded) =
+                instantiate_local_generic_ref_via_engine(self, resolution_scope_canonical_id, expr)
+                    .or_else(|| {
+                        instantiate_local_generic_ref_via_engine(
+                            self,
+                            active_scope_canonical_id,
+                            expr,
+                        )
+                    })
+                    .filter(|expanded| expanded != expr)
             {
                 return self.enumerate_member_surface_keys_via_route(
                     resolution_scope_canonical_id,
@@ -3888,18 +3798,17 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         // Try expanding the alias's body (substituting
                         // type arguments), then retry the indexed access
                         // against the substituted body.
-                        // Phase 5l: substitution lands through the dispatch
-                        // helper instead of the deprecated engine method.
-                        let host_ref = self.host;
+                        // Phase 5l: preserve the engine method's
+                        // re-export chain walk via the engine helper.
                         let expanded = if !type_arguments.is_empty() {
-                            crate::meta_resolve::instantiate_local_generic_ref_via_dispatch(
-                                host_ref,
+                            instantiate_local_generic_ref_via_engine(
+                                self,
                                 resolution_scope_canonical_id,
                                 object,
                             )
                             .or_else(|| {
-                                crate::meta_resolve::instantiate_local_generic_ref_via_dispatch(
-                                    host_ref,
+                                instantiate_local_generic_ref_via_engine(
+                                    self,
                                     active_scope_canonical_id,
                                     object,
                                 )
@@ -3967,324 +3876,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
 
-    /// Project a single member from a type expression in a declaration scope.
-    ///
-    /// Results are write-through: stable projections are published to
-    /// `TypeSurfaceDb` and reused by later requests.
-    #[deprecated(note = "Phase 5l deletion target: project_type_member — \
-                migrate via dispatch.execute(SemanticQueryKey::ProjectPath{..., path: [Member(member)], mode: Expanded})")]
-    pub fn project_type_member(
-        &mut self,
-        scope_canonical_id: &str,
-        symbol_name: &str,
-        member_name: &str,
-    ) -> Option<verter_semantic::analysis::type_solver::query_engine::ProjectedMember> {
-        if self
-            .fuse_state
-            .check_projection_op_count(&self.fuse_budgets)
-        {
-            return None;
-        }
-        self.dispatch_projected_member(scope_canonical_id, symbol_name, member_name)
-            .or_else(|| {
-                let mut active = FxHashSet::default();
-                self.project_prepared_requested_member_from_symbol(
-                    scope_canonical_id,
-                    symbol_name,
-                    member_name,
-                    &FxHashMap::default(),
-                    &mut active,
-                )
-            })
-    }
-
-    /// Project the keyspace (member names) from a type expression in a
-    /// declaration scope.
-    ///
-    /// Results are write-through: stable projections are published to
-    /// `TypeSurfaceDb` and reused by later requests.
-    #[deprecated(note = "Phase 5l deletion target: project_type_keyspace — \
-                migrate via dispatch.execute(SemanticQueryKey::KeyOf{base}) on the lowered scope")]
-    pub fn project_type_keyspace(
-        &mut self,
-        scope_canonical_id: &str,
-        symbol_name: &str,
-    ) -> Option<verter_semantic::analysis::type_solver::query_engine::ProjectedKeyspace> {
-        if self
-            .fuse_state
-            .check_projection_op_count(&self.fuse_budgets)
-        {
-            return None;
-        }
-        self.dispatch_projected_keyspace(scope_canonical_id, symbol_name)
-    }
-
-    /// Project an arbitrary [`TypeExpr`] to its surface form (plan §9
-    /// appendix row 1-2).
-    ///
-    /// **Phase 5c trampoline (sub-plan §5 commit 3.7).** The body is
-    /// dispatch-centric: a registry-route discriminator
-    /// (`component_meta_registry_public_indexed_access_route` /
-    /// `_utility_route`) translates indexed-access /
-    /// `Pick<>`/`Omit<>` style expressions into a `RouteDemand` shape
-    /// that hits the route-aware projection (which itself trampolines
-    /// through dispatch); arbitrary expressions go through the
-    /// `ProjectPath { ..., mode: Expanded }` dispatch entry directly.
-    /// All branches reach the shared `ProjectSemanticDispatch` memo;
-    /// no embedded resolver remains in this body. Callers migrate off
-    /// this method in 5d-5f; the method itself is deleted in 5g.
-    #[deprecated(note = "Phase 5l deletion target: project_expr_surface_expr — \
-                migrate via dispatch.execute_to_type_expr(SemanticQueryKey::ProjectPath{..., Expanded}) on the lowered expression")]
-    pub fn project_expr_surface_expr(
-        &mut self,
-        scope_canonical_id: &str,
-        expr: &TypeExpr,
-    ) -> Option<TypeExpr> {
-        if self
-            .fuse_state
-            .check_projection_op_count(&self.fuse_budgets)
-        {
-            return None;
-        }
-        if let Some((root_symbol, route)) =
-            super::component_meta_registry::component_meta_registry_public_indexed_access_route(
-                expr,
-            )
-            .or_else(|| {
-                super::component_meta_registry::component_meta_registry_public_utility_route(expr)
-            })
-        {
-            if let Some(projected) =
-                self.project_route_surface_expr(scope_canonical_id, &root_symbol, &route)
-            {
-                return Some(projected);
-            }
-            if let Some(solved) = self.lower_and_project_to_expanded(scope_canonical_id, expr) {
-                return Some(solved);
-            }
-        }
-        let dispatch = self.semantic_dispatch();
-        let base = dispatch.lower_type_expr_in_scope(scope_canonical_id, expr)?;
-        let read = dispatch.execute_to_type_expr(&SemanticQueryKey::ProjectPath {
-            base,
-            path: std::sync::Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-            mode: ProjectionMode::Expanded,
-        });
-        let projected = match read.value {
-            QueryResult::Value(expr) => expr,
-            QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
-        };
-        (!type_expr_contains_semantic_miss(&projected) && type_expr_is_expanded_surface(&projected))
-            .then_some(projected)
-    }
-
-    /// Like [`Self::project_expr_surface_expr`] but accepts compound
-    /// projections (Intersection / Union / Parenthesized) that contain
-    /// at least one Object arm even when sibling arms are still deferred
-    /// shells (Mapped / KeyOf / IndexedAccess / Conditional). Used by
-    /// the `defineSlots<T>` macro-shape producer to extract explicit
-    /// slot names from `{ leading?, content? } & DynamicSlots<...>`-
-    /// shaped intersections where the dynamic helper arm cannot
-    /// enumerate keys at unresolved-generic time.
-    ///
-    /// Returns `None` when the projection has no Object arm at any
-    /// nesting level — there is no surface to extract.
-    ///
-    /// **Phase 5c trampoline.** Body is dispatch-only (the shared
-    /// `ProjectSemanticDispatch` projection through `ProjectPath { ...,
-    /// mode: Expanded }` followed by the compound-object filter). No
-    /// registry/route fast-path. Method retires in 5g.
-    #[deprecated(
-        note = "Phase 5l deletion target: project_expr_surface_expr_with_compound_objects — \
-                migrate via dispatch.execute_to_type_expr(SemanticQueryKey::ProjectPath{..., Expanded}) + type_expr_has_any_object_arm filter"
-    )]
-    pub fn project_expr_surface_expr_with_compound_objects(
-        &mut self,
-        scope_canonical_id: &str,
-        expr: &TypeExpr,
-    ) -> Option<TypeExpr> {
-        if self
-            .fuse_state
-            .check_projection_op_count(&self.fuse_budgets)
-        {
-            return None;
-        }
-        let dispatch = self.semantic_dispatch();
-        let base = dispatch.lower_type_expr_in_scope(scope_canonical_id, expr)?;
-        let read = dispatch.execute_to_type_expr(&SemanticQueryKey::ProjectPath {
-            base,
-            path: std::sync::Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-            mode: ProjectionMode::Expanded,
-        });
-        let projected = match read.value {
-            QueryResult::Value(expr) => expr,
-            QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
-        };
-        type_expr_has_any_object_arm(&projected).then_some(projected)
-    }
-
-    /// Like [`Self::project_expr_surface_expr`] but returns the raw
-    /// projection result regardless of whether it is fully expanded.
-    /// Returns `None` only when the projection itself fails to produce
-    /// a value (lowering miss / dispatch error) or when the result is
-    /// the `Opaque(Miss)` sentinel.
-    /// Solve an arbitrary [`TypeExpr`] to its reduced form (plan §9
-    /// appendix row 3). Routes through [`ProjectSemanticDispatch`] with
-    /// `mode: Expanded` — D-Cutover §5.8 retired the pre-cutover
-    /// `owner_engine.solve_scoped` fallback.
-    ///
-    /// Returns `Some(reduced)` only when the dispatch result differs
-    /// structurally from `expr`, matching the pre-migration contract.
-    ///
-    /// **Phase 5c trampoline.** Body is the shared
-    /// `ProjectSemanticDispatch` `ProjectPath { mode: Expanded }`
-    /// projection. Method retires in 5g.
-    #[deprecated(note = "Phase 5l deletion target: lower_and_project_to_expanded — \
-                migrate via dispatch.execute_to_type_expr(SemanticQueryKey::ProjectPath{..., Expanded}) on the lowered expression")]
-    pub fn lower_and_project_to_expanded(
-        &mut self,
-        scope_canonical_id: &str,
-        expr: &TypeExpr,
-    ) -> Option<TypeExpr> {
-        if self
-            .fuse_state
-            .check_projection_op_count(&self.fuse_budgets)
-        {
-            return None;
-        }
-        let dispatch = self.semantic_dispatch();
-        let base = dispatch.lower_type_expr_in_scope(scope_canonical_id, expr)?;
-        let read = dispatch.execute_to_type_expr(&SemanticQueryKey::ProjectPath {
-            base,
-            path: std::sync::Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-            mode: ProjectionMode::Expanded,
-        });
-        let reduced = match read.value {
-            QueryResult::Value(expr) => expr,
-            QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
-        };
-        (!type_expr_contains_semantic_miss(&reduced)
-            && type_expr_is_expanded_surface(&reduced)
-            && reduced != *expr)
-            .then_some(reduced)
-    }
-
-    /// Phase 5e commit 6 — engine-internal callers RETAINED on this
-    /// method until 5g engine retirement. The production callers in
-    /// `meta_resolve.rs` migrated to
-    /// `crate::meta_resolve::instantiate_local_generic_ref_via_dispatch`
-    /// (the dispatch helper goes through the shared memo and
-    /// `SemanticQueryKey::Instantiate { base, args, body_mode: Expanded }`).
-    /// Engine-internal callers (lines 3601, 3844, 3849, 4256) retain
-    /// the engine method because they depend on
-    /// `resolve_final_prepared_type_target`'s re-export chain walk
-    /// (which the dispatch's `lower_type_expr_in_scope` does NOT
-    /// inherit verbatim — bare-name resolution and final-target
-    /// walking are distinct resolution layers; threading the
-    /// re-export walk through dispatch is a 5g-scope change). Method
-    /// retires fully in 5g once the engine-internal callers retire
-    /// alongside engine deletion (§4.3 deletion gate).
-    #[deprecated(note = "Phase 5l deletion target: instantiate_local_generic_ref — \
-                migrate via crate::meta_resolve::instantiate_local_generic_ref_via_dispatch (SemanticQueryKey::Instantiate)")]
-    pub fn instantiate_local_generic_ref(
-        &mut self,
-        scope_canonical_id: &str,
-        expr: &TypeExpr,
-    ) -> Option<TypeExpr> {
-        let TypeExpr::Ref {
-            name,
-            type_arguments,
-        } = expr
-        else {
-            return None;
-        };
-        if type_arguments.is_empty() {
-            return None;
-        }
-
-        let declaration = self.resolve_type_declaration(scope_canonical_id, name.as_ref());
-        let declared_canonical_id = if declaration.canonical_source.is_empty() {
-            scope_canonical_id.to_string()
-        } else {
-            declaration.canonical_source.clone()
-        };
-        let declared_symbol_name = if declaration.resolved_name.is_empty() {
-            name.as_ref().to_string()
-        } else {
-            declaration.resolved_name.clone()
-        };
-        let (target_canonical_id, target_symbol_name) = self.resolve_final_prepared_type_target(
-            declared_canonical_id.as_str(),
-            declared_symbol_name.as_str(),
-        );
-        if is_package_source(Some(target_canonical_id.as_str())) {
-            return None;
-        }
-        let prepared = self.prepared_type_decl(&target_canonical_id, &target_symbol_name)?;
-        let substitutions =
-            build_default_type_param_substitutions(prepared.as_ref(), type_arguments)?;
-        Some(apply_type_param_substitutions(
-            &prepared.body,
-            &substitutions,
-        ))
-    }
-
-    /// **Phase 5c trampoline (sub-plan §5 commit 3.7).** Body is
-    /// dispatch-centric: registry-route discriminator translates
-    /// indexed-access / utility expressions into a `RouteDemand` that
-    /// flows through `project_routed_expr_surface_expr` (itself a
-    /// dispatch trampoline); a direct-utility shape rewrite handles
-    /// `Pick<T,K>`/`Omit<T,K>`/`Partial<T>` etc. via the engine's
-    /// surface helpers (which themselves call dispatch); arbitrary
-    /// expressions go through `ProjectPath { ..., mode: Shallow }`.
-    /// All branches reach the shared `ProjectSemanticDispatch` memo;
-    /// no embedded resolver remains. Method retires in 5g.
-    #[deprecated(note = "Phase 5l deletion target: project_expr_surface_shape — \
-                migrate via dispatch.execute(SemanticQueryKey::ProjectPath{..., Shallow}) + projected_surface_to_expanded_shape")]
-    pub fn project_expr_surface_shape(
-        &mut self,
-        scope_canonical_id: &str,
-        expr: &TypeExpr,
-    ) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
-        if self
-            .fuse_state
-            .check_projection_op_count(&self.fuse_budgets)
-        {
-            return None;
-        }
-        if let Some((root_symbol, route)) =
-            super::component_meta_registry::component_meta_registry_public_indexed_access_route(
-                expr,
-            )
-            .or_else(|| {
-                super::component_meta_registry::component_meta_registry_public_utility_route(expr)
-            })
-        {
-            if let Some(projected) =
-                self.project_routed_expr_surface_expr(scope_canonical_id, &root_symbol, &route)
-            {
-                return Some(
-                    verter_semantic::analysis::type_expand::type_expr_to_object_shape(&projected),
-                );
-            }
-        }
-        if let Some(shape) = self.project_direct_utility_surface_shape(scope_canonical_id, expr) {
-            return Some(shape);
-        }
-        let dispatch = self.semantic_dispatch();
-        let base = dispatch.lower_type_expr_in_scope(scope_canonical_id, expr)?;
-        let QueryResult::Value(node) = dispatch.execute(SemanticQueryKey::ProjectPath {
-            base,
-            path: std::sync::Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-            mode: ProjectionMode::Shallow,
-        }) else {
-            return None;
-        };
-        let surface = projected_surface_from_semantic_node(self.host, node)?;
-        let shape = projected_surface_to_expanded_shape(&surface);
-        (!shape.properties.is_empty() || !shape.call_signatures.is_empty()).then_some(shape)
-    }
-
     pub(crate) fn project_direct_utility_surface_shape(
         &mut self,
         scope_canonical_id: &str,
@@ -4305,7 +3896,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             // Phase 5l: route through the dispatch-based bridges in
             // `meta_resolve` instead of the deprecated engine methods.
             // The bridges compose dispatch + the engine's surviving
-            // `pub(crate)` cycle-protected helpers.
+            // `pub(crate)` cycle-protected helpers, preserving the
+            // engine method's "lower whole expr, dispatch with empty
+            // path" semantics (no IndexedAccess decomposition).
             if let Some(shape) = crate::meta_resolve::project_expr_surface_shape_via_host_threaded(
                 query_engine,
                 scope_canonical_id,
@@ -4315,9 +3908,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     return Some(shape);
                 }
             }
-            if let Some(projected) = crate::meta_resolve::project_expr_class_a_via_dispatch_threaded(
-                query_engine.host,
-                Some(query_engine),
+            if let Some(projected) = crate::meta_resolve::project_expr_surface_expr_via_host_threaded(
+                query_engine,
                 scope_canonical_id,
                 target,
             ) {
@@ -4327,12 +3919,11 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     return Some(shape);
                 }
             }
-            // Phase 5l: instantiate via the dispatch helper instead of
-            // the deprecated engine method (re-export chain semantics
-            // are preserved by the bridge through
-            // `instantiate_local_generic_ref_via_dispatch`).
-            let expanded_ref_opt = crate::meta_resolve::instantiate_local_generic_ref_via_dispatch(
-                query_engine.host,
+            // Phase 5l: preserve the engine method's re-export chain
+            // walk by routing through the engine helper rather than
+            // the dispatch-only variant.
+            let expanded_ref_opt = instantiate_local_generic_ref_via_engine(
+                query_engine,
                 scope_canonical_id,
                 target,
             );
@@ -4346,9 +3937,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         return Some(shape);
                     }
                 }
-                if let Some(projected) = crate::meta_resolve::project_expr_class_a_via_dispatch_threaded(
-                    query_engine.host,
-                    Some(query_engine),
+                if let Some(projected) = crate::meta_resolve::project_expr_surface_expr_via_host_threaded(
+                    query_engine,
                     scope_canonical_id,
                     &expanded_ref,
                 ) {
@@ -4433,31 +4023,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             }
             _ => None,
         }
-    }
-
-    /// **Phase 5c trampoline (sub-plan §5 commit 3.7).** Body is a
-    /// thin entry into the engine's route-aware projection
-    /// (`project_routed_expr_surface_expr`), which itself dispatches
-    /// each `RouteDemand` shape (Whole / MemberPath / Pick / Omit)
-    /// through `ProjectSemanticDispatch`. Per sub-plan §5 commit 6
-    /// the seed `mapped_exclude` closure lands in 5e once the
-    /// route-target callers migrate to
-    /// `dispatch.execute_pick`/`execute_omit`. Method retires in 5g.
-    #[deprecated(note = "Phase 5l deletion target: project_route_surface_expr — \
-                migrate via dispatch.execute_pick / dispatch.execute_omit / dispatch.execute_to_type_expr(SemanticQueryKey::ProjectPath{..., MemberPath})")]
-    pub fn project_route_surface_expr(
-        &mut self,
-        scope_canonical_id: &str,
-        root_symbol: &str,
-        route: &super::RouteDemand,
-    ) -> Option<TypeExpr> {
-        if self
-            .fuse_state
-            .check_projection_op_count(&self.fuse_budgets)
-        {
-            return None;
-        }
-        self.project_routed_expr_surface_expr(scope_canonical_id, root_symbol, route)
     }
 
     pub(crate) fn project_routed_expr_surface_expr(
@@ -4884,10 +4449,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             }
             _ => {
                 // Phase 5l: dispatch path replaces the deprecated method.
-                let host_ref = self.host;
-                crate::meta_resolve::project_expr_class_a_via_dispatch_threaded(
-                    host_ref,
-                    Some(self),
+                crate::meta_resolve::project_expr_surface_expr_via_host_threaded(
+                    self,
                     scope_canonical_id,
                     &member.ty,
                 )
@@ -5282,22 +4845,18 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             // deprecated engine methods. The bridges share the engine's
             // cycle-protection helpers so behavior matches the legacy
             // method path.
-            let next = {
-                let host_ref = self.host;
-                crate::meta_resolve::lower_and_project_to_expanded_via_host_threaded(
+            let next = crate::meta_resolve::lower_and_project_to_expanded_via_host_threaded(
+                self,
+                scope_canonical_id,
+                &current,
+            )
+            .or_else(|| {
+                crate::meta_resolve::project_expr_surface_expr_via_host_threaded(
                     self,
                     scope_canonical_id,
                     &current,
                 )
-                .or_else(|| {
-                    crate::meta_resolve::project_expr_class_a_via_dispatch_threaded(
-                        host_ref,
-                        Some(self),
-                        scope_canonical_id,
-                        &current,
-                    )
-                })
-            };
+            });
             let Some(next) = next else {
                 return last;
             };
@@ -6108,6 +5667,56 @@ fn dispatch_member_for_root_symbol(
                 &mut active,
             )
         })
+}
+
+/// Phase 5l — engine-internal substitution helper that mirrors the
+/// deleted `instantiate_local_generic_ref` engine method body. Unlike
+/// the dispatch-only `instantiate_local_generic_ref_via_dispatch`, this
+/// helper walks the re-export chain via
+/// `resolve_final_prepared_type_target` before looking up the prepared
+/// decl — preserving the cross-file type-alias substitution semantics
+/// the engine method's call sites depended on.
+fn instantiate_local_generic_ref_via_engine(
+    engine: &mut ComponentMetaQueryEngine<'_>,
+    scope_canonical_id: &str,
+    expr: &TypeExpr,
+) -> Option<TypeExpr> {
+    let TypeExpr::Ref {
+        name,
+        type_arguments,
+    } = expr
+    else {
+        return None;
+    };
+    if type_arguments.is_empty() {
+        return None;
+    }
+
+    let declaration = engine.resolve_type_declaration(scope_canonical_id, name.as_ref());
+    let declared_canonical_id = if declaration.canonical_source.is_empty() {
+        scope_canonical_id.to_string()
+    } else {
+        declaration.canonical_source.clone()
+    };
+    let declared_symbol_name = if declaration.resolved_name.is_empty() {
+        name.as_ref().to_string()
+    } else {
+        declaration.resolved_name.clone()
+    };
+    let (target_canonical_id, target_symbol_name) = engine.resolve_final_prepared_type_target(
+        declared_canonical_id.as_str(),
+        declared_symbol_name.as_str(),
+    );
+    if is_package_source(Some(target_canonical_id.as_str())) {
+        return None;
+    }
+    let prepared = engine.prepared_type_decl(&target_canonical_id, &target_symbol_name)?;
+    let substitutions =
+        build_default_type_param_substitutions(prepared.as_ref(), type_arguments)?;
+    Some(apply_type_param_substitutions(
+        &prepared.body,
+        &substitutions,
+    ))
 }
 
 pub(crate) fn projected_surface_from_semantic_node(
@@ -7969,9 +7578,12 @@ export interface Wrapper extends PackageProps {}
         let _view = host.resolver_store_view();
         let mut engine = ComponentMetaQueryEngine::new(&host);
 
-        let shape = engine
-            .project_prepared_type_surface_shape("/workspace/src/Child.vue", "Wrapper")
-            .expect("prepared package wrapper projection should resolve");
+        let shape = crate::meta_resolve::project_prepared_type_surface_shape_via_host_threaded(
+            &mut engine,
+            "/workspace/src/Child.vue",
+            "Wrapper",
+        )
+        .expect("prepared package wrapper projection should resolve");
 
         assert!(
             shape.properties.iter().any(|property| property.name == "open"),
@@ -8470,10 +8082,11 @@ defineProps<Omit<SelectMenuProps<SelectMenuItem[]>, 'items'>>()
 
         let mut query_engine = ComponentMetaQueryEngine::new(&host);
         let expanded_target =
-            query_engine.instantiate_local_generic_ref("/src/App.vue", &target_expr);
-        let projected_target = query_engine.project_expr_surface_expr("/src/App.vue", &target_expr);
-        let shape = query_engine
-            .project_expr_surface_shape("/src/App.vue", &expr)
+            crate::meta_resolve::instantiate_local_generic_ref_via_dispatch(query_engine.host,"/src/App.vue", &target_expr);
+        let projected_target = crate::meta_resolve::project_expr_surface_expr_via_host_threaded(&mut query_engine,"/src/App.vue", &target_expr);
+        let shape = crate::meta_resolve::project_expr_surface_shape_via_host_threaded(
+            &mut query_engine,
+"/src/App.vue", &expr)
             .unwrap_or_else(|| {
                 panic!(
                     "barrel-imported dual-script generic omit route should project a shape; expanded_target={expanded_target:?} projected_target={projected_target:?}"
@@ -8639,9 +8252,12 @@ export interface TabsProps<T extends TabsItem = TabsItem> extends Pick<TabsRootP
             index: Arc::new(TypeExpr::string_literal("color")),
         };
 
-        let projected = query_engine
-            .project_expr_surface_expr("/src/App.vue", &expr)
-            .expect("nested indexed-access helper should project");
+        let projected = crate::meta_resolve::project_expr_surface_expr_via_host_threaded(
+            &mut query_engine,
+            "/src/App.vue",
+            &expr,
+        )
+        .expect("nested indexed-access helper should project");
 
         let TypeExpr::Union(members) = projected else {
             panic!("nested indexed-access helper should materialize as a literal union, got {projected:?}");
@@ -8701,8 +8317,9 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
         let _store_view = host.resolver_store_view();
         let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
-        let first = query_engine
-            .project_prepared_type_surface_expr("/src/App.vue", "ColorModeSelectProps")
+        let first = crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(
+            &mut query_engine,
+"/src/App.vue", "ColorModeSelectProps")
             .expect("generic inherited omit surface should project");
         let surface_cache_after_first = query_engine.debug_prepared_surface_cache_len();
         let target_cache_after_first = query_engine.debug_prepared_target_cache_len();
@@ -8711,8 +8328,9 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
             "first prepared projection should populate the request-local surface cache",
         );
 
-        let second = query_engine
-            .project_prepared_type_surface_expr("/src/App.vue", "ColorModeSelectProps")
+        let second = crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(
+            &mut query_engine,
+"/src/App.vue", "ColorModeSelectProps")
             .expect("repeat prepared projection should reuse the cached surface");
 
         assert_eq!(first, second);
@@ -8845,11 +8463,13 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
         let _store_view = host.resolver_store_view();
         let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
-        let expr_surface = query_engine
-            .project_prepared_type_surface_expr("/src/App.vue", "ColorModeSelectProps")
+        let expr_surface = crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(
+            &mut query_engine,
+"/src/App.vue", "ColorModeSelectProps")
             .expect("prepared surface should project");
-        let direct_shape = query_engine
-            .project_prepared_type_surface_shape("/src/App.vue", "ColorModeSelectProps")
+        let direct_shape = crate::meta_resolve::project_prepared_type_surface_shape_via_host_threaded(
+            &mut query_engine,
+"/src/App.vue", "ColorModeSelectProps")
             .expect("prepared shape should project");
 
         assert_eq!(
@@ -8913,8 +8533,9 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
         let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
         let prepared_db_before = host.project_type_store().prepared_surface_db().live_count();
-        let projected = query_engine
-            .project_prepared_type_surface_expr("/src/App.vue", "ColorModeSelectProps")
+        let projected = crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(
+            &mut query_engine,
+"/src/App.vue", "ColorModeSelectProps")
             .expect("prepared surface should project");
         let prepared_db_after = host.project_type_store().prepared_surface_db().live_count();
 
@@ -9033,13 +8654,15 @@ export type IdentityProps<T> = RootProps<T>
         let _store_view = host.resolver_store_view();
         let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
-        let identity_surface = query_engine
-            .project_prepared_type_surface_expr("/src/App.vue", "IdentityProps")
+        let identity_surface = crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(
+            &mut query_engine,
+"/src/App.vue", "IdentityProps")
             .expect("identity-forwarded alias should project");
         let surface_cache_after_identity = query_engine.debug_prepared_surface_cache_len();
 
-        let root_surface = query_engine
-            .project_prepared_type_surface_expr("/src/base.ts", "RootProps")
+        let root_surface = crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(
+            &mut query_engine,
+"/src/base.ts", "RootProps")
             .expect("direct root surface should project");
 
         assert_eq!(
@@ -9097,8 +8720,9 @@ export interface Props extends Pick<BaseProps, 'open' | 'defaultOpen' | 'disable
             "disabled".to_string(),
         ]);
 
-        let first = query_engine
-            .project_route_surface_expr("/src/base.ts", "Props", &route)
+        let first = crate::meta_resolve::project_route_surface_expr_via_host_threaded(
+            &mut query_engine,
+"/src/base.ts", "Props", &route)
             .expect("prepared pick route should project");
         let member_cache_after_first = query_engine.debug_prepared_member_cache_len();
         assert!(
@@ -9106,8 +8730,9 @@ export interface Props extends Pick<BaseProps, 'open' | 'defaultOpen' | 'disable
             "first prepared pick projection should populate the request-local member cache",
         );
 
-        let second = query_engine
-            .project_route_surface_expr("/src/base.ts", "Props", &route)
+        let second = crate::meta_resolve::project_route_surface_expr_via_host_threaded(
+            &mut query_engine,
+"/src/base.ts", "Props", &route)
             .expect("repeat prepared pick projection should reuse the cached members");
 
         assert_eq!(first, second);
@@ -9159,8 +8784,9 @@ export interface LinkProps extends NuxtLinkProps {
             crate::resolver_core::RouteDemand::Pick(vec!["to".to_string(), "target".to_string()]);
 
         let _guard = forbid_direct_pick_routed_expr_slow_lane_for_tests();
-        let projected = query_engine
-            .project_route_surface_expr("/src/Link.vue", "LinkProps", &route)
+        let projected = crate::meta_resolve::project_route_surface_expr_via_host_threaded(
+            &mut query_engine,
+"/src/Link.vue", "LinkProps", &route)
             .expect("member-viable inherited pick route should project without the direct routed-expr slow lane");
         let TypeExpr::Object(object) = projected else {
             panic!("projected inherited pick route should materialize as an object");
@@ -9239,8 +8865,9 @@ export interface LinkProps extends NuxtLinkProps {
         let route =
             crate::resolver_core::RouteDemand::Pick(vec!["to".to_string(), "target".to_string()]);
 
-        let projected = query_engine
-            .project_route_surface_expr("/src/Link.vue", "LinkProps", &route)
+        let projected = crate::meta_resolve::project_route_surface_expr_via_host_threaded(
+            &mut query_engine,
+"/src/Link.vue", "LinkProps", &route)
             .expect("package-backed inherited pick route should project");
         let TypeExpr::Object(object) = projected else {
             panic!("projected inherited pick route should materialize as an object");
@@ -9342,8 +8969,9 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
             crate::resolver_core::RouteDemand::Pick(vec!["to".to_string(), "target".to_string()]);
 
         let _guard = forbid_direct_pick_routed_expr_slow_lane_for_tests();
-        let projected = query_engine
-            .project_route_surface_expr("/src/Link.vue", "LinkProps", &route)
+        let projected = crate::meta_resolve::project_route_surface_expr_via_host_threaded(
+            &mut query_engine,
+"/src/Link.vue", "LinkProps", &route)
             .expect("local inherited members should project without deepening unrelated imported utility bases");
         let TypeExpr::Object(object) = projected else {
             panic!("projected inherited pick route should materialize as an object");
@@ -9471,8 +9099,9 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
             crate::resolver_core::RouteDemand::Pick(vec!["target".to_string(), "to".to_string()]);
 
         let _guard = forbid_direct_pick_routed_expr_slow_lane_for_tests();
-        let projected = query_engine
-            .project_route_surface_expr("/src/Link.vue", "LinkProps", &route)
+        let projected = crate::meta_resolve::project_route_surface_expr_via_host_threaded(
+            &mut query_engine,
+"/src/Link.vue", "LinkProps", &route)
             .expect("realistic inherited pick route should project without the direct routed-expr slow lane");
         let TypeExpr::Object(object) = projected else {
             panic!("projected inherited pick route should materialize as an object");
@@ -9605,8 +9234,9 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
             crate::resolver_core::RouteDemand::Pick(vec!["target".to_string(), "to".to_string()]);
 
         let _guard = forbid_direct_pick_routed_expr_slow_lane_for_tests();
-        let projected = query_engine
-            .project_route_surface_expr("/src/Link.vue", "LinkProps", &route)
+        let projected = crate::meta_resolve::project_route_surface_expr_via_host_threaded(
+            &mut query_engine,
+"/src/Link.vue", "LinkProps", &route)
             .expect("module-routed inherited pick route should project without the direct routed-expr slow lane");
         let TypeExpr::Object(object) = projected else {
             panic!("projected inherited pick route should materialize as an object");
@@ -9758,8 +9388,9 @@ export type EditorToolbarProps<T extends ArrayOrNested<EditorToolbarItem> = Arra
         let _store_view = host.resolver_store_view();
         let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
-        let projected = query_engine
-            .project_type_surface_expr("/src/EditorToolbar.vue", "EditorToolbarProps")
+        let projected = crate::meta_resolve::project_type_surface_expr_via_host_threaded(
+            &mut query_engine,
+"/src/EditorToolbar.vue", "EditorToolbarProps")
             .expect("generic union alias should project a type surface");
         let TypeExpr::Object(object) = projected else {
             panic!("projected surface should materialize as an object");
@@ -9886,8 +9517,9 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
         let _store_view = host.resolver_store_view();
         let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
-        let projected = query_engine
-            .project_type_surface_expr("/src/App.vue", "ColorModeSelectProps")
+        let projected = crate::meta_resolve::project_type_surface_expr_via_host_threaded(
+            &mut query_engine,
+"/src/App.vue", "ColorModeSelectProps")
             .expect("nested pick/omit generic interface should project a type surface");
         let TypeExpr::Object(object) = projected else {
             panic!("projected surface should materialize as an object");
@@ -9996,8 +9628,9 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
         let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
         let _guard = forbid_prepared_structural_substitution_slow_lane_for_tests();
-        let projected = query_engine
-            .project_type_surface_expr("/src/App.vue", "ColorModeSelectProps")
+        let projected = crate::meta_resolve::project_type_surface_expr_via_host_threaded(
+            &mut query_engine,
+"/src/App.vue", "ColorModeSelectProps")
             .expect("nested pick/omit generic interface should project without whole-body structural substitution");
 
         assert!(
@@ -10062,7 +9695,7 @@ export interface ComboboxRootProps<T = AcceptableValue> extends Omit<ListboxRoot
         let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
         let projected =
-            query_engine.project_prepared_type_surface_expr("/src/types.ts", "ComboboxRootProps");
+            crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(&mut query_engine,"/src/types.ts", "ComboboxRootProps");
         assert!(
             projected.is_some(),
             "generic inherited omit interface should have a prepared-only root surface projection available",
@@ -10138,9 +9771,12 @@ export type Concrete = Wrapper<string>
 
         let _guard = forbid_prepared_structural_substitution_slow_lane_for_tests();
         assert!(
-            query_engine
-                .project_prepared_type_surface_expr("/src/App.vue", "Concrete")
-                .is_none(),
+            crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(
+                &mut query_engine,
+                "/src/App.vue",
+                "Concrete",
+            )
+            .is_none(),
             "unbound generic forwarding should stay symbolic instead of taking the structural substitution slow lane",
         );
         assert_eq!(
@@ -10560,9 +10196,12 @@ type Button = ComponentConfig<typeof theme, AppConfig, 'button'>
             index: Arc::new(TypeExpr::string_literal("color")),
         };
 
-        let projected = query_engine
-            .project_expr_surface_expr("/src/Button.vue", &expr)
-            .expect("component-config indexed access route should project");
+        let projected = crate::meta_resolve::project_expr_surface_expr_via_host_threaded(
+            &mut query_engine,
+            "/src/Button.vue",
+            &expr,
+        )
+        .expect("component-config indexed access route should project");
 
         let TypeExpr::Union(members) = projected else {
             panic!(
@@ -11453,8 +11092,9 @@ const props = defineProps<AppProps>()
         let _store_view = host.resolver_store_view();
         let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
-        let shape = query_engine
-            .project_prepared_type_surface_shape("/src/App.vue", "AppProps")
+        let shape = crate::meta_resolve::project_prepared_type_surface_shape_via_host_threaded(
+            &mut query_engine,
+"/src/App.vue", "AppProps")
             .expect("cross-file Omit in interface extends should produce a projectable surface");
 
         let member_names: Vec<&str> = shape.properties.iter().map(|p| p.name.as_str()).collect();
