@@ -140,27 +140,63 @@ fn no_local_vite_helpers_in_lsp() {
 #[test]
 #[ignore = "phase-11 pending"]
 fn god_module_size_budget() {
-    // Size budgets reflect post-Phase-11 expected sizes. Until Phase 11
-    // lands, these tests stay #[ignore]. After Phase 11, ignore is
-    // removed and the budget enforces.
-    let budgets = [
-        ("crates/verter_session/src/meta_resolve.rs", 6000usize),
-        (
-            "crates/verter_session/src/resolver_core/component_meta_query_engine.rs",
-            6000,
-        ),
-        ("crates/verter_session/src/host_manage.rs", 5000),
-        ("crates/verter_compiler/src/ide/script.rs", 6000),
-        ("crates/verter_lsp/src/server.rs", 4000),
-    ];
-    for (path, max_lines) in budgets {
-        let src = read_workspace_file(path);
+    // r15/F6 (Claude review) — walkdir-based, NOT hard-coded paths.
+    // Hard-coded paths break after Phase 5l deletes
+    // component_meta_query_engine.rs (file-missing => panic in
+    // read_workspace_file) and after Phase 11 splits meta_resolve.rs
+    // (path either no longer exists or becomes a thin re-export shell
+    // that trivially passes — losing signal).
+    //
+    // The r15 design enumerates EVERY .rs file under
+    // crates/verter_session/src and asserts each ≤ DEFAULT_MAX_LINES
+    // unless on an allow-list of known-larger files.
+    //
+    // Default budget: 4000 lines per file (post-Phase-11 expectation).
+    // Allow-list: files documented to be intentionally larger
+    // (e.g., generated SDK shims). Each entry MUST link to a phase
+    // report justifying the exception.
+    use std::collections::HashSet;
+    use walkdir::WalkDir;
+    const DEFAULT_MAX_LINES: usize = 4000;
+    let allow_list: HashSet<&str> = [
+        // (path-relative-to-workspace-root, justified-by-report)
+        // Add entries here ONLY with a phase-report citation.
+    ]
+    .iter()
+    .copied()
+    .collect();
+    let crate_root = workspace_root().join("crates/verter_session/src");
+    let mut violations = Vec::<String>::new();
+    for entry in WalkDir::new(&crate_root) {
+        let entry = entry.expect("walkdir entry");
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let rel = path
+            .strip_prefix(workspace_root())
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        if allow_list.contains(rel.as_str()) {
+            continue;
+        }
+        let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
         let lines = src.lines().count();
-        assert!(
-            lines <= max_lines,
-            "{path} exceeds budget: {lines} > {max_lines} (Phase 11)"
-        );
+        if lines > DEFAULT_MAX_LINES {
+            violations.push(format!(
+                "{rel}: {lines} > {DEFAULT_MAX_LINES} (Phase 11 god-module budget)"
+            ));
+        }
     }
+    assert!(
+        violations.is_empty(),
+        "god_module_size_budget violations:\n{}",
+        violations.join("\n")
+    );
 }
 
 // ----------------------------------------------------------------------

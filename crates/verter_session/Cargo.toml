@@ -71,6 +71,8 @@ oxc_ast = { workspace = true }
 oxc_parser = { workspace = true }
 oxc_span = { workspace = true }
 tempfile = "3"
+walkdir = "2"
+regex = "1"
 
 [[bench]]
 name = "host_bench"

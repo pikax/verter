@@ -3874,6 +3874,7 @@ dependencies = [
  "oxc_parser",
  "oxc_span",
  "parking_lot",
+ "regex",
  "rustc-hash 2.1.1",
  "self_cell",
  "serde",
@@ -3892,6 +3893,7 @@ dependencies = [
  "verter_semantic",
  "verter_span",
  "verter_workspace",
+ "walkdir",
  "web-time",
  "xxhash-rust",
 ]
