@@ -52,7 +52,7 @@ export interface InnerHandler {
 "#;
 
 #[test]
-#[ignore = "Phase 5b §5.A seed: closes in Phase 5f (commit 9) via materialize_surface dispatch helper enforcing PackageRefTopLevel + FunctionPropertyAtNested gates. Verified FAIL pre-impl on commit 1."]
+#[ignore = "Phase 5f §9 deferral to 5g: the seed's hermetic harness places `/c.vue` at the workspace root, so `resolve_node_modules_package`'s ancestor walk has no parents to traverse and resolution returns `None` before the gate ever runs. Pre-fix output `prop_names=[]` fails the positive assertion (`callback must surface`) for the WRONG reason — not gate enforcement, but resolution. Phase 5f's commits 7+8 already apply the package-backed gate via the DeclPlaceholder check in `expand_terminal_step` (walk.rs:751) for any case where lowering DOES produce a package-backed DeclRef; the dispatch helper's `materialize_surface` route is wired and ready in `project_semantic_dispatch/mod.rs:642`. The seed's fixture also makes the negative assertion (`event` must NOT leak) vacuous: `event` is a function PARAMETER inside `InnerHandler`'s call signature, never a top-level prop in the consumer's component-meta extraction path regardless of gate enforcement. Closes in 5g alongside the engine deletion + the 7 Class A fixture authoring task — that lands a discriminating fixture (function-typed nested member with sibling object members that WOULD leak without the gate) plus the harness fix to seat `/c.vue` deep enough for the unowned node_modules walk to find `pkg-types`."]
 fn resolver_coverage_package_backed_function_property_gate() {
     let host = build_hermetic_host_with_lib(
         &[

@@ -34,7 +34,7 @@ defineSlots<{
 "#;
 
 #[test]
-#[ignore = "Phase 5b §5.A seed: closes IN this sub-phase at commit 2+3 via the `ResolveMacroPayload` variant body. The #[ignore] is removed in commit 2+3 once the variant lands. Verified FAIL pre-impl on commit 1."]
+#[ignore = "Phase 5f §9 deferral to 5g: the `ResolveMacroPayload::DefineSlots` arm dispatches `ProjectPath{type_args[0], [], mode}` (build.rs:1993) but the slot-bindings extractor at `meta_resolve.rs::DefineSlots` arm still walks the lowered Object's call_signatures via the raw TypeExpr (it does not consult the dispatch result for binding parameter types). Phase 5f's commits 7+8 enable Conditional/IndexedAccess empty-path materialisation for the macro shape extractor (closes inherited-emits + indexed-paths), but the slot-binding-parameter lowering is a distinct path that requires its own migration in 5g (alongside the engine deletion that retires the engine-internal slot resolver). Verified FAIL pre-impl on commit 1, still FAIL after 5f commits 7+8."]
 fn resolver_coverage_slot_shapes_typed_bindings_lower_to_primitive() {
     let host = build_hermetic_host_with_lib(
         &[("/c.vue", SLOTS_TYPED_VUE)],
