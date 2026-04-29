@@ -216,3 +216,135 @@ fn evict_canonical_cascade_includes_route_owned_shallow() {
         "POST-EVICT: per-canonical evict must NOT touch unrelated entries",
     );
 }
+
+// ─── T9 — configure_projects cascade clears route_owned_shallow (lands 6b.D2a step 6) ───
+//
+// Discrimination: pre-migration `configure_projects` does NOT call
+// `route_owned_shallow().clear_all()` (verified at HEAD `3147c02f`,
+// lib.rs:1149-1163 — the wrapper resets resolver / resolved_type_cache /
+// eval_env_cache / semantic_invalidate_all but no project_type_store
+// cascade). Post-migration: it ALSO calls `bump_project_generation_and_evict`
+// and `route_owned_shallow().clear_all()`. With a populated
+// route_owned_shallow entry, pre-migration assertion would FAIL (entry
+// survives configure_projects); post-migration it passes (entry cleared).
+#[test]
+fn route_owned_shallow_clears_on_host_configure_projects() {
+    use crate::project_type_store::RouteOwnedShallowEntry;
+
+    let host = host();
+    let store = host.project_type_store();
+
+    let canonical: Arc<str> = Arc::from("/seeded/route_only.ts");
+    let entry = Arc::new(RouteOwnedShallowEntry::test_stub(canonical.clone()));
+    store
+        .route_owned_shallow()
+        .publish(canonical.clone(), Arc::clone(&entry));
+
+    // Setup-discrimination assertion (per fourth-pass review): assert
+    // entry IS present BEFORE the wrapper. Without this, a never-populated
+    // entry → assert.is_none() trivially true after configure_projects()
+    // would pass without proving anything.
+    assert!(
+        store.route_owned_shallow().get_any(&canonical).is_some(),
+        "PRE-CONFIGURE: entry must be present after publish",
+    );
+
+    let pre_gen = store.current_project_generation();
+
+    // Trigger the cascade.
+    host.configure_projects(Vec::new());
+
+    assert!(
+        store.route_owned_shallow().get_any(&canonical).is_none(),
+        "POST-CONFIGURE: configure_projects must clear route_owned_shallow \
+         via the new cascade extension (Phase 6b.D2a step 6)",
+    );
+
+    // Project generation must have advanced (proves
+    // bump_project_generation_and_evict is in the cascade).
+    let post_gen = store.current_project_generation();
+    assert!(
+        post_gen > pre_gen,
+        "POST-CONFIGURE: project_generation must advance \
+         (bump_project_generation_and_evict in cascade)",
+    );
+}
+
+// ─── T-clear_compile_cache cascade extension (lands 6b.D2a step 6) ───────
+//
+// Brief §6b.0.2 doesn't enumerate this exact test, but the cascade
+// extension to `clear_compile_cache` is part of step 6 — verifying it
+// exists keeps the cascade-additions audit honest. Discrimination as
+// above.
+#[test]
+fn route_owned_shallow_clears_on_host_clear_compile_cache() {
+    use crate::project_type_store::RouteOwnedShallowEntry;
+
+    let host = host();
+    let store = host.project_type_store();
+
+    let canonical: Arc<str> = Arc::from("/seeded/clear_compile.ts");
+    let entry = Arc::new(RouteOwnedShallowEntry::test_stub(canonical.clone()));
+    store
+        .route_owned_shallow()
+        .publish(canonical.clone(), Arc::clone(&entry));
+    assert!(
+        store.route_owned_shallow().get_any(&canonical).is_some(),
+        "PRE-CLEAR: entry must be present",
+    );
+
+    host.clear_compile_cache();
+
+    assert!(
+        store.route_owned_shallow().get_any(&canonical).is_none(),
+        "POST-CLEAR: clear_compile_cache must clear route_owned_shallow \
+         (Phase 6b.D2a step 6 cascade extension)",
+    );
+}
+
+// ─── T-set_workspace cascade extension (lands 6b.D2a step 6) ─────────────
+//
+// `set_workspace` is the most aggressive workspace mutation: the entire
+// workspace authority swaps out. Pre-migration cascade: only
+// `set_default_resolve_extensions` + workspace.write() + bump_store_view_epoch.
+// Post-migration cascade additionally: bump_project_generation_and_evict +
+// route_owned_shallow.clear_all + resolver.reset_all + resolved_type_cache.clear
+// + eval_env_cache.clear + semantic_invalidate_all.
+#[test]
+fn route_owned_shallow_clears_on_host_set_workspace() {
+    use crate::project_type_store::RouteOwnedShallowEntry;
+    use std::sync::Arc as StdArc;
+
+    let host = host();
+    let store = host.project_type_store();
+
+    let canonical: Arc<str> = Arc::from("/seeded/set_workspace.ts");
+    let entry = Arc::new(RouteOwnedShallowEntry::test_stub(canonical.clone()));
+    store
+        .route_owned_shallow()
+        .publish(canonical.clone(), Arc::clone(&entry));
+    assert!(
+        store.route_owned_shallow().get_any(&canonical).is_some(),
+        "PRE-SWAP: entry must be present",
+    );
+
+    let pre_gen = store.current_project_generation();
+
+    // Swap to a fresh workspace — triggers the full cascade.
+    let fresh_ws: StdArc<dyn verter_workspace::WorkspaceAccess> = StdArc::new(
+        verter_workspace::MemoryWorkspace::new(verter_workspace::MemoryOptions::default()),
+    );
+    host.set_workspace(fresh_ws);
+
+    assert!(
+        store.route_owned_shallow().get_any(&canonical).is_none(),
+        "POST-SWAP: set_workspace must clear route_owned_shallow \
+         (Phase 6b.D2a step 6 cascade extension)",
+    );
+
+    let post_gen = store.current_project_generation();
+    assert!(
+        post_gen > pre_gen,
+        "POST-SWAP: project_generation must advance",
+    );
+}

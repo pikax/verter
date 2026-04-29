@@ -939,6 +939,17 @@ impl VerterHost {
     pub fn set_workspace(&self, workspace: Arc<dyn verter_workspace::WorkspaceAccess>) {
         workspace.set_default_resolve_extensions(self.config.resolve_extensions.clone());
         *self.workspace.write() = workspace;
+        // Phase 6b.D2a step 6 — `set_workspace` is the most aggressive
+        // possible mutation: the entire workspace authority swaps out, so
+        // every cache layer's identity is potentially invalidated.
+        // Mirrors the configure_projects cascade plus the resolver /
+        // resolved-type / eval-env / semantic clears that close() runs.
+        self.project_type_store.bump_project_generation_and_evict();
+        self.project_type_store.route_owned_shallow().clear_all();
+        self.resolver.reset_all();
+        self.resolved_type_cache.lock().clear();
+        self.eval_env_cache.lock().clear();
+        self.semantic_invalidate_all();
         self.bump_store_view_epoch();
     }
 
@@ -1257,6 +1268,10 @@ impl VerterHost {
         }
         self.resolved_type_cache.lock().clear();
         self.eval_env_cache.lock().clear();
+        // Phase 6b.D2a step 6 — extend cascade with the new
+        // `RouteOwnedShallowDb` bulk eviction. Mirrors the
+        // route-resolution invalidation discipline introduced in 6b.D1.
+        self.project_type_store.route_owned_shallow().clear_all();
         self.bump_store_view_epoch();
     }
 
@@ -1306,6 +1321,11 @@ impl VerterHost {
         self.provenance.reset();
         // Clear all semantic caches
         *self.semantic_db.lock() = verter_semantic::db::SemanticDb::new();
+        // Phase 6b.D2a step 6 — close-cascade extension for the new
+        // `RouteOwnedShallowDb`. `close()` already resets the resolver
+        // (which clears RouteDb / ImportedRootDb), so route-resolution
+        // facts are gone; clear the route-only shallow DB in lockstep.
+        self.project_type_store.route_owned_shallow().clear_all();
         self.bump_store_view_epoch();
     }
 
@@ -1335,6 +1355,17 @@ impl VerterHost {
         self.resolved_type_cache.lock().clear();
         self.eval_env_cache.lock().clear();
         self.semantic_invalidate_all();
+        // Phase 6b.D2a step 6 — `configure_projects` is a route-resolution
+        // mutation: the project graph changes, which means the cached
+        // route-only shallow entries' `project_generation` tag is now
+        // stale. Bump project_generation (also evicts the project-shape
+        // cluster: owner_import_surfaces, semantic_graph,
+        // component_meta_results, etc., per project_type_store.rs:870)
+        // and clear_all the route-only shallow DB. The materialiser's
+        // tier-3 staleness gate is the safety net for any in-flight cold
+        // publish that started before the bump.
+        self.project_type_store.bump_project_generation_and_evict();
+        self.project_type_store.route_owned_shallow().clear_all();
         self.bump_store_view_epoch();
     }
 
