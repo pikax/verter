@@ -746,6 +746,25 @@ impl ProjectTypeStore {
         &self.imported_roots
     }
 
+    /// Phase 6b.F3 (Option (i)) — return a cloned `Arc<RouteDb>` handle
+    /// that callers can store and use as a stable, shared reference.
+    /// Identical authority to `routes()` but returns a clonable owned
+    /// `Arc` so the [`UnifiedResolverRuntime`](crate::resolver_core::resolver_runtime::UnifiedResolverRuntime)
+    /// can hold a handle pinned to the same project-store-owned instance.
+    /// Successive calls always return Arcs that
+    /// [`Arc::ptr_eq`](std::sync::Arc::ptr_eq) the inner instance.
+    #[must_use]
+    pub fn routes_handle(&self) -> Arc<RouteDb> {
+        Arc::clone(&self.routes)
+    }
+
+    /// Phase 6b.F3 — return a cloned `Arc<ImportedRootDb>` handle. See
+    /// [`Self::routes_handle`] for the full rationale.
+    #[must_use]
+    pub fn imported_roots_handle(&self) -> Arc<ImportedRootDb> {
+        Arc::clone(&self.imported_roots)
+    }
+
     /// Host-owned semantic-query memo table. Shared across every consumer
     /// that dispatches through the semantic-query API.
     pub fn semantic_graph(&self) -> &Arc<SemanticGraphStore> {

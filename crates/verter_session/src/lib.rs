@@ -93,6 +93,8 @@ pub mod owner_import_surface;
 mod parity_tests;
 mod parse;
 #[cfg(test)]
+mod phase_6b_characterization_tests;
+#[cfg(test)]
 mod project_global_cache_tests;
 pub mod project_semantic_dispatch;
 pub mod project_type_store;
@@ -222,9 +224,20 @@ pub(crate) struct HostResolverState {
 }
 
 impl HostResolverState {
-    fn new() -> Self {
+    /// Phase 6b.F3 (Option (i)) — construct a `HostResolverState` whose
+    /// inner [`UnifiedResolverRuntime`](crate::resolver_core::resolver_runtime::UnifiedResolverRuntime)
+    /// shares its `RouteDb` / `ImportedRootDb` authority with the host's
+    /// [`ProjectTypeStore`](crate::project_type_store::ProjectTypeStore)
+    /// via `Arc` clones supplied by the host at construction time.
+    fn new(
+        routes: Arc<crate::resolver_core::RouteDb>,
+        imported_roots: Arc<crate::resolver_core::ImportedRootDb>,
+    ) -> Self {
         Self {
-            runtime: crate::resolver_core::resolver_runtime::UnifiedResolverRuntime::new(),
+            runtime: crate::resolver_core::resolver_runtime::UnifiedResolverRuntime::new(
+                routes,
+                imported_roots,
+            ),
         }
     }
 
@@ -471,6 +484,15 @@ impl VerterHost {
         let project_type_store = Arc::new(
             crate::project_type_store::ProjectTypeStore::with_provenance(Arc::clone(&provenance)),
         );
+        // Phase 6b.F3 (Option (i)): pull RouteDb / ImportedRootDb handles
+        // from the project-type-store BEFORE constructing the resolver
+        // runtime so the runtime borrows the project-shared `Arc`s. This
+        // makes `host.project_type_store.routes_handle()` and
+        // `host.resolver.runtime.routes_handle()` `Arc::ptr_eq`-equal —
+        // resolver hot-path mutations land on the same DB the project
+        // store exposes (validated by phase-6b characterization test T1).
+        let routes_handle = project_type_store.routes_handle();
+        let imported_roots_handle = project_type_store.imported_roots_handle();
         // Phase 5g-supplement §5.D.0 r17: install the host-level test
         // audit hook on the IndexedReadyDb so fresh `insert`s bump
         // `total_shallow_processes` + `loaded_files` cumulatively across
@@ -496,7 +518,7 @@ impl VerterHost {
             compile_cache: dashmap::DashMap::new(),
             provenance,
             resolved_type_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
-            resolver: HostResolverState::new(),
+            resolver: HostResolverState::new(routes_handle, imported_roots_handle),
             eval_env_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             semantic_db: parking_lot::Mutex::new(verter_semantic::db::SemanticDb::new()),
             query_profile: parking_lot::Mutex::new(verter_semantic::profile::QueryProfile::Build),

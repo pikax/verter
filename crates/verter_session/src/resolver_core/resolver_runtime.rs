@@ -123,9 +123,18 @@ where
         SingleflightGroup<String, Arc<crate::project_type_store::IndexedReady>, ()>,
     /// Host-owned cross-file route subsystem: barrel surfaces, route results,
     /// and stable negative answers.
-    pub routes: RouteDb,
+    ///
+    /// Phase 6b.F3 (Option (i)): authority owned by
+    /// [`ProjectTypeStore`](crate::project_type_store::ProjectTypeStore).
+    /// The runtime holds an `Arc` clone of the store's instance so resolver
+    /// hot-path mutations land on the project-shared `RouteDb`. See
+    /// [`Self::routes_handle`].
+    pub routes: Arc<RouteDb>,
     /// Host-owned imported-root proof cache (positive and negative).
-    pub imported_roots: ImportedRootDb,
+    ///
+    /// Phase 6b.F3: same `Arc`-shared discipline as `routes`. See
+    /// [`Self::imported_roots_handle`].
+    pub imported_roots: Arc<ImportedRootDb>,
 }
 
 impl<MetaV, FallthroughV> UnifiedResolverRuntime<MetaV, FallthroughV>
@@ -133,8 +142,18 @@ where
     MetaV: Clone,
     FallthroughV: Clone,
 {
-    /// Create a new runtime with fresh caches and counters.
-    pub fn new() -> Self {
+    /// Create a new runtime with fresh caches and counters, sharing the
+    /// project-store-owned `RouteDb` / `ImportedRootDb` instances.
+    ///
+    /// Phase 6b.F3 (Option (i)): the host's
+    /// [`ProjectTypeStore`](crate::project_type_store::ProjectTypeStore)
+    /// is the project-global authority for both DBs. The host pulls
+    /// [`ProjectTypeStore::routes_handle`](crate::project_type_store::ProjectTypeStore::routes_handle)
+    /// and
+    /// [`ProjectTypeStore::imported_roots_handle`](crate::project_type_store::ProjectTypeStore::imported_roots_handle)
+    /// at construction time and threads them in here so resolver hot-path
+    /// mutations land on the shared project authority.
+    pub fn new(routes: Arc<RouteDb>, imported_roots: Arc<ImportedRootDb>) -> Self {
         let counters = Arc::new(ResolverCounters::new());
         Self {
             symbol: SymbolResolverState::new(counters.clone()),
@@ -144,13 +163,19 @@ where
             top_level_fallthrough_singleflight: SingleflightGroup::default(),
             counters,
             indexed_singleflight: SingleflightGroup::default(),
-            routes: RouteDb::new(),
-            imported_roots: ImportedRootDb::new(),
+            routes,
+            imported_roots,
         }
     }
 
-    /// Create a runtime with shared counters (e.g., from a parent runtime).
-    pub fn with_counters(counters: Arc<ResolverCounters>) -> Self {
+    /// Create a runtime with shared counters and project-store-owned
+    /// `RouteDb` / `ImportedRootDb` instances. See [`Self::new`] for the
+    /// authority chain.
+    pub fn with_counters(
+        counters: Arc<ResolverCounters>,
+        routes: Arc<RouteDb>,
+        imported_roots: Arc<ImportedRootDb>,
+    ) -> Self {
         Self {
             symbol: SymbolResolverState::new(counters.clone()),
             fallthrough: FallthroughResolverState::new(counters.clone()),
@@ -159,9 +184,26 @@ where
             top_level_fallthrough_singleflight: SingleflightGroup::default(),
             counters,
             indexed_singleflight: SingleflightGroup::default(),
-            routes: RouteDb::new(),
-            imported_roots: ImportedRootDb::new(),
+            routes,
+            imported_roots,
         }
+    }
+
+    /// Phase 6b.F3 — return a cloned `Arc<RouteDb>` handle for use as a
+    /// stable shared reference. Mirrors
+    /// [`ProjectTypeStore::routes_handle`](crate::project_type_store::ProjectTypeStore::routes_handle)
+    /// — successive calls return Arcs that `Arc::ptr_eq` the inner
+    /// instance, which is itself shared with the project-store handle.
+    #[must_use]
+    pub fn routes_handle(&self) -> Arc<RouteDb> {
+        Arc::clone(&self.routes)
+    }
+
+    /// Phase 6b.F3 — return a cloned `Arc<ImportedRootDb>` handle. See
+    /// [`Self::routes_handle`] for the full rationale.
+    #[must_use]
+    pub fn imported_roots_handle(&self) -> Arc<ImportedRootDb> {
+        Arc::clone(&self.imported_roots)
     }
 
     /// Clear all cached results in both subsystems.
@@ -217,29 +259,33 @@ where
         self.counters.reset();
     }
 
-    /// Test-only constructor minting a fresh runtime with private
-    /// `RouteDb` / `ImportedRootDb` instances.
+    /// Test-only constructor minting a fresh runtime with newly-allocated
+    /// `Arc<RouteDb>` / `Arc<ImportedRootDb>` instances.
     ///
-    /// Phase 6b.B1: introduced ahead of the §6b.B2 production cutover where
-    /// `UnifiedResolverRuntime::new()` will gain mandatory
+    /// Phase 6b.B2: now that `UnifiedResolverRuntime::new` requires
     /// `Arc<RouteDb>` / `Arc<ImportedRootDb>` parameters supplied by the
-    /// host's `ProjectTypeStore`. Tests that don't have a `ProjectTypeStore`
-    /// in scope continue to call `for_tests()`, which delegates to the
-    /// internal helper that builds the runtime with locally-owned `Arc`s.
-    /// In B2 the body of this helper is updated to pass fresh
-    /// `Arc::new(RouteDb::new())` / `Arc::new(ImportedRootDb::new())`
-    /// directly — but in B1 it is a no-op alias so this commit changes no
-    /// behaviour.
+    /// host's [`ProjectTypeStore`](crate::project_type_store::ProjectTypeStore),
+    /// tests that mint their own runtime in isolation use this helper to
+    /// create both `Arc`s locally without taking a project-store
+    /// dependency. Each call produces a fresh, isolated authority — so
+    /// these test runtimes are NOT project-shared (each test owns its own
+    /// instance). For Arc-identity assertions (T1) the host is constructed
+    /// via `VerterHost::new_standalone(...)`, which routes through the
+    /// real project-store path.
     #[cfg(test)]
     pub fn for_tests() -> Self {
-        Self::new()
+        Self::new(Arc::new(RouteDb::new()), Arc::new(ImportedRootDb::new()))
     }
 
     /// Test-only constructor variant that shares counters with another
     /// runtime. Same Phase 6b.B1 / B2 lifecycle as `for_tests()`.
     #[cfg(test)]
     pub fn for_tests_with_counters(counters: Arc<ResolverCounters>) -> Self {
-        Self::with_counters(counters)
+        Self::with_counters(
+            counters,
+            Arc::new(RouteDb::new()),
+            Arc::new(ImportedRootDb::new()),
+        )
     }
 }
 
@@ -249,7 +295,7 @@ where
     FallthroughV: Clone,
 {
     fn default() -> Self {
-        Self::new()
+        Self::new(Arc::new(RouteDb::new()), Arc::new(ImportedRootDb::new()))
     }
 }
 

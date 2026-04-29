@@ -802,6 +802,12 @@ fn completion_fence_observed_signature_reflects_latest_fact() {
 /// The ProjectTypeStore route/imported-roots accessors return stable Arcs
 /// so downstream consumers can hold a long-lived handle on the rehomed
 /// caches.
+///
+/// Phase 6b.F3 (Option (i)) extension: the same `Arc` instances are now
+/// SHARED with the host's `UnifiedResolverRuntime`, so `routes_handle()` /
+/// `imported_roots_handle()` on the store and on the runtime are
+/// `Arc::ptr_eq`-equal. Resolver hot-path mutations land on the same DBs
+/// the project store exposes.
 #[test]
 fn project_type_store_exposes_stable_route_and_imported_root_handles() {
     let host = host();
@@ -813,6 +819,19 @@ fn project_type_store_exposes_stable_route_and_imported_root_handles() {
     let i1 = store.imported_roots().clone();
     let i2 = store.imported_roots().clone();
     assert!(Arc::ptr_eq(&i1, &i2));
+
+    // Phase 6b.F3: handles are shared with the resolver runtime — same
+    // project-store-owned `Arc<RouteDb>` / `Arc<ImportedRootDb>`.
+    let runtime_routes = host.resolver.runtime.routes_handle();
+    let runtime_imported_roots = host.resolver.runtime.imported_roots_handle();
+    assert!(
+        Arc::ptr_eq(&r1, &runtime_routes),
+        "RouteDb authority must be shared with UnifiedResolverRuntime",
+    );
+    assert!(
+        Arc::ptr_eq(&i1, &runtime_imported_roots),
+        "ImportedRootDb authority must be shared with UnifiedResolverRuntime",
+    );
 }
 
 /// An empty, never-used canonical key returns None cleanly from the project
