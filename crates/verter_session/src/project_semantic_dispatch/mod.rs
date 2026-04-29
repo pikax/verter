@@ -731,6 +731,134 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
+    /// Phase 5j §5.12 — slot-binding-parameter type lowering.
+    ///
+    /// Given the `defineSlots<T>()` macro payload's lowered base node
+    /// and the target `slot_name` + `binding_name` pair, projects the
+    /// slot's first-parameter Object's `binding_name` member through
+    /// dispatch via existing variants — i.e., composes:
+    ///
+    /// 1. `ProjectPath { base, [Member(slot_name)], Navigate }` →
+    ///    yields the slot value's `SemanticNodeId`. Navigate mode is
+    ///    correct here because this is an intermediate hop per
+    ///    CLAUDE.md "Macro Type Traversal Rule"
+    ///    (path-precise rule — only the terminal hop runs in the
+    ///    caller's mode).
+    /// 2. Reads the slot value's [`SemanticNodeData`]: a slot's value
+    ///    is a `Function` (call signature), and the binding lives on
+    ///    its first parameter's `Object` surface. Pull `params[0].ty`.
+    /// 3. `ProjectPath { base: param0_ty, [Member(binding_name)], mode }` →
+    ///    yields the binding's lowered type in the caller's mode
+    ///    (typically `Expanded` for component-meta).
+    ///
+    /// **Why a helper, not a new variant?** Per parent §0 binding
+    /// amendment + §5.12 r15/F11 (sub-plan §0 worker constraint), the
+    /// slot-binding lowering must compose existing variants and live
+    /// as a non-variant dispatch helper. This mirrors `execute_pick` /
+    /// `execute_omit` / `materialize_surface` / `execute_to_type_expr`
+    /// which are non-variant dispatch helpers added in Phase 5b/5d/5e.
+    ///
+    /// **Migration source:** the engine analysis path's
+    /// `expand_field_expr` closure used to dispatch a single
+    /// `ProjectPath { base, [Member(slot), Member(binding)], Expanded }`
+    /// directly. The walker emits `Opaque(Miss)` when it reaches the
+    /// slot's `Function` value with `Member(binding)` remaining (per
+    /// `walk.rs:606-625` — `SemanticNodeData::Function { .. }` falls
+    /// through to `opaque_miss`), so the engine output for typed slot
+    /// bindings was `Unknown { raw: "semanticMiss" }`. This helper
+    /// closes that gap by descending through the `Function`'s
+    /// first-parameter into the binding's Object member.
+    ///
+    /// Returns:
+    /// - `CacheRead<QueryResult<TypeExpr>>` so dep_signature flows
+    ///   back to the caller's local fence (mirrors
+    ///   `execute_to_type_expr`).
+    /// - `QueryResult::Error(Miss)` when the intermediate hop misses,
+    ///   the slot value is not a `Function`, or the function has no
+    ///   parameters. Caller falls back to symbolic preservation per
+    ///   the engine's existing pattern.
+    pub fn project_slot_binding_member(
+        &self,
+        base: SemanticNodeId,
+        slot_name: &str,
+        binding_name: &str,
+        mode: ProjectionMode,
+    ) -> CacheRead<QueryResult<TypeExpr>> {
+        // Hop 1: navigate the slot member from the macro payload base.
+        // Path-precise rule: intermediate hops use Navigate mode so the
+        // shared memo stores the intermediate at Navigate-mode key
+        // regardless of the caller's terminal mode (CLAUDE.md "Macro
+        // Type Traversal Rule").
+        let slot_path: Arc<[PathSegment]> =
+            Arc::from(vec![PathSegment::Member(Arc::from(slot_name))].into_boxed_slice());
+        let slot_read = self.execute_read(SemanticQueryKey::ProjectPath {
+            base,
+            path: slot_path,
+            mode: ProjectionMode::Navigate,
+        });
+        let slot_node = match slot_read.value {
+            QueryResult::Value(id) => id,
+            QueryResult::Recursive(id) => {
+                return CacheRead {
+                    value: QueryResult::Recursive(id),
+                    dep_signature: slot_read.dep_signature,
+                };
+            }
+            QueryResult::Error(e) => {
+                return CacheRead {
+                    value: QueryResult::Error(e),
+                    dep_signature: slot_read.dep_signature,
+                };
+            }
+        };
+
+        // Hop 2: read the slot value's first-parameter type.
+        // Per the slot-binding semantics (Verter macros §slots), every
+        // slot key surfaces as a slot whose bindings live on the slot
+        // function's first parameter Object literal.
+        let param0_ty = match node_data_for(self.host, slot_node).as_deref() {
+            Some(SemanticNodeData::Function { params, .. }) => match params.first() {
+                Some(param) => param.ty,
+                None => {
+                    return CacheRead {
+                        value: QueryResult::Error(QueryError::Miss),
+                        dep_signature: slot_read.dep_signature,
+                    };
+                }
+            },
+            _ => {
+                return CacheRead {
+                    value: QueryResult::Error(QueryError::Miss),
+                    dep_signature: slot_read.dep_signature,
+                };
+            }
+        };
+
+        // Hop 3: project the binding member off the param Object in
+        // the caller's mode (terminal hop runs in the requested mode
+        // per the path-precise rule).
+        let binding_path: Arc<[PathSegment]> =
+            Arc::from(vec![PathSegment::Member(Arc::from(binding_name))].into_boxed_slice());
+        let binding_read = self.execute_to_type_expr(&SemanticQueryKey::ProjectPath {
+            base: param0_ty,
+            path: binding_path,
+            mode,
+        });
+        // Merge dep signatures across the three hops so any change in
+        // the intermediate (slot Function shape) or terminal (binding
+        // Object) is observed by the caller's local fence.
+        let merged: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = slot_read
+            .dep_signature
+            .iter()
+            .cloned()
+            .chain(binding_read.dep_signature.iter().cloned())
+            .collect();
+        CacheRead {
+            value: binding_read.value,
+            dep_signature: Arc::from(merged.into_boxed_slice()),
+        }
+    }
+
     /// Phase 5 §3.4 — Trivial helper: lower a `[String]` member-name
     /// list to an `Arc<[PathSegment]>` for `ProjectPath` queries.
     ///

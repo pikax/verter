@@ -4879,6 +4879,89 @@ impl VerterHost {
                                         symbolic_fallback()
                                     }
                                     Some(base_id) => {
+                                        // Phase 5j §5.12 — slot-binding-parameter
+                                        // type lowering migrates from the engine's
+                                        // analysis path to dispatch via the
+                                        // `ResolveMacroPayload` variant +
+                                        // `MaterializeSurface { Slots }` codepath.
+                                        //
+                                        // The pre-Phase-5j closure dispatched
+                                        // `ProjectPath { base, [Member(slot),
+                                        // Member(binding)], Expanded }` directly,
+                                        // but the walker emits `Opaque(Miss)` when
+                                        // it reaches the slot's `Function` value
+                                        // with `Member(binding)` remaining (per
+                                        // `walk.rs` Function arm at the catch-all
+                                        // `opaque_miss` fall-through). The slot
+                                        // value's bindings live inside the
+                                        // function's first-parameter Object, not
+                                        // as a direct member of the Function.
+                                        //
+                                        // Phase 5j routes slot-binding lowering
+                                        // through the new helper
+                                        // `project_slot_binding_member` which
+                                        // composes existing variants to descend
+                                        // through `Function` -> `params[0].ty`
+                                        // -> `Member(binding)`. This closes the
+                                        // `slot_shapes` seed and the
+                                        // `fixture_slots_typed` deferred fixture.
+                                        if matches!(
+                                            ctx.kind,
+                                            verter_semantic::analysis::type_eval_build::FieldKind::SlotBinding
+                                        ) {
+                                            // SlotBinding output_path always has
+                                            // exactly two segments per
+                                            // `type_eval_build.rs` SlotBinding
+                                            // emission: [Member(slot),
+                                            // Member(binding)]. Anything else is
+                                            // a closure-emission contract
+                                            // violation; fall back to symbolic.
+                                            let mut iter = ctx.output_path.iter();
+                                            match (iter.next(), iter.next(), iter.next()) {
+                                                (
+                                                    Some(MacroPathSegment::Member(slot)),
+                                                    Some(MacroPathSegment::Member(binding)),
+                                                    None,
+                                                ) => {
+                                                    let slot_binding = dispatch
+                                                        .project_slot_binding_member(
+                                                            base_id,
+                                                            slot.as_ref(),
+                                                            binding.as_ref(),
+                                                            ProjectionMode::Expanded,
+                                                        );
+                                                    match slot_binding.value {
+                                                        QueryResult::Value(raised) => {
+                                                            ExpansionResult::exact_concrete(
+                                                                ExpandedNormalizedExpr {
+                                                                    expr: raised,
+                                                                },
+                                                            )
+                                                        }
+                                                        _ => {
+                                                            component_meta_trace_custom!(
+                                                                "macro_projection_failover",
+                                                                format!(
+                                                                    "macro_index={} field_kind={:?} reason=slot_binding_projection_miss",
+                                                                    ctx.macro_index, ctx.kind,
+                                                                ),
+                                                            );
+                                                            symbolic_fallback()
+                                                        }
+                                                    }
+                                                }
+                                                _ => {
+                                                    component_meta_trace_custom!(
+                                                        "macro_projection_failover",
+                                                        format!(
+                                                            "macro_index={} field_kind={:?} reason=slot_binding_unexpected_path",
+                                                            ctx.macro_index, ctx.kind,
+                                                        ),
+                                                    );
+                                                    symbolic_fallback()
+                                                }
+                                            }
+                                        } else {
                                         let dispatch_path: std::sync::Arc<[SemanticPathSegment]> =
                                             std::sync::Arc::from(
                                                 ctx.output_path
@@ -4928,6 +5011,7 @@ impl VerterHost {
                                             );
                                                 symbolic_fallback()
                                             }
+                                        }
                                         }
                                     }
                                 }
