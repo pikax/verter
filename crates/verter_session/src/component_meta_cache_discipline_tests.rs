@@ -315,3 +315,59 @@ fn cache_discipline_execute_omit_repeated_keys_warm() {
         "unrelated execute_omit cold key should still cold-fire (got {unrelated_cold})"
     );
 }
+
+/// 5b §5.D.1 — `execute_to_type_expr` repeated identical keys: cold
+/// once, warm N-1. The helper wraps `execute_read(key.clone())` so
+/// the counter probe targets the wrapped key directly.
+#[test]
+fn cache_discipline_execute_to_type_expr_repeated_keys_warm() {
+    let host = build_test_host();
+    let base = intern_empty_object(&host);
+    // Use a ProjectMember key as the wrapped dispatch — it routes
+    // through execute_read like every other variant. The
+    // SemanticQueryKeyDigest canonicalises ProjectMember →
+    // ProjectPath before hashing so the counter probe with the
+    // pre-canonical key form sees the same digest as the warm cache.
+    let key = SemanticQueryKey::ProjectMember {
+        base,
+        member: Arc::from("a"),
+        mode: ProjectionMode::Expanded,
+    };
+
+    let counter = DispatchCounter;
+    let baseline_cold = counter.family_cold(&key);
+    let baseline_warm = counter.family_warm(&key);
+
+    const N: usize = 8;
+    let dispatch = host.semantic_dispatch();
+    for _ in 0..N {
+        let _ = dispatch.execute_to_type_expr(&key);
+    }
+
+    let cold = counter.family_cold(&key) - baseline_cold;
+    let warm = counter.family_warm(&key) - baseline_warm;
+    assert_eq!(
+        cold, 1,
+        "execute_to_type_expr cold path should fire ONCE for repeated identical key (got {cold})"
+    );
+    assert_eq!(
+        warm,
+        N - 1,
+        "execute_to_type_expr warm path should fire N-1 times for repeated identical key (got {warm})"
+    );
+
+    // Negative assertion: a different member name produces a
+    // distinct key that cold-fires once.
+    let unrelated_key = SemanticQueryKey::ProjectMember {
+        base,
+        member: Arc::from("z"),
+        mode: ProjectionMode::Expanded,
+    };
+    let unrelated_baseline_cold = counter.family_cold(&unrelated_key);
+    let _ = dispatch.execute_to_type_expr(&unrelated_key);
+    let unrelated_cold = counter.family_cold(&unrelated_key) - unrelated_baseline_cold;
+    assert_eq!(
+        unrelated_cold, 1,
+        "unrelated execute_to_type_expr cold key should still cold-fire (got {unrelated_cold})"
+    );
+}
