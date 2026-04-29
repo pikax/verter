@@ -441,6 +441,67 @@ fn deferred_fixture_fixture_slots_typed_byte_equal_to_rule_correct_expected() {
     );
 }
 
+/// Phase 5k §5.B.5.1 rule-correctness gate for the
+/// `generic_substitution_via_typeof` deferred fixture
+/// (`phase-00-tier1-mismatches.md` row 4).
+///
+/// **Discrimination:**
+///   - Pre-Phase-5k-fix: `shallow_lower_type_expr`'s `TypeExpr::TypeOf`
+///     arm joined `value_ref.path[0..2]` into the literal `"sample.id"`
+///     and looked it up as a single value root. No such binding
+///     exists, so the lookup missed and propagated `Opaque(Miss)`
+///     up through `Instantiate`. Substitution into the body
+///     `{ id: T }` left T unsubstituted; the snapshot rendered
+///     `id: T` (the bare type-parameter token).
+///   - Post-Phase-5k-fix: the lowering attempts single-segment root
+///     resolution first (`sample`), succeeds, projects the remaining
+///     `["id"]` path through `ProjectPath { mode: Navigate }` to
+///     `string`, then substitutes `T → string`. The snapshot
+///     renders `id: string`.
+///
+/// **Negative assertion:** `UPDATE_SNAPSHOTS=1` PANICS — the
+/// self-confirming-snapshot trap is closed.
+#[test]
+fn deferred_fixture_generic_substitution_via_typeof_byte_equal_to_rule_correct_expected() {
+    if std::env::var("UPDATE_SNAPSHOTS").as_deref() == Ok("1") {
+        panic!(
+            "UPDATE_SNAPSHOTS=1 is FORBIDDEN for deferred fixtures \
+             (§5.B.5.1 r15/F9 — would lock in self-confirming snapshot). \
+             Either fix the resolver (rule-correct expected stays) OR \
+             escalate to user (rule-correct expected was wrong)."
+        );
+    }
+
+    let rule_correct_expected =
+        read_rule_correct_block_from_mismatches_md("generic_substitution_via_typeof")
+            .unwrap_or_else(|| {
+                panic!(
+                    "Rule-correct expected for `generic_substitution_via_typeof` not found in \
+                     phase-00-tier1-mismatches.md. Per §5.B.5.1 STOP CONDITIONS, the \
+                     .md file must carry a machine-readable JSON block \
+                     (`{{ \"fixture_id\": \"generic_substitution_via_typeof\", \"expected\": <SnapshotView> }}`). \
+                     Surface to user."
+                );
+            });
+
+    let actual = run_resolver_under_audit_and_serialize("generic_substitution_via_typeof");
+
+    let rule_correct_json = serde_json::to_string_pretty(&rule_correct_expected)
+        .expect("rule-correct SnapshotView serializes");
+    let actual_json =
+        serde_json::to_string_pretty(&actual).expect("post-fix SnapshotView serializes");
+    assert_eq!(
+        actual_json, rule_correct_json,
+        "Phase 5k §5.B.5.1 rule-correctness gate: post-fix output for \
+         `generic_substitution_via_typeof` MUST byte-equal the rule-correct \
+         expected from phase-00-tier1-mismatches.md row 4. Either the \
+         §5.13 single-segment-first lookup in `shallow_lower_type_expr`'s \
+         `TypeExpr::TypeOf` arm did not fully close the value-member \
+         typeof gap (5k STOP) OR the rule-correct expected was wrong \
+         (escalate to user, do NOT regenerate)."
+    );
+}
+
 /// Phase 5j §5.B.5.1 rule-correctness gate for the `fixture_models`
 /// deferred fixture (`phase-00b-tier1-mismatches.md` row 2,
 /// re-homed from 5k to 5j per parent §5.13 r15 table).
