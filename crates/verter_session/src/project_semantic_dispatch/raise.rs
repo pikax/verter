@@ -92,12 +92,49 @@ pub(crate) struct SemanticQueryKeyDigest {
 impl SemanticQueryKeyDigest {
     fn from_key(key: &crate::semantic_query::SemanticQueryKey) -> Self {
         use std::hash::{Hash, Hasher};
+        // Phase 5g-supplement §5.D.0 r17 — canonicalise the key BEFORE
+        // hashing so probes via the caller's key shape (e.g.
+        // `ProjectMember`) hit the same digest the warm cache stores
+        // (e.g. `ProjectPath` with a length-1 path). Without this,
+        // tests probing `family_cold(&original_key)` always read 0
+        // because the warm cache stores the post-canonical form.
+        let canonical = canonicalise_for_digest(key);
         let mut hasher = rustc_hash::FxHasher::default();
-        key.hash(&mut hasher);
+        canonical.hash(&mut hasher);
         Self {
-            variant: std::mem::discriminant(key),
+            variant: std::mem::discriminant(&canonical),
             hash: hasher.finish(),
         }
+    }
+}
+
+#[cfg(test)]
+fn canonicalise_for_digest(
+    key: &crate::semantic_query::SemanticQueryKey,
+) -> crate::semantic_query::SemanticQueryKey {
+    use std::sync::Arc;
+
+    use crate::semantic_query::{PathSegment, SemanticQueryKey};
+    match key {
+        SemanticQueryKey::ProjectMember { base, member, mode } => SemanticQueryKey::ProjectPath {
+            base: *base,
+            path: Arc::from(vec![PathSegment::Member(Arc::clone(member))].into_boxed_slice()),
+            mode: *mode,
+        },
+        SemanticQueryKey::IndexedAccess { base, index, mode } => SemanticQueryKey::ProjectPath {
+            base: *base,
+            path: Arc::from(vec![PathSegment::Index(index.clone())].into_boxed_slice()),
+            mode: *mode,
+        },
+        SemanticQueryKey::NormalizeUnion { members } => SemanticQueryKey::NormalizeUnion {
+            members: super::canonicalize_node_list(members),
+        },
+        SemanticQueryKey::NormalizeIntersection { members } => {
+            SemanticQueryKey::NormalizeIntersection {
+                members: super::canonicalize_node_list(members),
+            }
+        }
+        other => other.clone(),
     }
 }
 
@@ -563,18 +600,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         #[cfg(test)]
         record_dispatch_key(&key);
 
-        // Phase 5g-supplement §5.D.0 r17 — split the per-key counter
-        // into cold (cache miss; `build` will be invoked) vs warm
-        // (cache hit; returning the memoized value). Peek the cache
-        // before `execute_cooperative` enters its retry loop. The
-        // peek is racy under concurrency but tests run hermetically
-        // so the result is exact for §5.D.1 cache_discipline tests.
-        #[cfg(test)]
-        if self.graph().get(&key).is_some() {
-            record_dispatch_warm(&key);
-        } else {
-            record_dispatch_cold(&key);
-        }
+        // Phase 5g-supplement §5.D.0 r17 — cold/warm split is recorded
+        // inside `SemanticGraphStore::execute_cooperative` after
+        // canonicalisation. The digest function in
+        // `SemanticQueryKeyDigest::from_key` canonicalises the key
+        // before hashing so caller-side probes (e.g.
+        // `family_cold(&ProjectMember{..})`) read the same counter
+        // as the canonical form (`ProjectPath{path: [Member(..)]}`)
+        // the warm cache stores.
 
         // Mirror the canonicalisation done by `execute` so the cache key
         // identity is stable across the sugar variants.

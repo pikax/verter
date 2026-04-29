@@ -56,6 +56,8 @@ mod cache;
 mod compile;
 pub mod completion_fence;
 pub mod component_meta_audit;
+#[cfg(test)]
+mod component_meta_cache_discipline_tests;
 pub mod component_meta_caches;
 #[cfg(test)]
 mod component_meta_caches_tests;

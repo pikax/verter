@@ -1907,6 +1907,19 @@ impl SemanticGraphStore {
         let mut miss_recorded = false;
         let mut retries = 0usize;
 
+        // Phase 5g-supplement §5.D.0 r17 — record cold/warm split for
+        // the §5.D.1 cache-discipline tests. Done ONCE per logical
+        // call (before the retry loop) so retries don't double-count.
+        // Recorded with the canonical key the warm cache stores, AND
+        // with the caller-side pre-canonical key (via raise/trait
+        // entry-point recordings) so tests can probe by either form.
+        #[cfg(test)]
+        if self.get(&key).is_some() {
+            crate::project_semantic_dispatch::raise::record_dispatch_warm(&key);
+        } else {
+            crate::project_semantic_dispatch::raise::record_dispatch_cold(&key);
+        }
+
         let (inflight, key) = loop {
             // 1. Warm memo hit.
             if let Some(hit) = self.get(&key) {
