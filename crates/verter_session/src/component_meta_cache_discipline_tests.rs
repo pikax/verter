@@ -19,6 +19,7 @@ use std::sync::Arc;
 use verter_semantic::analysis::AnalyzedMacroKind;
 
 use crate::host_test_audit::DispatchCounter;
+use crate::project_semantic_dispatch::pick_builtin_decl_identity;
 use crate::semantic_query::{
     DeclIdentity, ProjectionMode, SemanticNodeData, SemanticNodeId, SemanticQueryApi,
     SemanticQueryKey,
@@ -189,5 +190,68 @@ fn cache_discipline_materialize_surface_repeated_keys_warm() {
     assert!(
         after_unrelated_live > after_n_live,
         "unrelated cold key must publish a fresh live entry (after_n={after_n_live}, after_unrelated={after_unrelated_live})"
+    );
+}
+
+/// 5b §5.D.1 — `execute_pick` repeated identical keys: cold once,
+/// warm N-1. The underlying dispatch is `Instantiate { pick_decl,
+/// args, body_mode }` so we probe the counter against that key.
+#[test]
+fn cache_discipline_execute_pick_repeated_keys_warm() {
+    let host = build_test_host();
+    let base = intern_empty_object(&host);
+    let members: Vec<Arc<str>> = vec![Arc::from("a"), Arc::from("b")];
+    let mode = ProjectionMode::Expanded;
+
+    // Construct the same Instantiate key shape execute_pick uses
+    // internally so we can read the cold/warm counters for it.
+    let key_set = host
+        .semantic_dispatch()
+        .intern_string_literal_union(&members);
+    let probe_key = SemanticQueryKey::Instantiate {
+        base: pick_builtin_decl_identity(),
+        args: Arc::from(vec![base, key_set].into_boxed_slice()),
+        body_mode: mode,
+    };
+
+    let counter = DispatchCounter;
+    let baseline_cold = counter.family_cold(&probe_key);
+    let baseline_warm = counter.family_warm(&probe_key);
+
+    const N: usize = 8;
+    let dispatch = host.semantic_dispatch();
+    for _ in 0..N {
+        let _ = dispatch.execute_pick(base, &members, mode);
+    }
+
+    let cold = counter.family_cold(&probe_key) - baseline_cold;
+    let warm = counter.family_warm(&probe_key) - baseline_warm;
+    assert_eq!(
+        cold, 1,
+        "execute_pick cold path should fire ONCE for repeated identical key (got {cold})"
+    );
+    assert_eq!(
+        warm,
+        N - 1,
+        "execute_pick warm path should fire N-1 times for repeated identical key (got {warm})"
+    );
+
+    // Negative assertion: a different members set produces a
+    // distinct key that cold-fires once.
+    let unrelated_members: Vec<Arc<str>> = vec![Arc::from("z")];
+    let unrelated_key_set = host
+        .semantic_dispatch()
+        .intern_string_literal_union(&unrelated_members);
+    let unrelated_probe = SemanticQueryKey::Instantiate {
+        base: pick_builtin_decl_identity(),
+        args: Arc::from(vec![base, unrelated_key_set].into_boxed_slice()),
+        body_mode: mode,
+    };
+    let unrelated_baseline_cold = counter.family_cold(&unrelated_probe);
+    let _ = dispatch.execute_pick(base, &unrelated_members, mode);
+    let unrelated_cold = counter.family_cold(&unrelated_probe) - unrelated_baseline_cold;
+    assert_eq!(
+        unrelated_cold, 1,
+        "unrelated execute_pick cold key should still cold-fire (got {unrelated_cold})"
     );
 }
