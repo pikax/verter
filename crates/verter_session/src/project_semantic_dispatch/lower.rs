@@ -268,10 +268,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 //
                 // Userland types that shadow a builtin name (e.g.
                 // `type Partial<T> = ...` in the user's scope) live in
-                // `name_resolution` and take the normal `ResolveDecl`
-                // path below — this preserves the plan's "user
-                // shadowing wins" rule for utilities.
+                // `name_resolution` OR in `scope_payload.scope_type_names`
+                // (the latter covers callers that lower with an empty
+                // `name_resolution` map but still hand a populated
+                // `scope_payload`, e.g.
+                // [`Self::lower_type_expr_in_scope_with_mode`]). In
+                // both cases the builtin fast-path is suppressed and
+                // the bare-name walk below resolves the userland
+                // alias via the standard `ResolveDecl` path —
+                // preserving the "user shadowing wins" rule.
+                let shadowed_by_scope = scope_payload
+                    .map(|payload| {
+                        payload.scope_type_names.contains(name.as_ref())
+                            || payload.scope_type_bindings.contains_key(name.as_ref())
+                    })
+                    .unwrap_or(false);
                 if !name_resolution.contains_key(name.as_ref())
+                    && !shadowed_by_scope
                     && verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(
                         name.as_ref(),
                     )

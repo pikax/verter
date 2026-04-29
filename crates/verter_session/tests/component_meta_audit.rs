@@ -63,3 +63,10 @@ mod resolver_coverage_mapped_types;
 mod resolver_coverage_package_backed;
 #[path = "component_meta_audit/resolver_coverage_slot_shapes.rs"]
 mod resolver_coverage_slot_shapes;
+
+// Phase 5 §5.C (commit N+1) — lib parity tests. Exercise the
+// `MaterializeSurface` variant against ambient-lib and userland
+// mapped types, plus userland-shadowing-pick. Run via
+// `build_hermetic_host_with_lib`.
+#[path = "component_meta_audit/lib_parity.rs"]
+mod lib_parity;
