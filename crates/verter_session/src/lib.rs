@@ -64,6 +64,8 @@ mod component_meta_no_cache_promotion_tests;
 #[cfg(test)]
 mod component_meta_read_once_tests;
 #[cfg(test)]
+mod component_meta_terminal_mode_tests;
+#[cfg(test)]
 mod component_meta_caches_tests;
 pub mod component_meta_host;
 pub mod component_meta_materialize;
