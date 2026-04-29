@@ -525,6 +525,22 @@ impl VerterHost {
         )
     }
 
+    /// Test-only [`ProjectSemanticDispatch`] accessor for §5.D
+    /// dispatch tests. Phase 5g-supplement §5.D.0 r17.
+    ///
+    /// Production callers route dispatch through the component-meta
+    /// resolver and engine; tests construct a hermetic host and
+    /// dispatch directly via this accessor to exercise the
+    /// cache-discipline / read-once / terminal-mode-only-expansion
+    /// invariants without going through the surface materialiser.
+    #[cfg(test)]
+    #[must_use]
+    pub fn semantic_dispatch(
+        &self,
+    ) -> crate::project_semantic_dispatch::ProjectSemanticDispatch<'_> {
+        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(self)
+    }
+
     /// Access the project-global type-resolution cache root. Owned exclusively
     /// by the host; shared through an `Arc` so downstream cache consumers can
     /// hold stable references without taking the host lock.
