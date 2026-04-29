@@ -306,15 +306,6 @@ struct ParsedTypeResolutionContextCacheEntry {
     type_context: Rc<crate::ParsedTypeResolutionContext>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct ExternalTypeAnalysisCacheKey {
-    canonical_id: String,
-    source_type: oxc_span::SourceType,
-    /// §4.6 Sub-task C: content-version partitioning — same rationale as on
-    /// `ParsedEvalProgramCacheKey`.
-    whole_hash: Hash16,
-}
-
 /// Thin adapter that implements
 /// [`verter_compiler::utils::oxc::vue::resolve_type::cache_keys::NamedTypeCache`]
 /// on top of the project-global
@@ -374,12 +365,6 @@ impl verter_compiler::utils::oxc::vue::resolve_type::cache_keys::NamedTypeCache
         };
         self.graph.insert_resolved_named_type(host_key, value);
     }
-}
-
-#[derive(Clone)]
-pub(crate) struct ExternalTypeAnalysisCacheEntry {
-    whole_hash: Hash16,
-    analysis: Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>,
 }
 
 #[derive(Clone, Debug)]
@@ -1947,51 +1932,6 @@ impl VerterHost {
         })
     }
 
-    fn cached_external_type_analysis_entry(
-        &self,
-        canonical_id: &str,
-        whole_hash: Hash16,
-        raw_source: &str,
-        cached_parse: Option<&verter_compiler::parser::types::ParsedSfc>,
-        eval_source: &Arc<str>,
-    ) -> (
-        Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>,
-        bool,
-    ) {
-        let cache_key = ExternalTypeAnalysisCacheKey {
-            canonical_id: canonical_id.to_string(),
-            source_type: self.imported_eval_source_type_for(canonical_id, raw_source, cached_parse),
-            whole_hash,
-        };
-        {
-            let cache = self.external_type_analysis_cache.lock();
-            if let Some(entry) = cache.get(&cache_key) {
-                if entry.whole_hash == whole_hash {
-                    return (Arc::clone(&entry.analysis), true);
-                }
-            }
-        }
-
-        let analysis = self.build_external_type_analysis(
-            canonical_id,
-            whole_hash,
-            raw_source,
-            cached_parse,
-            eval_source,
-        );
-        {
-            let mut cache = self.external_type_analysis_cache.lock();
-            cache.insert(
-                cache_key,
-                ExternalTypeAnalysisCacheEntry {
-                    whole_hash,
-                    analysis: Arc::clone(&analysis),
-                },
-            );
-        }
-        (analysis, false)
-    }
-
     fn external_type_resolution_inputs(
         &self,
         canonical_id: &str,
@@ -2016,39 +1956,25 @@ impl VerterHost {
             return Some(inputs);
         }
 
-        let (raw_source, cached_parse, whole_hash) = self.current_eval_state(canonical_id)?;
-
-        let refreshed_facts = self.project_type_store.indexed().get_any(canonical_id);
-        if let Some(facts) = refreshed_facts {
-            let inputs = ExternalTypeResolutionInputs {
-                raw_source: Arc::clone(&facts.raw_source),
-                cached_parse: facts.cached_parse.clone(),
-                whole_hash: facts.whole_hash,
-                eval_source: Arc::clone(&facts.eval_source),
-                analysis: Arc::clone(&facts.external_type_analysis),
-                analysis_cache_hit: true,
-            };
-            return Some(inputs);
-        }
-
-        let eval_source = Arc::<str>::from(Self::build_eval_script_source(
-            raw_source.as_ref(),
-            cached_parse.as_deref(),
-        ));
-        let (analysis, analysis_cache_hit) = self.cached_external_type_analysis_entry(
-            canonical_id,
-            whole_hash,
-            raw_source.as_ref(),
-            cached_parse.as_deref(),
-            &eval_source,
-        );
+        // Phase 6b.D2a step 3 — F6 reader migration. Drive the route-only
+        // fall-through path through the shared materialiser so external-type
+        // analysis is built exactly once per `(canonical, whole_hash)` and
+        // shared with F7's `route_shallow_state` reader. The materialiser's
+        // tiered staleness gate (route_owned_entry_is_fresh) is the
+        // authoritative freshness check; the legacy
+        // `cached_external_type_analysis_entry` mutex cache is gone.
+        let entry = self.ensure_route_owned_shallow_entry(canonical_id)?;
         let inputs = ExternalTypeResolutionInputs {
-            raw_source,
-            cached_parse,
-            whole_hash,
-            eval_source,
-            analysis,
-            analysis_cache_hit,
+            raw_source: Arc::clone(&entry.raw_source),
+            cached_parse: entry.cached_parse.clone(),
+            whole_hash: entry.whole_hash,
+            eval_source: Arc::clone(&entry.eval_source),
+            analysis: Arc::clone(&entry.external_type_analysis),
+            // The materialiser publishes once per content generation; warm
+            // hits return the same entry through the pre-flight fast path.
+            // Treat warm hits (singleflight returned the published entry)
+            // as cache hits for telemetry.
+            analysis_cache_hit: true,
         };
         Some(inputs)
     }
@@ -2134,7 +2060,14 @@ impl VerterHost {
                 .borrow_mut()
                 .retain(|key, _| key.host_instance_id != host_instance_id);
         });
-        self.external_type_analysis_cache.lock().clear();
+        // Phase 6b.D2a step 4 — `external_type_analysis_cache` host mutex
+        // is gone (folded into `RouteOwnedShallowDb` via the unified F6/F7
+        // entry). The new discipline is per-canonical tiered staleness gate
+        // + atomic `project_type_store.evict_canonical` cascade on file
+        // change + bulk `route_owned_shallow.clear_all` on route-resolution
+        // mutation. NO cache-wide epoch-bump clear — that was over-clearing
+        // and the per-entry `route_owned_entry_is_fresh` gate is precise.
+        //
         // Clear host-owned named-type cache on epoch bump. Entries live on
         // the shared `SemanticGraphStore` under `HostResolvedNamedTypeKey`
         // identities, scoped by `(canonical_id, whole_hash)`. Whole_hash
@@ -2145,10 +2078,6 @@ impl VerterHost {
         self.project_type_store
             .semantic_graph()
             .clear_resolved_named_types();
-        // Note: route_owned_shallow_cache is NOT cleared here — it's invalidated
-        // per-file by invalidate_route_owned_shallow_cache() and validated by
-        // content-hash on lookup. Clearing it on every epoch bump would defeat
-        // the caching benefit for unchanged imported files.
     }
 
     fn build_external_type_analysis(

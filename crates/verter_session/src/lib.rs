@@ -359,22 +359,13 @@ pub struct VerterHost {
     ///
     /// Phase 6b classification: `legitimate-authority`. See sub-plan §6b.2.F10.
     pub(crate) query_profile: parking_lot::Mutex<verter_semantic::profile::QueryProfile>,
-    /// Host-owned external type analysis cache (migrated from thread-local).
-    /// Keyed by (canonical_id, source_type); content-hash validated per lookup.
-    pub(crate) external_type_analysis_cache: parking_lot::Mutex<
-        rustc_hash::FxHashMap<
-            crate::host_manage::ExternalTypeAnalysisCacheKey,
-            crate::host_manage::ExternalTypeAnalysisCacheEntry,
-        >,
-    >,
-    /// Host-owned route-owned shallow state cache (migrated from thread-local).
-    /// Keyed by canonical_id; workspace-generation and content-hash validated.
-    pub(crate) route_owned_shallow_cache: parking_lot::Mutex<
-        rustc_hash::FxHashMap<
-            crate::host_resolve::RouteOwnedShallowStateCacheKey,
-            crate::host_resolve::RouteOwnedShallowStateCacheEntry,
-        >,
-    >,
+    // Phase 6b.D2a step 4 — `external_type_analysis_cache` (F6) and
+    // `route_owned_shallow_cache` (F7) host mutexes are DELETED. Both
+    // halves are now carried in
+    // [`ProjectTypeStore.route_owned_shallow`](crate::project_type_store::ProjectTypeStore::route_owned_shallow)
+    // as a single first-class artifact ([`RouteOwnedShallowEntry`]). See
+    // sub-plan §6b.2.F6/F7 (Option (c)) and §6b.D2a step 2 for the
+    // canonical materialiser.
     /// Project-global type-resolution cache root (Phase 1+ of the cache
     /// overhaul). Owns `IndexedReady`, `AnalysisReady`, and the rehomed
     /// `RouteDb` / `ImportedRootDb`. See `project_type_store` module docs.
@@ -522,8 +513,10 @@ impl VerterHost {
             eval_env_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             semantic_db: parking_lot::Mutex::new(verter_semantic::db::SemanticDb::new()),
             query_profile: parking_lot::Mutex::new(verter_semantic::profile::QueryProfile::Build),
-            external_type_analysis_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
-            route_owned_shallow_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
+            // Phase 6b.D2a step 4 — `external_type_analysis_cache` and
+            // `route_owned_shallow_cache` host mutexes deleted; their
+            // workload moved to
+            // `ProjectTypeStore.route_owned_shallow`.
             project_type_store,
             request_id_counter: std::sync::atomic::AtomicU64::new(0),
             audit_records: Arc::new(crate::component_meta_audit::AuditRecordsStore::default()),

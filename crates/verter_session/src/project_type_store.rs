@@ -676,6 +676,25 @@ impl RouteOwnedShallowDb {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    /// Project each `(canonical_id, &RouteOwnedShallowEntry)` pair through
+    /// `f` and collect the results. Phase 6b.D2a step 3 — exposes a stable
+    /// iteration surface for `resolver_store::derived_hashes` fact-capture
+    /// without leaking the inner `DashMap` type. The iteration is a DashMap
+    /// snapshot — concurrent inserts during iteration are handled by
+    /// DashMap's internal sharding.
+    pub fn for_each_entry<R, F>(&self, mut f: F) -> Vec<R>
+    where
+        F: FnMut(&str, &RouteOwnedShallowEntry) -> R,
+    {
+        let mut results = Vec::with_capacity(self.entries.len());
+        for entry in self.entries.iter() {
+            let key = entry.key();
+            let value = entry.value();
+            results.push(f(key.as_ref(), value.as_ref()));
+        }
+        results
+    }
 }
 
 impl Default for RouteOwnedShallowDb {

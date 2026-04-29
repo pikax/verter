@@ -289,25 +289,37 @@ fn external_type_frontier_layer_result_detail(
     )
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct RouteOwnedShallowStateCacheKey {
-    canonical_id: String,
-}
-
-#[derive(Clone)]
-pub(crate) struct RouteOwnedShallowStateCacheEntry {
-    workspace_generation: u64,
-    whole_hash: Hash16,
-    raw_source: Arc<str>,
-    cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
-    raw_snapshot: Arc<crate::types::FileAnalysisSnapshot>,
-    shallow_state: Arc<crate::resolver_core::ShallowFileState>,
-}
-
+/// Lightweight projection of a [`RouteOwnedShallowEntry`] used by
+/// [`crate::resolver_store`] when snapshotting the route-only shallow cache
+/// for fact-capture. **Not** a cache entry itself; the project-store-owned
+/// [`RouteOwnedShallowDb`](crate::project_type_store::RouteOwnedShallowDb)
+/// retains the full entry, while this projection is the thin shape exposed
+/// across the in-crate consumer boundary (Phase 6b sub-plan §6b.D2a step 5).
 pub(crate) struct RouteOwnedShallowStateSnapshot {
     pub canonical_id: String,
     pub whole_hash: Hash16,
     pub route_hash: Option<Hash16>,
+}
+
+impl RouteOwnedShallowStateSnapshot {
+    /// Project a [`RouteOwnedShallowEntry`] into a snapshot. The entry's
+    /// shallow state is consulted to compute `route_hash` only when the
+    /// surface is resolvable — mirrors the pre-migration `From` behaviour
+    /// that lived inline in `snapshot_route_owned_shallow_cache_entries`.
+    pub(crate) fn from_entry(
+        canonical_id: &str,
+        entry: &crate::project_type_store::RouteOwnedShallowEntry,
+    ) -> Self {
+        let route_hash = entry
+            .shallow_state
+            .has_resolvable_surface()
+            .then(|| crate::resolver_store::hash_route_surface(entry.shallow_state.as_ref()));
+        Self {
+            canonical_id: canonical_id.to_string(),
+            whole_hash: entry.whole_hash,
+            route_hash,
+        }
+    }
 }
 
 fn wildcard_source_stem_for_matching(path: &str) -> Option<String> {
@@ -556,27 +568,34 @@ impl crate::resolver_core::ExternalMacroTypeCollectorHost for HostExternalMacroT
 }
 
 impl VerterHost {
+    /// Phase 6b.D2a step 3 — invalidate the route-only shallow entry for a
+    /// canonical via the project-store-owned
+    /// [`RouteOwnedShallowDb`](crate::project_type_store::RouteOwnedShallowDb).
+    /// The pre-migration host-mutex (`route_owned_shallow_cache`) is gone;
+    /// this thin wrapper keeps the existing call site
+    /// (`host_manage::set_import_dependencies`) working through one indirection
+    /// while the body delegates to the store DB. Future cleanup may inline
+    /// the call.
     pub(crate) fn invalidate_route_owned_shallow_cache(&self, canonical_id: &str) {
-        let key = RouteOwnedShallowStateCacheKey {
-            canonical_id: canonical_id.to_string(),
-        };
-        self.route_owned_shallow_cache.lock().remove(&key);
+        self.project_type_store
+            .route_owned_shallow()
+            .remove(canonical_id);
     }
 
+    /// Phase 6b.D2a step 3 — snapshot the route-only shallow entries from the
+    /// project-store DB for fact-capture (`resolver_store::derived_hashes`).
+    /// Iteration is across `DashMap<Arc<str>, Arc<RouteOwnedShallowEntry>>`;
+    /// the projection ([`RouteOwnedShallowStateSnapshot`]) carries the
+    /// minimal `(canonical_id, whole_hash, optional route_hash)` shape
+    /// consumed by `resolver_store.rs:137`.
     pub(crate) fn snapshot_route_owned_shallow_cache_entries(
         &self,
     ) -> Vec<RouteOwnedShallowStateSnapshot> {
-        let cache = self.route_owned_shallow_cache.lock();
-        cache
-            .iter()
-            .map(|(key, entry)| RouteOwnedShallowStateSnapshot {
-                canonical_id: key.canonical_id.clone(),
-                whole_hash: entry.whole_hash,
-                route_hash: entry.shallow_state.has_resolvable_surface().then(|| {
-                    crate::resolver_store::hash_route_surface(entry.shallow_state.as_ref())
-                }),
+        self.project_type_store
+            .route_owned_shallow()
+            .for_each_entry(|canonical_id, entry| {
+                RouteOwnedShallowStateSnapshot::from_entry(canonical_id, entry)
             })
-            .collect()
     }
 
     /// Expand a relative import specifier into all candidate canonical IDs.
@@ -2094,58 +2113,13 @@ impl VerterHost {
         }
     }
 
-    fn route_owned_shallow_state_cache_key(
-        &self,
-        canonical_id: &str,
-        _workspace_generation: u64,
-    ) -> RouteOwnedShallowStateCacheKey {
-        RouteOwnedShallowStateCacheKey {
-            canonical_id: canonical_id.to_string(),
-        }
-    }
-
-    fn cached_route_owned_shallow_state(
-        &self,
-        canonical_id: &str,
-        workspace_generation: u64,
-    ) -> Option<Arc<crate::resolver_core::ShallowFileState>> {
-        self.cached_route_owned_shallow_state_entry(canonical_id, workspace_generation)
-            .map(|entry| entry.shallow_state)
-    }
-
-    fn cached_route_owned_shallow_state_entry(
-        &self,
-        canonical_id: &str,
-        workspace_generation: u64,
-    ) -> Option<RouteOwnedShallowStateCacheEntry> {
-        let key = self.route_owned_shallow_state_cache_key(canonical_id, workspace_generation);
-        let entry = self.route_owned_shallow_cache.lock().get(&key).cloned()?;
-
-        // Post-cut: live-host probe validates via the live `get_whole_hash`
-        // path (scheduler + module_facts), falling back to
-        // workspace_generation + file existence when the host also lacks
-        // authority.
-        if let Some(current_hash) = self.get_whole_hash(canonical_id) {
-            if current_hash != entry.whole_hash {
-                return None;
-            }
-            return Some(entry);
-        }
-
-        if entry.workspace_generation == workspace_generation {
-            if !self.ws().file_exists(canonical_id) {
-                return None;
-            }
-            return Some(entry);
-        }
-
-        if !self.ws().file_exists(canonical_id) {
-            return None;
-        }
-
-        Some(entry)
-    }
-
+    /// Phase 6b.D2a step 3 — query the cached `whole_hash` for a canonical
+    /// without forcing a cold materialisation. Used by warm-path callers
+    /// that need a content-hash for `store_view_allows_current_whole_hash`
+    /// without consuming the full route-only artifact. Reads the
+    /// project-store DB directly via `get_any` (no tiered staleness gate
+    /// here — callers reapply their own staleness check via
+    /// `store_view_allows_current_whole_hash`).
     pub(crate) fn cached_route_owned_shallow_whole_hash(
         &self,
         canonical_id: &str,
@@ -2153,14 +2127,15 @@ impl VerterHost {
         let normalized_canonical = self
             .resolve_eval_dependency_canonical(canonical_id)
             .unwrap_or_else(|| canonical_id.to_string());
-        let workspace_generation = self.ws().content_generation();
-        self.cached_route_owned_shallow_state_entry(
-            normalized_canonical.as_str(),
-            workspace_generation,
-        )
-        .map(|entry| entry.whole_hash)
+        self.project_type_store
+            .route_owned_shallow()
+            .get_any(normalized_canonical.as_str())
+            .map(|entry| entry.whole_hash)
     }
 
+    /// Phase 6b.D2a step 3 — return the cached eval-state tuple for a
+    /// canonical via the materialiser. On cache miss, materialises through
+    /// [`Self::ensure_route_owned_shallow_entry`].
     pub(crate) fn cached_route_owned_eval_state(
         &self,
         canonical_id: &str,
@@ -2169,56 +2144,257 @@ impl VerterHost {
         Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
         Hash16,
     )> {
-        let normalized_canonical = self
-            .resolve_eval_dependency_canonical(canonical_id)
-            .unwrap_or_else(|| canonical_id.to_string());
-        let workspace_generation = self.ws().content_generation();
-        self.cached_route_owned_shallow_state_entry(
-            normalized_canonical.as_str(),
-            workspace_generation,
-        )
-        .map(|entry| (entry.raw_source, entry.cached_parse, entry.whole_hash))
+        let entry = self.ensure_route_owned_shallow_entry(canonical_id)?;
+        Some((
+            Arc::clone(&entry.raw_source),
+            entry.cached_parse.clone(),
+            entry.whole_hash,
+        ))
     }
 
+    /// Phase 6b.D2a step 3 — return the cached `FileAnalysisSnapshot` for a
+    /// canonical via the materialiser. On cache miss, materialises through
+    /// [`Self::ensure_route_owned_shallow_entry`].
     pub(crate) fn cached_route_owned_snapshot(
         &self,
         canonical_id: &str,
     ) -> Option<Arc<crate::types::FileAnalysisSnapshot>> {
+        let entry = self.ensure_route_owned_shallow_entry(canonical_id)?;
+        Some(Arc::clone(&entry.snapshot))
+    }
+
+    /// Phase 6b.D2a step 2 — shared materialiser for the route-only
+    /// shallow artifact. Three-layer pattern matching the verified
+    /// `ensure_indexed_ready` template at `host_manage.rs:3417`:
+    ///
+    /// 1. **Pre-flight fast path** — `get_any()` + tiered staleness gate
+    ///    (warm callers exit zero-I/O).
+    /// 2. **Singleflight on miss** — collapses concurrent cold callers to
+    ///    one leader via
+    ///    [`UnifiedResolverRuntime::route_owned_shallow_singleflight`](crate::resolver_core::resolver_runtime::UnifiedResolverRuntime::route_owned_shallow_singleflight).
+    /// 3. **Inside flight**: re-check `get_any()` + tiered gate, capture
+    ///    BOTH generations BEFORE the read, hash-validated re-check after
+    ///    hashing, parse + analysis, then a **pre-publish fence** that
+    ///    re-reads both generations to detect mid-flight mutations.
+    ///
+    /// The materialiser publishes once per content generation; subsequent
+    /// callers within that generation see the published `Arc`.
+    /// `Arc::ptr_eq` over the returned entry holds for two concurrent cold
+    /// callers (singleflight collapse).
+    pub(crate) fn ensure_route_owned_shallow_entry(
+        &self,
+        canonical_id: &str,
+    ) -> Option<Arc<crate::project_type_store::RouteOwnedShallowEntry>> {
         let normalized_canonical = self
             .resolve_eval_dependency_canonical(canonical_id)
             .unwrap_or_else(|| canonical_id.to_string());
-        let workspace_generation = self.ws().content_generation();
-        self.cached_route_owned_shallow_state_entry(
-            normalized_canonical.as_str(),
-            workspace_generation,
-        )
-        .map(|entry| entry.raw_snapshot)
+        let canonical_id = normalized_canonical.as_str();
+
+        // STEP 1 — pre-flight fast path (warm callers, ZERO I/O).
+        if let Some(entry) = self
+            .project_type_store
+            .route_owned_shallow()
+            .get_any(canonical_id)
+        {
+            if self.route_owned_entry_is_fresh(canonical_id, entry.as_ref()) {
+                return Some(entry);
+            }
+            self.project_type_store
+                .route_owned_shallow()
+                .remove(canonical_id);
+        }
+
+        if canonical_id.is_empty() || crate::host_manage::is_raw_import_specifier_id(canonical_id) {
+            return None;
+        }
+
+        // STEP 2 — singleflight on miss. Mirrors `indexed_singleflight`
+        // pattern at host_manage.rs:3725–3743 — uses `()` error type, returns
+        // `Option` at the outer fn.
+        let canonical_arc: Arc<str> = Arc::from(canonical_id);
+        let token = crate::resolver_core::StoreViewCompatToken {
+            epoch: 0,
+            session: None,
+        };
+        let materialize =
+            || -> Result<Arc<crate::project_type_store::RouteOwnedShallowEntry>, ()> {
+                // STEP 3 — re-check inside flight (apply the tiered gate again).
+                if let Some(entry) = self
+                    .project_type_store
+                    .route_owned_shallow()
+                    .get_any(canonical_id)
+                {
+                    if self.route_owned_entry_is_fresh(canonical_id, entry.as_ref()) {
+                        return Ok(entry);
+                    }
+                    self.project_type_store
+                        .route_owned_shallow()
+                        .remove(canonical_id);
+                }
+                // STEP 4 — capture BOTH generations BEFORE read+parse, so any
+                // mutation that lands during materialisation produces a generation
+                // mismatch on the pre-publish fence (STEP 7).
+                let workspace_generation = self.ws().content_generation();
+                let project_generation = self.project_type_store.current_project_generation();
+
+                let raw_source = self.read_analysis_source(canonical_id).ok_or(())?;
+                let whole_hash = crate::hash::hash_16(raw_source.as_bytes());
+
+                // STEP 5 — hash-validated re-check WITH the tiered gate.
+                // A by-hash hit must still pass the full freshness gate (per
+                // hard-stop constraint #13): tier-3 may reject the entry even
+                // though tier-1 (whole_hash) matches.
+                if let Some(entry) = self
+                    .project_type_store
+                    .route_owned_shallow()
+                    .get(canonical_id, whole_hash)
+                {
+                    if self.route_owned_entry_is_fresh(canonical_id, entry.as_ref()) {
+                        return Ok(entry);
+                    }
+                    self.project_type_store
+                        .route_owned_shallow()
+                        .remove(canonical_id);
+                }
+
+                // Honour the request-scoped store-view gate exactly like the
+                // pre-migration body did (`store_view_allows_current_whole_hash`).
+                if !self.store_view_allows_current_whole_hash(canonical_id, whole_hash) {
+                    return Err(());
+                }
+
+                // If a parallel materialisation populated `IndexedReadyDb` while
+                // we were reading, prefer that authoritative shape — same
+                // shortcut the pre-migration body had at host_resolve.rs:2257.
+                if let Some(facts) = self.project_type_store.indexed().get_any(canonical_id) {
+                    if facts.whole_hash == whole_hash {
+                        // The IndexedReady authority is preferred; do NOT publish
+                        // a route-only shadow because the IndexedReady fast path
+                        // is the canonical reader.
+                        return Err(());
+                    }
+                }
+
+                // STEP 6 — cold parse + analysis.
+                let cached_parse = canonical_id.ends_with(".vue").then(|| {
+                    Arc::new(verter_compiler::compile::parse_sfc(&raw_source, None, None))
+                });
+                let eval_source = Arc::<str>::from(Self::build_eval_script_source(
+                    raw_source.as_ref(),
+                    cached_parse.as_deref(),
+                ));
+                let snapshot = Arc::new(self.build_route_owned_snapshot_from_source_state(
+                    canonical_id,
+                    &raw_source,
+                    cached_parse.as_deref(),
+                    whole_hash,
+                ));
+                let (eval_env, external_type_analysis) = self
+                    .build_eval_env_and_external_type_analysis(
+                        canonical_id,
+                        whole_hash,
+                        raw_source.as_ref(),
+                        cached_parse.as_deref(),
+                        &eval_source,
+                    );
+                let shallow_state =
+                    Arc::new(crate::resolver_core::ShallowFileState::from_analysis(
+                        whole_hash,
+                        Arc::clone(&external_type_analysis),
+                        Some(eval_env.as_ref()),
+                    ));
+
+                // STEP 7 — PRE-PUBLISH FENCE.
+                // Re-read both generations. If either has bumped since STEP 4,
+                // a route-resolution mutation or content mutation landed during
+                // read+parse; the entry we just built is already stale. Abort
+                // the publish so the next caller re-cold-materialises against
+                // the new state.
+                let workspace_generation_post = self.ws().content_generation();
+                let project_generation_post = self.project_type_store.current_project_generation();
+                if workspace_generation_post != workspace_generation
+                    || project_generation_post != project_generation
+                {
+                    return Err(());
+                }
+
+                let entry = Arc::new(crate::project_type_store::RouteOwnedShallowEntry {
+                    whole_hash,
+                    workspace_generation,
+                    project_generation,
+                    raw_source: Arc::clone(&raw_source),
+                    eval_source,
+                    cached_parse,
+                    snapshot,
+                    external_type_analysis,
+                    shallow_state,
+                });
+                self.project_type_store
+                    .route_owned_shallow()
+                    .publish(canonical_arc.clone(), Arc::clone(&entry));
+                Ok(entry)
+            };
+        let singleflight = &self.resolver.runtime.route_owned_shallow_singleflight;
+        match singleflight.run(canonical_arc.clone(), token, materialize) {
+            Ok(run_result) => Some((*run_result.value).clone()),
+            Err(()) => None,
+        }
     }
 
-    fn cache_route_owned_shallow_state(
+    /// Phase 6b.D2a step 2 — tiered staleness gate for route-only entries.
+    /// Mirrors pre-migration `cached_route_owned_shallow_state_entry` body
+    /// (host_resolve.rs:2128–2147) extended with tier-3 `project_generation`
+    /// per tenth-pass Codex P0:
+    ///
+    /// - **Tier 3** — `entry.project_generation` must match
+    ///   [`ProjectTypeStore::current_project_generation`]. Covers
+    ///   `configure_projects` / `set_exact_resolutions` /
+    ///   `configure_resolver` route-resolution mutations that DO NOT bump
+    ///   `content_generation`.
+    /// - **Tier 1** — when `get_whole_hash` returns `Some`, the scheduler-
+    ///   backed authoritative content hash is the truth.
+    /// - **Tier 2** — fallback for route-only files the scheduler hasn't
+    ///   seen: `entry.workspace_generation == ws().content_generation()`
+    ///   AND `ws().file_exists(canonical_id)`.
+    fn route_owned_entry_is_fresh(
         &self,
         canonical_id: &str,
-        workspace_generation: u64,
-        whole_hash: Hash16,
-        raw_source: Arc<str>,
-        cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
-        raw_snapshot: Arc<crate::types::FileAnalysisSnapshot>,
-        shallow_state: Arc<crate::resolver_core::ShallowFileState>,
-    ) {
-        let key = self.route_owned_shallow_state_cache_key(canonical_id, workspace_generation);
-        self.route_owned_shallow_cache.lock().insert(
-            key,
-            RouteOwnedShallowStateCacheEntry {
-                workspace_generation,
-                whole_hash,
-                raw_source,
-                cached_parse,
-                raw_snapshot,
-                shallow_state,
-            },
-        );
+        entry: &crate::project_type_store::RouteOwnedShallowEntry,
+    ) -> bool {
+        // Tier 3 — project graph / route resolution.
+        if entry.project_generation != self.project_type_store.current_project_generation() {
+            return false;
+        }
+        // Tier 1 — scheduler-backed authoritative content hash.
+        if let Some(auth_hash) = self.get_whole_hash(canonical_id) {
+            return auth_hash == entry.whole_hash;
+        }
+        // Tier 2 — workspace_generation + file_exists.
+        entry.workspace_generation == self.ws().content_generation()
+            && self.ws().file_exists(canonical_id)
     }
 
+    /// Phase 6b.D2a — test-only accessor for the route-only freshness gate.
+    /// Used by `phase_6b_characterization_tests` to discriminate tier-2
+    /// behaviour without depending on the public materialiser path (which
+    /// always populates `compile_cache` and would otherwise put tier-1 in
+    /// charge).
+    #[cfg(test)]
+    pub(crate) fn route_owned_entry_is_fresh_for_test(
+        &self,
+        canonical_id: &str,
+        entry: &crate::project_type_store::RouteOwnedShallowEntry,
+    ) -> bool {
+        self.route_owned_entry_is_fresh(canonical_id, entry)
+    }
+
+    /// Phase 6b.D2a step 1 (writers) — `route_shallow_state` is the
+    /// route-only frontier reader. Body now delegates to the shared
+    /// materialiser ([`Self::ensure_route_owned_shallow_entry`]) and
+    /// returns the entry's `shallow_state`. The request-scoped
+    /// `route_shallow_cache` (frontier-engine memo, kept per-request to
+    /// avoid repeated `Arc` clones) is still populated for in-flight
+    /// frontier traversal.
     fn route_shallow_state(
         &self,
         canonical_id: &str,
@@ -2227,8 +2403,10 @@ impl VerterHost {
         let normalized_canonical = self
             .resolve_eval_dependency_canonical(canonical_id)
             .unwrap_or_else(|| canonical_id.to_string());
-        let workspace_generation = self.ws().content_generation();
 
+        // Authoritative `IndexedReady` fast path — preserved from the
+        // pre-migration body so scheduler-materialised entries take
+        // precedence over route-only shadow entries.
         if let Some(facts) = self
             .project_type_store
             .indexed()
@@ -2237,71 +2415,16 @@ impl VerterHost {
             return Some(Arc::clone(&facts.shallow_state));
         }
 
+        // Request-scoped memo (frontier engine de-dupe). NOT a host-side
+        // mirror — see `HostFrontierAdapter::route_shallow_cache` doc-comment
+        // (Phase 6b §6b.2.F9 `scratch` classification).
         if let Some(cached) = route_shallow_cache.get(normalized_canonical.as_str()) {
             return Some(Arc::clone(cached));
         }
 
-        if let Some(cached) = self
-            .cached_route_owned_shallow_state(normalized_canonical.as_str(), workspace_generation)
-        {
-            route_shallow_cache.insert(normalized_canonical.clone(), Arc::clone(&cached));
-            return Some(cached);
-        }
-
-        let raw_source = self.read_analysis_source(normalized_canonical.as_str())?;
-        let whole_hash = crate::hash::hash_16(raw_source.as_bytes());
-        if !self.store_view_allows_current_whole_hash(normalized_canonical.as_str(), whole_hash) {
-            return None;
-        }
-
-        if let Some(facts) = self
-            .project_type_store
-            .indexed()
-            .get_any(normalized_canonical.as_str())
-        {
-            if facts.whole_hash == whole_hash {
-                return Some(Arc::clone(&facts.shallow_state));
-            }
-        }
-
-        let cached_parse = normalized_canonical
-            .ends_with(".vue")
-            .then(|| Arc::new(verter_compiler::compile::parse_sfc(&raw_source, None, None)));
-        let eval_source = Arc::<str>::from(Self::build_eval_script_source(
-            raw_source.as_ref(),
-            cached_parse.as_deref(),
-        ));
-        let raw_snapshot = Arc::new(self.build_route_owned_snapshot_from_source_state(
-            normalized_canonical.as_str(),
-            &raw_source,
-            cached_parse.as_deref(),
-            whole_hash,
-        ));
-        let (eval_env, external_type_analysis) = self.build_eval_env_and_external_type_analysis(
-            normalized_canonical.as_str(),
-            whole_hash,
-            raw_source.as_ref(),
-            cached_parse.as_deref(),
-            &eval_source,
-        );
-        // Route-only shallow state must stay import-lazy. It can record raw
-        // import/reexport surfaces now and resolve only the single edge that
-        // the requested symbol route actually needs later.
-        let shallow_state = Arc::new(crate::resolver_core::ShallowFileState::from_analysis(
-            whole_hash,
-            external_type_analysis,
-            Some(eval_env.as_ref()),
-        ));
+        let entry = self.ensure_route_owned_shallow_entry(normalized_canonical.as_str())?;
+        let shallow_state = Arc::clone(&entry.shallow_state);
         route_shallow_cache.insert(normalized_canonical.clone(), Arc::clone(&shallow_state));
-        self.cache_route_owned_shallow_state(
-            normalized_canonical.as_str(),
-            workspace_generation,
-            whole_hash,
-            Arc::clone(&raw_source),
-            cached_parse.clone(),
-            Arc::clone(&raw_snapshot),
-            Arc::clone(&shallow_state),
-        );
         Some(shallow_state)
     }
 
