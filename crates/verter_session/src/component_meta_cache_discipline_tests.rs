@@ -19,7 +19,7 @@ use std::sync::Arc;
 use verter_semantic::analysis::AnalyzedMacroKind;
 
 use crate::host_test_audit::DispatchCounter;
-use crate::project_semantic_dispatch::pick_builtin_decl_identity;
+use crate::project_semantic_dispatch::{omit_builtin_decl_identity, pick_builtin_decl_identity};
 use crate::semantic_query::{
     DeclIdentity, ProjectionMode, SemanticNodeData, SemanticNodeId, SemanticQueryApi,
     SemanticQueryKey,
@@ -253,5 +253,65 @@ fn cache_discipline_execute_pick_repeated_keys_warm() {
     assert_eq!(
         unrelated_cold, 1,
         "unrelated execute_pick cold key should still cold-fire (got {unrelated_cold})"
+    );
+}
+
+/// 5b §5.D.1 — `execute_omit` repeated identical keys: cold once,
+/// warm N-1. Mirrors `execute_pick` shape. Underlying dispatch is
+/// `Instantiate { omit_decl, ... }`.
+#[test]
+fn cache_discipline_execute_omit_repeated_keys_warm() {
+    let host = build_test_host();
+    let base = intern_empty_object(&host);
+    let members: Vec<Arc<str>> = vec![Arc::from("x"), Arc::from("y")];
+    let mode = ProjectionMode::Expanded;
+
+    let key_set = host
+        .semantic_dispatch()
+        .intern_string_literal_union(&members);
+    let probe_key = SemanticQueryKey::Instantiate {
+        base: omit_builtin_decl_identity(),
+        args: Arc::from(vec![base, key_set].into_boxed_slice()),
+        body_mode: mode,
+    };
+
+    let counter = DispatchCounter;
+    let baseline_cold = counter.family_cold(&probe_key);
+    let baseline_warm = counter.family_warm(&probe_key);
+
+    const N: usize = 8;
+    let dispatch = host.semantic_dispatch();
+    for _ in 0..N {
+        let _ = dispatch.execute_omit(base, &members, mode);
+    }
+
+    let cold = counter.family_cold(&probe_key) - baseline_cold;
+    let warm = counter.family_warm(&probe_key) - baseline_warm;
+    assert_eq!(
+        cold, 1,
+        "execute_omit cold path should fire ONCE for repeated identical key (got {cold})"
+    );
+    assert_eq!(
+        warm,
+        N - 1,
+        "execute_omit warm path should fire N-1 times for repeated identical key (got {warm})"
+    );
+
+    // Negative assertion: distinct members set still cold-fires.
+    let unrelated_members: Vec<Arc<str>> = vec![Arc::from("q")];
+    let unrelated_key_set = host
+        .semantic_dispatch()
+        .intern_string_literal_union(&unrelated_members);
+    let unrelated_probe = SemanticQueryKey::Instantiate {
+        base: omit_builtin_decl_identity(),
+        args: Arc::from(vec![base, unrelated_key_set].into_boxed_slice()),
+        body_mode: mode,
+    };
+    let unrelated_baseline_cold = counter.family_cold(&unrelated_probe);
+    let _ = dispatch.execute_omit(base, &unrelated_members, mode);
+    let unrelated_cold = counter.family_cold(&unrelated_probe) - unrelated_baseline_cold;
+    assert_eq!(
+        unrelated_cold, 1,
+        "unrelated execute_omit cold key should still cold-fire (got {unrelated_cold})"
     );
 }
