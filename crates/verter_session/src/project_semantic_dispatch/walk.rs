@@ -170,7 +170,36 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         let mut current = start_node;
         let mut index = start_index;
 
+        // Phase 5g-supplement §5.D.0 r17 — honour
+        // `HostConfig::depth_budget` so §5.D.4
+        // `no_cache_promotion_for_budget_exceeded_*` tests can
+        // construct a constrained host and observe a budget-exceeded
+        // sentinel (Recursive).
+        //
+        // Per §0.6.5 stack-depth discipline this walker is already
+        // iterative (frame stack on the heap); the budget check here
+        // is a discrimination handle for the §5.D.4 contract, not a
+        // stack-safety rail. The budget caps the path-segment count
+        // the walker may consume — a path of length > budget short-
+        // circuits with a Recursive sentinel before the walker visits
+        // the over-budget hop.
+        //
+        // Convention: budget < `MAX_DEPTH` is interpreted as a
+        // strict cap; budget == `MAX_DEPTH` (the default) is the
+        // existing behavior. This keeps production hosts on the
+        // existing graph-size + cycle-set bound while letting
+        // hermetic tests construct a small budget for discrimination.
+        let budget = self.dispatch.host.config().depth_budget;
+        let cap_active =
+            budget > 0 && budget < crate::component_meta_materialize::MAX_DEPTH;
+
         while index < path.len() {
+            if cap_active && index >= budget {
+                results.push(self.dispatch.opaque(QueryError::RecursiveRef {
+                    name: Arc::from("depth-budget-exceeded"),
+                }));
+                return;
+            }
             let segment = &path[index];
             let data = match self.graph().node_data(current) {
                 Some(d) => d,

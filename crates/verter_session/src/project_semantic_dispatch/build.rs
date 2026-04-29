@@ -1118,6 +1118,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         let mut walker = PathWalker::new(self, mode, &fence);
         let result = walker.walk(start_base, walker_path.as_ref());
+        // Phase 5g-supplement §5.D.0 r17 — surface a budget-exceeded
+        // sentinel as `QueryResult::Recursive` so §5.D.4
+        // `no_cache_promotion_for_budget_exceeded_*` callers can
+        // discriminate via a type-level `matches!(_, Recursive(_))`
+        // check. The walker itself emits an `Opaque(RecursiveRef)`
+        // node id; we surface it through the QueryResult variant so
+        // the result is NOT cached as a warm `Value` (per CLAUDE.md
+        // "cancelled / superseded / interrupted / budget-exceeded
+        // ... must not be promoted as warm shared cache entries").
+        if let Some(crate::semantic_query::SemanticNodeData::Opaque(
+            crate::semantic_query::QueryError::RecursiveRef { .. },
+        )) = self.graph().node_data(result).as_deref()
+        {
+            return (QueryResult::Recursive(result), fence);
+        }
         // Emit a whole-path `ProjectPath` edge on the result so consumers
         // can recover the entry path without rebuilding it from per-hop
         // edges (plan §3 C3).

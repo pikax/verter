@@ -145,6 +145,18 @@ pub struct HostConfig {
     /// The miner truncates at this count and sets
     /// `graph_completeness.has_orphan_edges = true`. Default: 10_000.
     pub max_derivation_edges: usize,
+    /// Depth budget for path-projection / dispatch traversals
+    /// (Phase 5g-supplement §5.D.0 r17 + §0.6.5 stack-depth
+    /// discipline). Tests construct constrained hosts to exercise
+    /// budget-exceeded sentinel paths (`HostConfig { depth_budget: 2,
+    /// ..Default::default() }`). When `0`, the existing `MAX_DEPTH`
+    /// fall-back kicks in; non-zero values cap path traversal depth
+    /// at the constructor-time value.
+    ///
+    /// Constructor-time per §0.6.5: callers may NOT mutate this on
+    /// an existing host. Default: `MAX_DEPTH` (the
+    /// `component_meta_materialize` cap).
+    pub depth_budget: usize,
 }
 
 /// Configuration validation errors surfaced by
@@ -196,6 +208,7 @@ impl Default for HostConfig {
             audit_enabled: false,
             footprint_capture: false,
             max_derivation_edges: 10_000,
+            depth_budget: crate::component_meta_materialize::MAX_DEPTH,
         }
     }
 }
