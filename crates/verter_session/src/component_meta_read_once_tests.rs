@@ -122,6 +122,84 @@ fn read_once_shallow_first_lazy_for_resolve_macro_payload() {
     );
 }
 
+const FALLTHROUGH_VUE: &str = r#"<script setup lang="ts">
+import type { Inh } from './inh'
+defineProps<Inh>()
+defineEmits<{ click: [evt: MouseEvent] }>()
+</script>
+<template><div /></template>
+"#;
+
+const FALLTHROUGH_INH_TS: &str = r#"export interface Inh {
+  label: string;
+}
+"#;
+
+const FALLTHROUGH_UNRELATED_TS: &str = r#"export interface UnusedZ {
+  qux: number;
+}
+"#;
+
+/// 5f §5.D.2 — `fallthrough_inheritance` read-once / shallow-first /
+/// lazy-expansion. Owner uses defineProps + defineEmits so the
+/// inherited-emits + indexed-paths dispatch (which §5f closes via
+/// the resolver-internals migration) is exercised. /unrelated.ts
+/// stays untouched.
+#[test]
+fn read_once_shallow_first_lazy_for_fallthrough_inheritance() {
+    let host = build_hermetic_host(&[
+        ("/A.vue", FALLTHROUGH_VUE),
+        ("/inh.ts", FALLTHROUGH_INH_TS),
+        ("/unrelated.ts", FALLTHROUGH_UNRELATED_TS),
+    ]);
+
+    let q1 = host.get_component_meta("/A.vue");
+    assert!(
+        q1.is_some(),
+        "first get_component_meta on /A.vue must produce a result"
+    );
+    let after_first = host.audit().loaded_files();
+    let after_first_set: std::collections::HashSet<&str> =
+        after_first.iter().map(|s| s.as_ref()).collect();
+    assert!(
+        after_first_set.contains("/A.vue"),
+        "owner /A.vue must be loaded (got {after_first:?})"
+    );
+    assert!(
+        after_first_set.contains("/inh.ts"),
+        "transitively-needed /inh.ts must be loaded (got {after_first:?})"
+    );
+    assert!(
+        !after_first_set.contains("/unrelated.ts"),
+        "unrelated /unrelated.ts MUST NOT be loaded (got {after_first:?})"
+    );
+
+    let baseline_reads = host.audit().total_reads();
+    let baseline_shallow = host.audit().total_shallow_processes();
+    let baseline_lowerings = host.audit().total_lowerings();
+    let q2 = host.get_component_meta("/A.vue");
+    let read_delta = host.audit().total_reads() - baseline_reads;
+    let shallow_delta = host.audit().total_shallow_processes() - baseline_shallow;
+    let lowering_delta = host.audit().total_lowerings() - baseline_lowerings;
+    assert_eq!(
+        read_delta, 0,
+        "second query must NOT trigger additional read (got delta={read_delta})"
+    );
+    assert_eq!(
+        shallow_delta, 0,
+        "second query must NOT trigger additional shallow process (got delta={shallow_delta})"
+    );
+    assert_eq!(
+        lowering_delta, 0,
+        "second query must NOT trigger additional lowering (got delta={lowering_delta})"
+    );
+    assert_eq!(
+        format!("{:?}", q1),
+        format!("{:?}", q2),
+        "first and second component-meta results must be debug-equal"
+    );
+}
+
 const ROUTE_PICK_VUE: &str = r#"<script setup lang="ts">
 import type { BaseProps } from './props'
 defineProps<Pick<BaseProps, 'foo' | 'bar'>>()
