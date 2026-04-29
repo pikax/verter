@@ -475,11 +475,15 @@ fn phase_05m_class_b_callers_migrated_through_bridge_helpers() {
     // Simplest discriminating shape: count callsites OUTSIDE the
     // `Phase 5m §5.13a.2 — engine-method caller migration` section
     // demarcated by the section comment header.
-    let bridge_section_marker =
-        "Phase 5m §5.13a.2 — engine-method caller migration bridge helpers.";
+    // Phase 5l §5.14.2 update: the bridge section header changed when
+    // the bridges were rewritten to call dispatch + engine pub(crate)
+    // helpers directly (the 5m migration-window
+    // `#[allow(deprecated)]` annotations are gone post-engine-deletion).
+    // Match the new header.
+    let bridge_section_marker = "Phase 5l §5.14.2 — bridge helpers (post engine-method deletion).";
     let bridge_section_start = src
         .find(bridge_section_marker)
-        .expect("meta_resolve.rs must contain the §5.13a.2 bridge section header");
+        .expect("meta_resolve.rs must contain the §5.14.2 bridge section header");
     // The bridge section ends at the next section header
     // ("Plan §4.10 / K1 — `MacroFieldGraphState`...") — find that
     // marker to bound the bridge section body.
