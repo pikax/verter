@@ -25,7 +25,7 @@ use verter_semantic::analysis::type_expr::{
     LiteralValue, MappedModifier, ObjectMember, PrimitiveName, TypeExpr,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct SnapshotView {
     pub component_name: String,
     pub props: Vec<PropView>,
@@ -37,7 +37,7 @@ pub struct SnapshotView {
     pub flags: FlagsView,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct PropView {
     pub name: String,
     /// Canonical string form of the resolved [`TypeExpr`]. The
@@ -50,37 +50,37 @@ pub struct PropView {
     pub doc: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct SlotView {
     pub name: String,
     pub payload_signature: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct EventView {
     pub name: String,
     pub params_signature: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct ModelView {
     pub name: String,
     pub type_signature: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct ExposedView {
     pub name: String,
     pub type_signature: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct FallthroughView {
     pub inherit_attrs: bool,
     pub surface_signature: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct FlagsView {
     pub async_setup: bool,
     pub has_inherit_attrs_false: bool,

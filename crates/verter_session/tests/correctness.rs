@@ -31,6 +31,8 @@ mod expected;
 mod fixtures;
 #[path = "correctness/snapshot_view.rs"]
 mod snapshot_view;
+#[path = "correctness/deferred_fixtures_rule_correct.rs"]
+mod deferred_fixtures_rule_correct;
 
 /// Resolve the snapshot path for a fixture using the class-specific
 /// suffix discipline (§0p.A.2). Class A → `<id>.correctness.snap.json`,

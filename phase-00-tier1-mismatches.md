@@ -84,7 +84,7 @@ vue-component-meta (Tier 1 authorship rule, §0p.A.0).
 |                | resolution priority"); CLAUDE.md §"Macro Type Traversal Rule"   |
 |                | (single shared cross-file type resolver).                       |
 | EXPECTED       | `props = [alpha, beta, gamma]` — the userland `Pick<T,_K> = T`  |
-|                | shadows lib's `Pick`, returning the entire `Source` interface.  |
+|                | shadows lib's `Pick`, returning the entire `Cfg` interface.     |
 | ACTUAL         | `props = [alpha, beta]` — Verter dispatches to lib's `Pick`,    |
 |                | filtering by the second type argument.                         |
 | ROOT CAUSE     | The macro resolver does not perform an outward lexical-scope    |
@@ -92,6 +92,63 @@ vue-component-meta (Tier 1 authorship rule, §0p.A.0).
 |                | type aliases of common utility names are silently overridden.   |
 | OWNER (later)  | Resolver scope-walk policy. Likely Phase 5 / engine-retirement  |
 |                | scope.                                                          |
+
+### Rule-correct expected (machine-readable per §5.B.5.1 r15)
+
+The JSON block below is the hand-authored rule-correct `SnapshotView`
+for `userland_shadowing_pick`, derived from the Verter rule cited in
+the table above (TS-first resolution priority + user shadowing wins).
+The Phase 5h §5.B.5.1 rule-correctness gate test
+(`deferred_fixture_userland_shadowing_pick_byte_equal_to_rule_correct_expected`
+in
+`crates/verter_session/src/component_meta_audit_rule_correctness_tests.rs`)
+asserts byte-equality between this block and Verter's
+post-Phase-5h-fix output. Discrimination: pre-fix Verter produces
+`["alpha"]`, post-fix Verter produces `["alpha", "beta", "gamma"]`.
+
+```json
+{
+  "fixture_id": "userland_shadowing_pick",
+  "expected": {
+    "component_name": "C",
+    "props": [
+      {
+        "name": "alpha",
+        "type_signature": "string",
+        "required": true,
+        "has_default": false,
+        "default_signature": null,
+        "doc": null
+      },
+      {
+        "name": "beta",
+        "type_signature": "number",
+        "required": true,
+        "has_default": false,
+        "default_signature": null,
+        "doc": null
+      },
+      {
+        "name": "gamma",
+        "type_signature": "boolean",
+        "required": true,
+        "has_default": false,
+        "default_signature": null,
+        "doc": null
+      }
+    ],
+    "events": [],
+    "slots": [],
+    "models": [],
+    "exposed": [],
+    "fallthrough": null,
+    "flags": {
+      "async_setup": false,
+      "has_inherit_attrs_false": false
+    }
+  }
+}
+```
 
 ---
 
