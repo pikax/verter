@@ -1211,25 +1211,71 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     NodeScopeId::File { canonical_id, .. } => Arc::clone(canonical_id),
                     NodeScopeId::Global => return self.opaque(QueryError::Miss),
                 };
-                let (root_name, consumed_segments): (Arc<str>, usize) = if value_ref.path.len() > 1
-                {
-                    (
-                        Arc::<str>::from(format!("{}.{}", value_ref.path[0], value_ref.path[1])),
-                        2,
-                    )
-                } else {
-                    (Arc::from(value_ref.path[0].as_str()), 1)
-                };
-                let mut result = match self.execute(SemanticQueryKey::TypeOf {
+                // Phase 5k §5.13 — `typeof X.Y` semantic discrimination.
+                //
+                // The pre-Phase-5k branch unconditionally joined the first
+                // two path segments into `"X.Y"` whenever the path had
+                // length > 1, turning EVERY dotted typeof into a
+                // namespace-member lookup. That worked for
+                // `import * as Ns from './m'; typeof Ns.Foo` (the
+                // namespace-member case `build_typeof`'s
+                // `has_namespace_prefix` branch handles via
+                // `resolve_namespace_member_from_facts`) but broke
+                // ordinary value-member projection like
+                // `const sample: { id: string } = ...; typeof sample.id`,
+                // because no value binding named `"sample.id"` exists.
+                // The downstream Miss propagated up through `Instantiate`,
+                // leaving the type argument as a free `T` placeholder when
+                // the surface body referenced it through substitution
+                // (`Instantiate { TypeOf { ... } }` chained substitution
+                // gap — `phase-00-tier1-mismatches.md` row 4).
+                //
+                // The fix: attempt single-segment root resolution first
+                // (the value-member projection case) and fall back to the
+                // joined-2-segment lookup only when the single-segment
+                // root misses AND a longer path exists. The fallback
+                // preserves the namespace-member semantics for
+                // `Ns.Foo[.Bar...]` shapes; the primary path closes the
+                // value-member gap. Both branches reuse the same
+                // `ProjectPath { mode: Navigate }` projection for the
+                // tail segments — terminal-mode-only expansion is the
+                // outer caller's responsibility (per CLAUDE.md "type
+                // navigation must stay narrower than expansion").
+                let single_root: Arc<str> = Arc::from(value_ref.path[0].as_str());
+                let single_query = self.execute(SemanticQueryKey::TypeOf {
                     value_root: ValueRootKey {
                         scope: ScopeId {
-                            canonical_id: scope_canonical_id,
+                            canonical_id: Arc::clone(&scope_canonical_id),
                             local_scope: None,
                         },
-                        name: root_name,
+                        name: Arc::clone(&single_root),
                     },
-                }) {
-                    QueryResult::Value(id) => id,
+                });
+                let (mut result, consumed_segments) = match single_query {
+                    QueryResult::Value(id) => (id, 1usize),
+                    _ if value_ref.path.len() > 1 => {
+                        // Namespace-member fallback: join the first two
+                        // segments into `Ns.Foo` and let
+                        // `resolve_namespace_member_from_facts` interpret
+                        // the dotted prefix when the first segment is a
+                        // namespace import alias.
+                        let joined: Arc<str> = Arc::<str>::from(format!(
+                            "{}.{}",
+                            value_ref.path[0], value_ref.path[1]
+                        ));
+                        match self.execute(SemanticQueryKey::TypeOf {
+                            value_root: ValueRootKey {
+                                scope: ScopeId {
+                                    canonical_id: scope_canonical_id,
+                                    local_scope: None,
+                                },
+                                name: joined,
+                            },
+                        }) {
+                            QueryResult::Value(id) => (id, 2usize),
+                            _ => return self.opaque(QueryError::Miss),
+                        }
+                    }
                     _ => return self.opaque(QueryError::Miss),
                 };
                 if value_ref.path.len() > consumed_segments {
