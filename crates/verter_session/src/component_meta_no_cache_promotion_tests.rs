@@ -172,3 +172,48 @@ fn no_cache_promotion_for_budget_exceeded_route_target_pick_omit() {
         "warm count must NOT increment on second route-target budget-exceeded query (got warm={warm_delta})"
     );
 }
+
+/// 5f §5.D.4 — `fallthrough_inheritance` budget-exceeded must not
+/// warm. Same-host re-query contract: a depth-budget-exceeded
+/// path-projection (the ProjectPath dispatch the fallthrough
+/// inheritance closure traverses) must NOT be promoted to the warm
+/// cache; the second query on the SAME host MUST cold-fire.
+#[test]
+fn no_cache_promotion_for_budget_exceeded_fallthrough_inheritance() {
+    let host = build_constrained_host();
+    let base = intern_three_member_object(&host);
+    let key = SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::from(
+            vec![
+                PathSegment::Member(Arc::from("deep_0")),
+                PathSegment::Member(Arc::from("deep_1")),
+                PathSegment::Member(Arc::from("deep_2")),
+            ]
+            .into_boxed_slice(),
+        ),
+        mode: ProjectionMode::Expanded,
+    };
+
+    let dispatch = host.semantic_dispatch();
+    let r1 = dispatch.execute(key.clone());
+    assert!(
+        matches!(r1, QueryResult::Recursive(_) | QueryResult::Error(_)),
+        "constrained host (depth_budget=2) MUST report a budget-exceeded sentinel for the 5f fallthrough 3-segment path (got {r1:?})"
+    );
+
+    let counter = DispatchCounter;
+    let baseline_cold = counter.family_cold(&key);
+    let baseline_warm = counter.family_warm(&key);
+    let _r2 = dispatch.execute(key.clone());
+    let cold_delta = counter.family_cold(&key) - baseline_cold;
+    let warm_delta = counter.family_warm(&key) - baseline_warm;
+    assert_eq!(
+        cold_delta, 1,
+        "second fallthrough-inheritance query on same host MUST cold-fire (partial NOT promoted; got cold={cold_delta})"
+    );
+    assert_eq!(
+        warm_delta, 0,
+        "warm count must NOT increment on second fallthrough-inheritance budget-exceeded query (got warm={warm_delta})"
+    );
+}
