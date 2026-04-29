@@ -3908,11 +3908,13 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     return Some(shape);
                 }
             }
-            if let Some(projected) = crate::meta_resolve::project_expr_surface_expr_via_host_threaded(
-                query_engine,
-                scope_canonical_id,
-                target,
-            ) {
+            if let Some(projected) =
+                crate::meta_resolve::project_expr_surface_expr_via_host_threaded(
+                    query_engine,
+                    scope_canonical_id,
+                    target,
+                )
+            {
                 let shape =
                     verter_semantic::analysis::type_expand::type_expr_to_object_shape(&projected);
                 if shape_has_surface(&shape) {
@@ -3922,26 +3924,27 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             // Phase 5l: preserve the engine method's re-export chain
             // walk by routing through the engine helper rather than
             // the dispatch-only variant.
-            let expanded_ref_opt = instantiate_local_generic_ref_via_engine(
-                query_engine,
-                scope_canonical_id,
-                target,
-            );
+            let expanded_ref_opt =
+                instantiate_local_generic_ref_via_engine(query_engine, scope_canonical_id, target);
             if let Some(expanded_ref) = expanded_ref_opt {
-                if let Some(shape) = crate::meta_resolve::project_expr_surface_shape_via_host_threaded(
-                    query_engine,
-                    scope_canonical_id,
-                    &expanded_ref,
-                ) {
+                if let Some(shape) =
+                    crate::meta_resolve::project_expr_surface_shape_via_host_threaded(
+                        query_engine,
+                        scope_canonical_id,
+                        &expanded_ref,
+                    )
+                {
                     if shape_has_surface(&shape) {
                         return Some(shape);
                     }
                 }
-                if let Some(projected) = crate::meta_resolve::project_expr_surface_expr_via_host_threaded(
-                    query_engine,
-                    scope_canonical_id,
-                    &expanded_ref,
-                ) {
+                if let Some(projected) =
+                    crate::meta_resolve::project_expr_surface_expr_via_host_threaded(
+                        query_engine,
+                        scope_canonical_id,
+                        &expanded_ref,
+                    )
+                {
                     let shape = verter_semantic::analysis::type_expand::type_expr_to_object_shape(
                         &projected,
                     );
@@ -4049,32 +4052,31 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 root_symbol,
                 member_name,
             )
-                .or_else(|| {
-                    query_engine.project_prepared_member_route_projection(
-                        scope_canonical_id,
-                        root_symbol,
-                        member_name,
-                    )
+            .or_else(|| {
+                query_engine.project_prepared_member_route_projection(
+                    scope_canonical_id,
+                    root_symbol,
+                    member_name,
+                )
+            })
+            .or_else(|| {
+                query_engine.project_inherited_member_route_projection(
+                    scope_canonical_id,
+                    root_symbol,
+                    member_name,
+                )
+            })
+            .or_else(|| {
+                let prepared = query_engine.prepared_type_decl(scope_canonical_id, root_symbol)?;
+                let member = prepared.member(member_name)?;
+                Some(ProjectedMember {
+                    name: member_name.to_string(),
+                    ty: projected_expr.clone(),
+                    optional: member.optional,
+                    readonly: member.readonly,
+                    is_method: member.is_method,
                 })
-                .or_else(|| {
-                    query_engine.project_inherited_member_route_projection(
-                        scope_canonical_id,
-                        root_symbol,
-                        member_name,
-                    )
-                })
-                .or_else(|| {
-                    let prepared =
-                        query_engine.prepared_type_decl(scope_canonical_id, root_symbol)?;
-                    let member = prepared.member(member_name)?;
-                    Some(ProjectedMember {
-                        name: member_name.to_string(),
-                        ty: projected_expr.clone(),
-                        optional: member.optional,
-                        readonly: member.readonly,
-                        is_method: member.is_method,
-                    })
-                })
+            })
         }
 
         if let Some(cached_expr) =
@@ -5427,12 +5429,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 projected_member
             } else {
                 // Phase 5l: dispatch path replaces the deprecated method.
-                dispatch_member_for_root_symbol(
-                    self,
-                    scope_canonical_id,
-                    symbol_name,
-                    member_name,
-                )?
+                dispatch_member_for_root_symbol(self, scope_canonical_id, symbol_name, member_name)?
             };
             self.cache_projected_member(scope_canonical_id, symbol_name, &projected_member);
             if projected_member.is_method {
@@ -5711,8 +5708,7 @@ fn instantiate_local_generic_ref_via_engine(
         return None;
     }
     let prepared = engine.prepared_type_decl(&target_canonical_id, &target_symbol_name)?;
-    let substitutions =
-        build_default_type_param_substitutions(prepared.as_ref(), type_arguments)?;
+    let substitutions = build_default_type_param_substitutions(prepared.as_ref(), type_arguments)?;
     Some(apply_type_param_substitutions(
         &prepared.body,
         &substitutions,
@@ -8081,9 +8077,16 @@ defineProps<Omit<SelectMenuProps<SelectMenuItem[]>, 'items'>>()
         );
 
         let mut query_engine = ComponentMetaQueryEngine::new(&host);
-        let expanded_target =
-            crate::meta_resolve::instantiate_local_generic_ref_via_dispatch(query_engine.host,"/src/App.vue", &target_expr);
-        let projected_target = crate::meta_resolve::project_expr_surface_expr_via_host_threaded(&mut query_engine,"/src/App.vue", &target_expr);
+        let expanded_target = crate::meta_resolve::instantiate_local_generic_ref_via_dispatch(
+            query_engine.host,
+            "/src/App.vue",
+            &target_expr,
+        );
+        let projected_target = crate::meta_resolve::project_expr_surface_expr_via_host_threaded(
+            &mut query_engine,
+            "/src/App.vue",
+            &target_expr,
+        );
         let shape = crate::meta_resolve::project_expr_surface_shape_via_host_threaded(
             &mut query_engine,
 "/src/App.vue", &expr)
@@ -8319,8 +8322,10 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
 
         let first = crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(
             &mut query_engine,
-"/src/App.vue", "ColorModeSelectProps")
-            .expect("generic inherited omit surface should project");
+            "/src/App.vue",
+            "ColorModeSelectProps",
+        )
+        .expect("generic inherited omit surface should project");
         let surface_cache_after_first = query_engine.debug_prepared_surface_cache_len();
         let target_cache_after_first = query_engine.debug_prepared_target_cache_len();
         assert!(
@@ -8330,8 +8335,10 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
 
         let second = crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(
             &mut query_engine,
-"/src/App.vue", "ColorModeSelectProps")
-            .expect("repeat prepared projection should reuse the cached surface");
+            "/src/App.vue",
+            "ColorModeSelectProps",
+        )
+        .expect("repeat prepared projection should reuse the cached surface");
 
         assert_eq!(first, second);
         assert_eq!(
@@ -8463,13 +8470,19 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
         let _store_view = host.resolver_store_view();
         let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
-        let expr_surface = crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(
-            &mut query_engine,
-"/src/App.vue", "ColorModeSelectProps")
+        let expr_surface =
+            crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(
+                &mut query_engine,
+                "/src/App.vue",
+                "ColorModeSelectProps",
+            )
             .expect("prepared surface should project");
-        let direct_shape = crate::meta_resolve::project_prepared_type_surface_shape_via_host_threaded(
-            &mut query_engine,
-"/src/App.vue", "ColorModeSelectProps")
+        let direct_shape =
+            crate::meta_resolve::project_prepared_type_surface_shape_via_host_threaded(
+                &mut query_engine,
+                "/src/App.vue",
+                "ColorModeSelectProps",
+            )
             .expect("prepared shape should project");
 
         assert_eq!(
@@ -8535,8 +8548,10 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
         let prepared_db_before = host.project_type_store().prepared_surface_db().live_count();
         let projected = crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(
             &mut query_engine,
-"/src/App.vue", "ColorModeSelectProps")
-            .expect("prepared surface should project");
+            "/src/App.vue",
+            "ColorModeSelectProps",
+        )
+        .expect("prepared surface should project");
         let prepared_db_after = host.project_type_store().prepared_surface_db().live_count();
 
         assert!(
@@ -8654,15 +8669,21 @@ export type IdentityProps<T> = RootProps<T>
         let _store_view = host.resolver_store_view();
         let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
-        let identity_surface = crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(
-            &mut query_engine,
-"/src/App.vue", "IdentityProps")
+        let identity_surface =
+            crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(
+                &mut query_engine,
+                "/src/App.vue",
+                "IdentityProps",
+            )
             .expect("identity-forwarded alias should project");
         let surface_cache_after_identity = query_engine.debug_prepared_surface_cache_len();
 
-        let root_surface = crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(
-            &mut query_engine,
-"/src/base.ts", "RootProps")
+        let root_surface =
+            crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(
+                &mut query_engine,
+                "/src/base.ts",
+                "RootProps",
+            )
             .expect("direct root surface should project");
 
         assert_eq!(
@@ -8722,8 +8743,11 @@ export interface Props extends Pick<BaseProps, 'open' | 'defaultOpen' | 'disable
 
         let first = crate::meta_resolve::project_route_surface_expr_via_host_threaded(
             &mut query_engine,
-"/src/base.ts", "Props", &route)
-            .expect("prepared pick route should project");
+            "/src/base.ts",
+            "Props",
+            &route,
+        )
+        .expect("prepared pick route should project");
         let member_cache_after_first = query_engine.debug_prepared_member_cache_len();
         assert!(
             member_cache_after_first > 0,
@@ -8732,8 +8756,11 @@ export interface Props extends Pick<BaseProps, 'open' | 'defaultOpen' | 'disable
 
         let second = crate::meta_resolve::project_route_surface_expr_via_host_threaded(
             &mut query_engine,
-"/src/base.ts", "Props", &route)
-            .expect("repeat prepared pick projection should reuse the cached members");
+            "/src/base.ts",
+            "Props",
+            &route,
+        )
+        .expect("repeat prepared pick projection should reuse the cached members");
 
         assert_eq!(first, second);
         assert_eq!(
@@ -8867,8 +8894,11 @@ export interface LinkProps extends NuxtLinkProps {
 
         let projected = crate::meta_resolve::project_route_surface_expr_via_host_threaded(
             &mut query_engine,
-"/src/Link.vue", "LinkProps", &route)
-            .expect("package-backed inherited pick route should project");
+            "/src/Link.vue",
+            "LinkProps",
+            &route,
+        )
+        .expect("package-backed inherited pick route should project");
         let TypeExpr::Object(object) = projected else {
             panic!("projected inherited pick route should materialize as an object");
         };
@@ -9390,8 +9420,10 @@ export type EditorToolbarProps<T extends ArrayOrNested<EditorToolbarItem> = Arra
 
         let projected = crate::meta_resolve::project_type_surface_expr_via_host_threaded(
             &mut query_engine,
-"/src/EditorToolbar.vue", "EditorToolbarProps")
-            .expect("generic union alias should project a type surface");
+            "/src/EditorToolbar.vue",
+            "EditorToolbarProps",
+        )
+        .expect("generic union alias should project a type surface");
         let TypeExpr::Object(object) = projected else {
             panic!("projected surface should materialize as an object");
         };
@@ -9519,8 +9551,10 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
 
         let projected = crate::meta_resolve::project_type_surface_expr_via_host_threaded(
             &mut query_engine,
-"/src/App.vue", "ColorModeSelectProps")
-            .expect("nested pick/omit generic interface should project a type surface");
+            "/src/App.vue",
+            "ColorModeSelectProps",
+        )
+        .expect("nested pick/omit generic interface should project a type surface");
         let TypeExpr::Object(object) = projected else {
             panic!("projected surface should materialize as an object");
         };
@@ -9694,8 +9728,11 @@ export interface ComboboxRootProps<T = AcceptableValue> extends Omit<ListboxRoot
 
         let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
-        let projected =
-            crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(&mut query_engine,"/src/types.ts", "ComboboxRootProps");
+        let projected = crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(
+            &mut query_engine,
+            "/src/types.ts",
+            "ComboboxRootProps",
+        );
         assert!(
             projected.is_some(),
             "generic inherited omit interface should have a prepared-only root surface projection available",
@@ -11094,8 +11131,10 @@ const props = defineProps<AppProps>()
 
         let shape = crate::meta_resolve::project_prepared_type_surface_shape_via_host_threaded(
             &mut query_engine,
-"/src/App.vue", "AppProps")
-            .expect("cross-file Omit in interface extends should produce a projectable surface");
+            "/src/App.vue",
+            "AppProps",
+        )
+        .expect("cross-file Omit in interface extends should produce a projectable surface");
 
         let member_names: Vec<&str> = shape.properties.iter().map(|p| p.name.as_str()).collect();
 

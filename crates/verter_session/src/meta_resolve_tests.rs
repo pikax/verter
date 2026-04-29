@@ -7556,10 +7556,12 @@ fn produce_one_macro_object_shape_real_nuxt_ui_color_mode_select_stays_off_solve
         !listbox_root_decl.canonical_source.is_empty(),
         "real ListboxRootProps should resolve to a prepared declaration source",
     );
-    let listbox_root_prepared = crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(&mut direct_query_engine,
-        &listbox_root_decl.canonical_source,
-        &listbox_root_decl.resolved_name,
-    );
+    let listbox_root_prepared =
+        crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(
+            &mut direct_query_engine,
+            &listbox_root_decl.canonical_source,
+            &listbox_root_decl.resolved_name,
+        );
     assert!(
         listbox_root_prepared.is_some(),
         "real ListboxRootProps should have a prepared-only root surface projection available",
@@ -7573,10 +7575,12 @@ fn produce_one_macro_object_shape_real_nuxt_ui_color_mode_select_stays_off_solve
             combobox_root_decl.canonical_source.clone(),
             combobox_root_decl.resolved_name.clone(),
         ));
-    let combobox_root_prepared = crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(&mut direct_query_engine,
-        &combobox_root_target_source,
-        &combobox_root_target_name,
-    );
+    let combobox_root_prepared =
+        crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(
+            &mut direct_query_engine,
+            &combobox_root_target_source,
+            &combobox_root_target_name,
+        );
     assert!(
         combobox_root_prepared.is_some(),
         "real ComboboxRootProps routed target should have a prepared-only root surface projection available",
@@ -7587,25 +7591,31 @@ fn produce_one_macro_object_shape_real_nuxt_ui_color_mode_select_stays_off_solve
         !button_html_decl.canonical_source.is_empty(),
         "real ButtonHTMLAttributes should resolve to a prepared declaration source",
     );
-    let button_html_prepared = crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(&mut direct_query_engine,
-        &button_html_decl.canonical_source,
-        &button_html_decl.resolved_name,
-    );
+    let button_html_prepared =
+        crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(
+            &mut direct_query_engine,
+            &button_html_decl.canonical_source,
+            &button_html_decl.resolved_name,
+        );
     assert!(
         button_html_prepared.is_some(),
         "real ButtonHTMLAttributes should have a prepared-only root surface projection available",
     );
-    let select_menu_prepared = crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(
-        &mut direct_query_engine,
-        &select_menu_component,
-        "SelectMenuProps",
-    );
+    let select_menu_prepared =
+        crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(
+            &mut direct_query_engine,
+            &select_menu_component,
+            "SelectMenuProps",
+        );
     assert!(
         select_menu_prepared.is_some(),
         "real SelectMenuProps should have a prepared-only root surface projection available",
     );
-    let prepared_only =
-        crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(&mut direct_query_engine,&component, "ColorModeSelectProps");
+    let prepared_only = crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(
+        &mut direct_query_engine,
+        &component,
+        "ColorModeSelectProps",
+    );
     assert!(
         prepared_only.is_some(),
         "real ColorModeSelectProps should have a prepared-only root surface projection available",

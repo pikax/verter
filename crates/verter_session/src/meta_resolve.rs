@@ -533,9 +533,9 @@ pub(crate) fn project_expr_surface_shape_via_host_threaded<'host>(
         if let Some(projected) =
             engine.project_routed_expr_surface_expr(scope_canonical_id, &root_symbol, &route)
         {
-            return Some(verter_semantic::analysis::type_expand::type_expr_to_object_shape(
-                &projected,
-            ));
+            return Some(
+                verter_semantic::analysis::type_expand::type_expr_to_object_shape(&projected),
+            );
         }
     }
     if let Some(shape) = engine.project_direct_utility_surface_shape(scope_canonical_id, expr) {
@@ -631,9 +631,12 @@ pub(crate) fn project_expr_surface_expr_via_host_threaded<'host>(
     if let Some((root_symbol, route)) = component_meta_registry_public_indexed_access_route(expr)
         .or_else(|| component_meta_registry_public_utility_route(expr))
     {
-        if let Some(projected) =
-            project_route_surface_expr_via_host_threaded(engine, scope_canonical_id, &root_symbol, &route)
-        {
+        if let Some(projected) = project_route_surface_expr_via_host_threaded(
+            engine,
+            scope_canonical_id,
+            &root_symbol,
+            &route,
+        ) {
             return Some(projected);
         }
         if let Some(solved) =
