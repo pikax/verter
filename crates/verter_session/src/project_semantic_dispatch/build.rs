@@ -586,14 +586,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// - **Identity** (`NoInfer`): returns the first argument as an `Alias`
     ///   node, emitting `Instantiate` + `SubstituteTypeParam` +
     ///   `AliasResolve` edges.
-    /// - **Opaque** (`Pick`, `Omit`, `Extract`, `Exclude`, `NonNullable`,
-    ///   `ReturnType`, `Parameters`, `ConstructorParameters`,
-    ///   `InstanceType`, `Awaited`, string intrinsics): return a shell
-    ///   anchored to the utility + arg identity with `Instantiate` +
-    ///   `SubstituteTypeParam` edges. The shell's body is lazy — callers
-    ///   projecting into it follow the normal `ProjectPath` route which
-    ///   terminates with `Miss` until a later track implements the full
-    ///   shape. String intrinsics return the `String` primitive directly.
+    /// - **Object-filter** (`Pick`, `Omit`): produce an Object surface
+    ///   filtered by enumerable key set; preserve modifier flags +
+    ///   (for `Omit`) source signatures.
+    /// - **Union-filter** (`Extract`, `Exclude`): per-member
+    ///   assignability via `relate_nodes`; survivors reconstituted via
+    ///   `intern_normalized_union_or_intersection` so empty and
+    ///   singleton surviving sets canonicalise to `Never` / the lone
+    ///   member respectively. Phase 5i closes the literal-type
+    ///   reduction; non-literal arms still fall through to the
+    ///   deferred shell.
+    /// - **Opaque** (`NonNullable`, `Awaited`, function-signature
+    ///   utilities when the argument shape does not match, string
+    ///   intrinsics with non-literal inputs): return a shell anchored
+    ///   to the utility + arg identity with `Instantiate` +
+    ///   `SubstituteTypeParam` edges. The shell's body is lazy —
+    ///   callers projecting into it follow the normal `ProjectPath`
+    ///   route which terminates with `Miss` until a later track
+    ///   implements the full shape. String intrinsics return the
+    ///   `String` primitive directly.
     ///
     /// Every utility path emits the `Instantiate` edge with sources
     /// `[base, args...]` and per-arg `SubstituteTypeParam` edges so the
@@ -972,14 +983,92 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 (QueryResult::Value(result), fence)
             }
 
+            // ---- Union-filter utilities (Phase 5i) ----
+            // `Extract<T, U>` keeps each member of `T`'s union that is
+            // assignable to `U`; `Exclude<T, U>` keeps each member that
+            // is NOT assignable to `U`. Both delegate per-member
+            // assignability to the relation engine (`relate_nodes`),
+            // which already decides literal-vs-literal equality
+            // (`literals_equal`) plus the broader assignability
+            // lattice. The reduction reconstitutes the survivors as a
+            // canonical Union via
+            // `intern_normalized_union_or_intersection`, which yields
+            // `Primitive(Never)` for an empty survivor set and the
+            // single member directly for a one-element survivor.
+            //
+            // When the source `T` does not resolve to a Union /
+            // Literal / Primitive after `evaluate_deferred_semantic_node`
+            // OR any per-member relation returns `Unknown`, the
+            // utility falls through to the deferred shell so callers
+            // re-dispatch once the inputs become decidable. This
+            // preserves the prior `Opaque(Miss)` semantics for
+            // genuinely-undecidable shapes (TypeParam, Conditional
+            // shells, opaque carriers) while closing the literal-type
+            // case the `mapped_types` seed exercises.
+            //
+            // Plan: §5.11 (Phase 5i — `Exclude<>` / `Extract<>`
+            // concrete-literal reduction). The relation engine's
+            // union-distribution path (§3 Cluster A) already handles
+            // each per-member judgement; this arm composes those
+            // judgements into the utility's result.
+            "Extract" | "Exclude" if args.len() == 2 => {
+                let source_arg = args[0];
+                let filter_arg = args[1];
+                let source_resolved = self.evaluate_deferred_semantic_node(source_arg);
+                let source_data = graph.node_data(source_resolved);
+                let arms: Vec<SemanticNodeId> = match source_data.as_deref() {
+                    Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
+                    Some(SemanticNodeData::Literal(_) | SemanticNodeData::Primitive(_)) => {
+                        vec![source_resolved]
+                    }
+                    _ => {
+                        // Source did not resolve to a decidable shape;
+                        // fall through to the deferred shell.
+                        let result = self.opaque(QueryError::Miss);
+                        record_utility_edges(result);
+                        return (QueryResult::Value(result), fence);
+                    }
+                };
+                drop(source_data);
+                let keep_assignable = name == "Extract";
+                let mut survivors: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
+                for arm in arms.iter().copied() {
+                    let (relation, _arm_fence) = self.relate_nodes(arm, filter_arg);
+                    match relation {
+                        crate::semantic_query::RelationResult::Assignable { .. } => {
+                            if keep_assignable {
+                                survivors.push(arm);
+                            }
+                        }
+                        crate::semantic_query::RelationResult::NotAssignable => {
+                            if !keep_assignable {
+                                survivors.push(arm);
+                            }
+                        }
+                        crate::semantic_query::RelationResult::Unknown => {
+                            // Any undecidable arm forces the whole
+                            // utility result to defer — partial
+                            // reduction would silently drop
+                            // information.
+                            let result = self.opaque(QueryError::Miss);
+                            record_utility_edges(result);
+                            return (QueryResult::Value(result), fence);
+                        }
+                    }
+                }
+                let result = self.intern_normalized_union_or_intersection(&survivors, true);
+                record_utility_edges(result);
+                (QueryResult::Value(result), fence)
+            }
+
             // ---- Deferred utilities ----
-            // Extract/Exclude/NonNullable require union-filter
-            // semantics; Awaited requires recursive promise unwrapping.
-            // Each emits an `Opaque(Miss)` shell anchored to the
-            // instantiate identity so the origin walk remains coherent;
-            // full implementation falls out of the path-precise
-            // projection upgrades that land alongside the projection-
-            // authority cutover (D3) and after.
+            // `NonNullable` requires recursive null/undefined filtering;
+            // `Awaited` requires recursive promise unwrapping. Each
+            // emits an `Opaque(Miss)` shell anchored to the instantiate
+            // identity so the origin walk remains coherent; full
+            // implementation falls out of the path-precise projection
+            // upgrades that land alongside the projection-authority
+            // cutover (D3) and after.
             _ => {
                 let result = self.opaque(QueryError::Miss);
                 record_utility_edges(result);

@@ -6,21 +6,23 @@
 //! line 28). TS spec §4.4: `Exclude<T,U> = T extends U ? never : T`
 //! distributes over the union T and removes every member matching U.
 //!
-//! **Pre-Phase-5b behaviour (current tree):** the macro path surfaces
-//! the unresolved `Exclude<>` utility as `Unknown { raw: "semanticMiss" }`
-//! instead of evaluating the distributive conditional. The
-//! `kind` prop's resolved `type_expr` is therefore an `Unknown`
-//! variant, NOT a `Union` of `'a' | 'c'`.
+//! **Pre-Phase-5i behaviour:** the macro path surfaced the
+//! unresolved `Exclude<>` utility as `Unknown { raw: "semanticMiss" }`
+//! because `build_builtin_utility`'s `_` arm emitted an
+//! `Opaque(Miss)` shell for any union-filter utility.
 //!
-//! **Post-Phase-5b expected:** with the variant + dispatch helpers
-//! landed (commits 4a/5/9 close the gap end-to-end), the resolver
-//! emits a `Union` containing exactly `Literal::String("a")` and
-//! `Literal::String("c")`.
+//! **Post-Phase-5i:** the `Extract` / `Exclude` arms of
+//! `build_builtin_utility` (`crates/verter_session/src/project_semantic_dispatch/build.rs`)
+//! distribute the source union, dispatch each member through
+//! `relate_nodes` against the filter argument, and reconstitute the
+//! survivors via `intern_normalized_union_or_intersection`. The
+//! resolver therefore emits a `Union` containing exactly
+//! `Literal::String("a")` and `Literal::String("c")` for
+//! `Exclude<'a' | 'b' | 'c', 'b'>`.
 //!
-//! This seed remains RED through the end of Phase 5b — the close
-//! happens in 5d/5e/5f via callsite migrations. The rule is: this
-//! test must FAIL on the pre-Phase-5b tree (no `Union` of `'a' | 'c'`
-//! surfaces) and must PASS once the migration lands.
+//! Discrimination contract: this test FAILS on the pre-Phase-5i
+//! tree (no `Union` of `'a' | 'c'` surfaces; the type_expr is
+//! `Unknown`) and PASSES once 5i's reduction lands.
 
 use verter_semantic::analysis::type_expr::{LiteralValue, TypeExpr};
 
@@ -37,7 +39,6 @@ defineProps<Source>();
 "#;
 
 #[test]
-#[ignore = "Phase 5f §9 deferral to 5g: `Exclude<>` is a 'deferred utility' in `dispatch's build.rs:962-966` — its body lowers to `T extends U ? never : T` but the conditional reduction depends on the relation engine's ability to decide string-literal-extends-string-literal assignability. Phase 5f's commits 7+8 add open-Conditional empty-path distribution + IndexedAccess empty-path materialisation, but neither closes the `Exclude<'a'|'b'|'c', 'b'>` reduction because the conditional check (`'a'`, `'b'`, `'c'`) is bound to concrete string literals, not unbound, so distribution does NOT trigger (and would be wrong if it did — `Exclude` requires CONCRETE reduction to drop the matching literal, not Union both branches). Closes in 5g where the engine deletion + 7 fixture authoring lands a discriminating `Exclude` evaluation path that routes through the relation engine's literal-equality check. Verified FAIL pre-impl on commit 1, still FAIL after 5f commits 7+8."]
 fn resolver_coverage_mapped_types_exclude_distributes() {
     let host = build_hermetic_host_with_lib(
         &[("/c.vue", MAPPED_EXCLUDE_VUE)],

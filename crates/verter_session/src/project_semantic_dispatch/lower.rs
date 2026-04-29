@@ -337,7 +337,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // Other utilities (Extract, Exclude, NonNullable,
                     // Partial, Required, Readonly, Mutable, …) keep the
                     // existing eager-resolve path so they still reduce
-                    // through dispatch as before.
+                    // through dispatch as before. Phase 5i closes the
+                    // literal-type reduction for `Extract` / `Exclude`
+                    // through `build_builtin_utility`; the eager-resolve
+                    // path here remains unchanged because the lowering
+                    // contract (build the InstantiationRef carrier vs
+                    // dispatch the Instantiate query) is independent of
+                    // the utility's body evaluator.
                     if mode == ProjectionMode::Navigate && matches!(name.as_ref(), "Pick" | "Omit")
                     {
                         return graph.intern_node_with_scope(
