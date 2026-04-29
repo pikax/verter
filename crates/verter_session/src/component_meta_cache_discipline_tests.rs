@@ -124,3 +124,70 @@ fn cache_discipline_resolve_macro_payload_repeated_keys_warm() {
         "unrelated key must NOT warm-fire on its first call (got {unrelated_warm})"
     );
 }
+
+/// 5b §5.D.1 — `materialize_surface` dispatch helper: repeated
+/// identical `MaterializeStructureCacheKey` increments the live-entry
+/// counter EXACTLY once across N calls (the warm peek path returns
+/// the cached entry on every subsequent call).
+#[test]
+fn cache_discipline_materialize_surface_repeated_keys_warm() {
+    use crate::component_meta_materialize::{
+        MaterializationScope, MaterializeStructureCacheKey,
+    };
+
+    let host = build_test_host();
+    let base = intern_empty_object(&host);
+    let key = MaterializeStructureCacheKey {
+        scope_canonical_id: Arc::from("/test.vue"),
+        base,
+        scope_axis: MaterializationScope::TopLevel,
+        mode: ProjectionMode::Expanded,
+    };
+
+    // Drive a baseline call so any setup-time admission is paid up
+    // front; the deltas measured below should reflect repeated
+    // identical-key dispatch only.
+    let dispatch = host.semantic_dispatch();
+    let baseline_live = host
+        .project_type_store()
+        .materialize_structure_db()
+        .live_count();
+    let _ = dispatch.materialize_surface(key.clone());
+    let after_first_live = host
+        .project_type_store()
+        .materialize_structure_db()
+        .live_count();
+
+    const N: usize = 8;
+    for _ in 0..(N - 1) {
+        let _ = dispatch.materialize_surface(key.clone());
+    }
+    let after_n_live = host
+        .project_type_store()
+        .materialize_structure_db()
+        .live_count();
+
+    // Cold path published exactly one entry across the full run.
+    assert_eq!(
+        after_n_live - baseline_live,
+        after_first_live - baseline_live,
+        "live entry count must NOT grow across repeated identical materialize_surface calls (baseline={baseline_live}, after_first={after_first_live}, after_n={after_n_live})"
+    );
+
+    // Discrimination: an unrelated key bumps the counter by exactly 1.
+    let unrelated_key = MaterializeStructureCacheKey {
+        scope_canonical_id: Arc::from("/other.vue"),
+        base,
+        scope_axis: MaterializationScope::TopLevel,
+        mode: ProjectionMode::Expanded,
+    };
+    let _ = dispatch.materialize_surface(unrelated_key);
+    let after_unrelated_live = host
+        .project_type_store()
+        .materialize_structure_db()
+        .live_count();
+    assert!(
+        after_unrelated_live > after_n_live,
+        "unrelated cold key must publish a fresh live entry (after_n={after_n_live}, after_unrelated={after_unrelated_live})"
+    );
+}
