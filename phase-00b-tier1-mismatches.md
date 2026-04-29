@@ -70,6 +70,54 @@ extracted, the binding NAME is extracted, but the binding's
 resolution path. The fixture should be authored as Class A with the
 above rule-correct expected once the resolver fix lands.
 
+### Rule-correct expected (machine-readable per §5.B.5.1 r15)
+
+Hand-authored rule-correct `SnapshotView` for `fixture_slots_typed`,
+derived from Verter macros §slots (`./.claude/skills/component-meta`):
+"defineSlots<T> must surface every key of T as a slot, with bindings
+extracted from each slot function's first parameter". The Phase 5j
+§5.B.5.1 rule-correctness gate test
+(`deferred_fixture_fixture_slots_typed_byte_equal_to_rule_correct_expected`
+in `crates/verter_session/tests/correctness/deferred_fixtures_rule_correct.rs`)
+asserts byte-equality between this block and Verter's
+post-Phase-5j-fix output. Discrimination: pre-fix Verter produces
+`{ item: /*unknown*/ semanticMiss }` / `{ row: /*unknown*/ semanticMiss }`
+for the slot payload signatures; post-fix Verter produces
+`{ item: string }` / `{ row: number }` because
+`ProjectSemanticDispatch::project_slot_binding_member` descends
+through the slot's `Function.params[0].ty` to the binding Object.
+The `SnapshotView`'s slot list sorts alphabetically by name, so
+`default` precedes `named`; bindings within each slot's
+`payload_signature` are also sorted.
+
+```json
+{
+  "fixture_id": "fixture_slots_typed",
+  "expected": {
+    "component_name": "C",
+    "props": [],
+    "events": [],
+    "slots": [
+      {
+        "name": "default",
+        "payload_signature": "{ item: string }"
+      },
+      {
+        "name": "named",
+        "payload_signature": "{ row: number }"
+      }
+    ],
+    "models": [],
+    "exposed": [],
+    "fallthrough": null,
+    "flags": {
+      "async_setup": false,
+      "has_inherit_attrs_false": false
+    }
+  }
+}
+```
+
 ## Deferred fixture 2 — `fixture_models`
 
 **Rule citation:** Verter macros §model
@@ -136,6 +184,90 @@ re-use that resolution.
 **Owner phase:** later phase that reaches `defineModel<T>` type
 resolution. The fixture should be authored as Class A with the
 above rule-correct expected once the resolver fix lands.
+
+### Rule-correct expected (machine-readable per §5.B.5.1 r15)
+
+Hand-authored rule-correct `SnapshotView` for `fixture_models`,
+derived from Verter macros §model (`./.claude/skills/component-meta`):
+"defineModel<T>() exposes a model entry per call, with name from the
+optional first string argument (or 'modelValue' default) and type
+from the type parameter T". Vue's documented `defineModel<T>()`
+contract additionally:
+- emits a corresponding `<model_name>` prop whose type is `T |
+  undefined` when the model is optional (default — no `{ required:
+  true }` option) and not defaulted; `required: false`,
+  `has_default: false`.
+- emits an `update:<model_name>` event whose payload tuple is
+  `[value: T | undefined]` for the same reason.
+
+The `SnapshotView` projection sorts every collection alphabetically by
+name, so `count` precedes `modelValue` in props/models/events. The
+Phase 5j §5.B.5.1 rule-correctness gate test
+(`deferred_fixture_fixture_models_byte_equal_to_rule_correct_expected`
+in `crates/verter_session/tests/correctness/deferred_fixtures_rule_correct.rs`)
+asserts byte-equality between this block and Verter's post-Phase-5j-fix
+output. Discrimination: pre-fix Verter produces
+`/*unknown*/ semanticMiss` for the model `type_expr` and the prop
+`type_signature`; post-fix Verter produces `string` / `number`
+(model `type_expr`) and `string | undefined` / `number | undefined`
+(prop `type_signature`), because the `expand_field_expr` closure
+routes `DefineModel` macros through a direct lower+raise of the
+macro's `parsed_type_argument` rather than the path-projection arm
+that always missed for primitive-leaf type arguments.
+
+```json
+{
+  "fixture_id": "fixture_models",
+  "expected": {
+    "component_name": "C",
+    "props": [
+      {
+        "name": "count",
+        "type_signature": "number | undefined",
+        "required": false,
+        "has_default": false,
+        "default_signature": null,
+        "doc": null
+      },
+      {
+        "name": "modelValue",
+        "type_signature": "string | undefined",
+        "required": false,
+        "has_default": false,
+        "default_signature": null,
+        "doc": null
+      }
+    ],
+    "events": [
+      {
+        "name": "update:count",
+        "params_signature": "[value: number | undefined]"
+      },
+      {
+        "name": "update:modelValue",
+        "params_signature": "[value: string | undefined]"
+      }
+    ],
+    "slots": [],
+    "models": [
+      {
+        "name": "count",
+        "type_signature": "number"
+      },
+      {
+        "name": "modelValue",
+        "type_signature": "string"
+      }
+    ],
+    "exposed": [],
+    "fallthrough": null,
+    "flags": {
+      "async_setup": false,
+      "has_inherit_attrs_false": false
+    }
+  }
+}
+```
 
 ## Discriminating-test impact
 
