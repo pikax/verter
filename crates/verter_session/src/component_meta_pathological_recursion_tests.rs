@@ -760,3 +760,105 @@ fn pathological_self_referential_slot_payload() {
     let _ = dbg; // termination is the contract; structural shape is
                  // implementation-dependent and may change.
 }
+
+// ── 5k: typeof substitution cycle ──────────────────────────────────
+//
+// Per parent §5.D.5 ownership table (5k row): a typeof-via-typeof
+// cycle. `type X = typeof Y; const Y = null as unknown as typeof X;`
+// — the type `X` resolves to `typeof Y`; the value `Y` is annotated
+// as `typeof X`. Resolving X forces a typeof lookup of Y, which
+// forces a typeof lookup of X, which forces ... a cycle that the
+// resolver MUST catch via its existing recursion guards rather than
+// recursing infinitely.
+//
+// Phase 5k's substitution-layer fix changes how the `TypeExpr::TypeOf`
+// arm dispatches: single-segment first, then a tail
+// `ProjectPath { Navigate }`. The single-segment path is the same
+// `SemanticQueryKey::TypeOf { value_root }` query the pre-Phase-5k
+// branch already used (when path.len() == 1). So the cycle-detection
+// behaviour is governed by the engine's existing dispatch
+// admission table + memo Recursive sentinel — the §5.13 fix only
+// changes the path-decomposition shape, not the cycle gates.
+//
+// The discriminating proof: terminate-without-stack-overflow + the
+// resolved component-meta surface is materialised (i.e., the cycle
+// is contained at the typeof shell, not at the outer `defineProps`
+// dispatch).
+const PATHOLOGICAL_TYPEOF_SUBSTITUTION_CYCLE_VUE: &str = r#"<script setup lang="ts">
+type X = typeof Y;
+const Y = null as unknown as typeof X;
+interface Wrap<T> { value: T; }
+defineProps<Wrap<X>>();
+</script>
+<template><div /></template>
+"#;
+
+/// 5k §5.D.5 — `pathological_typeof_substitution_cycle`.
+///
+/// `type X = typeof Y; const Y = null as unknown as typeof X;` — a
+/// typeof-via-typeof cycle that crosses type/value boundary. The
+/// outer `defineProps<Wrap<X>>()` reaches X, X resolves to typeof Y,
+/// Y's type annotation is typeof X, ... cycle. The resolver's
+/// existing recursion guards (memo Recursive sentinel +
+/// `instantiate_active` same-identity check + dispatch admission
+/// table) MUST catch the cycle; the outer `Wrap<X>` instantiation
+/// MUST still terminate (the cycle is at the inner X resolution,
+/// not at the outermost Wrap key).
+///
+/// **Terminate-without-stack-overflow** is the load-bearing
+/// invariant — the dedicated worker thread has a 32 MiB stack so a
+/// regression in the recursion guard surfaces as a join error
+/// rather than a process crash.
+///
+/// Discriminating: the outer prop `value` MUST surface (proves the
+/// outer Wrap surface materialises despite the inner cycle). Its
+/// type signature SHOULD encode the cycle terminator (Recursive
+/// sentinel, Opaque, semanticMiss, or a deferred shell — any
+/// terminating shape is acceptable, stack-overflow is NOT).
+#[test]
+fn pathological_typeof_substitution_cycle() {
+    let host = build_hermetic_host(&[("/A.vue", PATHOLOGICAL_TYPEOF_SUBSTITUTION_CYCLE_VUE)]);
+    let host_for_thread = Arc::clone(&host);
+    let join = std::thread::Builder::new()
+        .name("pathological_typeof_substitution_cycle".to_string())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(move || host_for_thread.get_component_meta("/A.vue"))
+        .expect("spawn worker thread for pathological typeof-substitution cycle fixture");
+    let analysis = join.join().expect(
+        "worker thread MUST terminate without panic; a stack-overflow regression in \
+         the typeof-substitution recursion guard (memo Recursive sentinel OR \
+         engine `instantiate_active` same-identity check) would surface here as a join error",
+    );
+    let analysis = analysis.expect(
+        "get_component_meta must produce a result for the typeof-substitution cycle fixture",
+    );
+
+    // Discriminating: the outer `value` prop MUST surface (proves the
+    // outer Wrap surface materialises even with the inner X cycle).
+    // The cycle is contained at the inner `X` resolution, not at the
+    // outermost Wrap key — so the prop name is observable regardless
+    // of how the type signature renders the cycle.
+    let value_prop = analysis
+        .props
+        .iter()
+        .find(|p| p.name == "value")
+        .unwrap_or_else(|| {
+            panic!(
+                "outer `value` prop must surface even with self-referential inner type X; \
+                 got props {:?}",
+                analysis.props.iter().map(|p| &p.name).collect::<Vec<_>>()
+            )
+        });
+
+    // Negative assertion: the test must complete (already proven by
+    // `join().expect`). Additionally, the resolved type expression
+    // for `value` must NOT contain a literal "stack-overflow"
+    // signature (which would never appear unless the recursion guard
+    // failed catastrophically). Termination is the contract;
+    // structural shape is implementation-dependent.
+    let dbg = format!("{:?}", value_prop.type_expr);
+    assert!(
+        !dbg.contains("stack-overflow"),
+        "typeof-substitution cycle's resolved type must NOT surface stack-overflow signature; got {dbg}"
+    );
+}
