@@ -121,3 +121,83 @@ fn read_once_shallow_first_lazy_for_resolve_macro_payload() {
         "first and second component-meta results must be debug-equal"
     );
 }
+
+const ROUTE_PICK_VUE: &str = r#"<script setup lang="ts">
+import type { BaseProps } from './props'
+defineProps<Pick<BaseProps, 'foo' | 'bar'>>()
+</script>
+<template><div /></template>
+"#;
+
+const ROUTE_PROPS_TS: &str = r#"export interface BaseProps {
+  foo: string;
+  bar: number;
+  baz: boolean;
+}
+"#;
+
+const ROUTE_UNRELATED_TS: &str = r#"export interface UnrelatedC {
+  qux: boolean;
+}
+"#;
+
+/// 5e §5.D.2 — `route_target_pick_omit` read-once / shallow-first /
+/// lazy-expansion. The owner uses `defineProps<Pick<BaseProps, 'foo' |
+/// 'bar'>>()` so /props.ts is transitively needed; /unrelated.ts is
+/// unrelated and MUST NOT be loaded.
+#[test]
+fn read_once_shallow_first_lazy_for_route_target_pick_omit() {
+    let host = build_hermetic_host(&[
+        ("/A.vue", ROUTE_PICK_VUE),
+        ("/props.ts", ROUTE_PROPS_TS),
+        ("/unrelated.ts", ROUTE_UNRELATED_TS),
+    ]);
+
+    // First query — cold path.
+    let q1 = host.get_component_meta("/A.vue");
+    assert!(
+        q1.is_some(),
+        "first get_component_meta on /A.vue must produce a result"
+    );
+    let after_first = host.audit().loaded_files();
+    let after_first_set: std::collections::HashSet<&str> =
+        after_first.iter().map(|s| s.as_ref()).collect();
+    assert!(
+        after_first_set.contains("/A.vue"),
+        "owner /A.vue must be loaded after first query (got {after_first:?})"
+    );
+    assert!(
+        after_first_set.contains("/props.ts"),
+        "transitively-needed /props.ts must be loaded after first query (got {after_first:?})"
+    );
+    assert!(
+        !after_first_set.contains("/unrelated.ts"),
+        "unrelated /unrelated.ts MUST NOT be loaded after first query (got {after_first:?})"
+    );
+
+    // Second query — warm path.
+    let baseline_reads = host.audit().total_reads();
+    let baseline_shallow = host.audit().total_shallow_processes();
+    let baseline_lowerings = host.audit().total_lowerings();
+    let q2 = host.get_component_meta("/A.vue");
+    let read_delta = host.audit().total_reads() - baseline_reads;
+    let shallow_delta = host.audit().total_shallow_processes() - baseline_shallow;
+    let lowering_delta = host.audit().total_lowerings() - baseline_lowerings;
+    assert_eq!(
+        read_delta, 0,
+        "second query must NOT trigger additional read (got delta={read_delta})"
+    );
+    assert_eq!(
+        shallow_delta, 0,
+        "second query must NOT trigger additional shallow process (got delta={shallow_delta})"
+    );
+    assert_eq!(
+        lowering_delta, 0,
+        "second query must NOT trigger additional lowering (got delta={lowering_delta})"
+    );
+    assert_eq!(
+        format!("{:?}", q1),
+        format!("{:?}", q2),
+        "first and second component-meta results must be debug-equal"
+    );
+}
