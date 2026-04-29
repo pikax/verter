@@ -216,6 +216,31 @@ where
     pub fn reset_counters(&self) {
         self.counters.reset();
     }
+
+    /// Test-only constructor minting a fresh runtime with private
+    /// `RouteDb` / `ImportedRootDb` instances.
+    ///
+    /// Phase 6b.B1: introduced ahead of the §6b.B2 production cutover where
+    /// `UnifiedResolverRuntime::new()` will gain mandatory
+    /// `Arc<RouteDb>` / `Arc<ImportedRootDb>` parameters supplied by the
+    /// host's `ProjectTypeStore`. Tests that don't have a `ProjectTypeStore`
+    /// in scope continue to call `for_tests()`, which delegates to the
+    /// internal helper that builds the runtime with locally-owned `Arc`s.
+    /// In B2 the body of this helper is updated to pass fresh
+    /// `Arc::new(RouteDb::new())` / `Arc::new(ImportedRootDb::new())`
+    /// directly — but in B1 it is a no-op alias so this commit changes no
+    /// behaviour.
+    #[cfg(test)]
+    pub fn for_tests() -> Self {
+        Self::new()
+    }
+
+    /// Test-only constructor variant that shares counters with another
+    /// runtime. Same Phase 6b.B1 / B2 lifecycle as `for_tests()`.
+    #[cfg(test)]
+    pub fn for_tests_with_counters(counters: Arc<ResolverCounters>) -> Self {
+        Self::with_counters(counters)
+    }
 }
 
 impl<MetaV, FallthroughV> Default for UnifiedResolverRuntime<MetaV, FallthroughV>
@@ -234,7 +259,7 @@ mod tests {
 
     #[test]
     fn runtime_creates_with_shared_counters() {
-        let runtime = UnifiedResolverRuntime::<(), ()>::new();
+        let runtime = UnifiedResolverRuntime::<(), ()>::for_tests();
         runtime.symbol.counters().record_cache_hit();
         runtime.fallthrough.counters().record_cache_miss();
 
@@ -245,7 +270,7 @@ mod tests {
 
     #[test]
     fn runtime_clear_caches_resets_both_subsystems() {
-        let runtime = UnifiedResolverRuntime::<(), ()>::new();
+        let runtime = UnifiedResolverRuntime::<(), ()>::for_tests();
         runtime.clear_caches();
     }
 
@@ -254,7 +279,7 @@ mod tests {
         let counters = Arc::new(ResolverCounters::new());
         counters.record_cache_hit();
 
-        let runtime = UnifiedResolverRuntime::<(), ()>::with_counters(counters.clone());
+        let runtime = UnifiedResolverRuntime::<(), ()>::for_tests_with_counters(counters.clone());
         runtime.symbol.counters().record_cache_hit();
 
         assert_eq!(runtime.counter_snapshot().node_cache_hits, 2);
@@ -263,7 +288,7 @@ mod tests {
 
     #[test]
     fn runtime_reset_counters_clears_all() {
-        let runtime = UnifiedResolverRuntime::<(), ()>::new();
+        let runtime = UnifiedResolverRuntime::<(), ()>::for_tests();
         runtime.symbol.counters().record_cache_hit();
         runtime.fallthrough.counters().record_cache_miss();
 
