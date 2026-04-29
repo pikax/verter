@@ -469,6 +469,222 @@ impl Default for AnalysisReadyDb {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
+// RouteOwnedShallow — F6/F7 unified destination DB (Phase 6b sub-plan §6b.2)
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Project-store-owned route-only shallow state artifact.
+///
+/// Phase 6b sub-plan §6b.2.F6 / F7 — Option (c): a first-class
+/// `RouteOwnedShallowDb` field on [`ProjectTypeStore`], replacing the two
+/// pre-migration host mutex caches (`external_type_analysis_cache` and
+/// `route_owned_shallow_cache`). The pre-migration `route_shallow_state`
+/// helper at `host_resolve.rs:2222–2306` builds **eval_env**,
+/// **external_type_analysis**, **snapshot**, AND **shallow_state** from
+/// ONE route-only parse pass — F6 and F7 are two halves of the same
+/// materialisation. This struct carries all four halves in one shot.
+///
+/// Generation fields drive the materialiser's tiered staleness gate
+/// (sub-plan §6b.D2a step 2):
+/// - `whole_hash` — content authority (tier 1).
+/// - `workspace_generation` — `ws().content_generation()` at publish time
+///   (tier 2 fallback for files the scheduler hasn't seen).
+/// - `project_generation` —
+///   [`ProjectTypeStore::current_project_generation`] at publish time
+///   (tier 3 — covers `configure_projects` / `set_exact_resolutions`
+///   route-resolution mutations that don't bump `content_generation`).
+///
+/// **Lands in 6b.D1 as the destination shape; F6/F7 readers/writers are
+/// migrated in 6b.D2a.** Until 6b.D2a, the legacy
+/// `external_type_analysis_cache` / `route_owned_shallow_cache` host
+/// mutexes remain the active authority; this DB is published-into only by
+/// tests and the new materialiser. The transitional coexistence is
+/// internal to verter_session (not a long-lived shim — the legacy fields
+/// are deleted in 6b.D2a step 4).
+#[derive(Debug)]
+pub struct RouteOwnedShallowEntry {
+    /// Tier-1 content hash.
+    pub whole_hash: Hash16,
+    /// Tier-2 workspace content generation captured at publish time.
+    pub workspace_generation: u64,
+    /// Tier-3 project generation captured at publish time.
+    pub project_generation: u64,
+    /// Raw file source as-read.
+    pub raw_source: Arc<str>,
+    /// SFC-extracted `<script>` content used as the body of the eval
+    /// environment. For non-SFC files this equals the script slice of
+    /// the raw source.
+    pub eval_source: Arc<str>,
+    /// Cached parsed SFC payload when the canonical file is a Vue SFC.
+    pub cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
+    /// File-level analysis snapshot consumed by component-meta / linter
+    /// pipelines (the F7 "raw_snapshot" half).
+    pub snapshot: Arc<crate::types::FileAnalysisSnapshot>,
+    /// Cached external-type analysis used by the shared type resolver
+    /// (the F6 half, retired from `host_manage::ExternalTypeAnalysisCacheEntry`).
+    pub external_type_analysis:
+        Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>,
+    /// Shallow file state — symbol/import/export inventory consumed by
+    /// route resolution and frontier traversal.
+    pub shallow_state: Arc<crate::resolver_core::shallow_file_state::ShallowFileState>,
+}
+
+impl RouteOwnedShallowEntry {
+    /// Test-only constructor producing a minimal `RouteOwnedShallowEntry`
+    /// with stub fields. Used by phase-6b characterization tests T7 and
+    /// the eviction-cascade regression in 6b.D1; downstream consumers
+    /// don't read these fields, only assert on the entry's identity.
+    #[cfg(test)]
+    pub fn test_stub(_canonical_id: Arc<str>) -> Self {
+        use rustc_hash::{FxHashMap, FxHashSet};
+        let analysis = Arc::new(
+            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(),
+        );
+        let shallow = crate::resolver_core::shallow_file_state::ShallowFileState {
+            whole_hash: [0u8; 16],
+            exports: FxHashMap::default(),
+            wildcard_reexports: Vec::new(),
+            symbols: FxHashMap::default(),
+            value_symbols: FxHashMap::default(),
+            import_locals: FxHashSet::default(),
+            import_targets: FxHashMap::default(),
+            analysis: Arc::clone(&analysis),
+        };
+        Self {
+            whole_hash: [0u8; 16],
+            workspace_generation: 0,
+            project_generation: 0,
+            raw_source: Arc::from(""),
+            eval_source: Arc::from(""),
+            cached_parse: None,
+            snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
+            external_type_analysis: analysis,
+            shallow_state: Arc::new(shallow),
+        }
+    }
+}
+
+/// Host-owned cache of route-only [`RouteOwnedShallowEntry`] artifacts.
+///
+/// Mirrors [`IndexedReadyDb`] exactly: canonical-keyed (`Arc<str>`) with
+/// `whole_hash` validated INSIDE the entry. New publishes REPLACE the
+/// canonical's current entry — there is no version accumulation. Per-entry
+/// staleness is checked by the host materialiser via the tiered gate
+/// (`route_owned_entry_is_fresh`); per-canonical eviction goes through
+/// [`ProjectTypeStore::evict_canonical`] (extended in 6b.D1 to call
+/// `route_owned_shallow.remove(canonical)`); bulk eviction uses
+/// [`Self::clear_all`].
+///
+/// No explicit capacity bound — sizing follows the upsert/eviction
+/// lifecycle (same stance as [`IndexedReadyDb`]). Counters are required
+/// per sub-plan §6b.D1 fifth-pass review; they feed
+/// [`ProjectTypeStoreCounters`] for observability symmetry with
+/// [`IndexedReadyDb`].
+pub struct RouteOwnedShallowDb {
+    entries: DashMap<Arc<str>, Arc<RouteOwnedShallowEntry>>,
+    /// Live entry counter — bumped on insert of a new canonical key,
+    /// decremented on remove. Replacement (insert with existing key) does
+    /// not change the count.
+    live_counter: Arc<AtomicU64>,
+    /// Stale-sweep counter — bumped when [`Self::remove`] evicts an
+    /// existing entry or a replacement supersedes a prior whole-hash.
+    stale_sweeps: Arc<AtomicU64>,
+}
+
+impl RouteOwnedShallowDb {
+    pub fn new() -> Self {
+        Self::with_counters(Default::default(), Default::default())
+    }
+
+    pub(crate) fn with_counters(live: Arc<AtomicU64>, stale: Arc<AtomicU64>) -> Self {
+        Self {
+            entries: DashMap::new(),
+            live_counter: live,
+            stale_sweeps: stale,
+        }
+    }
+
+    /// Look up the route-only artifact for `canonical_id` if the cached
+    /// entry matches `expected_whole_hash`. Stale entries are ignored;
+    /// callers re-materialize through the host materialiser and re-publish.
+    #[must_use]
+    pub fn get(
+        &self,
+        canonical_id: &str,
+        expected_whole_hash: Hash16,
+    ) -> Option<Arc<RouteOwnedShallowEntry>> {
+        let entry = self.entries.get(canonical_id)?;
+        if entry.whole_hash == expected_whole_hash {
+            Some(entry.clone())
+        } else {
+            None
+        }
+    }
+
+    /// Look up the cached artifact for `canonical_id` without hash check.
+    /// The host materialiser uses this for the pre-flight fast path —
+    /// callers must apply the tiered staleness gate before trusting the
+    /// returned entry. Mirrors [`IndexedReadyDb::get_any`].
+    #[must_use]
+    pub fn get_any(&self, canonical_id: &str) -> Option<Arc<RouteOwnedShallowEntry>> {
+        self.entries.get(canonical_id).map(|entry| entry.clone())
+    }
+
+    /// Insert or replace the entry for `canonical_id`. Older versions for
+    /// the same canonical are overwritten — strong-consistency lookup is
+    /// the responsibility of the caller via `expected_whole_hash`.
+    /// Replacement increments the stale-sweep counter so downstream
+    /// telemetry can see how often stale entries are superseded.
+    pub fn publish(&self, canonical_id: Arc<str>, entry: Arc<RouteOwnedShallowEntry>) {
+        let prev = self.entries.insert(canonical_id, entry);
+        if prev.is_some() {
+            self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.live_counter.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Remove the entry for `canonical_id` (e.g. on per-canonical eviction
+    /// from [`ProjectTypeStore::evict_canonical`]). Method name mirrors
+    /// [`IndexedReadyDb::remove`]; the store-level cascade entry point is
+    /// `evict_canonical` (which calls into this method).
+    pub fn remove(&self, canonical_id: &str) {
+        if self.entries.remove(canonical_id).is_some() {
+            self.live_counter.fetch_sub(1, Ordering::Relaxed);
+            self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Bulk eviction — drains every entry. Called by the route-resolution
+    /// invalidation cascade (sub-plan §6b.D2a step 6: extended into
+    /// `configure_projects`, `clear_compile_cache`, `close`,
+    /// `set_workspace`).
+    pub fn clear_all(&self) {
+        let drained = self.entries.len();
+        self.entries.clear();
+        self.live_counter
+            .fetch_sub(drained as u64, Ordering::Relaxed);
+        self.stale_sweeps
+            .fetch_add(drained as u64, Ordering::Relaxed);
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+impl Default for RouteOwnedShallowDb {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
 // ProjectTypeStore
 // ──────────────────────────────────────────────────────────────────────────
 
@@ -495,6 +711,11 @@ pub struct ProjectTypeStoreCounters {
     /// snapshot reflects total host-owned cache occupancy without
     /// per-DB plumbing in the snapshot surface.
     pub component_meta_cache_live: Arc<AtomicU64>,
+    /// Phase 6b.D1 — Route-only shallow cache (`RouteOwnedShallowDb`).
+    /// Mirrors `indexed_live` / `indexed_stale_sweeps` for symmetric
+    /// observability with [`IndexedReadyDb`].
+    pub route_owned_shallow_live: Arc<AtomicU64>,
+    pub route_owned_shallow_stale_sweeps: Arc<AtomicU64>,
 }
 
 impl ProjectTypeStoreCounters {
@@ -513,6 +734,10 @@ impl ProjectTypeStoreCounters {
             component_meta_stale_sweeps: self.component_meta_stale_sweeps.load(Ordering::Relaxed),
             inflight_waiters: self.inflight_waiters.load(Ordering::Relaxed),
             component_meta_cache_live: self.component_meta_cache_live.load(Ordering::Relaxed),
+            route_owned_shallow_live: self.route_owned_shallow_live.load(Ordering::Relaxed),
+            route_owned_shallow_stale_sweeps: self
+                .route_owned_shallow_stale_sweeps
+                .load(Ordering::Relaxed),
         }
     }
 }
@@ -529,6 +754,8 @@ pub struct ProjectTypeStoreCounterSnapshot {
     pub component_meta_stale_sweeps: u64,
     pub inflight_waiters: u64,
     pub component_meta_cache_live: u64,
+    pub route_owned_shallow_live: u64,
+    pub route_owned_shallow_stale_sweeps: u64,
 }
 
 /// One per [`crate::VerterHost`] / loaded project. Owns the project-global
@@ -606,6 +833,15 @@ pub struct ProjectTypeStore {
     prepared_surface_db: PreparedSurfaceDb,
     prepared_member_db: PreparedMemberDb,
     routed_expr_surface_db: RoutedExprSurfaceDb,
+    /// Phase 6b.D1 (sub-plan §6b.2.F6/F7) — Route-only shallow cache.
+    /// Replaces the pre-migration `external_type_analysis_cache` and
+    /// `route_owned_shallow_cache` host mutexes (deleted in 6b.D2a step 4).
+    /// Canonical-keyed (`Arc<str>`) with `whole_hash` validated INSIDE the
+    /// entry; mirrors [`IndexedReadyDb`] exactly. Per-canonical eviction
+    /// goes through [`Self::evict_canonical`] (extended in 6b.D1 to call
+    /// `route_owned_shallow.remove(canonical)`); bulk eviction uses
+    /// [`RouteOwnedShallowDb::clear_all`].
+    route_owned_shallow: RouteOwnedShallowDb,
     /// Debug / diagnostic counters.
     pub counters: ProjectTypeStoreCounters,
 }
@@ -691,6 +927,10 @@ impl ProjectTypeStore {
             PreparedMemberDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
         let routed_expr_surface_db =
             RoutedExprSurfaceDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
+        let route_owned_shallow = RouteOwnedShallowDb::with_counters(
+            Arc::clone(&counters.route_owned_shallow_live),
+            Arc::clone(&counters.route_owned_shallow_stale_sweeps),
+        );
         Self {
             project_generation: AtomicU64::new(0),
             indexed,
@@ -712,6 +952,7 @@ impl ProjectTypeStore {
             prepared_surface_db,
             prepared_member_db,
             routed_expr_surface_db,
+            route_owned_shallow,
             counters,
         }
     }
@@ -720,6 +961,18 @@ impl ProjectTypeStore {
     /// layer — queries read it but never mutate it.
     pub fn project_generation(&self) -> u64 {
         self.project_generation.load(Ordering::Acquire)
+    }
+
+    /// Phase 6b.D1 alias — equivalent to [`Self::project_generation`] with
+    /// a clearer name for the route-only shallow materialiser's tier-3
+    /// staleness gate (sub-plan §6b.D2a step 2). The materialiser captures
+    /// this value before reading + parsing, then re-checks it inside the
+    /// pre-publish fence to detect mid-flight `bump_project_generation`
+    /// mutations (`configure_projects`, `set_exact_resolutions`,
+    /// `configure_resolver`).
+    #[must_use]
+    pub fn current_project_generation(&self) -> u64 {
+        self.project_generation()
     }
 
     /// Bump the project generation. Invoked exclusively by the host /
@@ -763,6 +1016,15 @@ impl ProjectTypeStore {
     #[must_use]
     pub fn imported_roots_handle(&self) -> Arc<ImportedRootDb> {
         Arc::clone(&self.imported_roots)
+    }
+
+    /// Phase 6b.D1 — Route-only shallow cache. F6/F7 destination DB.
+    /// See [`RouteOwnedShallowDb`] for the cache shape and
+    /// [`Self::evict_canonical`] for per-canonical eviction semantics
+    /// (which this DB participates in via the cascade extension landed
+    /// in 6b.D1).
+    pub fn route_owned_shallow(&self) -> &RouteOwnedShallowDb {
+        &self.route_owned_shallow
     }
 
     /// Host-owned semantic-query memo table. Shared across every consumer
@@ -875,6 +1137,9 @@ impl ProjectTypeStore {
     /// - `SemanticGraphStore`: removes every memo entry whose scope
     ///   references the canonical, and every Vue macro resolution entry
     ///   keyed on the canonical.
+    /// - `RouteOwnedShallowDb` (Phase 6b.D1): removes the route-only
+    ///   shallow entry for the canonical (extension landed in 6b.D1; the
+    ///   inner DB method is `remove`, mirroring `IndexedReadyDb::remove`).
     pub fn evict_canonical(&self, canonical_id: &str) {
         self.indexed.remove(canonical_id);
         self.analysis.invalidate_canonical(canonical_id);
@@ -906,6 +1171,9 @@ impl ProjectTypeStore {
         self.prepared_member_db.invalidate_canonical(canonical_id);
         self.routed_expr_surface_db
             .invalidate_canonical(canonical_id);
+        // Phase 6b.D1 — F6/F7 destination DB participates in the
+        // per-canonical eviction cascade.
+        self.route_owned_shallow.remove(canonical_id);
     }
 
     /// Targeted invalidation of a project-generation bump.

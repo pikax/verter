@@ -135,6 +135,15 @@ where
     /// Phase 6b.F3: same `Arc`-shared discipline as `routes`. See
     /// [`Self::imported_roots_handle`].
     pub imported_roots: Arc<ImportedRootDb>,
+    /// Phase 6b.D1 (sub-plan §6b.2.F6/F7) — singleflight for the route-only
+    /// shallow materialiser. Collapses concurrent cold callers for the
+    /// same canonical onto one materialisation path. Mirrors the
+    /// [`Self::indexed_singleflight`] pattern: key is `Arc<str>`
+    /// (canonical alone), error type is `()` (matches `indexed_singleflight`;
+    /// the host materialiser maps internal errors to `()` and returns
+    /// `Option<...>` to callers per sub-plan §6b.D2a step 2 STEP 7).
+    pub route_owned_shallow_singleflight:
+        SingleflightGroup<Arc<str>, Arc<crate::project_type_store::RouteOwnedShallowEntry>, ()>,
 }
 
 impl<MetaV, FallthroughV> UnifiedResolverRuntime<MetaV, FallthroughV>
@@ -165,6 +174,7 @@ where
             indexed_singleflight: SingleflightGroup::default(),
             routes,
             imported_roots,
+            route_owned_shallow_singleflight: SingleflightGroup::default(),
         }
     }
 
@@ -186,6 +196,7 @@ where
             indexed_singleflight: SingleflightGroup::default(),
             routes,
             imported_roots,
+            route_owned_shallow_singleflight: SingleflightGroup::default(),
         }
     }
 
@@ -216,6 +227,13 @@ where
         self.indexed_singleflight.clear();
         self.routes.clear();
         self.imported_roots.clear();
+        // Phase 6b.D1 — clear the route-only shallow singleflight too.
+        // The `RouteOwnedShallowDb` itself is project-store-owned and
+        // cleared via `ProjectTypeStore::route_owned_shallow().clear_all()`
+        // from the host's cascade (sub-plan §6b.D2a step 6). We only
+        // clear the singleflight here so any in-flight closures see a
+        // fresh start.
+        self.route_owned_shallow_singleflight.clear();
     }
 
     /// Evict artifacts owned by one canonical file without clearing unrelated

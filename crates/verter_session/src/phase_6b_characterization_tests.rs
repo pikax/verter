@@ -165,3 +165,54 @@ fn route_db_eviction_visible_via_both_handles_after_close() {
          held by external callers)",
     );
 }
+
+// ─── T7 — F6/F7 destination DB eviction cascade (lands in 6b.D1) ─────────
+//
+// Discrimination: pre-migration the `route_owned_shallow` field on
+// `ProjectTypeStore` does not exist, so this test does not compile against
+// the parent commit (compile failure = red). Post-migration:
+// `ProjectTypeStore::evict_canonical(canonical)` cascades to
+// `route_owned_shallow.remove(canonical)` — proving the new DB is wired
+// into the existing per-canonical eviction primitive.
+#[test]
+fn evict_canonical_cascade_includes_route_owned_shallow() {
+    use crate::project_type_store::RouteOwnedShallowEntry;
+
+    let host = host();
+    let store = host.project_type_store();
+
+    let canonical: Arc<str> = Arc::from("/seeded/route_owned.ts");
+    let entry = Arc::new(RouteOwnedShallowEntry::test_stub(canonical.clone()));
+
+    // Seed the new DB directly. The test exercises the eviction cascade,
+    // not the cold-materializer path (that's T2-T5 in 6b.D2a).
+    store
+        .route_owned_shallow()
+        .publish(canonical.clone(), Arc::clone(&entry));
+    assert!(
+        store.route_owned_shallow().get_any(&canonical).is_some(),
+        "PRE-EVICT: entry must be present after publish",
+    );
+
+    // Cascade: evict_canonical extends to route_owned_shallow.remove.
+    store.evict_canonical(&canonical);
+
+    assert!(
+        store.route_owned_shallow().get_any(&canonical).is_none(),
+        "POST-EVICT: ProjectTypeStore::evict_canonical must remove the \
+         route_owned_shallow entry for that canonical (Phase 6b.D1)",
+    );
+
+    // Negative assertion: an unrelated canonical's entry MUST survive
+    // a per-canonical evict (otherwise the cascade is overly broad).
+    let other: Arc<str> = Arc::from("/other/file.ts");
+    let other_entry = Arc::new(RouteOwnedShallowEntry::test_stub(other.clone()));
+    store
+        .route_owned_shallow()
+        .publish(other.clone(), Arc::clone(&other_entry));
+    store.evict_canonical(&canonical);
+    assert!(
+        store.route_owned_shallow().get_any(&other).is_some(),
+        "POST-EVICT: per-canonical evict must NOT touch unrelated entries",
+    );
+}
