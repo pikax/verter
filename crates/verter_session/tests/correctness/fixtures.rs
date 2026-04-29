@@ -265,6 +265,34 @@ defineEmits<{ click: [evt: string] }>();
 <template><div /></template>
 "#;
 
+// ── defineSlots<T> typed bindings — Verter macros §slots ────────────────────
+//   Two slots, each with a single typed binding on the slot
+//   function's first parameter Object literal. The binding types
+//   are primitives so no cross-file imports are needed.
+//   `phase-00b-tier1-mismatches.md` row 1; closed by Phase 5j §5.12.
+const FIXTURE_SLOTS_TYPED_VUE: &str = r#"<script setup lang="ts">
+defineSlots<{
+  default(props: { item: string }): any;
+  named(props: { row: number }): any;
+}>();
+</script>
+<template><div /></template>
+"#;
+
+// ── defineModel<T>() typed model — Verter macros §model ─────────────────────
+//   Two model calls: `defineModel<string>()` (defaults to
+//   `modelValue`) and `defineModel<number>('count')`. Both
+//   optional, no defaults, surfacing as model + prop +
+//   update:<name> event triples per Vue's documented contract.
+//   `phase-00b-tier1-mismatches.md` row 2 (re-homed from 5k to 5j
+//   per parent §5.13 r15 table); closed by Phase 5j §5.12.
+const FIXTURE_MODELS_VUE: &str = r#"<script setup lang="ts">
+defineModel<string>();
+defineModel<number>('count');
+</script>
+<template><div /></template>
+"#;
+
 // ── defineExpose — Verter macros §expose ────────────────────────────────────
 //   §0.6.1 small decision: Vue's documented public API uses the value
 //   form `defineExpose({ ... })`; type-only `defineExpose<T>()` is
@@ -478,6 +506,8 @@ const F_TEMPLATE_LITERAL_AS_KEY: &[(&str, &str)] = &[("/c.vue", TEMPLATE_LITERAL
 const F_FIXTURE_PROPS_WITH_DEFAULTS: &[(&str, &str)] =
     &[("/c.vue", FIXTURE_PROPS_WITH_DEFAULTS_VUE)];
 const F_FIXTURE_EVENTS_TYPED: &[(&str, &str)] = &[("/c.vue", FIXTURE_EVENTS_TYPED_VUE)];
+const F_FIXTURE_SLOTS_TYPED: &[(&str, &str)] = &[("/c.vue", FIXTURE_SLOTS_TYPED_VUE)];
+const F_FIXTURE_MODELS: &[(&str, &str)] = &[("/c.vue", FIXTURE_MODELS_VUE)];
 const F_FIXTURE_EXPOSED_METHODS: &[(&str, &str)] = &[("/c.vue", FIXTURE_EXPOSED_METHODS_VUE)];
 const F_FIXTURE_FALLTHROUGH_INHERIT: &[(&str, &str)] =
     &[("/c.vue", FIXTURE_FALLTHROUGH_INHERIT_VUE)];
@@ -719,6 +749,26 @@ pub const FIXTURES: &[CorrectnessFixture] = &[
     CorrectnessFixture {
         id: "fixture_events_typed",
         files: F_FIXTURE_EVENTS_TYPED,
+        target: "/c.vue",
+        class: FixtureClass::ClassA,
+    },
+    // ── Phase 5j §5.12 — slot-binding + defineModel fixtures ──────────────
+    //
+    // Originally deferred per §0p.A.4 case 2 in Phase 0b's first
+    // spawn (see `phase-00b-tier1-mismatches.md` rows 1-2). Phase 5j
+    // closes both gaps:
+    // - `fixture_slots_typed` via `project_slot_binding_member`.
+    // - `fixture_models` (re-homed from 5k per §5.13 r15 table)
+    //   via the `expand_field_expr` `DefineModel` branch.
+    CorrectnessFixture {
+        id: "fixture_slots_typed",
+        files: F_FIXTURE_SLOTS_TYPED,
+        target: "/c.vue",
+        class: FixtureClass::ClassA,
+    },
+    CorrectnessFixture {
+        id: "fixture_models",
+        files: F_FIXTURE_MODELS,
         target: "/c.vue",
         class: FixtureClass::ClassA,
     },

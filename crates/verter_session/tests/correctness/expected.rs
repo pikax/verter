@@ -374,6 +374,118 @@ pub fn fixture_fallthrough_root_inherit() -> SnapshotView {
     }
 }
 
+// ── defineSlots<T> typed bindings — Verter macros §slots ───────────────────
+//   `defineSlots<T>` surfaces every key of T as a slot, with bindings
+//   extracted from each slot function's first parameter Object literal.
+//   The fixture's two slots `default(props: { item: string })` and
+//   `named(props: { row: number })` produce one binding each:
+//   `default.item: string`, `named.row: number`. The
+//   `payload_signature` projection renders the binding Object as
+//   `{ <name>: <type> }` with bindings sorted alphabetically; here
+//   each slot has only one binding so the ordering question is moot.
+//   Slots themselves are alphabetised — `default` before `named`.
+//
+//   Rule citation: Verter macros §slots
+//   (`./.claude/skills/component-meta`).
+//   `phase-00b-tier1-mismatches.md` row 1; closed by Phase 5j §5.12
+//   via `ProjectSemanticDispatch::project_slot_binding_member` and
+//   the `expand_field_expr` SlotBinding branch.
+pub fn fixture_slots_typed() -> SnapshotView {
+    SnapshotView {
+        component_name: COMPONENT_NAME.to_string(),
+        props: vec![],
+        events: vec![],
+        slots: vec![
+            SlotView {
+                name: "default".to_string(),
+                payload_signature: "{ item: string }".to_string(),
+            },
+            SlotView {
+                name: "named".to_string(),
+                payload_signature: "{ row: number }".to_string(),
+            },
+        ],
+        models: vec![],
+        exposed: vec![],
+        fallthrough: None,
+        flags: empty_flags(),
+    }
+}
+
+// ── defineModel<T>() typed model — Verter macros §model ─────────────────────
+//   `defineModel<T>()` exposes a model entry with name from the
+//   optional first string argument (or `"modelValue"` default) and
+//   type T. Vue's documented contract additionally synthesises a
+//   matching prop with type `T | undefined` (when optional, no
+//   default) and an `update:<name>` event with payload tuple
+//   `[value: T | undefined]`.
+//
+//   The fixture has two calls: `defineModel<string>()` (defaults to
+//   `modelValue`) and `defineModel<number>('count')`. Both are
+//   optional (no `{ required: true }` option) and have no default,
+//   so each surfaces as:
+//     - model: name + concrete `T` (no `| undefined`).
+//     - prop: name + `T | undefined`, `required: false`,
+//       `has_default: false`.
+//     - event: `update:<name>` with payload `[value: T | undefined]`.
+//
+//   `SnapshotView::from_analysis` sorts every collection
+//   alphabetically by name, so `count` precedes `modelValue`.
+//
+//   Rule citation: Verter macros §model
+//   (`./.claude/skills/component-meta`).
+//   `phase-00b-tier1-mismatches.md` row 2; re-homed from 5k to 5j
+//   per parent §5.13 r15 table; closed by Phase 5j §5.12 via the
+//   `expand_field_expr` `DefineModel` branch in
+//   `host_manage.rs::compute_evaluated_types*`.
+pub fn fixture_models() -> SnapshotView {
+    SnapshotView {
+        component_name: COMPONENT_NAME.to_string(),
+        props: vec![
+            PropView {
+                name: "count".to_string(),
+                type_signature: "number | undefined".to_string(),
+                required: false,
+                has_default: false,
+                default_signature: None,
+                doc: None,
+            },
+            PropView {
+                name: "modelValue".to_string(),
+                type_signature: "string | undefined".to_string(),
+                required: false,
+                has_default: false,
+                default_signature: None,
+                doc: None,
+            },
+        ],
+        events: vec![
+            EventView {
+                name: "update:count".to_string(),
+                params_signature: "[value: number | undefined]".to_string(),
+            },
+            EventView {
+                name: "update:modelValue".to_string(),
+                params_signature: "[value: string | undefined]".to_string(),
+            },
+        ],
+        slots: vec![],
+        models: vec![
+            ModelView {
+                name: "count".to_string(),
+                type_signature: "number".to_string(),
+            },
+            ModelView {
+                name: "modelValue".to_string(),
+                type_signature: "string".to_string(),
+            },
+        ],
+        exposed: vec![],
+        fallthrough: None,
+        flags: empty_flags(),
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Class A dispatch: lookup_class_a_expected
 // ═══════════════════════════════════════════════════════════════════════════
@@ -403,10 +515,19 @@ pub fn lookup_class_a_expected(fixture_id: &str) -> Option<SnapshotView> {
         "mapped_extract" => Some(mapped_extract()),
         "template_literal_as_key" => Some(template_literal_as_key()),
         // Phase 0b — component-meta property macros (5 of 7 land;
-        // `fixture_slots_typed` and `fixture_models` deferred per
-        // §0p.A.4 case 2 — see `phase-00b-tier1-mismatches.md`).
+        // `fixture_slots_typed` and `fixture_models` originally
+        // deferred per §0p.A.4 case 2 — see
+        // `phase-00b-tier1-mismatches.md`. Phase 5j §5.12 closes
+        // both gaps and authors the fixtures.
         "fixture_props_with_defaults" => Some(fixture_props_with_defaults()),
         "fixture_events_typed" => Some(fixture_events_typed()),
+        // Phase 5j §5.12 — fixtures authored after the slot-binding
+        // dispatch helper closes `fixture_slots_typed` (row 1) and
+        // the DefineModel `expand_field_expr` branch closes
+        // `fixture_models` (row 2, re-homed from 5k per §5.13 r15
+        // table).
+        "fixture_slots_typed" => Some(fixture_slots_typed()),
+        "fixture_models" => Some(fixture_models()),
         "fixture_exposed_methods" => Some(fixture_exposed_methods()),
         "fixture_fallthrough_inherit" => Some(fixture_fallthrough_inherit()),
         "fixture_fallthrough_root_inherit" => Some(fixture_fallthrough_root_inherit()),
