@@ -1741,6 +1741,12 @@ impl VerterHost {
                             false,
                         ),
                     );
+                    // Phase 5g-supplement §5.D.0 r17 — fresh load,
+                    // count for the host-level test audit. Fresh
+                    // means we missed both `get_source` and
+                    // `IndexedReadyDb::get_any` before reaching here.
+                    #[cfg(test)]
+                    self.test_audit.record_read(canonical_id);
                     return Some(source);
                 }
                 if let Some(facts) = self.project_type_store.indexed().get_any(canonical_id) {
@@ -1753,6 +1759,8 @@ impl VerterHost {
                             false,
                         ),
                     );
+                    #[cfg(test)]
+                    self.test_audit.record_read(canonical_id);
                     return Some(Arc::clone(&facts.raw_source));
                 }
             }

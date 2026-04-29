@@ -234,6 +234,13 @@ pub struct IndexedReadyDb {
     /// Stale-sweep counter — bumped when [`Self::remove`] evicts an
     /// existing entry or a replacement supersedes a prior whole-hash.
     stale_sweeps: Arc<AtomicU64>,
+    /// Test-only host-level audit hook. Installed by
+    /// [`crate::VerterHost::new_with_scheduler_config`] post-construction.
+    /// On every fresh `insert`, the hook (if present) bumps the host's
+    /// `total_shallow_processes` counter and records the canonical.
+    /// Phase 5g-supplement §5.D.0 r17.
+    #[cfg(test)]
+    test_audit_hook: parking_lot::Mutex<Option<Arc<crate::host_test_audit::HostTestAuditState>>>,
 }
 
 impl IndexedReadyDb {
@@ -246,7 +253,22 @@ impl IndexedReadyDb {
             entries: DashMap::new(),
             live_counter: live,
             stale_sweeps: stale,
+            #[cfg(test)]
+            test_audit_hook: parking_lot::Mutex::new(None),
         }
+    }
+
+    /// Install the host-level test audit hook (Phase 5g-supplement
+    /// §5.D.0 r17). Called by `VerterHost::new_with_scheduler_config`
+    /// once the test-audit `Arc` is allocated. The hook fires on every
+    /// fresh `insert` and bumps `total_shallow_processes` plus the
+    /// `loaded_files` set on the host's [`HostTestAuditState`].
+    #[cfg(test)]
+    pub(crate) fn install_test_audit_hook(
+        &self,
+        state: Arc<crate::host_test_audit::HostTestAuditState>,
+    ) {
+        *self.test_audit_hook.lock() = Some(state);
     }
 
     /// Look up the indexed artifact for `canonical_id` if the cached entry
@@ -307,9 +329,17 @@ impl IndexedReadyDb {
             // `RustSemanticFootprintAudit.indexed_ready_builds` via
             // the miner.
             crate::component_meta_audit::record_indexed_ready_built(
-                canonical_for_event,
+                Arc::clone(&canonical_for_event),
                 whole_hash,
             );
+            // Phase 5g-supplement §5.D.0 r17 — host-level test audit
+            // hook. Bumps `total_shallow_processes` and adds the
+            // canonical to `loaded_files` so §5.D.2 read-once tests
+            // can sample cumulative counters across requests.
+            #[cfg(test)]
+            if let Some(state) = self.test_audit_hook.lock().as_ref() {
+                state.record_shallow_process(canonical_for_event.as_ref());
+            }
         }
     }
 

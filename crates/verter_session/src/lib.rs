@@ -72,6 +72,8 @@ mod hash;
 pub mod host_executor;
 pub mod host_manage;
 mod host_resolve;
+#[cfg(test)]
+pub(crate) mod host_test_audit;
 mod host_upsert;
 pub(crate) mod i64_as_decimal_string;
 mod id;
@@ -313,6 +315,13 @@ pub struct VerterHost {
     /// inserts happen in `emit_audit_trace`; consumers retrieve via
     /// `take_audit_record(request_id)`. Plan §2.5.
     pub(crate) audit_records: Arc<crate::component_meta_audit::AuditRecordsStore>,
+    /// Cumulative host-level test audit state. Phase 5g-supplement
+    /// §5.D.0 r17 — accessible via [`Self::audit`] (test-only).
+    /// Counters increment from `#[cfg(test)]` hooks at the production
+    /// read / shallow-process sites; the lowering count is read from
+    /// the graph store's existing `stats_snapshot`.
+    #[cfg(test)]
+    pub(crate) test_audit: Arc<crate::host_test_audit::HostTestAuditState>,
 }
 
 // Manual Debug impl because Arc<dyn WorkspaceAccess> doesn't implement Debug.
@@ -394,6 +403,17 @@ impl VerterHost {
         let project_type_store = Arc::new(
             crate::project_type_store::ProjectTypeStore::with_provenance(Arc::clone(&provenance)),
         );
+        // Phase 5g-supplement §5.D.0 r17: install the host-level test
+        // audit hook on the IndexedReadyDb so fresh `insert`s bump
+        // `total_shallow_processes` + `loaded_files` cumulatively across
+        // requests on this host. Test-only; production builds compile
+        // without this block.
+        #[cfg(test)]
+        let test_audit = Arc::new(crate::host_test_audit::HostTestAuditState::new());
+        #[cfg(test)]
+        project_type_store
+            .indexed()
+            .install_test_audit_hook(Arc::clone(&test_audit));
         Self {
             instance_id: next_host_instance_id(),
             config,
@@ -417,6 +437,8 @@ impl VerterHost {
             project_type_store,
             request_id_counter: std::sync::atomic::AtomicU64::new(0),
             audit_records: Arc::new(crate::component_meta_audit::AuditRecordsStore::default()),
+            #[cfg(test)]
+            test_audit,
         }
     }
 
@@ -449,6 +471,22 @@ impl VerterHost {
     /// Get a clone of the workspace Arc.
     pub fn workspace(&self) -> Arc<dyn verter_workspace::WorkspaceAccess> {
         self.workspace.read().clone()
+    }
+
+    /// Test-only host audit view. Phase 5g-supplement §5.D.0 r17.
+    ///
+    /// Exposes cumulative loaded-files / total-reads / total-shallow-
+    /// processes / total-lowerings counters for §5.D.2 read-once /
+    /// shallow-first / lazy-expansion tests. Gated by bare
+    /// `#[cfg(test)]`; production builds compile without this method
+    /// (no Cargo feature involved).
+    #[cfg(test)]
+    #[must_use]
+    pub fn audit(&self) -> crate::host_test_audit::HostTestAudit<'_> {
+        crate::host_test_audit::HostTestAudit::new(
+            &self.test_audit,
+            self.project_type_store.semantic_graph(),
+        )
     }
 
     /// Access the project-global type-resolution cache root. Owned exclusively
