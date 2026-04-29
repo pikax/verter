@@ -286,7 +286,9 @@ fn pathological_exclude_self_recursive() {
             };
             let key = SemanticQueryKey::Instantiate {
                 base: r_identity,
-                args: Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
+                args: Arc::from(
+                    Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice(),
+                ),
                 body_mode: ProjectionMode::Expanded,
             };
             dispatch.execute(key)
@@ -371,13 +373,16 @@ fn pathological_extract_through_typeof() {
          interaction would surface here as a join error",
     );
 
-    let analysis = result.expect("get_component_meta must produce a result for the typeof+Extract chain");
+    let analysis =
+        result.expect("get_component_meta must produce a result for the typeof+Extract chain");
     let kind_prop = analysis
         .props
         .iter()
         .find(|p| p.name == "kind")
         .expect("the `kind` prop must surface from defineProps<{ kind: X }>()");
-    let signature = crate::component_meta_pathological_recursion_tests::render_signature_for_test(&kind_prop.type_expr);
+    let signature = crate::component_meta_pathological_recursion_tests::render_signature_for_test(
+        &kind_prop.type_expr,
+    );
     assert_eq!(
         signature, "\"a\" | \"b\"",
         "Extract<typeof y, R> must reduce to the literal union \"a\" | \"b\" \
@@ -453,8 +458,7 @@ type R = { [K in keyof R as `${K & string}_x`]: R[K] };
 /// stack-overflow this test.
 #[test]
 fn pathological_template_literal_key_recursion() {
-    let host =
-        build_hermetic_host(&[("/A.vue", PATHOLOGICAL_TEMPLATE_LITERAL_KEY_RECURSION_VUE)]);
+    let host = build_hermetic_host(&[("/A.vue", PATHOLOGICAL_TEMPLATE_LITERAL_KEY_RECURSION_VUE)]);
     let host_for_thread = Arc::clone(&host);
     let join = std::thread::Builder::new()
         .name("pathological_template_literal_key_recursion".to_string())
@@ -472,7 +476,9 @@ fn pathological_template_literal_key_recursion() {
             };
             let key = SemanticQueryKey::Instantiate {
                 base: r_identity,
-                args: Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
+                args: Arc::from(
+                    Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice(),
+                ),
                 body_mode: ProjectionMode::Expanded,
             };
             dispatch.execute(key)
@@ -490,9 +496,7 @@ fn pathological_template_literal_key_recursion() {
             let data = graph.node_data(node_id).expect("result node must exist");
             let dbg = format!("{:?}", data.as_ref());
             assert!(
-                dbg.contains("RecursiveRef")
-                    || dbg.contains("Opaque")
-                    || dbg.contains("Mapped"),
+                dbg.contains("RecursiveRef") || dbg.contains("Opaque") || dbg.contains("Mapped"),
                 "self-referential template-literal mapped type must terminate \
                  with a RecursiveRef / Opaque / deferred Mapped shell sentinel; \
                  got node data {dbg}"

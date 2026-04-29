@@ -1564,8 +1564,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         mapper.parameter_node,
                         key_literal,
                     );
-                    let evaluated_remap =
-                        self.evaluate_deferred_semantic_node(substituted_remap);
+                    let evaluated_remap = self.evaluate_deferred_semantic_node(substituted_remap);
                     match graph.node_data(evaluated_remap).as_deref() {
                         Some(SemanticNodeData::Literal(LiteralValue::String(text))) => {
                             Arc::from(text.as_str())
