@@ -60,6 +60,8 @@ pub mod component_meta_audit;
 mod component_meta_cache_discipline_tests;
 pub mod component_meta_caches;
 #[cfg(test)]
+mod component_meta_no_cache_promotion_tests;
+#[cfg(test)]
 mod component_meta_read_once_tests;
 #[cfg(test)]
 mod component_meta_caches_tests;
