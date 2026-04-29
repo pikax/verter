@@ -66,6 +66,8 @@ pub mod component_meta_materialize;
 #[cfg(test)]
 mod component_meta_no_cache_promotion_tests;
 #[cfg(test)]
+mod component_meta_pathological_recursion_tests;
+#[cfg(test)]
 mod component_meta_read_once_tests;
 pub mod component_meta_resolution_policy;
 pub mod component_meta_result_db;
