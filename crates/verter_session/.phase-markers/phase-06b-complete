@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "phase": "phase-06b",
+  "status": "success",
+  "base_commit": "23bff7016eca28cd495e3764c6c417ab57f17db4",
+  "work_head_before_marker": "3f6b754fb958819417eb8d8e3728f46c815b4e69",
+  "test_results": {
+    "workspace": {
+      "test_scope": "cargo test --workspace --tests --verbose",
+      "passed": 10241,
+      "failed": 0
+    },
+    "correctness": {
+      "test_scope": "cargo test -p verter_session --test correctness",
+      "passed": 11,
+      "failed": 0
+    }
+  },
+  "snapshot_drift": "none",
+  "guards_un_ignored": [],
+  "deferred": [],
+  "report_path": "phase-06b-report.md",
+  "derivation_notes_verified": false,
+  "atomic_gate_phase": false
+}
