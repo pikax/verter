@@ -279,3 +279,92 @@ fn read_once_shallow_first_lazy_for_route_target_pick_omit() {
         "first and second component-meta results must be debug-equal"
     );
 }
+
+const USERLAND_SHADOWING_PICK_VUE: &str = r#"<script setup lang="ts">
+import type { CfgUserland } from './shadow_cfg'
+type Pick<T, _K> = T;
+defineProps<Pick<CfgUserland, 'alpha'>>()
+</script>
+<template><div /></template>
+"#;
+
+const USERLAND_SHADOWING_CFG_TS: &str = r#"export interface CfgUserland {
+  alpha: string;
+  beta: number;
+  gamma: boolean;
+}
+"#;
+
+const USERLAND_SHADOWING_UNRELATED_TS: &str = r#"export interface UnrelatedHelper {
+  qux: boolean;
+}
+"#;
+
+/// 5h §5.D.2 — `userland_shadowing_pick` read-once / shallow-first /
+/// lazy-expansion. The owner /A.vue declares a userland
+/// `type Pick<T, _K> = T` shadowing the ambient lib's `Pick`, and
+/// imports the source interface `CfgUserland` from /shadow_cfg.ts —
+/// so the `defineProps<Pick<CfgUserland, 'alpha'>>()` call walks
+/// the userland Pick's body and expands `CfgUserland`. The
+/// transitively-needed file /shadow_cfg.ts MUST be loaded; the
+/// unrelated /unused.ts MUST NOT be loaded (the resolver-context
+/// shadow gate must NOT cause spurious cross-file walks). The
+/// second identical query MUST trigger ZERO additional reads /
+/// shallow processes / lowerings (the read-once contract holds for
+/// the shadow-gate path).
+#[test]
+fn read_once_shallow_first_lazy_for_userland_shadowing_pick() {
+    let host = build_hermetic_host(&[
+        ("/A.vue", USERLAND_SHADOWING_PICK_VUE),
+        ("/shadow_cfg.ts", USERLAND_SHADOWING_CFG_TS),
+        ("/unused.ts", USERLAND_SHADOWING_UNRELATED_TS),
+    ]);
+
+    let q1 = host.get_component_meta("/A.vue");
+    assert!(
+        q1.is_some(),
+        "first get_component_meta on /A.vue must produce a result for the userland shadowing case"
+    );
+    let after_first = host.audit().loaded_files();
+    let after_first_set: std::collections::HashSet<&str> =
+        after_first.iter().map(|s| s.as_ref()).collect();
+    assert!(
+        after_first_set.contains("/A.vue"),
+        "owner /A.vue must be loaded after first query (got {after_first:?})"
+    );
+    assert!(
+        after_first_set.contains("/shadow_cfg.ts"),
+        "transitively-needed /shadow_cfg.ts must be loaded after first query (got {after_first:?})"
+    );
+    assert!(
+        !after_first_set.contains("/unused.ts"),
+        "unrelated /unused.ts MUST NOT be loaded after first query \
+         (lazy expansion contract — the userland-shadow gate must \
+         not cause spurious cross-file walks; got {after_first:?})"
+    );
+
+    let baseline_reads = host.audit().total_reads();
+    let baseline_shallow = host.audit().total_shallow_processes();
+    let baseline_lowerings = host.audit().total_lowerings();
+    let q2 = host.get_component_meta("/A.vue");
+    let read_delta = host.audit().total_reads() - baseline_reads;
+    let shallow_delta = host.audit().total_shallow_processes() - baseline_shallow;
+    let lowering_delta = host.audit().total_lowerings() - baseline_lowerings;
+    assert_eq!(
+        read_delta, 0,
+        "second userland-shadowing query must NOT trigger additional read (got delta={read_delta})"
+    );
+    assert_eq!(
+        shallow_delta, 0,
+        "second userland-shadowing query must NOT trigger additional shallow process (got delta={shallow_delta})"
+    );
+    assert_eq!(
+        lowering_delta, 0,
+        "second userland-shadowing query must NOT trigger additional lowering (got delta={lowering_delta})"
+    );
+    assert_eq!(
+        format!("{:?}", q1),
+        format!("{:?}", q2),
+        "first and second userland-shadowing component-meta results must be debug-equal"
+    );
+}
