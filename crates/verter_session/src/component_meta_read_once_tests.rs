@@ -547,3 +547,94 @@ fn read_once_shallow_first_lazy_for_slot_binding_lowering() {
         "first and second slot-binding-lowering component-meta results must be debug-equal"
     );
 }
+
+const TYPEOF_SUBSTITUTION_OWNER_VUE: &str = r#"<script setup lang="ts">
+import type { Sample } from './sample_types'
+const sample: Sample = { id: "abc" };
+interface IdShape<T> { id: T; }
+defineProps<IdShape<typeof sample.id>>();
+</script>
+<template><div /></template>
+"#;
+
+const TYPEOF_SUBSTITUTION_SAMPLE_TS: &str = r#"export interface Sample {
+  id: string;
+}
+"#;
+
+const TYPEOF_SUBSTITUTION_UNRELATED_TS: &str = r#"export interface UnrelatedZ {
+  qux: boolean;
+}
+"#;
+
+/// 5k §5.D.2 — value-member typeof substitution read-once /
+/// shallow-first / lazy-expansion. The owner /A.vue uses
+/// `IdShape<typeof sample.id>` where `sample: Sample` and the
+/// `Sample` interface is imported from /sample_types.ts — so the
+/// substitution layer must descend into the typeof projection
+/// (`sample.id` → string) before binding T. The transitively-needed
+/// /sample_types.ts MUST be loaded so the `Sample` type-annotation
+/// resolves; the unrelated /unused.ts MUST NOT be loaded (the typeof
+/// substitution's value-member projection must NOT cause spurious
+/// cross-file walks). The second identical query MUST trigger ZERO
+/// additional reads / shallow processes / lowerings (the read-once
+/// contract holds for the single-segment-first lookup +
+/// `ProjectPath { Navigate }` tail composition).
+#[test]
+fn read_once_shallow_first_lazy_for_typeof_substitution() {
+    let host = build_hermetic_host(&[
+        ("/A.vue", TYPEOF_SUBSTITUTION_OWNER_VUE),
+        ("/sample_types.ts", TYPEOF_SUBSTITUTION_SAMPLE_TS),
+        ("/unused.ts", TYPEOF_SUBSTITUTION_UNRELATED_TS),
+    ]);
+
+    // First query — cold path.
+    let q1 = host.get_component_meta("/A.vue");
+    assert!(
+        q1.is_some(),
+        "first get_component_meta on /A.vue must produce a result for typeof substitution"
+    );
+    let after_first = host.audit().loaded_files();
+    let after_first_set: std::collections::HashSet<&str> =
+        after_first.iter().map(|s| s.as_ref()).collect();
+    assert!(
+        after_first_set.contains("/A.vue"),
+        "owner /A.vue must be loaded after first query (got {after_first:?})"
+    );
+    assert!(
+        after_first_set.contains("/sample_types.ts"),
+        "transitively-needed /sample_types.ts must be loaded after first query (got {after_first:?})"
+    );
+    assert!(
+        !after_first_set.contains("/unused.ts"),
+        "unrelated /unused.ts MUST NOT be loaded after first query \
+         (lazy expansion contract — the typeof substitution's value-member \
+         projection must not cause spurious cross-file walks; got {after_first:?})"
+    );
+
+    // Second query — warm path.
+    let baseline_reads = host.audit().total_reads();
+    let baseline_shallow = host.audit().total_shallow_processes();
+    let baseline_lowerings = host.audit().total_lowerings();
+    let q2 = host.get_component_meta("/A.vue");
+    let read_delta = host.audit().total_reads() - baseline_reads;
+    let shallow_delta = host.audit().total_shallow_processes() - baseline_shallow;
+    let lowering_delta = host.audit().total_lowerings() - baseline_lowerings;
+    assert_eq!(
+        read_delta, 0,
+        "second typeof-substitution query must NOT trigger additional read (got delta={read_delta})"
+    );
+    assert_eq!(
+        shallow_delta, 0,
+        "second typeof-substitution query must NOT trigger additional shallow process (got delta={shallow_delta})"
+    );
+    assert_eq!(
+        lowering_delta, 0,
+        "second typeof-substitution query must NOT trigger additional lowering (got delta={lowering_delta})"
+    );
+    assert_eq!(
+        format!("{:?}", q1),
+        format!("{:?}", q2),
+        "first and second typeof-substitution component-meta results must be debug-equal"
+    );
+}
