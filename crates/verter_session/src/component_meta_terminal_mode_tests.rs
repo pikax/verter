@@ -120,3 +120,49 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_route_target_pick_omit(
         }
     }
 }
+
+/// 5f §5.D.3 — `fallthrough_inheritance` intermediate hops Navigate,
+/// terminal hop Expanded. Mirror of the 5e test for the
+/// fallthrough-inheritance closure: a multi-hop ProjectPath in
+/// Expanded mode must populate intermediate cache entries in
+/// Navigate and only the terminal in Expanded.
+#[test]
+fn intermediate_hops_navigate_terminal_only_expanded_for_fallthrough_inheritance() {
+    let host = build_test_host();
+    let base = intern_four_hop_object(&host);
+    let key = SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::from(
+            vec![
+                PathSegment::Member(Arc::from("a")),
+                PathSegment::Member(Arc::from("b")),
+                PathSegment::Member(Arc::from("full")),
+                PathSegment::Member(Arc::from("bar")),
+            ]
+            .into_boxed_slice(),
+        ),
+        mode: ProjectionMode::Expanded,
+    };
+
+    let _ = host.semantic_dispatch().execute(key.clone());
+
+    let trace = host.dispatch_trace_for(&key);
+    let decomposition = trace.path_decomposition();
+    assert_eq!(
+        decomposition.len(),
+        4,
+        "trace should decompose the 4-segment path into 4 hops (got {})",
+        decomposition.len()
+    );
+
+    for (i, sub_key) in decomposition.iter().enumerate() {
+        let is_terminal = i == decomposition.len() - 1;
+        match (sub_key.mode(), is_terminal) {
+            (ProjectionMode::Navigate, false) => {} // expected
+            (ProjectionMode::Expanded, true) => {}  // expected
+            (mode, terminal) => panic!(
+                "fallthrough hop {i} (terminal={terminal}) ran in {mode:?} (expected Navigate for intermediate, Expanded for terminal)"
+            ),
+        }
+    }
+}
