@@ -247,8 +247,9 @@ mod tests {
         // construction paths. Build a shared map, then construct a
         // PreparedDeclBundle stub to verify the bundle path returns
         // the same shadow set.
-        let names: rustc_hash::FxHashSet<String> =
-            ["Pick".to_string(), "Cfg".to_string()].into_iter().collect();
+        let names: rustc_hash::FxHashSet<String> = ["Pick".to_string(), "Cfg".to_string()]
+            .into_iter()
+            .collect();
         let mut bindings: FxHashMap<String, TypeParamBinding> = FxHashMap::default();
         bindings.insert("T".to_string(), make_binding("T", 0));
 

@@ -164,16 +164,12 @@ fn pathological_self_shadowing_userland_pick() {
             // arg shapes because `build_instantiate` looks up the
             // body via `decl_canonical + decl_name` only.
             let graph = host_for_thread.project_type_store().semantic_graph();
-            let arg_t = graph.intern_node(
-                crate::semantic_query::SemanticNodeData::Primitive(
-                    crate::semantic_query::PrimitiveKind::String,
-                ),
-            );
-            let arg_k = graph.intern_node(
-                crate::semantic_query::SemanticNodeData::Primitive(
-                    crate::semantic_query::PrimitiveKind::String,
-                ),
-            );
+            let arg_t = graph.intern_node(crate::semantic_query::SemanticNodeData::Primitive(
+                crate::semantic_query::PrimitiveKind::String,
+            ));
+            let arg_k = graph.intern_node(crate::semantic_query::SemanticNodeData::Primitive(
+                crate::semantic_query::PrimitiveKind::String,
+            ));
             let key = SemanticQueryKey::Instantiate {
                 base: pick_identity,
                 args: Arc::from(vec![arg_t, arg_k].into_boxed_slice()),

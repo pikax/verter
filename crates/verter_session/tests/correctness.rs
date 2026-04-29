@@ -25,14 +25,14 @@ use verter_semantic::analysis::component_meta::ComponentMetaAnalysis;
 use verter_session::{HostConfig, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
+#[path = "correctness/deferred_fixtures_rule_correct.rs"]
+mod deferred_fixtures_rule_correct;
 #[path = "correctness/expected.rs"]
 mod expected;
 #[path = "correctness/fixtures.rs"]
 mod fixtures;
 #[path = "correctness/snapshot_view.rs"]
 mod snapshot_view;
-#[path = "correctness/deferred_fixtures_rule_correct.rs"]
-mod deferred_fixtures_rule_correct;
 
 /// Resolve the snapshot path for a fixture using the class-specific
 /// suffix discipline (§0p.A.2). Class A → `<id>.correctness.snap.json`,

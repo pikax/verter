@@ -176,11 +176,10 @@ fn deferred_fixture_userland_shadowing_pick_byte_equal_to_rule_correct_expected(
     // runs.
     let rule_correct_json = serde_json::to_string_pretty(&rule_correct_expected)
         .expect("rule-correct SnapshotView serializes");
-    let actual_json = serde_json::to_string_pretty(&actual)
-        .expect("post-fix SnapshotView serializes");
+    let actual_json =
+        serde_json::to_string_pretty(&actual).expect("post-fix SnapshotView serializes");
     assert_eq!(
-        actual_json,
-        rule_correct_json,
+        actual_json, rule_correct_json,
         "Phase 5h §5.B.5.1 rule-correctness gate: post-fix output for \
          `userland_shadowing_pick` MUST byte-equal the rule-correct expected \
          from phase-00-tier1-mismatches.md. Either the §5.10 ScopeShadowing \
