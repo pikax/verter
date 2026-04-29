@@ -18615,60 +18615,19 @@ withDefaults(defineProps<EditorToolbarProps<T>>(), {
     );
 }
 
-#[test]
-fn get_component_meta_real_nuxt_ui_editor_toolbar_keeps_base_and_plugin_props() {
-    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../.integration-tests/repos/nuxt-ui")
-        .canonicalize()
-        .expect("nuxt-ui integration fixture should exist");
-    let repo_root = repo_root.to_string_lossy().replace('\\', "/");
-    let component = format!("{repo_root}/src/runtime/components/EditorToolbar.vue");
-
-    let ws = Arc::new(verter_workspace::FilesystemWorkspace::new(
-        verter_workspace::FilesystemOptions::default(),
-    ));
-    let host = VerterHost::new(
-        HostConfig {
-            analysis_level: crate::types::AnalysisLevel::Full,
-            ..HostConfig::default()
-        },
-        ws,
-    );
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            repo_root.clone(),
-            repo_root.clone(),
-            Some(format!("{repo_root}/tsconfig.json")),
-        ),
-    ]);
-    let project = Arc::new(MetaProject::new(host));
-
-    let meta = get_meta(&project, &component);
-    let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
-
-    assert!(
-        prop_names.contains(&"as")
-            && prop_names.contains(&"color")
-            && prop_names.contains(&"variant")
-            && prop_names.contains(&"activeColor")
-            && prop_names.contains(&"activeVariant")
-            && prop_names.contains(&"size")
-            && prop_names.contains(&"items")
-            && prop_names.contains(&"editor")
-            && prop_names.contains(&"class")
-            && prop_names.contains(&"ui")
-            && prop_names.contains(&"layout"),
-        "real nuxt-ui EditorToolbar must keep its base props, got: {prop_names:?}"
-    );
-    assert!(
-        prop_names.contains(&"appendTo")
-            && prop_names.contains(&"pluginKey")
-            && prop_names.contains(&"shouldShow")
-            && prop_names.contains(&"updateDelay")
-            && prop_names.contains(&"options"),
-        "real nuxt-ui EditorToolbar must also keep branch-specific plugin props, got: {prop_names:?}"
-    );
-}
+// `get_component_meta_real_nuxt_ui_editor_toolbar_keeps_base_and_plugin_props`
+// retired: the hermetic
+// `get_component_meta_editor_toolbar_union_keeps_base_and_plugin_props`
+// above asserts the same 16-prop contract (as, color, variant,
+// activeColor, activeVariant, size, items, editor, class, ui, layout,
+// appendTo, pluginKey, shouldShow, updateDelay, options) against the
+// same EditorToolbarProps union shape. The retired test inspected the
+// same shape from a `.integration-tests/repos/nuxt-ui/` checkout via
+// FilesystemWorkspace; per the user directive (unit tests must not
+// rely on third-party code) and CLAUDE.md "Legacy Code Deletion"
+// (do not preserve dual paths), the third-party-coupled duplicate
+// was deleted rather than re-ported into a near-identical second
+// hermetic copy.
 
 /// defineEmits: call-signature / overload form. Projection must preserve event
 /// names and payloads for callable emit declarations.
