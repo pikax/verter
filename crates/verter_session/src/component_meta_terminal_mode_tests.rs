@@ -225,3 +225,62 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_userland_shadowing_pick
         }
     }
 }
+
+/// 5i §5.D.3 — `Exclude<>` / `Extract<>` reduction intermediate
+/// hops Navigate, terminal hop Expanded. Mirror of the 5e/5f/5h
+/// tests for the literal-type reduction landed in 5i: a multi-hop
+/// ProjectPath in Expanded mode must populate intermediate cache
+/// entries in Navigate and only the terminal in Expanded. The
+/// path-precise contract (CLAUDE.md "Macro Type Traversal Rule")
+/// applies to ALL path-projection sub-phases including 5i's
+/// `Exclude` / `Extract` reduction.
+///
+/// The Exclude/Extract reduction itself does not change the
+/// path-decomposition behaviour (terminal-mode-only expansion is a
+/// dispatch-engine invariant; the reduction lives behind
+/// `build_builtin_utility` and is invoked from the Instantiate
+/// dispatch, not from path projection). The discriminating proof
+/// remains: a path ending at the terminal hop runs the terminal
+/// in caller's mode, intermediates in Navigate.
+#[test]
+fn intermediate_hops_navigate_terminal_only_expanded_for_exclude_extract_reduction() {
+    let host = build_test_host();
+    let base = intern_four_hop_object(&host);
+    let key = SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::from(
+            vec![
+                PathSegment::Member(Arc::from("a")),
+                PathSegment::Member(Arc::from("b")),
+                PathSegment::Member(Arc::from("full")),
+                PathSegment::Member(Arc::from("bar")),
+            ]
+            .into_boxed_slice(),
+        ),
+        mode: ProjectionMode::Expanded,
+    };
+
+    let _ = host.semantic_dispatch().execute(key.clone());
+
+    let trace = host.dispatch_trace_for(&key);
+    let decomposition = trace.path_decomposition();
+    assert_eq!(
+        decomposition.len(),
+        4,
+        "trace should decompose the 4-segment path into 4 hops for the Exclude/Extract reduction scenario (got {})",
+        decomposition.len()
+    );
+
+    for (i, sub_key) in decomposition.iter().enumerate() {
+        let is_terminal = i == decomposition.len() - 1;
+        match (sub_key.mode(), is_terminal) {
+            (ProjectionMode::Navigate, false) => {} // expected
+            (ProjectionMode::Expanded, true) => {}  // expected
+            (mode, terminal) => panic!(
+                "Exclude/Extract reduction hop {i} (terminal={terminal}) ran in {mode:?} \
+                 (expected Navigate for intermediate, Expanded for terminal — \
+                 the new Extract/Exclude arm must NOT alter path-decomposition modes)"
+            ),
+        }
+    }
+}
