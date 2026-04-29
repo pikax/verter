@@ -394,135 +394,229 @@ pub(crate) fn instantiate_local_generic_ref_via_dispatch(
 }
 
 // =============================================================================
-// Phase 5m §5.13a.2 — engine-method caller migration bridge helpers.
+// Phase 5l §5.14.2 — bridge helpers (post engine-method deletion).
 //
-// The 18 external callsites of legacy engine resolver methods (in
-// `meta_resolve.rs` and `host_manage.rs`) are migrated to the bridge
-// helpers below. Each bridge constructs a transient
-// `ComponentMetaQueryEngine` internally, calls the deprecated engine
-// method, and returns the result.
+// The 18 external callsites that 5m migrated onto these wrappers continue
+// to call them, but their bodies no longer dispatch through the deleted
+// `ComponentMetaQueryEngine` resolver methods. Each helper inlines the
+// same trampoline body the deprecated method had — a thin composition of
+// the engine's surviving `pub(crate)` cycle-protected dispatch helpers
+// (`dispatch_projected_surface`, `cached_prepared_root_surface`,
+// `project_routed_expr_surface_expr`, `project_direct_utility_surface_shape`,
+// etc.) plus the surface→expr / surface→shape raises.
 //
-// The bridges are GATED with `#[allow(deprecated)]` so the §5.14.1
-// pre-flight gate (which counts `#[deprecated]` warnings carrying the
-// "Phase 5l deletion target:" prefix) sees ZERO external callers.
-// The 21 engine-internal callers remain visible to the gate; those go
-// away atomically with the engine body in §5.14.2 (5l's deletion).
-//
-// During the 5m migration window:
-// - The bridges are the SOLE external entry points for engine method
-//   calls — every external callsite routes through a bridge.
-// - The bridges' bodies internally call `engine.<method>(...)` inside
-//   `#[allow(deprecated)]`. The brief explicitly permits this in the
-//   migration window: "Both the engine (during the migration window
-//   in 5m) AND dispatch's `lower_type_expr_in_scope` call this
-//   helper" (§5.13a.1.3).
-//
-// Post-5l (engine deletion):
-// - 5l atomically deletes the engine + the bridge bodies. The bridge
-//   functions are private helpers per the §5.14.2 deletion list ("the
-//   13 engine resolver methods … 21 engine-internal callsites …
-//   private helpers per §F call-graph closure"). The deletion either
-//   removes the bridges entirely (rewriting their 18 callsites to
-//   call dispatch directly) or replaces the bridges' bodies with
-//   dispatch-only equivalents that consume the host helpers added in
-//   commits 5m.1, 5m.2, and 5m.3.
-//
-// Each bridge is named `<original_method_name>_via_host` to mark its
-// role as the host-API surface over the engine method.
+// The 5m migration-window `#[allow(deprecated)]` annotations are gone;
+// the bridges no longer call any deprecated method. The cycle-protection
+// the engine helpers carry (per-request prepared-decl request roots, the
+// `current_prepared_request_root` guard, the `prepared_target_cache`
+// read-through, the `routed_expr_surface_cache`) is preserved by
+// continuing to call those helpers on the engine instance — only the
+// `#[deprecated]` trampolines themselves are deleted.
 // =============================================================================
 
-#[allow(deprecated)] // Phase 5m migration window: bridge to engine method
 pub(crate) fn project_type_surface_expr_via_host(
     host: &VerterHost,
     scope_canonical_id: &str,
     symbol_name: &str,
 ) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+    use crate::resolver_core::projected_surface_to_type_expr;
     let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
-    engine.project_type_surface_expr(scope_canonical_id, symbol_name)
+    if engine.projection_op_budget_exhausted() {
+        return None;
+    }
+    let surface = engine
+        .dispatch_projected_surface(scope_canonical_id, symbol_name)
+        .or_else(|| engine.cached_prepared_root_surface(scope_canonical_id, symbol_name))?;
+    projected_surface_to_type_expr(&surface)
 }
 
-#[allow(deprecated)] // Phase 5m migration window: bridge to engine method
 pub(crate) fn project_type_surface_expr_via_host_threaded<'host>(
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'host>,
     scope_canonical_id: &str,
     symbol_name: &str,
 ) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
-    engine.project_type_surface_expr(scope_canonical_id, symbol_name)
+    use crate::resolver_core::projected_surface_to_type_expr;
+    if engine.projection_op_budget_exhausted() {
+        return None;
+    }
+    let surface = engine
+        .dispatch_projected_surface(scope_canonical_id, symbol_name)
+        .or_else(|| engine.cached_prepared_root_surface(scope_canonical_id, symbol_name))?;
+    projected_surface_to_type_expr(&surface)
 }
 
-#[allow(deprecated)] // Phase 5m migration window: bridge to engine method
 pub(crate) fn project_type_surface_shape_via_host(
     host: &VerterHost,
     scope_canonical_id: &str,
     symbol_name: &str,
 ) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
+    use crate::resolver_core::projected_surface_to_expanded_shape;
     let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
-    engine.project_type_surface_shape(scope_canonical_id, symbol_name)
+    if engine.projection_op_budget_exhausted() {
+        return None;
+    }
+    let surface = engine
+        .dispatch_projected_surface(scope_canonical_id, symbol_name)
+        .or_else(|| engine.cached_prepared_root_surface(scope_canonical_id, symbol_name))?;
+    Some(projected_surface_to_expanded_shape(&surface))
 }
 
-#[allow(deprecated)] // Phase 5m migration window: bridge to engine method
 pub(crate) fn project_type_surface_shape_via_host_threaded<'host>(
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'host>,
     scope_canonical_id: &str,
     symbol_name: &str,
 ) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
-    engine.project_type_surface_shape(scope_canonical_id, symbol_name)
+    use crate::resolver_core::projected_surface_to_expanded_shape;
+    if engine.projection_op_budget_exhausted() {
+        return None;
+    }
+    let surface = engine
+        .dispatch_projected_surface(scope_canonical_id, symbol_name)
+        .or_else(|| engine.cached_prepared_root_surface(scope_canonical_id, symbol_name))?;
+    Some(projected_surface_to_expanded_shape(&surface))
 }
 
-#[allow(deprecated)] // Phase 5m migration window: bridge to engine method
 pub(crate) fn project_prepared_type_surface_shape_via_host(
     host: &VerterHost,
     scope_canonical_id: &str,
     symbol_name: &str,
 ) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
+    use crate::resolver_core::projected_surface_to_expanded_shape;
     let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
-    engine.project_prepared_type_surface_shape(scope_canonical_id, symbol_name)
+    let surface = engine.cached_prepared_root_surface(scope_canonical_id, symbol_name)?;
+    Some(projected_surface_to_expanded_shape(&surface))
 }
 
-#[allow(deprecated)] // Phase 5m migration window: bridge to engine method
 pub(crate) fn project_prepared_type_surface_shape_via_host_threaded<'host>(
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'host>,
     scope_canonical_id: &str,
     symbol_name: &str,
 ) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
-    engine.project_prepared_type_surface_shape(scope_canonical_id, symbol_name)
+    use crate::resolver_core::projected_surface_to_expanded_shape;
+    let surface = engine.cached_prepared_root_surface(scope_canonical_id, symbol_name)?;
+    Some(projected_surface_to_expanded_shape(&surface))
 }
 
-#[allow(deprecated)] // Phase 5m migration window: bridge to engine method
 pub(crate) fn project_expr_surface_shape_via_host_threaded<'host>(
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'host>,
     scope_canonical_id: &str,
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
 ) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
-    engine.project_expr_surface_shape(scope_canonical_id, expr)
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::resolver_core::component_meta_registry::{
+        component_meta_registry_public_indexed_access_route,
+        component_meta_registry_public_utility_route,
+    };
+    use crate::resolver_core::{
+        projected_surface_from_semantic_node, projected_surface_to_expanded_shape,
+    };
+    use crate::semantic_query::{
+        PathSegment, ProjectionMode, QueryResult, SemanticQueryApi, SemanticQueryKey,
+    };
+
+    if engine.projection_op_budget_exhausted() {
+        return None;
+    }
+    if let Some((root_symbol, route)) = component_meta_registry_public_indexed_access_route(expr)
+        .or_else(|| component_meta_registry_public_utility_route(expr))
+    {
+        if let Some(projected) =
+            engine.project_routed_expr_surface_expr(scope_canonical_id, &root_symbol, &route)
+        {
+            return Some(verter_semantic::analysis::type_expand::type_expr_to_object_shape(
+                &projected,
+            ));
+        }
+    }
+    if let Some(shape) = engine.project_direct_utility_surface_shape(scope_canonical_id, expr) {
+        return Some(shape);
+    }
+    let host = engine.host();
+    let dispatch = ProjectSemanticDispatch::new(host);
+    let base = dispatch.lower_type_expr_in_scope(scope_canonical_id, expr)?;
+    let QueryResult::Value(node) = dispatch.execute(SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        mode: ProjectionMode::Shallow,
+    }) else {
+        return None;
+    };
+    let surface = projected_surface_from_semantic_node(host, node)?;
+    let shape = projected_surface_to_expanded_shape(&surface);
+    (!shape.properties.is_empty() || !shape.call_signatures.is_empty()).then_some(shape)
 }
 
-#[allow(deprecated)] // Phase 5m migration window: bridge to engine method
 pub(crate) fn project_route_surface_expr_via_host_threaded<'host>(
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'host>,
     scope_canonical_id: &str,
     root_symbol: &str,
     route: &crate::resolver_core::RouteDemand,
 ) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
-    engine.project_route_surface_expr(scope_canonical_id, root_symbol, route)
+    if engine.projection_op_budget_exhausted() {
+        return None;
+    }
+    engine.project_routed_expr_surface_expr(scope_canonical_id, root_symbol, route)
 }
 
-#[allow(deprecated)] // Phase 5m migration window: bridge to engine method
 pub(crate) fn lower_and_project_to_expanded_via_host_threaded<'host>(
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'host>,
     scope_canonical_id: &str,
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
 ) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
-    engine.lower_and_project_to_expanded(scope_canonical_id, expr)
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::resolver_core::{type_expr_contains_semantic_miss, type_expr_is_expanded_surface};
+    use crate::semantic_query::{
+        PathSegment, ProjectionMode, QueryResult, SemanticQueryApi, SemanticQueryKey,
+    };
+
+    if engine.projection_op_budget_exhausted() {
+        return None;
+    }
+    let host = engine.host();
+    let dispatch = ProjectSemanticDispatch::new(host);
+    let base = dispatch.lower_type_expr_in_scope(scope_canonical_id, expr)?;
+    let read = dispatch.execute_to_type_expr(&SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        mode: ProjectionMode::Expanded,
+    });
+    let reduced = match read.value {
+        QueryResult::Value(expr) => expr,
+        QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
+    };
+    (!type_expr_contains_semantic_miss(&reduced)
+        && type_expr_is_expanded_surface(&reduced)
+        && reduced != *expr)
+        .then_some(reduced)
 }
 
-#[allow(deprecated)] // Phase 5m migration window: bridge to engine method
 pub(crate) fn project_expr_surface_expr_with_compound_objects_via_host_threaded<'host>(
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'host>,
     scope_canonical_id: &str,
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
 ) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
-    engine.project_expr_surface_expr_with_compound_objects(scope_canonical_id, expr)
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::resolver_core::type_expr_has_any_object_arm;
+    use crate::semantic_query::{
+        PathSegment, ProjectionMode, QueryResult, SemanticQueryApi, SemanticQueryKey,
+    };
+
+    if engine.projection_op_budget_exhausted() {
+        return None;
+    }
+    let host = engine.host();
+    let dispatch = ProjectSemanticDispatch::new(host);
+    let base = dispatch.lower_type_expr_in_scope(scope_canonical_id, expr)?;
+    let read = dispatch.execute_to_type_expr(&SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        mode: ProjectionMode::Expanded,
+    });
+    let projected = match read.value {
+        QueryResult::Value(expr) => expr,
+        QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
+    };
+    type_expr_has_any_object_arm(&projected).then_some(projected)
 }
 
 // =============================================================================

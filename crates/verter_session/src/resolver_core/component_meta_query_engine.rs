@@ -1656,9 +1656,13 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 
     fn deep_resolve_type_refs(&mut self, scope_canonical_id: &str, expr: &TypeExpr) -> TypeExpr {
         match expr {
-            TypeExpr::Ref { .. } => self
-                .dispatch_project_expr_to_expanded_expr(scope_canonical_id, expr)
-                .unwrap_or_else(|| expr.clone()),
+            TypeExpr::Ref { .. } => crate::meta_resolve::project_expr_class_a_via_dispatch_threaded(
+                self.host,
+                Some(self),
+                scope_canonical_id,
+                expr,
+            )
+            .unwrap_or_else(|| expr.clone()),
             TypeExpr::Function(func) => TypeExpr::Function(std::sync::Arc::new(
                 self.deep_resolve_fn_refs(scope_canonical_id, func),
             )),
@@ -1694,45 +1698,17 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             | TypeExpr::IndexedAccess { .. }
             | TypeExpr::Mapped { .. }
             | TypeExpr::KeyOf(_)
-            | TypeExpr::TypeOf(_) => self
-                .dispatch_project_expr_to_expanded_expr(scope_canonical_id, expr)
-                .unwrap_or_else(|| expr.clone()),
+            | TypeExpr::TypeOf(_) => {
+                crate::meta_resolve::project_expr_class_a_via_dispatch_threaded(
+                    self.host,
+                    Some(self),
+                    scope_canonical_id,
+                    expr,
+                )
+                .unwrap_or_else(|| expr.clone())
+            }
             _ => expr.clone(),
         }
-    }
-
-    /// Phase 5l — direct dispatch path used by surviving engine code
-    /// (currently `deep_resolve_type_refs`). Replaces the deprecated
-    /// `project_expr_surface_expr` for callers that don't need the
-    /// utility-route fast-path. Equivalent to the dispatch-only tail of
-    /// the legacy method's body: lower the expression in scope, run a
-    /// `ProjectPath { mode: Expanded }` query through the shared
-    /// `ProjectSemanticDispatch` memo, and return the projection only
-    /// when it materialises a full expanded surface.
-    fn dispatch_project_expr_to_expanded_expr(
-        &mut self,
-        scope_canonical_id: &str,
-        expr: &TypeExpr,
-    ) -> Option<TypeExpr> {
-        if self
-            .fuse_state
-            .check_projection_op_count(&self.fuse_budgets)
-        {
-            return None;
-        }
-        let dispatch = self.semantic_dispatch();
-        let base = dispatch.lower_type_expr_in_scope(scope_canonical_id, expr)?;
-        let read = dispatch.execute_to_type_expr(&SemanticQueryKey::ProjectPath {
-            base,
-            path: std::sync::Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-            mode: ProjectionMode::Expanded,
-        });
-        let projected = match read.value {
-            QueryResult::Value(expr) => expr,
-            QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
-        };
-        (!type_expr_contains_semantic_miss(&projected) && type_expr_is_expanded_surface(&projected))
-            .then_some(projected)
     }
 
     fn deep_resolve_fn_refs(
@@ -2071,6 +2047,15 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .check_structural_slow_lane(&self.fuse_budgets)
     }
 
+    /// Phase 5l — `pub(crate)` accessor for the projection-op fuse
+    /// budget check. Used by the bridge helpers in `meta_resolve.rs`
+    /// (post engine-method deletion) to gate the same-budget check the
+    /// retired engine methods enforced.
+    pub(crate) fn projection_op_budget_exhausted(&mut self) -> bool {
+        self.fuse_state
+            .check_projection_op_count(&self.fuse_budgets)
+    }
+
     /// Check wildcard route fanout budget. Returns `true` if within budget.
     pub fn allow_wildcard_route(&mut self) -> bool {
         !self
@@ -2254,7 +2239,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
 
-    fn dispatch_projected_surface(
+    pub(crate) fn dispatch_projected_surface(
         &mut self,
         scope_canonical_id: &str,
         symbol_name: &str,
@@ -2263,7 +2248,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         projected_surface_from_semantic_node(self.host, root)
     }
 
-    fn dispatch_projected_member(
+    pub(crate) fn dispatch_projected_member(
         &mut self,
         scope_canonical_id: &str,
         symbol_name: &str,
@@ -2275,7 +2260,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .find(|member| member.name == member_name)
     }
 
-    fn dispatch_projected_keyspace(
+    pub(crate) fn dispatch_projected_keyspace(
         &mut self,
         scope_canonical_id: &str,
         symbol_name: &str,
@@ -2294,7 +2279,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         })
     }
 
-    fn dispatch_routed_expr_surface_expr(
+    pub(crate) fn dispatch_routed_expr_surface_expr(
         &mut self,
         scope_canonical_id: &str,
         root_symbol: &str,
@@ -2446,8 +2431,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .map(|surface| projected_surface_to_expanded_shape(&surface))
     }
 
-    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
-    fn cached_prepared_root_surface(
+    pub(crate) fn cached_prepared_root_surface(
         &mut self,
         scope_canonical_id: &str,
         symbol_name: &str,
@@ -2922,7 +2906,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }))
     }
 
-    fn project_prepared_requested_member_from_symbol(
+    pub(crate) fn project_prepared_requested_member_from_symbol(
         &mut self,
         scope_canonical_id: &str,
         symbol_name: &str,
@@ -4285,8 +4269,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         (!shape.properties.is_empty() || !shape.call_signatures.is_empty()).then_some(shape)
     }
 
-    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
-    fn project_direct_utility_surface_shape(
+    pub(crate) fn project_direct_utility_surface_shape(
         &mut self,
         scope_canonical_id: &str,
         expr: &TypeExpr,
@@ -4441,8 +4424,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         self.project_routed_expr_surface_expr(scope_canonical_id, root_symbol, route)
     }
 
-    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
-    fn project_routed_expr_surface_expr(
+    pub(crate) fn project_routed_expr_surface_expr(
         &mut self,
         scope_canonical_id: &str,
         root_symbol: &str,
@@ -6017,7 +5999,7 @@ fn empty_semantic_args() -> std::sync::Arc<[SemanticNodeId]> {
     std::sync::Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice())
 }
 
-fn projected_surface_from_semantic_node(
+pub(crate) fn projected_surface_from_semantic_node(
     host: &VerterHost,
     node: SemanticNodeId,
 ) -> Option<ProjectedSurface> {
@@ -6236,7 +6218,7 @@ pub(crate) fn type_expr_is_expanded_surface(expr: &TypeExpr) -> bool {
 /// `Intersection` / `Union`). Used by the slot-shape producer to
 /// decide whether a partially-deferred compound shape is still useful
 /// for extracting explicit slot members.
-fn type_expr_has_any_object_arm(expr: &TypeExpr) -> bool {
+pub(crate) fn type_expr_has_any_object_arm(expr: &TypeExpr) -> bool {
     match expr {
         TypeExpr::Object(_) => true,
         TypeExpr::Parenthesized(inner) => type_expr_has_any_object_arm(inner),
@@ -7049,7 +7031,7 @@ pub(crate) fn projected_surface_to_type_expr(surface: &ProjectedSurface) -> Opti
     Some(TypeExpr::Object(Arc::new(ObjectExpr { properties })))
 }
 
-fn projected_surface_to_expanded_shape(
+pub(crate) fn projected_surface_to_expanded_shape(
     surface: &ProjectedSurface,
 ) -> verter_semantic::analysis::type_expand::ExpandedObjectShape {
     use verter_semantic::analysis::type_expand::{
