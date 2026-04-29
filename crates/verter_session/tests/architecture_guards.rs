@@ -604,3 +604,83 @@ fn no_unbounded_recursion_in_resolver_core() {
         violations.join("\n")
     );
 }
+
+/// Phase 5l §5.14.2 — atomic deletion regression guard.
+///
+/// Asserts the 13 deprecated `ComponentMetaQueryEngine` methods that
+/// 5k marked with `#[deprecated(note = "Phase 5l deletion target: ...")]`
+/// have been deleted. Runs a static grep over
+/// `component_meta_query_engine.rs` for the `pub fn <method_name>`
+/// pattern and fails if any of the 13 names re-introduce themselves
+/// at a definition site.
+///
+/// The assertion is bounded to the engine module: the method names
+/// are unique enough that a grep over the engine source file
+/// discriminates re-introduction at the engine impl block from
+/// unrelated `_via_host_threaded` bridge wrapper names that
+/// `meta_resolve.rs` defines (the bridges live in a different file
+/// and use `pub(crate) fn` rather than `pub fn`).
+///
+/// Discriminating: the test FAILS against the pre-deletion tree
+/// (the deprecated trampolines were `pub fn <name>(`) and PASSES
+/// against the post-deletion tree (no `pub fn <name>(` remains in
+/// the engine module).
+#[test]
+fn phase_05l_engine_resolver_methods_deleted() {
+    let src = read_workspace_file(
+        "crates/verter_session/src/resolver_core/component_meta_query_engine.rs",
+    );
+    let retired_methods: &[&str] = &[
+        "project_type_surface",
+        "project_type_surface_expr",
+        "project_type_surface_shape",
+        "project_prepared_type_surface_expr",
+        "project_prepared_type_surface_shape",
+        "project_type_member",
+        "project_type_keyspace",
+        "project_expr_surface_expr",
+        "project_expr_surface_expr_with_compound_objects",
+        "lower_and_project_to_expanded",
+        "instantiate_local_generic_ref",
+        "project_expr_surface_shape",
+        "project_route_surface_expr",
+    ];
+    let mut violations = Vec::<String>::new();
+    for method in retired_methods {
+        // The deprecated trampolines were declared as
+        // `pub fn <name>(` (no visibility modifier or signature
+        // sugar). The grep matches that exact prefix to avoid false
+        // positives from the surviving `pub(crate) fn <name>...`
+        // helpers (e.g., `project_routed_expr_surface_expr` is
+        // pub(crate) and survives).
+        let definition_marker = format!("pub fn {method}(");
+        if src.contains(&definition_marker) {
+            violations.push(format!(
+                "deprecated engine method `{method}` still defined as `pub fn {method}(...)` \
+                 in component_meta_query_engine.rs"
+            ));
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "Phase 5l §5.14.2 deletion regression: the following retired engine methods \
+         must be DELETED but were found at their definition sites:\n{}",
+        violations.join("\n")
+    );
+
+    // Negative-direction discriminator: the test must FAIL against
+    // any reintroduction. We sanity-check that the assertion can
+    // detect a re-introduction by scanning for a method that we know
+    // SURVIVES the deletion (`should_preserve_shallow_field_expr` is
+    // an unrelated public engine method that stays). If this assert
+    // fails, the discriminator is broken — we'd miss real
+    // re-introductions.
+    assert!(
+        src.contains("pub fn should_preserve_shallow_field_expr("),
+        "discriminator check: the surviving engine method \
+         `should_preserve_shallow_field_expr` must still appear in the \
+         engine source — its absence means the discriminator is \
+         broken and this test cannot detect re-introductions of the \
+         retired methods"
+    );
+}
