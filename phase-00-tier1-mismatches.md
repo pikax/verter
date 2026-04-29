@@ -37,6 +37,47 @@ vue-component-meta (Tier 1 authorship rule, §0p.A.0).
 | OWNER (later)  | Type-resolver / mapped-type evaluator, likely Phase 5 (engine  |
 |                | retirement) or a dedicated utility-evaluation phase.            |
 
+### Rule-correct expected (machine-readable per §5.B.5.1 r15)
+
+The JSON block below is the hand-authored rule-correct `SnapshotView`
+for `mapped_exclude`, derived from TS spec §4.4 (distributive
+conditional `Exclude<T,U> = T extends U ? never : T`). The Phase 5i
+§5.B.5.1 rule-correctness gate test
+(`deferred_fixture_mapped_exclude_byte_equal_to_rule_correct_expected`
+in
+`crates/verter_session/tests/correctness/deferred_fixtures_rule_correct.rs`)
+asserts byte-equality between this block and Verter's
+post-Phase-5i-fix output. Discrimination: pre-fix Verter produces
+`/*unknown*/ semanticMiss`; post-fix Verter produces `"a" | "c"`.
+
+```json
+{
+  "fixture_id": "mapped_exclude",
+  "expected": {
+    "component_name": "C",
+    "props": [
+      {
+        "name": "kind",
+        "type_signature": "\"a\" | \"c\"",
+        "required": true,
+        "has_default": false,
+        "default_signature": null,
+        "doc": null
+      }
+    ],
+    "events": [],
+    "slots": [],
+    "models": [],
+    "exposed": [],
+    "fallthrough": null,
+    "flags": {
+      "async_setup": false,
+      "has_inherit_attrs_false": false
+    }
+  }
+}
+```
+
 ## 2. `mapped_extract` — Extract<T,U> not evaluated
 
 | Field          | Value                                                          |
@@ -47,6 +88,44 @@ vue-component-meta (Tier 1 authorship rule, §0p.A.0).
 | ROOT CAUSE     | Same as `mapped_exclude` — the distributive-conditional        |
 |                | utility is not evaluated.                                       |
 | OWNER (later)  | Same as `mapped_exclude`.                                       |
+
+### Rule-correct expected (machine-readable per §5.B.5.1 r15)
+
+Hand-authored rule-correct `SnapshotView` for `mapped_extract`,
+derived from TS spec §4.4 (distributive conditional
+`Extract<T,U> = T extends U ? T : never`). The Phase 5i §5.B.5.1
+rule-correctness gate test
+(`deferred_fixture_mapped_extract_byte_equal_to_rule_correct_expected`)
+asserts byte-equality. Discrimination: pre-fix Verter produces
+`/*unknown*/ semanticMiss`; post-fix Verter produces `"a" | "b"`.
+
+```json
+{
+  "fixture_id": "mapped_extract",
+  "expected": {
+    "component_name": "C",
+    "props": [
+      {
+        "name": "kind",
+        "type_signature": "\"a\" | \"b\"",
+        "required": true,
+        "has_default": false,
+        "default_signature": null,
+        "doc": null
+      }
+    ],
+    "events": [],
+    "slots": [],
+    "models": [],
+    "exposed": [],
+    "fallthrough": null,
+    "flags": {
+      "async_setup": false,
+      "has_inherit_attrs_false": false
+    }
+  }
+}
+```
 
 ## 3. `template_literal_as_key` — template-literal key iteration loses props
 
@@ -60,6 +139,54 @@ vue-component-meta (Tier 1 authorship rule, §0p.A.0).
 | OWNER (later)  | Mapped-type evaluator + template-literal lowering. Touches      |
 |                | `verter_semantic::analysis::type_expand` plus the mapped/typed-  |
 |                | key handling in the macro resolver.                            |
+
+### Rule-correct expected (machine-readable per §5.B.5.1 r15)
+
+Hand-authored rule-correct `SnapshotView` for
+`template_literal_as_key`, derived from TS spec §4.5 (template
+literal types in mapped key positions). The Phase 5i §5.B.5.1
+rule-correctness gate test
+(`deferred_fixture_template_literal_as_key_byte_equal_to_rule_correct_expected`)
+asserts byte-equality. Discrimination: pre-fix Verter produces
+either `props = []` or props named after the source literals (`A`,
+`B`) without applying the `as <template>` clause; post-fix Verter
+produces `prefixA: number` and `prefixB: number`.
+
+```json
+{
+  "fixture_id": "template_literal_as_key",
+  "expected": {
+    "component_name": "C",
+    "props": [
+      {
+        "name": "prefixA",
+        "type_signature": "number",
+        "required": true,
+        "has_default": false,
+        "default_signature": null,
+        "doc": null
+      },
+      {
+        "name": "prefixB",
+        "type_signature": "number",
+        "required": true,
+        "has_default": false,
+        "default_signature": null,
+        "doc": null
+      }
+    ],
+    "events": [],
+    "slots": [],
+    "models": [],
+    "exposed": [],
+    "fallthrough": null,
+    "flags": {
+      "async_setup": false,
+      "has_inherit_attrs_false": false
+    }
+  }
+}
+```
 
 ## 4. `generic_substitution_via_typeof` — typeof substitution skipped
 
