@@ -4848,64 +4848,130 @@ impl VerterHost {
                             .macros
                             .get(ctx.macro_index)
                             .and_then(|m| m.parsed_type_argument.clone());
+                        let macro_kind = snapshot.macros.get(ctx.macro_index).map(|m| m.kind);
 
-                        match (ctx.output_path.is_empty(), macro_type_arg) {
-                            (true, _) | (_, None) => {
-                                component_meta_trace_custom!(
+                        // Phase 5j §5.12 — `defineModel<T>()` prop /
+                        // model lowering. The `expand_macro_types_impl_with_expander`
+                        // emits the model's prop field with
+                        // `output_path = [Member(<model_name>)]`, but the
+                        // macro's `parsed_type_argument` is `T` itself —
+                        // not a parent shell whose member is the type.
+                        // Dispatching `ProjectPath { base, [Member(model)],
+                        // Expanded }` always misses because `T` is
+                        // typically a `Primitive` / `Ref` / `Union` (no
+                        // member to navigate). The closure used to fall
+                        // through to symbolic preservation, but symbolic
+                        // preservation is gated on
+                        // `should_preserve_shallow_field_expr`, which is
+                        // false for primitive-leaf types — leaving the
+                        // dispatch arm to produce `Unknown { raw:
+                        // "semanticMiss" }`.
+                        //
+                        // Phase 5j routes `DefineModel` prop / model
+                        // fields through a direct lower+raise of
+                        // `macro_type_arg` (the type IS the field's
+                        // type), bypassing the path projection. Mirrors
+                        // the empty-output_path arm semantically. Closes
+                        // `fixture_models` deferred fixture (re-homed
+                        // from 5k per §5.13 r15 table).
+                        if matches!(
+                            macro_kind,
+                            Some(verter_semantic::analysis::AnalyzedMacroKind::DefineModel)
+                        ) {
+                            if let Some(macro_type_arg) = macro_type_arg.as_ref() {
+                                let dispatch = ProjectSemanticDispatch::new(engine.host());
+                                if let Some(base_id) = dispatch.lower_type_expr_in_scope_with_mode(
+                                    canonical,
+                                    macro_type_arg.as_ref(),
+                                    ProjectionMode::Expanded,
+                                ) {
+                                    if let Some(raised) = dispatch.raise_node_to_type_expr(base_id)
+                                    {
+                                        ExpansionResult::exact_concrete(ExpandedNormalizedExpr {
+                                            expr: raised,
+                                        })
+                                    } else {
+                                        // Lowering succeeded but raise
+                                        // failed — fall back to `parsed`
+                                        // (already the model's type).
+                                        ExpansionResult::exact_concrete(ExpandedNormalizedExpr {
+                                            expr: parsed.clone(),
+                                        })
+                                    }
+                                } else {
+                                    // Lowering miss — fall back to `parsed`.
+                                    ExpansionResult::exact_concrete(ExpandedNormalizedExpr {
+                                        expr: parsed.clone(),
+                                    })
+                                }
+                            } else {
+                                // No `parsed_type_argument` — fall back to
+                                // `parsed` directly (the macro's
+                                // `prop_fields[0].type_annotation` per
+                                // `extract_define_model_type` IS the
+                                // macro's first type argument).
+                                ExpansionResult::exact_concrete(ExpandedNormalizedExpr {
+                                    expr: parsed.clone(),
+                                })
+                            }
+                        } else {
+                            match (ctx.output_path.is_empty(), macro_type_arg) {
+                                (true, _) | (_, None) => {
+                                    component_meta_trace_custom!(
                                     "macro_projection_failover",
                                     format!(
                                         "macro_index={} field_kind={:?} reason=no_parsed_type_argument",
                                         ctx.macro_index, ctx.kind,
                                     ),
                                 );
-                                symbolic_fallback()
-                            }
-                            (false, Some(macro_type_arg)) => {
-                                let dispatch = ProjectSemanticDispatch::new(engine.host());
-                                let lowered = dispatch.lower_type_expr_in_scope_with_mode(
-                                    canonical,
-                                    macro_type_arg.as_ref(),
-                                    ProjectionMode::Expanded,
-                                );
-                                match lowered {
-                                    None => {
-                                        component_meta_trace_custom!(
+                                    symbolic_fallback()
+                                }
+                                (false, Some(macro_type_arg)) => {
+                                    let dispatch = ProjectSemanticDispatch::new(engine.host());
+                                    let lowered = dispatch.lower_type_expr_in_scope_with_mode(
+                                        canonical,
+                                        macro_type_arg.as_ref(),
+                                        ProjectionMode::Expanded,
+                                    );
+                                    match lowered {
+                                        None => {
+                                            component_meta_trace_custom!(
                                         "macro_projection_failover",
                                         format!(
                                             "macro_index={} field_kind={:?} reason=opaque_scope_or_uninterpretable",
                                             ctx.macro_index, ctx.kind,
                                         ),
                                     );
-                                        symbolic_fallback()
-                                    }
-                                    Some(base_id) => {
-                                        // Phase 5j §5.12 — slot-binding-parameter
-                                        // type lowering migrates from the engine's
-                                        // analysis path to dispatch via the
-                                        // `ResolveMacroPayload` variant +
-                                        // `MaterializeSurface { Slots }` codepath.
-                                        //
-                                        // The pre-Phase-5j closure dispatched
-                                        // `ProjectPath { base, [Member(slot),
-                                        // Member(binding)], Expanded }` directly,
-                                        // but the walker emits `Opaque(Miss)` when
-                                        // it reaches the slot's `Function` value
-                                        // with `Member(binding)` remaining (per
-                                        // `walk.rs` Function arm at the catch-all
-                                        // `opaque_miss` fall-through). The slot
-                                        // value's bindings live inside the
-                                        // function's first-parameter Object, not
-                                        // as a direct member of the Function.
-                                        //
-                                        // Phase 5j routes slot-binding lowering
-                                        // through the new helper
-                                        // `project_slot_binding_member` which
-                                        // composes existing variants to descend
-                                        // through `Function` -> `params[0].ty`
-                                        // -> `Member(binding)`. This closes the
-                                        // `slot_shapes` seed and the
-                                        // `fixture_slots_typed` deferred fixture.
-                                        if matches!(
+                                            symbolic_fallback()
+                                        }
+                                        Some(base_id) => {
+                                            // Phase 5j §5.12 — slot-binding-parameter
+                                            // type lowering migrates from the engine's
+                                            // analysis path to dispatch via the
+                                            // `ResolveMacroPayload` variant +
+                                            // `MaterializeSurface { Slots }` codepath.
+                                            //
+                                            // The pre-Phase-5j closure dispatched
+                                            // `ProjectPath { base, [Member(slot),
+                                            // Member(binding)], Expanded }` directly,
+                                            // but the walker emits `Opaque(Miss)` when
+                                            // it reaches the slot's `Function` value
+                                            // with `Member(binding)` remaining (per
+                                            // `walk.rs` Function arm at the catch-all
+                                            // `opaque_miss` fall-through). The slot
+                                            // value's bindings live inside the
+                                            // function's first-parameter Object, not
+                                            // as a direct member of the Function.
+                                            //
+                                            // Phase 5j routes slot-binding lowering
+                                            // through the new helper
+                                            // `project_slot_binding_member` which
+                                            // composes existing variants to descend
+                                            // through `Function` -> `params[0].ty`
+                                            // -> `Member(binding)`. This closes the
+                                            // `slot_shapes` seed and the
+                                            // `fixture_slots_typed` deferred fixture.
+                                            if matches!(
                                             ctx.kind,
                                             verter_semantic::analysis::type_eval_build::FieldKind::SlotBinding
                                         ) {
@@ -5011,6 +5077,7 @@ impl VerterHost {
                                             );
                                                 symbolic_fallback()
                                             }
+                                        }
                                         }
                                         }
                                     }
