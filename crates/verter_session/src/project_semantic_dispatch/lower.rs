@@ -22,6 +22,7 @@ use super::{map_primitive_name, ProjectSemanticDispatch};
 use crate::resolver_core::bare_name_resolve::{
     resolve_bare_name_in_scope, DeclarationScopePayload,
 };
+use crate::resolver_core::scope_shadowing::ScopeShadowing;
 use crate::semantic_query::{
     DeclIdentity, HashValue, IndexSignature, NodeScopeId, PathSegment, PrimitiveKind,
     ProjectionMode, QueryError, QueryResult, ResolveDeclKey, ScopeId, SemanticNodeData,
@@ -52,6 +53,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// name-resolution context without routing through
     /// `SessionSolverHost`).
     ///
+    /// `shadowing` carries the scope-shadowing decision once per
+    /// resolver context (Phase 5h §5.10 r15/F11). The dispatch
+    /// fast-path consults `shadowing.is_shadowing_lib(name)` before
+    /// routing a bare `Ref` through the ambient-lib `__builtin__`
+    /// path — when `true`, the userland declaration wins via the
+    /// standard `ResolveDecl` route. The struct (rather than a bare
+    /// `bool`) keeps the threading axis single-source-of-truth so
+    /// Phase 10a's `ResolverContext` migration absorbs the field
+    /// without inventing a parallel axis to undo. Constructible via
+    /// [`ScopeShadowing::from_scope_payload`] (dispatch path) or
+    /// [`ScopeShadowing::from_host_scope`] (materialise path).
+    ///
     /// `substitutions` accumulates `(param_name, arg_id)` facts for
     /// `SubstituteTypeParam` origin-edge emission at the shell level.
     pub(crate) fn shallow_lower_type_expr(
@@ -61,6 +74,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         scope: &NodeScopeId,
         name_resolution: &FxHashMap<String, ResolvedRootIdentity>,
         scope_payload: Option<&DeclarationScopePayload>,
+        shadowing: &ScopeShadowing,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         mode: ProjectionMode,
     ) -> SemanticNodeId {
@@ -96,6 +110,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             scope,
                             name_resolution,
                             scope_payload,
+                            shadowing,
                             substitutions,
                             mode,
                         )
@@ -107,6 +122,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             scope,
                             name_resolution,
                             scope_payload,
+                            shadowing,
                             substitutions,
                             mode,
                         )
@@ -191,6 +207,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         scope,
                         name_resolution,
                         scope_payload,
+                        shadowing,
                         substitutions,
                         mode,
                     )
@@ -202,6 +219,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         scope,
                         name_resolution,
                         scope_payload,
+                        shadowing,
                         substitutions,
                         mode,
                     )
@@ -268,23 +286,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 //
                 // Userland types that shadow a builtin name (e.g.
                 // `type Partial<T> = ...` in the user's scope) live in
-                // `name_resolution` OR in `scope_payload.scope_type_names`
-                // (the latter covers callers that lower with an empty
-                // `name_resolution` map but still hand a populated
-                // `scope_payload`, e.g.
+                // `name_resolution` OR in the
+                // [`ScopeShadowing`](ScopeShadowing) context built once
+                // per resolver context from the owner scope's
+                // `scope_type_names` + `scope_type_bindings` (Phase 5h
+                // §5.10 r15/F11 — the second source covers callers
+                // that lower with an empty `name_resolution` map but
+                // still hand a populated `scope_payload`, e.g.
                 // [`Self::lower_type_expr_in_scope_with_mode`]). In
                 // both cases the builtin fast-path is suppressed and
                 // the bare-name walk below resolves the userland
                 // alias via the standard `ResolveDecl` path —
-                // preserving the "user shadowing wins" rule.
-                let shadowed_by_scope = scope_payload
-                    .map(|payload| {
-                        payload.scope_type_names.contains(name.as_ref())
-                            || payload.scope_type_bindings.contains_key(name.as_ref())
-                    })
-                    .unwrap_or(false);
+                // preserving the "user shadowing wins" rule across
+                // BOTH lowering entry points (the materialise path's
+                // `extract_route_root_identity_node` callers consume
+                // the same `ScopeShadowing` value).
                 if !name_resolution.contains_key(name.as_ref())
-                    && !shadowed_by_scope
+                    && !shadowing.is_shadowing_lib(name.as_ref())
                     && verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(
                         name.as_ref(),
                     )
@@ -304,6 +322,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 scope,
                                 name_resolution,
                                 scope_payload,
+                                shadowing,
                                 substitutions,
                                 mode,
                             )
@@ -446,6 +465,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                     scope,
                                     name_resolution,
                                     scope_payload,
+                                    shadowing,
                                     substitutions,
                                     mode,
                                 )
@@ -494,6 +514,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 scope,
                                 name_resolution,
                                 scope_payload,
+                                shadowing,
                                 substitutions,
                                 mode,
                             )
@@ -518,6 +539,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         scope,
                         name_resolution,
                         scope_payload,
+                        shadowing,
                         substitutions,
                         mode,
                     ));
@@ -542,6 +564,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         scope,
                         name_resolution,
                         scope_payload,
+                        shadowing,
                         substitutions,
                         mode,
                     ));
@@ -571,6 +594,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 scope,
                                 name_resolution,
                                 scope_payload,
+                                shadowing,
                                 substitutions,
                                 mode,
                             );
@@ -605,6 +629,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 scope,
                                 name_resolution,
                                 scope_payload,
+                                shadowing,
                                 substitutions,
                                 mode,
                             );
@@ -635,6 +660,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 scope,
                                 name_resolution,
                                 scope_payload,
+                                shadowing,
                                 substitutions,
                                 mode,
                             );
@@ -648,6 +674,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 scope,
                                 name_resolution,
                                 scope_payload,
+                                shadowing,
                                 substitutions,
                                 mode,
                             );
@@ -660,6 +687,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 scope,
                                 name_resolution,
                                 scope_payload,
+                                shadowing,
                                 substitutions,
                                 mode,
                             );
@@ -669,6 +697,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 scope,
                                 name_resolution,
                                 scope_payload,
+                                shadowing,
                                 substitutions,
                                 mode,
                             );
@@ -703,6 +732,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     scope,
                     name_resolution,
                     scope_payload,
+                    shadowing,
                     substitutions,
                     mode,
                 );
@@ -729,6 +759,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         scope,
                         name_resolution,
                         scope_payload,
+                        shadowing,
                         substitutions,
                         mode,
                     );
@@ -768,6 +799,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             scope,
                             name_resolution,
                             scope_payload,
+                            shadowing,
                             substitutions,
                             mode,
                         )
@@ -790,6 +822,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 scope,
                 name_resolution,
                 scope_payload,
+                shadowing,
                 substitutions,
                 mode,
             ),
@@ -876,6 +909,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             scope,
                             name_resolution,
                             scope_payload,
+                            shadowing,
                             substitutions,
                             mode,
                         );
@@ -894,6 +928,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             scope,
                             name_resolution,
                             scope_payload,
+                            shadowing,
                             substitutions,
                             mode,
                         );
@@ -907,6 +942,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     scope,
                     name_resolution,
                     scope_payload,
+                    shadowing,
                     substitutions,
                     mode,
                 );
@@ -929,6 +965,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         scope,
                         name_resolution,
                         scope_payload,
+                        shadowing,
                         substitutions,
                         mode,
                     )
@@ -976,6 +1013,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     scope,
                     name_resolution,
                     scope_payload,
+                    shadowing,
                     substitutions,
                     mode,
                 );
@@ -1004,6 +1042,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     scope,
                     name_resolution,
                     scope_payload,
+                    shadowing,
                     substitutions,
                     mode,
                 );
@@ -1025,6 +1064,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 scope,
                                 name_resolution,
                                 scope_payload,
+                                shadowing,
                                 substitutions,
                                 mode,
                             );
@@ -1038,6 +1078,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             scope,
                             name_resolution,
                             scope_payload,
+                            shadowing,
                             substitutions,
                             mode,
                         );
@@ -1080,6 +1121,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     scope,
                     name_resolution,
                     scope_payload,
+                    shadowing,
                     substitutions,
                     mode,
                 );
@@ -1089,6 +1131,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     scope,
                     name_resolution,
                     scope_payload,
+                    shadowing,
                     substitutions,
                     mode,
                 );
@@ -1129,6 +1172,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     scope,
                     name_resolution,
                     scope_payload,
+                    shadowing,
                     substitutions,
                     mode,
                 );
@@ -1138,6 +1182,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     scope,
                     name_resolution,
                     scope_payload,
+                    shadowing,
                     substitutions,
                     mode,
                 );
@@ -1219,6 +1264,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             scope,
                             name_resolution,
                             scope_payload,
+                            shadowing,
                             substitutions,
                             mode,
                         ),
@@ -1233,6 +1279,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         scope,
                         name_resolution,
                         scope_payload,
+                        shadowing,
                         substitutions,
                         mode,
                     ),
@@ -1250,6 +1297,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 scope,
                                 name_resolution,
                                 scope_payload,
+                                shadowing,
                                 substitutions,
                                 mode,
                             )
@@ -1261,6 +1309,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 scope,
                                 name_resolution,
                                 scope_payload,
+                                shadowing,
                                 substitutions,
                                 mode,
                             )

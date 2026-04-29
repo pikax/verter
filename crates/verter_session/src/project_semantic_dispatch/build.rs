@@ -145,6 +145,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     &bundle,
                 )
             });
+        // Phase 5h §5.10 r15/F11 — capture the scope-shadowing context
+        // once for the whole `build_typeof` body so every recursive
+        // lowering observes the same shadow set.
+        let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
+            scope_payload.as_ref(),
+        );
         let root_identity =
             match crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
                 self.host,
@@ -189,6 +195,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 &scope,
                 &prepared.name_resolution,
                 scope_payload.as_ref(),
+                &shadowing,
                 &mut substitutions,
                 crate::semantic_query::ProjectionMode::Expanded,
             )
@@ -199,6 +206,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 &scope,
                 &prepared.name_resolution,
                 scope_payload.as_ref(),
+                &shadowing,
                 &mut substitutions,
                 crate::semantic_query::ProjectionMode::Expanded,
             )
@@ -223,6 +231,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 &scope,
                 &prepared.name_resolution,
                 scope_payload.as_ref(),
+                &shadowing,
                 &mut substitutions,
                 crate::semantic_query::ProjectionMode::Expanded,
             )
@@ -246,6 +255,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 &scope,
                 &prepared.name_resolution,
                 scope_payload.as_ref(),
+                &shadowing,
                 &mut substitutions,
                 crate::semantic_query::ProjectionMode::Expanded,
             )
@@ -343,6 +353,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     &bundle,
                 )
             });
+        // Phase 5h §5.10 r15/F11 — capture the scope-shadowing context
+        // once for the whole `build_instantiate` body so every
+        // recursive lowering observes the same shadow set.
+        let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
+            scope_payload.as_ref(),
+        );
         let mut env: FxHashMap<String, SemanticNodeId> = FxHashMap::default();
         let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
         for (index, param) in prepared.type_parameters.iter().enumerate() {
@@ -355,6 +371,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     &scope,
                     &prepared.name_resolution,
                     scope_payload.as_ref(),
+                    &shadowing,
                     &mut substitutions,
                     body_mode,
                 )
@@ -427,6 +444,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             &scope,
             &prepared.name_resolution,
             scope_payload.as_ref(),
+            &shadowing,
             &mut substitutions,
             body_mode,
         );
@@ -436,6 +454,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             &env,
             &scope,
             scope_payload.as_ref(),
+            &shadowing,
             &mut substitutions,
         );
         self.pop_instantiate_active();
@@ -480,6 +499,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         env: &FxHashMap<String, SemanticNodeId>,
         scope: &NodeScopeId,
         scope_payload: Option<&crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,
+        shadowing: &crate::resolver_core::scope_shadowing::ScopeShadowing,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
     ) -> SemanticNodeId {
         let Some(data) = self.graph().node_data(result) else {
@@ -508,6 +528,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     scope,
                     &prepared.name_resolution,
                     scope_payload,
+                    shadowing,
                     substitutions,
                     crate::semantic_query::ProjectionMode::Expanded,
                 );

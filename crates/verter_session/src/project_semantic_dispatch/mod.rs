@@ -299,6 +299,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     &bundle,
                 )
             });
+        // Phase 5h §5.10 r15/F11 — construct the resolver-context
+        // `ScopeShadowing` once at the dispatch entry point. The
+        // shadow set is derived from the same `scope_payload` the
+        // foundation (`524f469d`) consumed inline; any future
+        // shadow-source addition lands in `ScopeShadowing::from_*`
+        // rather than at every call site.
+        let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
+            scope_payload.as_ref(),
+        );
         let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
         let id = self.shallow_lower_type_expr(
             expr,
@@ -306,6 +315,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             &scope,
             &name_resolution,
             scope_payload.as_ref(),
+            &shadowing,
             &mut substitutions,
             mode,
         );

@@ -33,6 +33,7 @@ pub mod type_text_parser;
 pub mod fuses;
 pub mod imported_root_db;
 pub mod route_db;
+pub(crate) mod scope_shadowing;
 
 pub use fuses::{FuseBudgets, FuseState, FuseTrip};
 pub use imported_root_db::{ImportedRootDb, ImportedRootResult};

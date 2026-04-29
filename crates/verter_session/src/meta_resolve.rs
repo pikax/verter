@@ -1798,12 +1798,20 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
     };
     let name_resolution = rustc_hash::FxHashMap::default();
     let mut substitutions: Vec<(Arc<str>, crate::semantic_query::SemanticNodeId)> = Vec::new();
+    // Phase 5h §5.10 r15/F11 — capture the scope-shadowing context
+    // once for the materialize → lower pipeline so the dispatch
+    // fast-path observes the same shadow set the route extraction
+    // path uses.
+    let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
+        scope_payload.as_deref(),
+    );
     let lowered = dispatch.shallow_lower_type_expr(
         expr,
         &env,
         &scope,
         &name_resolution,
         scope_payload.as_deref(),
+        &shadowing,
         &mut substitutions,
         mode,
     );
