@@ -391,3 +391,61 @@ fn no_cache_promotion_for_budget_exceeded_slot_binding_lowering() {
          warm-promotion of partials; got warm={warm_delta})"
     );
 }
+
+/// 5k §5.D.4 — value-member typeof substitution budget-exceeded
+/// must not promote to warm cache. The §5.13 fix in
+/// `shallow_lower_type_expr`'s `TypeExpr::TypeOf` arm composes a
+/// `ProjectPath { mode: Navigate }` query for the tail segments;
+/// when that projection exceeds `depth_budget`, the sentinel must
+/// not warm-cache.
+///
+/// CLAUDE.md "cancelled, superseded, interrupted, budget-exceeded,
+/// or partial semantic results must not be promoted as warm shared
+/// cache entries" applies uniformly. The discriminating proof: a
+/// constrained host (`depth_budget = 2`) on a 3-segment path
+/// produces a budget-exceeded sentinel on first execution; the
+/// SECOND execution on the SAME host MUST cold-fire (proving the
+/// partial was NOT promoted).
+#[test]
+fn no_cache_promotion_for_budget_exceeded_typeof_substitution() {
+    let host = build_constrained_host();
+    let base = intern_three_member_object(&host);
+    let key = SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::from(
+            vec![
+                PathSegment::Member(Arc::from("deep_0")),
+                PathSegment::Member(Arc::from("deep_1")),
+                PathSegment::Member(Arc::from("deep_2")),
+            ]
+            .into_boxed_slice(),
+        ),
+        mode: ProjectionMode::Expanded,
+    };
+
+    let dispatch = host.semantic_dispatch();
+    let r1 = dispatch.execute(key.clone());
+    assert!(
+        matches!(r1, QueryResult::Recursive(_) | QueryResult::Error(_)),
+        "constrained host (depth_budget=2) MUST report a budget-exceeded sentinel \
+         for the 5k typeof-substitution 3-segment path (got {r1:?})"
+    );
+
+    let counter = DispatchCounter;
+    let baseline_cold = counter.family_cold(&key);
+    let baseline_warm = counter.family_warm(&key);
+    let _r2 = dispatch.execute(key.clone());
+    let cold_delta = counter.family_cold(&key) - baseline_cold;
+    let warm_delta = counter.family_warm(&key) - baseline_warm;
+    assert_eq!(
+        cold_delta, 1,
+        "second typeof-substitution query on same host MUST cold-fire \
+         (partial NOT promoted to warm cache; got cold={cold_delta})"
+    );
+    assert_eq!(
+        warm_delta, 0,
+        "warm count must NOT increment on second typeof-substitution budget-exceeded query \
+         (the §5.13 single-segment-first lookup must not introduce \
+         warm-promotion of partials; got warm={warm_delta})"
+    );
+}
