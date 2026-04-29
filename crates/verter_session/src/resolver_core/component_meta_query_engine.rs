@@ -1657,7 +1657,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     fn deep_resolve_type_refs(&mut self, scope_canonical_id: &str, expr: &TypeExpr) -> TypeExpr {
         match expr {
             TypeExpr::Ref { .. } => self
-                .project_expr_surface_expr(scope_canonical_id, expr)
+                .dispatch_project_expr_to_expanded_expr(scope_canonical_id, expr)
                 .unwrap_or_else(|| expr.clone()),
             TypeExpr::Function(func) => TypeExpr::Function(std::sync::Arc::new(
                 self.deep_resolve_fn_refs(scope_canonical_id, func),
@@ -1695,10 +1695,44 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             | TypeExpr::Mapped { .. }
             | TypeExpr::KeyOf(_)
             | TypeExpr::TypeOf(_) => self
-                .project_expr_surface_expr(scope_canonical_id, expr)
+                .dispatch_project_expr_to_expanded_expr(scope_canonical_id, expr)
                 .unwrap_or_else(|| expr.clone()),
             _ => expr.clone(),
         }
+    }
+
+    /// Phase 5l — direct dispatch path used by surviving engine code
+    /// (currently `deep_resolve_type_refs`). Replaces the deprecated
+    /// `project_expr_surface_expr` for callers that don't need the
+    /// utility-route fast-path. Equivalent to the dispatch-only tail of
+    /// the legacy method's body: lower the expression in scope, run a
+    /// `ProjectPath { mode: Expanded }` query through the shared
+    /// `ProjectSemanticDispatch` memo, and return the projection only
+    /// when it materialises a full expanded surface.
+    fn dispatch_project_expr_to_expanded_expr(
+        &mut self,
+        scope_canonical_id: &str,
+        expr: &TypeExpr,
+    ) -> Option<TypeExpr> {
+        if self
+            .fuse_state
+            .check_projection_op_count(&self.fuse_budgets)
+        {
+            return None;
+        }
+        let dispatch = self.semantic_dispatch();
+        let base = dispatch.lower_type_expr_in_scope(scope_canonical_id, expr)?;
+        let read = dispatch.execute_to_type_expr(&SemanticQueryKey::ProjectPath {
+            base,
+            path: std::sync::Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+            mode: ProjectionMode::Expanded,
+        });
+        let projected = match read.value {
+            QueryResult::Value(expr) => expr,
+            QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
+        };
+        (!type_expr_contains_semantic_miss(&projected) && type_expr_is_expanded_surface(&projected))
+            .then_some(projected)
     }
 
     fn deep_resolve_fn_refs(
