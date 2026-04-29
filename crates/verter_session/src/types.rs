@@ -157,6 +157,29 @@ pub struct HostConfig {
     /// an existing host. Default: `MAX_DEPTH` (the
     /// `component_meta_materialize` cap).
     pub depth_budget: usize,
+    /// Projection-operation budget for path-projection / dispatch
+    /// traversals (Phase 5m §5.13a.1.2 — request-scoped fuse state
+    /// promoted to host-owned state per §0.6.5 stack-depth
+    /// discipline).
+    ///
+    /// The legacy engine carried this as `FuseBudgets::projection_op_count`,
+    /// a per-engine-construction-scoped fuse rail (§1.4) that
+    /// terminates utility-shape recursion (`Partial<T>` / `Pick<T,K>` /
+    /// etc.) before recursion exhausts the call stack. Phase 5m
+    /// promotes the BUDGET (not the per-request COUNTER — that lives
+    /// in the request-scoped `RequestBudget` accessed via TLS) to a
+    /// constructor-time `HostConfig` field so dispatch consumers
+    /// observe the same cap.
+    ///
+    /// Constructor-time per §0.6.5: callers may NOT mutate this on
+    /// an existing host. Default: `2000` (the legacy
+    /// `FuseBudgets::projection_op_count` default).
+    ///
+    /// When `0`, the legacy `FuseBudgets::default()` value is used as
+    /// a fall-back so existing tests that construct a `HostConfig`
+    /// without setting this field continue to observe the documented
+    /// 2000-op cap.
+    pub projection_op_budget: usize,
 }
 
 /// Configuration validation errors surfaced by
@@ -209,6 +232,7 @@ impl Default for HostConfig {
             footprint_capture: false,
             max_derivation_edges: 10_000,
             depth_budget: crate::component_meta_materialize::MAX_DEPTH,
+            projection_op_budget: 2000,
         }
     }
 }
