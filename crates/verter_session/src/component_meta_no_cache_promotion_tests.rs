@@ -273,3 +273,61 @@ fn no_cache_promotion_for_budget_exceeded_userland_shadowing_pick() {
          (the shadow-gate thread must not introduce warm-promotion of partials; got warm={warm_delta})"
     );
 }
+
+/// 5i §5.D.4 — `Exclude<>` / `Extract<>` reduction budget-exceeded
+/// must not warm. Same-host re-query contract: a depth-budget-
+/// exceeded path-projection (the literal-type reduction lives
+/// behind `build_builtin_utility`, but the path-walker that
+/// drives projection into the produced Union members shares the
+/// same depth budget as every other path-projection) must NOT be
+/// promoted to the warm cache; the second query on the SAME host
+/// MUST cold-fire.
+///
+/// The Extract/Exclude arm does not alter cache-promotion
+/// behaviour (CLAUDE.md "cancelled, superseded, interrupted,
+/// budget-exceeded, or partial semantic results must not be
+/// promoted as warm shared cache entries" applies uniformly). The
+/// test exercises the contract through the same path-projection
+/// key shape so a regression in the new arm that accidentally
+/// cached budget-exceeded partials would surface here.
+#[test]
+fn no_cache_promotion_for_budget_exceeded_exclude_extract_reduction() {
+    let host = build_constrained_host();
+    let base = intern_three_member_object(&host);
+    let key = SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::from(
+            vec![
+                PathSegment::Member(Arc::from("deep_0")),
+                PathSegment::Member(Arc::from("deep_1")),
+                PathSegment::Member(Arc::from("deep_2")),
+            ]
+            .into_boxed_slice(),
+        ),
+        mode: ProjectionMode::Expanded,
+    };
+
+    let dispatch = host.semantic_dispatch();
+    let r1 = dispatch.execute(key.clone());
+    assert!(
+        matches!(r1, QueryResult::Recursive(_) | QueryResult::Error(_)),
+        "constrained host (depth_budget=2) MUST report a budget-exceeded sentinel for the 5i Exclude/Extract reduction 3-segment path (got {r1:?})"
+    );
+
+    let counter = DispatchCounter;
+    let baseline_cold = counter.family_cold(&key);
+    let baseline_warm = counter.family_warm(&key);
+    let _r2 = dispatch.execute(key.clone());
+    let cold_delta = counter.family_cold(&key) - baseline_cold;
+    let warm_delta = counter.family_warm(&key) - baseline_warm;
+    assert_eq!(
+        cold_delta, 1,
+        "second Exclude/Extract reduction query on same host MUST cold-fire \
+         (partial NOT promoted to warm cache; got cold={cold_delta})"
+    );
+    assert_eq!(
+        warm_delta, 0,
+        "warm count must NOT increment on second Exclude/Extract reduction budget-exceeded query \
+         (the new Extract/Exclude arm must not introduce warm-promotion of partials; got warm={warm_delta})"
+    );
+}
