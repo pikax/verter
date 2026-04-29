@@ -1656,13 +1656,16 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 
     fn deep_resolve_type_refs(&mut self, scope_canonical_id: &str, expr: &TypeExpr) -> TypeExpr {
         match expr {
-            TypeExpr::Ref { .. } => crate::meta_resolve::project_expr_class_a_via_dispatch_threaded(
-                self.host,
-                Some(self),
-                scope_canonical_id,
-                expr,
-            )
-            .unwrap_or_else(|| expr.clone()),
+            TypeExpr::Ref { .. } => {
+                let host_ref = self.host;
+                crate::meta_resolve::project_expr_class_a_via_dispatch_threaded(
+                    host_ref,
+                    Some(self),
+                    scope_canonical_id,
+                    expr,
+                )
+                .unwrap_or_else(|| expr.clone())
+            }
             TypeExpr::Function(func) => TypeExpr::Function(std::sync::Arc::new(
                 self.deep_resolve_fn_refs(scope_canonical_id, func),
             )),
@@ -1699,8 +1702,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             | TypeExpr::Mapped { .. }
             | TypeExpr::KeyOf(_)
             | TypeExpr::TypeOf(_) => {
+                let host_ref = self.host;
                 crate::meta_resolve::project_expr_class_a_via_dispatch_threaded(
-                    self.host,
+                    host_ref,
                     Some(self),
                     scope_canonical_id,
                     expr,
@@ -3629,13 +3633,22 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             )
             .unwrap_or_else(|| expr.clone());
         if matches!(projected_expr, TypeExpr::Unknown { .. }) {
-            // Phase 5e commit 6 — engine-internal caller retained on
-            // engine method until 5g (depends on
-            // `resolve_final_prepared_type_target` re-export chain).
-            if let Some(expanded) = self
-                .instantiate_local_generic_ref(resolution_scope_canonical_id, expr)
-                .or_else(|| self.instantiate_local_generic_ref(active_scope_canonical_id, expr))
-                .filter(|expanded| expanded != expr)
+            // Phase 5l: re-export chain semantics now travel through
+            // the dispatch helper `instantiate_local_generic_ref_via_dispatch`.
+            let host_ref = self.host;
+            if let Some(expanded) = crate::meta_resolve::instantiate_local_generic_ref_via_dispatch(
+                host_ref,
+                resolution_scope_canonical_id,
+                expr,
+            )
+            .or_else(|| {
+                crate::meta_resolve::instantiate_local_generic_ref_via_dispatch(
+                    host_ref,
+                    active_scope_canonical_id,
+                    expr,
+                )
+            })
+            .filter(|expanded| expanded != expr)
             {
                 return self.enumerate_member_surface_keys_via_route(
                     resolution_scope_canonical_id,
@@ -3875,15 +3888,18 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         // Try expanding the alias's body (substituting
                         // type arguments), then retry the indexed access
                         // against the substituted body.
-                        // Phase 5e commit 6 — engine-internal caller retained
-                        // on engine method until 5g (re-export chain semantics).
+                        // Phase 5l: substitution lands through the dispatch
+                        // helper instead of the deprecated engine method.
+                        let host_ref = self.host;
                         let expanded = if !type_arguments.is_empty() {
-                            self.instantiate_local_generic_ref(
+                            crate::meta_resolve::instantiate_local_generic_ref_via_dispatch(
+                                host_ref,
                                 resolution_scope_canonical_id,
                                 object,
                             )
                             .or_else(|| {
-                                self.instantiate_local_generic_ref(
+                                crate::meta_resolve::instantiate_local_generic_ref_via_dispatch(
+                                    host_ref,
                                     active_scope_canonical_id,
                                     object,
                                 )
@@ -4286,36 +4302,56 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             scope_canonical_id: &str,
             target: &TypeExpr,
         ) -> Option<ExpandedObjectShape> {
-            if let Some(shape) = query_engine.project_expr_surface_shape(scope_canonical_id, target)
-            {
+            // Phase 5l: route through the dispatch-based bridges in
+            // `meta_resolve` instead of the deprecated engine methods.
+            // The bridges compose dispatch + the engine's surviving
+            // `pub(crate)` cycle-protected helpers.
+            if let Some(shape) = crate::meta_resolve::project_expr_surface_shape_via_host_threaded(
+                query_engine,
+                scope_canonical_id,
+                target,
+            ) {
                 if shape_has_surface(&shape) {
                     return Some(shape);
                 }
             }
-            if let Some(projected) =
-                query_engine.project_expr_surface_expr(scope_canonical_id, target)
-            {
+            if let Some(projected) = crate::meta_resolve::project_expr_class_a_via_dispatch_threaded(
+                query_engine.host,
+                Some(query_engine),
+                scope_canonical_id,
+                target,
+            ) {
                 let shape =
                     verter_semantic::analysis::type_expand::type_expr_to_object_shape(&projected);
                 if shape_has_surface(&shape) {
                     return Some(shape);
                 }
             }
-            // Phase 5e commit 6 — engine-internal caller retained on
-            // engine method until 5g (re-export chain semantics).
-            if let Some(expanded_ref) =
-                query_engine.instantiate_local_generic_ref(scope_canonical_id, target)
-            {
-                if let Some(shape) =
-                    query_engine.project_expr_surface_shape(scope_canonical_id, &expanded_ref)
-                {
+            // Phase 5l: instantiate via the dispatch helper instead of
+            // the deprecated engine method (re-export chain semantics
+            // are preserved by the bridge through
+            // `instantiate_local_generic_ref_via_dispatch`).
+            let expanded_ref_opt = crate::meta_resolve::instantiate_local_generic_ref_via_dispatch(
+                query_engine.host,
+                scope_canonical_id,
+                target,
+            );
+            if let Some(expanded_ref) = expanded_ref_opt {
+                if let Some(shape) = crate::meta_resolve::project_expr_surface_shape_via_host_threaded(
+                    query_engine,
+                    scope_canonical_id,
+                    &expanded_ref,
+                ) {
                     if shape_has_surface(&shape) {
                         return Some(shape);
                     }
                 }
-                if let Some(projected) =
-                    query_engine.project_expr_surface_expr(scope_canonical_id, &expanded_ref)
-                {
+                if let Some(projected) = crate::meta_resolve::project_expr_class_a_via_dispatch_threaded(
+                    query_engine.host,
+                    Some(query_engine),
+                    scope_canonical_id,
+                    &expanded_ref,
+                ) {
                     let shape = verter_semantic::analysis::type_expand::type_expr_to_object_shape(
                         &projected,
                     );
@@ -4437,8 +4473,17 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             member_name: &str,
             projected_expr: &TypeExpr,
         ) -> Option<ProjectedMember> {
-            query_engine
-                .project_type_member(scope_canonical_id, root_symbol, member_name)
+            // Phase 5l: dispatch a single-member ProjectPath query for
+            // the (root_symbol, member_name) pair, then fall back to the
+            // engine's prepared/inherited route helpers (kept on the
+            // engine because they consume the per-engine prepared-decl
+            // request-root state).
+            dispatch_member_for_root_symbol(
+                query_engine,
+                scope_canonical_id,
+                root_symbol,
+                member_name,
+            )
                 .or_else(|| {
                     query_engine.project_prepared_member_route_projection(
                         scope_canonical_id,
@@ -4540,8 +4585,13 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 return Some(projected_expr);
             }
             if let [member_name] = path.as_slice() {
-                let projected_member =
-                    self.project_type_member(scope_canonical_id, root_symbol, member_name)?;
+                // Phase 5l: dispatch the single-member projection.
+                let projected_member = dispatch_member_for_root_symbol(
+                    self,
+                    scope_canonical_id,
+                    root_symbol,
+                    member_name,
+                )?;
                 let projected_expr = projected_member.ty.clone();
                 self.cache_routed_expr_surface_expr(
                     scope_canonical_id,
@@ -4832,7 +4882,16 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             {
                 Some(member.ty.clone())
             }
-            _ => self.project_expr_surface_expr(scope_canonical_id, &member.ty),
+            _ => {
+                // Phase 5l: dispatch path replaces the deprecated method.
+                let host_ref = self.host;
+                crate::meta_resolve::project_expr_class_a_via_dispatch_threaded(
+                    host_ref,
+                    Some(self),
+                    scope_canonical_id,
+                    &member.ty,
+                )
+            }
         }?;
         Some(ProjectedMember {
             name: member_name.to_string(),
@@ -5218,9 +5277,27 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let mut current = expr.clone();
         let mut last = None;
         for _ in 0..3 {
-            let next = self
-                .lower_and_project_to_expanded(scope_canonical_id, &current)
-                .or_else(|| self.project_expr_surface_expr(scope_canonical_id, &current));
+            // Phase 5l: dispatch the lower+project tail and the
+            // expr-surface bridge from `meta_resolve` instead of the
+            // deprecated engine methods. The bridges share the engine's
+            // cycle-protection helpers so behavior matches the legacy
+            // method path.
+            let next = {
+                let host_ref = self.host;
+                crate::meta_resolve::lower_and_project_to_expanded_via_host_threaded(
+                    self,
+                    scope_canonical_id,
+                    &current,
+                )
+                .or_else(|| {
+                    crate::meta_resolve::project_expr_class_a_via_dispatch_threaded(
+                        host_ref,
+                        Some(self),
+                        scope_canonical_id,
+                        &current,
+                    )
+                })
+            };
             let Some(next) = next else {
                 return last;
             };
@@ -5790,7 +5867,13 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             ) {
                 projected_member
             } else {
-                self.project_type_member(scope_canonical_id, symbol_name, member_name)?
+                // Phase 5l: dispatch path replaces the deprecated method.
+                dispatch_member_for_root_symbol(
+                    self,
+                    scope_canonical_id,
+                    symbol_name,
+                    member_name,
+                )?
             };
             self.cache_projected_member(scope_canonical_id, symbol_name, &projected_member);
             if projected_member.is_method {
@@ -5997,6 +6080,34 @@ impl DeclarationMetadataResolver for DirectPreparedDeclarationResolver<'_> {
 
 fn empty_semantic_args() -> std::sync::Arc<[SemanticNodeId]> {
     std::sync::Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice())
+}
+
+/// Phase 5l — engine-internal helper that mirrors the deprecated
+/// `project_type_member` entry: dispatch the single-member projection,
+/// falling back to the prepared-decl walker when dispatch misses.
+/// Used by `project_routed_expr_surface_expr` and friends after the
+/// deprecated engine method's deletion.
+fn dispatch_member_for_root_symbol(
+    engine: &mut ComponentMetaQueryEngine<'_>,
+    scope_canonical_id: &str,
+    symbol_name: &str,
+    member_name: &str,
+) -> Option<ProjectedMember> {
+    if engine.projection_op_budget_exhausted() {
+        return None;
+    }
+    engine
+        .dispatch_projected_member(scope_canonical_id, symbol_name, member_name)
+        .or_else(|| {
+            let mut active = FxHashSet::default();
+            engine.project_prepared_requested_member_from_symbol(
+                scope_canonical_id,
+                symbol_name,
+                member_name,
+                &FxHashMap::default(),
+                &mut active,
+            )
+        })
 }
 
 pub(crate) fn projected_surface_from_semantic_node(
