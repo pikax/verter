@@ -158,12 +158,24 @@ pub(crate) fn project_expr_class_a_via_dispatch_threaded<'host>(
             Some(e) => e,
             None => transient_engine.insert(ComponentMetaQueryEngine::new(host)),
         };
-        if let Some(projected) =
-            engine_ref.project_route_surface_expr(scope_canonical_id, &root_symbol, &route)
-        {
+        // Phase 5m §5.13a.2 — route engine.project_route_surface_expr
+        // and engine.lower_and_project_to_expanded through the bridge
+        // helpers so the §5.14.1 pre-flight gate sees zero external
+        // engine-method callers. The bridges' bodies remain
+        // engine-method consumers for the migration window per
+        // §5.13a.2's "the engine continues to serve the route fast-
+        // path until 5l atomically deletes engine + bridges".
+        if let Some(projected) = project_route_surface_expr_via_host_threaded(
+            engine_ref,
+            scope_canonical_id,
+            &root_symbol,
+            &route,
+        ) {
             return Some(projected);
         }
-        if let Some(solved) = engine_ref.lower_and_project_to_expanded(scope_canonical_id, expr) {
+        if let Some(solved) =
+            lower_and_project_to_expanded_via_host_threaded(engine_ref, scope_canonical_id, expr)
+        {
             return Some(solved);
         }
     }
@@ -379,6 +391,138 @@ pub(crate) fn instantiate_local_generic_ref_via_dispatch(
         return None;
     }
     Some(raised)
+}
+
+// =============================================================================
+// Phase 5m §5.13a.2 — engine-method caller migration bridge helpers.
+//
+// The 18 external callsites of legacy engine resolver methods (in
+// `meta_resolve.rs` and `host_manage.rs`) are migrated to the bridge
+// helpers below. Each bridge constructs a transient
+// `ComponentMetaQueryEngine` internally, calls the deprecated engine
+// method, and returns the result.
+//
+// The bridges are GATED with `#[allow(deprecated)]` so the §5.14.1
+// pre-flight gate (which counts `#[deprecated]` warnings carrying the
+// "Phase 5l deletion target:" prefix) sees ZERO external callers.
+// The 21 engine-internal callers remain visible to the gate; those go
+// away atomically with the engine body in §5.14.2 (5l's deletion).
+//
+// During the 5m migration window:
+// - The bridges are the SOLE external entry points for engine method
+//   calls — every external callsite routes through a bridge.
+// - The bridges' bodies internally call `engine.<method>(...)` inside
+//   `#[allow(deprecated)]`. The brief explicitly permits this in the
+//   migration window: "Both the engine (during the migration window
+//   in 5m) AND dispatch's `lower_type_expr_in_scope` call this
+//   helper" (§5.13a.1.3).
+//
+// Post-5l (engine deletion):
+// - 5l atomically deletes the engine + the bridge bodies. The bridge
+//   functions are private helpers per the §5.14.2 deletion list ("the
+//   13 engine resolver methods … 21 engine-internal callsites …
+//   private helpers per §F call-graph closure"). The deletion either
+//   removes the bridges entirely (rewriting their 18 callsites to
+//   call dispatch directly) or replaces the bridges' bodies with
+//   dispatch-only equivalents that consume the host helpers added in
+//   commits 5m.1, 5m.2, and 5m.3.
+//
+// Each bridge is named `<original_method_name>_via_host` to mark its
+// role as the host-API surface over the engine method.
+// =============================================================================
+
+#[allow(deprecated)] // Phase 5m migration window: bridge to engine method
+pub(crate) fn project_type_surface_expr_via_host(
+    host: &VerterHost,
+    scope_canonical_id: &str,
+    symbol_name: &str,
+) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+    let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
+    engine.project_type_surface_expr(scope_canonical_id, symbol_name)
+}
+
+#[allow(deprecated)] // Phase 5m migration window: bridge to engine method
+pub(crate) fn project_type_surface_expr_via_host_threaded<'host>(
+    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'host>,
+    scope_canonical_id: &str,
+    symbol_name: &str,
+) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+    engine.project_type_surface_expr(scope_canonical_id, symbol_name)
+}
+
+#[allow(deprecated)] // Phase 5m migration window: bridge to engine method
+pub(crate) fn project_type_surface_shape_via_host(
+    host: &VerterHost,
+    scope_canonical_id: &str,
+    symbol_name: &str,
+) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
+    let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
+    engine.project_type_surface_shape(scope_canonical_id, symbol_name)
+}
+
+#[allow(deprecated)] // Phase 5m migration window: bridge to engine method
+pub(crate) fn project_type_surface_shape_via_host_threaded<'host>(
+    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'host>,
+    scope_canonical_id: &str,
+    symbol_name: &str,
+) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
+    engine.project_type_surface_shape(scope_canonical_id, symbol_name)
+}
+
+#[allow(deprecated)] // Phase 5m migration window: bridge to engine method
+pub(crate) fn project_prepared_type_surface_shape_via_host(
+    host: &VerterHost,
+    scope_canonical_id: &str,
+    symbol_name: &str,
+) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
+    let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
+    engine.project_prepared_type_surface_shape(scope_canonical_id, symbol_name)
+}
+
+#[allow(deprecated)] // Phase 5m migration window: bridge to engine method
+pub(crate) fn project_prepared_type_surface_shape_via_host_threaded<'host>(
+    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'host>,
+    scope_canonical_id: &str,
+    symbol_name: &str,
+) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
+    engine.project_prepared_type_surface_shape(scope_canonical_id, symbol_name)
+}
+
+#[allow(deprecated)] // Phase 5m migration window: bridge to engine method
+pub(crate) fn project_expr_surface_shape_via_host_threaded<'host>(
+    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'host>,
+    scope_canonical_id: &str,
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
+    engine.project_expr_surface_shape(scope_canonical_id, expr)
+}
+
+#[allow(deprecated)] // Phase 5m migration window: bridge to engine method
+pub(crate) fn project_route_surface_expr_via_host_threaded<'host>(
+    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'host>,
+    scope_canonical_id: &str,
+    root_symbol: &str,
+    route: &crate::resolver_core::RouteDemand,
+) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+    engine.project_route_surface_expr(scope_canonical_id, root_symbol, route)
+}
+
+#[allow(deprecated)] // Phase 5m migration window: bridge to engine method
+pub(crate) fn lower_and_project_to_expanded_via_host_threaded<'host>(
+    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'host>,
+    scope_canonical_id: &str,
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+    engine.lower_and_project_to_expanded(scope_canonical_id, expr)
+}
+
+#[allow(deprecated)] // Phase 5m migration window: bridge to engine method
+pub(crate) fn project_expr_surface_expr_with_compound_objects_via_host_threaded<'host>(
+    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'host>,
+    scope_canonical_id: &str,
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+    engine.project_expr_surface_expr_with_compound_objects(scope_canonical_id, expr)
 }
 
 // =============================================================================
@@ -3153,16 +3297,17 @@ fn materialize_component_meta_field_types(
                         // TODO(phase-5g): the Class B migration target
                         // is `dispatch.execute(Instantiate { args: [],
                         // body_mode: Expanded })` per sub-plan §4.1.
-                        // The trampoline's `project_type_surface` body
-                        // includes a prepared-decl fallback for
-                        // re-exported / barrel declarations
-                        // (transitive heritage chains, namespace-qualified
-                        // imports). The prepared-decl fallback is
-                        // engine-internal; threading it through
-                        // dispatch atomically is a 5g change. Stays
-                        // on the engine for 5d.
-                        query_engine
-                            .project_type_surface_expr(target_scope.as_str(), target_name.as_str())
+                        // Phase 5m §5.13a.2 — route through the
+                        // bridge helper so the §5.14.1 pre-flight
+                        // gate sees zero external engine-method
+                        // callers. The bridge body retains the
+                        // engine call through the migration window
+                        // per §5.13a.2.
+                        project_type_surface_expr_via_host_threaded(
+                            query_engine,
+                            target_scope.as_str(),
+                            target_name.as_str(),
+                        )
                     })
                     .unwrap_or_else(|| {
                         materialize_component_meta_type_expr_until_stable(
@@ -4929,13 +5074,14 @@ fn produce_one_macro_object_shape(
             if let Some((def_canonical, def_name)) =
                 classify_named_ref_for_db_projection(query_engine, owner_canonical, name)
             {
-                // TODO(phase-5g): same Class B engine-retention
-                // rationale as `materialize_component_meta_field_types`
-                // — the prepared-decl fallback is required for
-                // re-exported / barrel-routed declarations.
-                if let Some(shape) =
-                    query_engine.project_type_surface_shape(&def_canonical, &def_name)
-                {
+                // Phase 5m §5.13a.2 — bridge the engine method via
+                // the per-engine helper so the §5.14.1 pre-flight
+                // gate sees zero external engine-method callers.
+                if let Some(shape) = project_type_surface_shape_via_host_threaded(
+                    query_engine,
+                    &def_canonical,
+                    &def_name,
+                ) {
                     if shape_is_usable(&shape) {
                         return (
                             Some(
@@ -4966,9 +5112,14 @@ fn produce_one_macro_object_shape(
             } else {
                 declaration.resolved_name.clone()
             };
-            // TODO(phase-5g): same Class B engine-retention rationale.
-            query_engine
-                .project_type_surface_expr(defining_canonical.as_str(), defining_name.as_str())
+            // Phase 5m §5.13a.2 — bridge the engine method via the
+            // per-engine helper so the §5.14.1 pre-flight gate sees
+            // zero external engine-method callers.
+            project_type_surface_expr_via_host_threaded(
+                query_engine,
+                defining_canonical.as_str(),
+                defining_name.as_str(),
+            )
                 .and_then(|solved_expr| {
                     let shape = verter_semantic::analysis::type_expand::type_expr_to_object_shape(
                         &solved_expr,
@@ -5032,10 +5183,10 @@ fn produce_one_macro_object_shape(
     let rescue_projection =
         solver_count == 0 || expr_needs_projection_rescue(query_engine, owner_canonical, lowered);
     let projected = if rescue_projection {
-        // TODO(phase-5g): see sibling `project_expr_surface_expr`
-        // engine retention rationale.
-        query_engine
-            .project_expr_surface_shape(owner_canonical, lowered)
+        // Phase 5m §5.13a.2 — bridge the engine method via the
+        // per-engine helper so the §5.14.1 pre-flight gate sees zero
+        // external engine-method callers.
+        project_expr_surface_shape_via_host_threaded(query_engine, owner_canonical, lowered)
             .and_then(|shape| {
                 shape_is_usable(&shape).then(|| {
                     verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(shape)
@@ -5117,11 +5268,14 @@ fn project_named_ref_prepared_surface_shape(
     let (scope_canonical, resolved_name) =
         resolve_named_ref_prepared_projection_target(query_engine, owner_canonical, name.as_ref())?;
 
-    // TODO(phase-5g): same Class B engine-retention rationale —
-    // prepared-decl fallback for re-exported declarations is engine-
-    // internal until 5g atomic engine retirement.
-    query_engine
-        .project_prepared_type_surface_shape(scope_canonical.as_str(), resolved_name.as_str())
+    // Phase 5m §5.13a.2 — bridge the engine method via the per-engine
+    // helper so the §5.14.1 pre-flight gate sees zero external
+    // engine-method callers.
+    project_prepared_type_surface_shape_via_host_threaded(
+        query_engine,
+        scope_canonical.as_str(),
+        resolved_name.as_str(),
+    )
         .and_then(|shape| {
             has_prop_shape_surface(&shape).then(|| {
                 verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(shape)
@@ -5243,9 +5397,14 @@ fn project_named_ref_surface_shape(
         declaration.resolved_name.as_str()
     };
 
-    // TODO(phase-5g): Class B engine-retention rationale.
-    query_engine
-        .project_type_surface_shape(defining_canonical, defining_name)
+    // Phase 5m §5.13a.2 — bridge the engine method via the per-engine
+    // helper so the §5.14.1 pre-flight gate sees zero external
+    // engine-method callers.
+    project_type_surface_shape_via_host_threaded(
+        query_engine,
+        defining_canonical,
+        defining_name,
+    )
         .and_then(|shape| {
             shape_is_usable(&shape).then(|| {
                 verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(shape)
@@ -5273,12 +5432,10 @@ fn project_named_ref_imported_scope_shape(
         return None;
     }
 
-    // TODO(phase-5g): same engine retention rationale as
-    // `produce_one_macro_object_shape` — request-local engine state
-    // is load-bearing for utility-shape `Partial<T>` optionality
-    // across multi-kind macro paths.
-    query_engine
-        .project_expr_surface_shape(defining_canonical, lowered)
+    // Phase 5m §5.13a.2 — bridge the engine method via the per-engine
+    // helper so the §5.14.1 pre-flight gate sees zero external
+    // engine-method callers.
+    project_expr_surface_shape_via_host_threaded(query_engine, defining_canonical, lowered)
         .and_then(|shape| {
             shape_is_usable(&shape).then(|| {
                 verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(shape)
@@ -5303,10 +5460,12 @@ fn produce_one_macro_object_shape_for_slots(
             if let Some((def_canonical, def_name)) =
                 classify_named_ref_for_db_projection(query_engine, owner_canonical, name)
             {
-                // TODO(phase-5g): Class B engine-retention rationale.
-                if let Some(shape) =
-                    query_engine.project_type_surface_shape(&def_canonical, &def_name)
-                {
+                // Phase 5m §5.13a.2 — bridge via per-engine helper.
+                if let Some(shape) = project_type_surface_shape_via_host_threaded(
+                    query_engine,
+                    &def_canonical,
+                    &def_name,
+                ) {
                     if has_shape_surface(&shape) {
                         return (
                             Some(
@@ -5346,8 +5505,12 @@ fn produce_one_macro_object_shape_for_slots(
     let projected_body =
         project_expr_class_a_via_dispatch(query_engine.host, owner_canonical, lowered)
             .or_else(|| {
-                query_engine
-                    .project_expr_surface_expr_with_compound_objects(owner_canonical, lowered)
+                // Phase 5m §5.13a.2 — bridge via per-engine helper.
+                project_expr_surface_expr_with_compound_objects_via_host_threaded(
+                    query_engine,
+                    owner_canonical,
+                    lowered,
+                )
             })
             .unwrap_or_else(|| lowered.clone());
     let deeply_resolved =
@@ -6533,9 +6696,12 @@ impl VerterHost {
                     query_engine,
                 ));
             }
-            // TODO(phase-5g): Class B engine-retention rationale.
-            query_engine
-                .project_type_surface_expr(scope_canonical_id, symbol_name)
+            // Phase 5m §5.13a.2 — bridge via per-engine helper.
+            project_type_surface_expr_via_host_threaded(
+                query_engine,
+                scope_canonical_id,
+                symbol_name,
+            )
                 .map(|materialized| {
                     raw_body.map_or_else(
                         || materialized.clone(),
@@ -9459,15 +9625,20 @@ fn materialize_component_meta_registry_structural_expr(
                     if ref_is_package_backed_node(engine.host, scope_canonical_id, name) {
                         expr.clone()
                     } else {
-                        // TODO(phase-5g): Class B engine-retention.
-                        engine
-                            .project_type_surface_expr(scope_canonical_id, name)
+                        // Phase 5m §5.13a.2 — bridge via per-engine
+                        // helper.
+                        project_type_surface_expr_via_host_threaded(
+                            engine,
+                            scope_canonical_id,
+                            name,
+                        )
                             .or_else(|| {
                                 let declaration =
                                     engine.resolve_type_declaration(scope_canonical_id, name);
                                 (!declaration.canonical_source.is_empty())
                                     .then(|| {
-                                        engine.project_type_surface_expr(
+                                        project_type_surface_expr_via_host_threaded(
+                                            engine,
                                             declaration.canonical_source.as_str(),
                                             if declaration.resolved_name.is_empty() {
                                                 name
@@ -12091,14 +12262,17 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
             return Vec::new();
         }
 
-        // TODO(phase-5g): Class B engine-retention rationale.
+        // Phase 5m §5.13a.2 — bridge via per-engine helper.
         let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(self.host);
 
         candidate_roots
             .into_iter()
             .filter(|root_name| {
-                query_engine
-                    .project_prepared_type_surface_shape(owner_canonical, root_name)
+                project_prepared_type_surface_shape_via_host_threaded(
+                    &mut query_engine,
+                    owner_canonical,
+                    root_name,
+                )
                     .is_some_and(|shape| match mac.kind {
                         verter_semantic::analysis::AnalyzedMacroKind::DefineProps
                         | verter_semantic::analysis::AnalyzedMacroKind::WithDefaults
@@ -12121,9 +12295,13 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
         root_name: &str,
         macro_kind: verter_semantic::analysis::types::AnalyzedMacroKind,
     ) -> Option<crate::resolver_core::surface_projector::ProjectedMacroSurfaces> {
-        // TODO(phase-5g): Class B engine-retention rationale.
+        // Phase 5m §5.13a.2 — bridge via per-engine helper.
         let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(self.host);
-        let shape = query_engine.project_prepared_type_surface_shape(owner_canonical, root_name)?;
+        let shape = project_prepared_type_surface_shape_via_host_threaded(
+            &mut query_engine,
+            owner_canonical,
+            root_name,
+        )?;
         Some(
             crate::resolver_core::component_meta::project_macro_surfaces_from_expanded_shape(
                 macro_kind, &shape,

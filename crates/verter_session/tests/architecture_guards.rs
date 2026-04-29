@@ -378,12 +378,23 @@ fn phase_05d_4b_class_a_slots_callers_migrated() {
 }
 
 #[test]
-fn phase_05d_4c_class_b_callers_documented_for_5g_engine_retirement() {
-    // Phase 5d 4c CHARTER (sub-plan §4.1 + brief): migrate the 11
-    // Class B caller sites + 1 test in meta_resolve.rs to the
-    // shared dispatch helpers executing
-    // `Instantiate { args: [], body_mode: Expanded }` on the
-    // bare-name-resolved decl identity.
+fn phase_05m_class_b_callers_migrated_through_bridge_helpers() {
+    // Phase 5m §5.13a.2 (re-charter of Phase 5d 4c): migrate the 11
+    // Class B caller sites + 1 test in meta_resolve.rs through bridge
+    // helpers in `meta_resolve.rs` (named `*_via_host_threaded`) so
+    // the §5.14.1 pre-flight gate sees zero external engine-method
+    // callers. The bridge bodies internally call the deprecated
+    // engine methods inside `#[allow(deprecated)]` for the migration
+    // window per §5.13a.2; 5l's atomic engine deletion will replace
+    // the bridge bodies with dispatch-only equivalents (consuming
+    // the host helpers added in 5m.1 / 5m.2 / 5m.3).
+    //
+    // The guard's pre-5m invariant — "11 Class B engine refs in
+    // meta_resolve.rs (deferred-to-5g)" — is invalidated by 5m's
+    // migration. The post-5m invariant: zero external engine-method
+    // callsites in meta_resolve.rs (and host_manage.rs); all
+    // engine method calls live inside the bridge helpers which
+    // themselves are private free functions in meta_resolve.rs.
     //
     // ARCHITECTURAL FINDING (TODO(phase-5g)): the trampoline's
     // `project_type_surface` body is dispatch-first then
@@ -440,26 +451,48 @@ fn phase_05d_4c_class_b_callers_documented_for_5g_engine_retirement() {
          is deferred to 5g). found {stale_helper_invocations}"
     );
 
-    // Confirm the TODO(phase-5g) markers exist so a follow-up
-    // worker can locate the deferred sites without re-deriving the
-    // analysis. The brief lists 11 Class B caller sites in
-    // meta_resolve.rs — at least 5 of those carry a TODO marker
-    // (clusters of related sites share a single comment block).
-    let todos_in_meta_resolve = src.matches("TODO(phase-5g)").count();
-    assert!(
-        todos_in_meta_resolve >= 5,
-        "Phase 5d 4c: meta_resolve.rs must have at least 5 \
-         TODO(phase-5g) markers documenting the deferred Class B \
-         sites; found {todos_in_meta_resolve}"
-    );
+    // Phase 5m §5.13a.2 — TODO(phase-5g) markers were deleted as
+    // each callsite migrated to its bridge helper. The
+    // discriminating proof is now the absence of direct engine-method
+    // callsites in meta_resolve.rs — counted below.
+    //
+    // Note: the engine method body itself still has internal callers
+    // (the 21 engine-internal sites enumerated in
+    // phase-05l-stuck.md's §5.14.1 gate output). Those are deleted
+    // atomically with the engine body in 5l per §5.14.2. The guard
+    // here only counts EXTERNAL callsites (in meta_resolve.rs and
+    // host_manage.rs) — the post-5m invariant is "zero".
 
-    // Confirm the Class B caller sites are still on the engine
-    // (not accidentally dropped). Pre-4c the count is 11; post-4c
-    // it stays at 11 because Class B migration is deferred. A
-    // worker that later migrates these sites should update this
-    // test's expected count alongside the migration.
-    let invocations = count_callsites(
-        &src,
+    // Phase 5m §5.13a.2 invariant: meta_resolve.rs Class B engine
+    // refs are now ZERO (all 11 + 1 sites migrated through bridge
+    // helpers). The bridges themselves contain engine method calls
+    // inside `#[allow(deprecated)]` — those are not counted here
+    // because the regex includes `.project_*` (with the leading
+    // dot) which matches `engine.project_*(...)` callsites; the
+    // bridges' internal calls match too, so we filter them out by
+    // requiring the callsite is NOT inside a `*_via_host*` helper.
+    //
+    // Simplest discriminating shape: count callsites OUTSIDE the
+    // `Phase 5m §5.13a.2 — engine-method caller migration` section
+    // demarcated by the section comment header.
+    let bridge_section_marker =
+        "Phase 5m §5.13a.2 — engine-method caller migration bridge helpers.";
+    let bridge_section_start = src
+        .find(bridge_section_marker)
+        .expect("meta_resolve.rs must contain the §5.13a.2 bridge section header");
+    // The bridge section ends at the next section header
+    // ("Plan §4.10 / K1 — `MacroFieldGraphState`...") — find that
+    // marker to bound the bridge section body.
+    let bridge_section_end_marker = "Plan §4.10 / K1";
+    let bridge_section_end = src[bridge_section_start..]
+        .find(bridge_section_end_marker)
+        .expect("meta_resolve.rs must contain the §4.10 K1 section header marking the end of the bridge block");
+    let pre_bridge = &src[..bridge_section_start];
+    let post_bridge = &src[bridge_section_start + bridge_section_end..];
+    let outside_bridge_src = format!("{pre_bridge}{post_bridge}");
+
+    let invocations_outside_bridges = count_callsites(
+        &outside_bridge_src,
         &[
             ".project_type_surface_expr(",
             ".project_type_surface_shape(",
@@ -468,10 +501,11 @@ fn phase_05d_4c_class_b_callers_documented_for_5g_engine_retirement() {
         ],
     );
     assert_eq!(
-        invocations, 11,
-        "Phase 5d 4c: meta_resolve.rs Class B engine refs must \
-         remain at 11 (deferred-to-5g per fix-quality rule); \
-         found {invocations}"
+        invocations_outside_bridges, 0,
+        "Phase 5m §5.13a.2: meta_resolve.rs Class B engine refs must \
+         be ZERO outside the bridge-helpers section (all sites migrated \
+         through `*_via_host_threaded` bridges); found \
+         {invocations_outside_bridges}"
     );
 
     let host_manage_src = read_workspace_file("crates/verter_session/src/host_manage.rs");
@@ -485,9 +519,10 @@ fn phase_05d_4c_class_b_callers_documented_for_5g_engine_retirement() {
         ],
     );
     assert_eq!(
-        host_manage_b, 1,
-        "Phase 5d 4c: host_manage.rs Class B engine refs must remain \
-         at 1 (deferred-to-5g); found {host_manage_b}"
+        host_manage_b, 0,
+        "Phase 5m §5.13a.2: host_manage.rs Class B engine refs must \
+         be ZERO (the JSX.IntrinsicElements site migrated through the \
+         bridge helper); found {host_manage_b}"
     );
 }
 

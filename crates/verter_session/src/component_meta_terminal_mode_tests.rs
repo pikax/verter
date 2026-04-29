@@ -406,3 +406,60 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_typeof_substitution() {
         }
     }
 }
+
+/// 5m §5.D.3 — `engine_state_promotion` intermediate hops Navigate,
+/// terminal hop Expanded. The Phase 5m caller migration routes the
+/// 18 external engine-method callsites through bridge helpers; the
+/// underlying dispatch path-decomposition contract is unchanged
+/// (CLAUDE.md "Macro Type Traversal Rule"). The discriminating
+/// proof: a multi-hop ProjectPath query in `Expanded` mode produces
+/// a decomposition where intermediate sub-keys ran in `Navigate` and
+/// only the terminal hop ran in `Expanded`.
+///
+/// A regression in 5m's bridge migration that accidentally promoted
+/// intermediate hops to `Expanded` (e.g. by routing route-fast-path
+/// through a sibling family that loses the mode-decomposition) would
+/// surface here as a non-Navigate intermediate.
+#[test]
+fn intermediate_hops_navigate_terminal_only_expanded_for_engine_state_promotion() {
+    let host = build_test_host();
+    let base = intern_four_hop_object(&host);
+    let key = SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::from(
+            vec![
+                PathSegment::Member(Arc::from("a")),
+                PathSegment::Member(Arc::from("b")),
+                PathSegment::Member(Arc::from("full")),
+                PathSegment::Member(Arc::from("bar")),
+            ]
+            .into_boxed_slice(),
+        ),
+        mode: ProjectionMode::Expanded,
+    };
+
+    let _ = host.semantic_dispatch().execute(key.clone());
+
+    let trace = host.dispatch_trace_for(&key);
+    let decomposition = trace.path_decomposition();
+    assert_eq!(
+        decomposition.len(),
+        4,
+        "trace should decompose the 4-segment path into 4 hops for the \
+         engine-state-promotion scenario (got {})",
+        decomposition.len()
+    );
+
+    for (i, sub_key) in decomposition.iter().enumerate() {
+        let is_terminal = i == decomposition.len() - 1;
+        match (sub_key.mode(), is_terminal) {
+            (ProjectionMode::Navigate, false) => {} // expected
+            (ProjectionMode::Expanded, true) => {}  // expected
+            (mode, terminal) => panic!(
+                "engine-state-promotion hop {i} (terminal={terminal}) ran in {mode:?} \
+                 (expected Navigate for intermediate, Expanded for terminal — \
+                 the 5m bridge migration must NOT alter path-decomposition modes)"
+            ),
+        }
+    }
+}

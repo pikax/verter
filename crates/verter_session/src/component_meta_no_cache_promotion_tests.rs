@@ -449,3 +449,66 @@ fn no_cache_promotion_for_budget_exceeded_typeof_substitution() {
          warm-promotion of partials; got warm={warm_delta})"
     );
 }
+
+/// 5m §5.D.4 — `engine_state_promotion` budget-exceeded must not
+/// promote to warm cache. The 5m caller migration routes the 18
+/// external engine-method callsites through bridge helpers; the
+/// bridge bodies internally call the engine's deprecated methods
+/// (during the migration window per §5.13a.2). The cache-promotion
+/// contract — cancelled / superseded / interrupted / budget-exceeded
+/// / partial semantic results MUST NOT be promoted as warm shared
+/// cache entries (CLAUDE.md) — applies uniformly across every
+/// dispatch call site, INCLUDING the bridge call sites.
+///
+/// Discriminating proof: a constrained host (`depth_budget = 2`) on
+/// a 3-segment path produces a budget-exceeded sentinel on first
+/// execution. The SAME host, SAME key, second execution MUST
+/// cold-fire (proving the partial was NOT promoted by the bridge's
+/// internal engine call OR by the dispatch path the bridge composes).
+///
+/// A regression in 5m that accidentally promoted budget-exceeded
+/// partials to the warm cache would surface here as a non-zero
+/// warm_delta on the second execution.
+#[test]
+fn no_cache_promotion_for_budget_exceeded_engine_state_promotion() {
+    let host = build_constrained_host();
+    let base = intern_three_member_object(&host);
+    let key = SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::from(
+            vec![
+                PathSegment::Member(Arc::from("deep_0")),
+                PathSegment::Member(Arc::from("deep_1")),
+                PathSegment::Member(Arc::from("deep_2")),
+            ]
+            .into_boxed_slice(),
+        ),
+        mode: ProjectionMode::Expanded,
+    };
+
+    let dispatch = host.semantic_dispatch();
+    let r1 = dispatch.execute(key.clone());
+    assert!(
+        matches!(r1, QueryResult::Recursive(_) | QueryResult::Error(_)),
+        "constrained host (depth_budget=2) MUST report a budget-exceeded sentinel \
+         for the 5m engine-state-promotion 3-segment path (got {r1:?})"
+    );
+
+    let counter = DispatchCounter;
+    let baseline_cold = counter.family_cold(&key);
+    let baseline_warm = counter.family_warm(&key);
+    let _r2 = dispatch.execute(key.clone());
+    let cold_delta = counter.family_cold(&key) - baseline_cold;
+    let warm_delta = counter.family_warm(&key) - baseline_warm;
+    assert_eq!(
+        cold_delta, 1,
+        "second engine-state-promotion query on same host MUST cold-fire \
+         (partial NOT promoted to warm cache; got cold={cold_delta})"
+    );
+    assert_eq!(
+        warm_delta, 0,
+        "warm count must NOT increment on second engine-state-promotion budget-exceeded query \
+         (the 5m bridge migration must NOT introduce warm-promotion of partials; \
+         got warm={warm_delta})"
+    );
+}

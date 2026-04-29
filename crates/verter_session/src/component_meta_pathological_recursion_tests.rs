@@ -862,3 +862,90 @@ fn pathological_typeof_substitution_cycle() {
         "typeof-substitution cycle's resolved type must NOT surface stack-overflow signature; got {dbg}"
     );
 }
+
+// ===========================================================================
+// Phase 5m §5.D.5 — engine state promotion pathological recursion
+// ===========================================================================
+
+const PATHOLOGICAL_ENGINE_STATE_PROMOTION_VUE: &str = r#"<script setup lang="ts">
+// A self-referential type alias whose body re-instantiates itself
+// through a Pick wrapper. The 5m bridge migration routes the resolver
+// through `project_type_surface_expr_via_host_threaded`; the
+// underlying engine retains its `push_instantiate_active` same-
+// identity guard, so the self-reference must terminate with a
+// `Recursive` sentinel rather than stack-overflowing through the
+// bridge call frames.
+interface SelfRecConfig {
+  // Outer prop is observable regardless of the inner cycle.
+  marker: number;
+  // Inner self-reference exercises the recursion guard.
+  inner: Pick<SelfRecConfig, 'marker' | 'inner'>;
+}
+defineProps<SelfRecConfig>()
+</script>
+<template><div /></template>
+"#;
+
+/// 5m §5.D.5 — `pathological_engine_state_promotion_recursion`.
+///
+/// A self-referential interface body containing
+/// `Pick<SelfRecConfig, 'marker' | 'inner'>` exercises the engine's
+/// `push_instantiate_active` same-identity guard during 5m's
+/// migration window — the bridge helpers route through the engine
+/// method, which threads the guard. A regression in the bridge
+/// migration that accidentally bypassed the guard (e.g. by
+/// constructing a fresh engine instance per call frame and losing
+/// the active-set) would surface here as a stack overflow OR
+/// infinite recursion.
+///
+/// Termination is the load-bearing invariant: the test simply
+/// running to completion (Cargo's default 60s timeout) discriminates
+/// the change. The thread spawn with a 32 MiB stack matches the
+/// existing §5.D.5 pattern; a regression in the recursion guard
+/// would still overflow this larger stack.
+#[test]
+fn pathological_engine_state_promotion_recursion() {
+    let host = build_hermetic_host(&[("/A.vue", PATHOLOGICAL_ENGINE_STATE_PROMOTION_VUE)]);
+    let host_for_thread = Arc::clone(&host);
+    let join = std::thread::Builder::new()
+        .name("pathological_engine_state_promotion_recursion".to_string())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(move || host_for_thread.get_component_meta("/A.vue"))
+        .expect("spawn worker thread for pathological engine-state-promotion recursion fixture");
+    let analysis = join.join().expect(
+        "worker thread MUST terminate without panic; a stack-overflow regression in \
+         the 5m bridge migration's recursion handling (engine `instantiate_active` \
+         same-identity check or the bridge frame pattern) would surface here as a \
+         join error",
+    );
+    let analysis = analysis.expect(
+        "get_component_meta must produce a result for the engine-state-promotion \
+         recursion fixture",
+    );
+
+    // Discriminating: the outer `marker` prop MUST surface (proves the
+    // outer SelfRecConfig surface materializes even with the inner
+    // self-reference cycle). Termination is the contract; result
+    // shape is implementation-dependent.
+    let _marker_prop = analysis
+        .props
+        .iter()
+        .find(|p| p.name == "marker")
+        .unwrap_or_else(|| {
+            panic!(
+                "outer `marker` prop must surface even with self-referential inner type; \
+                 got props {:?}",
+                analysis.props.iter().map(|p| &p.name).collect::<Vec<_>>()
+            )
+        });
+
+    // Negative assertion: the resolved type expression must NOT
+    // surface a literal "stack-overflow" signature (which would never
+    // appear unless the recursion guard failed catastrophically).
+    let dbg = format!("{:?}", analysis.props);
+    assert!(
+        !dbg.contains("stack-overflow"),
+        "engine-state-promotion recursion's resolved props must NOT surface \
+         stack-overflow signature; got {dbg}"
+    );
+}

@@ -2227,17 +2227,19 @@ impl VerterHost {
         canonical_id: &str,
         type_name: &str,
     ) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
-        // Phase 5d (sub-plan §4.1 host_manage row): the Class A
-        // `project_expr_surface_expr` fallback routes through the
-        // shared dispatch helper. The Class B
-        // `project_type_surface_expr` site stays on the engine —
-        // TODO(phase-5g): the prepared-decl fallback inside
-        // `project_type_surface` is essential for re-exported /
+        // Phase 5m §5.13a.2 — JSX intrinsics resolve through the
+        // bridge helper so the §5.14.1 pre-flight gate sees zero
+        // external engine-method callers. The bridge body retains
+        // the engine call through the migration window per §5.13a.2;
+        // the prepared-decl fallback for re-exported /
         // namespace-qualified globals (e.g. `JSX.IntrinsicElements`)
-        // and migrates atomically with the engine retirement.
+        // is engine-internal until 5l atomic engine retirement.
         let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(self);
-        let expanded = engine
-            .project_type_surface_expr(canonical_id, type_name)
+        let expanded = crate::meta_resolve::project_type_surface_expr_via_host_threaded(
+            &mut engine,
+            canonical_id,
+            type_name,
+        )
             .or_else(|| {
                 let expr = verter_semantic::analysis::type_expr::TypeExpr::named(type_name);
                 crate::meta_resolve::project_expr_class_a_via_dispatch(self, canonical_id, &expr)
