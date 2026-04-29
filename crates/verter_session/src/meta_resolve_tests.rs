@@ -7717,42 +7717,97 @@ defineProps<ColorModeSelectProps>()
     );
 }
 
+/// Hermetic port of the prior
+/// `produce_macro_object_shapes_real_nuxt_ui_color_mode_select_reuses_authoritative_surface_without_solves`
+/// test. The component-under-test directly invokes
+/// `defineProps<ColorModeSelectProps>()`, where ColorModeSelectProps
+/// is an owner-local interface that extends an imported
+/// `SelectMenuProps` macro root from another SFC. The discriminating
+/// contract: imported macro roots reachable only through the heritage
+/// chain (here, `SelectMenuProps`) must NOT enter `resolved_macros`,
+/// since the owner-local wrapper can be projected lazily — and any
+/// defineProps resolved-macro that IS present must already be
+/// authoritative. Renamed to drop the third-party-source coupling.
 #[test]
-fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_reuses_authoritative_surface_without_solves(
-) {
-    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../.integration-tests/repos/nuxt-ui")
-        .canonicalize()
-        .expect("nuxt-ui integration fixture should exist");
-    let repo_root = repo_root.to_string_lossy().replace('\\', "/");
-    let component = format!("{repo_root}/src/runtime/components/color-mode/ColorModeSelect.vue");
+fn produce_macro_object_shapes_color_mode_select_keeps_imported_macro_root_off_resolved_macros() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/pkg/combobox.ts",
+            r#"
+export interface ListboxRootProps<T> {
+  open?: boolean
+  defaultOpen?: boolean
+  modelValue?: T
+}
 
-    let ws = Arc::new(verter_workspace::FilesystemWorkspace::new(
-        verter_workspace::FilesystemOptions::default(),
-    ));
-    let host = VerterHost::new(
-        HostConfig {
-            analysis_level: crate::types::AnalysisLevel::Full,
-            ..HostConfig::default()
-        },
-        ws,
-    );
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            repo_root.clone(),
-            repo_root.clone(),
-            Some(format!("{repo_root}/tsconfig.json")),
-        ),
-    ]);
+export interface ComboboxRootProps<T> extends ListboxRootProps<T> {
+  disabled?: boolean
+  name?: string
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/types/html.ts",
+            r#"
+export interface ButtonHTMLAttributes {
+  type?: 'button' | 'submit'
+  disabled?: boolean
+  name?: string
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/runtime/SelectMenu.vue",
+            r#"<script lang="ts">
+import type { ComboboxRootProps } from '../pkg/combobox'
+import type { ButtonHTMLAttributes } from '../types/html'
 
+export type Item = { label?: string }
+
+export interface SelectMenuProps<T = Item[]>
+  extends Pick<ComboboxRootProps<T>, 'open' | 'defaultOpen' | 'disabled'>,
+    Omit<ButtonHTMLAttributes, 'type' | 'disabled' | 'name'> {
+  items?: T
+  color?: 'primary' | 'neutral'
+  variant?: 'solid' | 'ghost'
+}
+</script>
+<script setup lang="ts">
+defineProps<SelectMenuProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/runtime/ColorModeSelect.vue",
+            r#"<script lang="ts">
+import type { SelectMenuProps, Item } from './SelectMenu.vue'
+
+export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'items'> {}
+</script>
+<script setup lang="ts">
+defineProps<ColorModeSelectProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let host = project.host();
+    let component = "/src/runtime/ColorModeSelect.vue";
     let _store_view = host.resolver_store_view();
     let snapshot = host
-        .get_raw_analysis_snapshot(&component)
+        .get_raw_analysis_snapshot(component)
         .expect("raw snapshot should exist");
-    let resolver_host = super::HostComponentMetaResolver { host: &host };
+    let resolver_host = super::HostComponentMetaResolver { host };
     let mut parts = crate::resolver_core::resolve_component_meta_parts(
         &resolver_host,
-        &component,
+        component,
         &snapshot,
         true,
         None,
@@ -7763,7 +7818,7 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_reuses_authoritati
             !(resolved.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps
                 && resolved.type_name == "SelectMenuProps")
         }),
-        "real ColorModeSelect should keep the imported SelectMenuProps macro root off resolved_macros when the owner-local wrapper can be projected lazily: {:?}",
+        "ColorModeSelect should keep the imported SelectMenuProps macro root off resolved_macros when the owner-local wrapper can be projected lazily: {:?}",
         parts.resolved_macros
             .iter()
             .map(|resolved| (resolved.macro_kind, resolved.type_name.as_str()))
@@ -7778,15 +7833,11 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_reuses_authoritati
         );
     }
 
-    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(&host);
-    // TODO(phase-5g): the §4.1 row marks this test for migration to
-    // `dispatch.execute_to_type_expr(Instantiate{..})` — but the
-    // prepared-decl fallback that handles overlay-backed types is
-    // engine-internal. Migrate atomically with the engine retirement.
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
     let prepared_overlay_surface =
         crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(
             &mut query_engine,
-            &component,
+            component,
             "ColorModeSelectProps",
         );
     assert!(
@@ -7799,7 +7850,7 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_reuses_authoritati
         "overlay-backed prepared root-surface lookup must stay off the semantic solver before macro-shape synthesis",
     );
     let overlay_declaration =
-        query_engine.resolve_type_declaration(&component, "ColorModeSelectProps");
+        query_engine.resolve_type_declaration(component, "ColorModeSelectProps");
     assert_eq!(
         overlay_declaration.canonical_source,
         component,
@@ -7811,7 +7862,7 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_reuses_authoritati
         "overlay-backed ColorModeSelectProps should keep its local symbol name before macro-shape synthesis",
     );
     host.append_component_meta_registry_entries(
-        &component,
+        component,
         &snapshot,
         parts.evaluated_types.as_ref(),
         &mut parts.resolved_type_registry,
@@ -7820,7 +7871,7 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_reuses_authoritati
         &mut query_engine,
     );
     let facts = host
-        .ensure_indexed_ready(&component)
+        .ensure_indexed_ready(component)
         .expect("component facts should exist");
     let eval_source =
         VerterHost::build_eval_script_source(&facts.raw_source, facts.cached_parse.as_deref());
@@ -7828,7 +7879,7 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_reuses_authoritati
     let solves_before = 0u32;
 
     produce_macro_object_shapes(
-        &component,
+        component,
         &snapshot,
         &parts.resolved_macros,
         &parts.resolved_type_registry,
@@ -7841,64 +7892,117 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_reuses_authoritati
     assert_eq!(
         0u32.saturating_sub(solves_before),
         0,
-        "real ColorModeSelect should reuse its authoritative local defineProps surface instead of triggering another projection solve during macro-shape synthesis",
+        "ColorModeSelect should reuse its authoritative local defineProps surface instead of triggering another projection solve during macro-shape synthesis",
     );
 }
 
+/// Hermetic port of the prior
+/// `produce_macro_object_shapes_real_nuxt_ui_color_mode_select_overlay_upsert_stays_off_solver`
+/// test. The component-under-test is upserted explicitly via the
+/// host's `UpsertRequest` API (mirroring the editor "save" overlay
+/// path) and then must still produce a prepared root-surface SHAPE
+/// (not just an expr) after registry append. The discriminating
+/// contract: after `host.upsert()` for an owner-local
+/// `ColorModeSelectProps` whose heritage chain reaches an imported
+/// macro root, both `project_prepared_type_surface_shape_via_host_threaded`
+/// must return a shape with prop surface AND the direct
+/// `produce_one_macro_object_shape` must remain on the projection path.
 #[test]
-fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_overlay_upsert_stays_off_solver() {
-    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../.integration-tests/repos/nuxt-ui")
-        .canonicalize()
-        .expect("nuxt-ui integration fixture should exist");
-    let repo_root = repo_root.to_string_lossy().replace('\\', "/");
-    let component = format!("{repo_root}/src/runtime/components/color-mode/ColorModeSelect.vue");
-    let source = std::fs::read_to_string(&component)
-        .expect("real ColorModeSelect source should be readable from the fixture");
+fn produce_macro_object_shapes_color_mode_select_overlay_upsert_stays_off_solver() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/pkg/combobox.ts",
+            r#"
+export interface ListboxRootProps<T> {
+  open?: boolean
+  defaultOpen?: boolean
+  modelValue?: T
+}
 
-    let ws = Arc::new(verter_workspace::FilesystemWorkspace::new(
-        verter_workspace::FilesystemOptions::default(),
-    ));
-    let host = VerterHost::new(
-        HostConfig {
-            analysis_level: crate::types::AnalysisLevel::Full,
-            ..HostConfig::default()
-        },
-        ws,
-    );
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            repo_root.clone(),
-            repo_root.clone(),
-            Some(format!("{repo_root}/tsconfig.json")),
-        ),
-    ]);
+export interface ComboboxRootProps<T> extends ListboxRootProps<T> {
+  disabled?: boolean
+  name?: string
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/types/html.ts",
+            r#"
+export interface ButtonHTMLAttributes {
+  type?: 'button' | 'submit'
+  disabled?: boolean
+  name?: string
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/runtime/SelectMenu.vue",
+            r#"<script lang="ts">
+import type { ComboboxRootProps } from '../pkg/combobox'
+import type { ButtonHTMLAttributes } from '../types/html'
+
+export type Item = { label?: string }
+
+export interface SelectMenuProps<T = Item[]>
+  extends Pick<ComboboxRootProps<T>, 'open' | 'defaultOpen' | 'disabled'>,
+    Omit<ButtonHTMLAttributes, 'type' | 'disabled' | 'name'> {
+  items?: T
+  color?: 'primary' | 'neutral'
+  variant?: 'solid' | 'ghost'
+}
+</script>
+<script setup lang="ts">
+defineProps<SelectMenuProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let host = project.host();
+    let component = "/src/runtime/ColorModeSelect.vue";
+    // Explicit overlay-style upsert mirrors the editor "save" path:
+    // the SFC is upserted directly via the host's UpsertRequest API
+    // rather than through `upsert_base()`'s same-process convenience.
+    let source = r#"<script lang="ts">
+import type { SelectMenuProps, Item } from './SelectMenu.vue'
+
+export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'items'> {}
+</script>
+<script setup lang="ts">
+defineProps<ColorModeSelectProps>()
+</script>
+<template><div /></template>"#;
     let _ = host
         .upsert(crate::types::UpsertRequest {
-            canonical_id: Some(component.clone()),
-            input_id: component.clone(),
+            canonical_id: Some(component.to_string()),
+            input_id: component.to_string(),
             source: Arc::from(source),
-            file_kind: crate::types::FileKind::from_path(&component),
+            file_kind: crate::types::FileKind::from_path(component),
             aliases: Vec::new(),
         })
         .expect("overlay-style upsert should succeed");
 
     let _store_view = host.resolver_store_view();
     let snapshot = host
-        .get_raw_analysis_snapshot(&component)
+        .get_raw_analysis_snapshot(component)
         .expect("overlay-backed raw snapshot should exist");
-    let resolver_host = super::HostComponentMetaResolver { host: &host };
+    let resolver_host = super::HostComponentMetaResolver { host };
     let mut parts = crate::resolver_core::resolve_component_meta_parts(
         &resolver_host,
-        &component,
+        component,
         &snapshot,
         true,
         None,
         crate::resolver_core::ComponentMetaResolutionPurpose::Full,
     );
-    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(&host);
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
     host.append_component_meta_registry_entries(
-        &component,
+        component,
         &snapshot,
         parts.evaluated_types.as_ref(),
         &mut parts.resolved_type_registry,
@@ -7908,7 +8012,7 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_overlay_upsert_sta
     );
     let prepared_overlay_shape = crate::meta_resolve::project_prepared_type_surface_shape_via_host_threaded(
         &mut query_engine,
-        &component,
+        component,
         "ColorModeSelectProps",
     )
         .expect("overlay-backed prepared root surface should still materialize a shape after registry append");
@@ -7921,7 +8025,7 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_overlay_upsert_sta
     let direct_solves_before = 0u32;
     let (direct_shape, direct_source) = produce_one_macro_object_shape(
         &mut query_engine,
-        &component,
+        component,
         &lowered,
         has_prop_shape_surface,
     );
@@ -7939,7 +8043,7 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_overlay_upsert_sta
         "overlay-backed direct macro object shape should stay solve-free after registry append",
     );
     let facts = host
-        .ensure_indexed_ready(&component)
+        .ensure_indexed_ready(component)
         .expect("overlay-backed component facts should exist");
     let eval_source =
         VerterHost::build_eval_script_source(&facts.raw_source, facts.cached_parse.as_deref());
@@ -7947,7 +8051,7 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_overlay_upsert_sta
     let solves_before = 0u32;
 
     produce_macro_object_shapes(
-        &component,
+        component,
         &snapshot,
         &parts.resolved_macros,
         &parts.resolved_type_registry,
@@ -7964,50 +8068,109 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_overlay_upsert_sta
     );
 }
 
+/// Hermetic port of the prior
+/// `produce_macro_object_shapes_real_nuxt_ui_color_mode_select_projects_when_appended_registry_root_is_empty_shell`
+/// test. The component-under-test declares an owner-local
+/// `ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'items'>`
+/// with NO local prop members of its own — i.e., the registry root
+/// lowers to an empty object shell. The discriminating contract:
+/// even though the registry root has no prop surface, the
+/// `produce_macro_object_shapes` projection path must still walk the
+/// heritage chain and surface props inherited from `SelectMenuProps`
+/// (here, `color`/`variant`). If the projection bypasses the empty
+/// shell and trusts the registry blindly, the prop list would be
+/// empty.
 #[test]
-fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_projects_when_appended_registry_root_is_empty_shell(
+fn produce_macro_object_shapes_color_mode_select_projects_when_appended_registry_root_is_empty_shell(
 ) {
-    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../.integration-tests/repos/nuxt-ui")
-        .canonicalize()
-        .expect("nuxt-ui integration fixture should exist");
-    let repo_root = repo_root.to_string_lossy().replace('\\', "/");
-    let component = format!("{repo_root}/src/runtime/components/color-mode/ColorModeSelect.vue");
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/pkg/combobox.ts",
+            r#"
+export interface ListboxRootProps<T> {
+  open?: boolean
+  defaultOpen?: boolean
+  modelValue?: T
+}
 
-    let ws = Arc::new(verter_workspace::FilesystemWorkspace::new(
-        verter_workspace::FilesystemOptions::default(),
-    ));
-    let host = VerterHost::new(
-        HostConfig {
-            analysis_level: crate::types::AnalysisLevel::Full,
-            ..HostConfig::default()
-        },
-        ws,
-    );
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            repo_root.clone(),
-            repo_root.clone(),
-            Some(format!("{repo_root}/tsconfig.json")),
-        ),
-    ]);
+export interface ComboboxRootProps<T> extends ListboxRootProps<T> {
+  disabled?: boolean
+  name?: string
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/types/html.ts",
+            r#"
+export interface ButtonHTMLAttributes {
+  type?: 'button' | 'submit'
+  disabled?: boolean
+  name?: string
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/runtime/SelectMenu.vue",
+            r#"<script lang="ts">
+import type { ComboboxRootProps } from '../pkg/combobox'
+import type { ButtonHTMLAttributes } from '../types/html'
 
+export type Item = { label?: string }
+
+export interface SelectMenuProps<T = Item[]>
+  extends Pick<ComboboxRootProps<T>, 'open' | 'defaultOpen' | 'disabled'>,
+    Omit<ButtonHTMLAttributes, 'type' | 'disabled' | 'name'> {
+  items?: T
+  color?: 'primary' | 'neutral'
+  variant?: 'solid' | 'ghost'
+}
+</script>
+<script setup lang="ts">
+defineProps<SelectMenuProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/runtime/ColorModeSelect.vue",
+            r#"<script lang="ts">
+import type { SelectMenuProps, Item } from './SelectMenu.vue'
+
+// Empty-shell shape: no local prop members of its own; the registry
+// root lowers to TypeExpr::Object with empty properties.
+export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'items'> {}
+</script>
+<script setup lang="ts">
+defineProps<ColorModeSelectProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let host = project.host();
+    let component = "/src/runtime/ColorModeSelect.vue";
     let _store_view = host.resolver_store_view();
     let snapshot = host
-        .get_raw_analysis_snapshot(&component)
+        .get_raw_analysis_snapshot(component)
         .expect("raw snapshot should exist");
-    let resolver_host = super::HostComponentMetaResolver { host: &host };
+    let resolver_host = super::HostComponentMetaResolver { host };
     let mut parts = crate::resolver_core::resolve_component_meta_parts(
         &resolver_host,
-        &component,
+        component,
         &snapshot,
         true,
         None,
         crate::resolver_core::ComponentMetaResolutionPurpose::Full,
     );
-    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(&host);
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
     host.append_component_meta_registry_entries(
-        &component,
+        component,
         &snapshot,
         parts.evaluated_types.as_ref(),
         &mut parts.resolved_type_registry,
@@ -8031,10 +8194,10 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_projects_when_appe
         .expect("object shell should still lower into an expanded shape");
     assert!(
         !has_prop_shape_surface(&registry_root_shape),
-        "the real ColorModeSelect local seed is an empty shell; if this changes, tighten the registry shortcut instead of silently trusting every object seed",
+        "the empty-extends ColorModeSelectProps local seed is an empty shell; if this changes, tighten the registry shortcut instead of silently trusting every object seed",
     );
     let facts = host
-        .ensure_indexed_ready(&component)
+        .ensure_indexed_ready(component)
         .expect("component facts should exist");
     let eval_source =
         VerterHost::build_eval_script_source(&facts.raw_source, facts.cached_parse.as_deref());
@@ -8042,7 +8205,7 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_projects_when_appe
     let solves_before = 0u32;
 
     produce_macro_object_shapes(
-        &component,
+        component,
         &snapshot,
         &parts.resolved_macros,
         &parts.resolved_type_registry,
@@ -8052,23 +8215,16 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_projects_when_appe
         &mut query_engine,
     );
 
-    // Phase 5c (sub-plan §A9 (d)): migrate from projection-count
-    // delta (`debug_prepared_root_surface_projection_count`) to
-    // behavior assertion. Previously this test asserted the prepared
-    // projection path was taken exactly once via the
-    // `prepared_root_surface_projection_count` counter delta. After
-    // the surface-method trampoline conversion, the projection path
-    // routing is an internal dispatch detail; the discriminating
-    // contract is that the projection produces a usable
+    // Behavior contract: the projection produces a usable
     // `define_props` shape (i.e., is not just the empty registry
-    // shell) and that the shape contains the real ColorModeSelectProps
-    // surface (inherited via Omit<SelectMenuProps<Item[]>, 'items'>
-    // from the package, which transitively reaches root props
-    // including `color`/`variant`).
+    // shell) and the shape contains the props inherited via
+    // Omit<SelectMenuProps<Item[]>, 'items'> from the heritage chain,
+    // which transitively reaches root props including
+    // `color`/`variant`.
     assert_eq!(
         evaluated_types.define_props.len(),
         1,
-        "projection fallback should still synthesize the real defineProps shape",
+        "projection fallback should still synthesize the defineProps shape",
     );
     let macro_shape = &evaluated_types.define_props[0];
     let prop_names: Vec<&str> = macro_shape
