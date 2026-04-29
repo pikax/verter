@@ -106,6 +106,18 @@ thread_local! {
     pub(crate) static DISPATCH_KEY_COUNTS:
         std::cell::RefCell<rustc_hash::FxHashMap<SemanticQueryKeyDigest, u32>> =
         std::cell::RefCell::new(rustc_hash::FxHashMap::default());
+    /// Phase 5g-supplement §5.D.0 r17 — per-key COLD dispatch count.
+    /// Incremented when `execute_read` enters with no warm cache entry
+    /// for the key (cache miss; `build` is invoked).
+    pub(crate) static DISPATCH_KEY_COLD_COUNTS:
+        std::cell::RefCell<rustc_hash::FxHashMap<SemanticQueryKeyDigest, u32>> =
+        std::cell::RefCell::new(rustc_hash::FxHashMap::default());
+    /// Phase 5g-supplement §5.D.0 r17 — per-key WARM dispatch count.
+    /// Incremented when `execute_read` enters with the key already in
+    /// the warm cache (cache hit; `build` is NOT invoked).
+    pub(crate) static DISPATCH_KEY_WARM_COUNTS:
+        std::cell::RefCell<rustc_hash::FxHashMap<SemanticQueryKeyDigest, u32>> =
+        std::cell::RefCell::new(rustc_hash::FxHashMap::default());
 }
 
 #[cfg(test)]
@@ -114,6 +126,43 @@ pub(crate) fn record_dispatch_key(key: &crate::semantic_query::SemanticQueryKey)
     DISPATCH_KEY_COUNTS.with(|c| {
         *c.borrow_mut().entry(digest).or_insert(0) += 1;
     });
+}
+
+/// Phase 5g-supplement §5.D.0 r17 — record a COLD dispatch entry for
+/// this key (cache miss, `build` will be invoked).
+#[cfg(test)]
+pub(crate) fn record_dispatch_cold(key: &crate::semantic_query::SemanticQueryKey) {
+    let digest = SemanticQueryKeyDigest::from_key(key);
+    DISPATCH_KEY_COLD_COUNTS.with(|c| {
+        *c.borrow_mut().entry(digest).or_insert(0) += 1;
+    });
+}
+
+/// Phase 5g-supplement §5.D.0 r17 — record a WARM dispatch entry for
+/// this key (cache hit, returning the memoized value).
+#[cfg(test)]
+pub(crate) fn record_dispatch_warm(key: &crate::semantic_query::SemanticQueryKey) {
+    let digest = SemanticQueryKeyDigest::from_key(key);
+    DISPATCH_KEY_WARM_COUNTS.with(|c| {
+        *c.borrow_mut().entry(digest).or_insert(0) += 1;
+    });
+}
+
+/// Phase 5g-supplement §5.D.0 r17 — read the COLD count for `key`.
+/// Returns 0 if the key has not been dispatched on this thread since
+/// thread start. The counter is monotonic; tests sample baselines and
+/// deltas across paired queries.
+#[cfg(test)]
+pub(crate) fn dispatch_cold_for(key: &crate::semantic_query::SemanticQueryKey) -> usize {
+    let digest = SemanticQueryKeyDigest::from_key(key);
+    DISPATCH_KEY_COLD_COUNTS.with(|c| c.borrow().get(&digest).copied().unwrap_or(0) as usize)
+}
+
+/// Phase 5g-supplement §5.D.0 r17 — read the WARM count for `key`.
+#[cfg(test)]
+pub(crate) fn dispatch_warm_for(key: &crate::semantic_query::SemanticQueryKey) -> usize {
+    let digest = SemanticQueryKeyDigest::from_key(key);
+    DISPATCH_KEY_WARM_COUNTS.with(|c| c.borrow().get(&digest).copied().unwrap_or(0) as usize)
 }
 
 #[cfg(test)]
@@ -513,6 +562,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // §1.C.3 pending an InputMenu corpus fixture).
         #[cfg(test)]
         record_dispatch_key(&key);
+
+        // Phase 5g-supplement §5.D.0 r17 — split the per-key counter
+        // into cold (cache miss; `build` will be invoked) vs warm
+        // (cache hit; returning the memoized value). Peek the cache
+        // before `execute_cooperative` enters its retry loop. The
+        // peek is racy under concurrency but tests run hermetically
+        // so the result is exact for §5.D.1 cache_discipline tests.
+        #[cfg(test)]
+        if self.graph().get(&key).is_some() {
+            record_dispatch_warm(&key);
+        } else {
+            record_dispatch_cold(&key);
+        }
 
         // Mirror the canonicalisation done by `execute` so the cache key
         // identity is stable across the sugar variants.

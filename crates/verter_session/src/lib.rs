@@ -489,6 +489,42 @@ impl VerterHost {
         )
     }
 
+    /// Test-only dispatch counter view. Phase 5g-supplement §5.D.0 r17.
+    ///
+    /// Returns a [`DispatchCounter`](crate::host_test_audit::DispatchCounter)
+    /// with `family_cold(&key)` / `family_warm(&key)` accessors for
+    /// §5.D.1 cache-discipline tests. Counters are thread-local and
+    /// monotonic; tests sample baselines and deltas across paired
+    /// queries.
+    #[cfg(test)]
+    #[must_use]
+    pub fn dispatch_counter(&self) -> crate::host_test_audit::DispatchCounter {
+        crate::host_test_audit::DispatchCounter
+    }
+
+    /// Test-only per-key dispatch trace. Phase 5g-supplement §5.D.0 r17.
+    ///
+    /// Reads the warm cache to produce a
+    /// [`DispatchTrace`](crate::host_test_audit::DispatchTrace) whose
+    /// `path_decomposition()` enumerates each hop and the projection
+    /// mode the cache carries for that hop. Intended for §5.D.3
+    /// terminal-mode-only-expansion tests.
+    ///
+    /// For `ProjectPath` keys the decomposition has one entry per
+    /// prefix length; for other variants it has a single terminal
+    /// entry.
+    #[cfg(test)]
+    #[must_use]
+    pub fn dispatch_trace_for(
+        &self,
+        key: &crate::semantic_query::SemanticQueryKey,
+    ) -> crate::host_test_audit::DispatchTrace {
+        crate::host_test_audit::DispatchTrace::from_key(
+            self.project_type_store.semantic_graph(),
+            key,
+        )
+    }
+
     /// Access the project-global type-resolution cache root. Owned exclusively
     /// by the host; shared through an `Arc` so downstream cache consumers can
     /// hold stable references without taking the host lock.
