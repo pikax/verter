@@ -2,7 +2,7 @@ use super::*;
 use crate::changes::WorkspaceChange;
 use crate::project_graph::{ProjectGraph, ProjectRank, VfsProjectConfig};
 use crate::resolver::{IdeProjectCompilerOptions, ProjectMembership};
-use crate::traits::WorkspaceAccess;
+use crate::traits::{WorkspaceAccess, WorkspaceRead};
 use crate::types::{
     ExactResolution, FileKind, ParsedEdge, ProjectOwnership, ResolutionContext, ResolvePhase,
     ResolveRequestKind,

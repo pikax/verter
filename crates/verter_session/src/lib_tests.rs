@@ -17,7 +17,7 @@ use super::upsert::{
 };
 use super::*;
 use verter_semantic::analysis::AnalysisScope;
-use verter_workspace::WorkspaceAccess;
+use verter_workspace::WorkspaceRead;
 
 fn profile_dev() -> CompileProfile {
     CompileProfile {
@@ -2873,7 +2873,10 @@ fn ensure_compiled_hydrates_vue_compile_blockers_via_workspace_resolution() {
         "/workspace/src/App.vue",
         "<template src=\"@/partials/panel.html\"></template>\n<script setup lang=\"ts\">\nimport type { Props } from '@/types'\nconst props = defineProps<Props>()\n</script>",
     );
-    host.workspace().set_exact_resolutions(
+    // Phase 6b sub-plan §6b.D2b reroute — host wrapper runs the route
+    // resolution invalidation cascade (bump_project_generation_and_evict +
+    // route_owned_shallow.clear_all + ws().set_exact_resolutions).
+    host.set_exact_resolutions(
         "/workspace/src/App.vue",
         vec![
             verter_workspace::ExactResolution {
@@ -4422,13 +4425,14 @@ mod phase2a_upsert_tests {
         // accessible to the scheduler when ensure_loaded runs. We register a
         // MemoryWorkspace overlay so the WorkspaceSourceLoader can read the
         // file content during the load.
-        host.workspace().notify_upsert(
+        // Phase 6b sub-plan §6b.D2b reroute — host wrapper runs the
+        // route_owned_shallow eviction alongside the workspace overlay write.
+        host.notify_upsert(
             "/lib/types.ts",
             std::sync::Arc::from("export interface Foo {}"),
         );
         // Also inject the resolved target.
-        host.workspace()
-            .notify_upsert("/lib/aliased.ts", std::sync::Arc::from("export {}"));
+        host.notify_upsert("/lib/aliased.ts", std::sync::Arc::from("export {}"));
 
         // (a) Pre-load: bundler informs the host about a route resolution
         // BEFORE the source has been seen.
@@ -4526,10 +4530,9 @@ mod phase2a_upsert_tests {
             "import type { Shared } from './shared'\nexport interface Foo { x: Shared }";
         let shared_src = "export interface Shared { v: number }";
 
-        host.workspace()
-            .notify_upsert("/src/types.ts", std::sync::Arc::from(types_src));
-        host.workspace()
-            .notify_upsert("/src/shared.ts", std::sync::Arc::from(shared_src));
+        // Phase 6b sub-plan §6b.D2b reroute — host wrapper.
+        host.notify_upsert("/src/types.ts", std::sync::Arc::from(types_src));
+        host.notify_upsert("/src/shared.ts", std::sync::Arc::from(shared_src));
 
         let _ = upsert_vue(&host, "/src/Comp.vue", comp_src);
 

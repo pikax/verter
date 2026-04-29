@@ -229,9 +229,11 @@ impl MemoryWorkspace {
     }
 }
 
-// ── WorkspaceAccess implementation ──
+// ── WorkspaceRead / WorkspaceAccess implementations ──
+// Phase 6b sub-plan §6b.D2b — read-only methods live on the
+// `WorkspaceRead` impl; mutators stay on `WorkspaceAccess`.
 
-impl crate::traits::WorkspaceAccess for MemoryWorkspace {
+impl crate::traits::WorkspaceRead for MemoryWorkspace {
     fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
         // 1. Check overlay
         if let Some(content) = self.engine.overlay.read().get(canonical_id) {
@@ -325,16 +327,8 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
         self.engine.vfs_provenance.snapshot()
     }
 
-    fn reset_vfs_provenance(&self) {
-        self.engine.vfs_provenance.reset();
-    }
-
     fn resource_snapshot(&self) -> crate::traits::WorkspaceResourceSnapshot {
         self.engine.resource_snapshot()
-    }
-
-    fn record_parsed_edges(&self, canonical_id: &str, edges: &[crate::types::ParsedEdge]) {
-        self.engine.record_parsed_edges(self, canonical_id, edges);
     }
 
     fn reverse_deps_for(&self, canonical_id: &str) -> Vec<String> {
@@ -345,78 +339,12 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
         self.engine.forward_deps_for(canonical_id)
     }
 
-    fn set_exact_resolutions(
-        &self,
-        canonical_id: &str,
-        resolutions: Vec<crate::types::ExactResolution>,
-    ) -> crate::types::ExactResolutionResult {
-        self.engine.set_exact_resolutions(canonical_id, resolutions)
-    }
-
-    fn replace_semantic_transitive(
-        &self,
-        canonical_id: &str,
-        deps: std::collections::BTreeSet<String>,
-    ) {
-        self.engine.replace_semantic_transitive(canonical_id, deps);
-    }
-
-    fn set_default_resolve_extensions(&self, host_extensions: Vec<String>) {
-        self.engine.set_default_resolve_extensions(host_extensions);
-    }
-
     fn dependency_snapshot(
         &self,
         canonical_id: &str,
     ) -> Option<crate::exact_resolution::DependencySnapshotView> {
         self.engine.dependency_snapshot(canonical_id)
     }
-
-    fn notify_upsert(&self, canonical_id: &str, source: Arc<str>) {
-        self.engine.invalidate_package_manifest(canonical_id);
-        self.engine
-            .overlay
-            .write()
-            .set(canonical_id.to_string(), source);
-        self.engine.bump_content_generation();
-    }
-
-    fn notify_close(&self, canonical_id: &str) {
-        self.engine.invalidate_package_manifest(canonical_id);
-        self.engine.overlay.write().clear(canonical_id);
-        self.engine.bump_content_generation();
-    }
-
-    fn notify_delete(&self, canonical_id: &str) {
-        self.engine.invalidate_package_manifest(canonical_id);
-        self.engine.overlay.write().clear(canonical_id);
-        self.engine.snapshot.write().remove(canonical_id);
-        self.engine.edges.write().remove_file(canonical_id);
-        self.engine.bump_content_generation();
-    }
-
-    fn configure_resolver(&self, projects: Vec<crate::resolver::IdeProjectConfig>) {
-        let vfs_configs: Vec<crate::project_graph::VfsProjectConfig> = projects
-            .into_iter()
-            .map(|p| crate::project_graph::VfsProjectConfig {
-                root: p.root.clone(),
-                rank: crate::project_graph::ProjectRank::Explicit,
-                tsconfig_path: p.tsconfig_path.clone(),
-                root_files: vec![],
-                extensions: vec![".vue".to_string(), ".ts".to_string(), ".tsx".to_string()],
-                workspace_root: p.workspace_root.clone(),
-                workspace_aliases: p.workspace_aliases.clone(),
-                compiler_options: p.compiler_options.clone(),
-                references: p.references.clone(),
-                membership: p.membership.clone(),
-            })
-            .collect();
-        let graph = crate::project_graph::ProjectGraph::from_configs(vfs_configs);
-        *self.engine.project_graph.write() = graph;
-        self.engine.rebuild_and_publish();
-    }
-
-    // ── Directory and mutation operations (in-memory) ──
 
     fn read_dir(&self, dir: &str) -> Result<Vec<crate::error::DirEntry>, crate::error::VfsError> {
         let snapshot = self.engine.snapshot.read();
@@ -495,6 +423,121 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
         Ok(result)
     }
 
+    fn is_dir(&self, path: &str) -> bool {
+        let prefix = if path.ends_with('/') {
+            path.to_string()
+        } else {
+            format!("{path}/")
+        };
+        let guard = self.engine.snapshot.read();
+        let ids: Vec<&str> = guard.ids().collect();
+        ids.iter().any(|id| id.starts_with(&prefix))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn read_ambient_lib(
+        &self,
+        stable_key: crate::project_key::ProjectStableKey,
+        canonical_id: &str,
+    ) -> Option<Arc<str>> {
+        self.engine.read_ambient_lib(self, stable_key, canonical_id)
+    }
+
+    fn project_stable_key(
+        &self,
+        project_id: crate::workspace_snapshot::ProjectId,
+    ) -> Option<crate::project_key::ProjectStableKey> {
+        self.engine.project_stable_key(project_id)
+    }
+
+    fn lookup_ambient_symbol(
+        &self,
+        consumer_project: crate::project_key::ProjectStableKey,
+        symbol: &str,
+    ) -> Option<crate::ambient_lib::AmbientSymbolHit> {
+        self.engine.lookup_ambient_symbol(consumer_project, symbol)
+    }
+
+    fn ambient_libs_view(&self) -> Arc<crate::ambient_lib::AmbientLibsByProject> {
+        self.engine.ambient_libs_view()
+    }
+}
+
+impl crate::traits::WorkspaceAccess for MemoryWorkspace {
+    fn reset_vfs_provenance(&self) {
+        self.engine.vfs_provenance.reset();
+    }
+
+    fn record_parsed_edges(&self, canonical_id: &str, edges: &[crate::types::ParsedEdge]) {
+        self.engine.record_parsed_edges(self, canonical_id, edges);
+    }
+
+    fn set_exact_resolutions(
+        &self,
+        canonical_id: &str,
+        resolutions: Vec<crate::types::ExactResolution>,
+    ) -> crate::types::ExactResolutionResult {
+        self.engine.set_exact_resolutions(canonical_id, resolutions)
+    }
+
+    fn replace_semantic_transitive(
+        &self,
+        canonical_id: &str,
+        deps: std::collections::BTreeSet<String>,
+    ) {
+        self.engine.replace_semantic_transitive(canonical_id, deps);
+    }
+
+    fn set_default_resolve_extensions(&self, host_extensions: Vec<String>) {
+        self.engine.set_default_resolve_extensions(host_extensions);
+    }
+
+    fn notify_upsert(&self, canonical_id: &str, source: Arc<str>) {
+        self.engine.invalidate_package_manifest(canonical_id);
+        self.engine
+            .overlay
+            .write()
+            .set(canonical_id.to_string(), source);
+        self.engine.bump_content_generation();
+    }
+
+    fn notify_close(&self, canonical_id: &str) {
+        self.engine.invalidate_package_manifest(canonical_id);
+        self.engine.overlay.write().clear(canonical_id);
+        self.engine.bump_content_generation();
+    }
+
+    fn notify_delete(&self, canonical_id: &str) {
+        self.engine.invalidate_package_manifest(canonical_id);
+        self.engine.overlay.write().clear(canonical_id);
+        self.engine.snapshot.write().remove(canonical_id);
+        self.engine.edges.write().remove_file(canonical_id);
+        self.engine.bump_content_generation();
+    }
+
+    fn configure_resolver(&self, projects: Vec<crate::resolver::IdeProjectConfig>) {
+        let vfs_configs: Vec<crate::project_graph::VfsProjectConfig> = projects
+            .into_iter()
+            .map(|p| crate::project_graph::VfsProjectConfig {
+                root: p.root.clone(),
+                rank: crate::project_graph::ProjectRank::Explicit,
+                tsconfig_path: p.tsconfig_path.clone(),
+                root_files: vec![],
+                extensions: vec![".vue".to_string(), ".ts".to_string(), ".tsx".to_string()],
+                workspace_root: p.workspace_root.clone(),
+                workspace_aliases: p.workspace_aliases.clone(),
+                compiler_options: p.compiler_options.clone(),
+                references: p.references.clone(),
+                membership: p.membership.clone(),
+            })
+            .collect();
+        let graph = crate::project_graph::ProjectGraph::from_configs(vfs_configs);
+        *self.engine.project_graph.write() = graph;
+        self.engine.rebuild_and_publish();
+    }
+
+    // ── Directory mutations (in-memory) ──
+
     fn write_file(&self, path: &str, content: &str) -> Result<(), crate::error::VfsError> {
         self.engine.invalidate_package_manifest(path);
         mark_parent_dir_dirty(&self.engine, path);
@@ -566,17 +609,6 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
         Ok(())
     }
 
-    fn is_dir(&self, path: &str) -> bool {
-        let prefix = if path.ends_with('/') {
-            path.to_string()
-        } else {
-            format!("{path}/")
-        };
-        let guard = self.engine.snapshot.read();
-        let ids: Vec<&str> = guard.ids().collect();
-        ids.iter().any(|id| id.starts_with(&prefix))
-    }
-
     fn register_audit_sink(
         &self,
         sink: Arc<dyn crate::audit_sink::VfsAuditSink>,
@@ -619,40 +651,12 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
         self.engine.unregister_ambient_lib(stable_key, canonical_id)
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    fn read_ambient_lib(
-        &self,
-        stable_key: crate::project_key::ProjectStableKey,
-        canonical_id: &str,
-    ) -> Option<Arc<str>> {
-        self.engine.read_ambient_lib(self, stable_key, canonical_id)
-    }
-
     fn record_ambient_dependency(&self, consumer: &str, virtual_id: &str) {
         // F1.5 fix: route ambient deps through the dedicated
         // `ambient_resolved` class so they survive `record_parsed_edges`
         // re-records. Previously this routed to `lazy_resolved` which is
         // cleared on every parse re-record.
         self.engine.add_ambient_resolved_dep(consumer, virtual_id);
-    }
-
-    fn project_stable_key(
-        &self,
-        project_id: crate::workspace_snapshot::ProjectId,
-    ) -> Option<crate::project_key::ProjectStableKey> {
-        self.engine.project_stable_key(project_id)
-    }
-
-    fn lookup_ambient_symbol(
-        &self,
-        consumer_project: crate::project_key::ProjectStableKey,
-        symbol: &str,
-    ) -> Option<crate::ambient_lib::AmbientSymbolHit> {
-        self.engine.lookup_ambient_symbol(consumer_project, symbol)
-    }
-
-    fn ambient_libs_view(&self) -> Arc<crate::ambient_lib::AmbientLibsByProject> {
-        self.engine.ambient_libs_view()
     }
 }
 

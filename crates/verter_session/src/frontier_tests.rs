@@ -112,7 +112,7 @@ impl CountingWorkspace {
     }
 }
 
-impl verter_workspace::WorkspaceAccess for CountingWorkspace {
+impl verter_workspace::WorkspaceRead for CountingWorkspace {
     fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
         *self
             .read_counts
@@ -162,16 +162,41 @@ impl verter_workspace::WorkspaceAccess for CountingWorkspace {
         self.inner.content_generation()
     }
 
-    fn record_parsed_edges(&self, canonical_id: &str, edges: &[verter_workspace::ParsedEdge]) {
-        self.inner.record_parsed_edges(canonical_id, edges);
-    }
-
     fn reverse_deps_for(&self, canonical_id: &str) -> Vec<String> {
         self.inner.reverse_deps_for(canonical_id)
     }
 
     fn forward_deps_for(&self, canonical_id: &str) -> Vec<String> {
         self.inner.forward_deps_for(canonical_id)
+    }
+
+    fn dependency_snapshot(
+        &self,
+        canonical_id: &str,
+    ) -> Option<verter_workspace::DependencySnapshotView> {
+        self.inner.dependency_snapshot(canonical_id)
+    }
+
+    fn read_dir(
+        &self,
+        dir: &str,
+    ) -> Result<Vec<verter_workspace::DirEntry>, verter_workspace::VfsError> {
+        self.inner.read_dir(dir)
+    }
+
+    fn walk(
+        &self,
+        root: &str,
+        filter_dir: &dyn Fn(&str) -> bool,
+        filter_file: &dyn Fn(&str) -> bool,
+    ) -> Result<Vec<String>, verter_workspace::VfsError> {
+        self.inner.walk(root, filter_dir, filter_file)
+    }
+}
+
+impl verter_workspace::WorkspaceAccess for CountingWorkspace {
+    fn record_parsed_edges(&self, canonical_id: &str, edges: &[verter_workspace::ParsedEdge]) {
+        self.inner.record_parsed_edges(canonical_id, edges);
     }
 
     fn set_exact_resolutions(
@@ -198,13 +223,6 @@ impl verter_workspace::WorkspaceAccess for CountingWorkspace {
         self.inner.set_default_resolve_extensions(host_extensions);
     }
 
-    fn dependency_snapshot(
-        &self,
-        canonical_id: &str,
-    ) -> Option<verter_workspace::DependencySnapshotView> {
-        self.inner.dependency_snapshot(canonical_id)
-    }
-
     fn record_ambient_dependency(&self, consumer: &str, virtual_id: &str) {
         self.inner.record_ambient_dependency(consumer, virtual_id);
     }
@@ -223,22 +241,6 @@ impl verter_workspace::WorkspaceAccess for CountingWorkspace {
 
     fn configure_resolver(&self, projects: Vec<verter_workspace::resolver::IdeProjectConfig>) {
         self.inner.configure_resolver(projects);
-    }
-
-    fn read_dir(
-        &self,
-        dir: &str,
-    ) -> Result<Vec<verter_workspace::DirEntry>, verter_workspace::VfsError> {
-        self.inner.read_dir(dir)
-    }
-
-    fn walk(
-        &self,
-        root: &str,
-        filter_dir: &dyn Fn(&str) -> bool,
-        filter_file: &dyn Fn(&str) -> bool,
-    ) -> Result<Vec<String>, verter_workspace::VfsError> {
-        self.inner.walk(root, filter_dir, filter_file)
     }
 }
 

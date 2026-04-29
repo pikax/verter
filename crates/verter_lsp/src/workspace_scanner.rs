@@ -591,7 +591,9 @@ async fn sync_non_vue_file_to_provider(
             .map(|result| result.module_references)
             .unwrap_or_default();
 
-        let ws = host_clone.workspace();
+        // Phase 6b sub-plan §6b.D2b — `prepare_non_vue_provider_sync` is
+        // a read-only consumer; route through `host.workspace_read()`.
+        let ws = host_clone.workspace_read();
         crate::server::prepare_non_vue_provider_sync(
             Some(&snap_clone),
             ws.as_ref(),

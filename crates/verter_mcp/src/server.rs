@@ -3859,7 +3859,7 @@ const msg = ref('hello')
         );
 
         // Verify the host has a workspace reference (non-standalone uses Arc<dyn WorkspaceAccess>)
-        let ws = host.workspace();
+        let ws = host.workspace_read();
         // owner_for_file returns None because no project graph was set
         assert!(
             ws.owner_for_file("/test-project/Comp.vue").is_none(),
@@ -3870,7 +3870,7 @@ const msg = ref('hello')
     #[test]
     fn host_with_filesystem_workspace_owner_for_file() {
         let host = make_host_with_workspace(vec!["/my-project".to_string()]);
-        let ws = host.workspace();
+        let ws = host.workspace_read();
 
         // Before setting a project graph, owner_for_file returns None
         assert!(

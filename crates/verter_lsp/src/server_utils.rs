@@ -234,34 +234,35 @@ impl<'a> LspProjectResolverReader<'a> {
     }
 }
 
-impl verter_workspace::WorkspaceAccess for LspProjectResolverReader<'_> {
+impl verter_workspace::WorkspaceRead for LspProjectResolverReader<'_> {
     fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
         // Try host cache first (already-upserted files), then workspace (disk).
-        self.documents
-            .host()
-            .get_source(canonical_id)
-            .or_else(|| self.documents.host().workspace().read_file(canonical_id))
+        self.documents.host().get_source(canonical_id).or_else(|| {
+            self.documents
+                .host()
+                .workspace_read()
+                .read_file(canonical_id)
+        })
     }
 
     fn file_exists(&self, canonical_id: &str) -> bool {
         self.documents.host().get_source(canonical_id).is_some()
-            || self.documents.host().workspace().file_exists(canonical_id)
+            || self
+                .documents
+                .host()
+                .workspace_read()
+                .file_exists(canonical_id)
     }
 
     fn realpath(&self, canonical_id: &str) -> Option<String> {
         if self.documents.host().get_source(canonical_id).is_some() {
             return Some(canonical_id.replace('\\', "/"));
         }
-        self.documents.host().workspace().realpath(canonical_id)
+        self.documents
+            .host()
+            .workspace_read()
+            .realpath(canonical_id)
     }
-
-    // ── Reader-only stub overrides for reverse-graph methods (R6/R7) ──
-    //
-    // Rationale (§2.16b): `LspProjectResolverReader` is a thin file-read
-    // adapter passed to the project resolver for source/manifest reads
-    // during import resolution. It does not participate in dep-flow; the
-    // host's workspace owns those edges.
-    fn record_parsed_edges(&self, _canonical_id: &str, _edges: &[verter_workspace::ParsedEdge]) {}
 
     fn reverse_deps_for(&self, _canonical_id: &str) -> Vec<String> {
         Vec::new()
@@ -270,6 +271,23 @@ impl verter_workspace::WorkspaceAccess for LspProjectResolverReader<'_> {
     fn forward_deps_for(&self, _canonical_id: &str) -> Vec<String> {
         Vec::new()
     }
+
+    fn dependency_snapshot(
+        &self,
+        _canonical_id: &str,
+    ) -> Option<verter_workspace::DependencySnapshotView> {
+        None
+    }
+}
+
+impl verter_workspace::WorkspaceAccess for LspProjectResolverReader<'_> {
+    // ── Reader-only stub overrides for reverse-graph methods (R6/R7) ──
+    //
+    // Rationale (§2.16b): `LspProjectResolverReader` is a thin file-read
+    // adapter passed to the project resolver for source/manifest reads
+    // during import resolution. It does not participate in dep-flow; the
+    // host's workspace owns those edges.
+    fn record_parsed_edges(&self, _canonical_id: &str, _edges: &[verter_workspace::ParsedEdge]) {}
 
     fn set_exact_resolutions(
         &self,
@@ -288,19 +306,12 @@ impl verter_workspace::WorkspaceAccess for LspProjectResolverReader<'_> {
 
     fn set_default_resolve_extensions(&self, _host_extensions: Vec<String>) {}
 
-    fn dependency_snapshot(
-        &self,
-        _canonical_id: &str,
-    ) -> Option<verter_workspace::DependencySnapshotView> {
-        None
-    }
-
     fn record_ambient_dependency(&self, _consumer: &str, _virtual_id: &str) {}
 }
 
 pub(crate) fn rewrite_non_vue_source_with_resolver(
     resolver: &crate::project_resolver::NativeProjectResolver,
-    reader: &dyn verter_workspace::WorkspaceAccess,
+    reader: &dyn verter_workspace::WorkspaceRead,
     importer_id: &str,
     source: &str,
     module_references: &[verter_session::ScriptModuleReference],
@@ -348,7 +359,7 @@ pub(crate) fn rewrite_non_vue_source_with_resolver(
 
 pub(crate) fn prepare_non_vue_provider_sync(
     snapshot: Option<&super::PublishedResolverSnapshot>,
-    reader: &dyn verter_workspace::WorkspaceAccess,
+    reader: &dyn verter_workspace::WorkspaceRead,
     importer_id: &str,
     source: &str,
     module_references: &[verter_session::ScriptModuleReference],
@@ -378,7 +389,7 @@ pub(crate) fn prepare_non_vue_provider_sync(
 
 pub(crate) fn collect_resolved_provider_dependencies(
     resolver: &crate::project_resolver::NativeProjectResolver,
-    reader: &dyn verter_workspace::WorkspaceAccess,
+    reader: &dyn verter_workspace::WorkspaceRead,
     importer_id: &str,
     module_references: &[verter_session::ScriptModuleReference],
 ) -> Vec<crate::project_resolver::ResolveResult> {
@@ -433,7 +444,7 @@ pub(crate) fn collect_resolved_provider_dependencies(
 
 pub(super) fn collect_resolved_provider_dependencies_from_analyzed_refs(
     resolver: &crate::project_resolver::NativeProjectResolver,
-    reader: &dyn verter_workspace::WorkspaceAccess,
+    reader: &dyn verter_workspace::WorkspaceRead,
     importer_id: &str,
     module_references: &[verter_semantic::analysis::AnalyzedModuleReference],
 ) -> Vec<crate::project_resolver::ResolveResult> {
@@ -826,7 +837,7 @@ where
 
 pub(super) fn collect_priority_vue_targets_from_module_references(
     snapshot: Option<&super::PublishedResolverSnapshot>,
-    reader: &dyn verter_workspace::WorkspaceAccess,
+    reader: &dyn verter_workspace::WorkspaceRead,
     importer_id: &str,
     module_references: &[verter_semantic::analysis::AnalyzedModuleReference],
 ) -> Vec<String> {

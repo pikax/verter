@@ -214,7 +214,9 @@ mod self_tests {
     #[test]
     fn stub_lib_pick_resolves() {
         let host = build_hermetic_host_with_lib(&[], &[("lib.es5.d.ts", STUB_LIB_ES5)]);
-        let workspace = host.workspace();
+        // Phase 6b sub-plan §6b.D2b — read consumers route through
+        // `host.workspace_read()` (the `WorkspaceRead` trait surface).
+        let workspace = host.workspace_read();
         let key = workspace
             .project_stable_key(ProjectId(0))
             .expect("hermetic host with lib MUST have a configured project");
@@ -246,18 +248,27 @@ mod self_tests {
     fn register_ambient_lib_idempotent() {
         let host_a = build_hermetic_host_with_lib(&[], &[("lib.es5.d.ts", STUB_LIB_ES5)]);
         let host_b = build_hermetic_host_with_lib(&[], &[("lib.es5.d.ts", STUB_LIB_ES5)]);
-        let key_a = host_a.workspace().project_stable_key(ProjectId(0)).unwrap();
-        let key_b = host_b.workspace().project_stable_key(ProjectId(0)).unwrap();
+        // Phase 6b sub-plan §6b.D2b — read consumers route through
+        // `host.workspace_read()`.
+        let key_a = host_a
+            .workspace_read()
+            .project_stable_key(ProjectId(0))
+            .unwrap();
+        let key_b = host_b
+            .workspace_read()
+            .project_stable_key(ProjectId(0))
+            .unwrap();
         // Same configured project (same workspace_root + tsconfig) → same
         // ProjectStableKey across hosts (A3 determinism).
         assert_eq!(key_a, key_b);
-        // Both registries expose Pick.
+        // Both registries expose Pick. Phase 6b sub-plan §6b.D2b — read
+        // consumers route through `host.workspace_read()`.
         assert!(host_a
-            .workspace()
+            .workspace_read()
             .lookup_ambient_symbol(key_a, "Pick")
             .is_some());
         assert!(host_b
-            .workspace()
+            .workspace_read()
             .lookup_ambient_symbol(key_b, "Pick")
             .is_some());
     }
@@ -268,12 +279,15 @@ mod self_tests {
     #[test]
     fn vfs_shadowing_overlay_wins() {
         let host = build_hermetic_host_with_lib(&[], &[("lib.es5.d.ts", STUB_LIB_ES5)]);
-        let workspace = host.workspace();
+        // Phase 6b sub-plan §6b.D2b — read consumers route through
+        // `host.workspace_read()`; mutators (`notify_upsert`) go through
+        // the dedicated host wrapper.
+        let workspace = host.workspace_read();
         let key = workspace.project_stable_key(ProjectId(0)).unwrap();
         // Initial state: ambient lib reachable.
         assert!(workspace.read_ambient_lib(key, "lib.es5.d.ts").is_some());
         // Open an editor buffer at the same canonical_id.
-        workspace.notify_upsert("lib.es5.d.ts", Arc::from("// user override"));
+        host.notify_upsert("lib.es5.d.ts", Arc::from("// user override"));
         assert!(
             workspace.read_ambient_lib(key, "lib.es5.d.ts").is_none(),
             "A5: user overlay MUST shadow ambient lib via read_ambient_lib"

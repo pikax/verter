@@ -1022,7 +1022,7 @@ impl TestResolverReader {
     }
 }
 
-impl verter_workspace::WorkspaceAccess for TestResolverReader {
+impl verter_workspace::WorkspaceRead for TestResolverReader {
     fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
         self.texts.get(&canonical_id.replace('\\', "/")).cloned()
     }
@@ -1036,17 +1036,26 @@ impl verter_workspace::WorkspaceAccess for TestResolverReader {
         self.file_exists(&normalized).then_some(normalized)
     }
 
-    // Reader-only stub overrides (R6/R7). Rationale: `TestResolverReader`
-    // is an LSP test fixture that only feeds the resolver with file content
-    // for definition/hover/completion test plumbing; it never participates
-    // in the host's dep-flow.
-    fn record_parsed_edges(&self, _canonical_id: &str, _edges: &[verter_workspace::ParsedEdge]) {}
     fn reverse_deps_for(&self, _canonical_id: &str) -> Vec<String> {
         Vec::new()
     }
     fn forward_deps_for(&self, _canonical_id: &str) -> Vec<String> {
         Vec::new()
     }
+    fn dependency_snapshot(
+        &self,
+        _canonical_id: &str,
+    ) -> Option<verter_workspace::DependencySnapshotView> {
+        None
+    }
+}
+
+impl verter_workspace::WorkspaceAccess for TestResolverReader {
+    // Reader-only stub overrides (R6/R7). Rationale: `TestResolverReader`
+    // is an LSP test fixture that only feeds the resolver with file content
+    // for definition/hover/completion test plumbing; it never participates
+    // in the host's dep-flow.
+    fn record_parsed_edges(&self, _canonical_id: &str, _edges: &[verter_workspace::ParsedEdge]) {}
     fn set_exact_resolutions(
         &self,
         _canonical_id: &str,
@@ -1061,12 +1070,6 @@ impl verter_workspace::WorkspaceAccess for TestResolverReader {
     ) {
     }
     fn set_default_resolve_extensions(&self, _host_extensions: Vec<String>) {}
-    fn dependency_snapshot(
-        &self,
-        _canonical_id: &str,
-    ) -> Option<verter_workspace::DependencySnapshotView> {
-        None
-    }
     fn record_ambient_dependency(&self, _consumer: &str, _virtual_id: &str) {}
 }
 
@@ -6451,7 +6454,7 @@ async fn sync_pending_vue_provider_file_hydrates_codegen_blockers_before_sync() 
         resolver: crate::project_resolver::NativeProjectResolver::new(vec![project]),
         ownership_ready: true,
     };
-    let ws = documents.host().workspace();
+    let ws = documents.host().workspace_read();
     let external_resolved = snapshot.resolver.resolve_with_reader(
         ws.as_ref(),
         &crate::project_resolver::ResolveRequest {
@@ -7430,7 +7433,7 @@ fn vfs_workspace_with_project_graph() {
     ));
 
     // Before setting a project graph, owner_for_file returns None
-    use verter_workspace::WorkspaceAccess;
+    use verter_workspace::WorkspaceRead;
     assert!(
         workspace
             .owner_for_file("/my-project/src/App.vue")
@@ -7477,7 +7480,7 @@ fn vfs_workspace_with_project_graph() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn on_file_changed_invalidates_vfs_negative_cache_for_created_file() {
-    use verter_workspace::WorkspaceAccess;
+    use verter_workspace::WorkspaceRead;
 
     let temp = tempfile::tempdir().expect("temp dir");
     let workspace = temp.path().join("workspace");
@@ -7525,7 +7528,7 @@ async fn on_file_changed_invalidates_vfs_negative_cache_for_created_file() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn on_watcher_state_changed_invalidates_vfs_negative_cache_under_workspace_root() {
-    use verter_workspace::WorkspaceAccess;
+    use verter_workspace::WorkspaceRead;
 
     let temp = tempfile::tempdir().expect("temp dir");
     let workspace = temp.path().join("workspace");

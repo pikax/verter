@@ -121,7 +121,7 @@ pub use snapshot_builder::build_workspace_snapshot_simple;
 #[cfg(not(target_arch = "wasm32"))]
 pub use snapshot_builder::{build_workspace_snapshot, membership_to_spec, SnapshotBuildResult};
 pub use traits::{
-    EmptyResolverSnapshot, ResolverSnapshot, SourceLoader, WorkspaceAccess,
+    EmptyResolverSnapshot, ResolverSnapshot, SourceLoader, WorkspaceAccess, WorkspaceRead,
     WorkspaceResourceSnapshot,
 };
 pub use types::{

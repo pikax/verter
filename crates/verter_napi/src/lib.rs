@@ -1109,21 +1109,21 @@ impl NapiWorkspace {
     /// Read a file from the workspace (overlay → snapshot → disk).
     #[napi(js_name = "readFile")]
     pub async fn read_file(&self, path: String) -> Result<Option<String>> {
-        use verter_workspace::WorkspaceAccess;
+        use verter_workspace::WorkspaceRead;
         Ok(self.inner.read_file(&path).map(|s| s.to_string()))
     }
 
     /// Check if a file exists in the workspace.
     #[napi(js_name = "fileExists")]
     pub async fn file_exists(&self, path: String) -> Result<bool> {
-        use verter_workspace::WorkspaceAccess;
+        use verter_workspace::WorkspaceRead;
         Ok(self.inner.file_exists(&path))
     }
 
     /// Check if a path is a directory.
     #[napi(js_name = "isDir")]
     pub async fn is_dir(&self, path: String) -> Result<bool> {
-        use verter_workspace::WorkspaceAccess;
+        use verter_workspace::WorkspaceRead;
         Ok(self.inner.is_dir(&path))
     }
 
@@ -1139,7 +1139,7 @@ impl NapiWorkspace {
     /// Read directory entries. Returns array of { path, isDir }.
     #[napi(js_name = "readDir")]
     pub async fn read_dir(&self, dir: String) -> Result<Vec<NapiDirEntry>> {
-        use verter_workspace::WorkspaceAccess;
+        use verter_workspace::WorkspaceRead;
         self.inner
             .read_dir(&dir)
             .map(|entries| {
@@ -1162,7 +1162,7 @@ impl NapiWorkspace {
         exclude_dirs: Vec<String>,
         extensions: Option<Vec<String>>,
     ) -> Result<Vec<String>> {
-        use verter_workspace::WorkspaceAccess;
+        use verter_workspace::WorkspaceRead;
         let exts = extensions;
         self.inner
             .walk(
@@ -1218,7 +1218,7 @@ impl NapiWorkspace {
     /// Resolve symlinks to real path. Returns null if not found.
     #[napi(js_name = "realpath")]
     pub async fn realpath(&self, path: String) -> Result<Option<String>> {
-        use verter_workspace::WorkspaceAccess;
+        use verter_workspace::WorkspaceRead;
         Ok(self.inner.realpath(&path))
     }
 
@@ -1231,7 +1231,7 @@ impl NapiWorkspace {
         phase: Option<String>,
         kind: Option<String>,
     ) -> Result<Option<String>> {
-        use verter_workspace::WorkspaceAccess;
+        use verter_workspace::WorkspaceRead;
         let phase = match phase.as_deref() {
             Some("provider") => verter_workspace::ResolvePhase::ProviderGraph,
             _ => verter_workspace::ResolvePhase::CodegenBlocker,

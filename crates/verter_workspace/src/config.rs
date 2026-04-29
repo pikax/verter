@@ -1,13 +1,14 @@
 //! Tsconfig discovery and parsing for project configuration.
 //!
-//! All filesystem access goes through `&dyn WorkspaceAccess`.
+//! All filesystem access goes through `&dyn WorkspaceRead` (Phase 6b
+//! sub-plan §6b.D2b — these helpers are read-only consumers).
 
 use std::path::{Path, PathBuf};
 
 use crate::resolver::{
     join_paths, normalize_canonical_id, parent_dir, IdeProjectCompilerOptions, ProjectMembership,
 };
-use crate::traits::WorkspaceAccess;
+use crate::traits::WorkspaceRead;
 
 /// Maximum depth for tsconfig `extends` chain resolution.
 const MAX_TSCONFIG_EXTENDS_DEPTH: u8 = 8;
@@ -228,10 +229,7 @@ pub fn discover_tsconfigs(root: &Path) -> Vec<TsConfigEntry> {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Parse a tsconfig.json. All file reads go through `ws`.
-pub fn parse_tsconfig_json(
-    ws: &dyn WorkspaceAccess,
-    tsconfig_path: &str,
-) -> Option<ParsedTsConfig> {
+pub fn parse_tsconfig_json(ws: &dyn WorkspaceRead, tsconfig_path: &str) -> Option<ParsedTsConfig> {
     let compiler_options = load_compiler_options(ws, tsconfig_path);
     let membership = load_project_membership(ws, tsconfig_path);
     let references = load_project_references(ws, tsconfig_path);
@@ -244,14 +242,14 @@ pub fn parse_tsconfig_json(
 
 /// Load compiler options from a tsconfig.json, following `extends`.
 pub fn load_compiler_options(
-    ws: &dyn WorkspaceAccess,
+    ws: &dyn WorkspaceRead,
     tsconfig_path: &str,
 ) -> IdeProjectCompilerOptions {
     load_compiler_options_inner(ws, tsconfig_path, 0).unwrap_or_default()
 }
 
 fn load_compiler_options_inner(
-    ws: &dyn WorkspaceAccess,
+    ws: &dyn WorkspaceRead,
     tsconfig_path: &str,
     depth: u8,
 ) -> Option<IdeProjectCompilerOptions> {
@@ -310,12 +308,12 @@ fn load_compiler_options_inner(
 }
 
 /// Load project membership (files/include/exclude) from a tsconfig.json.
-pub fn load_project_membership(ws: &dyn WorkspaceAccess, tsconfig_path: &str) -> ProjectMembership {
+pub fn load_project_membership(ws: &dyn WorkspaceRead, tsconfig_path: &str) -> ProjectMembership {
     load_project_membership_inner(ws, tsconfig_path, 0).unwrap_or(ProjectMembership::MatchAll)
 }
 
 fn load_project_membership_inner(
-    ws: &dyn WorkspaceAccess,
+    ws: &dyn WorkspaceRead,
     tsconfig_path: &str,
     depth: u8,
 ) -> Option<ProjectMembership> {
@@ -381,7 +379,7 @@ fn load_project_membership_inner(
 }
 
 /// Load project references from a tsconfig.json.
-pub fn load_project_references(ws: &dyn WorkspaceAccess, tsconfig_path: &str) -> Vec<String> {
+pub fn load_project_references(ws: &dyn WorkspaceRead, tsconfig_path: &str) -> Vec<String> {
     let tsconfig_dir = parent_dir(tsconfig_path);
     let Some(content) = ws.read_file(tsconfig_path) else {
         return Vec::new();
@@ -401,7 +399,7 @@ pub fn load_project_references(ws: &dyn WorkspaceAccess, tsconfig_path: &str) ->
 }
 
 /// Check if a workspace has any solution-style tsconfig.json.
-pub fn has_solution_style_tsconfig(ws: &dyn WorkspaceAccess, workspace_root: &str) -> bool {
+pub fn has_solution_style_tsconfig(ws: &dyn WorkspaceRead, workspace_root: &str) -> bool {
     let tsconfig = join_paths(workspace_root, "tsconfig.json");
     if is_solution_style_tsconfig(ws, &tsconfig) {
         return true;
@@ -441,7 +439,7 @@ pub fn has_solution_style_tsconfig(ws: &dyn WorkspaceAccess, workspace_root: &st
     false
 }
 
-fn is_solution_style_tsconfig(ws: &dyn WorkspaceAccess, tsconfig_path: &str) -> bool {
+fn is_solution_style_tsconfig(ws: &dyn WorkspaceRead, tsconfig_path: &str) -> bool {
     let Some(content) = ws.read_file(tsconfig_path) else {
         return false;
     };
@@ -460,14 +458,14 @@ fn is_solution_style_tsconfig(ws: &dyn WorkspaceAccess, tsconfig_path: &str) -> 
 
 /// Extract the raw `baseUrl` and `paths` JSON from a tsconfig.
 pub fn raw_paths_json(
-    ws: &dyn WorkspaceAccess,
+    ws: &dyn WorkspaceRead,
     tsconfig_path: &str,
 ) -> Option<(String, serde_json::Value)> {
     raw_paths_json_inner(ws, tsconfig_path, 0)
 }
 
 fn raw_paths_json_inner(
-    ws: &dyn WorkspaceAccess,
+    ws: &dyn WorkspaceRead,
     tsconfig_path: &str,
     depth: u8,
 ) -> Option<(String, serde_json::Value)> {
@@ -525,7 +523,7 @@ fn raw_paths_json_inner(
 
 /// Resolve `extends` field from tsconfig.json.
 pub fn resolve_tsconfig_extends(
-    ws: &dyn WorkspaceAccess,
+    ws: &dyn WorkspaceRead,
     tsconfig_dir: &str,
     extends: &str,
 ) -> Option<String> {
@@ -565,7 +563,7 @@ pub fn resolve_tsconfig_extends(
 }
 
 fn resolve_tsconfig_reference(
-    ws: &dyn WorkspaceAccess,
+    ws: &dyn WorkspaceRead,
     tsconfig_dir: &str,
     ref_path: &str,
 ) -> Option<String> {

@@ -556,15 +556,37 @@ impl VerterHost {
     /// **Mutator caution (Phase 6b sub-plan §6b.2.F6.bypass):** mutator
     /// methods on the returned trait object (`notify_upsert`, `notify_close`,
     /// `notify_delete`, `set_exact_resolutions`, `configure_resolver`,
-    /// `set_workspace`, etc.) bypass the host-side cache cascade and will be
-    /// rerouted through dedicated wrappers (`host.notify_upsert(...)`,
+    /// `set_workspace`, etc.) bypass the host-side cache cascade — go through
+    /// the dedicated wrappers (`host.notify_upsert(...)`,
     /// `host.notify_close(...)`, `host.set_exact_resolutions(...)`,
-    /// `host.configure_projects(...)`) in commit 6b.D2b. Phase 6b also
-    /// demotes this accessor to `pub(crate)` and exposes a public
-    /// `workspace_read()` accessor that returns a narrower `WorkspaceRead`
-    /// trait object covering only the file-access methods.
-    pub fn workspace(&self) -> Arc<dyn verter_workspace::WorkspaceAccess> {
+    /// `host.configure_projects(...)`) instead.
+    ///
+    /// **Phase 6b sub-plan §6b.D2b:** demoted to `pub(crate)` so external
+    /// crates cannot reach mutators directly. External read consumers go
+    /// through [`Self::workspace_read`] which returns the narrower
+    /// `Arc<dyn WorkspaceRead>` trait object covering only file-access
+    /// methods. Trait upcasting (Rust 1.86+) makes
+    /// `Arc<dyn WorkspaceAccess>` → `Arc<dyn WorkspaceRead>` lock-free.
+    pub(crate) fn workspace(&self) -> Arc<dyn verter_workspace::WorkspaceAccess> {
         self.workspace.read().clone()
+    }
+
+    /// Phase 6b sub-plan §6b.D2b — public read-only workspace access.
+    ///
+    /// Returns the narrower [`WorkspaceRead`](verter_workspace::WorkspaceRead)
+    /// trait object covering all file-access methods. Mutators
+    /// (`notify_close`, `notify_upsert`, `configure_projects`,
+    /// `set_exact_resolutions`, `upsert`, etc.) are reachable only via
+    /// host wrappers that run the cache-cascade discipline; direct
+    /// `WorkspaceAccess` mutator calls are gated behind `pub(crate)
+    /// workspace()` and not callable from external crates.
+    ///
+    /// The `WorkspaceAccess: WorkspaceRead` supertrait bound (Rust 1.86+
+    /// trait upcasting) makes this a lock-free `Arc` clone +
+    /// upcast — no separate adapter or tracing layer.
+    #[must_use]
+    pub fn workspace_read(&self) -> Arc<dyn verter_workspace::WorkspaceRead> {
+        self.workspace.read().clone() as Arc<dyn verter_workspace::WorkspaceRead>
     }
 
     /// Test-only host audit view. Phase 5g-supplement §5.D.0 r17.
@@ -1359,6 +1381,81 @@ impl VerterHost {
         // publish that started before the bump.
         self.project_type_store.bump_project_generation_and_evict();
         self.project_type_store.route_owned_shallow().clear_all();
+        self.bump_store_view_epoch();
+    }
+
+    /// Phase 6b sub-plan §6b.D2b — host wrapper for
+    /// [`WorkspaceAccess::notify_close`] that runs the cache-eviction
+    /// cascade alongside the workspace-side overlay clear. Replaces direct
+    /// `host.workspace().notify_close(...)` calls (now `pub(crate)`-gated).
+    ///
+    /// EVICT FIRST. `notify_close` bumps `content_generation` (verified at
+    /// `engine.rs:350/755/772`); the materialiser's tier-2 gate catches
+    /// stale entries via workspace_generation mismatch on subsequent
+    /// reads. The pre-publish fence (§6b.D2a step 2 STEP 7) catches
+    /// in-flight publishes by re-reading content_generation immediately
+    /// before publish.
+    pub fn notify_close(&self, canonical_id: &str) {
+        self.project_type_store
+            .route_owned_shallow()
+            .remove(canonical_id);
+        self.ws().notify_close(canonical_id);
+    }
+
+    /// Phase 6b sub-plan §6b.D2b — host wrapper for
+    /// [`WorkspaceAccess::notify_upsert`] that runs the route-only cache
+    /// eviction alongside the workspace-side overlay write. Replaces
+    /// direct `host.workspace().notify_upsert(...)` calls.
+    ///
+    /// EVICT FIRST. `ws().notify_upsert` internally bumps
+    /// `content_generation`, which feeds the materialiser's tier-2
+    /// fallback gate. Eviction-first shrinks the race window. The
+    /// residual race (a concurrent cold reader publishes an entry
+    /// tagged with the pre-mutation workspace_generation immediately
+    /// before this wrapper's `content_generation` bump lands) is
+    /// tolerated: the next reader's tier-2 gate catches it via
+    /// generation mismatch and re-materialises.
+    ///
+    /// Note: the full content-change cascade (resolved_type_cache,
+    /// semantic_invalidate, etc.) belongs on `host.upsert(canonical,
+    /// source)` — the authoritative content-change pipeline.
+    /// `notify_upsert` is the overlay-signal hook only.
+    pub fn notify_upsert(&self, canonical_id: &str, source: Arc<str>) {
+        self.project_type_store
+            .route_owned_shallow()
+            .remove(canonical_id);
+        self.ws().notify_upsert(canonical_id, source);
+    }
+
+    /// Phase 6b sub-plan §6b.D2b — host wrapper for
+    /// [`WorkspaceAccess::set_exact_resolutions`] with the FULL
+    /// `set_import_dependencies` cascade shape PLUS
+    /// `bump_project_generation_and_evict` and
+    /// `route_owned_shallow.clear_all`.
+    ///
+    /// `set_exact_resolutions` is a route-resolution mutation — the
+    /// project graph changes but `content_generation` does NOT bump
+    /// (verified at `engine.rs:357–365`). Without bumping
+    /// `project_generation`, an in-flight materialiser that captured
+    /// the old generation could publish a stale entry, and the tier-3
+    /// gate would let the stale entry through on subsequent reads.
+    /// Bumping `project_generation` in this wrapper closes that race.
+    pub fn set_exact_resolutions(
+        &self,
+        canonical: &str,
+        resolutions: Vec<verter_workspace::ExactResolution>,
+    ) {
+        // EVICT-FIRST: bump project_generation BEFORE the workspace
+        // mutator so a concurrent in-flight materialiser's pre-read
+        // project_generation capture is invalidated by tier-3 before
+        // it can publish.
+        self.project_type_store.bump_project_generation_and_evict();
+        self.project_type_store.route_owned_shallow().clear_all();
+        self.ws().set_exact_resolutions(canonical, resolutions);
+        self.resolver.runtime.invalidate_canonical(canonical);
+        self.project_type_store.evict_canonical(canonical); // belt-and-suspenders per-canonical
+        self.resolved_type_cache.lock().clear();
+        self.semantic_invalidate(canonical);
         self.bump_store_view_epoch();
     }
 

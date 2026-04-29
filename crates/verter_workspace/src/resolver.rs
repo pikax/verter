@@ -262,7 +262,7 @@ impl ProjectResolver {
     /// project references) requires an owning project.
     pub fn resolve_with_reader(
         &self,
-        reader: &dyn crate::traits::WorkspaceAccess,
+        reader: &dyn crate::traits::WorkspaceRead,
         request: &ResolveRequest,
     ) -> Option<ResolveResult> {
         let importer_owner = self.owner_for_file(&request.importer_id);
@@ -295,7 +295,7 @@ impl ProjectResolver {
 
     pub fn resolve_for_project_with_reader(
         &self,
-        reader: &dyn crate::traits::WorkspaceAccess,
+        reader: &dyn crate::traits::WorkspaceRead,
         owner: &crate::types::ProjectOwnership,
         specifier: &str,
         ctx: ResolutionContext,
@@ -394,7 +394,7 @@ impl ProjectResolver {
     /// - `node_modules` resolution
     fn resolve_source_id_unowned(
         &self,
-        reader: &dyn crate::traits::WorkspaceAccess,
+        reader: &dyn crate::traits::WorkspaceRead,
         importer_id: &str,
         specifier: &str,
         ctx: ResolutionContext,
@@ -436,7 +436,7 @@ impl ProjectResolver {
 
     fn resolve_source_id(
         &self,
-        reader: &dyn crate::traits::WorkspaceAccess,
+        reader: &dyn crate::traits::WorkspaceRead,
         importer_owner: &IdeProjectConfig,
         importer_id: &str,
         specifier: &str,
@@ -514,7 +514,7 @@ impl ProjectResolver {
 
     fn resolve_source_id_for_project(
         &self,
-        reader: &dyn crate::traits::WorkspaceAccess,
+        reader: &dyn crate::traits::WorkspaceRead,
         project: &IdeProjectConfig,
         specifier: &str,
         ctx: ResolutionContext,
@@ -590,7 +590,7 @@ impl ProjectResolver {
     /// Returns `None` if no alias matches or the importer has no owning project.
     pub fn preferred_specifier(
         &self,
-        reader: &dyn crate::traits::WorkspaceAccess,
+        reader: &dyn crate::traits::WorkspaceRead,
         importer_id: &str,
         target_id: &str,
     ) -> Option<String> {
@@ -656,7 +656,7 @@ impl ProjectResolver {
 
     fn resolve_project_references(
         &self,
-        reader: &dyn crate::traits::WorkspaceAccess,
+        reader: &dyn crate::traits::WorkspaceRead,
         importer_owner: &IdeProjectConfig,
         specifier: &str,
         ctx: ResolutionContext,
@@ -722,7 +722,7 @@ fn matches_any_pattern_for_root(path: &str, root: &str, patterns: &[String]) -> 
 }
 
 fn resolve_tsconfig_paths(
-    reader: &dyn crate::traits::WorkspaceAccess,
+    reader: &dyn crate::traits::WorkspaceRead,
     project: &IdeProjectConfig,
     specifier: &str,
     ctx: ResolutionContext,
@@ -750,7 +750,7 @@ fn resolve_tsconfig_paths(
 }
 
 fn resolve_path_mapping_target(
-    reader: &dyn crate::traits::WorkspaceAccess,
+    reader: &dyn crate::traits::WorkspaceRead,
     candidate: &str,
     ctx: ResolutionContext,
 ) -> Option<String> {
@@ -885,7 +885,7 @@ fn sorted_workspace_aliases(aliases: &[WorkspaceAlias]) -> Vec<&WorkspaceAlias> 
     aliases
 }
 
-fn probe_path(reader: &dyn crate::traits::WorkspaceAccess, base: &str) -> Option<String> {
+fn probe_path(reader: &dyn crate::traits::WorkspaceRead, base: &str) -> Option<String> {
     let base = normalize_canonical_id(base);
     let has_extension = Path::new(&base).extension().is_some();
 
@@ -913,7 +913,7 @@ fn probe_path(reader: &dyn crate::traits::WorkspaceAccess, base: &str) -> Option
 }
 
 fn probe_path_for_context(
-    reader: &dyn crate::traits::WorkspaceAccess,
+    reader: &dyn crate::traits::WorkspaceRead,
     base: &str,
     ctx: ResolutionContext,
 ) -> Option<String> {
@@ -927,7 +927,7 @@ fn probe_path_for_context(
 }
 
 fn resolve_existing_path(
-    reader: &dyn crate::traits::WorkspaceAccess,
+    reader: &dyn crate::traits::WorkspaceRead,
     candidate: &str,
 ) -> Option<String> {
     let normalized = normalize_canonical_id(candidate);
@@ -982,7 +982,7 @@ fn is_declaration_file(path: &str) -> bool {
 }
 
 fn resolve_manifest_types_entry(
-    reader: &dyn crate::traits::WorkspaceAccess,
+    reader: &dyn crate::traits::WorkspaceRead,
     package_dir: &str,
     package_json: &PackageManifest,
 ) -> Option<String> {
@@ -1002,7 +1002,7 @@ fn resolve_manifest_types_entry(
 }
 
 fn resolve_declaration_companion(
-    reader: &dyn crate::traits::WorkspaceAccess,
+    reader: &dyn crate::traits::WorkspaceRead,
     candidate: &str,
 ) -> Option<String> {
     let normalized = normalize_canonical_id(candidate);
@@ -1031,7 +1031,7 @@ fn resolve_declaration_companion(
 }
 
 fn package_follow_is_confirmed(
-    reader: &dyn crate::traits::WorkspaceAccess,
+    reader: &dyn crate::traits::WorkspaceRead,
     importer_id: &str,
     resolved: &str,
 ) -> bool {
@@ -1159,7 +1159,7 @@ fn project_rank(project: &IdeProjectConfig) -> u8 {
 }
 
 fn resolve_package_imports(
-    reader: &dyn crate::traits::WorkspaceAccess,
+    reader: &dyn crate::traits::WorkspaceRead,
     importer_id: &str,
     specifier: &str,
     ctx: ResolutionContext,
@@ -1192,7 +1192,7 @@ fn resolve_package_imports(
 }
 
 fn resolve_package_imports_from_dir(
-    reader: &dyn crate::traits::WorkspaceAccess,
+    reader: &dyn crate::traits::WorkspaceRead,
     start_dir: &str,
     specifier: &str,
     ctx: ResolutionContext,
@@ -1225,7 +1225,7 @@ fn resolve_package_imports_from_dir(
 }
 
 fn resolve_node_modules_package(
-    reader: &dyn crate::traits::WorkspaceAccess,
+    reader: &dyn crate::traits::WorkspaceRead,
     importer_id: &str,
     specifier: &str,
     ctx: ResolutionContext,
@@ -1240,7 +1240,7 @@ fn resolve_node_modules_package(
 }
 
 fn resolve_node_modules_package_from_dir(
-    reader: &dyn crate::traits::WorkspaceAccess,
+    reader: &dyn crate::traits::WorkspaceRead,
     start_dir: &str,
     specifier: &str,
     ctx: ResolutionContext,
@@ -1255,7 +1255,7 @@ fn resolve_node_modules_package_from_dir(
 }
 
 fn resolve_node_modules_package_from_dirs<I>(
-    reader: &dyn crate::traits::WorkspaceAccess,
+    reader: &dyn crate::traits::WorkspaceRead,
     directories: I,
     specifier: &str,
     ctx: ResolutionContext,
@@ -1323,7 +1323,7 @@ where
 }
 
 fn read_package_manifest_if_present(
-    reader: &dyn crate::traits::WorkspaceAccess,
+    reader: &dyn crate::traits::WorkspaceRead,
     canonical_id: &str,
 ) -> Option<PackageManifest> {
     let normalized = normalize_canonical_id(canonical_id);
@@ -1334,7 +1334,7 @@ fn read_package_manifest_if_present(
 }
 
 fn resolve_package_exports(
-    reader: &dyn crate::traits::WorkspaceAccess,
+    reader: &dyn crate::traits::WorkspaceRead,
     package_dir: &str,
     exports: &serde_json::Value,
     export_key: &str,
@@ -1364,7 +1364,7 @@ fn resolve_package_exports(
 }
 
 fn resolve_legacy_package(
-    reader: &dyn crate::traits::WorkspaceAccess,
+    reader: &dyn crate::traits::WorkspaceRead,
     package_dir: &str,
     package_json: &PackageManifest,
     subpath: &str,
@@ -1406,7 +1406,7 @@ fn resolve_legacy_package(
 }
 
 fn resolve_package_target(
-    reader: &dyn crate::traits::WorkspaceAccess,
+    reader: &dyn crate::traits::WorkspaceRead,
     package_dir: &str,
     value: &serde_json::Value,
     captured: Option<&str>,

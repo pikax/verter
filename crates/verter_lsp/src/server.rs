@@ -42,7 +42,7 @@ use crate::tsgo::merge;
 use crate::tsgo::project_sync::ProjectSync;
 use crate::tsgo::traits::TypeProvider;
 use crate::LspConfig;
-use verter_workspace::WorkspaceAccess;
+use verter_workspace::WorkspaceRead;
 
 // ── Handler tracking for freeze diagnosis ──────────────────────────────
 

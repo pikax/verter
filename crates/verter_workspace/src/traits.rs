@@ -23,29 +23,29 @@ pub struct WorkspaceResourceSnapshot {
     pub published_project_count: usize,
 }
 
-/// Single workspace trait — sole authority for file access and resolution.
+/// Phase 6b sub-plan §6b.D2b — read-only view of the workspace authority.
 ///
-/// All workspace I/O (reads, writes, walks, resolution) goes through this
-/// trait. There is no separate `ProjectResolverReader` or `ConfigFileReader`.
-/// The resolver, config parser, and host all take `&dyn WorkspaceAccess`.
+/// `WorkspaceRead` carries every method that does NOT mutate workspace state
+/// (file reads, resolution, ownership, generation, queries, ambient-lib
+/// lookups). It is the public surface of the workspace exposed to external
+/// crates via [`VerterHost::workspace_read`](`crate::WorkspaceRead`); the
+/// mutator surface lives on [`WorkspaceAccess`] (which extends
+/// `WorkspaceRead`) and is gated behind `pub(crate) workspace()`.
 ///
-/// # Implementors
+/// **Trait-upcasting requires Rust 1.86.** The workspace `Cargo.toml`
+/// declares `rust-version = "1.86"`; this lets `Arc<dyn WorkspaceAccess>`
+/// upcast to `Arc<dyn WorkspaceRead>` without a manual `as_read_arc`
+/// conversion.
 ///
-/// - [`FilesystemWorkspace`] — disk-backed with overlay/snapshot cache
-/// - [`MemoryWorkspace`] — fully in-memory (tests, WASM, playground)
-/// - Lightweight adapters (LSP readers) that delegate to a host's workspace
+/// # Implementation note
 ///
-/// # Minimal implementation
-///
-/// Only [`read_file`], [`file_exists`], and [`realpath`] are required for
-/// a lightweight adapter (e.g., for the project resolver). All other methods
-/// have default implementations.
-///
-/// # Thread safety
-///
-/// Requires `Send + Sync` — implementations must use interior mutability
-/// (e.g., `parking_lot::RwLock`) for thread-safe state.
-pub trait WorkspaceAccess: Send + Sync {
+/// Concrete workspaces (`FilesystemWorkspace`, `MemoryWorkspace`, etc.)
+/// implement BOTH traits. The split is mechanical: read-method bodies live
+/// on `impl WorkspaceRead for X`, mutator-method bodies on
+/// `impl WorkspaceAccess for X`. The `WorkspaceAccess: WorkspaceRead`
+/// supertrait bound ensures any `&dyn WorkspaceAccess` can be implicitly
+/// used as a `&dyn WorkspaceRead`.
+pub trait WorkspaceRead: Send + Sync {
     // ── File reads ──
 
     /// Read file content. Returns overlay content if set, otherwise
@@ -139,9 +139,6 @@ pub trait WorkspaceAccess: Send + Sync {
         crate::types::VfsProvenanceSnapshot::default()
     }
 
-    /// Reset VFS provenance counters.
-    fn reset_vfs_provenance(&self) {}
-
     /// Point-in-time resource snapshot for native audit.
     fn resource_snapshot(&self) -> WorkspaceResourceSnapshot {
         WorkspaceResourceSnapshot::default()
@@ -156,6 +153,127 @@ pub trait WorkspaceAccess: Send + Sync {
         None
     }
 
+    /// Query reverse deps (files that import this file). Returns the union
+    /// of canonical-axis and stem-axis hits, with the queried target
+    /// stripped longest-suffix-first against the workspace's configured
+    /// extension list.
+    fn reverse_deps_for(&self, canonical_id: &str) -> Vec<String>;
+
+    /// Query forward deps (files this file imports). Union of all
+    /// canonical-axis dep classes (parsed + exact + lazy + ambient +
+    /// semantic_transitive). Stems are NOT included.
+    fn forward_deps_for(&self, canonical_id: &str) -> Vec<String>;
+
+    /// Inspection: snapshot of an owner's dependency state.
+    fn dependency_snapshot(&self, canonical_id: &str) -> Option<DependencySnapshotView>;
+
+    // ── Directory queries ──
+
+    /// List entries in a directory.
+    /// Default: `Err(UnsupportedOperation)`.
+    fn read_dir(&self, _dir: &str) -> Result<Vec<crate::error::DirEntry>, crate::error::VfsError> {
+        Err(crate::error::VfsError::UnsupportedOperation("read_dir"))
+    }
+
+    /// Recursively walk a directory tree, filtering directories and files.
+    /// Returns canonical paths of matching files.
+    /// Default: `Err(UnsupportedOperation)`.
+    fn walk(
+        &self,
+        _root: &str,
+        _filter_dir: &dyn Fn(&str) -> bool,
+        _filter_file: &dyn Fn(&str) -> bool,
+    ) -> Result<Vec<String>, crate::error::VfsError> {
+        Err(crate::error::VfsError::UnsupportedOperation("walk"))
+    }
+
+    /// Check whether a path is a directory.
+    fn is_dir(&self, _path: &str) -> bool {
+        false
+    }
+
+    // ── Ambient TypeScript lib reads ──
+
+    /// Read an ambient lib's source by `(stable_key, canonical_id)`.
+    ///
+    /// Returns `None` when the canonical_id is shadowed by a non-ambient user
+    /// file (overlay or snapshot) — see A5 user-wins shadowing.
+    ///
+    /// Default: `None`.
+    fn read_ambient_lib(
+        &self,
+        _stable_key: ProjectStableKey,
+        _canonical_id: &str,
+    ) -> Option<Arc<str>> {
+        None
+    }
+
+    /// Compute the project-scoped ambient virtual canonical id for a
+    /// `(stable_key, canonical_id)` pair (`ambient:/<tag>/<canonical>`).
+    ///
+    /// Default falls through to the helper in [`crate::ambient_lib`] so all
+    /// backends produce the same id for the same inputs.
+    fn ambient_virtual_canonical_id(
+        &self,
+        stable_key: ProjectStableKey,
+        canonical_id: &str,
+    ) -> Arc<str> {
+        crate::ambient_lib::ambient_virtual_canonical_id(stable_key, canonical_id)
+    }
+
+    /// Resolve a `ProjectId` (snapshot index) to its stable key for ambient
+    /// lookups. Returns `None` when the workspace is not yet published or the
+    /// id is unknown. Default: `None`.
+    fn project_stable_key(&self, _project_id: ProjectId) -> Option<ProjectStableKey> {
+        None
+    }
+
+    /// O(1) symbol-name lookup against the registered ambient libs for a
+    /// given consumer project. Used by the bare-name resolver as a fallback
+    /// when a symbol is not present in scope or in the import graph.
+    ///
+    /// Default: `None`.
+    fn lookup_ambient_symbol(
+        &self,
+        _consumer_project: ProjectStableKey,
+        _symbol: &str,
+    ) -> Option<AmbientSymbolHit> {
+        None
+    }
+
+    /// Lock-free read of the engine's ambient lib registry, used by host-side
+    /// validators (e.g., `HostFenceValidator`'s ambient `WholeHash` arm).
+    /// Backends that don't support ambient libs return an empty registry.
+    fn ambient_libs_view(&self) -> Arc<AmbientLibsByProject> {
+        Arc::new(AmbientLibsByProject::default())
+    }
+}
+
+/// Mutating view of the workspace authority — extends [`WorkspaceRead`]
+/// with edge recording, exact-resolution writes, overlay notifications,
+/// audit-sink registry, and ambient-lib mutators.
+///
+/// All workspace I/O (reads, writes, walks, resolution) goes through this
+/// trait hierarchy. There is no separate `ProjectResolverReader` or
+/// `ConfigFileReader`. The resolver, config parser, and host all take
+/// `&dyn WorkspaceAccess` (or the narrower `&dyn WorkspaceRead` for
+/// read-only consumers).
+///
+/// # Implementors
+///
+/// - [`FilesystemWorkspace`] — disk-backed with overlay/snapshot cache
+/// - [`MemoryWorkspace`] — fully in-memory (tests, WASM, playground)
+/// - Lightweight adapters (LSP readers) that delegate to a host's workspace
+///
+/// # Phase 6b sub-plan §6b.D2b
+///
+/// `WorkspaceAccess` is no longer the public read API for external crates;
+/// it is gated behind `pub(crate) VerterHost::workspace()`. Read consumers
+/// outside `verter_session` use `VerterHost::workspace_read()` →
+/// `Arc<dyn WorkspaceRead>`. Mutators (`notify_close`, `notify_upsert`,
+/// `set_exact_resolutions`, `configure_resolver`) are reachable only via
+/// host wrappers that run the cache-cascade discipline.
+pub trait WorkspaceAccess: WorkspaceRead {
     // ── Reverse-graph authority methods (R6: NO DEFAULTS) ──
     //
     // Every WorkspaceAccess impl MUST explicitly implement these. A future
@@ -170,17 +288,6 @@ pub trait WorkspaceAccess: Send + Sync {
     /// `lazy_resolved`, and `semantic_transitive` for the file. **Does NOT
     /// clear `ambient_resolved` (F1.5).**
     fn record_parsed_edges(&self, canonical_id: &str, edges: &[ParsedEdge]);
-
-    /// Query reverse deps (files that import this file). Returns the union
-    /// of canonical-axis and stem-axis hits, with the queried target
-    /// stripped longest-suffix-first against the workspace's configured
-    /// extension list.
-    fn reverse_deps_for(&self, canonical_id: &str) -> Vec<String>;
-
-    /// Query forward deps (files this file imports). Union of all
-    /// canonical-axis dep classes (parsed + exact + lazy + ambient +
-    /// semantic_transitive). Stems are NOT included.
-    fn forward_deps_for(&self, canonical_id: &str) -> Vec<String>;
 
     /// Replace bundler-injected exact resolutions for a file. The active
     /// stem set is recomputed AFTER the exact mutation; parsed-unresolved
@@ -199,8 +306,8 @@ pub trait WorkspaceAccess: Send + Sync {
     /// with `probe_extensions()` and sorts longest-first at set-time (F4).
     fn set_default_resolve_extensions(&self, host_extensions: Vec<String>);
 
-    /// Inspection: snapshot of an owner's dependency state.
-    fn dependency_snapshot(&self, canonical_id: &str) -> Option<DependencySnapshotView>;
+    /// Reset VFS provenance counters.
+    fn reset_vfs_provenance(&self) {}
 
     /// Notify the workspace that a file was upserted into the host.
     ///
@@ -228,24 +335,6 @@ pub trait WorkspaceAccess: Send + Sync {
     fn configure_resolver(&self, _projects: Vec<crate::resolver::IdeProjectConfig>) {}
 
     // ── Directory and mutation operations ──
-
-    /// List entries in a directory.
-    /// Default: `Err(UnsupportedOperation)`.
-    fn read_dir(&self, _dir: &str) -> Result<Vec<crate::error::DirEntry>, crate::error::VfsError> {
-        Err(crate::error::VfsError::UnsupportedOperation("read_dir"))
-    }
-
-    /// Recursively walk a directory tree, filtering directories and files.
-    /// Returns canonical paths of matching files.
-    /// Default: `Err(UnsupportedOperation)`.
-    fn walk(
-        &self,
-        _root: &str,
-        _filter_dir: &dyn Fn(&str) -> bool,
-        _filter_file: &dyn Fn(&str) -> bool,
-    ) -> Result<Vec<String>, crate::error::VfsError> {
-        Err(crate::error::VfsError::UnsupportedOperation("walk"))
-    }
 
     /// Write file content. Creates parent directories as needed.
     /// Default: `Err(UnsupportedOperation)`.
@@ -281,11 +370,6 @@ pub trait WorkspaceAccess: Send + Sync {
         Err(crate::error::VfsError::UnsupportedOperation("copy_file"))
     }
 
-    /// Check whether a path is a directory.
-    fn is_dir(&self, _path: &str) -> bool {
-        false
-    }
-
     // ── Audit sink registry (plan §2.4 / Commit 4) ──
 
     /// Register a VFS audit sink. The returned handle is deregister-able
@@ -308,11 +392,7 @@ pub trait WorkspaceAccess: Send + Sync {
         Err(crate::audit_sink::AuditSinkError::NotSupported)
     }
 
-    // ── Ambient TypeScript lib registry (Phase 5 §6 — A1) ──
-    //
-    // All methods live on the base trait so `VerterHost::workspace()` can reach
-    // them through `Arc<dyn WorkspaceAccess>`. Default impls return
-    // `NotBootstrapped` / `None` for backends without ambient lib support.
+    // ── Ambient TypeScript lib registry mutations ──
 
     /// Register an ambient TypeScript lib (e.g. `lib.es5.d.ts`) for a project.
     ///
@@ -335,33 +415,6 @@ pub trait WorkspaceAccess: Send + Sync {
         Err(AmbientLibError::NotBootstrapped)
     }
 
-    /// Read an ambient lib's source by `(stable_key, canonical_id)`.
-    ///
-    /// Returns `None` when the canonical_id is shadowed by a non-ambient user
-    /// file (overlay or snapshot) — see A5 user-wins shadowing.
-    ///
-    /// Default: `None`.
-    fn read_ambient_lib(
-        &self,
-        _stable_key: ProjectStableKey,
-        _canonical_id: &str,
-    ) -> Option<Arc<str>> {
-        None
-    }
-
-    /// Compute the project-scoped ambient virtual canonical id for a
-    /// `(stable_key, canonical_id)` pair (`ambient:/<tag>/<canonical>`).
-    ///
-    /// Default falls through to the helper in [`crate::ambient_lib`] so all
-    /// backends produce the same id for the same inputs.
-    fn ambient_virtual_canonical_id(
-        &self,
-        stable_key: ProjectStableKey,
-        canonical_id: &str,
-    ) -> Arc<str> {
-        crate::ambient_lib::ambient_virtual_canonical_id(stable_key, canonical_id)
-    }
-
     /// Record a session-side reverse-dep edge from a consumer file to the
     /// ambient virtual id. Routes to the dedicated `ambient_resolved`
     /// dep class (F1.5: ambient deps survive parse re-records).
@@ -369,33 +422,6 @@ pub trait WorkspaceAccess: Send + Sync {
     /// `HostFenceValidator` invalidates downstream caches.
     /// **R6: no default; every workspace impl must override.**
     fn record_ambient_dependency(&self, consumer: &str, virtual_id: &str);
-
-    /// Resolve a `ProjectId` (snapshot index) to its stable key for ambient
-    /// lookups. Returns `None` when the workspace is not yet published or the
-    /// id is unknown. Default: `None`.
-    fn project_stable_key(&self, _project_id: ProjectId) -> Option<ProjectStableKey> {
-        None
-    }
-
-    /// O(1) symbol-name lookup against the registered ambient libs for a
-    /// given consumer project. Used by the bare-name resolver as a fallback
-    /// when a symbol is not present in scope or in the import graph.
-    ///
-    /// Default: `None`.
-    fn lookup_ambient_symbol(
-        &self,
-        _consumer_project: ProjectStableKey,
-        _symbol: &str,
-    ) -> Option<AmbientSymbolHit> {
-        None
-    }
-
-    /// Lock-free read of the engine's ambient lib registry, used by host-side
-    /// validators (e.g., `HostFenceValidator`'s ambient `WholeHash` arm).
-    /// Backends that don't support ambient libs return an empty registry.
-    fn ambient_libs_view(&self) -> Arc<AmbientLibsByProject> {
-        Arc::new(AmbientLibsByProject::default())
-    }
 }
 
 // ── Scheduler-oriented traits ──
@@ -488,7 +514,7 @@ mod ambient_default_tests {
     use std::collections::BTreeSet;
     use std::sync::Arc;
 
-    use super::{DependencySnapshotView, WorkspaceAccess};
+    use super::{DependencySnapshotView, WorkspaceAccess, WorkspaceRead};
     use crate::ambient_lib::{AmbientLibError, AmbientLibSpec};
     use crate::project_key::ProjectStableKey;
     use crate::types::{ExactResolution, ExactResolutionResult, ParsedEdge};
@@ -497,7 +523,7 @@ mod ambient_default_tests {
     /// trait defaults.
     struct StubWs;
 
-    impl WorkspaceAccess for StubWs {
+    impl WorkspaceRead for StubWs {
         fn read_file(&self, _id: &str) -> Option<Arc<str>> {
             None
         }
@@ -507,18 +533,23 @@ mod ambient_default_tests {
         fn realpath(&self, _id: &str) -> Option<String> {
             None
         }
-
-        // Reader-only stub overrides (R6/R7). Rationale (§2.16b):
-        // `StubWs` lives inside a `#[cfg(test)]` ambient_default_tests module;
-        // constructed only by trait-default coverage tests that don't invoke
-        // VerterHost or any dep-flow path.
-        fn record_parsed_edges(&self, _id: &str, _edges: &[ParsedEdge]) {}
         fn reverse_deps_for(&self, _id: &str) -> Vec<String> {
             Vec::new()
         }
         fn forward_deps_for(&self, _id: &str) -> Vec<String> {
             Vec::new()
         }
+        fn dependency_snapshot(&self, _id: &str) -> Option<DependencySnapshotView> {
+            None
+        }
+    }
+
+    impl WorkspaceAccess for StubWs {
+        // Reader-only stub overrides (R6/R7). Rationale (§2.16b):
+        // `StubWs` lives inside a `#[cfg(test)]` ambient_default_tests module;
+        // constructed only by trait-default coverage tests that don't invoke
+        // VerterHost or any dep-flow path.
+        fn record_parsed_edges(&self, _id: &str, _edges: &[ParsedEdge]) {}
         fn set_exact_resolutions(
             &self,
             _id: &str,
@@ -528,9 +559,6 @@ mod ambient_default_tests {
         }
         fn replace_semantic_transitive(&self, _id: &str, _deps: BTreeSet<String>) {}
         fn set_default_resolve_extensions(&self, _host_extensions: Vec<String>) {}
-        fn dependency_snapshot(&self, _id: &str) -> Option<DependencySnapshotView> {
-            None
-        }
         fn record_ambient_dependency(&self, _consumer: &str, _virtual_id: &str) {}
     }
 

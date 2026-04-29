@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use verter_span::Span;
-use verter_workspace::WorkspaceAccess;
+use verter_workspace::WorkspaceRead;
 
 #[cfg(target_arch = "wasm32")]
 use crate::shared::read_lock;
@@ -1180,8 +1180,9 @@ fn directory_index_resolution_follows_extension_priority() {
 #[test]
 fn candidate_list_resolves_to_first_loaded() {
     let host = strict_host();
-    // Configure workspace with @/ alias
-    host.workspace().configure_resolver(vec![
+    // Configure workspace with @/ alias via host wrapper (Phase 6b sub-plan
+    // §6b.D2b reroute — `host.workspace()` is `pub(crate)`).
+    host.configure_projects(vec![
         verter_semantic::analysis::project_resolver::IdeProjectConfig {
             root: "/src".to_string(),
             workspace_root: "/src".to_string(),

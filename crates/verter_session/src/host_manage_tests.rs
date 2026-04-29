@@ -2,7 +2,7 @@ use super::*;
 
 use std::sync::Arc;
 use verter_semantic::analysis::type_expr::TypeExpr;
-use verter_workspace::WorkspaceAccess;
+use verter_workspace::{WorkspaceAccess, WorkspaceRead};
 
 const LAZY_ANALYSIS_SFC: &str = r#"<template><div>{{ msg }}</div></template>
 <script setup>
@@ -115,7 +115,7 @@ impl CountingWorkspace {
     }
 }
 
-impl verter_workspace::WorkspaceAccess for CountingWorkspace {
+impl verter_workspace::WorkspaceRead for CountingWorkspace {
     fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
         *self
             .read_counts
@@ -180,16 +180,45 @@ impl verter_workspace::WorkspaceAccess for CountingWorkspace {
         self.inner.content_generation()
     }
 
-    fn record_parsed_edges(&self, canonical_id: &str, edges: &[verter_workspace::ParsedEdge]) {
-        self.inner.record_parsed_edges(canonical_id, edges);
-    }
-
     fn reverse_deps_for(&self, canonical_id: &str) -> Vec<String> {
         self.inner.reverse_deps_for(canonical_id)
     }
 
     fn forward_deps_for(&self, canonical_id: &str) -> Vec<String> {
         self.inner.forward_deps_for(canonical_id)
+    }
+
+    fn dependency_snapshot(
+        &self,
+        canonical_id: &str,
+    ) -> Option<verter_workspace::DependencySnapshotView> {
+        self.inner.dependency_snapshot(canonical_id)
+    }
+
+    fn read_dir(
+        &self,
+        dir: &str,
+    ) -> Result<Vec<verter_workspace::DirEntry>, verter_workspace::VfsError> {
+        self.inner.read_dir(dir)
+    }
+
+    fn walk(
+        &self,
+        root: &str,
+        filter_dir: &dyn Fn(&str) -> bool,
+        filter_file: &dyn Fn(&str) -> bool,
+    ) -> Result<Vec<String>, verter_workspace::VfsError> {
+        self.inner.walk(root, filter_dir, filter_file)
+    }
+
+    fn is_dir(&self, path: &str) -> bool {
+        self.inner.is_dir(path)
+    }
+}
+
+impl verter_workspace::WorkspaceAccess for CountingWorkspace {
+    fn record_parsed_edges(&self, canonical_id: &str, edges: &[verter_workspace::ParsedEdge]) {
+        self.inner.record_parsed_edges(canonical_id, edges);
     }
 
     fn set_exact_resolutions(
@@ -213,13 +242,6 @@ impl verter_workspace::WorkspaceAccess for CountingWorkspace {
         self.inner.set_default_resolve_extensions(host_extensions);
     }
 
-    fn dependency_snapshot(
-        &self,
-        canonical_id: &str,
-    ) -> Option<verter_workspace::DependencySnapshotView> {
-        self.inner.dependency_snapshot(canonical_id)
-    }
-
     fn record_ambient_dependency(&self, consumer: &str, virtual_id: &str) {
         self.inner.record_ambient_dependency(consumer, virtual_id);
     }
@@ -240,22 +262,6 @@ impl verter_workspace::WorkspaceAccess for CountingWorkspace {
         self.inner.configure_resolver(projects);
     }
 
-    fn read_dir(
-        &self,
-        dir: &str,
-    ) -> Result<Vec<verter_workspace::DirEntry>, verter_workspace::VfsError> {
-        self.inner.read_dir(dir)
-    }
-
-    fn walk(
-        &self,
-        root: &str,
-        filter_dir: &dyn Fn(&str) -> bool,
-        filter_file: &dyn Fn(&str) -> bool,
-    ) -> Result<Vec<String>, verter_workspace::VfsError> {
-        self.inner.walk(root, filter_dir, filter_file)
-    }
-
     fn write_file(&self, path: &str, content: &str) -> Result<(), verter_workspace::VfsError> {
         self.inner.write_file(path, content)
     }
@@ -274,10 +280,6 @@ impl verter_workspace::WorkspaceAccess for CountingWorkspace {
 
     fn copy_file(&self, src: &str, dst: &str) -> Result<(), verter_workspace::VfsError> {
         self.inner.copy_file(src, dst)
-    }
-
-    fn is_dir(&self, path: &str) -> bool {
-        self.inner.is_dir(path)
     }
 }
 
@@ -2586,9 +2588,10 @@ fn get_analysis_resolves_alias_import() {
         "/project/src/App.vue",
         "<script setup>\nimport Child from '@/components/Child.vue'\n</script>\n<template><Child/></template>",
     );
-    // Configure workspace resolver with alias
+    // Configure workspace resolver via host wrapper (Phase 6b sub-plan
+    // §6b.D2b reroute).
     {
-        host.workspace().configure_resolver(vec![
+        host.configure_projects(vec![
             verter_semantic::analysis::project_resolver::IdeProjectConfig {
                 root: "/project".to_string(),
                 workspace_root: "/project".to_string(),
@@ -10112,7 +10115,7 @@ mod ambient_fence_validator_tests {
     use crate::{HostConfig, VerterHost};
     use verter_workspace::{
         ambient_virtual_canonical_id, compute_ambient_hash16, AmbientLibSpec, MemoryOptions,
-        MemoryWorkspace, ProjectStableKey, WorkspaceAccess,
+        MemoryWorkspace, ProjectStableKey, WorkspaceAccess, WorkspaceRead,
     };
 
     fn ws_with_one_project() -> Arc<MemoryWorkspace> {

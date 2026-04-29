@@ -50,7 +50,7 @@ mod tests {
     use std::sync::Arc;
 
     use verter_workspace::{
-        AmbientLibSpec, MemoryOptions, MemoryWorkspace, ProjectId, WorkspaceAccess,
+        AmbientLibSpec, MemoryOptions, MemoryWorkspace, ProjectId, WorkspaceAccess, WorkspaceRead,
     };
 
     use super::*;

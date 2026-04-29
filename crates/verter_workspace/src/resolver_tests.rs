@@ -54,7 +54,7 @@ impl TestReader {
     }
 }
 
-impl crate::traits::WorkspaceAccess for TestReader {
+impl crate::traits::WorkspaceRead for TestReader {
     fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
         self.texts
             .get(&normalize_canonical_id(canonical_id))
@@ -75,16 +75,25 @@ impl crate::traits::WorkspaceAccess for TestReader {
             })
     }
 
-    // Reader-only stub overrides (R6/R7). Rationale: `TestReader` is
-    // constructed only by resolver unit tests that exercise resolver-side
-    // concerns (file reads, realpath); they don't touch dep-flow.
-    fn record_parsed_edges(&self, _id: &str, _edges: &[crate::types::ParsedEdge]) {}
     fn reverse_deps_for(&self, _id: &str) -> Vec<String> {
         Vec::new()
     }
     fn forward_deps_for(&self, _id: &str) -> Vec<String> {
         Vec::new()
     }
+    fn dependency_snapshot(
+        &self,
+        _id: &str,
+    ) -> Option<crate::exact_resolution::DependencySnapshotView> {
+        None
+    }
+}
+
+impl crate::traits::WorkspaceAccess for TestReader {
+    // Reader-only stub overrides (R6/R7). Rationale: `TestReader` is
+    // constructed only by resolver unit tests that exercise resolver-side
+    // concerns (file reads, realpath); they don't touch dep-flow.
+    fn record_parsed_edges(&self, _id: &str, _edges: &[crate::types::ParsedEdge]) {}
     fn set_exact_resolutions(
         &self,
         _id: &str,
@@ -94,12 +103,6 @@ impl crate::traits::WorkspaceAccess for TestReader {
     }
     fn replace_semantic_transitive(&self, _id: &str, _deps: std::collections::BTreeSet<String>) {}
     fn set_default_resolve_extensions(&self, _host_extensions: Vec<String>) {}
-    fn dependency_snapshot(
-        &self,
-        _id: &str,
-    ) -> Option<crate::exact_resolution::DependencySnapshotView> {
-        None
-    }
     fn record_ambient_dependency(&self, _consumer: &str, _virtual_id: &str) {}
 }
 
@@ -187,7 +190,7 @@ impl CountingReader {
     }
 }
 
-impl crate::traits::WorkspaceAccess for CountingReader {
+impl crate::traits::WorkspaceRead for CountingReader {
     fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
         self.read_file_count.fetch_add(1, Ordering::Relaxed);
         let normalized = normalize_canonical_id(canonical_id);
@@ -232,16 +235,25 @@ impl crate::traits::WorkspaceAccess for CountingReader {
         Some(manifest)
     }
 
-    // Reader-only stub overrides (R6/R7). Rationale: `CountingReader` is a
-    // resolver unit-test fixture for read_file/file_exists call counting;
-    // it never participates in dep-flow.
-    fn record_parsed_edges(&self, _id: &str, _edges: &[crate::types::ParsedEdge]) {}
     fn reverse_deps_for(&self, _id: &str) -> Vec<String> {
         Vec::new()
     }
     fn forward_deps_for(&self, _id: &str) -> Vec<String> {
         Vec::new()
     }
+    fn dependency_snapshot(
+        &self,
+        _id: &str,
+    ) -> Option<crate::exact_resolution::DependencySnapshotView> {
+        None
+    }
+}
+
+impl crate::traits::WorkspaceAccess for CountingReader {
+    // Reader-only stub overrides (R6/R7). Rationale: `CountingReader` is a
+    // resolver unit-test fixture for read_file/file_exists call counting;
+    // it never participates in dep-flow.
+    fn record_parsed_edges(&self, _id: &str, _edges: &[crate::types::ParsedEdge]) {}
     fn set_exact_resolutions(
         &self,
         _id: &str,
@@ -251,12 +263,6 @@ impl crate::traits::WorkspaceAccess for CountingReader {
     }
     fn replace_semantic_transitive(&self, _id: &str, _deps: std::collections::BTreeSet<String>) {}
     fn set_default_resolve_extensions(&self, _host_extensions: Vec<String>) {}
-    fn dependency_snapshot(
-        &self,
-        _id: &str,
-    ) -> Option<crate::exact_resolution::DependencySnapshotView> {
-        None
-    }
     fn record_ambient_dependency(&self, _consumer: &str, _virtual_id: &str) {}
 }
 

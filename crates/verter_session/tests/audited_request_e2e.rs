@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use verter_session::audited_request::AuditedRequest;
 use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
-use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
+use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess, WorkspaceRead};
 
 fn setup_host() -> Arc<VerterHost> {
     let workspace: Arc<dyn WorkspaceAccess> =

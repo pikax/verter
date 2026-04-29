@@ -60,7 +60,7 @@ fn take_last_read_file_trace_detail(canonical_id: &str) -> Option<String> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl WorkspaceAccess for SchedulerBackedWorkspace {
+impl verter_workspace::WorkspaceRead for SchedulerBackedWorkspace {
     fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
         // Check scheduler's generation-current source snapshot
         if let Some(src) = self.scheduler.try_get_source(canonical_id) {
@@ -97,6 +97,21 @@ impl WorkspaceAccess for SchedulerBackedWorkspace {
         }
     }
 
+    fn reverse_deps_for(&self, _canonical_id: &str) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn forward_deps_for(&self, _canonical_id: &str) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn dependency_snapshot(&self, _canonical_id: &str) -> Option<DependencySnapshotView> {
+        None
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl WorkspaceAccess for SchedulerBackedWorkspace {
     // ── Reader-only stub overrides for reverse-graph methods (R6/R7) ──
     //
     // Rationale (§2.16a/§2.16b): `SchedulerBackedWorkspace` is used only in
@@ -108,14 +123,6 @@ impl WorkspaceAccess for SchedulerBackedWorkspace {
 
     fn record_parsed_edges(&self, _canonical_id: &str, _edges: &[ParsedEdge]) {
         // No edge tracking. See §2.16b reader-only-stub rationale.
-    }
-
-    fn reverse_deps_for(&self, _canonical_id: &str) -> Vec<String> {
-        Vec::new()
-    }
-
-    fn forward_deps_for(&self, _canonical_id: &str) -> Vec<String> {
-        Vec::new()
     }
 
     fn set_exact_resolutions(
@@ -130,10 +137,6 @@ impl WorkspaceAccess for SchedulerBackedWorkspace {
 
     fn set_default_resolve_extensions(&self, _host_extensions: Vec<String>) {}
 
-    fn dependency_snapshot(&self, _canonical_id: &str) -> Option<DependencySnapshotView> {
-        None
-    }
-
     fn record_ambient_dependency(&self, _consumer: &str, _virtual_id: &str) {}
 }
 
@@ -143,6 +146,7 @@ mod tests {
     use verter_scheduler::scheduler::{Request, SchedulerConfig};
     use verter_scheduler::source_loader::MemorySourceLoader;
     use verter_scheduler::stage::{Priority, TargetStage};
+    use verter_workspace::WorkspaceRead;
 
     #[test]
     fn scheduler_backed_workspace_reports_scheduler_hit_trace_detail() {

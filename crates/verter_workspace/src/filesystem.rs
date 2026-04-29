@@ -252,7 +252,9 @@ impl FilesystemWorkspace {
 
 // â”€â”€ WorkspaceAccess implementation â”€â”€
 
-impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
+// Phase 6b sub-plan §6b.D2b — split into `WorkspaceRead` (read-only)
+// and `WorkspaceAccess` (mutators) per the trait hierarchy.
+impl crate::traits::WorkspaceRead for FilesystemWorkspace {
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
         // 1. Overlay
@@ -403,10 +405,6 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         FilesystemWorkspace::vfs_provenance_snapshot(self)
     }
 
-    fn reset_vfs_provenance(&self) {
-        FilesystemWorkspace::reset_vfs_provenance(self);
-    }
-
     fn resource_snapshot(&self) -> crate::traits::WorkspaceResourceSnapshot {
         self.engine.resource_snapshot()
     }
@@ -416,16 +414,77 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
             .preferred_specifier(self, importer_id, target_id)
     }
 
-    fn record_parsed_edges(&self, canonical_id: &str, edges: &[crate::types::ParsedEdge]) {
-        self.engine.record_parsed_edges(self, canonical_id, edges);
-    }
-
     fn reverse_deps_for(&self, canonical_id: &str) -> Vec<String> {
         self.engine.reverse_deps_for(canonical_id)
     }
 
     fn forward_deps_for(&self, canonical_id: &str) -> Vec<String> {
         self.engine.forward_deps_for(canonical_id)
+    }
+
+    fn dependency_snapshot(
+        &self,
+        canonical_id: &str,
+    ) -> Option<crate::exact_resolution::DependencySnapshotView> {
+        self.engine.dependency_snapshot(canonical_id)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn read_dir(&self, dir: &str) -> Result<Vec<crate::error::DirEntry>, crate::error::VfsError> {
+        self.native_fs.read_dir(dir)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn walk(
+        &self,
+        root: &str,
+        filter_dir: &dyn Fn(&str) -> bool,
+        filter_file: &dyn Fn(&str) -> bool,
+    ) -> Result<Vec<String>, crate::error::VfsError> {
+        self.native_fs.walk(root, filter_dir, filter_file)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn is_dir(&self, path: &str) -> bool {
+        self.native_fs.is_dir(path)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn read_ambient_lib(
+        &self,
+        stable_key: crate::project_key::ProjectStableKey,
+        canonical_id: &str,
+    ) -> Option<Arc<str>> {
+        self.engine.read_ambient_lib(self, stable_key, canonical_id)
+    }
+
+    fn project_stable_key(
+        &self,
+        project_id: crate::workspace_snapshot::ProjectId,
+    ) -> Option<crate::project_key::ProjectStableKey> {
+        self.engine.project_stable_key(project_id)
+    }
+
+    fn lookup_ambient_symbol(
+        &self,
+        consumer_project: crate::project_key::ProjectStableKey,
+        symbol: &str,
+    ) -> Option<crate::ambient_lib::AmbientSymbolHit> {
+        self.engine.lookup_ambient_symbol(consumer_project, symbol)
+    }
+
+    fn ambient_libs_view(&self) -> Arc<crate::ambient_lib::AmbientLibsByProject> {
+        self.engine.ambient_libs_view()
+    }
+}
+
+impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
+    fn reset_vfs_provenance(&self) {
+        FilesystemWorkspace::reset_vfs_provenance(self);
+    }
+
+    fn record_parsed_edges(&self, canonical_id: &str, edges: &[crate::types::ParsedEdge]) {
+        self.engine.record_parsed_edges(self, canonical_id, edges);
     }
 
     fn set_exact_resolutions(
@@ -446,13 +505,6 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
 
     fn set_default_resolve_extensions(&self, host_extensions: Vec<String>) {
         self.engine.set_default_resolve_extensions(host_extensions);
-    }
-
-    fn dependency_snapshot(
-        &self,
-        canonical_id: &str,
-    ) -> Option<crate::exact_resolution::DependencySnapshotView> {
-        self.engine.dependency_snapshot(canonical_id)
     }
 
     fn notify_upsert(&self, canonical_id: &str, source: Arc<str>) {
@@ -505,22 +557,7 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         self.engine.rebuild_and_publish();
     }
 
-    // â”€â”€ Directory and mutation operations (delegate to NativeFs) â”€â”€
-
-    #[cfg(not(target_arch = "wasm32"))]
-    fn read_dir(&self, dir: &str) -> Result<Vec<crate::error::DirEntry>, crate::error::VfsError> {
-        self.native_fs.read_dir(dir)
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    fn walk(
-        &self,
-        root: &str,
-        filter_dir: &dyn Fn(&str) -> bool,
-        filter_file: &dyn Fn(&str) -> bool,
-    ) -> Result<Vec<String>, crate::error::VfsError> {
-        self.native_fs.walk(root, filter_dir, filter_file)
-    }
+    // ── Directory and mutation operations (delegate to NativeFs) ──
 
     #[cfg(not(target_arch = "wasm32"))]
     fn write_file(&self, path: &str, content: &str) -> Result<(), crate::error::VfsError> {
@@ -586,11 +623,6 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         Ok(())
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    fn is_dir(&self, path: &str) -> bool {
-        self.native_fs.is_dir(path)
-    }
-
     fn register_audit_sink(
         &self,
         sink: Arc<dyn crate::audit_sink::VfsAuditSink>,
@@ -633,39 +665,11 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         self.engine.unregister_ambient_lib(stable_key, canonical_id)
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    fn read_ambient_lib(
-        &self,
-        stable_key: crate::project_key::ProjectStableKey,
-        canonical_id: &str,
-    ) -> Option<Arc<str>> {
-        self.engine.read_ambient_lib(self, stable_key, canonical_id)
-    }
-
     fn record_ambient_dependency(&self, consumer: &str, virtual_id: &str) {
         // F1.5 fix: route ambient deps through the dedicated
         // `ambient_resolved` class so they survive `record_parsed_edges`
         // re-records.
         self.engine.add_ambient_resolved_dep(consumer, virtual_id);
-    }
-
-    fn project_stable_key(
-        &self,
-        project_id: crate::workspace_snapshot::ProjectId,
-    ) -> Option<crate::project_key::ProjectStableKey> {
-        self.engine.project_stable_key(project_id)
-    }
-
-    fn lookup_ambient_symbol(
-        &self,
-        consumer_project: crate::project_key::ProjectStableKey,
-        symbol: &str,
-    ) -> Option<crate::ambient_lib::AmbientSymbolHit> {
-        self.engine.lookup_ambient_symbol(consumer_project, symbol)
-    }
-
-    fn ambient_libs_view(&self) -> Arc<crate::ambient_lib::AmbientLibsByProject> {
-        self.engine.ambient_libs_view()
     }
 }
 

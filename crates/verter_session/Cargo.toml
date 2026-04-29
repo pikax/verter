@@ -73,6 +73,10 @@ oxc_span = { workspace = true }
 tempfile = "3"
 walkdir = "2"
 regex = "1"
+# Phase 6b sub-plan §6b.D2b — T11 compile-fail trybuild target verifies
+# that `VerterHost::workspace()` is gated behind `pub(crate)` and is not
+# callable from external compilation units.
+trybuild = "1"
 
 [[bench]]
 name = "host_bench"

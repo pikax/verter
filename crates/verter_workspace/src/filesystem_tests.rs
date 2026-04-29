@@ -1,6 +1,6 @@
 use super::*;
 use crate::changes::WorkspaceChange;
-use crate::traits::WorkspaceAccess;
+use crate::traits::{WorkspaceAccess, WorkspaceRead};
 use crate::types::{
     ExactResolution, FileKind, ResolutionContext, ResolvePhase, ResolveRequestKind,
 };

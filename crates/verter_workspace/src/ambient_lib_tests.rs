@@ -15,7 +15,7 @@ use crate::memory::{MemoryOptions, MemoryWorkspace};
 use crate::project_graph::{ProjectGraph, ProjectRank, VfsProjectConfig};
 use crate::project_key::ProjectStableKey;
 use crate::resolver::{IdeProjectCompilerOptions, ProjectMembership};
-use crate::traits::WorkspaceAccess;
+use crate::traits::{WorkspaceAccess, WorkspaceRead};
 
 const STUB_LIB_ES5: &str = r#"
     interface Pick<T, K extends keyof T> { /* */ }

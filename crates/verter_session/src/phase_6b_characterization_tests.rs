@@ -395,7 +395,7 @@ impl CountingWs {
     }
 }
 
-impl WorkspaceAccess for CountingWs {
+impl verter_workspace::WorkspaceRead for CountingWs {
     fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
         *self
             .read_counts
@@ -410,14 +410,26 @@ impl WorkspaceAccess for CountingWs {
     fn realpath(&self, canonical_id: &str) -> Option<String> {
         self.inner.realpath(canonical_id)
     }
-    fn record_parsed_edges(&self, canonical_id: &str, edges: &[verter_workspace::ParsedEdge]) {
-        self.inner.record_parsed_edges(canonical_id, edges)
-    }
     fn reverse_deps_for(&self, canonical_id: &str) -> Vec<String> {
         self.inner.reverse_deps_for(canonical_id)
     }
     fn forward_deps_for(&self, canonical_id: &str) -> Vec<String> {
         self.inner.forward_deps_for(canonical_id)
+    }
+    fn dependency_snapshot(
+        &self,
+        canonical_id: &str,
+    ) -> Option<verter_workspace::DependencySnapshotView> {
+        self.inner.dependency_snapshot(canonical_id)
+    }
+    fn content_generation(&self) -> u64 {
+        self.inner.content_generation()
+    }
+}
+
+impl WorkspaceAccess for CountingWs {
+    fn record_parsed_edges(&self, canonical_id: &str, edges: &[verter_workspace::ParsedEdge]) {
+        self.inner.record_parsed_edges(canonical_id, edges)
     }
     fn set_exact_resolutions(
         &self,
@@ -438,15 +450,6 @@ impl WorkspaceAccess for CountingWs {
     }
     fn set_default_resolve_extensions(&self, host_extensions: Vec<String>) {
         self.inner.set_default_resolve_extensions(host_extensions)
-    }
-    fn dependency_snapshot(
-        &self,
-        canonical_id: &str,
-    ) -> Option<verter_workspace::DependencySnapshotView> {
-        self.inner.dependency_snapshot(canonical_id)
-    }
-    fn content_generation(&self) -> u64 {
-        self.inner.content_generation()
     }
     fn notify_upsert(&self, canonical_id: &str, source: Arc<str>) {
         self.inner.notify_upsert(canonical_id, source)
@@ -822,6 +825,105 @@ fn route_owned_shallow_tiered_gate_invalidates_on_workspace_generation_bump() {
         !host.route_owned_entry_is_fresh_for_test(canonical, &fresh_entry),
         "tier-2 gate must require file_exists; nonexistent file rejects \
          even when workspace_generation matches",
+    );
+}
+
+// ─── T8 — host.set_exact_resolutions wrapper evicts route_owned_shallow ──
+//
+// Per §6b.0.2 row T8: populate a `RouteOwnedShallowEntry` for canonical X;
+// call `host.set_exact_resolutions(canonical, resolutions)`; assert entry
+// is gone. Pre-migration the wrapper doesn't exist (compile failure → red).
+// Post-migration: wrapper cascade includes `bump_project_generation_and_evict`
+// + `route_owned_shallow.clear_all` (per §6b.D2b step 5 + eleventh-pass
+// Codex P0).
+#[test]
+fn route_owned_shallow_evicts_via_host_set_exact_resolutions_wrapper() {
+    use crate::project_type_store::RouteOwnedShallowEntry;
+
+    let host = host();
+    let store = host.project_type_store();
+
+    let canonical: Arc<str> = Arc::from("/seeded/exact_res.ts");
+    let entry = Arc::new(RouteOwnedShallowEntry::test_stub(canonical.clone()));
+    store
+        .route_owned_shallow()
+        .publish(canonical.clone(), Arc::clone(&entry));
+
+    // Setup-discrimination assertion (per §6b.0.2): entry IS present BEFORE
+    // the wrapper call, so a "false-green" (never-populated entry → trivially
+    // is_none after the wrapper) is caught.
+    assert!(
+        store.route_owned_shallow().get_any(&canonical).is_some(),
+        "PRE: entry must be present after publish",
+    );
+
+    let pre_gen = store.current_project_generation();
+
+    // Trigger the cascade.
+    host.set_exact_resolutions(&canonical, Vec::new());
+
+    assert!(
+        store.route_owned_shallow().get_any(&canonical).is_none(),
+        "POST: set_exact_resolutions wrapper must clear route_owned_shallow \
+         via bump_project_generation_and_evict + clear_all cascade",
+    );
+
+    // Project generation must have advanced (proves
+    // bump_project_generation_and_evict is in the cascade per §6b.2.F6.bypass
+    // step 7 / eleventh-pass Codex P0).
+    let post_gen = store.current_project_generation();
+    assert!(
+        post_gen > pre_gen,
+        "POST: project_generation must advance on set_exact_resolutions",
+    );
+}
+
+// ─── T10 — host.notify_close wrapper evicts route_owned_shallow ──────────
+//
+// Per §6b.0.2 row T10: populate a `RouteOwnedShallowEntry` for canonical X;
+// call `host.notify_close(X)`; assert entry is gone. Pre-migration the
+// wrapper doesn't exist (compile failure → red). Post-migration: cascade
+// evicts via `project_type_store.route_owned_shallow.remove(canonical_id)`.
+// This test directly verifies the bypass-fix for the LSP's `did_close`
+// production caller at `verter_lsp/src/documents/mod.rs:322`.
+#[test]
+fn host_notify_close_evicts_route_owned_shallow() {
+    use crate::project_type_store::RouteOwnedShallowEntry;
+
+    let host = host();
+    let store = host.project_type_store();
+
+    let canonical: Arc<str> = Arc::from("/seeded/notify_close.ts");
+    let entry = Arc::new(RouteOwnedShallowEntry::test_stub(canonical.clone()));
+    store
+        .route_owned_shallow()
+        .publish(canonical.clone(), Arc::clone(&entry));
+
+    // Setup-discrimination: entry IS present before the wrapper.
+    assert!(
+        store.route_owned_shallow().get_any(&canonical).is_some(),
+        "PRE: entry must be present after publish",
+    );
+
+    // Trigger the wrapper.
+    host.notify_close(&canonical);
+
+    assert!(
+        store.route_owned_shallow().get_any(&canonical).is_none(),
+        "POST: notify_close wrapper must remove route_owned_shallow entry",
+    );
+
+    // Negative assertion: an unrelated canonical's entry must survive
+    // a per-canonical notify_close (otherwise the wrapper is overly broad).
+    let other: Arc<str> = Arc::from("/other/file.ts");
+    let other_entry = Arc::new(RouteOwnedShallowEntry::test_stub(other.clone()));
+    store
+        .route_owned_shallow()
+        .publish(other.clone(), Arc::clone(&other_entry));
+    host.notify_close(&canonical);
+    assert!(
+        store.route_owned_shallow().get_any(&other).is_some(),
+        "POST: per-canonical notify_close must NOT touch unrelated entries",
     );
 }
 

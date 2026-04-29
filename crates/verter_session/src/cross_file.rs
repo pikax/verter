@@ -618,10 +618,13 @@ import Child from '@/components/Child.vue'
         compile_file(&host, "/project/src/components/Child.vue");
         compile_file(&host, "/project/src/App.vue");
 
-        // Configure workspace resolver with alias (as LSP/unplugin would do)
+        // Configure workspace resolver via host wrapper — Phase 6b sub-plan
+        // §6b.D2b reroute. LSP/unplugin route through `host.configure_projects`
+        // post-bypass-closure; the host wrapper runs the route_owned_shallow
+        // clear_all + bump_project_generation_and_evict cascade.
         {
             use verter_semantic::analysis::project_resolver::*;
-            host.workspace().configure_resolver(vec![IdeProjectConfig {
+            host.configure_projects(vec![IdeProjectConfig {
                 root: "/project".to_string(),
                 workspace_root: "/project".to_string(),
                 tsconfig_path: None,
