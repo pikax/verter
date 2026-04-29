@@ -196,6 +196,47 @@ defineProps<Pick<Cfg, 'alpha'>>();
 <template><div /></template>
 "#;
 
+// ── Exclude<T,U> over a literal union — TS spec §4.4 ────────────────────────
+//   `Exclude<T,U> = T extends U ? never : T` distributes per-member
+//   over T and drops every member matching U. For
+//   `Exclude<'a' | 'b' | 'c', 'b'>`, only `'a'` and `'c'` survive.
+//   Phase 5i §5.11 closes this gap via per-member relation engine
+//   dispatch in `build_builtin_utility`'s new `Extract` / `Exclude`
+//   arms.
+const MAPPED_EXCLUDE_VUE: &str = r#"<script setup lang="ts">
+defineProps<{ kind: Exclude<'a' | 'b' | 'c', 'b'> }>();
+</script>
+<template><div /></template>
+"#;
+
+// ── Extract<T,U> over a literal union — TS spec §4.4 ────────────────────────
+//   `Extract<T,U> = T extends U ? T : never` distributes per-member
+//   over T and keeps every member matching U. For
+//   `Extract<'a' | 'b' | 'c', 'a' | 'b'>`, only `'a'` and `'b'`
+//   survive. Phase 5i §5.11 closes this gap via the same arm that
+//   handles `Exclude` (sister utility).
+const MAPPED_EXTRACT_VUE: &str = r#"<script setup lang="ts">
+defineProps<{ kind: Extract<'a' | 'b' | 'c', 'a' | 'b'> }>();
+</script>
+<template><div /></template>
+"#;
+
+// ── Template-literal mapped type key — TS spec §4.5 ─────────────────────────
+//   `{ [K in 'A' | 'B' as `prefix${K}`]: number }` iterates
+//   K = 'A' | 'B' and uses the `as <template>` clause to interpolate
+//   K into a template literal, producing keys `prefixA` and
+//   `prefixB`. The mapped value is always `number`. Phase 5i §5.11
+//   (re-homed from 5k per §5.13 r15 table) closes the gap by
+//   applying `mapper.name_remap` during member iteration in
+//   `build_mapped_type` and folding `TemplateLiteral` nodes into a
+//   `Literal::String` when every expression resolves to a literal.
+const TEMPLATE_LITERAL_AS_KEY_VUE: &str = r#"<script setup lang="ts">
+type R = { [K in 'A' | 'B' as `prefix${K}`]: number };
+defineProps<R>();
+</script>
+<template><div /></template>
+"#;
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Phase 0b — Class A property fixtures (component-meta macros).
 // ═══════════════════════════════════════════════════════════════════════════
@@ -429,6 +470,9 @@ const F_CONDITIONAL_DISTRIBUTIVE: &[(&str, &str)] = &[("/c.vue", CONDITIONAL_DIS
 const F_INTERSECTION_OF_OBJECTS: &[(&str, &str)] = &[("/c.vue", INTERSECTION_OF_OBJECTS_VUE)];
 const F_RECURSIVE_ALIAS_VIA_TYPEOF: &[(&str, &str)] = &[("/c.vue", RECURSIVE_ALIAS_VIA_TYPEOF_VUE)];
 const F_USERLAND_SHADOWING_PICK: &[(&str, &str)] = &[("/c.vue", USERLAND_SHADOWING_PICK_VUE)];
+const F_MAPPED_EXCLUDE: &[(&str, &str)] = &[("/c.vue", MAPPED_EXCLUDE_VUE)];
+const F_MAPPED_EXTRACT: &[(&str, &str)] = &[("/c.vue", MAPPED_EXTRACT_VUE)];
+const F_TEMPLATE_LITERAL_AS_KEY: &[(&str, &str)] = &[("/c.vue", TEMPLATE_LITERAL_AS_KEY_VUE)];
 
 // ── Phase 0b Class A property fixture file sets ─────────────────────────────
 const F_FIXTURE_PROPS_WITH_DEFAULTS: &[(&str, &str)] =
@@ -627,6 +671,31 @@ pub const FIXTURES: &[CorrectnessFixture] = &[
     CorrectnessFixture {
         id: "userland_shadowing_pick",
         files: F_USERLAND_SHADOWING_PICK,
+        target: "/c.vue",
+        class: FixtureClass::ClassA,
+    },
+    // Phase 5i §5.11 — re-homed Class A fixtures authored after the
+    // `Exclude` / `Extract` literal-type reduction lands (rows 1, 2)
+    // and after the mapper `name_remap` + `TemplateLiteral` fold
+    // lands (row 3 — re-homed from 5k per §5.13 r15 table). All
+    // three were deferred per §0p.A.4 case 2 in Phase 0a's first
+    // spawn and recorded in `phase-00-tier1-mismatches.md`
+    // rows 1-3 / §5.B.5.
+    CorrectnessFixture {
+        id: "mapped_exclude",
+        files: F_MAPPED_EXCLUDE,
+        target: "/c.vue",
+        class: FixtureClass::ClassA,
+    },
+    CorrectnessFixture {
+        id: "mapped_extract",
+        files: F_MAPPED_EXTRACT,
+        target: "/c.vue",
+        class: FixtureClass::ClassA,
+    },
+    CorrectnessFixture {
+        id: "template_literal_as_key",
+        files: F_TEMPLATE_LITERAL_AS_KEY,
         target: "/c.vue",
         class: FixtureClass::ClassA,
     },

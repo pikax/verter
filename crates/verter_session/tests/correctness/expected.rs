@@ -181,6 +181,56 @@ pub fn userland_shadowing_pick() -> SnapshotView {
     ])
 }
 
+// ── Exclude<'a' | 'b' | 'c', 'b'> — distributive conditional reduction ──────
+//   Per TS spec §4.4: `Exclude<T,U> = T extends U ? never : T`
+//   distributes over the union T and drops every member matching U.
+//   `Exclude<'a' | 'b' | 'c', 'b'>` therefore reduces to `'a' | 'c'`
+//   (the survivors after filtering out `'b'`). The renderer prints
+//   the union in source order (`"a" | "c"`), preserving the
+//   left-to-right occurrence of the surviving members in T.
+//
+//   Rule citation: TS spec §4.4 (distributive conditional / Exclude).
+//   `phase-00-tier1-mismatches.md` row 1; closed by Phase 5i §5.11.
+pub fn mapped_exclude() -> SnapshotView {
+    shell(vec![required_prop("kind", "\"a\" | \"c\"")])
+}
+
+// ── Extract<'a' | 'b' | 'c', 'a' | 'b'> — distributive conditional ──────────
+//   Per TS spec §4.4: `Extract<T,U> = T extends U ? T : never`
+//   distributes over T and keeps every member assignable to U.
+//   `Extract<'a' | 'b' | 'c', 'a' | 'b'>` therefore reduces to
+//   `'a' | 'b'` (the survivors are the source members that are
+//   assignable to one of the filter literals). The renderer prints
+//   the union in source order (`"a" | "b"`).
+//
+//   Rule citation: TS spec §4.4 (distributive conditional / Extract).
+//   `phase-00-tier1-mismatches.md` row 2; closed by Phase 5i §5.11.
+pub fn mapped_extract() -> SnapshotView {
+    shell(vec![required_prop("kind", "\"a\" | \"b\"")])
+}
+
+// ── { [K in 'A' | 'B' as `prefix${K}`]: number } — template-literal key ─────
+//   Per TS spec §4.5: a mapped type's `as <expr>` clause re-maps
+//   each iterated key through `<expr>`. When the expression is a
+//   template-literal type referencing the mapper binder K, each
+//   iterated K substitutes into the template; the folded literal
+//   becomes the produced surface name. Iterating
+//   K = 'A' | 'B' through `\`prefix${K}\`` produces members
+//   `prefixA: number` and `prefixB: number`. Both are required
+//   (no `?` modifier). The snapshot projection sorts members
+//   alphabetically by name, so the surface order is
+//   `[prefixA, prefixB]`.
+//
+//   Rule citation: TS spec §4.5 (template-literal types in mapped
+//   key positions). `phase-00-tier1-mismatches.md` row 3; closed by
+//   Phase 5i §5.11 (re-homed from 5k per §5.13 r15 table).
+pub fn template_literal_as_key() -> SnapshotView {
+    shell(vec![
+        required_prop("prefixA", "number"),
+        required_prop("prefixB", "number"),
+    ])
+}
+
 // ── Recursive type alias — `{ root: Tree }` where Tree references itself ────
 //   Per CLAUDE.md "type navigation must stay narrower than expansion:
 //   walking `A['c']['full']['bar']` should navigate intermediate hops
@@ -345,6 +395,13 @@ pub fn lookup_class_a_expected(fixture_id: &str) -> Option<SnapshotView> {
         // Phase 5h §5.10 — fixture authored after the
         // ScopeShadowing thread closes the userland-shadow-pick gap.
         "userland_shadowing_pick" => Some(userland_shadowing_pick()),
+        // Phase 5i §5.11 — fixtures authored after the
+        // Exclude/Extract literal-type reduction (rows 1, 2) and
+        // the mapper name_remap + template-literal fold (row 3,
+        // re-homed from 5k per §5.13 r15) close the deferred gaps.
+        "mapped_exclude" => Some(mapped_exclude()),
+        "mapped_extract" => Some(mapped_extract()),
+        "template_literal_as_key" => Some(template_literal_as_key()),
         // Phase 0b — component-meta property macros (5 of 7 land;
         // `fixture_slots_typed` and `fixture_models` deferred per
         // §0p.A.4 case 2 — see `phase-00b-tier1-mismatches.md`).
