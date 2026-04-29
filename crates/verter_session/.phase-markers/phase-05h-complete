@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "phase": "phase-05h",
+  "status": "success",
+  "base_commit": "ac1ed58f",
+  "work_head_before_marker": "138817d5",
+  "test_results": {
+    "workspace": {
+      "test_scope": "cargo test --workspace --tests --verbose",
+      "passed": 10253,
+      "failed": 0
+    },
+    "correctness": {
+      "test_scope": "cargo test -p verter_session --test correctness",
+      "passed": 12,
+      "failed": 0
+    }
+  },
+  "snapshot_drift": "none",
+  "guards_un_ignored": [
+    "shadowed_pick_is_userland_not_intrinsic"
+  ],
+  "deferred": [],
+  "atomic_gate_phase": true,
+  "derivation_notes_verified": true,
+  "report_path": "phase-05h-report.md"
+}
