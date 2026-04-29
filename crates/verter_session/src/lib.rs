@@ -60,17 +60,17 @@ pub mod component_meta_audit;
 mod component_meta_cache_discipline_tests;
 pub mod component_meta_caches;
 #[cfg(test)]
-mod component_meta_no_cache_promotion_tests;
-#[cfg(test)]
-mod component_meta_read_once_tests;
-#[cfg(test)]
-mod component_meta_terminal_mode_tests;
-#[cfg(test)]
 mod component_meta_caches_tests;
 pub mod component_meta_host;
 pub mod component_meta_materialize;
+#[cfg(test)]
+mod component_meta_no_cache_promotion_tests;
+#[cfg(test)]
+mod component_meta_read_once_tests;
 pub mod component_meta_resolution_policy;
 pub mod component_meta_result_db;
+#[cfg(test)]
+mod component_meta_terminal_mode_tests;
 pub mod cooperative_admission;
 pub mod cross_file;
 #[cfg(test)]

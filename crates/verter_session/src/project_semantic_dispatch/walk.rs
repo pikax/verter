@@ -190,8 +190,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         // existing graph-size + cycle-set bound while letting
         // hermetic tests construct a small budget for discrimination.
         let budget = self.dispatch.host.config().depth_budget;
-        let cap_active =
-            budget > 0 && budget < crate::component_meta_materialize::MAX_DEPTH;
+        let cap_active = budget > 0 && budget < crate::component_meta_materialize::MAX_DEPTH;
 
         while index < path.len() {
             if cap_active && index >= budget {

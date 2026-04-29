@@ -98,12 +98,12 @@ fn cache_discipline_resolve_macro_payload_repeated_keys_warm() {
     );
 
     // Negative assertion: an UNRELATED ResolveMacroPayload key cold-fires.
-    let unrelated_arg = host
-        .project_type_store()
-        .semantic_graph()
-        .intern_node(SemanticNodeData::Primitive(
-            crate::semantic_query::PrimitiveKind::String,
-        ));
+    let unrelated_arg =
+        host.project_type_store()
+            .semantic_graph()
+            .intern_node(SemanticNodeData::Primitive(
+                crate::semantic_query::PrimitiveKind::String,
+            ));
     let unrelated_key = SemanticQueryKey::ResolveMacroPayload {
         owner: DeclIdentity::synthetic("OtherOwner"),
         macro_index: 1,
@@ -132,9 +132,7 @@ fn cache_discipline_resolve_macro_payload_repeated_keys_warm() {
 /// the cached entry on every subsequent call).
 #[test]
 fn cache_discipline_materialize_surface_repeated_keys_warm() {
-    use crate::component_meta_materialize::{
-        MaterializationScope, MaterializeStructureCacheKey,
-    };
+    use crate::component_meta_materialize::{MaterializationScope, MaterializeStructureCacheKey};
 
     let host = build_test_host();
     let base = intern_empty_object(&host);

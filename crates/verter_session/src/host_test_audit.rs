@@ -157,9 +157,7 @@ impl DispatchTrace {
                         // a Union/Intersection/Conditional mid-path.
                         let alt_key = crate::semantic_query::SemanticQueryKey::ProjectPath {
                             base: *base,
-                            path: std::sync::Arc::from(
-                                path[..k].to_vec().into_boxed_slice(),
-                            ),
+                            path: std::sync::Arc::from(path[..k].to_vec().into_boxed_slice()),
                             mode: *mode,
                         };
                         if graph.get(&alt_key).is_some() {
@@ -187,16 +185,13 @@ impl DispatchTrace {
                 // Non-ProjectPath: single-element decomposition.
                 let mode = match other {
                     crate::semantic_query::SemanticQueryKey::ProjectMember { mode, .. }
-                    | crate::semantic_query::SemanticQueryKey::IndexedAccess { mode, .. } => {
-                        *mode
-                    }
+                    | crate::semantic_query::SemanticQueryKey::IndexedAccess { mode, .. } => *mode,
                     crate::semantic_query::SemanticQueryKey::ResolveMacroPayload {
-                        mode,
-                        ..
+                        mode, ..
                     } => *mode,
-                    crate::semantic_query::SemanticQueryKey::Instantiate {
-                        body_mode, ..
-                    } => *body_mode,
+                    crate::semantic_query::SemanticQueryKey::Instantiate { body_mode, .. } => {
+                        *body_mode
+                    }
                     _ => crate::semantic_query::ProjectionMode::Expanded,
                 };
                 vec![SubKey {
@@ -283,6 +278,8 @@ impl<'a> HostTestAudit<'a> {
     /// deep expansion only on demand" rule.
     #[must_use]
     pub fn total_lowerings(&self) -> usize {
-        self.graph.stats_snapshot().decl_subexpression_lowering_count as usize
+        self.graph
+            .stats_snapshot()
+            .decl_subexpression_lowering_count as usize
     }
 }
