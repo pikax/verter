@@ -1,4 +1,4 @@
-//! Phase 5b §5.A — TDD seed for resolver coverage gap: typed slot
+//! Phase 5j §5.12 — TDD seed for resolver coverage gap: typed slot
 //! payload bindings (`defineSlots<{ default(props: { item: string }) }>`)
 //! lower the binding parameter type to `Unknown { raw: "semanticMiss" }`
 //! instead of `Primitive(String)`.
@@ -7,18 +7,22 @@
 //! Verter macros §slots: every key of T surfaces as a slot, with
 //! bindings extracted from each slot function's first parameter.
 //!
-//! **Pre-Phase-5b behaviour:** the slot NAME is extracted, the binding
+//! **Pre-Phase-5j behaviour:** the slot NAME is extracted, the binding
 //! NAME is extracted, but the binding's `TypeExpr` lowers to
 //! `Unknown { raw: "semanticMiss" }`.
 //!
-//! **Post-Phase-5b expected (after commits 2+3 — `ResolveMacroPayload`):**
-//! the binding's `TypeExpr` is `Primitive(String)` for `item: string`
-//! and `Primitive(Number)` for `row: number`.
+//! **Post-Phase-5j expected:** the binding's `TypeExpr` is
+//! `Primitive(String)` for `item: string` and `Primitive(Number)` for
+//! `row: number`.
 //!
-//! This is the ONLY seed that flips green inside Phase 5b — the
-//! `ResolveMacroPayload` variant body lands in commits 2+3 and closes
-//! the slot dispatch path. The other 4 seeds remain RED until
-//! 5d/5e/5f.
+//! Phase 5j adds `ProjectSemanticDispatch::project_slot_binding_member`
+//! which composes existing variants to descend through `Function` ->
+//! `params[0].ty` -> `Member(binding)`. The `expand_field_expr` closure
+//! (`host_manage.rs::compute_evaluated_types*`) routes
+//! `FieldKind::SlotBinding` through this helper instead of the generic
+//! 2-segment `ProjectPath` (which the walker emitted `Opaque(Miss)` for
+//! when reaching the slot's `Function` value with `Member(binding)`
+//! remaining — `walk.rs` Function arm fall-through to `opaque_miss`).
 
 use verter_semantic::analysis::type_expr::{PrimitiveName, TypeExpr};
 
@@ -34,7 +38,6 @@ defineSlots<{
 "#;
 
 #[test]
-#[ignore = "Phase 5f §9 deferral to 5g: the `ResolveMacroPayload::DefineSlots` arm dispatches `ProjectPath{type_args[0], [], mode}` (build.rs:1993) but the slot-bindings extractor at `meta_resolve.rs::DefineSlots` arm still walks the lowered Object's call_signatures via the raw TypeExpr (it does not consult the dispatch result for binding parameter types). Phase 5f's commits 7+8 enable Conditional/IndexedAccess empty-path materialisation for the macro shape extractor (closes inherited-emits + indexed-paths), but the slot-binding-parameter lowering is a distinct path that requires its own migration in 5g (alongside the engine deletion that retires the engine-internal slot resolver). Verified FAIL pre-impl on commit 1, still FAIL after 5f commits 7+8."]
 fn resolver_coverage_slot_shapes_typed_bindings_lower_to_primitive() {
     let host = build_hermetic_host_with_lib(
         &[("/c.vue", SLOTS_TYPED_VUE)],
