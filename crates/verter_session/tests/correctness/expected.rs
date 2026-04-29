@@ -163,6 +163,24 @@ pub fn intersection_of_objects() -> SnapshotView {
     ])
 }
 
+// ── Userland Pick<T,_K> = T shadowing lib's mapped Pick ─────────────────────
+//   The userland alias ignores its `K` parameter and returns the
+//   entire `T`. With it in scope, `defineProps<Pick<Cfg, 'alpha'>>()`
+//   resolves to `Cfg`, so all three members surface (alpha + beta +
+//   gamma — sorted alphabetically by the snapshot projection). The
+//   lib's mapped `Pick<T, K>` would have surfaced only `alpha`.
+//
+//   Rule citation: Verter rule `./.claude/skills/type-resolution`
+//   ("user shadowing wins" / TS-first resolution priority).
+//   `phase-00-tier1-mismatches.md` row 5; closed by Phase 5h §5.10.
+pub fn userland_shadowing_pick() -> SnapshotView {
+    shell(vec![
+        required_prop("alpha", "string"),
+        required_prop("beta", "number"),
+        required_prop("gamma", "boolean"),
+    ])
+}
+
 // ── Recursive type alias — `{ root: Tree }` where Tree references itself ────
 //   Per CLAUDE.md "type navigation must stay narrower than expansion:
 //   walking `A['c']['full']['bar']` should navigate intermediate hops
@@ -324,6 +342,9 @@ pub fn lookup_class_a_expected(fixture_id: &str) -> Option<SnapshotView> {
         "conditional_distributive" => Some(conditional_distributive()),
         "intersection_of_objects" => Some(intersection_of_objects()),
         "recursive_alias_via_typeof" => Some(recursive_alias_via_typeof()),
+        // Phase 5h §5.10 — fixture authored after the
+        // ScopeShadowing thread closes the userland-shadow-pick gap.
+        "userland_shadowing_pick" => Some(userland_shadowing_pick()),
         // Phase 0b — component-meta property macros (5 of 7 land;
         // `fixture_slots_typed` and `fixture_models` deferred per
         // §0p.A.4 case 2 — see `phase-00b-tier1-mismatches.md`).

@@ -176,6 +176,26 @@ defineProps<{ root: Tree }>();
 <template><div /></template>
 "#;
 
+// ── Userland Pick<T,_K> = T shadowing lib Pick — Verter ts-first rule ───────
+//   The userland alias `Pick<T,_K> = T` returns the entire `T` (ignoring
+//   `K`). With this alias in scope, `defineProps<Pick<Cfg, 'alpha'>>()`
+//   resolves to `Cfg` itself — surfacing all three members
+//   (`alpha`, `beta`, `gamma`) — NOT the lib's mapped-Pick output of
+//   only `alpha`. Verter rule `./.claude/skills/type-resolution`
+//   ("user shadowing wins"). Phase 5h §5.10 closes this case via
+//   the resolver-context `ScopeShadowing` struct.
+const USERLAND_SHADOWING_PICK_VUE: &str = r#"<script setup lang="ts">
+type Pick<T, _K> = T;
+interface Cfg {
+  alpha: string;
+  beta: number;
+  gamma: boolean;
+}
+defineProps<Pick<Cfg, 'alpha'>>();
+</script>
+<template><div /></template>
+"#;
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Phase 0b — Class A property fixtures (component-meta macros).
 // ═══════════════════════════════════════════════════════════════════════════
@@ -408,6 +428,7 @@ const F_KEYOF_INTERSECTION: &[(&str, &str)] = &[("/c.vue", KEYOF_INTERSECTION_VU
 const F_CONDITIONAL_DISTRIBUTIVE: &[(&str, &str)] = &[("/c.vue", CONDITIONAL_DISTRIBUTIVE_VUE)];
 const F_INTERSECTION_OF_OBJECTS: &[(&str, &str)] = &[("/c.vue", INTERSECTION_OF_OBJECTS_VUE)];
 const F_RECURSIVE_ALIAS_VIA_TYPEOF: &[(&str, &str)] = &[("/c.vue", RECURSIVE_ALIAS_VIA_TYPEOF_VUE)];
+const F_USERLAND_SHADOWING_PICK: &[(&str, &str)] = &[("/c.vue", USERLAND_SHADOWING_PICK_VUE)];
 
 // ── Phase 0b Class A property fixture file sets ─────────────────────────────
 const F_FIXTURE_PROPS_WITH_DEFAULTS: &[(&str, &str)] =
@@ -595,6 +616,17 @@ pub const FIXTURES: &[CorrectnessFixture] = &[
     CorrectnessFixture {
         id: "recursive_alias_via_typeof",
         files: F_RECURSIVE_ALIAS_VIA_TYPEOF,
+        target: "/c.vue",
+        class: FixtureClass::ClassA,
+    },
+    // Phase 5h §5.10 — re-homed Class A fixture authored after the
+    // resolver-context `ScopeShadowing` thread closes the
+    // userland-shadow-pick gap (was deferred per §0p.A.4 case 2 in
+    // Phase 0a's first spawn, recorded in `phase-00-tier1-mismatches.md`
+    // row 5 / §5.B.5).
+    CorrectnessFixture {
+        id: "userland_shadowing_pick",
+        files: F_USERLAND_SHADOWING_PICK,
         target: "/c.vue",
         class: FixtureClass::ClassA,
     },
