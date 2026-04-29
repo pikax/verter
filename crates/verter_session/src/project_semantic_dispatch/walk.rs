@@ -820,17 +820,29 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             // top-level Conditional shell that the trampoline filter
             // `type_expr_is_expanded_surface` rejects.
             //
-            // Pre-evaluation guard: do not redistribute closed
-            // conditionals (already reduced by `build_conditional`'s
-            // distributive arm before the shell was interned). The
-            // shell exists ONLY when the check is unbound (TypeParam
-            // / Infer / etc.), so distribution is safe — both
-            // branches are independently meaningful surfaces.
+            // Distribution-trigger guard: only distribute when the
+            // `check` is unbound (TypeParam / Infer). Concrete checks
+            // that produced a deferred shell because `relate_nodes`
+            // returned `Unknown` (e.g., a structural relation the
+            // shallow check can't decide) MUST NOT distribute — the
+            // relation may still resolve at a more concrete callsite
+            // (after substitutions land), and a premature distribute
+            // would falsely Union the false branch into a result that
+            // is actually true-branch-only. CLAUDE.md "open
+            // conditionals" semantics scope distribution to unbound
+            // checks; concrete-check Unknowns are deferred reductions,
+            // not open conditionals.
             SemanticNodeData::Conditional {
+                check,
                 true_branch_ref,
                 false_branch_ref,
                 ..
-            } if matches!(self.mode, ProjectionMode::Expanded) => {
+            } if matches!(self.mode, ProjectionMode::Expanded)
+                && matches!(
+                    self.graph().node_data(*check).as_deref(),
+                    Some(SemanticNodeData::TypeParam { .. } | SemanticNodeData::Infer { .. })
+                ) =>
+            {
                 let true_branch = *true_branch_ref;
                 let false_branch = *false_branch_ref;
                 drop(data);

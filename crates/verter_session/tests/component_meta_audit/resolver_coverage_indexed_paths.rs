@@ -51,7 +51,6 @@ export interface Theme {
 "#;
 
 #[test]
-#[ignore = "Phase 5b §5.A seed: closes in Phase 5f (commit 8) via dispatch ProjectPath migration. Verified FAIL pre-impl on commit 1."]
 fn resolver_coverage_indexed_paths_deep_chain() {
     let host = build_hermetic_host_with_lib(
         &[("/c.vue", INDEXED_PATHS_VUE), ("/deep_cfg.ts", DEEP_CFG_TS)],

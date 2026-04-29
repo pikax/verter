@@ -151,13 +151,38 @@ pub(crate) fn project_expr_class_a_via_dispatch_threaded<'host>(
         }
     }
 
-    // Phase 3: generic ProjectPath dispatch (host-cached, engine
-    // independent).
+    // Phase 5f §8: indexed-path dispatch via decomposed `ProjectPath`.
+    // For an IndexedAccess chain with literal-string indices over a
+    // generic-instantiated Ref base (e.g.,
+    // `WrappedConfig<Theme>['nested']['palette']`), the registry-route
+    // fast-path does not match (it requires `type_arguments.is_empty()`),
+    // so the chain reaches `lower_type_expr_in_scope` which lowers each
+    // hop into deferred IndexedAccess shells. The shell wrapping the
+    // generic-substitution context cannot be evaluated in
+    // `expand_empty_path_terminal` without losing the substitution
+    // thread. CLAUDE.md "Macro Type Traversal Rule" — "walking
+    // A['c']['full']['bar'] should navigate intermediate hops and
+    // expand only the terminal requested projection" — directs the
+    // walker to receive the full path as `PathSegment::Index` segments
+    // so `PathWalker` threads the substitution context across hops
+    // consistently. Decompose the IndexedAccess chain at the caller
+    // boundary, lower only the innermost (non-IndexedAccess) base, then
+    // dispatch `ProjectPath { base, path: [..segments], Expanded }`.
+    let (base_expr, path_segments) = decompose_indexed_access_chain(expr);
     let dispatch = ProjectSemanticDispatch::new(host);
-    let base = dispatch.lower_type_expr_in_scope(scope_canonical_id, expr)?;
+    let (base, project_path) = if path_segments.is_empty() {
+        let base = dispatch.lower_type_expr_in_scope(scope_canonical_id, expr)?;
+        (
+            base,
+            Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        )
+    } else {
+        let base = dispatch.lower_type_expr_in_scope(scope_canonical_id, base_expr)?;
+        (base, path_segments)
+    };
     let read = dispatch.execute_to_type_expr(&SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        path: project_path,
         mode: ProjectionMode::Expanded,
     });
     let projected = match read.value {
@@ -166,6 +191,47 @@ pub(crate) fn project_expr_class_a_via_dispatch_threaded<'host>(
     };
     (!type_expr_contains_semantic_miss(&projected) && type_expr_is_expanded_surface(&projected))
         .then_some(projected)
+}
+
+/// Phase 5f §8 — decompose an IndexedAccess chain over literal-string
+/// indices into `(base_expr, path_segments)` so the dispatch helper can
+/// route through `ProjectPath { base, path, Expanded }` per CLAUDE.md
+/// "Macro Type Traversal Rule".
+///
+/// Returns `(expr, &[])` when the input is not a string-indexed
+/// IndexedAccess chain — caller falls back to lowering `expr` whole.
+/// Walks Parenthesized wrappers transparently. Stops decomposition at
+/// the first non-string-literal index (returns the partial chain as
+/// path with the partial-chain root as base).
+fn decompose_indexed_access_chain(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> (
+    &verter_semantic::analysis::type_expr::TypeExpr,
+    Arc<[crate::semantic_query::PathSegment]>,
+) {
+    use crate::semantic_query::{IndexKey, PathSegment};
+    use verter_semantic::analysis::type_expr::{LiteralValue, TypeExpr};
+
+    fn descend<'a>(expr: &'a TypeExpr, path: &mut Vec<PathSegment>) -> &'a TypeExpr {
+        match expr {
+            TypeExpr::Parenthesized(inner) => descend(inner, path),
+            TypeExpr::IndexedAccess { object, index } => match index.as_ref() {
+                TypeExpr::Literal(LiteralValue::String(member)) => {
+                    let inner_base = descend(object, path);
+                    path.push(PathSegment::Index(IndexKey::String(Arc::from(
+                        member.as_str(),
+                    ))));
+                    inner_base
+                }
+                _ => expr,
+            },
+            other => other,
+        }
+    }
+
+    let mut path: Vec<PathSegment> = Vec::new();
+    let base = descend(expr, &mut path);
+    (base, Arc::from(path.into_boxed_slice()))
 }
 
 /// Class A shape variant (Phase 5d §4.1) — dispatch-direct equivalent
@@ -4898,11 +4964,22 @@ fn produce_one_macro_object_shape(
     // exact-concrete SolverResult so `solver_result_to_object_expansion`
     // still derives the expansion.
     let solver_result = scoped_solver_result.unwrap_or_else(|| {
-        // D-Cutover §5.8: dispatch's `project_expr_surface_expr` is the
-        // sole solve path. Empty-path `ProjectPath` with mode Expanded
-        // now expands terminal DeclAnchors via `Instantiate(anchor, [])`
+        // D-Cutover §5.8: dispatch's surface projection is the sole
+        // solve path. Empty-path `ProjectPath` with mode Expanded now
+        // expands terminal DeclAnchors via `Instantiate(anchor, [])`
         // so non-generic aliases (including namespace-qualified
         // `Types.Props` → `Props`) emit their body surface here.
+        //
+        // Phase 5f §8 — route through `project_expr_class_a_via_dispatch_threaded`
+        // so IndexedAccess chains (`WrappedConfig<Theme>['nested']['palette']`)
+        // are decomposed into `(base_expr, [PathSegment::Index(...)])`
+        // and dispatched as `ProjectPath { base, path, Expanded }`.
+        // PathWalker threads the inner generic-substitution context
+        // (`T → Theme`) consistently across hops via per-segment
+        // walking — closing the indexed-paths seed where the engine
+        // method's prepared-decl chain enumerated sibling members at
+        // each intermediate hop instead of following the requested
+        // path.
         //
         // TODO(phase-5g): retain the engine helper in this generic
         // (multi-macro-kind) callsite — the engine threads
@@ -4911,9 +4988,13 @@ fn produce_one_macro_object_shape(
         // across props/emits/slots in the same request. Migrate
         // alongside the engine retirement in 5g, when the engine's
         // load-bearing state can be host-promoted atomically.
-        let projected = query_engine
-            .project_expr_surface_expr(owner_canonical, lowered)
-            .unwrap_or_else(|| lowered.clone());
+        let projected = project_expr_class_a_via_dispatch_threaded(
+            query_engine.host,
+            Some(query_engine),
+            owner_canonical,
+            lowered,
+        )
+        .unwrap_or_else(|| lowered.clone());
         let deeply_resolved =
             query_engine.deep_resolve_slot_function_refs(owner_canonical, &projected);
         verter_semantic::analysis::type_expand::solver_result_to_object_expansion(
