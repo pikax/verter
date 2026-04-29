@@ -140,20 +140,22 @@ fn pick_and_my_pick_produce_identical_props() {
 /// members of `Cfg` (`alpha`, `beta`, `gamma`) surface — the lib's
 /// `Pick<Cfg, 'alpha'>` would surface only `alpha`.
 ///
-/// **Phase 5g status:** the dispatch lowering path has been patched
-/// to suppress the builtin-utility fast-path when the scope payload
-/// already contains a userland declaration with the same name (see
-/// `project_semantic_dispatch/lower.rs::shadowed_by_scope`). With
-/// that gate in place, the `pick_and_my_pick_produce_identical_props`
-/// parity test PASSES (userland `MyPick<T,K> = { [P in K]: T[P] }`
-/// produces the same surface as ambient `Pick`). The userland
-/// `type Pick<T,_K> = T` shadow case still fails because the
-/// downstream materialize path's `extract_route_root_identity_node`
-/// ALSO recognises `Pick` based on the unresolved name, bypassing
-/// the dispatch lowering's shadow gate. Closing this requires a
-/// further migration — see `phase-05g-stuck.md`.
+/// **Phase 5h status (closed):** Phase 5h §5.10 introduced the
+/// resolver-context [`ScopeShadowing`] struct in
+/// `verter_session::resolver_core::scope_shadowing` and threaded it
+/// through both the dispatch-lowering entry
+/// (`shallow_lower_type_expr`) and the materialise-path registry
+/// route fast-path (`project_expr_class_a_via_dispatch_threaded`).
+/// The dispatch lowering path's foundation gate (`524f469d`)
+/// already suppressed `__builtin__/Pick` when the SFC's scope
+/// declared a userland alias of the same name; 5h's commit
+/// `refactor(meta): thread ScopeShadowing through materialize-path
+/// registry route` extends the same scope check to the TypeExpr
+/// route extractors so the materialise path also defers to
+/// userland declarations. The `#[ignore]` attribute is removed
+/// because the gap is closed — the test is now a regression
+/// guard.
 #[test]
-#[ignore = "Phase 5g §F STOP: userland-shadowing-pick still resolves via the lib's mapped Pick because the materialize-path's extract_route_root_identity_node recognises `__builtin__/Pick` independently of the dispatch lowering's userland shadow gate. lower.rs's shadowed_by_scope check works for the MyPick parity case (which uses a distinct name) but does not cover the same-name shadow case. Closing this requires either (a) propagating the shadowed-resolution result through to the materialize-path's route extraction, or (b) re-checking scope shadowing inside extract_route_root_identity_node before routing to __builtin__ Pick. Both are scope changes beyond engine deletion."]
 fn shadowed_pick_is_userland_not_intrinsic() {
     let host = build_hermetic_host_with_lib(
         &[("/c.vue", SHADOWED_PICK_VUE)],
