@@ -3822,6 +3822,15 @@ pub(crate) struct HostFrontierAdapter<'a> {
     pub host: &'a VerterHost,
     pub materialize_symbols: bool,
     pub route_exports_only: bool,
+    /// Request-scoped memoisation of route-only [`ShallowFileState`] entries
+    /// for the duration of a single frontier traversal. **NOT a host-side
+    /// mirror** of the host's `route_owned_shallow` cache (Phase 6b: the
+    /// host cache lives on `ProjectTypeStore.route_owned_shallow`); this
+    /// `RefCell<...>` exists only to dedupe repeated reads of the same
+    /// canonical within one request, so request-level callers do not
+    /// repeatedly clone the host-cached `Arc`. Lifetime bounded to the
+    /// adapter (`'a`). Phase 6b classification: `scratch`. See sub-plan
+    /// §6b.2.F9.
     pub route_shallow_cache: RefCell<RouteShallowStateCache>,
 }
 

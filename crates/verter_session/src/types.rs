@@ -1189,6 +1189,26 @@ pub(crate) struct CompileCacheEntry {
         Option<Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>>,
 
     // ── DependencyState: resolution metadata + invalidation hashes ──
+    /// Per-file dependency resolution scoped to the **compile cache
+    /// lifecycle** (cleared on `clear_compile_cache`, on `configure_projects`,
+    /// and on per-file upsert when compile state changes). NOT a mirror of
+    /// [`IndexedReady.import_routes`](crate::project_type_store::IndexedReady)
+    /// — which is scoped to the **project-type-store lifecycle**, evicted
+    /// only on content-hash change via
+    /// [`ProjectTypeStore::evict_canonical`](crate::project_type_store::ProjectTypeStore::evict_canonical).
+    /// The two store the same `DependencyResolution` shape but follow
+    /// different invalidation triggers:
+    /// - This field follows COMPILE-event invalidation (profile changes,
+    ///   slot mutations).
+    /// - `IndexedReady.import_routes` follows FILE-CONTENT-event invalidation.
+    ///
+    /// A profile change that doesn't touch file content evicts this field
+    /// but preserves `IndexedReady.import_routes`. A content change without
+    /// a profile change evicts both. Consolidating them under one cache
+    /// would require conflating COMPILE-event and FILE-CONTENT-event
+    /// invalidation, which the existing system deliberately keeps separate.
+    /// Phase 6b classification: `legitimate-authority` (sub-mirror). See
+    /// sub-plan §6b.2.F1.
     pub(crate) import_routes: FxHashMap<String, DependencyResolution>,
     pub(crate) dependencies: std::collections::BTreeSet<String>,
     pub(crate) resolved_type_hashes: FxHashMap<(String, String), Hash16>,

@@ -251,6 +251,14 @@ pub struct VerterHost {
     /// Wrapped in Arc<RwLock> so the scheduler's SourceLoader can share the same
     /// lock and always read through the latest workspace after `set_workspace()`.
     pub(crate) workspace: Arc<parking_lot::RwLock<Arc<dyn verter_workspace::WorkspaceAccess>>>,
+    /// Caller-supplied virtual-alias map populated at upsert time from
+    /// [`UpsertRequest`](crate::types::UpsertRequest)`.aliases`. Maps
+    /// non-canonical paths (e.g. synthetic IDs from the unplugin or LSP layer)
+    /// to canonical IDs for symbol-resolution stability across surfaces.
+    /// Disjoint from VFS overlay storage (which keys by canonical) and from
+    /// `verter_vfs::ProjectResolver` (which resolves import strings). Phase 6b
+    /// classification: `legitimate-authority` — host-scoped, no equivalent
+    /// in `ProjectTypeStore`. See sub-plan §6b.2.F12.
     pub(crate) alias_to_canonical: Shared<FxHashMap<String, String>>,
     pub(crate) tick: std::sync::atomic::AtomicU64,
     /// Coarse semantic mutation epoch used for snapshot-coherent resolver views.
@@ -258,8 +266,12 @@ pub struct VerterHost {
     /// Unlike `tick`, which tracks compile/access recency, this counter only
     /// advances after host mutations that can change semantic resolution inputs.
     pub(crate) store_view_epoch: std::sync::atomic::AtomicU64,
-    /// Last computed cross-file prop constness overrides.
-    /// Used to detect changes on re-computation (Phase 7 invalidation).
+    /// Last computed cross-file prop constness overrides — Phase-7
+    /// invalidation tracking. Stores the LAST computed cross-file prop
+    /// constness overrides for diff-detection on re-computation. **NOT a
+    /// cache** of resolution results — a state-diff record. Phase 6b
+    /// classification: `legitimate-authority` — no equivalent in
+    /// `ProjectTypeStore`. See sub-plan §6b.2.F13.
     pub(crate) last_const_prop_overrides:
         Shared<rustc_hash::FxHashMap<String, rustc_hash::FxHashSet<String>>>,
     #[cfg(feature = "session_metrics")]
@@ -272,28 +284,67 @@ pub struct VerterHost {
     pub(crate) scheduler: Arc<verter_scheduler::scheduler::Scheduler>,
     /// Per-file compile cache: overrides, compile slots, diagnostics, deps.
     /// Scheduler owns raw source + analysis; this cache owns per-profile state.
+    ///
+    /// Phase 6b classification: `legitimate-authority`. The
+    /// [`CompileCacheEntry::import_routes`](crate::types::CompileCacheEntry::import_routes)
+    /// sub-shape and `IndexedReady.import_routes` share the same
+    /// `DependencyResolution` shape but follow different invalidation
+    /// triggers — see the doc on `CompileCacheEntry.import_routes` for the
+    /// lifecycle disclosure. See sub-plan §6b.2.F1.
     pub(crate) compile_cache: dashmap::DashMap<String, CompileCacheEntry>,
     /// Provenance counters for component-meta observability.
     /// Shared with sessions via `Arc`.
     pub(crate) provenance: Arc<MetaProvenance>,
-    /// Host-level shared resolved external type cache.
-    /// Keyed by (dep_canonical_id, dep_source_hash, type_name, resolve_kind).
-    /// Bounded to RESOLVED_TYPE_CACHE_CAP entries; cleared on close/clear_compile_cache.
+    /// Shared external-type cache with profile-gated writes. All callers
+    /// (including component-meta) read via
+    /// `lookup_resolved_external_type_cache`; only callers passing
+    /// `profile_hash: None` populate via `store_resolved_external_type_cache`.
+    /// The profile gate prevents overlay-tainted resolutions from polluting
+    /// project-global cache state.
+    ///
+    /// Bounded **clear-all** at `RESOLVED_TYPE_CACHE_CAP` entries (NOT LRU —
+    /// see `host_resolve.rs:1538–1540`). Distinct from
+    /// `SemanticGraphStore.HostResolvedNamedTypeKey`, which serves the
+    /// component-meta resolved-named-type pipeline with a richer identity
+    /// (surface, companion, type-param bindings).
+    ///
+    /// Phase 6b classification: `legitimate-authority`. See sub-plan §6b.2.F2.
     pub(crate) resolved_type_cache:
         parking_lot::Mutex<rustc_hash::FxHashMap<ResolvedTypeCacheKey, ResolvedTypeCacheEntry>>,
     /// Consolidated resolver state: sub-node caches (symbol + fallthrough),
     /// top-level host caches (meta + fallthrough), and singleflight groups.
     pub(crate) resolver: HostResolverState,
-    /// Cached pristine eval environments keyed by canonical id + whole_hash.
-    /// Stored pre-evaluation and cloned per query to avoid reparsing the same
-    /// script/declaration sources across component-meta requests.
+    /// Pre-evaluated [`EvalEnv`](verter_semantic::analysis::type_eval::EvalEnv)
+    /// snapshots, content-hash-validated. **Owned data** (no
+    /// allocator-lifetime constraints — `EvalEnv` is built from `String` /
+    /// `Arc<TypeExpr>` / `EvalLimits` fields, no AST-borrowed types). Kept
+    /// host-local because consumers all run within the host and no other
+    /// cache surface benefits from project-global sharing of `EvalEnv`
+    /// values. Migration to a hypothetical `ProjectTypeStore.EvalEnvDb` is
+    /// possible but unmotivated by current consumer patterns.
+    ///
+    /// Phase 6b classification: `legitimate-authority`. See sub-plan §6b.2.F4.
     pub(crate) eval_env_cache: parking_lot::Mutex<
         rustc_hash::FxHashMap<String, (Hash16, Arc<verter_semantic::analysis::type_eval::EvalEnv>)>,
     >,
     /// Semantic query database: revision-gated caches for component surfaces,
     /// binding facts, and reactivity provenance.
+    ///
+    /// **Different crate, different artifact.** [`verter_semantic::db::SemanticDb`]
+    /// is a SEPARATE crate's query-memo DB serving the surfaces / bindings /
+    /// reactivity provenance layer — orthogonal to
+    /// [`ProjectTypeStore.semantic_graph()`](crate::project_type_store::ProjectTypeStore::semantic_graph)
+    /// which is the resolved-named-type graph arena. Two databases, two
+    /// crates, two artifact types.
+    ///
+    /// Phase 6b classification: `legitimate-authority`. See sub-plan §6b.2.F5.
     pub(crate) semantic_db: parking_lot::Mutex<verter_semantic::db::SemanticDb>,
-    /// Current query profile for execution policy decisions.
+    /// Active per-host query profile — execution-policy decisions
+    /// (prewarming, budgets, allowed query families). **Not a cache** — does
+    /// not memoise query results. Different artifact type than anything in
+    /// `ProjectTypeStore`.
+    ///
+    /// Phase 6b classification: `legitimate-authority`. See sub-plan §6b.2.F10.
     pub(crate) query_profile: parking_lot::Mutex<verter_semantic::profile::QueryProfile>,
     /// Host-owned external type analysis cache (migrated from thread-local).
     /// Keyed by (canonical_id, source_type); content-hash validated per lookup.
@@ -319,9 +370,18 @@ pub struct VerterHost {
     /// Zero is reserved for "not populated" (plan §1.4); the counter
     /// starts at 0 and `next_request_id()` returns pre-increment + 1.
     pub(crate) request_id_counter: std::sync::atomic::AtomicU64,
-    /// Bounded insert-ordered store of finished audit records. Per-request
-    /// inserts happen in `emit_audit_trace`; consumers retrieve via
+    /// Bounded insert-ordered store of finished audit records.
+    ///
+    /// Backing shape:
+    /// `Mutex<IndexMap<u64, RustAuditRecord>>` with capacity 256 and
+    /// **FIFO eviction** via `shift_remove_index(0)` at capacity (verified
+    /// at `audit_records_store.rs:23–26, 49–56`). Different artifact type
+    /// than anything in `ProjectTypeStore`; the audit subsystem has its own
+    /// per-request lifecycle. Per-request inserts happen in
+    /// `emit_audit_trace`; consumers retrieve via
     /// `take_audit_record(request_id)`. Plan §2.5.
+    ///
+    /// Phase 6b classification: `legitimate-authority`. See sub-plan §6b.2.F11.
     pub(crate) audit_records: Arc<crate::component_meta_audit::AuditRecordsStore>,
     /// Cumulative host-level test audit state. Phase 5g-supplement
     /// §5.D.0 r17 — accessible via [`Self::audit`] (test-only).
@@ -476,7 +536,18 @@ impl VerterHost {
         Self::new_with_scheduler_config(config, workspace, scheduler_config)
     }
 
-    /// Get a clone of the workspace Arc.
+    /// Get a clone of the workspace `Arc`.
+    ///
+    /// **Mutator caution (Phase 6b sub-plan §6b.2.F6.bypass):** mutator
+    /// methods on the returned trait object (`notify_upsert`, `notify_close`,
+    /// `notify_delete`, `set_exact_resolutions`, `configure_resolver`,
+    /// `set_workspace`, etc.) bypass the host-side cache cascade and will be
+    /// rerouted through dedicated wrappers (`host.notify_upsert(...)`,
+    /// `host.notify_close(...)`, `host.set_exact_resolutions(...)`,
+    /// `host.configure_projects(...)`) in commit 6b.D2b. Phase 6b also
+    /// demotes this accessor to `pub(crate)` and exposes a public
+    /// `workspace_read()` accessor that returns a narrower `WorkspaceRead`
+    /// trait object covering only the file-access methods.
     pub fn workspace(&self) -> Arc<dyn verter_workspace::WorkspaceAccess> {
         self.workspace.read().clone()
     }
