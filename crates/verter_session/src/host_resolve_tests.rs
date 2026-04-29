@@ -4195,9 +4195,7 @@ fn resolve_prepared_decl_target_returns_unchanged_for_same_file_decl() {
     let _ = host.upsert(crate::UpsertRequest {
         canonical_id: None,
         input_id: "/src/decl.ts".to_string(),
-        source: Arc::from(
-            "export interface LocalProps { a: number; b: string }\n",
-        ),
+        source: Arc::from("export interface LocalProps { a: number; b: string }\n"),
         file_kind: crate::FileKind::NonSfc,
         aliases: Vec::new(),
     });
@@ -4248,9 +4246,7 @@ fn resolve_decl_in_scope_with_reexport_chain_returns_declaring_decl_identity() {
     let _ = host.upsert(crate::UpsertRequest {
         canonical_id: None,
         input_id: "/src/lib.ts".to_string(),
-        source: Arc::from(
-            "export interface ChildProps { x: number; y: string }\n",
-        ),
+        source: Arc::from("export interface ChildProps { x: number; y: string }\n"),
         file_kind: crate::FileKind::NonSfc,
         aliases: Vec::new(),
     });

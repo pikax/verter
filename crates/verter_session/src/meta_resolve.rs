@@ -5120,16 +5120,13 @@ fn produce_one_macro_object_shape(
                 defining_canonical.as_str(),
                 defining_name.as_str(),
             )
-                .and_then(|solved_expr| {
-                    let shape = verter_semantic::analysis::type_expand::type_expr_to_object_shape(
-                        &solved_expr,
-                    );
-                    shape_is_usable(&shape).then(|| {
-                        verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(
-                            shape,
-                        )
-                    })
+            .and_then(|solved_expr| {
+                let shape =
+                    verter_semantic::analysis::type_expand::type_expr_to_object_shape(&solved_expr);
+                shape_is_usable(&shape).then(|| {
+                    verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(shape)
                 })
+            })
         }
         _ => None,
     };
@@ -5276,11 +5273,10 @@ fn project_named_ref_prepared_surface_shape(
         scope_canonical.as_str(),
         resolved_name.as_str(),
     )
-        .and_then(|shape| {
-            has_prop_shape_surface(&shape).then(|| {
-                verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(shape)
-            })
-        })
+    .and_then(|shape| {
+        has_prop_shape_surface(&shape)
+            .then(|| verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(shape))
+    })
 }
 
 fn named_ref_can_use_prepared_projection(
@@ -5400,11 +5396,7 @@ fn project_named_ref_surface_shape(
     // Phase 5m §5.13a.2 — bridge the engine method via the per-engine
     // helper so the §5.14.1 pre-flight gate sees zero external
     // engine-method callers.
-    project_type_surface_shape_via_host_threaded(
-        query_engine,
-        defining_canonical,
-        defining_name,
-    )
+    project_type_surface_shape_via_host_threaded(query_engine, defining_canonical, defining_name)
         .and_then(|shape| {
             shape_is_usable(&shape).then(|| {
                 verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(shape)
@@ -6702,44 +6694,33 @@ impl VerterHost {
                 scope_canonical_id,
                 symbol_name,
             )
-                .map(|materialized| {
-                    raw_body.map_or_else(
-                        || materialized.clone(),
-                        |raw| {
-                            let preserved_package_refs =
-                                lowered_preserve_package_backed_symbolic_refs(
-                                    &materialized,
-                                    raw,
-                                    scope_canonical_id,
-                                    query_engine,
-                                );
-                            preserve_registry_callable_param_member_routes(
-                                &preserved_package_refs,
-                                raw,
-                            )
-                        },
-                    )
+            .map(|materialized| {
+                raw_body.map_or_else(
+                    || materialized.clone(),
+                    |raw| {
+                        let preserved_package_refs = lowered_preserve_package_backed_symbolic_refs(
+                            &materialized,
+                            raw,
+                            scope_canonical_id,
+                            query_engine,
+                        );
+                        preserve_registry_callable_param_member_routes(&preserved_package_refs, raw)
+                    },
+                )
+            })
+            .map(|candidate| maybe_refine_imported_generic_alias_object(candidate, query_engine))
+            .or_else(|| {
+                raw_body.and_then(|expr| {
+                    (!component_meta_registry_has_non_object_top_level_surface(expr)).then(|| {
+                        maybe_refine_imported_generic_alias_object(expr.clone(), query_engine)
+                    })
                 })
-                .map(|candidate| {
+            })
+            .or_else(|| {
+                raw_body.cloned().map(|candidate| {
                     maybe_refine_imported_generic_alias_object(candidate, query_engine)
                 })
-                .or_else(|| {
-                    raw_body.and_then(|expr| {
-                        (!component_meta_registry_has_non_object_top_level_surface(expr)).then(
-                            || {
-                                maybe_refine_imported_generic_alias_object(
-                                    expr.clone(),
-                                    query_engine,
-                                )
-                            },
-                        )
-                    })
-                })
-                .or_else(|| {
-                    raw_body.cloned().map(|candidate| {
-                        maybe_refine_imported_generic_alias_object(candidate, query_engine)
-                    })
-                })
+            })
         }
         fn build_registry_indexed_access_expr(
             symbol_name: &str,
@@ -9632,24 +9613,24 @@ fn materialize_component_meta_registry_structural_expr(
                             scope_canonical_id,
                             name,
                         )
-                            .or_else(|| {
-                                let declaration =
-                                    engine.resolve_type_declaration(scope_canonical_id, name);
-                                (!declaration.canonical_source.is_empty())
-                                    .then(|| {
-                                        project_type_surface_expr_via_host_threaded(
-                                            engine,
-                                            declaration.canonical_source.as_str(),
-                                            if declaration.resolved_name.is_empty() {
-                                                name
-                                            } else {
-                                                declaration.resolved_name.as_str()
-                                            },
-                                        )
-                                    })
-                                    .flatten()
-                            })
-                            .unwrap_or_else(|| expr.clone())
+                        .or_else(|| {
+                            let declaration =
+                                engine.resolve_type_declaration(scope_canonical_id, name);
+                            (!declaration.canonical_source.is_empty())
+                                .then(|| {
+                                    project_type_surface_expr_via_host_threaded(
+                                        engine,
+                                        declaration.canonical_source.as_str(),
+                                        if declaration.resolved_name.is_empty() {
+                                            name
+                                        } else {
+                                            declaration.resolved_name.as_str()
+                                        },
+                                    )
+                                })
+                                .flatten()
+                        })
+                        .unwrap_or_else(|| expr.clone())
                     }
                 }
                 TypeExpr::Ref {
@@ -12273,17 +12254,17 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
                     owner_canonical,
                     root_name,
                 )
-                    .is_some_and(|shape| match mac.kind {
-                        verter_semantic::analysis::AnalyzedMacroKind::DefineProps
-                        | verter_semantic::analysis::AnalyzedMacroKind::WithDefaults
-                        | verter_semantic::analysis::AnalyzedMacroKind::DefineModel
-                        | verter_semantic::analysis::AnalyzedMacroKind::DefineSlots => true,
-                        verter_semantic::analysis::AnalyzedMacroKind::DefineEmits => {
-                            !shape.properties.is_empty() || !shape.call_signatures.is_empty()
-                        }
-                        verter_semantic::analysis::AnalyzedMacroKind::DefineExpose
-                        | verter_semantic::analysis::AnalyzedMacroKind::DefineOptions => false,
-                    })
+                .is_some_and(|shape| match mac.kind {
+                    verter_semantic::analysis::AnalyzedMacroKind::DefineProps
+                    | verter_semantic::analysis::AnalyzedMacroKind::WithDefaults
+                    | verter_semantic::analysis::AnalyzedMacroKind::DefineModel
+                    | verter_semantic::analysis::AnalyzedMacroKind::DefineSlots => true,
+                    verter_semantic::analysis::AnalyzedMacroKind::DefineEmits => {
+                        !shape.properties.is_empty() || !shape.call_signatures.is_empty()
+                    }
+                    verter_semantic::analysis::AnalyzedMacroKind::DefineExpose
+                    | verter_semantic::analysis::AnalyzedMacroKind::DefineOptions => false,
+                })
             })
             .map(str::to_string)
             .collect()

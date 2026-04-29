@@ -501,7 +501,10 @@ mod tests {
         // The 2000th call is exactly at cap (2000 > 2000 is false).
         assert!(!budget.check_projection_op_count(), "2000th call at cap");
         // The 2001st call exceeds the fall-back cap.
-        assert!(budget.check_projection_op_count(), "2001st call exceeds default");
+        assert!(
+            budget.check_projection_op_count(),
+            "2001st call exceeds default"
+        );
     }
 
     #[test]
@@ -510,10 +513,7 @@ mod tests {
         let budget = RequestBudget::new(123);
         {
             let _g = RequestBudgetGuard::install(Arc::clone(&budget));
-            assert_eq!(
-                current_request_budget().unwrap().projection_op_budget,
-                123
-            );
+            assert_eq!(current_request_budget().unwrap().projection_op_budget, 123);
         }
         // NEGATIVE assertion: TLS slot is empty after the guard drops.
         assert!(

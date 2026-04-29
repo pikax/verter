@@ -2642,15 +2642,13 @@ impl VerterHost {
         scope_canonical_id: &str,
         symbol_name: &str,
     ) -> Option<crate::semantic_query::DeclIdentity> {
-        let scope_payload_arc = self
-            .prepared_decl_bundle(scope_canonical_id)
-            .map(|bundle| {
-                std::sync::Arc::new(
-                    crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
-                        &bundle,
-                    ),
-                )
-            });
+        let scope_payload_arc = self.prepared_decl_bundle(scope_canonical_id).map(|bundle| {
+            std::sync::Arc::new(
+                crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
+                    &bundle,
+                ),
+            )
+        });
         let resolved_root = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
             self,
             scope_canonical_id,
@@ -2658,12 +2656,7 @@ impl VerterHost {
             symbol_name,
         )
         .map(|root| (root.canonical_id, root.symbol_name))
-        .unwrap_or_else(|| {
-            (
-                scope_canonical_id.to_string(),
-                symbol_name.to_string(),
-            )
-        });
+        .unwrap_or_else(|| (scope_canonical_id.to_string(), symbol_name.to_string()));
         // Walk the re-export chain to land on the declaring file.
         let (declaring_canonical, declaring_symbol) =
             self.resolve_prepared_decl_target(resolved_root.0.as_str(), resolved_root.1.as_str());

@@ -2240,10 +2240,10 @@ impl VerterHost {
             canonical_id,
             type_name,
         )
-            .or_else(|| {
-                let expr = verter_semantic::analysis::type_expr::TypeExpr::named(type_name);
-                crate::meta_resolve::project_expr_class_a_via_dispatch(self, canonical_id, &expr)
-            })?;
+        .or_else(|| {
+            let expr = verter_semantic::analysis::type_expr::TypeExpr::named(type_name);
+            crate::meta_resolve::project_expr_class_a_via_dispatch(self, canonical_id, &expr)
+        })?;
         let mut shape =
             verter_semantic::analysis::type_expand::type_expr_to_object_shape(&expanded);
         Self::materialize_project_intrinsic_shape_members(&mut shape, &mut engine, canonical_id);
