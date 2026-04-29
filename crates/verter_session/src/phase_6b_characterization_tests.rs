@@ -74,3 +74,94 @@ fn route_db_and_imported_root_db_share_arc_identity_across_runtime_and_store() {
          the runtime's handle — proving a single project-shared authority",
     );
 }
+
+// ─── F3 eviction-cascade regression (lands in 6b.B3, REGRESSION) ─────────
+//
+// The brief's mention of `host.clear_compile_cache()` is incorrect against
+// HEAD `3147c02f`: `clear_compile_cache` (lib.rs:1149-1163) only clears
+// compile_cache / resolved_type_cache / eval_env_cache and explicitly
+// preserves resolver caches. The actual clear-all paths that touch
+// `RouteDb` / `ImportedRootDb` are `host.close()` (lib.rs:1175) and
+// `host.configure_projects()` (lib.rs:1219), both via
+// `self.resolver.reset_all() -> runtime.clear_caches() ->
+// routes.clear() + imported_roots.clear()`.
+//
+// This regression test uses `host.close()` (the actual clear path) to
+// verify the project-shared semantics established by F3: a clear on the
+// runtime's RouteDb is observable from the project-store's handle (and
+// vice versa), because they're the same `Arc`-shared instance. Pre-F3
+// the two were distinct instances; clearing one wouldn't affect the
+// other.
+//
+// Classified REGRESSION (CLAUDE.md "always include negative assertions"):
+// the post-clear assertion confirms the entry vanished AND the pre-clear
+// assertion confirms it was present (so a "false-green" from a never-
+// populated cache is impossible).
+#[test]
+fn route_db_eviction_visible_via_both_handles_after_close() {
+    use crate::resolver_core::RouteResult;
+
+    let host = host();
+    let store = host.project_type_store();
+
+    // Seed an entry via the runtime handle.
+    let runtime_routes = host.resolver.runtime.routes_handle();
+    runtime_routes.insert_route(
+        "/seeded/provider.ts".to_string(),
+        "Seeded".to_string(),
+        RouteResult::Resolved {
+            defining_canonical: "/seeded/provider.ts".to_string(),
+            defining_symbol: "Seeded".to_string(),
+        },
+    );
+
+    // Pre-clear discrimination assertion: the entry IS present, observable
+    // from BOTH handles. Without this, a "false-green" from an empty cache
+    // (entry never populated → assert.is_none() trivially true after
+    // close()) would pass without proving anything.
+    let store_routes = store.routes_handle();
+    assert!(
+        runtime_routes
+            .get_route_any("/seeded/provider.ts", "Seeded")
+            .is_some(),
+        "PRE-CLEAR: entry must be present on the runtime handle",
+    );
+    assert!(
+        store_routes
+            .get_route_any("/seeded/provider.ts", "Seeded")
+            .is_some(),
+        "PRE-CLEAR: same entry must be observable from the project-store \
+         handle (proves Arc identity / project-shared semantics)",
+    );
+
+    // Trigger the clear-all cascade via host.close(). Internally:
+    // close() -> resolver.reset_all() -> runtime.clear_caches() ->
+    //   routes.clear() (and imported_roots.clear()).
+    host.close();
+
+    // Post-clear assertion: entry is gone, observable from BOTH handles.
+    assert!(
+        runtime_routes
+            .get_route_any("/seeded/provider.ts", "Seeded")
+            .is_none(),
+        "POST-CLEAR: runtime handle must report the entry evicted",
+    );
+    assert!(
+        store_routes
+            .get_route_any("/seeded/provider.ts", "Seeded")
+            .is_none(),
+        "POST-CLEAR: project-store handle must observe the same eviction \
+         (single project-shared RouteDb instance)",
+    );
+
+    // Negative assertion: the handles are still ptr_eq after close()
+    // (close does not swap the underlying Arc, only mutates the inner DB).
+    let runtime_routes_after = host.resolver.runtime.routes_handle();
+    let store_routes_after = store.routes_handle();
+    assert!(
+        Arc::ptr_eq(&runtime_routes_after, &store_routes_after),
+        "POST-CLEAR: handles must remain Arc::ptr_eq — close() must NOT \
+         re-allocate the RouteDb (which would break stable references \
+         held by external callers)",
+    );
+}
