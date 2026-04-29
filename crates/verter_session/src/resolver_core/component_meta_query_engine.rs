@@ -2329,6 +2329,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// without embedding a separate resolver). Callers migrate off
     /// this method in 5d-5f; the method retires in 5g along with the
     /// prepared-projection helpers per §F call-graph closure.
+    #[deprecated(note = "Phase 5l deletion target: project_type_surface — \
+                migrate via dispatch.execute(SemanticQueryKey::ProjectPath{..., Expanded})")]
     pub fn project_type_surface(
         &mut self,
         scope_canonical_id: &str,
@@ -2347,6 +2349,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// **Phase 5c trampoline.** Composes [`Self::project_type_surface`]
     /// (itself a dispatch trampoline) with the projection → `TypeExpr`
     /// raise. Callers migrate off in 5d-5f.
+    #[deprecated(note = "Phase 5l deletion target: project_type_surface_expr — \
+                migrate via dispatch.execute_to_type_expr(SemanticQueryKey::ProjectPath{..., Expanded})")]
     pub fn project_type_surface_expr(
         &mut self,
         scope_canonical_id: &str,
@@ -2359,6 +2363,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// **Phase 5c trampoline.** Composes [`Self::project_type_surface`]
     /// with the projection → `ExpandedObjectShape` raise. Callers
     /// migrate off in 5d-5f.
+    #[deprecated(note = "Phase 5l deletion target: project_type_surface_shape — \
+                migrate via dispatch.execute(SemanticQueryKey::ProjectPath{..., Expanded}) + projected_surface_to_expanded_shape")]
     pub fn project_type_surface_shape(
         &mut self,
         scope_canonical_id: &str,
@@ -2377,6 +2383,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// `dispatch.execute_to_type_expr(Instantiate { .. })` lands once
     /// the prepared-decl Instantiate path subsumes the surface-side
     /// barrel-routing helpers.
+    #[deprecated(
+        note = "Phase 5l deletion target: project_prepared_type_surface_expr — \
+                migrate via dispatch.execute_to_type_expr(SemanticQueryKey::Instantiate{..., body_mode: Expanded})"
+    )]
     pub fn project_prepared_type_surface_expr(
         &mut self,
         scope_canonical_id: &str,
@@ -2389,6 +2399,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// **Phase 5c trampoline (sub-plan §4.2 line 441).** Sibling to
     /// [`Self::project_prepared_type_surface_expr`] but raises to an
     /// `ExpandedObjectShape`. Callers migrate off in 5d-5f.
+    #[deprecated(
+        note = "Phase 5l deletion target: project_prepared_type_surface_shape — \
+                migrate via dispatch.execute(SemanticQueryKey::Instantiate{..., body_mode: Expanded}) + projected_surface_to_expanded_shape"
+    )]
     pub fn project_prepared_type_surface_shape(
         &mut self,
         scope_canonical_id: &str,
@@ -3923,6 +3937,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     ///
     /// Results are write-through: stable projections are published to
     /// `TypeSurfaceDb` and reused by later requests.
+    #[deprecated(note = "Phase 5l deletion target: project_type_member — \
+                migrate via dispatch.execute(SemanticQueryKey::ProjectPath{..., path: [Member(member)], mode: Expanded})")]
     pub fn project_type_member(
         &mut self,
         scope_canonical_id: &str,
@@ -3953,6 +3969,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     ///
     /// Results are write-through: stable projections are published to
     /// `TypeSurfaceDb` and reused by later requests.
+    #[deprecated(note = "Phase 5l deletion target: project_type_keyspace — \
+                migrate via dispatch.execute(SemanticQueryKey::KeyOf{base}) on the lowered scope")]
     pub fn project_type_keyspace(
         &mut self,
         scope_canonical_id: &str,
@@ -3981,6 +3999,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// All branches reach the shared `ProjectSemanticDispatch` memo;
     /// no embedded resolver remains in this body. Callers migrate off
     /// this method in 5d-5f; the method itself is deleted in 5g.
+    #[deprecated(note = "Phase 5l deletion target: project_expr_surface_expr — \
+                migrate via dispatch.execute_to_type_expr(SemanticQueryKey::ProjectPath{..., Expanded}) on the lowered expression")]
     pub fn project_expr_surface_expr(
         &mut self,
         scope_canonical_id: &str,
@@ -4040,6 +4060,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// `ProjectSemanticDispatch` projection through `ProjectPath { ...,
     /// mode: Expanded }` followed by the compound-object filter). No
     /// registry/route fast-path. Method retires in 5g.
+    #[deprecated(
+        note = "Phase 5l deletion target: project_expr_surface_expr_with_compound_objects — \
+                migrate via dispatch.execute_to_type_expr(SemanticQueryKey::ProjectPath{..., Expanded}) + type_expr_has_any_object_arm filter"
+    )]
     pub fn project_expr_surface_expr_with_compound_objects(
         &mut self,
         scope_canonical_id: &str,
@@ -4081,6 +4105,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// **Phase 5c trampoline.** Body is the shared
     /// `ProjectSemanticDispatch` `ProjectPath { mode: Expanded }`
     /// projection. Method retires in 5g.
+    #[deprecated(note = "Phase 5l deletion target: lower_and_project_to_expanded — \
+                migrate via dispatch.execute_to_type_expr(SemanticQueryKey::ProjectPath{..., Expanded}) on the lowered expression")]
     pub fn lower_and_project_to_expanded(
         &mut self,
         scope_canonical_id: &str,
@@ -4124,6 +4150,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// re-export walk through dispatch is a 5g-scope change). Method
     /// retires fully in 5g once the engine-internal callers retire
     /// alongside engine deletion (§4.3 deletion gate).
+    #[deprecated(note = "Phase 5l deletion target: instantiate_local_generic_ref — \
+                migrate via crate::meta_resolve::instantiate_local_generic_ref_via_dispatch (SemanticQueryKey::Instantiate)")]
     pub fn instantiate_local_generic_ref(
         &mut self,
         scope_canonical_id: &str,
@@ -4177,6 +4205,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// expressions go through `ProjectPath { ..., mode: Shallow }`.
     /// All branches reach the shared `ProjectSemanticDispatch` memo;
     /// no embedded resolver remains. Method retires in 5g.
+    #[deprecated(note = "Phase 5l deletion target: project_expr_surface_shape — \
+                migrate via dispatch.execute(SemanticQueryKey::ProjectPath{..., Shallow}) + projected_surface_to_expanded_shape")]
     pub fn project_expr_surface_shape(
         &mut self,
         scope_canonical_id: &str,
@@ -4360,6 +4390,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// the seed `mapped_exclude` closure lands in 5e once the
     /// route-target callers migrate to
     /// `dispatch.execute_pick`/`execute_omit`. Method retires in 5g.
+    #[deprecated(note = "Phase 5l deletion target: project_route_surface_expr — \
+                migrate via dispatch.execute_pick / dispatch.execute_omit / dispatch.execute_to_type_expr(SemanticQueryKey::ProjectPath{..., MemberPath})")]
     pub fn project_route_surface_expr(
         &mut self,
         scope_canonical_id: &str,

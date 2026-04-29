@@ -2089,10 +2089,35 @@ fn solver_caches_relation_rebuilt_per_dispatch_builder_invocation() {
 #[test]
 fn no_deprecated_attributes_on_retired_symbols() {
     // Plan §0 criterion 15: no `#[deprecated]` attribute may reference
-    // any of the retired symbols. The squash commit fully removes the
-    // retired symbols rather than `#[deprecated]`-ing them.
+    // any of the D-cutover-era retired symbols. The squash commit fully
+    // removes the retired symbols rather than `#[deprecated]`-ing them.
     //
-    // Retired symbols (plan §9 + §5.8):
+    // **Phase 5k §5.14.0 amendment (parent §5.14.0 r16/Claude-N1).**
+    // Three engine-resolver methods originally listed here as retired
+    // — `lower_and_project_to_expanded`, `project_expr_surface_shape`,
+    // `instantiate_local_generic_ref` — are deletion targets of
+    // **Phase 5l** (engine retirement, parent §5.14.2 / sub-plan §8).
+    // The §5.14.0 prerequisite mandates that 5k add
+    // `#[deprecated(note = "Phase 5l deletion target: ...")]` to EVERY
+    // engine resolver method 5l will delete, and 5l's pre-flight gate
+    // (§5.14.1) uses `cargo rustc -- -W deprecated` to enumerate every
+    // surviving caller. The deprecation attribute is a mechanical
+    // caller-discovery tool with a finite lifetime: it lands in 5k and
+    // disappears in 5l along with the retired methods themselves.
+    //
+    // Removing the three names from this retired-list lifts the
+    // D-cutover-era prohibition for the 5k-5l window only — every
+    // other D-cutover-retired symbol stays in the list (the
+    // engine-resolver methods are the only exception, scoped to the
+    // §8 deletion list).
+    //
+    // After 5l lands, the three methods cease to exist; the
+    // `#[deprecated]` attributes vanish with them; the characterization
+    // test no longer needs the exception. A future maintenance commit
+    // can re-add the names to the list once 5l has merged (the names
+    // would be vacuously satisfied because no `#[deprecated]` references
+    // them), but the names being absent does not weaken the test's
+    // discriminating power for the remaining 17 names.
     let retired = [
         "TypeSolverHost",
         "EvalEnvSolverHost",
@@ -2102,10 +2127,11 @@ fn no_deprecated_attributes_on_retired_symbols() {
         "TypeSurfaceOpResult",
         "dispatch_bridge",
         "shallow_relation_check",
-        "lower_and_project_to_expanded",
+        // "lower_and_project_to_expanded" — Phase 5l deletion target
+        // (§5.14.2 / sub-plan §8); 5k §5.14.0 attaches `#[deprecated]`.
         "project_expr_surface_as_type_expr",
-        "project_expr_surface_shape",
-        "instantiate_local_generic_ref",
+        // "project_expr_surface_shape" — Phase 5l deletion target.
+        // "instantiate_local_generic_ref" — Phase 5l deletion target.
         "solver_host_for_scope",
         "owner_engine",
         "expand_macro_types",
