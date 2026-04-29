@@ -7514,47 +7514,117 @@ defineProps<Props>()
     );
 }
 
+/// Hermetic port of the prior `produce_one_macro_object_shape_real_nuxt_ui_color_mode_select_stays_off_solver`
+/// test. Inline fixtures replace the third-party `nuxt-ui` filesystem
+/// repo: a multi-file shape where `ColorModeSelectProps` extends
+/// `Omit<SelectMenuProps<Item[]>, ...>` from a separate SFC, which
+/// itself extends `Pick<ComboboxRootProps...>` and
+/// `Omit<ButtonHTMLAttributes, ...>` from package-style imports.
+/// Discriminating contract: each step in the prepared declaration
+/// chain (ComboboxRootProps → ListboxRootProps → ButtonHTMLAttributes
+/// → SelectMenuProps → ColorModeSelectProps) must produce a non-empty
+/// prepared-only root surface, and the final macro object shape must
+/// remain on the projection path.
 #[test]
-fn produce_one_macro_object_shape_real_nuxt_ui_color_mode_select_stays_off_solver() {
-    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../.integration-tests/repos/nuxt-ui")
-        .canonicalize()
-        .expect("nuxt-ui integration fixture should exist");
-    let repo_root = repo_root.to_string_lossy().replace('\\', "/");
-    let component = format!("{repo_root}/src/runtime/components/color-mode/ColorModeSelect.vue");
+fn produce_one_macro_object_shape_color_mode_select_chain_stays_off_solver() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/pkg/combobox.ts",
+            r#"
+export interface ListboxRootProps<T> {
+  open?: boolean
+  defaultOpen?: boolean
+  modelValue?: T
+}
 
-    let ws = Arc::new(verter_workspace::FilesystemWorkspace::new(
-        verter_workspace::FilesystemOptions::default(),
-    ));
-    let host = VerterHost::new(
-        HostConfig {
-            analysis_level: crate::types::AnalysisLevel::Full,
-            ..HostConfig::default()
-        },
-        ws,
-    );
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            repo_root.clone(),
-            repo_root.clone(),
-            Some(format!("{repo_root}/tsconfig.json")),
-        ),
-    ]);
+export interface ComboboxRootProps<T> extends ListboxRootProps<T> {
+  disabled?: boolean
+  name?: string
+  by?: string
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/types/html.ts",
+            r#"
+export interface ButtonHTMLAttributes {
+  type?: 'button' | 'submit'
+  disabled?: boolean
+  name?: string
+  form?: string
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/types/icon.ts",
+            r#"
+export interface IconProps {
+  icon?: string
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/runtime/SelectMenu.vue",
+            r#"<script lang="ts">
+import type { ComboboxRootProps } from '../pkg/combobox'
+import type { ButtonHTMLAttributes } from '../types/html'
+import type { IconProps } from '../types/icon'
 
+export type Item = { label?: string }
+
+export interface SelectMenuProps<T = Item[]>
+  extends Pick<ComboboxRootProps<T>, 'open' | 'defaultOpen' | 'disabled'>,
+    IconProps,
+    Omit<ButtonHTMLAttributes, 'type' | 'disabled' | 'name'> {
+  items?: T
+  color?: 'primary' | 'neutral'
+  variant?: 'solid' | 'ghost'
+}
+</script>
+<script setup lang="ts">
+defineProps<SelectMenuProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/runtime/ColorModeSelect.vue",
+            r#"<script lang="ts">
+import type { SelectMenuProps, Item } from './SelectMenu.vue'
+
+export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'icon' | 'items'> {}
+</script>
+<script setup lang="ts">
+defineProps<ColorModeSelectProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let host = project.host();
     let _store_view = host.resolver_store_view();
-    let mut direct_query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(&host);
-    let select_menu_component = format!("{repo_root}/src/runtime/components/SelectMenu.vue");
+    let mut direct_query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
+    let select_menu_component = "/src/runtime/SelectMenu.vue";
+    let component = "/src/runtime/ColorModeSelect.vue";
     let combobox_root_decl =
-        direct_query_engine.resolve_type_declaration(&select_menu_component, "ComboboxRootProps");
+        direct_query_engine.resolve_type_declaration(select_menu_component, "ComboboxRootProps");
     assert!(
         !combobox_root_decl.canonical_source.is_empty(),
-        "real ComboboxRootProps should resolve to a prepared declaration source",
+        "ComboboxRootProps should resolve to a prepared declaration source",
     );
     let listbox_root_decl = direct_query_engine
         .resolve_type_declaration(&combobox_root_decl.canonical_source, "ListboxRootProps");
     assert!(
         !listbox_root_decl.canonical_source.is_empty(),
-        "real ListboxRootProps should resolve to a prepared declaration source",
+        "ListboxRootProps should resolve to a prepared declaration source",
     );
     let listbox_root_prepared =
         crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(
@@ -7564,7 +7634,7 @@ fn produce_one_macro_object_shape_real_nuxt_ui_color_mode_select_stays_off_solve
         );
     assert!(
         listbox_root_prepared.is_some(),
-        "real ListboxRootProps should have a prepared-only root surface projection available",
+        "ListboxRootProps should have a prepared-only root surface projection available",
     );
     let (combobox_root_target_source, combobox_root_target_name) = host
         .resolve_named_type_export_target(
@@ -7583,13 +7653,13 @@ fn produce_one_macro_object_shape_real_nuxt_ui_color_mode_select_stays_off_solve
         );
     assert!(
         combobox_root_prepared.is_some(),
-        "real ComboboxRootProps routed target should have a prepared-only root surface projection available",
+        "ComboboxRootProps routed target should have a prepared-only root surface projection available",
     );
-    let button_html_decl = direct_query_engine
-        .resolve_type_declaration(&select_menu_component, "ButtonHTMLAttributes");
+    let button_html_decl =
+        direct_query_engine.resolve_type_declaration(select_menu_component, "ButtonHTMLAttributes");
     assert!(
         !button_html_decl.canonical_source.is_empty(),
-        "real ButtonHTMLAttributes should resolve to a prepared declaration source",
+        "ButtonHTMLAttributes should resolve to a prepared declaration source",
     );
     let button_html_prepared =
         crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(
@@ -7599,55 +7669,51 @@ fn produce_one_macro_object_shape_real_nuxt_ui_color_mode_select_stays_off_solve
         );
     assert!(
         button_html_prepared.is_some(),
-        "real ButtonHTMLAttributes should have a prepared-only root surface projection available",
+        "ButtonHTMLAttributes should have a prepared-only root surface projection available",
     );
     let select_menu_prepared =
         crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(
             &mut direct_query_engine,
-            &select_menu_component,
+            select_menu_component,
             "SelectMenuProps",
         );
     assert!(
         select_menu_prepared.is_some(),
-        "real SelectMenuProps should have a prepared-only root surface projection available",
+        "SelectMenuProps should have a prepared-only root surface projection available",
     );
     let prepared_only = crate::meta_resolve::project_prepared_type_surface_expr_via_host_threaded(
         &mut direct_query_engine,
-        &component,
+        component,
         "ColorModeSelectProps",
     );
     assert!(
         prepared_only.is_some(),
-        "real ColorModeSelectProps should have a prepared-only root surface projection available",
+        "ColorModeSelectProps should have a prepared-only root surface projection available",
     );
     assert_eq!(
         0u32, 0,
-        "prepared-only real ColorModeSelectProps projection must not invoke the semantic solver",
+        "prepared-only ColorModeSelectProps projection must not invoke the semantic solver",
     );
 
-    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(&host);
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
     let lowered =
         verter_semantic::analysis::type_expr_lower::parse_type_annotation("ColorModeSelectProps");
 
     let (shape, source) = produce_one_macro_object_shape(
         &mut query_engine,
-        &component,
+        component,
         &lowered,
         has_prop_shape_surface,
     );
 
-    assert!(
-        shape.is_some(),
-        "real ColorModeSelectProps should materialize"
-    );
+    assert!(shape.is_some(), "ColorModeSelectProps should materialize");
     assert!(
         matches!(source, MacroShapeSource::Projection),
-        "real ColorModeSelectProps should still prefer the projection path",
+        "ColorModeSelectProps should still prefer the projection path",
     );
     assert_eq!(
-        0u32,
-        0,
-        "real ColorModeSelectProps should stay on the shallow projection path without a semantic solve",
+        0u32, 0,
+        "ColorModeSelectProps should stay on the shallow projection path without a semantic solve",
     );
 }
 
