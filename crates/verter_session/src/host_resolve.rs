@@ -2584,6 +2584,100 @@ impl VerterHost {
         Some(result)
     }
 
+    /// Phase 5m §5.13a.1.1 — host-level prepared-decl barrel routing
+    /// helper.
+    ///
+    /// Returns the declaring `(canonical_id, symbol_name)` for the
+    /// passed `(canonical_source, resolved_name)` pair after walking
+    /// the re-export chain. Mirrors the legacy engine's
+    /// `resolve_final_prepared_type_target` semantics:
+    /// - When `(canonical_source, resolved_name)` already has a
+    ///   `prepared_type_decl`, returns it unchanged.
+    /// - Otherwise consults `resolve_named_type_export_target_shallow`
+    ///   for a re-export target and verifies the target itself has a
+    ///   `prepared_type_decl`.
+    /// - Falls back to the original pair when no prepared decl is
+    ///   reachable.
+    ///
+    /// This is a host-state-only operation (no engine instance
+    /// required). After Phase 5m, dispatch-side helpers consume this
+    /// directly to subsume the engine route fast-path's barrel
+    /// routing.
+    pub(crate) fn resolve_prepared_decl_target(
+        &self,
+        canonical_source: &str,
+        resolved_name: &str,
+    ) -> (String, String) {
+        if self
+            .prepared_type_decl(canonical_source, resolved_name)
+            .is_some()
+        {
+            return (canonical_source.to_string(), resolved_name.to_string());
+        }
+        self.resolve_named_type_export_target_shallow(canonical_source, resolved_name)
+            .filter(|(target_canonical, target_name)| {
+                self.prepared_type_decl(target_canonical.as_str(), target_name.as_str())
+                    .is_some()
+            })
+            .unwrap_or_else(|| (canonical_source.to_string(), resolved_name.to_string()))
+    }
+
+    /// Phase 5m §5.13a.1.3 — host-level re-export chain walking helper.
+    ///
+    /// Resolves a bare-name reference in a scope, walking the
+    /// re-export chain to the declaring file. Returns the canonical
+    /// `DeclIdentity` describing the declaring file, the resolved
+    /// symbol name, and the file's whole-hash.
+    ///
+    /// This subsumes the legacy engine's `dispatch_root_instantiated`
+    /// two-layer resolution:
+    /// 1. `resolve_bare_name_in_scope` → `(canonical_id, symbol_name)`.
+    /// 2. `resolve_prepared_decl_target` → final declaring location.
+    ///
+    /// Returns `None` only when the bare name cannot be resolved at
+    /// all and the requested scope is itself missing a shallow
+    /// state.
+    pub(crate) fn resolve_decl_in_scope_with_reexport_chain(
+        &self,
+        scope_canonical_id: &str,
+        symbol_name: &str,
+    ) -> Option<crate::semantic_query::DeclIdentity> {
+        let scope_payload_arc = self
+            .prepared_decl_bundle(scope_canonical_id)
+            .map(|bundle| {
+                std::sync::Arc::new(
+                    crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
+                        &bundle,
+                    ),
+                )
+            });
+        let resolved_root = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+            self,
+            scope_canonical_id,
+            scope_payload_arc.as_deref(),
+            symbol_name,
+        )
+        .map(|root| (root.canonical_id, root.symbol_name))
+        .unwrap_or_else(|| {
+            (
+                scope_canonical_id.to_string(),
+                symbol_name.to_string(),
+            )
+        });
+        // Walk the re-export chain to land on the declaring file.
+        let (declaring_canonical, declaring_symbol) =
+            self.resolve_prepared_decl_target(resolved_root.0.as_str(), resolved_root.1.as_str());
+        let whole_hash = self
+            .shallow_file_state(declaring_canonical.as_str())
+            .map(|s| s.whole_hash)
+            .unwrap_or_default();
+        Some(crate::semantic_query::DeclIdentity {
+            canonical_id: std::sync::Arc::from(declaring_canonical.as_str()),
+            whole_hash,
+            decl_name: std::sync::Arc::from(declaring_symbol.as_str()),
+        })
+    }
+
     pub(crate) fn resolve_named_type_export_target(
         &self,
         dep_canonical: &str,

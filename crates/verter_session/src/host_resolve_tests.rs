@@ -4171,3 +4171,107 @@ const AFTER_CLOSE = 1;
         "template content must not leak into extracted script content, got: {with_cache}"
     );
 }
+
+// ===========================================================================
+// Phase 5m §5.13a.1.1 + §5.13a.1.3 — host helper tests
+// ===========================================================================
+
+#[test]
+fn resolve_prepared_decl_target_returns_unchanged_for_same_file_decl() {
+    // Discrimination: when `(canonical, name)` already has a
+    // `prepared_type_decl`, the helper returns the same pair. This
+    // matches the legacy engine's
+    // `resolve_final_prepared_type_target` early-return on a
+    // resolvable same-file decl.
+    let host = strict_host();
+    upsert_vue(
+        &host,
+        "/src/app.vue",
+        "<script setup lang=\"ts\">\
+         import type { LocalProps } from './decl';\n\
+         defineProps<LocalProps>();\n\
+         </script><template>x</template>",
+    );
+    let _ = host.upsert(crate::UpsertRequest {
+        canonical_id: None,
+        input_id: "/src/decl.ts".to_string(),
+        source: Arc::from(
+            "export interface LocalProps { a: number; b: string }\n",
+        ),
+        file_kind: crate::FileKind::NonSfc,
+        aliases: Vec::new(),
+    });
+    // The helper takes a "scope canonical, name" pair. For a
+    // same-file local decl, the resolver finds it directly.
+    let (resolved_canonical, resolved_name) =
+        host.resolve_prepared_decl_target("/src/decl.ts", "LocalProps");
+    assert_eq!(
+        resolved_canonical, "/src/decl.ts",
+        "same-file decl: canonical must be unchanged"
+    );
+    assert_eq!(
+        resolved_name, "LocalProps",
+        "same-file decl: name must be unchanged"
+    );
+    // Negative assertion: an unrelated symbol that has no prepared
+    // decl in `/src/decl.ts` falls back to the original pair, NOT to
+    // some other canonical_source.
+    let (fallback_canonical, fallback_name) =
+        host.resolve_prepared_decl_target("/src/decl.ts", "Nonexistent");
+    assert_eq!(
+        fallback_canonical, "/src/decl.ts",
+        "unresolvable: canonical must fall back to input"
+    );
+    assert_eq!(
+        fallback_name, "Nonexistent",
+        "unresolvable: name must fall back to input"
+    );
+}
+
+#[test]
+fn resolve_decl_in_scope_with_reexport_chain_returns_declaring_decl_identity() {
+    // Discrimination: a request for a name in a scope that does NOT
+    // declare it locally walks the import chain, then the re-export
+    // chain, and lands on the declaring file's DeclIdentity. This
+    // matches the legacy engine's `dispatch_root_instantiated`
+    // two-layer resolution (bare-name resolve, then prepared-decl
+    // re-export walk).
+    let host = strict_host();
+    upsert_vue(
+        &host,
+        "/src/owner.vue",
+        "<script setup lang=\"ts\">\
+         import type { ChildProps } from './lib';\n\
+         defineProps<ChildProps>();\n\
+         </script><template>x</template>",
+    );
+    let _ = host.upsert(crate::UpsertRequest {
+        canonical_id: None,
+        input_id: "/src/lib.ts".to_string(),
+        source: Arc::from(
+            "export interface ChildProps { x: number; y: string }\n",
+        ),
+        file_kind: crate::FileKind::NonSfc,
+        aliases: Vec::new(),
+    });
+    let identity = host
+        .resolve_decl_in_scope_with_reexport_chain("/src/owner.vue", "ChildProps")
+        .expect("scope present must yield Some");
+    // The declaring file is `/src/lib.ts`, NOT the owner scope.
+    assert_eq!(
+        identity.canonical_id.as_ref(),
+        "/src/lib.ts",
+        "DeclIdentity.canonical_id must point to declaring file, not owner scope"
+    );
+    assert_eq!(
+        identity.decl_name.as_ref(),
+        "ChildProps",
+        "DeclIdentity.decl_name must be the declared symbol"
+    );
+    // Negative assertion: whole-hash MUST be non-zero (declaring file is loaded).
+    let zero_hash: [u8; 16] = [0; 16];
+    assert_ne!(
+        identity.whole_hash, zero_hash,
+        "declaring file's whole-hash must be populated, not zero-initialized"
+    );
+}
