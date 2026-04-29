@@ -345,3 +345,64 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_slot_binding_lowering()
         }
     }
 }
+
+/// 5k §5.D.3 — value-member typeof substitution intermediate hops
+/// Navigate, terminal hop Expanded. The Phase 5k §5.13 fix in
+/// `shallow_lower_type_expr`'s `TypeExpr::TypeOf` arm explicitly
+/// projects the tail segments via
+/// `ProjectPath { mode: Navigate }` (intermediate, terminal-as-leaf
+/// when only one segment remains). The path-precise contract
+/// (CLAUDE.md "Macro Type Traversal Rule") applies: when an outer
+/// caller dispatches a deeper `ProjectPath` in `Expanded` mode
+/// against the typeof-substituted result, intermediate hops MUST
+/// run in `Navigate` and only the terminal hop in `Expanded`.
+///
+/// The typeof-substitution fix itself does not change
+/// path-decomposition behaviour (terminal-mode-only expansion is a
+/// dispatch-engine invariant; the new lookup composes the same
+/// `ProjectPath` query, not a sibling family). The discriminating
+/// proof remains: a path ending at the terminal hop runs the
+/// terminal in caller's mode, intermediates in Navigate.
+#[test]
+fn intermediate_hops_navigate_terminal_only_expanded_for_typeof_substitution() {
+    let host = build_test_host();
+    let base = intern_four_hop_object(&host);
+    let key = SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::from(
+            vec![
+                PathSegment::Member(Arc::from("a")),
+                PathSegment::Member(Arc::from("b")),
+                PathSegment::Member(Arc::from("full")),
+                PathSegment::Member(Arc::from("bar")),
+            ]
+            .into_boxed_slice(),
+        ),
+        mode: ProjectionMode::Expanded,
+    };
+
+    let _ = host.semantic_dispatch().execute(key.clone());
+
+    let trace = host.dispatch_trace_for(&key);
+    let decomposition = trace.path_decomposition();
+    assert_eq!(
+        decomposition.len(),
+        4,
+        "trace should decompose the 4-segment path into 4 hops for the typeof-substitution scenario (got {})",
+        decomposition.len()
+    );
+
+    for (i, sub_key) in decomposition.iter().enumerate() {
+        let is_terminal = i == decomposition.len() - 1;
+        match (sub_key.mode(), is_terminal) {
+            (ProjectionMode::Navigate, false) => {} // expected
+            (ProjectionMode::Expanded, true) => {}  // expected
+            (mode, terminal) => panic!(
+                "typeof-substitution hop {i} (terminal={terminal}) ran in {mode:?} \
+                 (expected Navigate for intermediate, Expanded for terminal — \
+                 the §5.13 single-segment-first lookup must NOT alter \
+                 path-decomposition modes)"
+            ),
+        }
+    }
+}
