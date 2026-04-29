@@ -203,6 +203,50 @@ produces `prefixA: number` and `prefixB: number`.
 |                | overlaps with the generic-instantiation work flagged in         |
 |                | Phase 5 / Phase 7 of the cutover plan.                          |
 
+### Rule-correct expected (machine-readable per §5.B.5.1 r15)
+
+The JSON block below is the hand-authored rule-correct `SnapshotView`
+for `generic_substitution_via_typeof`, derived from TS spec §3.6
+(generic substitution) and CLAUDE.md "generic substitutions are part
+of semantic meaning". The Phase 5k §5.B.5.1 rule-correctness gate
+test
+(`deferred_fixture_generic_substitution_via_typeof_byte_equal_to_rule_correct_expected`
+in
+`crates/verter_session/tests/correctness/deferred_fixtures_rule_correct.rs`)
+asserts byte-equality between this block and Verter's
+post-Phase-5k-fix output. Discrimination: pre-Phase-5k Verter
+produces `id: T` (the unsubstituted type parameter token); post-fix
+Verter produces `id: string` (T resolved through the value-member
+typeof projection).
+
+```json
+{
+  "fixture_id": "generic_substitution_via_typeof",
+  "expected": {
+    "component_name": "C",
+    "props": [
+      {
+        "name": "id",
+        "type_signature": "string",
+        "required": true,
+        "has_default": false,
+        "default_signature": null,
+        "doc": null
+      }
+    ],
+    "events": [],
+    "slots": [],
+    "models": [],
+    "exposed": [],
+    "fallthrough": null,
+    "flags": {
+      "async_setup": false,
+      "has_inherit_attrs_false": false
+    }
+  }
+}
+```
+
 ## 5. `userland_shadowing_pick` — TS-first / userland shadow not honoured
 
 | Field          | Value                                                          |

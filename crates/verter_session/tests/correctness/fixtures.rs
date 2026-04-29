@@ -221,6 +221,43 @@ defineProps<{ kind: Extract<'a' | 'b' | 'c', 'a' | 'b'> }>();
 <template><div /></template>
 "#;
 
+// ── Generic substitution via typeof on a value-member path — TS spec §3.6 ───
+//   `IdShape<T>` is a userland generic interface whose body references
+//   `T`. The defineProps argument is `IdShape<typeof sample.id>` —
+//   the type argument is a `typeof` expression whose path projects
+//   the `id` member of the value `sample`. With `sample` typed as
+//   `Sample { id: string }`, `typeof sample.id` evaluates to `string`.
+//   Substitution into the body `{ id: T }` yields `{ id: string }`,
+//   surfacing one required prop `id: string`.
+//
+//   Pre-Phase-5k: the `shallow_lower_type_expr`'s `TypeExpr::TypeOf`
+//   arm unconditionally joined the first two `value_ref.path`
+//   segments into `"sample.id"` and looked up that joined name as a
+//   value root. No such value binding exists, so the lookup missed,
+//   the type argument lowered to `Opaque(Miss)`, and substitution
+//   left the body `{ id: T }` with `T` unsubstituted — Verter
+//   emitted the bare token `T` as the prop's type signature.
+//
+//   Post-Phase-5k: the lowering attempts single-segment root
+//   resolution first (`sample`), succeeds, projects the remaining
+//   `["id"]` path through `ProjectPath { mode: Navigate }` to
+//   `string`, then substitutes `T → string` in the instantiation
+//   body. The materialised surface produces one required prop
+//   `id: string`, matching `phase-00-tier1-mismatches.md` row 4.
+//
+//   Rule citation: TS spec §3.6 (generic substitution); CLAUDE.md
+//   "generic substitutions are part of semantic meaning". Phase 5k
+//   §5.13 closes the gap; the fixture is authored as a regression
+//   guard.
+const GENERIC_SUBSTITUTION_VIA_TYPEOF_VUE: &str = r#"<script setup lang="ts">
+interface Sample { id: string }
+const sample: Sample = { id: "abc" };
+interface IdShape<T> { id: T; }
+defineProps<IdShape<typeof sample.id>>();
+</script>
+<template><div /></template>
+"#;
+
 // ── Template-literal mapped type key — TS spec §4.5 ─────────────────────────
 //   `{ [K in 'A' | 'B' as `prefix${K}`]: number }` iterates
 //   K = 'A' | 'B' and uses the `as <template>` clause to interpolate
@@ -501,6 +538,8 @@ const F_USERLAND_SHADOWING_PICK: &[(&str, &str)] = &[("/c.vue", USERLAND_SHADOWI
 const F_MAPPED_EXCLUDE: &[(&str, &str)] = &[("/c.vue", MAPPED_EXCLUDE_VUE)];
 const F_MAPPED_EXTRACT: &[(&str, &str)] = &[("/c.vue", MAPPED_EXTRACT_VUE)];
 const F_TEMPLATE_LITERAL_AS_KEY: &[(&str, &str)] = &[("/c.vue", TEMPLATE_LITERAL_AS_KEY_VUE)];
+const F_GENERIC_SUBSTITUTION_VIA_TYPEOF: &[(&str, &str)] =
+    &[("/c.vue", GENERIC_SUBSTITUTION_VIA_TYPEOF_VUE)];
 
 // ── Phase 0b Class A property fixture file sets ─────────────────────────────
 const F_FIXTURE_PROPS_WITH_DEFAULTS: &[(&str, &str)] =
@@ -726,6 +765,17 @@ pub const FIXTURES: &[CorrectnessFixture] = &[
     CorrectnessFixture {
         id: "template_literal_as_key",
         files: F_TEMPLATE_LITERAL_AS_KEY,
+        target: "/c.vue",
+        class: FixtureClass::ClassA,
+    },
+    // Phase 5k §5.13 — re-homed Class A fixture authored after the
+    // single-segment-first lookup in `shallow_lower_type_expr`'s
+    // `TypeExpr::TypeOf` arm closes the value-member typeof gap.
+    // Was deferred per §0p.A.4 case 2 in Phase 0a's first spawn and
+    // recorded in `phase-00-tier1-mismatches.md` row 4 / §5.B.5.
+    CorrectnessFixture {
+        id: "generic_substitution_via_typeof",
+        files: F_GENERIC_SUBSTITUTION_VIA_TYPEOF,
         target: "/c.vue",
         class: FixtureClass::ClassA,
     },

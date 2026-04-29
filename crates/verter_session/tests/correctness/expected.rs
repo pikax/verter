@@ -209,6 +209,33 @@ pub fn mapped_extract() -> SnapshotView {
     shell(vec![required_prop("kind", "\"a\" | \"b\"")])
 }
 
+// ── IdShape<typeof sample.id> — generic substitution via value-member typeof ─
+//   Per TS spec §3.6: when a generic alias `IdShape<T>` is
+//   instantiated with a `typeof <value-path>` argument, the value
+//   path resolves to the value's annotated type, T is bound to that
+//   type, and the body is substituted accordingly. For
+//   `IdShape<typeof sample.id>` with `sample: Sample` and
+//   `interface Sample { id: string }`, the body `{ id: T }`
+//   substitutes `T → string`, surfacing one required prop
+//   `id: string`.
+//
+//   Pre-Phase-5k: the `shallow_lower_type_expr`'s `TypeExpr::TypeOf`
+//   arm joined the first two segments into `"sample.id"`, missed
+//   on the value-symbol lookup, and propagated `Opaque(Miss)` up
+//   through `Instantiate`. Substitution into `{ id: T }` left T
+//   unsubstituted; the prop surfaced as `id: T`.
+//   Post-Phase-5k: the single-segment-first lookup resolves
+//   `typeof sample` via `build_typeof`, projects `[id]` through
+//   `ProjectPath { mode: Navigate }` to `string`, then substitutes
+//   T → string in the body. Result: `id: string`.
+//
+//   Rule citation: TS spec §3.6 (generic substitution); CLAUDE.md
+//   "generic substitutions are part of semantic meaning".
+//   `phase-00-tier1-mismatches.md` row 4; closed by Phase 5k §5.13.
+pub fn generic_substitution_via_typeof() -> SnapshotView {
+    shell(vec![required_prop("id", "string")])
+}
+
 // ── { [K in 'A' | 'B' as `prefix${K}`]: number } — template-literal key ─────
 //   Per TS spec §4.5: a mapped type's `as <expr>` clause re-maps
 //   each iterated key through `<expr>`. When the expression is a
@@ -514,6 +541,11 @@ pub fn lookup_class_a_expected(fixture_id: &str) -> Option<SnapshotView> {
         "mapped_exclude" => Some(mapped_exclude()),
         "mapped_extract" => Some(mapped_extract()),
         "template_literal_as_key" => Some(template_literal_as_key()),
+        // Phase 5k §5.13 — fixture authored after the
+        // single-segment-first lookup in `shallow_lower_type_expr`'s
+        // `TypeExpr::TypeOf` arm closes the value-member typeof gap
+        // (`phase-00-tier1-mismatches.md` row 4).
+        "generic_substitution_via_typeof" => Some(generic_substitution_via_typeof()),
         // Phase 0b — component-meta property macros (5 of 7 land;
         // `fixture_slots_typed` and `fixture_models` originally
         // deferred per §0p.A.4 case 2 — see
