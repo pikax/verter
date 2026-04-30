@@ -181,44 +181,49 @@ pub fn resolve_type_declaration<R: DeclarationMetadataResolver>(
     let export_span = resolver
         .get_export_span_follow_reexports(dep_canonical, requested_name)
         .unwrap_or_default();
-    let source = resolver.read_source(canonical_source.as_str());
+    // Phase 4b §4b.3 — source-text reparse path retired. The graph
+    // surface (`resolve_local_type_symbol_metadata`) is the
+    // authoritative kind/span carrier; declaration text is no longer
+    // populated by the resolver.
     let (kind, span, text) = resolve_local_symbol_details(
         resolver,
         canonical_source.as_str(),
         resolved_name.as_str(),
         export_span,
-        source.as_deref(),
+        None,
     );
     let declaration_id =
         resolver.type_declaration_id(canonical_source.as_str(), resolved_name.as_str());
 
     if kind == ResolvedDeclarationKind::Unknown {
-        if let Some(source) = source.as_deref() {
-            if let Some(local_name) = resolver.resolve_local_export_symbol_target(
+        // The same-file local_export rerouting (e.g.
+        // `export { Foo as Lt }`) stays — it consumes only graph
+        // metadata via `resolve_local_export_symbol_target` and
+        // `resolve_local_type_symbol_metadata`.
+        if let Some(local_name) = resolver.resolve_local_export_symbol_target(
+            canonical_source.as_str(),
+            resolved_name.as_str(),
+        ) {
+            let followed_details = resolve_local_symbol_details(
+                resolver,
                 canonical_source.as_str(),
-                resolved_name.as_str(),
-            ) {
-                let followed_details = resolve_local_symbol_details(
-                    resolver,
-                    canonical_source.as_str(),
-                    local_name.as_str(),
-                    export_span,
-                    Some(source),
-                );
-                if followed_details.0 != ResolvedDeclarationKind::Unknown
-                    || followed_details.2.is_some()
-                {
-                    return ResolvedTypeDeclaration {
-                        requested_name: requested_name.to_string(),
-                        declaration_id: resolver
-                            .type_declaration_id(canonical_source.as_str(), local_name.as_str()),
-                        resolved_name: local_name,
-                        canonical_source,
-                        span: followed_details.1,
-                        kind: followed_details.0,
-                        text: followed_details.2,
-                    };
-                }
+                local_name.as_str(),
+                export_span,
+                None,
+            );
+            if followed_details.0 != ResolvedDeclarationKind::Unknown
+                || followed_details.2.is_some()
+            {
+                return ResolvedTypeDeclaration {
+                    requested_name: requested_name.to_string(),
+                    declaration_id: resolver
+                        .type_declaration_id(canonical_source.as_str(), local_name.as_str()),
+                    resolved_name: local_name,
+                    canonical_source,
+                    span: followed_details.1,
+                    kind: followed_details.0,
+                    text: followed_details.2,
+                };
             }
         }
     }
@@ -745,10 +750,11 @@ type Props = {
         assert_eq!(resolved.resolved_name, "RouteLocationRaw");
         assert_eq!(resolved.declaration_id, Some(11));
         assert_eq!(resolved.kind, ResolvedDeclarationKind::TypeAlias);
-        assert_eq!(
-            resolved.text.as_deref(),
-            Some("type RouteLocationRaw = string;")
-        );
+        // Phase 4b §4b.3 — source-text reparse retired. The
+        // local_export symbol target rerouting still resolves the
+        // declaration via graph metadata; only the `text` field is
+        // no longer populated.
+        assert_eq!(resolved.text, None);
     }
 
     #[test]
@@ -833,10 +839,9 @@ type Props = {
             resolved.span,
             verter_span::Span::new(0, source.len() as u32)
         );
-        assert_eq!(
-            resolved.text.as_deref(),
-            Some("type Props = {\n  label: string\n};")
-        );
+        // Phase 4b §4b.3 — graph metadata is the kind/span carrier;
+        // declaration text is no longer populated.
+        assert_eq!(resolved.text, None);
     }
 
     // ----------------------------------------------------------------------

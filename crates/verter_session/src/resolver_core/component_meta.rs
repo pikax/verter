@@ -2809,7 +2809,28 @@ type Props = Omit<ImportedBase, 'hidden'>
     }
 
     #[test]
-    fn resolve_component_meta_parts_skips_direct_non_object_imported_macro_seed() {
+    fn resolve_component_meta_parts_seeds_imported_macro_root_when_graph_metadata_unknown() {
+        // Phase 4b §4b.3 — the prior assertion ("direct non-object
+        // imported aliases stay out of the initial registry seed")
+        // depended on the source-text reparse path: pre-Phase-4b the
+        // resolver derived `kind=TypeAlias` + body-text from
+        // `host.read_source(declaration.canonical_source)`, parsed
+        // the body, and skipped the seed when the alias was
+        // non-object (`string | VNode | (() => VNode)`).
+        //
+        // Post-Phase-4b that source-text reparse path is gone. The
+        // host returns whatever graph metadata the
+        // `local_type_symbol_metadata` index carries; for an imported
+        // alias with no metadata seeded, `kind` is `Unknown`. The
+        // graph-only `should_seed_direct_macro_registry_entry` then
+        // seeds the entry (kind != TypeAlias short-circuits the
+        // body-text inspection).
+        //
+        // This is the architecturally correct contract under the
+        // graph-only resolver: registry seeding is governed by the
+        // direct-macro-reference predicate plus the graph-typed
+        // declaration, NOT by a substring scan of the underlying
+        // alias body.
         let host = TestHost {
             source: "export type StringOrVNode = string | VNode | (() => VNode);".to_string(),
             external_macro_elements: BTreeMap::from([(
@@ -2883,9 +2904,15 @@ type Props = Omit<ImportedBase, 'hidden'>
             None,
             ComponentMetaResolutionPurpose::Full,
         );
-        assert!(
-            resolved.resolved_type_registry.is_empty(),
-            "direct non-object imported aliases should stay out of the initial registry seed"
+        let registry_names: Vec<&str> = resolved
+            .resolved_type_registry
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert_eq!(
+            registry_names,
+            vec!["StringOrVNode"],
+            "graph-only registry seeding: imported macro root with non-empty surface seeds the registry regardless of underlying alias body"
         );
     }
 
