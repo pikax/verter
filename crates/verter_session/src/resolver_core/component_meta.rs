@@ -13,10 +13,7 @@ use verter_span::Span;
 use crate::resolver_core::{
     component_meta_registry::component_meta_registry_has_non_object_top_level_surface,
     project_macro_surfaces, resolve_local_type_declaration, resolve_type_declaration,
-    surface_projector::{
-        project_macro_surfaces_from_expanded_text, project_macro_surfaces_from_source_type_name,
-        ProjectedMacroSurfaces,
-    },
+    surface_projector::{project_macro_surfaces_from_expanded_text, ProjectedMacroSurfaces},
     DeclarationMetadataResolver, FactVersionRef, ResolvedNativeProp, ResolvedTypeDeclaration,
 };
 
@@ -347,19 +344,13 @@ where
         Default::default()
     };
     let macro_type_deps: Vec<MacroTypeDep> = host.snapshot_macro_type_deps(snapshot).to_vec();
-    let owner_source = if expanded {
-        host.read_source(owner_canonical)
-    } else {
-        None
-    };
     for dep in &macro_type_deps {
         if purpose == ComponentMetaResolutionPurpose::Fallthrough
             && !macro_kind_needed_for_fallthrough(dep.macro_kind)
         {
             continue;
         }
-        let direct_macro_reference =
-            is_direct_macro_type_reference(macros, dep, owner_source.as_deref());
+        let direct_macro_reference = is_direct_macro_type_reference(macros, dep, None);
         if expanded {
             if let Some(mac) = macros.get(dep.macro_index) {
                 let authoritative_owner = macro_has_authoritative_owner_surface(
@@ -527,37 +518,15 @@ where
                 )
             });
         if let Some(elements) = imported_elements {
-            let declaration_source = if skip_declaration_metadata {
-                None
-            } else {
-                host.read_source(declaration.canonical_source.as_str())
-            };
-            let mut projected =
-                project_macro_surfaces(declaration_source.as_deref(), dep.macro_kind, &elements);
-            // TODO(follow-up): this source-text reparsing fallback violates the
-            // cache-owned recovery rule.  The resolver should be extended to handle
-            // mapped types, inherited emits, and other cases that currently produce
-            // empty surfaces from `resolve_macro_elements`.  Once the resolver covers
-            // all cases, remove this fallback entirely.
-            if projected.props.is_empty()
-                && projected.emits.is_empty()
-                && projected.slots.is_empty()
-                && projected.native_props.is_empty()
-            {
-                if let Some(source_projected) = declaration_source.as_deref().and_then(|source| {
-                    let projection_source = source_for_local_type_projection(source);
-                    project_macro_surfaces_from_source_type_name(
-                        projection_source.as_ref(),
-                        dep.macro_kind,
-                        dep_exported_name.as_ref(),
-                    )
-                }) {
-                    projected = source_projected;
-                }
-            }
+            // Phase 4 — graph-native projection. The resolver's
+            // `host.resolve_macro_elements` returns the prop/emit/slot
+            // surface graph-natively; `project_macro_surfaces(None, ...)`
+            // preserves the core data extraction (JSDoc + raw text are
+            // ancillary and intentionally absent here).
+            let projected = project_macro_surfaces(None, dep.macro_kind, &elements);
             let package_backed_dep = dep_canonical.contains("/node_modules/")
                 || declaration.canonical_source.contains("/node_modules/");
-            if is_direct_macro_type_reference(macros, dep, owner_source.as_deref())
+            if is_direct_macro_type_reference(macros, dep, None)
                 && !package_backed_dep
                 && should_seed_direct_macro_registry_entry(&declaration)
                 && seen_registry_names.insert(dep.type_name.clone())
@@ -591,7 +560,7 @@ where
                 purpose,
                 macros,
                 dep,
-                owner_source.as_deref(),
+                None,
                 &declaration,
             );
             if !projectable_owner_local || keep_direct_imported_vue_macro {
@@ -610,22 +579,12 @@ where
                 });
             }
         } else {
-            // TODO(follow-up): same as the fallback above — this source-text
-            // reparsing should be replaced by extending the resolver to handle
-            // all imported macro types through the cache-owned path.
-            let declaration_source = if skip_declaration_metadata {
-                None
-            } else {
-                host.read_source(declaration.canonical_source.as_str())
-            };
-            let projected_from_source = declaration_source.as_deref().and_then(|source| {
-                let projection_source = source_for_local_type_projection(source);
-                project_macro_surfaces_from_source_type_name(
-                    projection_source.as_ref(),
-                    dep.macro_kind,
-                    dep_exported_name.as_ref(),
-                )
-            });
+            // Phase 4 — graph-native fallback. When `imported_elements`
+            // is `None` the macro has no resolvable surface; emit empty
+            // surfaces and proceed. The previous source-text reparse
+            // path (read source then call
+            // `project_macro_surfaces_from_source_type_name`) violated
+            // the cache-owned recovery rule and is deleted.
             let projectable_owner_local = projectable_owner_local_surfaces
                 .get(dep.macro_index)
                 .copied()
@@ -635,66 +594,33 @@ where
                 purpose,
                 macros,
                 dep,
-                owner_source.as_deref(),
+                None,
                 &declaration,
             );
             let package_backed_dep = dep_canonical.contains("/node_modules/")
                 || declaration.canonical_source.contains("/node_modules/");
+            if is_direct_macro_type_reference(macros, dep, None)
+                && !package_backed_dep
+                && should_seed_direct_macro_registry_entry(&declaration)
+                && seen_registry_names.insert(dep.type_name.clone())
+            {
+                resolved_type_registry.push(ResolvedTypeAnalysis {
+                    name: dep.type_name.clone(),
+                    type_expr: TypeExpr::named(dep.type_name.clone()),
+                    type_expansion: None,
+                });
+                resolved_type_registry_meta.push(ResolvedTypeRegistryMeta {
+                    name: dep.type_name.clone(),
+                    declaration: declaration.clone(),
+                });
+            }
             let (
                 surface_props,
                 surface_emits,
                 surface_slots,
                 surface_native_props,
                 surface_authoritative,
-            ) = if let Some(projected) = projected_from_source.filter(|p| {
-                !p.props.is_empty()
-                    || !p.emits.is_empty()
-                    || !p.slots.is_empty()
-                    || !p.native_props.is_empty()
-            }) {
-                if is_direct_macro_type_reference(macros, dep, owner_source.as_deref())
-                    && !package_backed_dep
-                    && should_seed_direct_macro_registry_entry(&declaration)
-                    && seen_registry_names.insert(dep.type_name.clone())
-                {
-                    resolved_type_registry.push(ResolvedTypeAnalysis {
-                        name: dep.type_name.clone(),
-                        type_expr: projected_macro_surfaces_to_type_expr(
-                            dep.macro_kind,
-                            &projected,
-                        ),
-                        type_expansion: None,
-                    });
-                    resolved_type_registry_meta.push(ResolvedTypeRegistryMeta {
-                        name: dep.type_name.clone(),
-                        declaration: declaration.clone(),
-                    });
-                }
-                (
-                    projected.props,
-                    projected.emits,
-                    projected.slots,
-                    projected.native_props,
-                    imported_declaration_surface_is_authoritative(&declaration),
-                )
-            } else {
-                if is_direct_macro_type_reference(macros, dep, owner_source.as_deref())
-                    && !package_backed_dep
-                    && should_seed_direct_macro_registry_entry(&declaration)
-                    && seen_registry_names.insert(dep.type_name.clone())
-                {
-                    resolved_type_registry.push(ResolvedTypeAnalysis {
-                        name: dep.type_name.clone(),
-                        type_expr: TypeExpr::named(dep.type_name.clone()),
-                        type_expansion: None,
-                    });
-                    resolved_type_registry_meta.push(ResolvedTypeRegistryMeta {
-                        name: dep.type_name.clone(),
-                        declaration: declaration.clone(),
-                    });
-                }
-                (Vec::new(), Vec::new(), Vec::new(), Vec::new(), false)
-            };
+            ) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), false);
             if !projectable_owner_local || keep_direct_imported_vue_macro {
                 resolved_macros.push(ResolvedMacroMeta {
                     macro_index,
@@ -742,7 +668,6 @@ where
                         | AnalyzedMacroKind::DefineEmits
                 );
 
-            let owner_source = host.read_source(owner_canonical);
             for (resolved_index, resolved) in mac.resolved_local_types.iter().enumerate() {
                 if !is_direct_local_macro_type_reference(
                     mac,
@@ -752,19 +677,17 @@ where
                     continue;
                 }
                 {
-                    if let Some(projected) = owner_source
-                        .as_deref()
-                        .and_then(|source| {
-                            let projection_source = source_for_local_type_projection(source);
-                            project_macro_surfaces_from_source_type_name(
-                                projection_source.as_ref(),
-                                mac.kind,
-                                resolved.name.as_str(),
-                            )
-                        })
-                        .or_else(|| {
-                            project_macro_surfaces_from_expanded_text(mac.kind, &resolved.expanded)
-                        })
+                    // Phase 4 — graph-native first-pass projection. The
+                    // owner-source-text reparse arm (read owner source
+                    // then call
+                    // `project_macro_surfaces_from_source_type_name`)
+                    // was deleted; the surviving arm projects from
+                    // `resolved.expanded` (semantic-data text-reparse,
+                    // retired by Phase 4b). The authoritative second
+                    // pass below (`prepared_surface_will_handle`) reuses
+                    // the prepared owner-local surface graph-natively.
+                    if let Some(projected) =
+                        project_macro_surfaces_from_expanded_text(mac.kind, &resolved.expanded)
                     {
                         if !projected.props.is_empty()
                             || !projected.emits.is_empty()
@@ -998,6 +921,7 @@ fn macro_kind_needed_for_fallthrough(kind: AnalyzedMacroKind) -> bool {
 mod tests {
     use super::*;
     use crate::resolver_core::declaration_metadata::ResolvedExportTarget;
+    use crate::resolver_core::surface_projector::project_macro_surfaces_from_source_type_name;
     use std::collections::BTreeMap;
     use verter_compiler::utils::oxc::vue::resolve_type::{
         ResolvedEmit, ResolvedEmitSignature, ResolvedMemberVisibility, ResolvedProp, RuntimeType,
@@ -3231,7 +3155,7 @@ fn should_ignore_external_macro_type(dep: &MacroTypeDep) -> bool {
 fn is_direct_macro_type_reference(
     macros: &[AnalyzedMacro],
     dep: &MacroTypeDep,
-    owner_source: Option<&str>,
+    _owner_source: Option<&str>,
 ) -> bool {
     let Some(mac) = macros.get(dep.macro_index) else {
         return false;
@@ -3244,9 +3168,22 @@ fn is_direct_macro_type_reference(
         return false;
     }
 
-    owner_source
-        .and_then(|source| direct_macro_type_reference_expr(source, mac.span))
-        .map(|expr| type_expr_has_direct_macro_reference(&expr, dep.type_name.as_str()))
+    // Phase 4 — graph-native gate. The parsed type argument (cached
+    // once during shallow analysis per the Shallow File Processing
+    // Core Invariant) is the authoritative shape of the macro's first
+    // type arg. When present, the dep is "direct" only if the parsed
+    // expression carries a top-level (non-Object-property) reference
+    // to `dep.type_name` reachable through Ref / Array / Tuple /
+    // Intersection / Union / Conditional etc. — never through Object
+    // members, which encode "nested" deps.
+    //
+    // When `parsed_type_argument` is `None` (the macro has no type
+    // arguments OR shallow parsing failed), fall back to the
+    // `mac.type_references` membership we already proved above
+    // (`unwrap_or(true)` semantics preserved).
+    mac.parsed_type_argument
+        .as_deref()
+        .map(|expr| type_expr_has_direct_macro_reference(expr, dep.type_name.as_str()))
         .unwrap_or(true)
 }
 
