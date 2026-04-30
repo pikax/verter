@@ -2813,10 +2813,10 @@ type Props = Omit<ImportedBase, 'hidden'>
         // Phase 4b §4b.3 — the prior assertion ("direct non-object
         // imported aliases stay out of the initial registry seed")
         // depended on the source-text reparse path: pre-Phase-4b the
-        // resolver derived `kind=TypeAlias` + body-text from
-        // `host.read_source(declaration.canonical_source)`, parsed
-        // the body, and skipped the seed when the alias was
-        // non-object (`string | VNode | (() => VNode)`).
+        // resolver derived `kind=TypeAlias` + body-text from the
+        // host source-text reader, parsed the body, and skipped the
+        // seed when the alias was non-object
+        // (`string | VNode | (() => VNode)`).
         //
         // Post-Phase-4b that source-text reparse path is gone. The
         // host returns whatever graph metadata the

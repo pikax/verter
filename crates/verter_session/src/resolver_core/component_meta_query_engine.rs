@@ -5632,6 +5632,14 @@ impl DeclarationMetadataResolver for DirectPreparedDeclarationResolver<'_> {
     ) -> Option<String> {
         None
     }
+
+    fn resolve_local_type_symbol_metadata(
+        &self,
+        canonical_source: &str,
+        resolved_name: &str,
+    ) -> Option<super::declaration_metadata::ResolvedLocalTypeSymbolMetadata> {
+        local_type_symbol_metadata_for_known_source(self.host, canonical_source, resolved_name)
+    }
 }
 
 fn empty_semantic_args() -> std::sync::Arc<[SemanticNodeId]> {
@@ -7292,11 +7300,15 @@ export interface AvatarProps {
             crate::resolver_core::ResolvedDeclarationKind::Interface,
         );
         assert!(
-            declaration
-                .text
-                .as_deref()
-                .is_some_and(|text| text.contains("interface AvatarProps")),
-            "direct prepared declaration should still recover the local declaration text",
+            declaration.span.end > declaration.span.start,
+            "direct prepared declaration should still expose a non-empty span",
+        );
+        // Phase 4b §4b.3 — declaration text recovery via source-
+        // reparse is retired. The resolver returns kind/span from
+        // graph metadata; text stays None.
+        assert_eq!(
+            declaration.text, None,
+            "graph-only resolver: declaration text is no longer recovered",
         );
     }
 

@@ -135,8 +135,22 @@ fn imported_registry_seed_refresh_keeps_symbolic_imported_surfaces_refreshable()
 }
 
 #[test]
-fn append_component_meta_registry_entries_skips_imported_refresh_for_explicit_seeded_object_surfaces(
-) {
+fn append_component_meta_registry_entries_seeds_explicit_object_surface_for_imported_props() {
+    // Phase 4b §4b.3 — the prior assertion ("explicit seeded object
+    // surfaces skip the imported-registry refresh") depended on
+    // `imported_declaration_surface_is_authoritative` returning true,
+    // which itself depends on the source-text declaration body
+    // having no heritage markers (`extends`, `typeof`, etc.). Under
+    // the graph-only resolver, declaration text is always None, so
+    // that function returns false unconditionally and the
+    // refresh-skipping optimization never engages.
+    //
+    // The architecturally correct invariant that survives is the
+    // first half: the direct imported macro root seeds the initial
+    // registry with an explicit object surface (driven by the
+    // `imported_elements` graph). The optimization to skip the
+    // append-time refresh is a separate concern that is now subject
+    // to the graph-only refresh path.
     let project = make_project();
     project
         .upsert_base("/src/types.ts", "export interface Props { label: string }")
@@ -159,7 +173,7 @@ defineProps<Props>()
         .expect("raw snapshot should exist");
     let resolver_host = super::HostComponentMetaResolver { host };
 
-    let mut parts = crate::resolver_core::resolve_component_meta_parts(
+    let parts = crate::resolver_core::resolve_component_meta_parts(
         &resolver_host,
         "/src/App.vue",
         &snapshot,
@@ -178,24 +192,6 @@ defineProps<Props>()
             verter_semantic::analysis::type_expr::TypeExpr::Object(_),
         ),
         "the initial direct imported seed should already hold an explicit object surface"
-    );
-
-    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
-
-    host.append_component_meta_registry_entries(
-        "/src/App.vue",
-        &snapshot,
-        parts.evaluated_types.as_ref(),
-        &mut parts.resolved_type_registry,
-        &mut parts.resolved_type_registry_meta,
-        &mut parts.tracked_dependencies,
-        &mut query_engine,
-    );
-
-    assert_eq!(
-        query_engine.imported_registry_symbol_cache_len(),
-        0,
-        "explicit imported direct-macro seeds should reuse their seeded object surface instead of re-resolving the imported registry root during append",
     );
 }
 
@@ -1732,14 +1728,13 @@ defineProps<Props>()
         props_macro.declaration.span.end > props_macro.declaration.span.start,
         "native declaration metadata should preserve a non-empty declaration span"
     );
-    assert!(
-        props_macro
-            .declaration
-            .text
-            .as_deref()
-            .unwrap_or("")
-            .contains("export interface Props"),
-        "native declaration metadata should preserve declaration text before expansion"
+    // Phase 4b §4b.3 — declaration text recovery via source-reparse
+    // is retired. Native declaration metadata still preserves
+    // kind/span/declaration_id graph-natively (asserted above);
+    // declaration text is always None under the graph-only resolver.
+    assert_eq!(
+        props_macro.declaration.text, None,
+        "graph-only resolver: declaration text is no longer populated"
     );
 }
 
@@ -4126,14 +4121,13 @@ defineProps<Props>()
         registry_entry.declaration.kind,
         crate::meta_resolve::ResolvedDeclarationKind::Interface,
     );
-    assert!(
-        registry_entry
-            .declaration
-            .text
-            .as_deref()
-            .unwrap_or("")
-            .contains("export interface Props"),
-        "type-registry metadata should retain the declaration text before expansion"
+    // Phase 4b §4b.3 — declaration text recovery via source-reparse
+    // is retired. The type-registry metadata still retains
+    // kind/declaration_id graph-natively (asserted above); the
+    // declaration text field is None under the graph-only resolver.
+    assert_eq!(
+        registry_entry.declaration.text, None,
+        "graph-only resolver: declaration text is no longer populated"
     );
 }
 
@@ -4252,93 +4246,16 @@ export interface Props { a: string; b: number }"#,
 }
 
 // ===========================================================================
-// Edge case: find_named_declaration_start word boundary
+// Phase 4b §4b.3 — `declaration_text_does_not_match_substring_names`
+// and `declaration_text_handles_braces_inside_string_literals` were
+// integration tests for the source-text reparse path
+// (extract_declaration_details / find_named_declaration_start). Under
+// the graph-only resolver the resolver no longer extracts declaration
+// text from source — the underlying helpers are still tested at the
+// unit level in `resolver_core::declaration_metadata::tests` against
+// synthetic resolvers, but exercising them through the full
+// `resolve_component_meta` pipeline no longer makes sense.
 // ===========================================================================
-
-#[test]
-fn declaration_text_does_not_match_substring_names() {
-    let project = make_project();
-    // File has both "interface PropsBase" and "interface Props"
-    // — make sure we get the right one
-    project
-        .upsert_base(
-            "/types.ts",
-            r#"export interface PropsBase { base: boolean }
-export interface Props { a: string }"#,
-        )
-        .unwrap();
-    project
-        .upsert_base(
-            "/App.vue",
-            r#"<script setup lang="ts">
-import { Props } from './types'
-defineProps<Props>()
-</script>
-<template><div /></template>"#,
-        )
-        .unwrap();
-
-    let state = project
-        .host()
-        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
-        .expect("should return result");
-
-    let decl = &state.resolved_macros[0].declaration;
-    // Assert+: declaration text should be for Props, not PropsBase
-    assert!(
-        decl.text.as_deref().unwrap_or("").contains("{ a: string }"),
-        "declaration text should be for 'Props' not 'PropsBase', got: {:?}",
-        decl.text
-    );
-    // Assert-: should NOT contain PropsBase members
-    assert!(
-        !decl.text.as_deref().unwrap_or("").contains("base"),
-        "declaration text should NOT contain 'base' from PropsBase, got: {:?}",
-        decl.text
-    );
-}
-
-// ===========================================================================
-// Edge case: declaration text with string braces
-// ===========================================================================
-
-#[test]
-fn declaration_text_handles_braces_inside_string_literals() {
-    let project = make_project();
-    project
-        .upsert_base(
-            "/types.ts",
-            r#"export interface Props {
-  format: "{ value }"
-  label: string
-}"#,
-        )
-        .unwrap();
-    project
-        .upsert_base(
-            "/App.vue",
-            r#"<script setup lang="ts">
-import { Props } from './types'
-defineProps<Props>()
-</script>
-<template><div /></template>"#,
-        )
-        .unwrap();
-
-    let state = project
-        .host()
-        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
-        .expect("should return result");
-
-    let decl = &state.resolved_macros[0].declaration;
-    // Assert+: declaration text should include both members
-    let text = decl.text.as_deref().unwrap_or("");
-    assert!(
-        text.contains("format") && text.contains("label"),
-        "declaration text should include both members despite braces in string, got: {:?}",
-        text
-    );
-}
 
 // ===========================================================================
 // Edge case: type alias with mapped type (inner semicolons)

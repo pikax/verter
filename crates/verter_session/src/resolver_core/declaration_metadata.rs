@@ -310,10 +310,16 @@ pub fn resolve_local_type_declaration<R: DeclarationMetadataResolver>(
     resolved_name: &str,
     span: verter_span::Span,
 ) -> ResolvedTypeDeclaration {
-    let (kind, resolved_span, text) = resolver
-        .read_source(canonical_source)
-        .map(|source| extract_declaration_details(&source, span, resolved_name))
-        .unwrap_or((ResolvedDeclarationKind::Unknown, span, None));
+    // Phase 4b §4b.3 — source-text reparse path retired. The graph
+    // metadata (`resolve_local_type_symbol_metadata`) is the
+    // authoritative kind/span carrier. When metadata is available
+    // its `kind` and `span` are preferred; otherwise the caller's
+    // `span` is preserved and `kind` is `Unknown`. Declaration text
+    // is no longer populated by the resolver.
+    let (kind, resolved_span) = resolver
+        .resolve_local_type_symbol_metadata(canonical_source, resolved_name)
+        .map(|metadata| (metadata.kind, metadata.span))
+        .unwrap_or((ResolvedDeclarationKind::Unknown, span));
     let declaration_id = resolver.type_declaration_id(canonical_source, resolved_name);
 
     ResolvedTypeDeclaration {
@@ -323,7 +329,7 @@ pub fn resolve_local_type_declaration<R: DeclarationMetadataResolver>(
         canonical_source: canonical_source.to_string(),
         span: resolved_span,
         kind,
-        text,
+        text: None,
     }
 }
 
