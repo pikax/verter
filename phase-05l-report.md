@@ -293,3 +293,212 @@ Total: 752 insertions, 829 deletions across 6 files.
 None. Per §5.14.3 + §0.5.1 + §0.3 ATOMIC_GATE_PHASES validator,
 `deferred[]` is empty; the marker is `status: success` per the
 atomic-gate enforcement (post-r17, no grandfather claim).
+
+---
+
+# Phase 5l fix-up addendum (review-agent)
+
+**Branch HEAD before fix-up:** `d225b0e2` (worker report commit)
+**Reset:** `cd36b246` (the prior worker's invalid `failed: 5` marker)
+was dropped via `git reset --hard d225b0e2`, then 4 new commits
+landed on top.
+
+## Context
+
+The prior 5l worker landed marker `cd36b246` with `failed: 5` against
+the atomic-gate phase contract (§5.14.3 + §0.5.1 + §0.3
+ATOMIC_GATE_PHASES enforces `failed == 0`). The 5 failing tests were
+all coupled to `.integration-tests/repos/nuxt-ui/` via
+`FilesystemWorkspace` and broke because the junctioned `nuxt-ui`
+checkout (branch `v4`) no longer exposes `ListboxRootProps` /
+`ButtonHTMLAttributes` / `EditorToolbar` at the same paths the tests
+were originally authored against.
+
+Per the user directive ("port the fixtures to not rely on integration
+folder clone. Unit tests should not rely on third-party code"), the
+fix-up replaces the third-party-coupled tests with hermetic
+`MemoryWorkspace`-backed fixtures inline in the test source.
+
+## Per-commit summary (fix-up)
+
+| SHA | Title |
+|---|---|
+| `c22613ff` | `test(meta): port produce_one_macro_object_shape ColorModeSelect chain test to hermetic fixtures` |
+| `21004829` | `test(meta): port produce_macro_object_shapes ColorModeSelect tests to hermetic fixtures` |
+| `950a52f2` | `test(meta): retire duplicate _real_nuxt_ui_editor_toolbar test` |
+
+## Per-test port details
+
+### Tests in `meta_resolve_tests.rs`
+
+The 4 ColorModeSelect tests share a single hermetic fixture skeleton
+that captures the same declaration-chain shape as the real nuxt-ui
+component but inlines all dependent types:
+
+```
+/src/pkg/combobox.ts
+  → ListboxRootProps<T> (shape match for reka-ui's ListboxRootProps)
+  → ComboboxRootProps<T> extends ListboxRootProps<T>
+
+/src/types/html.ts
+  → ButtonHTMLAttributes (shape match for nuxt-ui's local html types)
+
+/src/runtime/SelectMenu.vue (owner-local SFC)
+  → SelectMenuProps<T = Item[]> extends
+      Pick<ComboboxRootProps<T>, 'open' | 'defaultOpen' | 'disabled'>,
+      Omit<ButtonHTMLAttributes, 'type' | 'disabled' | 'name'>
+    + local color/variant props for the discrimination check
+
+/src/runtime/ColorModeSelect.vue
+  → ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'items'>
+```
+
+The shape was extracted by reading the actual nuxt-ui sources at:
+
+- `D:/dev/github/verter-test-repos/nuxt-ui/src/runtime/components/color-mode/ColorModeSelect.vue`
+- `D:/dev/github/verter-test-repos/nuxt-ui/src/runtime/components/SelectMenu.vue`
+
+The hermetic version retains the structural elements that make the
+test discriminate (cross-file imports, generic substitution,
+Pick/Omit utility composition, multi-level heritage chain) without
+reaching into a third-party checkout.
+
+#### Test 1: `produce_one_macro_object_shape_color_mode_select_chain_stays_off_solver`
+
+Renamed from `produce_one_macro_object_shape_real_nuxt_ui_color_mode_select_stays_off_solver`.
+
+**Discriminating contract:** every step in the prepared declaration
+chain (ComboboxRootProps → ListboxRootProps, ButtonHTMLAttributes,
+SelectMenuProps, ColorModeSelectProps) must yield a non-empty
+prepared-only root surface, the routed target re-export chain must
+also yield a prepared root surface, and `produce_one_macro_object_shape`
+must return `MacroShapeSource::Projection`.
+
+#### Test 2: `produce_macro_object_shapes_color_mode_select_keeps_imported_macro_root_off_resolved_macros`
+
+Renamed from `produce_macro_object_shapes_real_nuxt_ui_color_mode_select_reuses_authoritative_surface_without_solves`.
+
+**Discriminating contract:** imported macro roots reachable only via
+the heritage chain (here, `SelectMenuProps`) must NOT enter
+`resolved_macros`, since the owner-local `ColorModeSelectProps`
+wrapper can be projected lazily — and any `defineProps` resolved-macro
+that IS present must already be `surface_is_authoritative`.
+
+#### Test 3: `produce_macro_object_shapes_color_mode_select_overlay_upsert_stays_off_solver`
+
+Renamed from `produce_macro_object_shapes_real_nuxt_ui_color_mode_select_overlay_upsert_stays_off_solver`.
+
+**Discriminating contract:** explicit `host.upsert(UpsertRequest{...})`
+for the SFC (mirroring the editor "save" overlay path) must still
+produce a prepared root-surface SHAPE (with prop surface) after
+registry append, and `produce_one_macro_object_shape` must remain on
+`MacroShapeSource::Projection`.
+
+#### Test 4: `produce_macro_object_shapes_color_mode_select_projects_when_appended_registry_root_is_empty_shell`
+
+Renamed from `produce_macro_object_shapes_real_nuxt_ui_color_mode_select_projects_when_appended_registry_root_is_empty_shell`.
+
+**Discriminating contract:** `ColorModeSelectProps` with empty
+extends body lowers to an empty object shell (no local prop members);
+the projection must still walk the heritage chain and surface props
+inherited from `SelectMenuProps` (here, the discriminating positive
+is `prop_names.contains(&"color") || prop_names.contains(&"variant")`).
+If the projection bypasses the empty shell and trusts the registry
+blindly, the prop list would be empty.
+
+### Test in `meta_tests.rs`
+
+#### `get_component_meta_real_nuxt_ui_editor_toolbar_keeps_base_and_plugin_props` — RETIRED, NOT PORTED
+
+The hermetic
+`get_component_meta_editor_toolbar_union_keeps_base_and_plugin_props`
+(line 18295) already asserts the exact same 16-prop contract
+(`as`, `color`, `variant`, `activeColor`, `activeVariant`, `size`,
+`items`, `editor`, `class`, `ui`, `layout`, `appendTo`, `pluginKey`,
+`shouldShow`, `updateDelay`, `options`) against the same
+`EditorToolbarProps` union shape. The retired test merely inspected
+the same shape from a `FilesystemWorkspace`-backed checkout of
+`.integration-tests/repos/nuxt-ui/`.
+
+Per the user directive (unit tests must not rely on third-party
+code) and CLAUDE.md "Legacy Code Deletion" (do not preserve dual
+paths), the third-party-coupled duplicate is deleted rather than
+re-ported into a near-identical second hermetic copy. A retirement
+marker comment is left in place to flag the lineage.
+
+## §5.14.1 pre-flight gate output (post-fix-up)
+
+```
+$ cargo rustc -p verter_session --lib -- -W deprecated 2>&1 | tee /tmp/p05l-fixup-deprecated.txt
+$ grep -c "Phase 5l deletion target" /tmp/p05l-fixup-deprecated.txt
+0
+```
+
+Pre-flight gate clean. The fix-up does not touch engine sources, so
+the deletion state from the prior 5l commits is preserved verbatim.
+
+## Workspace verification (final, post-fix-up)
+
+```
+cargo test --workspace --tests --verbose
+# 45 blocks; passed: 10283, failed: 0, ignored: 8
+
+cargo test -p verter_session --test correctness
+# Pass: 18, Fail: 0, Ignored: 1
+
+cargo fmt --all --check
+# clean
+
+pnpm install --frozen-lockfile
+# clean (no lockfile drift)
+
+cargo rustc -p verter_session --lib -- -W deprecated
+# 0 "Phase 5l deletion target" warnings
+```
+
+`cargo clippy --workspace -- -D warnings` continues to be skipped per
+the 5k/5m precedent (same 5 pre-existing dead-code warnings + 1
+pre-existing `arc-with-non-send-sync` in `request_context.rs` —
+verified identical to the `d225b0e2` baseline). The fix-up introduces
+ZERO new clippy errors.
+
+## Anchor drift log (fix-up)
+
+None. The brief listed 5 test names and their approximate file lines
+(7557, 7676, 7848, 7956, 18649); each was located by exact name
+match without drift.
+
+## LOC accounting (fix-up)
+
+```
+crates/verter_session/src/meta_resolve_tests.rs: -126 net deletions, +282 insertions (4 tests rewritten in hermetic form; net +156)
+crates/verter_session/src/meta_tests.rs: -54 deletions, +13 insertions (1 test deleted with retirement marker; net -41)
+```
+
+Total: 295 insertions, 180 deletions across 2 files.
+
+## Discrimination check
+
+Each ported test asserts a multi-step contract (e.g., test 1 has 7
+distinct prepared-only assertions). Removing any link in the
+hermetic fixture's heritage chain (e.g., dropping
+`Omit<ButtonHTMLAttributes, ...>` from `SelectMenuProps`) would break
+the corresponding `prepared_only.is_some()` assertion. The bridge
+helpers `project_prepared_type_surface_expr_via_host_threaded`,
+`project_prepared_type_surface_shape_via_host_threaded`, and the
+`produce_one_macro_object_shape` / `produce_macro_object_shapes`
+free functions are exercised end-to-end by the new hermetic
+fixtures.
+
+The retired test 5 was equivalent to an existing hermetic test;
+discrimination is preserved by `get_component_meta_editor_toolbar_union_keeps_base_and_plugin_props`.
+
+## Atomic-gate satisfaction (final)
+
+`failed: 0`, `deferred: []`, `status: "success"`,
+`atomic_gate_phase: true`. Marker keys are exactly `workspace` +
+`correctness`. `test_scope` strings restored to the standard
+`cargo test --workspace --tests --verbose` form (the prior worker's
+`--no-fail-fast` variant was a workaround for the 5 failures it
+intentionally allowed; that variant is removed since the failures
+are now zero).
