@@ -3620,7 +3620,7 @@ fn emit_minimal_wrapper(
 }
 
 /// Prefix for all emitted ___VERTER___ types/functions.
-const PREFIX: &str = "___VERTER___";
+pub(super) const PREFIX: &str = "___VERTER___";
 
 /// Emit the `___VERTER___instance` declaration and void suppression.
 ///
