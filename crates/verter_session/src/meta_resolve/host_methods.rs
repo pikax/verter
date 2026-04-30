@@ -77,6 +77,7 @@ use super::STORE_VIEW_STABILITY_MAX_ATTEMPTS;
 // then `host_methods.rs` reaches them via `super::*` so this commit is a
 // pure organisational move.
 use super::macro_member_walk::walk_component_meta_macro_shape_member_types;
+use super::origin_graph::build_origin_graph;
 use super::registry_materialize::{
     component_meta_registry_prefers_structural_materialization_node,
     component_meta_registry_should_keep_raw_symbolic_non_object_alias,
@@ -84,7 +85,7 @@ use super::registry_materialize::{
     preserve_registry_callable_param_member_routes,
     type_expr_needs_nested_symbolic_route_preservation,
 };
-use super::{build_origin_graph, HostComponentMetaResolver};
+use super::HostComponentMetaResolver;
 
 use crate::resolver_core::component_meta_registry::{
     collect_component_meta_registry_public_field_refs, collect_component_meta_registry_refs,
