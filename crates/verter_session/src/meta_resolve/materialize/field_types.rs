@@ -40,16 +40,15 @@ use super::macro_shapes::expr_needs_projection_rescue;
 // `macro_member_walk` sibling (Phase 11a commit 10);
 // `component_meta_registry_should_keep_raw_symbolic_non_object_alias`
 // and `preserve_package_backed_symbolic_refs_node` live in the
-// `registry_materialize` sibling (Phase 11a commit 11).
-// `type_node_needs_member_route_materialization` still lives in the
-// parent shell (`crate::meta_resolve`) and migrates to the
-// `graph_predicates` sibling in Phase 11a commit 12.
+// `registry_materialize` sibling (Phase 11a commit 11);
+// `type_node_needs_member_route_materialization` lives in the
+// `graph_predicates` sibling (Phase 11a commit 12).
+use super::super::graph_predicates::type_node_needs_member_route_materialization;
 use super::super::macro_member_walk::materialize_component_meta_macro_shape_member_type_expr;
 use super::super::registry_materialize::{
     component_meta_registry_should_keep_raw_symbolic_non_object_alias,
     preserve_package_backed_symbolic_refs_node,
 };
-use super::super::type_node_needs_member_route_materialization;
 
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub(crate) fn materialize_component_meta_type_expr_until_stable(

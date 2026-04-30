@@ -2822,12 +2822,29 @@ fn phase_05e_commit_5_route_loop_callers_migrate_to_dispatch() {
 ///   per the sub-plan §C.3 D-T recipe).
 #[test]
 fn phase_05e_commit_6_instantiate_local_generic_ref_callers_migrate_to_dispatch() {
-    let meta_src = include_str!("meta_resolve.rs");
+    // Phase 11a — `meta_resolve.rs` is now the shell of a folder
+    // module; the bodies that carry the `instantiate_local_generic_ref`
+    // / `SemanticQueryKey::Instantiate` markers landed in:
+    //   - `meta_resolve/registry_materialize.rs` (commit 11) — the
+    //     registry-route fast path that dispatches Instantiate for
+    //     route-target Pick/Omit recipes.
+    //   - `meta_resolve/dispatch_helpers.rs` (commit 4) — the
+    //     `instantiate_local_generic_ref_via_dispatch` bridge helper.
+    // The original test mechanism (single-file static-text grep) is
+    // preserved verbatim — we just concatenate the relevant
+    // post-split siblings before running the same predicates. §0.6.1
+    // mechanical adjustment.
+    let shell_src = include_str!("meta_resolve.rs");
+    let registry_materialize_src = include_str!("meta_resolve/registry_materialize.rs");
+    let dispatch_helpers_src = include_str!("meta_resolve/dispatch_helpers.rs");
+    let meta_src = format!(
+        "{shell_src}\n{registry_materialize_src}\n{dispatch_helpers_src}"
+    );
 
     let meta_callsites = meta_src.matches(".instantiate_local_generic_ref(").count();
     assert_eq!(
         meta_callsites, 0,
-        "Phase 5e commit 6: meta_resolve.rs must have 0 .instantiate_local_generic_ref( callsites post-migration; found {meta_callsites}",
+        "Phase 5e commit 6: meta_resolve.* must have 0 .instantiate_local_generic_ref( callsites post-migration; found {meta_callsites}",
     );
 
     // Positive marker: callers route through dispatch's Instantiate
@@ -2836,6 +2853,6 @@ fn phase_05e_commit_6_instantiate_local_generic_ref_callers_migrate_to_dispatch(
     let instantiate_dispatch_calls = meta_src.matches("SemanticQueryKey::Instantiate").count();
     assert!(
         instantiate_dispatch_calls >= 1,
-        "Phase 5e commit 6: meta_resolve.rs must dispatch SemanticQueryKey::Instantiate post-migration; found {instantiate_dispatch_calls}",
+        "Phase 5e commit 6: meta_resolve.* must dispatch SemanticQueryKey::Instantiate post-migration; found {instantiate_dispatch_calls}",
     );
 }

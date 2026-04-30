@@ -33,13 +33,8 @@ use super::resolved_state::{
 };
 use super::scoring::compare_type_expr_improvement;
 
-// `type_expr_contains_public_member_route` lives in the
-// `registry_materialize` sibling (Phase 11a commit 11);
-// `slot_binding_param_can_stay_symbolic_node` still lives in the parent
-// shell (`crate::meta_resolve`) and migrates to the `graph_predicates`
-// sibling in Phase 11a commit 12.
+use super::graph_predicates::slot_binding_param_can_stay_symbolic_node;
 use super::registry_materialize::type_expr_contains_public_member_route;
-use super::slot_binding_param_can_stay_symbolic_node;
 
 use crate::resolver_core::component_meta_registry::{
     component_meta_registry_public_indexed_access_route,

@@ -26,10 +26,7 @@ use super::dispatch_helpers::{
     project_expr_class_a_via_dispatch_threaded, project_type_surface_expr_via_host_threaded,
 };
 
-// `component_meta_ref_resolves_to_package_node` still lives in the
-// parent shell (`crate::meta_resolve`) and migrates to the graph_predicates
-// sibling in Phase 11a commit 12.
-use super::component_meta_ref_resolves_to_package_node;
+use super::graph_predicates::component_meta_ref_resolves_to_package_node;
 
 use crate::resolver_core::component_meta_registry::{
     component_meta_registry_public_indexed_access_route,
