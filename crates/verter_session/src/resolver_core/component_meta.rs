@@ -295,6 +295,179 @@ fn placeholder_type_declaration(
     }
 }
 
+/// Reconstruct the original `JsdocTag.text` payload from the
+/// post-parse `(text, raw_type, subject_name)` triple stored on
+/// `ResolvedJsdocTag`.
+///
+/// `parse_jsdoc_tag_payload` (in `meta_resolve.rs`) splits a tag's raw
+/// trailing text into three pieces: the `{Type}` block (`raw_type`),
+/// an optional subject name (only for `@param`/`@arg`/`@argument`),
+/// and the remaining trailing description text (`text`). The simple
+/// `JsdocTag.text` form keeps everything as one string. To round-trip
+/// through `host.resolve_jsdoc_block` we reassemble the three pieces
+/// in the order the parser took them apart.
+fn jsdoc_tag_text_from_resolved(tag: &ResolvedJsdocTag) -> Option<String> {
+    if let Some(raw_type) = &tag.raw_type {
+        let mut out = String::new();
+        out.push('{');
+        out.push_str(raw_type);
+        out.push('}');
+        if let Some(subject) = &tag.subject_name {
+            out.push(' ');
+            out.push_str(subject);
+        }
+        if let Some(text) = &tag.text {
+            out.push(' ');
+            out.push_str(text);
+        }
+        Some(out)
+    } else {
+        tag.text.clone()
+    }
+}
+
+fn jsdoc_tags_from_resolved(
+    resolved: &[ResolvedJsdocTag],
+) -> Vec<verter_semantic::analysis::types::JsdocTag> {
+    resolved
+        .iter()
+        .map(|tag| verter_semantic::analysis::types::JsdocTag {
+            name: tag.name.clone(),
+            text: jsdoc_tag_text_from_resolved(tag),
+        })
+        .collect()
+}
+
+/// Phase 4 — graph-native per-member JSDoc enrichment.
+///
+/// Walks the resolved cross-file `elements` parallel to the way
+/// `project_macro_surfaces` projected them, and asks
+/// `host.resolve_jsdoc_block` (an existing host API) for the JSDoc
+/// block sitting near each source-element span. Found descriptions
+/// and tags overwrite the empty `description = None` / `tags = vec![]`
+/// values that the post-Phase-4 graph-native projection (which
+/// receives `source = None`) wrote.
+///
+/// Pre-Phase-4 the resolver passed the imported declaration's raw
+/// source text into `project_macro_surfaces`, which then called
+/// `member_jsdoc(source, prop.span)` per element. Phase 4 deleted
+/// `host.read_source` from this resolver and the fallback paths it
+/// fed; the source-text inputs are gone. This helper reuses the
+/// shared `host.resolve_jsdoc_block` helper (the same path the
+/// declaration-level JSDoc already uses), which reads from the
+/// host-owned analysis source cache rather than re-parsing raw
+/// text — preserving the cache-owned recovery rule (CLAUDE.md
+/// "Component-Meta Native Vs Compat" + Macro Type Traversal Rule).
+#[allow(clippy::too_many_arguments)]
+fn enrich_projected_jsdoc<H>(
+    host: &H,
+    declaration: &ResolvedTypeDeclaration,
+    elements: &ResolvedElements,
+    macro_kind: AnalyzedMacroKind,
+    projected: &mut ProjectedMacroSurfaces,
+    expanded: bool,
+    tracked_deps: &mut BTreeSet<String>,
+    cache: &mut crate::resolver_core::ExternalTypeBodyCache,
+    visiting: &mut FxHashSet<(String, String)>,
+) where
+    H: ComponentMetaResolverHost,
+{
+    if declaration.canonical_source.is_empty() {
+        return;
+    }
+
+    let mut apply_jsdoc =
+        |span: verter_span::Span,
+         description_slot: &mut Option<String>,
+         tags_slot: &mut Vec<verter_semantic::analysis::types::JsdocTag>| {
+            if span.start == 0 && span.end == 0 {
+                return;
+            }
+            if let Some(block) = host.resolve_jsdoc_block(
+                declaration.canonical_source.as_str(),
+                span,
+                expanded,
+                tracked_deps,
+                cache,
+                visiting,
+            ) {
+                if block.description.is_some() {
+                    *description_slot = block.description;
+                }
+                if !block.tags.is_empty() {
+                    *tags_slot = jsdoc_tags_from_resolved(&block.tags);
+                }
+            }
+        };
+
+    match macro_kind {
+        AnalyzedMacroKind::DefineProps
+        | AnalyzedMacroKind::WithDefaults
+        | AnalyzedMacroKind::DefineModel => {
+            // `project_macro_surfaces` collects public props in the
+            // same iteration order; walk the same filter to align
+            // source spans 1:1 with `projected.props[i]`.
+            let public_props: Vec<&_> = elements
+                .props
+                .iter()
+                .filter(|prop| prop.visibility.is_public())
+                .collect();
+            for (proj, src) in projected.props.iter_mut().zip(public_props.iter()) {
+                apply_jsdoc(src.span, &mut proj.description, &mut proj.tags);
+            }
+        }
+        AnalyzedMacroKind::DefineEmits => {
+            if !elements.emits.is_empty() {
+                for (proj, src) in projected.emits.iter_mut().zip(elements.emits.iter()) {
+                    apply_jsdoc(src.span, &mut proj.description, &mut proj.tags);
+                }
+            } else {
+                // Property-style emits: `project_macro_surfaces`
+                // walks `elements.props` filtering public + dedup'd
+                // by name. Reproduce the same filter to align spans.
+                let mut seen = FxHashSet::default();
+                let mut prop_iter = elements
+                    .props
+                    .iter()
+                    .filter(|prop| prop.visibility.is_public())
+                    .filter_map(|prop| {
+                        let name = prop.key_name.clone()?;
+                        if !seen.insert(name) {
+                            return None;
+                        }
+                        Some(prop)
+                    });
+                for proj in projected.emits.iter_mut() {
+                    if let Some(src) = prop_iter.next() {
+                        apply_jsdoc(src.span, &mut proj.description, &mut proj.tags);
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+        AnalyzedMacroKind::DefineSlots => {
+            // `project_macro_surfaces` walks public props and keeps
+            // those whose type either yields slot bindings, a return
+            // type, or resolves as a function. Match by name to align
+            // (slots' projected order is the public-prop order with
+            // non-slot entries dropped).
+            let mut by_name: std::collections::HashMap<&str, &_> = elements
+                .props
+                .iter()
+                .filter(|prop| prop.visibility.is_public())
+                .filter_map(|prop| prop.key_name.as_deref().map(|name| (name, prop)))
+                .collect();
+            for proj in projected.slots.iter_mut() {
+                if let Some(src) = by_name.remove(proj.name.as_str()) {
+                    apply_jsdoc(src.span, &mut proj.description, &mut proj.tags);
+                }
+            }
+        }
+        AnalyzedMacroKind::DefineExpose | AnalyzedMacroKind::DefineOptions => {}
+    }
+}
+
 pub fn resolve_component_meta_parts<H>(
     host: &H,
     owner_canonical: &str,
@@ -521,9 +694,25 @@ where
             // Phase 4 — graph-native projection. The resolver's
             // `host.resolve_macro_elements` returns the prop/emit/slot
             // surface graph-natively; `project_macro_surfaces(None, ...)`
-            // preserves the core data extraction (JSDoc + raw text are
-            // ancillary and intentionally absent here).
-            let projected = project_macro_surfaces(None, dep.macro_kind, &elements);
+            // preserves the core data extraction. Per-member JSDoc is
+            // ancillary text; we recover it post-projection via
+            // `enrich_projected_jsdoc`, which routes through the
+            // host-owned `host.resolve_jsdoc_block` (the same
+            // shared resolver path the declaration-level JSDoc uses).
+            let mut projected = project_macro_surfaces(None, dep.macro_kind, &elements);
+            if !skip_declaration_metadata {
+                enrich_projected_jsdoc(
+                    host,
+                    &declaration,
+                    &elements,
+                    dep.macro_kind,
+                    &mut projected,
+                    expanded,
+                    &mut tracked_deps,
+                    &mut cache,
+                    &mut visiting,
+                );
+            }
             let package_backed_dep = dep_canonical.contains("/node_modules/")
                 || declaration.canonical_source.contains("/node_modules/");
             if is_direct_macro_type_reference(macros, dep, None)
