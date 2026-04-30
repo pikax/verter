@@ -80,13 +80,13 @@ mod ts_assertions;
 mod type_constructs;
 mod wrapper;
 
-#[cfg(test)]
-use comp_emit::resolve_all_prop_refs_in_expr;
+// Pull every sibling-internal symbol that any sibling resolves via
+// `super::<name>` into the script module's namespace. This single
+// surface lets each sibling reach the others without spelling
+// `crate::ide::script::other_sibling::foo` paths repeatedly.
 use comp_emit::{emit_comp_functions_to_string, emit_get_root_component_to_string};
 use detectors::{detect_get_current_instance, detect_use_attrs_calls};
 use event_inference::{apply_event_handler_param_inference, kebab_to_pascal_case};
-#[cfg(test)]
-use macros::is_simple_type_reference;
 use macros::{process_macros, MacroSourceCtx};
 use options_api::{process_companion_for_tsx, process_tsx_script_only};
 use setup::process_tsx_script_setup;
@@ -105,6 +105,11 @@ use wrapper::{
 };
 
 pub use type_constructs::{VERTER_TYPES_AMBIENT_MODULE, VERTER_TYPES_STANDALONE_DTS};
+
+#[cfg(test)]
+use comp_emit::resolve_all_prop_refs_in_expr;
+#[cfg(test)]
+use macros::is_simple_type_reference;
 
 /// Result of TSX script generation (internal, before building string).
 pub struct IdeScriptGenResult<'alloc> {
