@@ -427,10 +427,22 @@ fn phase_05m_class_b_callers_migrated_through_bridge_helpers() {
     // `TODO(phase-5g)` marker. This test asserts the markers exist
     // — a regression that drops a marker (or accidentally deletes a
     // site) fails this test.
-    let src = read_workspace_file("crates/verter_session/src/meta_resolve.rs");
+    // Phase 11a — `meta_resolve.rs` was split into a folder module;
+    // the bridge helpers now live in `meta_resolve/dispatch_helpers.rs`.
+    // Concatenate the shell + dispatch_helpers sibling so the
+    // §5.14.2 guard's structural assertions (presence of the bridge
+    // section header + Class B callsites OUTSIDE that section) still
+    // discriminate on the post-split source.
+    let shell_src = read_workspace_file("crates/verter_session/src/meta_resolve.rs");
+    let dispatch_helpers_src =
+        read_workspace_file("crates/verter_session/src/meta_resolve/dispatch_helpers.rs");
+    // Order matters: dispatch_helpers first so the bridge section
+    // header precedes the §4.10 K1 markers in the shell that bound
+    // the bridge block from below in the post-split source.
+    let src = format!("{dispatch_helpers_src}\n{shell_src}");
 
     // Negative assertion: no `project_type_class_b_via_dispatch`
-    // helper invocations should remain in meta_resolve.rs (the
+    // helper invocations should remain in the meta_resolve module (the
     // helper sketches were removed when the dispatch-only migration
     // regressed heritage chains). If a follow-up worker re-adds a
     // half-baked helper, this guard catches it.
