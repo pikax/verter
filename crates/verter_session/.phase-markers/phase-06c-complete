@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "phase": "phase-06c",
+  "status": "success",
+  "base_commit": "6461f9e8d959985f73fe767b18a8e42f6860e94d",
+  "work_head_before_marker": "1e511bb07bbf260fcca7fe610858333c2a3a8807",
+  "test_results": {
+    "workspace": {
+      "test_scope": "cargo test --workspace --tests --verbose",
+      "passed": 10282,
+      "failed": 0
+    },
+    "correctness": {
+      "test_scope": "cargo test -p verter_session --test correctness",
+      "passed": 18,
+      "failed": 0
+    },
+    "guard": {
+      "test_scope": "cargo test -p verter_session --test architecture_guards no_scheduler_backed_workspace_shim_in_session_src",
+      "passed": 1,
+      "failed": 0
+    },
+    "tdd_red_gate": {
+      "test_scope": "cargo test -p verter_session --test architecture_guards no_scheduler_backed_workspace_shim_in_session_src -- --ignored --exact (run between 6c.PRE and 6c.FINAL)",
+      "expected_outcome": "non-zero exit with file-existence assertion (a) firing",
+      "evidence_path": "/tmp/phase-6c-tdd-red.txt"
+    }
+  },
+  "snapshot_drift": "none",
+  "guards_un_ignored": ["no_scheduler_backed_workspace_shim_in_session_src"],
+  "deferred": [],
+  "report_path": "phase-06c-report.md",
+  "atomic_gate_phase": true,
+  "derivation_notes_verified": false
+}

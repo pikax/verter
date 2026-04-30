@@ -9,7 +9,7 @@ use crate::project_graph::{ProjectGraph, VfsProjectConfig};
 use crate::types::{ExactResolution, ExactResolutionResult};
 
 // Kept from the legacy trace system — callers (filesystem_tests,
-// scheduler_shim, frontier_tests) still consume the per-read detail
+// frontier_tests) still consume the per-read detail
 // string directly. The broader `component_meta_trace_*` span tree was
 // deleted in Commit 4 (plan §0.1 clean-cut rule); the replacement is
 // the `VfsAuditSink` registry below.

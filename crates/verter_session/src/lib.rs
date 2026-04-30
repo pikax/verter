@@ -103,7 +103,6 @@ pub mod project_type_store;
 pub mod request_context;
 pub mod resolver_core;
 mod resolver_store;
-pub mod scheduler_shim;
 pub mod semantic_query;
 pub mod semantic_query_memo;
 pub(crate) mod session_runtime;

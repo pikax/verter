@@ -689,7 +689,6 @@ fn phase_05l_engine_resolver_methods_deleted() {
 }
 
 #[test]
-#[ignore = "phase-06c pending"]
 fn no_scheduler_backed_workspace_shim_in_session_src() {
     // Phase 6c — production WorkspaceAccess shim removal regression
     // guard.
