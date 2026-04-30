@@ -687,3 +687,137 @@ fn phase_05l_engine_resolver_methods_deleted() {
          retired methods"
     );
 }
+
+#[test]
+#[ignore = "phase-06c pending"]
+fn no_scheduler_backed_workspace_shim_in_session_src() {
+    // Phase 6c — production WorkspaceAccess shim removal regression
+    // guard.
+    //
+    // After Phase 6c, the deleted scheduler-backed shim file under
+    // `crates/verter_session/src/` MUST NOT exist, and no production
+    // source file in that directory may declare the deleted type-name
+    // OR introduce a same-shape `WorkspaceAccess` impl under any
+    // rename. Test fixtures (files whose name ends in `_tests.rs`) are
+    // an explicit allow-list of characterization-test infrastructure
+    // permitted by Phase 6b — they implement `WorkspaceAccess` for
+    // CountingWorkspace-style instrumentation only.
+    //
+    // The forbidden type-name and file-name are constructed via
+    // `concat!` at compile time so this test's own source contains no
+    // literal occurrence of the deleted artefacts. The verification
+    // greps in §6c.6 (which walk `crates/` broadly) therefore return
+    // zero hits even when this guards file is in the search scope.
+    //
+    // Architectural rule (parent plan §6c.0): `verter_session` is not
+    // the home for production `WorkspaceAccess` impls — those belong
+    // in `verter_workspace` (`MemoryWorkspace`, `FilesystemWorkspace`).
+    // A reviewer who genuinely needs a new production
+    // `WorkspaceAccess` impl in this crate must update this guard with
+    // a phase-report citation justifying the exception — the existing
+    // allow-list pattern in `god_module_size_budget` is the template
+    // (see this file's lines 161–164).
+    use std::collections::HashSet;
+    use walkdir::WalkDir;
+
+    // Forbidden tokens built at compile time so they don't appear as
+    // literals in this source file. `concat!` is constant-folded, so
+    // the runtime behaviour is identical to a string literal.
+    const FORBIDDEN_TYPE: &str = concat!("Sched", "ulerBackedWorkspace");
+    const FORBIDDEN_MODULE_FILE: &str = concat!("scheduler", "_shim.rs");
+    // Trailing space catches both the unqualified form
+    // (`impl WorkspaceAccess for X`) and the qualified form
+    // (`impl verter_workspace::WorkspaceAccess for X`).
+    const FORBIDDEN_IMPL_PATTERN: &str = "WorkspaceAccess for ";
+    // Test-fixture filename suffix. The convention in this codebase
+    // is that test fixtures with `WorkspaceAccess` impls live in
+    // `*_tests.rs` files (e.g. `frontier_tests.rs`,
+    // `host_manage_tests.rs`, `phase_6b_characterization_tests.rs`).
+    const TEST_FIXTURE_SUFFIX: &str = "_tests.rs";
+
+    // (a) The deleted shim file MUST NOT exist.
+    let shim_path = workspace_root()
+        .join("crates/verter_session/src")
+        .join(FORBIDDEN_MODULE_FILE);
+    assert!(
+        !shim_path.exists(),
+        "Phase 6c regression: production shim file `{}` must not exist \
+         after Phase 6c removal — re-introducing the scheduler-backed \
+         `WorkspaceAccess` shim is forbidden per the cutover end-state \
+         (no shims, no dual paths)",
+        shim_path.display()
+    );
+
+    // (b) Walk production sources of `verter_session` and reject:
+    //     1. Any `*.rs` file containing the forbidden type-name (catches
+    //        a renamed re-introduction at any path that still uses the
+    //        deleted type-name as a substring).
+    //     2. Any non-test `*.rs` file containing the
+    //        `WorkspaceAccess for ` impl pattern (catches a same-shape
+    //        re-introduction under a renamed type).
+    //
+    //     Test fixture files (`*_tests.rs`) are allow-listed for rule
+    //     (b)(2) because their `WorkspaceAccess` impls are legitimate
+    //     instrumentation. They are still subject to rule (b)(1) —
+    //     even tests must not re-introduce the deleted type-name.
+    let session_src = workspace_root().join("crates/verter_session/src");
+    // Empty production allow-list by design. Future exceptions require
+    // a phase-report citation per the convention at lines 161–164.
+    let production_allow_list: HashSet<&str> = HashSet::new();
+    let mut violations = Vec::<String>::new();
+    for entry in WalkDir::new(&session_src) {
+        let entry = entry.expect("walkdir entry");
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        let rel = path
+            .strip_prefix(workspace_root())
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        if production_allow_list.contains(rel.as_str()) {
+            continue;
+        }
+        let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
+        // Rule (b)(1) — applies to ALL files in session/src/, including
+        // test fixtures. The deleted type-name must not be referenced
+        // anywhere.
+        if src.contains(FORBIDDEN_TYPE) {
+            violations.push(format!(
+                "{rel}: contains forbidden type `{}` — Phase 6c removed \
+                 the scheduler-backed shim; re-introduction under any \
+                 path is forbidden (any new shim requires a phase-report \
+                 citation per the established architecture-guards \
+                 convention)",
+                FORBIDDEN_TYPE
+            ));
+        }
+        // Rule (b)(2) — applies only to NON-test files. Test fixtures
+        // (`*_tests.rs`) legitimately implement `WorkspaceAccess` for
+        // characterization-test instrumentation.
+        let is_test_fixture = file_name.ends_with(TEST_FIXTURE_SUFFIX);
+        if !is_test_fixture && src.contains(FORBIDDEN_IMPL_PATTERN) {
+            violations.push(format!(
+                "{rel}: contains `{}` in non-test source — Phase 6c \
+                 forbids new production `WorkspaceAccess` impls in \
+                 `verter_session/src/`. Production `WorkspaceAccess` \
+                 impls belong in `verter_workspace`; test fixtures must \
+                 live in `*_tests.rs` files",
+                FORBIDDEN_IMPL_PATTERN.trim_end()
+            ));
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "no_scheduler_backed_workspace_shim_in_session_src violations:\n{}",
+        violations.join("\n")
+    );
+}
