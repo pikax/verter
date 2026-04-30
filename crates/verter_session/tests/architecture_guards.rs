@@ -525,8 +525,7 @@ fn phase_05m_class_b_callers_migrated_through_bridge_helpers() {
             .unwrap()
             .to_string_lossy()
             .replace('\\', "/");
-        let src = std::fs::read_to_string(path)
-            .unwrap_or_else(|e| panic!("read {rel}: {e}"));
+        let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
 
         // Stale helper alias regression check — applies to EVERY file.
         let stale_count = count_callsites(&src, stale_helper_patterns);
@@ -751,17 +750,17 @@ fn phase_05l_engine_resolver_methods_deleted() {
     // Negative-direction discriminator: the test must FAIL against
     // any reintroduction. We sanity-check that the assertion can
     // detect a re-introduction by scanning for a method that we know
-    // SURVIVES the deletion (`should_preserve_shallow_field_expr` is
-    // an unrelated public engine method that stays). If this assert
-    // fails, the discriminator is broken — we'd miss real
+    // SURVIVES the deletion (`pub fn new` is the engine constructor
+    // and stays in mod.rs after the Phase 11b folder split). If this
+    // assert fails, the discriminator is broken — we'd miss real
     // re-introductions.
     assert!(
-        src.contains("pub fn should_preserve_shallow_field_expr("),
-        "discriminator check: the surviving engine method \
-         `should_preserve_shallow_field_expr` must still appear in the \
-         engine source — its absence means the discriminator is \
-         broken and this test cannot detect re-introductions of the \
-         retired methods"
+        src.contains("pub fn new(host: &'a VerterHost)"),
+        "discriminator check: the surviving engine constructor \
+         `pub fn new(host: &'a VerterHost)` must still appear in \
+         component_meta_query_engine/mod.rs — its absence means the \
+         discriminator is broken and this test cannot detect \
+         re-introductions of the retired methods"
     );
 }
 

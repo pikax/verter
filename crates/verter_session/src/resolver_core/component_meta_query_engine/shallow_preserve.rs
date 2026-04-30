@@ -1,0 +1,1252 @@
+//! Shallow preservation, imported-route fast paths, and deep slot/type
+//! ref resolution methods extracted from
+//! `component_meta_query_engine/mod.rs` in Phase 11b.4.
+//!
+//! These methods are private inherent methods on
+//! `ComponentMetaQueryEngine<'a>`. They classify how shallowly an
+//! imported / package-backed type expression should be preserved
+//! (without crossing the import boundary), and resolve transitive
+//! references inside slot / function bodies during deep walks.
+//!
+//! The methods cross-call each other (`should_preserve_*`,
+//! `deep_resolve_*`) and read the engine's caches via `&self` /
+//! `&mut self`. They have no engine-state references beyond what the
+//! parent module already declares.
+//!
+//! Visibility:
+//! - `pub fn should_preserve_shallow_field_expr` (re-exported via
+//!   `mod.rs`'s engine surface; used by external callers in
+//!   `meta_resolve.rs`).
+//! - `pub fn deep_resolve_slot_function_refs` (used internally; kept
+//!   `pub` to match prior signature).
+//! - All other methods stay private (no visibility qualifier) and are
+//!   visible inside the `component_meta_query_engine` folder via the
+//!   parent-private locality rule (Rust child modules see parent
+//!   privates).
+
+use rustc_hash::FxHashSet;
+use verter_semantic::analysis::type_expr::TypeExpr;
+
+use super::helpers::{is_package_canonical, strip_parens_expr, type_expr_references_type_params};
+use super::{ComponentMetaQueryEngine, FastShallowFieldExpr, FastShallowFieldExprExactness};
+
+impl<'a> ComponentMetaQueryEngine<'a> {
+    /// Symbolic-preservation predicate for the define-props member rescue
+    /// path (D-Cutover §5.8 replacement for
+    /// `TypeQueryEngine::should_preserve_shallow_field_expr`).
+    ///
+    /// Returns `true` when `expr` references a package-backed imported
+    /// type surface that the component-meta pipeline should keep in
+    /// symbolic form (as a bare `Ref` / `IndexedAccess`) instead of
+    /// materialising through dispatch. Routes through
+    /// `bare_name_resolve::resolve_bare_name_in_scope` +
+    /// `host.prepared_type_decl` — no `SessionSolverHost`/`TypeSolverHost`
+    /// dependency.
+    pub fn should_preserve_shallow_field_expr(
+        &mut self,
+        scope_canonical_id: &str,
+        expr: &TypeExpr,
+    ) -> bool {
+        let mut active_exprs = rustc_hash::FxHashSet::<TypeExpr>::default();
+        let mut active_refs = rustc_hash::FxHashSet::<String>::default();
+        self.should_preserve_shallow_field_expr_inner(
+            scope_canonical_id,
+            expr,
+            &mut active_exprs,
+            &mut active_refs,
+        )
+    }
+
+    fn should_preserve_shallow_field_expr_inner(
+        &mut self,
+        scope_canonical_id: &str,
+        expr: &TypeExpr,
+        active_exprs: &mut rustc_hash::FxHashSet<TypeExpr>,
+        active_refs: &mut rustc_hash::FxHashSet<String>,
+    ) -> bool {
+        use verter_semantic::analysis::type_expr::ObjectMember;
+
+        if !active_exprs.insert(expr.clone()) {
+            return false;
+        }
+        let preserve = if self.should_preserve_imported_bare_ref(scope_canonical_id, expr)
+            || self.should_preserve_imported_member_path(scope_canonical_id, expr)
+            || self.should_preserve_imported_utility_route(scope_canonical_id, expr)
+            || self.should_preserve_package_member_path(scope_canonical_id, expr)
+        {
+            true
+        } else {
+            match expr {
+                TypeExpr::Union(members) | TypeExpr::Intersection(members) => {
+                    members.iter().any(|member| {
+                        self.should_preserve_shallow_field_expr_inner(
+                            scope_canonical_id,
+                            member,
+                            active_exprs,
+                            active_refs,
+                        )
+                    })
+                }
+                TypeExpr::Array { element, .. }
+                | TypeExpr::KeyOf(element)
+                | TypeExpr::Rest(element)
+                | TypeExpr::Parenthesized(element) => self
+                    .should_preserve_shallow_field_expr_inner(
+                        scope_canonical_id,
+                        element,
+                        active_exprs,
+                        active_refs,
+                    ),
+                TypeExpr::Tuple { elements, .. } => elements.iter().any(|element| {
+                    self.should_preserve_shallow_field_expr_inner(
+                        scope_canonical_id,
+                        &element.ty,
+                        active_exprs,
+                        active_refs,
+                    )
+                }),
+                TypeExpr::Object(object) => {
+                    object.properties.iter().any(|member| match member {
+                        ObjectMember::Property(property) => self
+                            .should_preserve_shallow_field_expr_inner(
+                                scope_canonical_id,
+                                &property.ty,
+                                active_exprs,
+                                active_refs,
+                            ),
+                        ObjectMember::IndexSignature(signature) => {
+                            self.should_preserve_shallow_field_expr_inner(
+                                scope_canonical_id,
+                                &signature.key_type,
+                                active_exprs,
+                                active_refs,
+                            ) || self.should_preserve_shallow_field_expr_inner(
+                                scope_canonical_id,
+                                &signature.value_type,
+                                active_exprs,
+                                active_refs,
+                            )
+                        }
+                        ObjectMember::CallSignature(function)
+                        | ObjectMember::ConstructSignature(function) => {
+                            function.parameters.iter().any(|parameter| {
+                                self.should_preserve_shallow_field_expr_inner(
+                                    scope_canonical_id,
+                                    &parameter.ty,
+                                    active_exprs,
+                                    active_refs,
+                                )
+                            }) || function.return_type.as_deref().is_some_and(|return_type| {
+                                self.should_preserve_shallow_field_expr_inner(
+                                    scope_canonical_id,
+                                    return_type,
+                                    active_exprs,
+                                    active_refs,
+                                )
+                            })
+                        }
+                        ObjectMember::Method(method) => {
+                            method.function.parameters.iter().any(|parameter| {
+                                self.should_preserve_shallow_field_expr_inner(
+                                    scope_canonical_id,
+                                    &parameter.ty,
+                                    active_exprs,
+                                    active_refs,
+                                )
+                            }) || method.function.return_type.as_deref().is_some_and(
+                                |return_type| {
+                                    self.should_preserve_shallow_field_expr_inner(
+                                        scope_canonical_id,
+                                        return_type,
+                                        active_exprs,
+                                        active_refs,
+                                    )
+                                },
+                            )
+                        }
+                    })
+                }
+                TypeExpr::Function(function) => {
+                    function.parameters.iter().any(|parameter| {
+                        self.should_preserve_shallow_field_expr_inner(
+                            scope_canonical_id,
+                            &parameter.ty,
+                            active_exprs,
+                            active_refs,
+                        )
+                    }) || function.return_type.as_deref().is_some_and(|return_type| {
+                        self.should_preserve_shallow_field_expr_inner(
+                            scope_canonical_id,
+                            return_type,
+                            active_exprs,
+                            active_refs,
+                        )
+                    })
+                }
+                TypeExpr::Ref {
+                    name,
+                    type_arguments,
+                } => {
+                    let utility_with_args = !type_arguments.is_empty()
+                        && verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(name.as_ref()).is_some();
+                    if utility_with_args
+                        && type_arguments.iter().any(|argument| {
+                            self.should_preserve_shallow_field_expr_inner(
+                                scope_canonical_id,
+                                argument,
+                                active_exprs,
+                                active_refs,
+                            )
+                        })
+                    {
+                        true
+                    } else {
+                        self.should_preserve_transitive_ref(
+                            scope_canonical_id,
+                            name.as_ref(),
+                            active_exprs,
+                            active_refs,
+                        )
+                    }
+                }
+                TypeExpr::IndexedAccess { object, index } => {
+                    self.should_preserve_shallow_field_expr_inner(
+                        scope_canonical_id,
+                        object,
+                        active_exprs,
+                        active_refs,
+                    ) || self.should_preserve_shallow_field_expr_inner(
+                        scope_canonical_id,
+                        index,
+                        active_exprs,
+                        active_refs,
+                    )
+                }
+                _ => false,
+            }
+        };
+        active_exprs.remove(expr);
+        preserve
+    }
+
+    fn should_preserve_imported_bare_ref(
+        &mut self,
+        scope_canonical_id: &str,
+        expr: &TypeExpr,
+    ) -> bool {
+        let stripped = strip_parens_expr(expr);
+        let TypeExpr::Ref {
+            name,
+            type_arguments,
+        } = stripped
+        else {
+            return false;
+        };
+        if !type_arguments.is_empty() {
+            return false;
+        }
+        if self.bare_ref_origin_in_scope(scope_canonical_id, name.as_ref())
+            != verter_semantic::analysis::type_solver::host::BareRefOrigin::Imported
+        {
+            return false;
+        }
+        let Some(root_identity) = self.root_identity_in_scope(scope_canonical_id, name.as_ref())
+        else {
+            return false;
+        };
+        if is_package_canonical(&root_identity.canonical_id) {
+            return true;
+        }
+        let Some(prepared) = self
+            .host
+            .prepared_type_decl(&root_identity.canonical_id, &root_identity.symbol_name)
+        else {
+            return false;
+        };
+        !prepared.member_index.is_empty()
+            || matches!(
+                prepared.projection_class,
+                verter_semantic::analysis::type_solver::prepared::PreparedProjectionClass::DirectMembers
+            )
+            || matches!(
+                prepared.kind,
+                verter_semantic::analysis::type_eval::TypeDeclKind::Class
+            )
+    }
+
+    fn should_preserve_imported_member_path(
+        &mut self,
+        scope_canonical_id: &str,
+        expr: &TypeExpr,
+    ) -> bool {
+        fn root_import_name(expr: &TypeExpr) -> Option<&str> {
+            match strip_parens_expr(expr) {
+                TypeExpr::IndexedAccess { object, .. } => root_import_name(object),
+                TypeExpr::Ref { name, .. } => Some(name.as_ref()),
+                _ => None,
+            }
+        }
+
+        let stripped = strip_parens_expr(expr);
+        let TypeExpr::IndexedAccess { object, .. } = stripped else {
+            return false;
+        };
+        let Some(name) = root_import_name(object) else {
+            return false;
+        };
+        if self.bare_ref_origin_in_scope(scope_canonical_id, name)
+            != verter_semantic::analysis::type_solver::host::BareRefOrigin::Imported
+        {
+            return false;
+        }
+        let Some(root_identity) = self.root_identity_in_scope(scope_canonical_id, name) else {
+            return false;
+        };
+        is_package_canonical(&root_identity.canonical_id)
+    }
+
+    fn should_preserve_imported_utility_route(
+        &mut self,
+        scope_canonical_id: &str,
+        expr: &TypeExpr,
+    ) -> bool {
+        let stripped = strip_parens_expr(expr);
+        let TypeExpr::Ref {
+            name,
+            type_arguments,
+        } = stripped
+        else {
+            return false;
+        };
+        if type_arguments.is_empty()
+            || verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(
+                name.as_ref(),
+            )
+            .is_none()
+        {
+            return false;
+        }
+        type_arguments.iter().any(|argument| {
+            self.should_preserve_imported_bare_ref(scope_canonical_id, argument)
+                || self.should_preserve_imported_utility_route(scope_canonical_id, argument)
+                || self.should_preserve_package_member_path(scope_canonical_id, argument)
+                || matches!(
+                    strip_parens_expr(argument),
+                    TypeExpr::TypeOf(value_ref)
+                        if value_ref.path.first().is_some_and(|root| {
+                            self.bare_ref_origin_in_scope(scope_canonical_id, root)
+                                == verter_semantic::analysis::type_solver::host::BareRefOrigin::Imported
+                        })
+                )
+        })
+    }
+
+    fn should_preserve_package_member_path(
+        &mut self,
+        scope_canonical_id: &str,
+        expr: &TypeExpr,
+    ) -> bool {
+        fn root_import_name(expr: &TypeExpr) -> Option<&str> {
+            match strip_parens_expr(expr) {
+                TypeExpr::IndexedAccess { object, .. } => root_import_name(object),
+                TypeExpr::Ref { name, .. } => Some(name.as_ref()),
+                _ => None,
+            }
+        }
+
+        let Some(name) = root_import_name(expr) else {
+            return false;
+        };
+        if self.bare_ref_origin_in_scope(scope_canonical_id, name)
+            != verter_semantic::analysis::type_solver::host::BareRefOrigin::Imported
+        {
+            return false;
+        }
+        let Some(root_identity) = self.root_identity_in_scope(scope_canonical_id, name) else {
+            return false;
+        };
+        is_package_canonical(&root_identity.canonical_id)
+    }
+
+    fn should_preserve_transitive_ref(
+        &mut self,
+        scope_canonical_id: &str,
+        name: &str,
+        active_exprs: &mut rustc_hash::FxHashSet<TypeExpr>,
+        active_refs: &mut rustc_hash::FxHashSet<String>,
+    ) -> bool {
+        let Some(root_identity) = self.root_identity_in_scope(scope_canonical_id, name) else {
+            return false;
+        };
+        let cache_key = format!(
+            "{}::{}",
+            root_identity.canonical_id, root_identity.symbol_name
+        );
+        if is_package_canonical(&root_identity.canonical_id) {
+            return true;
+        }
+        if !active_refs.insert(cache_key.clone()) {
+            return false;
+        }
+        let result = self
+            .host
+            .prepared_type_decl(&root_identity.canonical_id, &root_identity.symbol_name)
+            .is_some_and(|prepared| {
+                if matches!(prepared.body, TypeExpr::TypeParameter(_)) {
+                    true
+                } else {
+                    self.should_preserve_shallow_field_expr_inner(
+                        root_identity.canonical_id.as_str(),
+                        &prepared.body,
+                        active_exprs,
+                        active_refs,
+                    )
+                }
+            });
+        active_refs.remove(&cache_key);
+        result
+    }
+
+    pub(crate) fn try_fast_shallow_field_expr(
+        &mut self,
+        scope_canonical_id: &str,
+        expr: &TypeExpr,
+    ) -> Option<FastShallowFieldExpr> {
+        use verter_semantic::analysis::type_solver::host::BareRefOrigin;
+
+        fn single_member_import_root(expr: &TypeExpr) -> Option<(&str, &str)> {
+            let TypeExpr::IndexedAccess { object, index } = strip_parens_expr(expr) else {
+                return None;
+            };
+            let TypeExpr::Ref {
+                name,
+                type_arguments,
+            } = strip_parens_expr(object)
+            else {
+                return None;
+            };
+            if !type_arguments.is_empty() {
+                return None;
+            }
+            let TypeExpr::Literal(verter_semantic::analysis::type_expr::LiteralValue::String(
+                member_name,
+            )) = strip_parens_expr(index)
+            else {
+                return None;
+            };
+            Some((name.as_ref(), member_name.as_str()))
+        }
+
+        fn fast_symbolic_imported_generic_route(
+            engine: &mut ComponentMetaQueryEngine<'_>,
+            scope_canonical_id: &str,
+            expr: &TypeExpr,
+            active_locals: &mut FxHashSet<String>,
+        ) -> bool {
+            match strip_parens_expr(expr) {
+                TypeExpr::Ref {
+                    name,
+                    type_arguments,
+                } => match engine.bare_ref_origin_in_scope(scope_canonical_id, name.as_ref()) {
+                    BareRefOrigin::Imported => !type_arguments.is_empty(),
+                    BareRefOrigin::Local if type_arguments.is_empty() => {
+                        let Some(root_identity) =
+                            engine.root_identity_in_scope(scope_canonical_id, name.as_ref())
+                        else {
+                            return false;
+                        };
+                        let active_key = format!(
+                            "{}::{}",
+                            root_identity.canonical_id, root_identity.symbol_name
+                        );
+                        if !active_locals.insert(active_key.clone()) {
+                            return false;
+                        }
+                        let preserve = engine
+                            .prepared_type_decl(
+                                &root_identity.canonical_id,
+                                &root_identity.symbol_name,
+                            )
+                            .is_some_and(|prepared| {
+                                fast_symbolic_imported_generic_route(
+                                    engine,
+                                    root_identity.canonical_id.as_str(),
+                                    &prepared.body,
+                                    active_locals,
+                                )
+                            });
+                        active_locals.remove(&active_key);
+                        preserve
+                    }
+                    _ => false,
+                },
+                TypeExpr::IndexedAccess { object, .. }
+                | TypeExpr::Array {
+                    element: object, ..
+                }
+                | TypeExpr::KeyOf(object)
+                | TypeExpr::Rest(object)
+                | TypeExpr::Parenthesized(object) => fast_symbolic_imported_generic_route(
+                    engine,
+                    scope_canonical_id,
+                    object,
+                    active_locals,
+                ),
+                TypeExpr::Tuple { elements, .. } => elements.iter().any(|element| {
+                    fast_symbolic_imported_generic_route(
+                        engine,
+                        scope_canonical_id,
+                        &element.ty,
+                        active_locals,
+                    )
+                }),
+                TypeExpr::Union(members) | TypeExpr::Intersection(members) => {
+                    members.iter().any(|member| {
+                        fast_symbolic_imported_generic_route(
+                            engine,
+                            scope_canonical_id,
+                            member,
+                            active_locals,
+                        )
+                    })
+                }
+                _ => false,
+            }
+        }
+
+        fn fast_symbolic_imported_bare_ref_route(
+            engine: &mut ComponentMetaQueryEngine<'_>,
+            scope_canonical_id: &str,
+            expr: &TypeExpr,
+        ) -> bool {
+            match strip_parens_expr(expr) {
+                TypeExpr::Ref {
+                    name,
+                    type_arguments,
+                } if type_arguments.is_empty()
+                    && engine.bare_ref_origin_in_scope(scope_canonical_id, name.as_ref())
+                        == BareRefOrigin::Imported
+                    && name.as_ref().ends_with("Props") =>
+                {
+                    true
+                }
+                TypeExpr::Array { element, .. }
+                | TypeExpr::KeyOf(element)
+                | TypeExpr::Rest(element)
+                | TypeExpr::Parenthesized(element) => {
+                    fast_symbolic_imported_bare_ref_route(engine, scope_canonical_id, element)
+                }
+                TypeExpr::Tuple { elements, .. } => elements.iter().any(|element| {
+                    fast_symbolic_imported_bare_ref_route(engine, scope_canonical_id, &element.ty)
+                }),
+                TypeExpr::Union(members) | TypeExpr::Intersection(members) => {
+                    members.iter().any(|member| {
+                        fast_symbolic_imported_bare_ref_route(engine, scope_canonical_id, member)
+                    })
+                }
+                _ => false,
+            }
+        }
+
+        fn collapse_same_file_imported_alias_chain(
+            engine: &mut ComponentMetaQueryEngine<'_>,
+            canonical_id: &str,
+            expr: &TypeExpr,
+        ) -> TypeExpr {
+            let mut current = expr.clone();
+            let mut visited = FxHashSet::<String>::default();
+
+            loop {
+                let TypeExpr::Ref {
+                    name,
+                    type_arguments,
+                } = strip_parens_expr(&current)
+                else {
+                    return current;
+                };
+                if !type_arguments.is_empty() || !visited.insert(name.to_string()) {
+                    return current;
+                }
+                let Some(root_identity) =
+                    engine.root_identity_in_scope(canonical_id, name.as_ref())
+                else {
+                    return current;
+                };
+                if root_identity.canonical_id != canonical_id {
+                    return current;
+                }
+                let Some(prepared) = engine
+                    .prepared_type_decl(&root_identity.canonical_id, &root_identity.symbol_name)
+                else {
+                    return current;
+                };
+                current = prepared.body.clone();
+            }
+        }
+
+        fn imported_value_route_arg(
+            engine: &mut ComponentMetaQueryEngine<'_>,
+            scope_canonical_id: &str,
+            expr: &TypeExpr,
+        ) -> bool {
+            match strip_parens_expr(expr) {
+                TypeExpr::TypeOf(verter_semantic::analysis::type_expr::ValueRef { path }) => {
+                    path.first().is_some_and(|root| {
+                        engine.bare_ref_origin_in_scope(scope_canonical_id, root)
+                            == BareRefOrigin::Imported
+                    })
+                }
+                TypeExpr::Parenthesized(inner) => {
+                    imported_value_route_arg(engine, scope_canonical_id, inner)
+                }
+                _ => false,
+            }
+        }
+
+        fn contains_direct_imported_utility_route(
+            engine: &mut ComponentMetaQueryEngine<'_>,
+            scope_canonical_id: &str,
+            expr: &TypeExpr,
+        ) -> bool {
+            fn imported_route_arg(
+                engine: &mut ComponentMetaQueryEngine<'_>,
+                scope_canonical_id: &str,
+                expr: &TypeExpr,
+            ) -> bool {
+                match strip_parens_expr(expr) {
+                    TypeExpr::Ref {
+                        name,
+                        type_arguments,
+                    } => {
+                        (type_arguments.is_empty()
+                            && engine.bare_ref_origin_in_scope(scope_canonical_id, name.as_ref())
+                                == BareRefOrigin::Imported)
+                            || imported_value_route_arg(engine, scope_canonical_id, expr)
+                            || contains_direct_imported_utility_route(
+                                engine,
+                                scope_canonical_id,
+                                expr,
+                            )
+                    }
+                    TypeExpr::IndexedAccess { object, .. } => {
+                        imported_route_arg(engine, scope_canonical_id, object)
+                    }
+                    TypeExpr::TypeOf(_) => {
+                        imported_value_route_arg(engine, scope_canonical_id, expr)
+                    }
+                    TypeExpr::Parenthesized(inner) => {
+                        imported_route_arg(engine, scope_canonical_id, inner)
+                    }
+                    _ => contains_direct_imported_utility_route(engine, scope_canonical_id, expr),
+                }
+            }
+
+            match strip_parens_expr(expr) {
+                TypeExpr::Union(members) | TypeExpr::Intersection(members) => members.iter().any(
+                    |member| {
+                        contains_direct_imported_utility_route(engine, scope_canonical_id, member)
+                    },
+                ),
+                TypeExpr::Array { element, .. }
+                | TypeExpr::Rest(element)
+                | TypeExpr::Parenthesized(element) => {
+                    contains_direct_imported_utility_route(engine, scope_canonical_id, element)
+                }
+                TypeExpr::Tuple { elements, .. } => elements.iter().any(|element| {
+                    contains_direct_imported_utility_route(
+                        engine,
+                        scope_canonical_id,
+                        &element.ty,
+                    )
+                }),
+                TypeExpr::Object(object) => object.properties.iter().any(|member| match member {
+                    verter_semantic::analysis::type_expr::ObjectMember::Property(property) => {
+                        contains_direct_imported_utility_route(
+                            engine,
+                            scope_canonical_id,
+                            &property.ty,
+                        )
+                    }
+                    verter_semantic::analysis::type_expr::ObjectMember::Method(method) => {
+                        method.function.parameters.iter().any(|parameter| {
+                            contains_direct_imported_utility_route(
+                                engine,
+                                scope_canonical_id,
+                                &parameter.ty,
+                            )
+                        }) || method
+                            .function
+                            .return_type
+                            .as_deref()
+                            .is_some_and(|return_type| {
+                                contains_direct_imported_utility_route(
+                                    engine,
+                                    scope_canonical_id,
+                                    return_type,
+                                )
+                            })
+                    }
+                    verter_semantic::analysis::type_expr::ObjectMember::CallSignature(function)
+                    | verter_semantic::analysis::type_expr::ObjectMember::ConstructSignature(
+                        function,
+                    ) => function.parameters.iter().any(|parameter| {
+                        contains_direct_imported_utility_route(
+                            engine,
+                            scope_canonical_id,
+                            &parameter.ty,
+                        )
+                    }) || function.return_type.as_deref().is_some_and(|return_type| {
+                        contains_direct_imported_utility_route(
+                            engine,
+                            scope_canonical_id,
+                            return_type,
+                        )
+                    }),
+                    verter_semantic::analysis::type_expr::ObjectMember::IndexSignature(index) => {
+                        contains_direct_imported_utility_route(
+                            engine,
+                            scope_canonical_id,
+                            &index.key_type,
+                        ) || contains_direct_imported_utility_route(
+                            engine,
+                            scope_canonical_id,
+                            &index.value_type,
+                        )
+                    }
+                }),
+                TypeExpr::Function(function) => function.parameters.iter().any(|parameter| {
+                    contains_direct_imported_utility_route(
+                        engine,
+                        scope_canonical_id,
+                        &parameter.ty,
+                    )
+                }) || function.return_type.as_deref().is_some_and(|return_type| {
+                    contains_direct_imported_utility_route(engine, scope_canonical_id, return_type)
+                }),
+                TypeExpr::Ref {
+                    name,
+                    type_arguments,
+                } if !type_arguments.is_empty()
+                    && verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(
+                        name.as_ref(),
+                    )
+                    .is_some() =>
+                {
+                    type_arguments.iter().any(|argument| {
+                        imported_route_arg(engine, scope_canonical_id, argument)
+                    })
+                }
+                _ => false,
+            }
+        }
+
+        if contains_direct_imported_utility_route(self, scope_canonical_id, expr) {
+            return Some(FastShallowFieldExpr {
+                expr: expr.clone(),
+                exactness: FastShallowFieldExprExactness::Symbolic,
+            });
+        }
+
+        if fast_symbolic_imported_bare_ref_route(self, scope_canonical_id, expr) {
+            return Some(FastShallowFieldExpr {
+                expr: expr.clone(),
+                exactness: FastShallowFieldExprExactness::Symbolic,
+            });
+        }
+
+        if let TypeExpr::Ref {
+            name,
+            type_arguments,
+        } = strip_parens_expr(expr)
+        {
+            if !type_arguments.is_empty()
+                && self.bare_ref_origin_in_scope(scope_canonical_id, name.as_ref())
+                    == BareRefOrigin::Imported
+            {
+                let _ = self.root_identity_in_scope(scope_canonical_id, name.as_ref())?;
+                return Some(FastShallowFieldExpr {
+                    expr: expr.clone(),
+                    exactness: FastShallowFieldExprExactness::Symbolic,
+                });
+            }
+        }
+
+        if let Some((root_name, member_name)) = single_member_import_root(expr) {
+            if self.bare_ref_origin_in_scope(scope_canonical_id, root_name)
+                == BareRefOrigin::Imported
+            {
+                let root_identity = self.root_identity_in_scope(scope_canonical_id, root_name)?;
+                if is_package_canonical(&root_identity.canonical_id) {
+                    return Some(FastShallowFieldExpr {
+                        expr: expr.clone(),
+                        exactness: FastShallowFieldExprExactness::Symbolic,
+                    });
+                }
+                let prepared = self
+                    .prepared_type_decl(&root_identity.canonical_id, &root_identity.symbol_name)?;
+                let member = prepared.member(member_name)?;
+                if type_expr_references_type_params(&member.ty, &prepared.type_parameters) {
+                    return None;
+                }
+                let collapsed = collapse_same_file_imported_alias_chain(
+                    self,
+                    &root_identity.canonical_id,
+                    &member.ty,
+                );
+                return Some(FastShallowFieldExpr {
+                    expr: collapsed,
+                    exactness: FastShallowFieldExprExactness::Concrete,
+                });
+            }
+        }
+
+        if let Some(expanded) = self.try_fast_expand_shallow_alias_body(scope_canonical_id, expr) {
+            return Some(FastShallowFieldExpr {
+                expr: expanded,
+                exactness: FastShallowFieldExprExactness::Symbolic,
+            });
+        }
+
+        let mut active_locals = FxHashSet::default();
+        fast_symbolic_imported_generic_route(self, scope_canonical_id, expr, &mut active_locals)
+            .then(|| FastShallowFieldExpr {
+                expr: expr.clone(),
+                exactness: FastShallowFieldExprExactness::Symbolic,
+            })
+    }
+
+    fn try_fast_expand_shallow_alias_body(
+        &mut self,
+        scope_canonical_id: &str,
+        expr: &TypeExpr,
+    ) -> Option<TypeExpr> {
+        use verter_semantic::analysis::type_solver::host::BareRefOrigin;
+
+        let TypeExpr::Ref {
+            name,
+            type_arguments,
+        } = strip_parens_expr(expr)
+        else {
+            return None;
+        };
+        if !type_arguments.is_empty() {
+            return None;
+        }
+        if !matches!(
+            self.bare_ref_origin_in_scope(scope_canonical_id, name.as_ref()),
+            BareRefOrigin::Imported | BareRefOrigin::Local
+        ) {
+            return None;
+        }
+        let root_identity = self.root_identity_in_scope(scope_canonical_id, name.as_ref())?;
+        if is_package_canonical(&root_identity.canonical_id) {
+            return None;
+        }
+        let prepared =
+            self.prepared_type_decl(&root_identity.canonical_id, &root_identity.symbol_name)?;
+        if !prepared.type_parameters.is_empty() {
+            return None;
+        }
+        let mut active_aliases = FxHashSet::default();
+        let expanded = self.rewrite_fast_shallow_alias_body(
+            root_identity.canonical_id.as_str(),
+            &prepared.body,
+            &mut active_aliases,
+        )?;
+        (expanded != *expr).then_some(expanded)
+    }
+
+    fn rewrite_fast_shallow_alias_body(
+        &mut self,
+        scope_canonical_id: &str,
+        expr: &TypeExpr,
+        active_aliases: &mut FxHashSet<String>,
+    ) -> Option<TypeExpr> {
+        use verter_semantic::analysis::type_solver::host::BareRefOrigin;
+
+        match expr {
+            TypeExpr::Primitive(_)
+            | TypeExpr::Literal(_)
+            | TypeExpr::TypeOf(_)
+            | TypeExpr::Infer { .. }
+            | TypeExpr::RecursiveRef { .. }
+            | TypeExpr::Unknown { .. }
+            | TypeExpr::TypeParameter(_) => Some(expr.clone()),
+            TypeExpr::Parenthesized(inner) => Some(TypeExpr::Parenthesized(std::sync::Arc::new(
+                self.rewrite_fast_shallow_alias_body(scope_canonical_id, inner, active_aliases)?,
+            ))),
+            TypeExpr::KeyOf(inner) => Some(TypeExpr::KeyOf(std::sync::Arc::new(
+                self.rewrite_fast_shallow_alias_body(scope_canonical_id, inner, active_aliases)?,
+            ))),
+            TypeExpr::Rest(inner) => Some(TypeExpr::Rest(std::sync::Arc::new(
+                self.rewrite_fast_shallow_alias_body(scope_canonical_id, inner, active_aliases)?,
+            ))),
+            TypeExpr::Array { element, readonly } => Some(TypeExpr::Array {
+                element: std::sync::Arc::new(self.rewrite_fast_shallow_alias_body(
+                    scope_canonical_id,
+                    element,
+                    active_aliases,
+                )?),
+                readonly: *readonly,
+            }),
+            TypeExpr::Tuple { elements, readonly } => {
+                let elements = elements
+                    .iter()
+                    .map(|element| {
+                        Some(verter_semantic::analysis::type_expr::TupleElement {
+                            label: element.label.clone(),
+                            ty: self.rewrite_fast_shallow_alias_body(
+                                scope_canonical_id,
+                                &element.ty,
+                                active_aliases,
+                            )?,
+                            optional: element.optional,
+                            rest: element.rest,
+                        })
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                Some(TypeExpr::Tuple {
+                    elements: std::sync::Arc::from(elements),
+                    readonly: *readonly,
+                })
+            }
+            TypeExpr::Union(members) => Some(TypeExpr::Union(std::sync::Arc::from(
+                members
+                    .iter()
+                    .map(|member| {
+                        self.rewrite_fast_shallow_alias_body(
+                            scope_canonical_id,
+                            member,
+                            active_aliases,
+                        )
+                    })
+                    .collect::<Option<Vec<_>>>()?,
+            ))),
+            TypeExpr::Intersection(members) => Some(TypeExpr::Intersection(std::sync::Arc::from(
+                members
+                    .iter()
+                    .map(|member| {
+                        self.rewrite_fast_shallow_alias_body(
+                            scope_canonical_id,
+                            member,
+                            active_aliases,
+                        )
+                    })
+                    .collect::<Option<Vec<_>>>()?,
+            ))),
+            TypeExpr::TemplateLiteral {
+                quasis,
+                expressions,
+            } => Some(TypeExpr::TemplateLiteral {
+                quasis: quasis.clone(),
+                expressions: std::sync::Arc::from(
+                    expressions
+                        .iter()
+                        .map(|expression| {
+                            self.rewrite_fast_shallow_alias_body(
+                                scope_canonical_id,
+                                expression,
+                                active_aliases,
+                            )
+                        })
+                        .collect::<Option<Vec<_>>>()?,
+                ),
+            }),
+            TypeExpr::Function(function) => Some(TypeExpr::Function(std::sync::Arc::new(
+                verter_semantic::analysis::type_expr::FunctionExpr {
+                    parameters: function
+                        .parameters
+                        .iter()
+                        .map(|parameter| {
+                            Some(verter_semantic::analysis::type_expr::FunctionParam {
+                                name: parameter.name.clone(),
+                                ty: self.rewrite_fast_shallow_alias_body(
+                                    scope_canonical_id,
+                                    &parameter.ty,
+                                    active_aliases,
+                                )?,
+                                optional: parameter.optional,
+                                rest: parameter.rest,
+                            })
+                        })
+                        .collect::<Option<Vec<_>>>()?,
+                    return_type: match function.return_type.as_deref() {
+                        Some(return_type) => {
+                            Some(std::sync::Arc::new(self.rewrite_fast_shallow_alias_body(
+                                scope_canonical_id,
+                                return_type,
+                                active_aliases,
+                            )?))
+                        }
+                        None => None,
+                    },
+                    type_parameters: function
+                        .type_parameters
+                        .iter()
+                        .map(|parameter| {
+                            Some(verter_semantic::analysis::type_expr::TypeParam {
+                                name: parameter.name.clone(),
+                                constraint: match parameter.constraint.as_deref() {
+                                    Some(constraint) => Some(std::sync::Arc::new(
+                                        self.rewrite_fast_shallow_alias_body(
+                                            scope_canonical_id,
+                                            constraint,
+                                            active_aliases,
+                                        )?,
+                                    )),
+                                    None => None,
+                                },
+                                default: match parameter.default.as_deref() {
+                                    Some(default) => Some(std::sync::Arc::new(
+                                        self.rewrite_fast_shallow_alias_body(
+                                            scope_canonical_id,
+                                            default,
+                                            active_aliases,
+                                        )?,
+                                    )),
+                                    None => None,
+                                },
+                            })
+                        })
+                        .collect::<Option<Vec<_>>>()?,
+                },
+            ))),
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } => {
+                if !type_arguments.is_empty() {
+                    return None;
+                }
+                match self.bare_ref_origin_in_scope(scope_canonical_id, name.as_ref()) {
+                    BareRefOrigin::Imported | BareRefOrigin::Local => {
+                        let root_identity =
+                            self.root_identity_in_scope(scope_canonical_id, name.as_ref())?;
+                        if is_package_canonical(&root_identity.canonical_id) {
+                            return Some(expr.clone());
+                        }
+                        let active_key = format!(
+                            "{}::{}",
+                            root_identity.canonical_id, root_identity.symbol_name
+                        );
+                        if !active_aliases.insert(active_key.clone()) {
+                            return None;
+                        }
+                        let rewritten = self
+                            .prepared_type_decl(
+                                &root_identity.canonical_id,
+                                &root_identity.symbol_name,
+                            )
+                            .and_then(|prepared| {
+                                prepared.type_parameters.is_empty().then_some(prepared)
+                            })
+                            .and_then(|prepared| {
+                                self.rewrite_fast_shallow_alias_body(
+                                    root_identity.canonical_id.as_str(),
+                                    &prepared.body,
+                                    active_aliases,
+                                )
+                            });
+                        active_aliases.remove(&active_key);
+                        rewritten
+                    }
+                    _ => None,
+                }
+            }
+            TypeExpr::Object(object) => object
+                .properties
+                .is_empty()
+                .then(|| TypeExpr::Object(object.clone())),
+            TypeExpr::IndexedAccess { .. }
+            | TypeExpr::Conditional { .. }
+            | TypeExpr::Mapped { .. } => None,
+        }
+    }
+
+    fn bare_ref_origin_in_scope(
+        &mut self,
+        scope_canonical_id: &str,
+        name: &str,
+    ) -> verter_semantic::analysis::type_solver::host::BareRefOrigin {
+        use verter_semantic::analysis::type_solver::host::BareRefOrigin;
+        let payload = self.scope_payload_for_scope(scope_canonical_id);
+        if let Some(payload) = payload.as_deref() {
+            if payload.import_bindings.contains_key(name) {
+                return BareRefOrigin::Imported;
+            }
+            if payload.scope_type_bindings.contains_key(name)
+                || payload.scope_type_names.contains(name)
+                || payload.scope_value_names.contains(name)
+            {
+                return BareRefOrigin::Local;
+            }
+        }
+        BareRefOrigin::Unknown
+    }
+
+    fn root_identity_in_scope(
+        &mut self,
+        scope_canonical_id: &str,
+        name: &str,
+    ) -> Option<verter_semantic::analysis::type_solver::host::ResolvedRootIdentity> {
+        let payload = self.scope_payload_for_scope(scope_canonical_id);
+        crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+            self.host,
+            scope_canonical_id,
+            payload.as_deref(),
+            name,
+        )
+    }
+
+    /// Walk an Object's properties/methods and resolve any
+    /// `TypeExpr::Ref` leaves (inside property types, function return
+    /// types, array elements, union/intersection arms) to their
+    /// dispatch-projected surface (D-Cutover §5.8 replacement for the
+    /// retired `type_eval_build::deep_resolve_slot_function_refs`).
+    ///
+    /// Non-Object inputs are returned verbatim — matches the pre-cutover
+    /// contract. Ref resolution routes through
+    /// [`Self::project_expr_surface_expr`] so it uses the same dispatch
+    /// memo (`SemanticGraphStore`) + `instantiate_active` guards as the
+    /// rest of the component-meta pipeline, guaranteeing one cache entry
+    /// per `(scope, expr)` regardless of entry point.
+    pub fn deep_resolve_slot_function_refs(
+        &mut self,
+        scope_canonical_id: &str,
+        expr: &TypeExpr,
+    ) -> TypeExpr {
+        use verter_semantic::analysis::type_expr::{ObjectMember, ObjectProperty};
+
+        match expr {
+            TypeExpr::Object(obj) => {
+                let properties: Vec<ObjectMember> = obj
+                    .properties
+                    .iter()
+                    .map(|member| match member {
+                        ObjectMember::Property(p) => ObjectMember::Property(ObjectProperty {
+                            name: p.name.clone(),
+                            ty: self.deep_resolve_type_refs(scope_canonical_id, &p.ty),
+                            optional: p.optional,
+                            readonly: p.readonly,
+                        }),
+                        ObjectMember::Method(m) => ObjectMember::Method(
+                            verter_semantic::analysis::type_expr::MethodSignature {
+                                name: m.name.clone(),
+                                function: self
+                                    .deep_resolve_fn_refs(scope_canonical_id, &m.function),
+                                optional: m.optional,
+                            },
+                        ),
+                        other => other.clone(),
+                    })
+                    .collect();
+                TypeExpr::Object(std::sync::Arc::new(
+                    verter_semantic::analysis::type_expr::ObjectExpr { properties },
+                ))
+            }
+            // Path C C11-residual-A: walk compound shapes so
+            // `defineSlots<TabsSlots<T>>` patterns with
+            // `{ leading?, content? } & DynamicSlots<...>` bodies still
+            // resolve their explicit Object arm's `SlotProps<T>` members
+            // into Function signatures, which `enrich_missing_slot_bindings`
+            // consumes for slot-binding extraction.
+            TypeExpr::Parenthesized(inner) => TypeExpr::Parenthesized(std::sync::Arc::new(
+                self.deep_resolve_slot_function_refs(scope_canonical_id, inner),
+            )),
+            TypeExpr::Intersection(parts) => TypeExpr::Intersection(std::sync::Arc::from(
+                parts
+                    .iter()
+                    .map(|p| self.deep_resolve_slot_function_refs(scope_canonical_id, p))
+                    .collect::<Vec<_>>(),
+            )),
+            TypeExpr::Union(variants) => TypeExpr::Union(std::sync::Arc::from(
+                variants
+                    .iter()
+                    .map(|v| self.deep_resolve_slot_function_refs(scope_canonical_id, v))
+                    .collect::<Vec<_>>(),
+            )),
+            _ => expr.clone(),
+        }
+    }
+
+    fn deep_resolve_type_refs(&mut self, scope_canonical_id: &str, expr: &TypeExpr) -> TypeExpr {
+        match expr {
+            TypeExpr::Ref { .. } => {
+                crate::meta_resolve::project_expr_surface_expr_via_host_threaded(
+                    self,
+                    scope_canonical_id,
+                    expr,
+                )
+                .unwrap_or_else(|| expr.clone())
+            }
+            TypeExpr::Function(func) => TypeExpr::Function(std::sync::Arc::new(
+                self.deep_resolve_fn_refs(scope_canonical_id, func),
+            )),
+            TypeExpr::Array { element, readonly } => TypeExpr::Array {
+                element: std::sync::Arc::new(
+                    self.deep_resolve_type_refs(scope_canonical_id, element),
+                ),
+                readonly: *readonly,
+            },
+            TypeExpr::Union(variants) => TypeExpr::Union(std::sync::Arc::from(
+                variants
+                    .iter()
+                    .map(|v| self.deep_resolve_type_refs(scope_canonical_id, v))
+                    .collect::<Vec<_>>(),
+            )),
+            TypeExpr::Intersection(parts) => TypeExpr::Intersection(std::sync::Arc::from(
+                parts
+                    .iter()
+                    .map(|p| self.deep_resolve_type_refs(scope_canonical_id, p))
+                    .collect::<Vec<_>>(),
+            )),
+            // Path C C11-residual-A: try a strict projection on
+            // deferred shells that may have been left in a mapped-slot
+            // value when the upstream dispatch's same-path sentinel
+            // suppressed a sub-evaluation. The strict projection only
+            // returns when the full surface materialises (Object /
+            // Function / Primitive); otherwise the deferred shell is
+            // preserved so the TypeExpr-level slot-binding extractor
+            // (`enrich_missing_slot_bindings`) can apply its
+            // `decide_typeexpr_conditional_with_function_extends`
+            // workaround.
+            TypeExpr::Conditional { .. }
+            | TypeExpr::IndexedAccess { .. }
+            | TypeExpr::Mapped { .. }
+            | TypeExpr::KeyOf(_)
+            | TypeExpr::TypeOf(_) => {
+                crate::meta_resolve::project_expr_surface_expr_via_host_threaded(
+                    self,
+                    scope_canonical_id,
+                    expr,
+                )
+                .unwrap_or_else(|| expr.clone())
+            }
+            _ => expr.clone(),
+        }
+    }
+
+    fn deep_resolve_fn_refs(
+        &mut self,
+        scope_canonical_id: &str,
+        func: &verter_semantic::analysis::type_expr::FunctionExpr,
+    ) -> verter_semantic::analysis::type_expr::FunctionExpr {
+        verter_semantic::analysis::type_expr::FunctionExpr {
+            parameters: func
+                .parameters
+                .iter()
+                .map(|p| verter_semantic::analysis::type_expr::FunctionParam {
+                    name: p.name.clone(),
+                    ty: self.deep_resolve_type_refs(scope_canonical_id, &p.ty),
+                    optional: p.optional,
+                    rest: p.rest,
+                })
+                .collect(),
+            return_type: func
+                .return_type
+                .as_ref()
+                .map(|rt| std::sync::Arc::new(self.deep_resolve_type_refs(scope_canonical_id, rt))),
+            type_parameters: func.type_parameters.clone(),
+        }
+    }
+}
