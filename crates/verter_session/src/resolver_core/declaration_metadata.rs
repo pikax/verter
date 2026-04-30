@@ -198,10 +198,9 @@ pub fn resolve_type_declaration<R: DeclarationMetadataResolver>(
         // `export { Foo as Lt }`) stays — it consumes only graph
         // metadata via `resolve_local_export_symbol_target` and
         // `resolve_local_type_symbol_metadata`.
-        if let Some(local_name) = resolver.resolve_local_export_symbol_target(
-            canonical_source.as_str(),
-            resolved_name.as_str(),
-        ) {
+        if let Some(local_name) = resolver
+            .resolve_local_export_symbol_target(canonical_source.as_str(), resolved_name.as_str())
+        {
             let followed_details = resolve_local_symbol_details(
                 resolver,
                 canonical_source.as_str(),
@@ -278,8 +277,10 @@ pub fn resolve_type_declaration<R: DeclarationMetadataResolver>(
                 {
                     return ResolvedTypeDeclaration {
                         requested_name: requested_name.to_string(),
-                        declaration_id: resolver
-                            .type_declaration_id(followed_canonical.as_str(), followed_name.as_str()),
+                        declaration_id: resolver.type_declaration_id(
+                            followed_canonical.as_str(),
+                            followed_name.as_str(),
+                        ),
                         resolved_name: followed_name,
                         canonical_source: followed_canonical,
                         span: followed_details.1,
@@ -904,12 +905,7 @@ type Props = {
             .insert(("/types.ts".to_string(), "Props".to_string()), 11);
 
         // Drive the same path resolve_local_type_declaration runs in.
-        let resolved = resolve_local_type_declaration(
-            &resolver,
-            "/types.ts",
-            "Props",
-            graph_span,
-        );
+        let resolved = resolve_local_type_declaration(&resolver, "/types.ts", "Props", graph_span);
 
         assert_eq!(resolved.canonical_source, "/types.ts");
         assert_eq!(resolved.resolved_name, "Props");

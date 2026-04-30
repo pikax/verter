@@ -13,8 +13,8 @@ use verter_span::Span;
 use crate::resolver_core::{
     component_meta_registry::component_meta_registry_has_non_object_top_level_surface,
     project_macro_surfaces, resolve_local_type_declaration, resolve_type_declaration,
-    surface_projector::ProjectedMacroSurfaces,
-    DeclarationMetadataResolver, FactVersionRef, ResolvedNativeProp, ResolvedTypeDeclaration,
+    surface_projector::ProjectedMacroSurfaces, DeclarationMetadataResolver, FactVersionRef,
+    ResolvedNativeProp, ResolvedTypeDeclaration,
 };
 
 /// Collect the set of binding names exposed by macros (e.g., `defineExpose` fields).
