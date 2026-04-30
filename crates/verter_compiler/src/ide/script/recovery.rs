@@ -13,7 +13,7 @@ use oxc_span::GetSpan;
 use crate::utils::oxc::vue::ScriptItem;
 
 #[cfg(test)]
-use super::macro_span;
+use super::macros::macro_span;
 
 #[cfg(test)]
 #[allow(dead_code)]
