@@ -1,0 +1,2338 @@
+//! Materialization core: macro-shape producers.
+//!
+//! Phase 11a domain 7 (macro-shapes portion). Owns:
+//! - `produce_macro_object_shapes` + `produce_macro_object_shapes_for_purpose`
+//!   (the sole authority that emits `define_props` / `define_emits` /
+//!   `define_slots` object shapes for `ExpandedComponentTypes`),
+//! - `MacroShapeSource` (the source-tag enum used by the projection/solver
+//!   reconciliation),
+//! - the macro-shape synthesis / projection / penalty helpers
+//!   (`synthesize_define_props_shape_*`, `produce_one_macro_object_shape*`,
+//!   `type_expr_symbolic_penalty`, `shape_symbolic_penalty`, etc.).
+//!
+//! Lines 1819-4102 of the pre-split `meta_resolve.rs`. The body is verbatim
+//! apart from `pub(crate)` visibility escalation on the formerly-private
+//! items the parent shell still calls.
+
+use crate::host_manage::{
+    component_meta_debug, component_meta_debug_enabled, component_meta_trace_custom,
+};
+use crate::resolver_core::ComponentMetaQueryEngine;
+use crate::resolver_core::ComponentMetaResolutionPurpose;
+use crate::resolver_core::ResolvedDeclarationKind;
+use crate::types::FileAnalysisSnapshot;
+use std::collections::{BTreeSet, VecDeque};
+use std::sync::Arc;
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
+
+use verter_semantic::analysis::types::AnalyzedMacro;
+
+use super::super::dispatch_helpers::{
+    project_expr_class_a_shape_via_dispatch, project_expr_class_a_via_dispatch,
+    project_expr_class_a_via_dispatch_threaded,
+    project_expr_surface_expr_with_compound_objects_via_host_threaded,
+    project_expr_surface_shape_via_host_threaded,
+    project_prepared_type_surface_shape_via_host_threaded,
+    project_type_surface_expr_via_host_threaded, project_type_surface_shape_via_host_threaded,
+};
+use super::super::request_host::{ResolvedMacroMeta, ResolvedTypeRegistryMeta};
+use super::super::resolved_state::{
+    collect_expanded_slot_binding_param_types, collect_expanded_slot_bindings_from_object_type,
+    component_meta_substitute_typeexpr, lowered_root_reaches_transitive_cycle,
+};
+use super::super::scoring::compare_type_expr_improvement;
+use super::field_types::{
+    define_props_member_can_stay_symbolic_without_rescue,
+    field_should_preserve_shallow_symbolic_raw_type,
+    lowered_needs_member_route_materialization, materialize_component_meta_type_expr_until_stable,
+    parsed_field_raw_type, top_level_imported_ref_can_stay_symbolic,
+};
+
+/// Sole-authority producer for type-based macro object shapes.
+///
+/// This is the ONE place that produces `define_props`, `define_emits`, and
+/// `define_slots` object shapes for `ExpandedComponentTypes`.
+///
+/// The production pipeline is projection-first so one phase owns object-shape
+/// materialization. The solver is used only as the terminal fallback when
+/// projection cannot produce a usable shape.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn produce_macro_object_shapes(
+    owner_canonical: &str,
+    snapshot: &FileAnalysisSnapshot,
+    resolved_macros: &[ResolvedMacroMeta],
+    resolved_type_registry: &[verter_semantic::analysis::component_meta::ResolvedTypeAnalysis],
+    resolved_type_registry_meta: &[ResolvedTypeRegistryMeta],
+    eval_source: &str,
+    evaluated_types: &mut verter_semantic::analysis::type_expand::ExpandedComponentTypes,
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+) {
+    produce_macro_object_shapes_for_purpose(
+        owner_canonical,
+        snapshot,
+        resolved_macros,
+        resolved_type_registry,
+        resolved_type_registry_meta,
+        eval_source,
+        evaluated_types,
+        query_engine,
+        crate::resolver_core::ComponentMetaResolutionPurpose::Full,
+    );
+}
+
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
+pub(crate) fn produce_macro_object_shapes_for_purpose(
+    owner_canonical: &str,
+    snapshot: &FileAnalysisSnapshot,
+    resolved_macros: &[ResolvedMacroMeta],
+    resolved_type_registry: &[verter_semantic::analysis::component_meta::ResolvedTypeAnalysis],
+    resolved_type_registry_meta: &[ResolvedTypeRegistryMeta],
+    eval_source: &str,
+    evaluated_types: &mut verter_semantic::analysis::type_expand::ExpandedComponentTypes,
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    purpose: crate::resolver_core::ComponentMetaResolutionPurpose,
+) {
+    let params =
+        verter_semantic::analysis::type_eval_build::collect_define_macro_type_params(eval_source);
+    let mut define_props_index = 0usize;
+    let mut define_emits_index = 0usize;
+    let mut define_slots_index = 0usize;
+    let mut registry_hits = 0u32;
+    let mut projection_hits = 0u32;
+    let mut solver_fallbacks = 0u32;
+    let shapes_started = Instant::now();
+    let solves_before = 0u32;
+
+    for (macro_index, mac) in snapshot.macros.iter().enumerate() {
+        if !mac.is_type_based {
+            continue;
+        }
+
+        if purpose == crate::resolver_core::ComponentMetaResolutionPurpose::Fallthrough {
+            match mac.kind {
+                verter_semantic::analysis::AnalyzedMacroKind::DefineProps => {
+                    define_props_index += 1;
+                    continue;
+                }
+                verter_semantic::analysis::AnalyzedMacroKind::DefineSlots => {
+                    define_slots_index += 1;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+
+        match mac.kind {
+            verter_semantic::analysis::AnalyzedMacroKind::DefineProps => {
+                let define_props_lowered = params.define_props.get(define_props_index);
+                let define_props_has_matching_resolved_root =
+                    resolved_macros.iter().any(|resolved| {
+                        resolved.macro_index == macro_index
+                            && resolved.macro_kind
+                                == verter_semantic::analysis::AnalyzedMacroKind::DefineProps
+                            && mac
+                                .type_references
+                                .iter()
+                                .any(|type_name| type_name == &resolved.type_name)
+                    });
+                let define_props_prefers_prepared_projection =
+                    define_props_lowered.is_some_and(|lowered| {
+                        named_ref_matches_empty_shell_registry_root(
+                            owner_canonical,
+                            lowered,
+                            resolved_type_registry,
+                            resolved_type_registry_meta,
+                        )
+                    });
+                let define_props_needs_projection_rescue =
+                    define_props_lowered.is_some_and(|lowered| {
+                        expr_needs_projection_rescue(query_engine, owner_canonical, lowered)
+                    });
+                if define_props_prefers_prepared_projection {
+                    if let Some(lowered) = define_props_lowered {
+                        let item_started = Instant::now();
+                        let (shape, source) = produce_one_macro_object_shape(
+                            query_engine,
+                            owner_canonical,
+                            lowered,
+                            has_prop_shape_surface,
+                        );
+                        if source.is_projection() {
+                            projection_hits += 1;
+                        } else if source.is_solver() {
+                            solver_fallbacks += 1;
+                        }
+                        if let Some(shape) = shape {
+                            let count = shape.value.properties.len();
+                            component_meta_trace_custom!(
+                                "macro_object_shape",
+                                format!(
+                                    "owner={} macro_index={} kind=define_props source={} props={} took={:?}",
+                                    owner_canonical, macro_index, source.label(), count,
+                                    item_started.elapsed(),
+                                ),
+                            );
+                            evaluated_types.define_props.push(
+                                verter_semantic::analysis::type_expand::ExpandedMacroProps {
+                                    macro_index,
+                                    result: shape,
+                                },
+                            );
+                        }
+                    }
+                } else if let Some(lowered) = define_props_lowered.filter(|lowered| {
+                    matches!(
+                        lowered,
+                        verter_semantic::analysis::type_expr::TypeExpr::Ref { .. }
+                    ) && !define_props_has_matching_resolved_root
+                }) {
+                    let item_started = Instant::now();
+                    let (shape, source) = produce_one_macro_object_shape(
+                        query_engine,
+                        owner_canonical,
+                        lowered,
+                        has_prop_shape_surface,
+                    );
+                    if source.is_projection() {
+                        projection_hits += 1;
+                    } else if source.is_solver() {
+                        solver_fallbacks += 1;
+                    }
+                    if let Some(shape) = shape {
+                        let count = shape.value.properties.len();
+                        component_meta_trace_custom!(
+                            "macro_object_shape",
+                            format!(
+                                "owner={} macro_index={} kind=define_props source={} props={} took={:?}",
+                                owner_canonical,
+                                macro_index,
+                                source.label(),
+                                count,
+                                item_started.elapsed(),
+                            ),
+                        );
+                        evaluated_types.define_props.push(
+                            verter_semantic::analysis::type_expand::ExpandedMacroProps {
+                                macro_index,
+                                result: shape,
+                            },
+                        );
+                    }
+                } else if let Some((shape, source)) =
+                    synthesize_define_props_shape_from_known_surface_with_authority(
+                        macro_index,
+                        snapshot,
+                        resolved_macros,
+                        evaluated_types,
+                        define_props_lowered,
+                        true,
+                    )
+                {
+                    projection_hits += 1;
+                    let count = shape.value.properties.len();
+                    component_meta_trace_custom!(
+                        "macro_object_shape",
+                        format!(
+                            "owner={} macro_index={} kind=define_props source={} props={}",
+                            owner_canonical,
+                            macro_index,
+                            source.label(),
+                            count,
+                        ),
+                    );
+                    evaluated_types.define_props.push(
+                        verter_semantic::analysis::type_expand::ExpandedMacroProps {
+                            macro_index,
+                            result: shape,
+                        },
+                    );
+                } else if !define_props_has_direct_local_root(mac)
+                    && define_props_fields_fast_path_allowed(
+                        mac,
+                        macro_index,
+                        resolved_macros,
+                        params.define_props.get(define_props_index),
+                    )
+                {
+                    if let Some((shape, source)) =
+                        synthesize_define_props_shape_from_known_surface_with_authority(
+                            macro_index,
+                            snapshot,
+                            resolved_macros,
+                            evaluated_types,
+                            define_props_lowered,
+                            false,
+                        )
+                    {
+                        projection_hits += 1;
+                        let count = shape.value.properties.len();
+                        component_meta_trace_custom!(
+                            "macro_object_shape",
+                            format!(
+                                "owner={} macro_index={} kind=define_props source={} props={}",
+                                owner_canonical,
+                                macro_index,
+                                source.label(),
+                                count,
+                            ),
+                        );
+                        evaluated_types.define_props.push(
+                            verter_semantic::analysis::type_expand::ExpandedMacroProps {
+                                macro_index,
+                                result: shape,
+                            },
+                        );
+                    } else if let Some(lowered) = params.define_props.get(define_props_index) {
+                        let item_started = Instant::now();
+                        let (shape, source) = produce_one_macro_object_shape(
+                            query_engine,
+                            owner_canonical,
+                            lowered,
+                            has_prop_shape_surface,
+                        );
+                        if source.is_projection() {
+                            projection_hits += 1;
+                        } else if source.is_solver() {
+                            solver_fallbacks += 1;
+                        }
+                        if let Some(shape) = shape {
+                            let count = shape.value.properties.len();
+                            component_meta_trace_custom!(
+                                "macro_object_shape",
+                                format!(
+                                    "owner={} macro_index={} kind=define_props source={} props={} took={:?}",
+                                    owner_canonical, macro_index, source.label(), count,
+                                    item_started.elapsed(),
+                                ),
+                            );
+                            evaluated_types.define_props.push(
+                                verter_semantic::analysis::type_expand::ExpandedMacroProps {
+                                    macro_index,
+                                    result: shape,
+                                },
+                            );
+                        }
+                    }
+                } else if !define_props_needs_projection_rescue {
+                    if let Some((shape, source)) = synthesize_define_props_shape_from_registry_root(
+                        owner_canonical,
+                        macro_index,
+                        snapshot,
+                        resolved_type_registry,
+                        resolved_type_registry_meta,
+                    ) {
+                        registry_hits += 1;
+                        let count = shape.value.properties.len();
+                        component_meta_trace_custom!(
+                            "macro_object_shape",
+                            format!(
+                                "owner={} macro_index={} kind=define_props source={} props={}",
+                                owner_canonical,
+                                macro_index,
+                                source.label(),
+                                count,
+                            ),
+                        );
+                        evaluated_types.define_props.push(
+                            verter_semantic::analysis::type_expand::ExpandedMacroProps {
+                                macro_index,
+                                result: shape,
+                            },
+                        );
+                    } else if let Some(lowered) = define_props_lowered {
+                        let item_started = Instant::now();
+                        let (shape, source) = produce_one_macro_object_shape(
+                            query_engine,
+                            owner_canonical,
+                            lowered,
+                            has_prop_shape_surface,
+                        );
+                        if source.is_projection() {
+                            projection_hits += 1;
+                        } else if source.is_solver() {
+                            solver_fallbacks += 1;
+                        }
+                        if let Some(shape) = shape {
+                            let count = shape.value.properties.len();
+                            component_meta_trace_custom!(
+                                "macro_object_shape",
+                                format!(
+                                    "owner={} macro_index={} kind=define_props source={} props={} took={:?}",
+                                    owner_canonical, macro_index, source.label(), count,
+                                    item_started.elapsed(),
+                                ),
+                            );
+                            evaluated_types.define_props.push(
+                                verter_semantic::analysis::type_expand::ExpandedMacroProps {
+                                    macro_index,
+                                    result: shape,
+                                },
+                            );
+                        }
+                    }
+                } else if let Some(lowered) = define_props_lowered {
+                    let item_started = Instant::now();
+                    let (shape, source) = produce_one_macro_object_shape(
+                        query_engine,
+                        owner_canonical,
+                        lowered,
+                        has_prop_shape_surface,
+                    );
+                    if source.is_projection() {
+                        projection_hits += 1;
+                    } else if source.is_solver() {
+                        solver_fallbacks += 1;
+                    }
+                    if let Some(shape) = shape {
+                        let count = shape.value.properties.len();
+                        component_meta_trace_custom!(
+                            "macro_object_shape",
+                            format!(
+                                "owner={} macro_index={} kind=define_props source={} props={} took={:?}",
+                                owner_canonical, macro_index, source.label(), count,
+                                item_started.elapsed(),
+                            ),
+                        );
+                        evaluated_types.define_props.push(
+                            verter_semantic::analysis::type_expand::ExpandedMacroProps {
+                                macro_index,
+                                result: shape,
+                            },
+                        );
+                    }
+                }
+                define_props_index += 1;
+            }
+            verter_semantic::analysis::AnalyzedMacroKind::DefineEmits => {
+                if evaluated_types.define_emits.iter().any(|entry| {
+                    entry.macro_index == macro_index
+                        && verter_semantic::analysis::type_eval_build::has_named_shape_surface(
+                            &entry.result.value,
+                        )
+                }) {
+                    projection_hits += 1;
+                } else if let Some((shape, source)) =
+                    synthesize_define_emits_shape_from_known_surface(
+                        macro_index,
+                        snapshot,
+                        resolved_macros,
+                        evaluated_types,
+                    )
+                {
+                    projection_hits += 1;
+                    let count = shape.value.properties.len() + shape.value.call_signatures.len();
+                    component_meta_trace_custom!(
+                        "macro_object_shape",
+                        format!(
+                            "owner={} macro_index={} kind=define_emits source={} surface={}",
+                            owner_canonical,
+                            macro_index,
+                            source.label(),
+                            count,
+                        ),
+                    );
+                    evaluated_types.define_emits.push(
+                        verter_semantic::analysis::type_expand::ExpandedMacroObjectShape {
+                            macro_index,
+                            result: shape,
+                        },
+                    );
+                } else if let Some(lowered) = params.define_emits.get(define_emits_index) {
+                    if let Some((shape, source)) = synthesize_macro_shape_from_registry_lowered_root(
+                        lowered,
+                        resolved_type_registry,
+                        resolved_type_registry_meta,
+                        verter_semantic::analysis::type_eval_build::has_named_shape_surface,
+                    ) {
+                        registry_hits += 1;
+                        let count =
+                            shape.value.properties.len() + shape.value.call_signatures.len();
+                        component_meta_trace_custom!(
+                            "macro_object_shape",
+                            format!(
+                                "owner={} macro_index={} kind=define_emits source={} surface={}",
+                                owner_canonical,
+                                macro_index,
+                                source.label(),
+                                count,
+                            ),
+                        );
+                        evaluated_types.define_emits.push(
+                            verter_semantic::analysis::type_expand::ExpandedMacroObjectShape {
+                                macro_index,
+                                result: shape,
+                            },
+                        );
+                    } else {
+                        let item_started = Instant::now();
+                        let (shape, source) = produce_one_macro_object_shape(
+                            query_engine,
+                            owner_canonical,
+                            lowered,
+                            verter_semantic::analysis::type_eval_build::has_named_shape_surface,
+                        );
+                        if source.is_projection() {
+                            projection_hits += 1;
+                        } else if source.is_solver() {
+                            solver_fallbacks += 1;
+                        }
+                        if let Some(shape) = shape {
+                            let count =
+                                shape.value.properties.len() + shape.value.call_signatures.len();
+                            component_meta_trace_custom!(
+                                "macro_object_shape",
+                                format!(
+                                    "owner={} macro_index={} kind=define_emits source={} surface={} took={:?}",
+                                    owner_canonical, macro_index, source.label(), count,
+                                    item_started.elapsed(),
+                                ),
+                            );
+                            evaluated_types.define_emits.push(
+                                verter_semantic::analysis::type_expand::ExpandedMacroObjectShape {
+                                    macro_index,
+                                    result: shape,
+                                },
+                            );
+                        }
+                    }
+                }
+                define_emits_index += 1;
+            }
+            verter_semantic::analysis::AnalyzedMacroKind::DefineSlots => {
+                let define_slots_lowered = params.define_slots.get(define_slots_index);
+                let define_slots_owner_surface_incomplete = mac.slot_fields.is_empty()
+                    || mac.slot_fields.iter().any(|slot| slot.bindings.is_empty());
+                let define_slots_needs_projection_rescue =
+                    define_slots_lowered.is_some_and(|lowered| {
+                        expr_needs_projection_rescue(query_engine, owner_canonical, lowered)
+                    });
+                if !define_slots_needs_projection_rescue {
+                    if let Some((shape, source)) = synthesize_define_slots_shape_from_known_surface(
+                        macro_index,
+                        resolved_macros,
+                    ) {
+                        projection_hits += 1;
+                        let count = shape.value.properties.len();
+                        component_meta_trace_custom!(
+                            "macro_object_shape",
+                            format!(
+                                "owner={} macro_index={} kind=define_slots source={} slots={}",
+                                owner_canonical,
+                                macro_index,
+                                source.label(),
+                                count,
+                            ),
+                        );
+                        evaluated_types.define_slots.push(
+                            verter_semantic::analysis::type_expand::ExpandedMacroObjectShape {
+                                macro_index,
+                                result: shape,
+                            },
+                        );
+                    } else if let Some((shape, source)) = define_slots_lowered.and_then(|lowered| {
+                        synthesize_macro_shape_from_registry_lowered_root(
+                            lowered,
+                            resolved_type_registry,
+                            resolved_type_registry_meta,
+                            has_shape_surface,
+                        )
+                    }) {
+                        registry_hits += 1;
+                        let count = shape.value.properties.len();
+                        component_meta_trace_custom!(
+                            "macro_object_shape",
+                            format!(
+                                "owner={} macro_index={} kind=define_slots source={} slots={}",
+                                owner_canonical,
+                                macro_index,
+                                source.label(),
+                                count,
+                            ),
+                        );
+                        evaluated_types.define_slots.push(
+                            verter_semantic::analysis::type_expand::ExpandedMacroObjectShape {
+                                macro_index,
+                                result: shape,
+                            },
+                        );
+                    } else if let Some(lowered) = define_slots_lowered {
+                        // Local slot_fields can preserve only the slot names while
+                        // dropping the callable payload behind a helper alias.
+                        // In that case the lowered-type path still owns the real
+                        // defineSlots object shape.
+                        if define_slots_owner_surface_incomplete {
+                            let item_started = Instant::now();
+                            let (shape, source) = produce_one_macro_object_shape_for_slots(
+                                query_engine,
+                                owner_canonical,
+                                lowered,
+                            );
+                            if source.is_projection() {
+                                projection_hits += 1;
+                            } else if source.is_solver() {
+                                solver_fallbacks += 1;
+                            }
+                            if let Some(shape) = shape {
+                                if !shape.value.properties.is_empty() {
+                                    let count = shape.value.properties.len();
+                                    component_meta_trace_custom!(
+                                        "macro_object_shape",
+                                        format!(
+                                            "owner={} macro_index={} kind=define_slots source={} slots={} took={:?}",
+                                            owner_canonical, macro_index, source.label(), count,
+                                            item_started.elapsed(),
+                                        ),
+                                    );
+                                    evaluated_types.define_slots.push(
+                                        verter_semantic::analysis::type_expand::ExpandedMacroObjectShape {
+                                            macro_index,
+                                            result: shape,
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                    }
+                } else if let Some(lowered) = define_slots_lowered {
+                    let item_started = Instant::now();
+                    let (shape, source) = produce_one_macro_object_shape_for_slots(
+                        query_engine,
+                        owner_canonical,
+                        lowered,
+                    );
+                    if source.is_projection() {
+                        projection_hits += 1;
+                    } else if source.is_solver() {
+                        solver_fallbacks += 1;
+                    }
+                    if let Some(shape) = shape {
+                        if !shape.value.properties.is_empty() {
+                            let count = shape.value.properties.len();
+                            component_meta_trace_custom!(
+                                "macro_object_shape",
+                                format!(
+                                    "owner={} macro_index={} kind=define_slots source={} slots={} took={:?}",
+                                    owner_canonical, macro_index, source.label(), count,
+                                    item_started.elapsed(),
+                                ),
+                            );
+                            evaluated_types.define_slots.push(
+                                verter_semantic::analysis::type_expand::ExpandedMacroObjectShape {
+                                    macro_index,
+                                    result: shape,
+                                },
+                            );
+                        }
+                    }
+                }
+                define_slots_index += 1;
+            }
+            _ => {}
+        }
+    }
+
+    let solves_after = 0u32;
+    component_meta_trace_custom!(
+        "produce_macro_object_shapes",
+        format!(
+            "owner={} define_props={} define_emits={} define_slots={} registry_hits={} projection_hits={} solver_fallbacks={} solves_delta={} took={:?}",
+            owner_canonical,
+            evaluated_types.define_props.len(),
+            evaluated_types.define_emits.len(),
+            evaluated_types.define_slots.len(),
+            registry_hits,
+            projection_hits,
+            solver_fallbacks,
+            solves_after.saturating_sub(solves_before),
+            shapes_started.elapsed(),
+        ),
+    );
+}
+
+/// Which path produced the macro object shape.
+#[derive(Clone, Copy)]
+pub(crate) enum MacroShapeSource {
+    Fields,
+    ResolvedMacro,
+    Registry,
+    Projection,
+    Solver,
+    None,
+}
+
+impl MacroShapeSource {
+    fn is_projection(self) -> bool {
+        matches!(self, Self::Projection)
+    }
+    fn is_solver(self) -> bool {
+        matches!(self, Self::Solver)
+    }
+    fn label(self) -> &'static str {
+        match self {
+            Self::Fields => "fields",
+            Self::ResolvedMacro => "resolved-macro",
+            Self::Registry => "registry",
+            Self::Projection => "projection",
+            Self::Solver => "solver",
+            Self::None => "none",
+        }
+    }
+}
+
+pub(crate) fn define_props_fields_fast_path_allowed(
+    mac: &AnalyzedMacro,
+    macro_index: usize,
+    resolved_macros: &[ResolvedMacroMeta],
+    lowered: Option<&verter_semantic::analysis::type_expr::TypeExpr>,
+) -> bool {
+    fn strip_parens(
+        expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    ) -> &verter_semantic::analysis::type_expr::TypeExpr {
+        match expr {
+            verter_semantic::analysis::type_expr::TypeExpr::Parenthesized(inner) => {
+                strip_parens(inner)
+            }
+            other => other,
+        }
+    }
+
+    let Some(lowered) = lowered.map(strip_parens) else {
+        return false;
+    };
+
+    match lowered {
+        verter_semantic::analysis::type_expr::TypeExpr::Object(_) => return true,
+        verter_semantic::analysis::type_expr::TypeExpr::Ref { type_arguments, .. }
+            if type_arguments.is_empty() => {}
+        _ => return false,
+    }
+
+    let mut macro_surfaces = resolved_macros.iter().filter(|resolved| {
+        resolved.macro_index == macro_index
+            && resolved.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps
+            && !resolved.props.is_empty()
+    });
+    let Some(first_surface) = macro_surfaces.next() else {
+        return false;
+    };
+    if macro_surfaces.next().is_some() {
+        return false;
+    }
+    if !mac
+        .type_references
+        .iter()
+        .any(|type_name| type_name == &first_surface.type_name)
+    {
+        return false;
+    }
+    if !first_surface.surface_is_authoritative {
+        return false;
+    }
+
+    let Some(text) = first_surface.declaration.text.as_deref() else {
+        return false;
+    };
+    let compact: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
+    let complex_markers = [
+        "extends",
+        "&",
+        "Omit<",
+        "Pick<",
+        "Partial<",
+        "Required<",
+        "Record<",
+        "Exclude<",
+        "Extract<",
+        "NonNullable<",
+        "Readonly<",
+        "keyof",
+        "typeof",
+        "[",
+    ];
+
+    !complex_markers
+        .iter()
+        .any(|marker| compact.contains(marker))
+}
+
+pub(crate) fn define_props_has_direct_local_root(mac: &AnalyzedMacro) -> bool {
+    mac.resolved_local_types
+        .iter()
+        .enumerate()
+        .any(|(resolved_index, resolved)| {
+            is_direct_local_macro_type_reference(mac, resolved_index, resolved.name.as_str())
+        })
+}
+
+pub(crate) fn is_direct_local_macro_type_reference(
+    mac: &AnalyzedMacro,
+    resolved_index: usize,
+    resolved_name: &str,
+) -> bool {
+    resolved_index == 0
+        || mac
+            .type_references
+            .iter()
+            .any(|type_name| type_name == resolved_name)
+}
+
+pub(crate) fn define_props_known_surface_shortcut_allowed(
+    lowered: Option<&verter_semantic::analysis::type_expr::TypeExpr>,
+) -> bool {
+    fn strip_parens(
+        expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    ) -> &verter_semantic::analysis::type_expr::TypeExpr {
+        match expr {
+            verter_semantic::analysis::type_expr::TypeExpr::Parenthesized(inner) => {
+                strip_parens(inner)
+            }
+            other => other,
+        }
+    }
+
+    match lowered.map(strip_parens) {
+        Some(verter_semantic::analysis::type_expr::TypeExpr::Object(_)) => true,
+        Some(verter_semantic::analysis::type_expr::TypeExpr::Ref { type_arguments, .. }) => {
+            type_arguments.is_empty()
+        }
+        _ => false,
+    }
+}
+
+pub(crate) fn synthesize_define_props_shape_from_known_surface_with_authority(
+    macro_index: usize,
+    snapshot: &FileAnalysisSnapshot,
+    resolved_macros: &[ResolvedMacroMeta],
+    evaluated_types: &verter_semantic::analysis::type_expand::ExpandedComponentTypes,
+    lowered: Option<&verter_semantic::analysis::type_expr::TypeExpr>,
+    require_authoritative_surface: bool,
+) -> Option<(ShapeResult, MacroShapeSource)> {
+    use verter_semantic::analysis::type_expand::{
+        ExpandedObjectShape, ExpandedProperty, ExpansionResult,
+    };
+    use verter_semantic::analysis::type_solver::result::{ExecutionStatus, SolverExactness};
+
+    if !define_props_known_surface_shortcut_allowed(lowered) {
+        return None;
+    }
+
+    let mac = snapshot.macros.get(macro_index)?;
+    let allow_known_surface_shortcuts = !define_props_has_direct_local_root(mac);
+    let resolved_macro = if allow_known_surface_shortcuts {
+        let mut macro_surfaces = resolved_macros.iter().filter(|resolved| {
+            resolved.macro_index == macro_index
+                && resolved.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps
+                && !resolved.props.is_empty()
+                && (!require_authoritative_surface || resolved.surface_is_authoritative)
+        });
+        let first = macro_surfaces.next();
+        if macro_surfaces.next().is_none()
+            && first.is_some_and(|resolved| {
+                mac.type_references
+                    .iter()
+                    .any(|type_name| type_name == &resolved.type_name)
+            })
+        {
+            first
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let expanded_fields_cover_resolved_macro = resolved_macro.is_none_or(|resolved_macro| {
+        resolved_macro.props.iter().all(|prop| {
+            evaluated_types
+                .props
+                .iter()
+                .any(|field| field.name == prop.name)
+        })
+    });
+    let use_all_expanded_props = allow_known_surface_shortcuts
+        && reuse_expanded_define_props_shape(snapshot, evaluated_types)
+        && expanded_fields_cover_resolved_macro;
+
+    let mut exactness = SolverExactness::ExactConcrete;
+    let mut execution_status = ExecutionStatus::Completed;
+    let mut diagnostics = Vec::new();
+    let mut properties = Vec::new();
+
+    if use_all_expanded_props {
+        properties.reserve(evaluated_types.props.len());
+        for field in &evaluated_types.props {
+            exactness = exactness.merge(field.exactness);
+            execution_status =
+                merge_expansion_execution_status(execution_status, field.execution_status);
+            diagnostics.extend(field.diagnostics.clone());
+            properties.push(ExpandedProperty {
+                name: field.name.clone(),
+                ty: field.r#type.clone(),
+                optional: field.optional,
+                readonly: false,
+            });
+        }
+    } else if let Some(resolved_macro) = resolved_macro {
+        properties.reserve(resolved_macro.props.len());
+        for prop in &resolved_macro.props {
+            let field = evaluated_types
+                .props
+                .iter()
+                .find(|field| field.name == prop.name);
+            if let Some(field) = field {
+                exactness = exactness.merge(field.exactness);
+                execution_status =
+                    merge_expansion_execution_status(execution_status, field.execution_status);
+                diagnostics.extend(field.diagnostics.clone());
+                properties.push(ExpandedProperty {
+                    name: field.name.clone(),
+                    ty: field.r#type.clone(),
+                    optional: field.optional,
+                    readonly: false,
+                });
+                continue;
+            }
+
+            let ty = prop
+                .type_annotation
+                .as_deref()
+                .map(verter_semantic::analysis::type_expr_lower::parse_type_annotation)
+                .unwrap_or_else(|| verter_semantic::analysis::type_expr::TypeExpr::Unknown {
+                    raw: "unknown".to_string(),
+                });
+            properties.push(ExpandedProperty {
+                name: prop.name.clone(),
+                ty,
+                optional: prop.is_optional,
+                readonly: false,
+            });
+        }
+    } else {
+        return None;
+    }
+
+    Some((
+        ExpansionResult {
+            value: ExpandedObjectShape {
+                properties,
+                index_signatures: Vec::new(),
+                call_signatures: Vec::new(),
+            },
+            exactness,
+            execution_status,
+            diagnostics,
+        },
+        if use_all_expanded_props {
+            MacroShapeSource::Fields
+        } else {
+            MacroShapeSource::ResolvedMacro
+        },
+    ))
+}
+
+pub(crate) fn synthesize_define_props_shape_from_registry_root(
+    owner_canonical: &str,
+    macro_index: usize,
+    snapshot: &FileAnalysisSnapshot,
+    resolved_type_registry: &[verter_semantic::analysis::component_meta::ResolvedTypeAnalysis],
+    resolved_type_registry_meta: &[ResolvedTypeRegistryMeta],
+) -> Option<(ShapeResult, MacroShapeSource)> {
+    let mac = snapshot.macros.get(macro_index)?;
+    let root_name = mac.resolved_local_types.first()?.name.as_str();
+
+    let mut matches = resolved_type_registry
+        .iter()
+        .zip(resolved_type_registry_meta.iter())
+        .filter(|(entry, meta)| {
+            entry.name == root_name
+                && meta.name == root_name
+                && meta.declaration.canonical_source == owner_canonical
+        });
+    let (entry, _) = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+
+    let shape = registry_entry_to_expanded_shape(&entry.type_expr)?;
+    if !has_prop_shape_surface(&shape) {
+        return None;
+    }
+
+    Some((
+        verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(shape),
+        MacroShapeSource::Registry,
+    ))
+}
+
+pub(crate) fn synthesize_macro_shape_from_registry_lowered_root(
+    lowered: &verter_semantic::analysis::type_expr::TypeExpr,
+    resolved_type_registry: &[verter_semantic::analysis::component_meta::ResolvedTypeAnalysis],
+    resolved_type_registry_meta: &[ResolvedTypeRegistryMeta],
+    shape_is_usable: impl Fn(&verter_semantic::analysis::type_expand::ExpandedObjectShape) -> bool,
+) -> Option<(ShapeResult, MacroShapeSource)> {
+    fn root_name(expr: &verter_semantic::analysis::type_expr::TypeExpr) -> Option<&str> {
+        match expr {
+            verter_semantic::analysis::type_expr::TypeExpr::Parenthesized(inner) => {
+                root_name(inner)
+            }
+            verter_semantic::analysis::type_expr::TypeExpr::Ref { name, .. } => Some(name.as_ref()),
+            _ => None,
+        }
+    }
+
+    let root_name = root_name(lowered)?;
+    let mut matches = resolved_type_registry
+        .iter()
+        .zip(resolved_type_registry_meta.iter())
+        .filter(|(entry, meta)| entry.name == root_name && meta.name == root_name);
+    let (entry, _) = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+
+    let shape = registry_entry_to_expanded_shape(&entry.type_expr)?;
+    if !shape_is_usable(&shape) {
+        return None;
+    }
+
+    Some((
+        verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(shape),
+        MacroShapeSource::Registry,
+    ))
+}
+
+pub(crate) fn named_ref_matches_empty_shell_registry_root(
+    owner_canonical: &str,
+    lowered: &verter_semantic::analysis::type_expr::TypeExpr,
+    resolved_type_registry: &[verter_semantic::analysis::component_meta::ResolvedTypeAnalysis],
+    resolved_type_registry_meta: &[ResolvedTypeRegistryMeta],
+) -> bool {
+    let verter_semantic::analysis::type_expr::TypeExpr::Ref {
+        name,
+        type_arguments,
+    } = lowered
+    else {
+        return false;
+    };
+    if !type_arguments.is_empty() {
+        return false;
+    }
+
+    let mut matches = resolved_type_registry
+        .iter()
+        .zip(resolved_type_registry_meta.iter())
+        .filter(|(entry, meta)| {
+            entry.name == name.as_ref()
+                && meta.name == name.as_ref()
+                && meta.declaration.canonical_source == owner_canonical
+        });
+    let Some((entry, _)) = matches.next() else {
+        return false;
+    };
+    if matches.next().is_some() {
+        return false;
+    }
+
+    registry_entry_to_expanded_shape(&entry.type_expr).is_some_and(|shape| {
+        shape.properties.is_empty()
+            && shape.index_signatures.is_empty()
+            && shape.call_signatures.is_empty()
+    })
+}
+
+pub(crate) fn reuse_expanded_define_emits_shape(
+    snapshot: &FileAnalysisSnapshot,
+    evaluated_types: &verter_semantic::analysis::type_expand::ExpandedComponentTypes,
+) -> bool {
+    !evaluated_types.emits.is_empty()
+        && snapshot
+            .macros
+            .iter()
+            .filter(|mac| {
+                mac.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineEmits
+                    && mac.is_type_based
+            })
+            .take(2)
+            .count()
+            == 1
+}
+
+pub(crate) fn synthesize_define_emits_shape_from_known_surface(
+    macro_index: usize,
+    snapshot: &FileAnalysisSnapshot,
+    resolved_macros: &[ResolvedMacroMeta],
+    evaluated_types: &verter_semantic::analysis::type_expand::ExpandedComponentTypes,
+) -> Option<(ShapeResult, MacroShapeSource)> {
+    use verter_semantic::analysis::type_expand::{
+        ExpandedObjectShape, ExpandedProperty, ExpansionResult,
+    };
+    use verter_semantic::analysis::type_solver::result::{ExecutionStatus, SolverExactness};
+
+    let use_all_expanded_emits = reuse_expanded_define_emits_shape(snapshot, evaluated_types);
+    if use_all_expanded_emits {
+        let mut exactness = SolverExactness::ExactConcrete;
+        let mut execution_status = ExecutionStatus::Completed;
+        let mut diagnostics = Vec::new();
+        let mut properties = Vec::with_capacity(evaluated_types.emits.len());
+
+        for emit in &evaluated_types.emits {
+            exactness = exactness.merge(emit.exactness);
+            execution_status =
+                merge_expansion_execution_status(execution_status, emit.execution_status);
+            diagnostics.extend(emit.diagnostics.clone());
+            properties.push(ExpandedProperty {
+                name: emit.name.clone(),
+                ty: emit.r#type.clone(),
+                optional: false,
+                readonly: false,
+            });
+        }
+
+        return Some((
+            ExpansionResult {
+                value: ExpandedObjectShape {
+                    properties,
+                    index_signatures: Vec::new(),
+                    call_signatures: Vec::new(),
+                },
+                exactness,
+                execution_status,
+                diagnostics,
+            },
+            MacroShapeSource::Fields,
+        ));
+    }
+
+    let mut matching_macros = resolved_macros.iter().filter(|resolved| {
+        resolved.macro_index == macro_index
+            && resolved.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineEmits
+            && !resolved.emits.is_empty()
+    });
+    let resolved_macro = matching_macros.next();
+    if matching_macros.next().is_some() {
+        return None;
+    }
+    let mut exactness = SolverExactness::ExactConcrete;
+    let mut execution_status = ExecutionStatus::Completed;
+    let mut diagnostics = Vec::new();
+    let mut properties = Vec::new();
+
+    if let Some(resolved_macro) = resolved_macro {
+        properties.reserve(resolved_macro.emits.len());
+        for emit in &resolved_macro.emits {
+            let field = evaluated_types
+                .emits
+                .iter()
+                .find(|field| field.name == emit.name);
+            if let Some(field) = field {
+                exactness = exactness.merge(field.exactness);
+                execution_status =
+                    merge_expansion_execution_status(execution_status, field.execution_status);
+                diagnostics.extend(field.diagnostics.clone());
+                properties.push(ExpandedProperty {
+                    name: field.name.clone(),
+                    ty: field.r#type.clone(),
+                    optional: false,
+                    readonly: false,
+                });
+                continue;
+            }
+
+            let ty = emit
+                .payload_type
+                .as_deref()
+                .map(verter_semantic::analysis::type_expr_lower::parse_type_annotation)
+                .unwrap_or_else(|| verter_semantic::analysis::type_expr::TypeExpr::Unknown {
+                    raw: "unknown".to_string(),
+                });
+            properties.push(ExpandedProperty {
+                name: emit.name.clone(),
+                ty,
+                optional: false,
+                readonly: false,
+            });
+        }
+    } else {
+        return None;
+    }
+
+    Some((
+        ExpansionResult {
+            value: ExpandedObjectShape {
+                properties,
+                index_signatures: Vec::new(),
+                call_signatures: Vec::new(),
+            },
+            exactness,
+            execution_status,
+            diagnostics,
+        },
+        MacroShapeSource::ResolvedMacro,
+    ))
+}
+
+pub(crate) fn synthesize_define_slots_shape_from_known_surface(
+    macro_index: usize,
+    resolved_macros: &[ResolvedMacroMeta],
+) -> Option<(ShapeResult, MacroShapeSource)> {
+    use verter_semantic::analysis::type_expand::{
+        ExpandedObjectShape, ExpandedProperty, ExpansionResult,
+    };
+
+    let mut matching_macros = resolved_macros.iter().filter(|resolved| {
+        resolved.macro_index == macro_index
+            && resolved.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineSlots
+            && !resolved.slots.is_empty()
+    });
+    let resolved_macro = matching_macros.next()?;
+    if matching_macros.next().is_some() {
+        return None;
+    }
+
+    let properties = resolved_macro
+        .slots
+        .iter()
+        .map(|slot| ExpandedProperty {
+            name: slot.name.clone(),
+            ty: slot_field_function_type_expr(slot),
+            optional: !slot.is_required,
+            readonly: false,
+        })
+        .collect();
+
+    Some((
+        ExpansionResult::exact_symbolic(ExpandedObjectShape {
+            properties,
+            index_signatures: Vec::new(),
+            call_signatures: Vec::new(),
+        }),
+        MacroShapeSource::ResolvedMacro,
+    ))
+}
+
+pub(crate) fn slot_field_function_type_expr(
+    slot: &verter_semantic::analysis::AnalyzedSlotField,
+) -> verter_semantic::analysis::type_expr::TypeExpr {
+    let return_type = slot.return_type.as_deref().unwrap_or("any");
+    let signature = if slot.bindings.is_empty() {
+        format!("() => {return_type}")
+    } else {
+        let bindings = slot
+            .bindings
+            .iter()
+            .map(|binding| {
+                format!(
+                    "{}: {}",
+                    binding.name,
+                    binding.type_annotation.as_deref().unwrap_or("unknown")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("(props: {{ {bindings} }}) => {return_type}")
+    };
+
+    verter_semantic::analysis::type_expr_lower::parse_type_annotation(&signature)
+}
+
+pub(crate) fn reuse_expanded_define_props_shape(
+    snapshot: &FileAnalysisSnapshot,
+    evaluated_types: &verter_semantic::analysis::type_expand::ExpandedComponentTypes,
+) -> bool {
+    !evaluated_types.props.is_empty()
+        && snapshot
+            .macros
+            .iter()
+            .filter(|mac| mac.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps)
+            .take(2)
+            .count()
+            == 1
+        && !snapshot
+            .macros
+            .iter()
+            .any(|mac| mac.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineModel)
+}
+
+pub(crate) fn merge_expansion_execution_status(
+    current: verter_semantic::analysis::type_expand::ExpansionExecutionStatus,
+    next: verter_semantic::analysis::type_expand::ExpansionExecutionStatus,
+) -> verter_semantic::analysis::type_expand::ExpansionExecutionStatus {
+    use verter_semantic::analysis::type_expand::ExpansionExecutionStatus;
+
+    let severity = |status| match status {
+        ExpansionExecutionStatus::Completed => 0u8,
+        ExpansionExecutionStatus::Cancelled => 1u8,
+        ExpansionExecutionStatus::Interrupted => 2u8,
+        ExpansionExecutionStatus::HardStop => 3u8,
+    };
+
+    if severity(next) > severity(current) {
+        next
+    } else {
+        current
+    }
+}
+
+pub(crate) fn registry_entry_to_expanded_shape(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
+    use verter_semantic::analysis::type_expand::{
+        ExpandedCallSignature, ExpandedIndexSignature, ExpandedObjectShape, ExpandedParameter,
+        ExpandedProperty,
+    };
+    use verter_semantic::analysis::type_expr::{ObjectMember, PrimitiveName, TypeExpr};
+
+    let TypeExpr::Object(object) = expr else {
+        return None;
+    };
+
+    let mut properties = Vec::new();
+    let mut call_signatures = Vec::new();
+    let mut index_signatures = Vec::new();
+
+    for member in &object.properties {
+        match member {
+            ObjectMember::Property(property) => properties.push(ExpandedProperty {
+                name: property.name.clone(),
+                ty: property.ty.clone(),
+                optional: property.optional,
+                readonly: property.readonly,
+            }),
+            ObjectMember::Method(method) => call_signatures.push(ExpandedCallSignature {
+                parameters: method
+                    .function
+                    .parameters
+                    .iter()
+                    .map(|parameter| ExpandedParameter {
+                        name: parameter.name.clone().unwrap_or_default(),
+                        ty: parameter.ty.clone(),
+                        optional: parameter.optional,
+                        rest: parameter.rest,
+                    })
+                    .collect(),
+                return_type: method
+                    .function
+                    .return_type
+                    .as_ref()
+                    .map(|return_type| return_type.as_ref().clone())
+                    .unwrap_or(TypeExpr::Primitive(PrimitiveName::Void)),
+                type_parameters: method.function.type_parameters.clone(),
+            }),
+            ObjectMember::CallSignature(function) | ObjectMember::ConstructSignature(function) => {
+                call_signatures.push(ExpandedCallSignature {
+                    parameters: function
+                        .parameters
+                        .iter()
+                        .map(|parameter| ExpandedParameter {
+                            name: parameter.name.clone().unwrap_or_default(),
+                            ty: parameter.ty.clone(),
+                            optional: parameter.optional,
+                            rest: parameter.rest,
+                        })
+                        .collect(),
+                    return_type: function
+                        .return_type
+                        .as_ref()
+                        .map(|return_type| return_type.as_ref().clone())
+                        .unwrap_or(TypeExpr::Primitive(PrimitiveName::Void)),
+                    type_parameters: function.type_parameters.clone(),
+                });
+            }
+            ObjectMember::IndexSignature(signature) => {
+                index_signatures.push(ExpandedIndexSignature {
+                    key_type: signature.key_type.clone(),
+                    value_type: signature.value_type.clone(),
+                    readonly: signature.readonly,
+                });
+            }
+        }
+    }
+
+    Some(ExpandedObjectShape {
+        properties,
+        index_signatures,
+        call_signatures,
+    })
+}
+
+pub(crate) fn expanded_shape_to_type_expr(
+    shape: &verter_semantic::analysis::type_expand::ExpandedObjectShape,
+) -> verter_semantic::analysis::type_expr::TypeExpr {
+    use verter_semantic::analysis::type_expr::{
+        FunctionExpr, FunctionParam, ObjectExpr, ObjectMember, ObjectProperty, TypeExpr,
+    };
+
+    let mut properties = Vec::new();
+
+    for property in &shape.properties {
+        properties.push(ObjectMember::Property(ObjectProperty {
+            name: property.name.clone(),
+            ty: property.ty.clone(),
+            optional: property.optional,
+            readonly: property.readonly,
+        }));
+    }
+
+    for signature in &shape.call_signatures {
+        properties.push(ObjectMember::CallSignature(FunctionExpr {
+            parameters: signature
+                .parameters
+                .iter()
+                .map(|parameter| FunctionParam {
+                    name: (!parameter.name.is_empty()).then(|| parameter.name.clone()),
+                    ty: parameter.ty.clone(),
+                    optional: parameter.optional,
+                    rest: parameter.rest,
+                })
+                .collect(),
+            return_type: Some(std::sync::Arc::new(signature.return_type.clone())),
+            type_parameters: signature.type_parameters.clone(),
+        }));
+    }
+
+    for signature in &shape.index_signatures {
+        properties.push(
+            verter_semantic::analysis::type_expr::ObjectMember::IndexSignature(
+                verter_semantic::analysis::type_expr::IndexSignature {
+                    key_name: "key".to_string(),
+                    key_type: signature.key_type.clone(),
+                    value_type: signature.value_type.clone(),
+                    readonly: signature.readonly,
+                },
+            ),
+        );
+    }
+
+    TypeExpr::Object(std::sync::Arc::new(ObjectExpr { properties }))
+}
+
+type ShapeResult = verter_semantic::analysis::type_expand::ExpansionResult<
+    verter_semantic::analysis::type_expand::ExpandedObjectShape,
+>;
+
+pub(crate) fn expr_needs_projection_rescue(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    owner_canonical: &str,
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> bool {
+    use verter_semantic::analysis::type_expr::TypeExpr;
+
+    if lowered_root_reaches_transitive_cycle(query_engine, owner_canonical, expr) {
+        return false;
+    }
+
+    match expr {
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => {
+            let declaration = query_engine.resolve_type_declaration(owner_canonical, name);
+            let scope_canonical = if declaration.canonical_source.is_empty() {
+                owner_canonical
+            } else {
+                declaration.canonical_source.as_str()
+            };
+            let resolved_name = if declaration.resolved_name.is_empty() {
+                name.as_ref()
+            } else {
+                declaration.resolved_name.as_str()
+            };
+            let body_needs_projection = query_engine
+                .named_decl_body(scope_canonical, resolved_name)
+                .is_some_and(|body| {
+                    type_expr_has_non_object_top_level_surface(query_engine, scope_canonical, &body)
+                });
+            body_needs_projection
+                || (!type_arguments.is_empty()
+                    && query_engine
+                        .named_decl_body(scope_canonical, resolved_name)
+                        .is_none())
+        }
+        other => type_expr_has_non_object_top_level_surface(query_engine, owner_canonical, other),
+    }
+}
+
+pub(crate) fn type_expr_has_non_object_top_level_surface(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    owner_canonical: &str,
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> bool {
+    use verter_semantic::analysis::type_expr::TypeExpr;
+
+    match expr {
+        TypeExpr::TypeOf(_)
+        | TypeExpr::IndexedAccess { .. }
+        | TypeExpr::Conditional { .. }
+        | TypeExpr::Mapped { .. }
+        | TypeExpr::KeyOf(_)
+        | TypeExpr::Rest(_)
+        | TypeExpr::TemplateLiteral { .. } => true,
+        TypeExpr::Ref { name, .. } => {
+            let declaration = query_engine.resolve_type_declaration(owner_canonical, name);
+            let scope_canonical = if declaration.canonical_source.is_empty() {
+                owner_canonical
+            } else {
+                declaration.canonical_source.as_str()
+            };
+            let resolved_name = if declaration.resolved_name.is_empty() {
+                name.as_ref()
+            } else {
+                declaration.resolved_name.as_str()
+            };
+            query_engine
+                .named_decl_body(scope_canonical, resolved_name)
+                .is_some_and(|body| {
+                    type_expr_has_non_object_top_level_surface(query_engine, scope_canonical, &body)
+                })
+        }
+        TypeExpr::Parenthesized(inner) => {
+            type_expr_has_non_object_top_level_surface(query_engine, owner_canonical, inner)
+        }
+        TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
+            let mut saw_object = false;
+            for ty in types.iter() {
+                match ty {
+                    TypeExpr::Parenthesized(inner) => {
+                        if type_expr_has_non_object_top_level_surface(
+                            query_engine,
+                            owner_canonical,
+                            inner.as_ref(),
+                        ) {
+                            return true;
+                        }
+                        if matches!(inner.as_ref(), TypeExpr::Object(_)) {
+                            saw_object = true;
+                        }
+                    }
+                    TypeExpr::Object(_) => saw_object = true,
+                    _ => return true,
+                }
+            }
+            !saw_object
+        }
+        TypeExpr::Object(_)
+        | TypeExpr::Function(_)
+        | TypeExpr::Array { .. }
+        | TypeExpr::Tuple { .. } => false,
+        TypeExpr::Primitive(_)
+        | TypeExpr::Literal(_)
+        | TypeExpr::Unknown { .. }
+        | TypeExpr::RecursiveRef { .. }
+        | TypeExpr::TypeParameter(_)
+        | TypeExpr::Infer { .. } => false,
+    }
+}
+
+/// Produce one macro object shape.
+///
+/// Two strategies based on the body classification:
+///
+/// - **Direct Object body**: DB-backed `project_type_surface_expr` on the
+///   defining file.  Solver skipped — this is the fast path for the common
+///   case (imported interface with explicit members).
+///
+/// - **Non-Object body** (intersections, heritage, typeof, generics): solver
+///   first (clean engine state → complete results), then
+///   `project_expr_surface_expr` on warm caches (handles typeof member paths
+///   the solver cannot resolve).  The more complete result wins.
+pub(crate) fn produce_one_macro_object_shape(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    owner_canonical: &str,
+    lowered: &verter_semantic::analysis::type_expr::TypeExpr,
+    shape_is_usable: impl Fn(&verter_semantic::analysis::type_expand::ExpandedObjectShape) -> bool,
+) -> (Option<ShapeResult>, MacroShapeSource) {
+    // ── Fast path: direct Object body → DB-backed projection ──────────
+    if let Some(projected) =
+        project_named_ref_prepared_surface_shape(query_engine, owner_canonical, lowered)
+    {
+        return (Some(projected), MacroShapeSource::Projection);
+    }
+
+    if let verter_semantic::analysis::type_expr::TypeExpr::Ref {
+        name,
+        type_arguments,
+    } = lowered
+    {
+        if type_arguments.is_empty() {
+            if let Some((def_canonical, def_name)) =
+                classify_named_ref_for_db_projection(query_engine, owner_canonical, name)
+            {
+                // Phase 5m §5.13a.2 — bridge the engine method via
+                // the per-engine helper so the §5.14.1 pre-flight
+                // gate sees zero external engine-method callers.
+                if let Some(shape) = project_type_surface_shape_via_host_threaded(
+                    query_engine,
+                    &def_canonical,
+                    &def_name,
+                ) {
+                    if shape_is_usable(&shape) {
+                        return (
+                            Some(
+                                verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(shape),
+                            ),
+                            MacroShapeSource::Projection,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Non-object body: solver first, then projection on warm caches ─
+    let scoped_solver_result = match lowered {
+        verter_semantic::analysis::type_expr::TypeExpr::Ref {
+            name,
+            type_arguments,
+        } if type_arguments.is_empty() => {
+            let declaration = query_engine.resolve_type_declaration(owner_canonical, name.as_ref());
+            let defining_canonical = if declaration.canonical_source.is_empty() {
+                owner_canonical.to_string()
+            } else {
+                declaration.canonical_source.clone()
+            };
+            let defining_name = if declaration.resolved_name.is_empty() {
+                name.as_ref().to_string()
+            } else {
+                declaration.resolved_name.clone()
+            };
+            // Phase 5m §5.13a.2 — bridge the engine method via the
+            // per-engine helper so the §5.14.1 pre-flight gate sees
+            // zero external engine-method callers.
+            project_type_surface_expr_via_host_threaded(
+                query_engine,
+                defining_canonical.as_str(),
+                defining_name.as_str(),
+            )
+            .and_then(|solved_expr| {
+                let shape =
+                    verter_semantic::analysis::type_expand::type_expr_to_object_shape(&solved_expr);
+                shape_is_usable(&shape).then(|| {
+                    verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(shape)
+                })
+            })
+        }
+        _ => None,
+    };
+    // D-Cutover §5.8: the retired solver's `owner_engine.solve` is gone.
+    // Route through dispatch's surface projection + the dispatch-backed
+    // `deep_resolve_slot_function_refs` on CMQE (replacement for the
+    // retired solver-backed pass), treating the result as an
+    // exact-concrete SolverResult so `solver_result_to_object_expansion`
+    // still derives the expansion.
+    let solver_result = scoped_solver_result.unwrap_or_else(|| {
+        // D-Cutover §5.8: dispatch's surface projection is the sole
+        // solve path. Empty-path `ProjectPath` with mode Expanded now
+        // expands terminal DeclAnchors via `Instantiate(anchor, [])`
+        // so non-generic aliases (including namespace-qualified
+        // `Types.Props` → `Props`) emit their body surface here.
+        //
+        // Phase 5f §8 — route through `project_expr_class_a_via_dispatch_threaded`
+        // so IndexedAccess chains (`WrappedConfig<Theme>['nested']['palette']`)
+        // are decomposed into `(base_expr, [PathSegment::Index(...)])`
+        // and dispatched as `ProjectPath { base, path, Expanded }`.
+        // PathWalker threads the inner generic-substitution context
+        // (`T → Theme`) consistently across hops via per-segment
+        // walking — closing the indexed-paths seed where the engine
+        // method's prepared-decl chain enumerated sibling members at
+        // each intermediate hop instead of following the requested
+        // path.
+        //
+        // TODO(phase-5g): retain the engine helper in this generic
+        // (multi-macro-kind) callsite — the engine threads
+        // request-local fuse + scope-payload state that is
+        // load-bearing for `Partial<T>` optionality propagation
+        // across props/emits/slots in the same request. Migrate
+        // alongside the engine retirement in 5g, when the engine's
+        // load-bearing state can be host-promoted atomically.
+        let projected = project_expr_class_a_via_dispatch_threaded(
+            query_engine.host,
+            Some(query_engine),
+            owner_canonical,
+            lowered,
+        )
+        .unwrap_or_else(|| lowered.clone());
+        let deeply_resolved =
+            query_engine.deep_resolve_slot_function_refs(owner_canonical, &projected);
+        verter_semantic::analysis::type_expand::solver_result_to_object_expansion(
+            verter_semantic::analysis::type_solver::result::SolverResult::exact_concrete(
+                deeply_resolved,
+            ),
+        )
+    });
+    let solver_count = shape_surface_count(&solver_result);
+    let rescue_projection =
+        solver_count == 0 || expr_needs_projection_rescue(query_engine, owner_canonical, lowered);
+    let projected = if rescue_projection {
+        // Phase 5m §5.13a.2 — bridge the engine method via the
+        // per-engine helper so the §5.14.1 pre-flight gate sees zero
+        // external engine-method callers.
+        project_expr_surface_shape_via_host_threaded(query_engine, owner_canonical, lowered)
+            .and_then(|shape| {
+                shape_is_usable(&shape).then(|| {
+                    verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(shape)
+                })
+            })
+    } else {
+        None
+    };
+    let root_projected = if rescue_projection {
+        project_named_ref_surface_shape(query_engine, owner_canonical, lowered, &shape_is_usable)
+    } else {
+        None
+    };
+    let imported_scope_projected = if rescue_projection {
+        project_named_ref_imported_scope_shape(
+            query_engine,
+            owner_canonical,
+            lowered,
+            &shape_is_usable,
+        )
+    } else {
+        None
+    };
+    let projected = [projected, root_projected, imported_scope_projected]
+        .into_iter()
+        .flatten()
+        .max_by_key(shape_surface_count);
+
+    match projected {
+        Some(proj) if solver_count == 0 => (Some(proj), MacroShapeSource::Projection),
+        Some(proj) if projection_result_beats_solver_shape(&proj, &solver_result) => {
+            (Some(proj), MacroShapeSource::Projection)
+        }
+        _ if solver_count > 0 => (Some(solver_result), MacroShapeSource::Solver),
+        _ => match projected {
+            Some(proj) => (Some(proj), MacroShapeSource::Projection),
+            None => (None, MacroShapeSource::None),
+        },
+    }
+}
+
+pub(crate) fn project_named_ref_prepared_surface_shape(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    owner_canonical: &str,
+    lowered: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> Option<ShapeResult> {
+    let verter_semantic::analysis::type_expr::TypeExpr::Ref {
+        name,
+        type_arguments,
+    } = lowered
+    else {
+        return None;
+    };
+    if !named_ref_can_use_prepared_projection(query_engine, owner_canonical, name.as_ref()) {
+        return None;
+    }
+    if !type_arguments.is_empty() {
+        let declaration = query_engine.resolve_type_declaration(owner_canonical, name.as_ref());
+        let scope_canonical = if declaration.canonical_source.is_empty() {
+            owner_canonical
+        } else {
+            declaration.canonical_source.as_str()
+        };
+        let resolved_name = if declaration.resolved_name.is_empty() {
+            name.as_ref()
+        } else {
+            declaration.resolved_name.as_str()
+        };
+        if !query_engine
+            .named_decl_body(scope_canonical, resolved_name)
+            .is_some_and(|body| {
+                type_expr_has_non_object_top_level_surface(query_engine, scope_canonical, &body)
+            })
+        {
+            return None;
+        }
+    }
+
+    let (scope_canonical, resolved_name) =
+        resolve_named_ref_prepared_projection_target(query_engine, owner_canonical, name.as_ref())?;
+
+    // Phase 5m §5.13a.2 — bridge the engine method via the per-engine
+    // helper so the §5.14.1 pre-flight gate sees zero external
+    // engine-method callers.
+    project_prepared_type_surface_shape_via_host_threaded(
+        query_engine,
+        scope_canonical.as_str(),
+        resolved_name.as_str(),
+    )
+    .and_then(|shape| {
+        has_prop_shape_surface(&shape)
+            .then(|| verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(shape))
+    })
+}
+
+pub(crate) fn named_ref_can_use_prepared_projection(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    owner_canonical: &str,
+    requested_name: &str,
+) -> bool {
+    let declaration = query_engine.resolve_type_declaration(owner_canonical, requested_name);
+    if declaration.canonical_source.is_empty() || declaration.canonical_source == owner_canonical {
+        return true;
+    }
+
+    match declaration.kind {
+        crate::resolver_core::ResolvedDeclarationKind::Class => {
+            crate::resolver_core::component_meta::imported_declaration_surface_is_authoritative(
+                &declaration,
+            )
+        }
+        crate::resolver_core::ResolvedDeclarationKind::Interface
+        | crate::resolver_core::ResolvedDeclarationKind::TypeAlias => true,
+        crate::resolver_core::ResolvedDeclarationKind::Unknown => false,
+    }
+}
+
+pub(crate) fn resolve_named_ref_prepared_projection_target(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    owner_canonical: &str,
+    requested_name: &str,
+) -> Option<(String, String)> {
+    if query_engine
+        .host()
+        .prepared_type_decl(owner_canonical, requested_name)
+        .is_some()
+    {
+        return Some((owner_canonical.to_string(), requested_name.to_string()));
+    }
+
+    if let Some(state) = query_engine
+        .host()
+        .route_owned_shallow_state(owner_canonical)
+    {
+        if state.symbol(requested_name).is_some() {
+            return Some((owner_canonical.to_string(), requested_name.to_string()));
+        }
+
+        if let Some(import_target) = state.import_target(requested_name) {
+            let target_canonical = if import_target.canonical_id.is_empty() {
+                query_engine.host().resolve_route_type_edge(
+                    owner_canonical,
+                    import_target.source_specifier.as_str(),
+                )?
+            } else {
+                import_target.canonical_id.clone()
+            };
+            let target_name = import_target.imported_name.clone();
+            if let Some((routed_canonical, routed_name)) = query_engine
+                .host()
+                .resolve_named_type_export_target_shallow(
+                    target_canonical.as_str(),
+                    target_name.as_str(),
+                )
+            {
+                if query_engine
+                    .host()
+                    .prepared_type_decl(routed_canonical.as_str(), routed_name.as_str())
+                    .is_some()
+                {
+                    return Some((routed_canonical, routed_name));
+                }
+            }
+            if query_engine
+                .host()
+                .prepared_type_decl(target_canonical.as_str(), target_name.as_str())
+                .is_some()
+            {
+                return Some((target_canonical, target_name));
+            }
+        }
+    }
+
+    let declaration = query_engine.resolve_type_declaration(owner_canonical, requested_name);
+    let scope_canonical = if declaration.canonical_source.is_empty() {
+        owner_canonical.to_string()
+    } else {
+        declaration.canonical_source
+    };
+    let resolved_name = if declaration.resolved_name.is_empty() {
+        requested_name.to_string()
+    } else {
+        declaration.resolved_name
+    };
+    Some((scope_canonical, resolved_name))
+}
+
+pub(crate) fn project_named_ref_surface_shape(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    owner_canonical: &str,
+    lowered: &verter_semantic::analysis::type_expr::TypeExpr,
+    shape_is_usable: &impl Fn(&verter_semantic::analysis::type_expand::ExpandedObjectShape) -> bool,
+) -> Option<ShapeResult> {
+    let verter_semantic::analysis::type_expr::TypeExpr::Ref { name, .. } = lowered else {
+        return None;
+    };
+
+    let declaration = query_engine.resolve_type_declaration(owner_canonical, name);
+    let defining_canonical = if declaration.canonical_source.is_empty() {
+        owner_canonical
+    } else {
+        declaration.canonical_source.as_str()
+    };
+    let defining_name = if declaration.resolved_name.is_empty() {
+        name.as_ref()
+    } else {
+        declaration.resolved_name.as_str()
+    };
+
+    // Phase 5m §5.13a.2 — bridge the engine method via the per-engine
+    // helper so the §5.14.1 pre-flight gate sees zero external
+    // engine-method callers.
+    project_type_surface_shape_via_host_threaded(query_engine, defining_canonical, defining_name)
+        .and_then(|shape| {
+            shape_is_usable(&shape).then(|| {
+                verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(shape)
+            })
+        })
+}
+
+pub(crate) fn project_named_ref_imported_scope_shape(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    owner_canonical: &str,
+    lowered: &verter_semantic::analysis::type_expr::TypeExpr,
+    shape_is_usable: &impl Fn(&verter_semantic::analysis::type_expand::ExpandedObjectShape) -> bool,
+) -> Option<ShapeResult> {
+    let verter_semantic::analysis::type_expr::TypeExpr::Ref { name, .. } = lowered else {
+        return None;
+    };
+
+    let declaration = query_engine.resolve_type_declaration(owner_canonical, name);
+    let defining_canonical = if declaration.canonical_source.is_empty() {
+        owner_canonical
+    } else {
+        declaration.canonical_source.as_str()
+    };
+    if defining_canonical == owner_canonical {
+        return None;
+    }
+
+    // Phase 5m §5.13a.2 — bridge the engine method via the per-engine
+    // helper so the §5.14.1 pre-flight gate sees zero external
+    // engine-method callers.
+    project_expr_surface_shape_via_host_threaded(query_engine, defining_canonical, lowered)
+        .and_then(|shape| {
+            shape_is_usable(&shape).then(|| {
+                verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(shape)
+            })
+        })
+}
+
+/// Like `produce_one_macro_object_shape` but applies `deep_resolve_slot_function_refs`
+/// on the solver path for defineSlots.
+pub(crate) fn produce_one_macro_object_shape_for_slots(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    owner_canonical: &str,
+    lowered: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> (Option<ShapeResult>, MacroShapeSource) {
+    // ── Fast path: direct Object body → DB-backed projection ──────────
+    if let verter_semantic::analysis::type_expr::TypeExpr::Ref {
+        name,
+        type_arguments,
+    } = lowered
+    {
+        if type_arguments.is_empty() {
+            if let Some((def_canonical, def_name)) =
+                classify_named_ref_for_db_projection(query_engine, owner_canonical, name)
+            {
+                // Phase 5m §5.13a.2 — bridge via per-engine helper.
+                if let Some(shape) = project_type_surface_shape_via_host_threaded(
+                    query_engine,
+                    &def_canonical,
+                    &def_name,
+                ) {
+                    if has_shape_surface(&shape) {
+                        return (
+                            Some(
+                                verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(shape),
+                            ),
+                            MacroShapeSource::Projection,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Non-object body: dispatch projection first, then projection on warm caches ─
+    // D-Cutover §5.8: dispatch's `project_expr_surface_expr` replaces
+    // `owner_engine.solve`; `CMQE::deep_resolve_slot_function_refs`
+    // replaces the retired `type_eval_build::deep_resolve_slot_function_refs`
+    // pass. Both route through the shared dispatch memo so caches stay
+    // path-independent.
+    //
+    // Path C C11-residual-A: when the strict `project_expr_surface_expr`
+    // returns `None` because a compound-shape sibling is still a
+    // deferred shell (e.g. `{ explicit slots } & DynamicSlots<...>` —
+    // the `DynamicSlots` arm is a Mapped that can't enumerate keys
+    // when the type parameters are unresolved), fall back to the
+    // lenient `project_expr_surface_expr_with_compound_objects` so the
+    // explicit Object arm's properties still reach
+    // `solver_result_to_object_expansion`. The expansion's existing
+    // Intersection-merging in [`type_expr_to_expanded_shape`] then
+    // collects the explicit slot members from the compound shape.
+    // Phase 5d (sub-plan §4.1 slot-cluster row): the strict
+    // `project_expr_surface_expr` migrates to the shared dispatch
+    // helper. The lenient
+    // `project_expr_surface_expr_with_compound_objects` fallback is
+    // DEFERRED to 5e/5f per the brief note and stays on the engine
+    // for now.
+    let projected_body =
+        project_expr_class_a_via_dispatch(query_engine.host, owner_canonical, lowered)
+            .or_else(|| {
+                // Phase 5m §5.13a.2 — bridge via per-engine helper.
+                project_expr_surface_expr_with_compound_objects_via_host_threaded(
+                    query_engine,
+                    owner_canonical,
+                    lowered,
+                )
+            })
+            .unwrap_or_else(|| lowered.clone());
+    let deeply_resolved =
+        query_engine.deep_resolve_slot_function_refs(owner_canonical, &projected_body);
+    let solver_result = verter_semantic::analysis::type_expand::solver_result_to_object_expansion(
+        verter_semantic::analysis::type_solver::result::SolverResult::exact_concrete(
+            deeply_resolved,
+        ),
+    );
+    let solver_count = shape_surface_count(&solver_result);
+
+    let projected =
+        project_expr_class_a_shape_via_dispatch(query_engine.host, owner_canonical, lowered)
+            .and_then(|shape| {
+                let projected_expr = expanded_shape_to_type_expr(&shape);
+                let resolved_expr =
+                    query_engine.deep_resolve_slot_function_refs(owner_canonical, &projected_expr);
+                registry_entry_to_expanded_shape(&resolved_expr).and_then(|resolved_shape| {
+                    has_shape_surface(&resolved_shape).then(|| {
+                        verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(
+                            resolved_shape,
+                        )
+                    })
+                })
+            });
+    let imported_scope_projected = project_named_ref_imported_scope_shape(
+        query_engine,
+        owner_canonical,
+        lowered,
+        &has_shape_surface,
+    )
+    .and_then(|shape| {
+        let projected_expr = expanded_shape_to_type_expr(&shape.value);
+        let resolved_expr =
+            query_engine.deep_resolve_slot_function_refs(owner_canonical, &projected_expr);
+        registry_entry_to_expanded_shape(&resolved_expr).and_then(|resolved_shape| {
+            has_shape_surface(&resolved_shape).then(|| {
+                verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(
+                    resolved_shape,
+                )
+            })
+        })
+    });
+    let projected = [projected, imported_scope_projected]
+        .into_iter()
+        .flatten()
+        .max_by_key(shape_surface_count);
+
+    match projected {
+        Some(proj) if solver_count == 0 => (Some(proj), MacroShapeSource::Projection),
+        Some(proj) if projection_result_beats_solver_shape(&proj, &solver_result) => {
+            (Some(proj), MacroShapeSource::Projection)
+        }
+        _ if solver_count > 0 => (Some(solver_result), MacroShapeSource::Solver),
+        _ => match projected {
+            Some(proj) => (Some(proj), MacroShapeSource::Projection),
+            None => (None, MacroShapeSource::None),
+        },
+    }
+}
+
+pub(crate) fn has_shape_surface(shape: &verter_semantic::analysis::type_expand::ExpandedObjectShape) -> bool {
+    !shape.properties.is_empty()
+        || !shape.index_signatures.is_empty()
+        || !shape.call_signatures.is_empty()
+}
+
+pub(crate) fn type_expr_symbolic_penalty(expr: &verter_semantic::analysis::type_expr::TypeExpr) -> usize {
+    use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+
+    match expr {
+        TypeExpr::Primitive(_) | TypeExpr::Literal(_) => 0,
+        TypeExpr::Unknown { .. }
+        | TypeExpr::TypeParameter(_)
+        | TypeExpr::RecursiveRef { .. }
+        | TypeExpr::Infer { .. } => 2,
+        TypeExpr::Ref { type_arguments, .. } => {
+            1 + type_arguments
+                .iter()
+                .map(type_expr_symbolic_penalty)
+                .sum::<usize>()
+        }
+        TypeExpr::Array { element, .. }
+        | TypeExpr::Parenthesized(element)
+        | TypeExpr::KeyOf(element)
+        | TypeExpr::Rest(element) => type_expr_symbolic_penalty(element),
+        TypeExpr::Tuple { elements, .. } => elements
+            .iter()
+            .map(|element| type_expr_symbolic_penalty(&element.ty))
+            .sum(),
+        TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
+            types.iter().map(type_expr_symbolic_penalty).sum()
+        }
+        TypeExpr::Object(object) => object
+            .properties
+            .iter()
+            .map(|member| match member {
+                ObjectMember::Property(property) => type_expr_symbolic_penalty(&property.ty),
+                ObjectMember::IndexSignature(signature) => {
+                    type_expr_symbolic_penalty(&signature.key_type)
+                        + type_expr_symbolic_penalty(&signature.value_type)
+                }
+                ObjectMember::CallSignature(function)
+                | ObjectMember::ConstructSignature(function) => {
+                    function
+                        .parameters
+                        .iter()
+                        .map(|parameter| type_expr_symbolic_penalty(&parameter.ty))
+                        .sum::<usize>()
+                        + function
+                            .return_type
+                            .as_deref()
+                            .map(type_expr_symbolic_penalty)
+                            .unwrap_or_default()
+                }
+                ObjectMember::Method(method) => {
+                    method
+                        .function
+                        .parameters
+                        .iter()
+                        .map(|parameter| type_expr_symbolic_penalty(&parameter.ty))
+                        .sum::<usize>()
+                        + method
+                            .function
+                            .return_type
+                            .as_deref()
+                            .map(type_expr_symbolic_penalty)
+                            .unwrap_or_default()
+                }
+            })
+            .sum(),
+        TypeExpr::Function(function) => {
+            function
+                .parameters
+                .iter()
+                .map(|parameter| type_expr_symbolic_penalty(&parameter.ty))
+                .sum::<usize>()
+                + function
+                    .return_type
+                    .as_deref()
+                    .map(type_expr_symbolic_penalty)
+                    .unwrap_or_default()
+        }
+        TypeExpr::IndexedAccess { object, index } => {
+            2 + type_expr_symbolic_penalty(object) + type_expr_symbolic_penalty(index)
+        }
+        TypeExpr::Conditional {
+            check,
+            extends,
+            true_type,
+            false_type,
+        } => {
+            2 + type_expr_symbolic_penalty(check)
+                + type_expr_symbolic_penalty(extends)
+                + type_expr_symbolic_penalty(true_type)
+                + type_expr_symbolic_penalty(false_type)
+        }
+        TypeExpr::Mapped {
+            source,
+            value,
+            name_type,
+            ..
+        } => {
+            2 + type_expr_symbolic_penalty(source)
+                + type_expr_symbolic_penalty(value)
+                + name_type
+                    .as_deref()
+                    .map(type_expr_symbolic_penalty)
+                    .unwrap_or_default()
+        }
+        TypeExpr::TemplateLiteral { expressions, .. } => {
+            1 + expressions
+                .iter()
+                .map(type_expr_symbolic_penalty)
+                .sum::<usize>()
+        }
+        TypeExpr::TypeOf(_) => 2,
+    }
+}
+
+pub(crate) fn shape_symbolic_penalty(
+    shape: &verter_semantic::analysis::type_expand::ExpandedObjectShape,
+) -> usize {
+    shape
+        .properties
+        .iter()
+        .map(|property| type_expr_symbolic_penalty(&property.ty))
+        .sum::<usize>()
+        + shape
+            .index_signatures
+            .iter()
+            .map(|signature| {
+                type_expr_symbolic_penalty(&signature.key_type)
+                    + type_expr_symbolic_penalty(&signature.value_type)
+            })
+            .sum::<usize>()
+        + shape
+            .call_signatures
+            .iter()
+            .map(|signature| {
+                signature
+                    .parameters
+                    .iter()
+                    .map(|parameter| type_expr_symbolic_penalty(&parameter.ty))
+                    .sum::<usize>()
+                    + type_expr_symbolic_penalty(&signature.return_type)
+            })
+            .sum::<usize>()
+}
+
+pub(crate) fn projection_result_beats_solver_shape(projected: &ShapeResult, solver: &ShapeResult) -> bool {
+    let projected_count = shape_surface_count(projected);
+    let solver_count = shape_surface_count(solver);
+    projected_count > solver_count
+        || (projected_count == solver_count
+            && shape_symbolic_penalty(&projected.value) < shape_symbolic_penalty(&solver.value))
+}
+
+pub(crate) fn has_prop_shape_surface(
+    shape: &verter_semantic::analysis::type_expand::ExpandedObjectShape,
+) -> bool {
+    !shape.properties.is_empty() || !shape.index_signatures.is_empty()
+}
+
+pub(crate) fn shape_surface_count(result: &ShapeResult) -> usize {
+    result.value.properties.len()
+        + result.value.index_signatures.len()
+        + result.value.call_signatures.len()
+}
+
+/// Classify whether a zero-arg named ref can use DB-backed projection.
+///
+/// Returns `Some((defining_canonical, defining_name))` when the body is a
+/// direct Object and `project_type_surface_expr` on the defining file is the
+/// correct fast path.  Returns `None` for bodies that need the solver (typeof,
+/// intersections, heritage Refs, etc.).
+pub(crate) fn classify_named_ref_for_db_projection(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    owner_canonical: &str,
+    name: &str,
+) -> Option<(String, String)> {
+    let declaration = query_engine.resolve_type_declaration(owner_canonical, name);
+    let defining_canonical = declaration.canonical_source.clone();
+    let defining_name = declaration.resolved_name.clone();
+    if !declaration.canonical_source.is_empty()
+        && declaration.canonical_source != owner_canonical
+        && !crate::resolver_core::component_meta::imported_declaration_surface_is_authoritative(
+            &declaration,
+        )
+    {
+        return None;
+    }
+    let safe = match declaration.kind {
+        crate::resolver_core::ResolvedDeclarationKind::Interface
+        | crate::resolver_core::ResolvedDeclarationKind::Class => query_engine
+            .named_decl_body(&defining_canonical, &defining_name)
+            .is_some(),
+        crate::resolver_core::ResolvedDeclarationKind::TypeAlias
+        | crate::resolver_core::ResolvedDeclarationKind::Unknown => query_engine
+            .named_decl_body(&defining_canonical, &defining_name)
+            .is_some_and(|body| {
+                matches!(
+                    body,
+                    verter_semantic::analysis::type_expr::TypeExpr::Object(_),
+                )
+            }),
+    };
+    safe.then_some((defining_canonical, defining_name))
+}
+
+/// Collect every type-reference name mentioned inside `expr` (including names
+/// reachable through object members, unions/intersections, indexed access,
+/// tuples, arrays, parenthesized and function type nodes).
+///
+/// Used to decide which registry-referenced names are already "seeded" by
+/// published entries and therefore must keep their own registry publication
+/// instead of being inlined as indexed-access paths.
+pub(crate) fn collect_type_expr_ref_names(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    out: &mut rustc_hash::FxHashSet<String>,
+) {
+    use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+    match expr {
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+            ..
+        } => {
+            out.insert(name.to_string());
+            for arg in type_arguments.iter() {
+                collect_type_expr_ref_names(arg, out);
+            }
+        }
+        TypeExpr::Object(obj) => {
+            for member in &obj.properties {
+                match member {
+                    ObjectMember::Property(prop) => collect_type_expr_ref_names(&prop.ty, out),
+                    ObjectMember::IndexSignature(sig) => {
+                        collect_type_expr_ref_names(&sig.key_type, out);
+                        collect_type_expr_ref_names(&sig.value_type, out);
+                    }
+                    ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => {
+                        for param in &func.parameters {
+                            collect_type_expr_ref_names(&param.ty, out);
+                        }
+                        if let Some(ret) = &func.return_type {
+                            collect_type_expr_ref_names(ret, out);
+                        }
+                    }
+                    ObjectMember::Method(method) => {
+                        for param in &method.function.parameters {
+                            collect_type_expr_ref_names(&param.ty, out);
+                        }
+                        if let Some(ret) = &method.function.return_type {
+                            collect_type_expr_ref_names(ret, out);
+                        }
+                    }
+                }
+            }
+        }
+        TypeExpr::Array { element, .. } => collect_type_expr_ref_names(element, out),
+        TypeExpr::Tuple { elements, .. } => {
+            for el in elements.iter() {
+                collect_type_expr_ref_names(&el.ty, out);
+            }
+        }
+        TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
+            for ty in types.iter() {
+                collect_type_expr_ref_names(ty, out);
+            }
+        }
+        TypeExpr::IndexedAccess { object, index } => {
+            collect_type_expr_ref_names(object, out);
+            collect_type_expr_ref_names(index, out);
+        }
+        TypeExpr::Parenthesized(inner) => collect_type_expr_ref_names(inner, out),
+        TypeExpr::Function(func) => {
+            for param in &func.parameters {
+                collect_type_expr_ref_names(&param.ty, out);
+            }
+            if let Some(ret) = &func.return_type {
+                collect_type_expr_ref_names(ret, out);
+            }
+        }
+        _ => {}
+    }
+}
