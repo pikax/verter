@@ -21,7 +21,6 @@ fn read_workspace_file(rel: &str) -> String {
 }
 
 #[test]
-#[ignore = "phase-04 pending"]
 fn no_read_source_in_component_meta() {
     let src = read_workspace_file("crates/verter_session/src/resolver_core/component_meta.rs");
     let count = src.matches("host.read_source").count();

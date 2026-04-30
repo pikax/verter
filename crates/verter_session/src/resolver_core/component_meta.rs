@@ -351,8 +351,8 @@ fn jsdoc_tags_from_resolved(
 /// Pre-Phase-4 the resolver passed the imported declaration's raw
 /// source text into `project_macro_surfaces`, which then called
 /// `member_jsdoc(source, prop.span)` per element. Phase 4 deleted
-/// `host.read_source` from this resolver and the fallback paths it
-/// fed; the source-text inputs are gone. This helper reuses the
+/// the host source-text reader from this resolver and the fallback
+/// paths it fed; the source-text inputs are gone. This helper reuses the
 /// shared `host.resolve_jsdoc_block` helper (the same path the
 /// declaration-level JSDoc already uses), which reads from the
 /// host-owned analysis source cache rather than re-parsing raw
@@ -1924,8 +1924,8 @@ defineEmits<Emits>()
         //
         // Pre-Phase-4 + pre-Phase-5l: this test asserted the symbolic
         // form `Some("CalendarCellTriggerProps['day']")`. The pre-
-        // change pipeline read the owner source via
-        // `host.read_source` and ran
+        // change pipeline read the owner source via the host source-
+        // text reader and ran
         // `project_macro_surfaces_from_source_type_name(owner_source,
         // mac.kind, "CalendarSlots")` against it; that walked the
         // owner source (where `Pick<CalendarCellTriggerProps, 'day'>`
@@ -1934,8 +1934,9 @@ defineEmits<Emits>()
         // `CalendarCellTriggerProps['day']`.
         //
         // Post-Phase-4 + post-Phase-5l: the source-text reparse path
-        // (`host.read_source` + `project_macro_surfaces_from_source_
-        // type_name`) is gone. Owner-local resolved-type projection
+        // (the host source-text reader +
+        // `project_macro_surfaces_from_source_type_name`) is gone.
+        // Owner-local resolved-type projection
         // runs through the surviving
         // `project_macro_surfaces_from_expanded_text(mac.kind,
         // resolved.expanded)` arm. `resolved.expanded` is the
