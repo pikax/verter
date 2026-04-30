@@ -429,107 +429,175 @@ fn phase_05m_class_b_callers_migrated_through_bridge_helpers() {
     // site) fails this test.
     // Phase 11a — `meta_resolve.rs` was split into a folder module;
     // the bridge helpers now live in `meta_resolve/dispatch_helpers.rs`.
-    // Concatenate the shell + dispatch_helpers sibling so the
-    // §5.14.2 guard's structural assertions (presence of the bridge
-    // section header + Class B callsites OUTSIDE that section) still
-    // discriminate on the post-split source.
-    let shell_src = read_workspace_file("crates/verter_session/src/meta_resolve.rs");
-    let dispatch_helpers_src =
-        read_workspace_file("crates/verter_session/src/meta_resolve/dispatch_helpers.rs");
-    // Order matters: dispatch_helpers first so the bridge section
-    // header precedes the §4.10 K1 markers in the shell that bound
-    // the bridge block from below in the post-split source.
-    let src = format!("{dispatch_helpers_src}\n{shell_src}");
-
-    // Negative assertion: no `project_type_class_b_via_dispatch`
-    // helper invocations should remain in the meta_resolve module (the
-    // helper sketches were removed when the dispatch-only migration
-    // regressed heritage chains). If a follow-up worker re-adds a
-    // half-baked helper, this guard catches it.
-    let stale_helper_invocations = src.matches("project_type_class_b_via_dispatch").count()
-        + src
-            .matches("project_type_class_b_shape_via_dispatch")
-            .count();
-    assert_eq!(
-        stale_helper_invocations, 0,
-        "Phase 5d 4c: meta_resolve.rs must not contain stale \
-         `project_type_class_b_via_dispatch` helper references (the \
-         dispatch-only Class B helper was removed because it \
-         regressed transitive heritage resolution; class B migration \
-         is deferred to 5g). found {stale_helper_invocations}"
-    );
-
-    // Phase 5m §5.13a.2 — TODO(phase-5g) markers were deleted as
-    // each callsite migrated to its bridge helper. The
-    // discriminating proof is now the absence of direct engine-method
-    // callsites in meta_resolve.rs — counted below.
     //
-    // Note: the engine method body itself still has internal callers
-    // (the 21 engine-internal sites enumerated in
-    // phase-05l-stuck.md's §5.14.1 gate output). Those are deleted
-    // atomically with the engine body in 5l per §5.14.2. The guard
-    // here only counts EXTERNAL callsites (in meta_resolve.rs and
-    // host_manage.rs) — the post-5m invariant is "zero".
-
-    // Phase 5m §5.13a.2 invariant: meta_resolve.rs Class B engine
-    // refs are now ZERO (all 11 + 1 sites migrated through bridge
-    // helpers). The bridges themselves contain engine method calls
-    // inside `#[allow(deprecated)]` — those are not counted here
-    // because the regex includes `.project_*` (with the leading
-    // dot) which matches `engine.project_*(...)` callsites; the
-    // bridges' internal calls match too, so we filter them out by
-    // requiring the callsite is NOT inside a `*_via_host*` helper.
+    // The redesigned test (post-split) walks every .rs file under the
+    // meta_resolve module surface (the shell `meta_resolve.rs` plus
+    // every sibling under `meta_resolve/`) and asserts the
+    // architectural invariant per-file:
     //
-    // Simplest discriminating shape: count callsites OUTSIDE the
-    // `Phase 5m §5.13a.2 — engine-method caller migration` section
-    // demarcated by the section comment header.
-    // Phase 5l §5.14.2 update: the bridge section header changed when
-    // the bridges were rewritten to call dispatch + engine pub(crate)
-    // helpers directly (the 5m migration-window
-    // `#[allow(deprecated)]` annotations are gone post-engine-deletion).
-    // Match the new header.
-    let bridge_section_marker = "Phase 5l §5.14.2 — bridge helpers (post engine-method deletion).";
-    let bridge_section_start = src
-        .find(bridge_section_marker)
-        .expect("meta_resolve.rs must contain the §5.14.2 bridge section header");
-    // The bridge section ends at the next section header
-    // ("Plan §4.10 / K1 — `MacroFieldGraphState`...") — find that
-    // marker to bound the bridge section body.
-    let bridge_section_end_marker = "Plan §4.10 / K1";
-    let bridge_section_end = src[bridge_section_start..]
-        .find(bridge_section_end_marker)
-        .expect("meta_resolve.rs must contain the §4.10 K1 section header marking the end of the bridge block");
-    let pre_bridge = &src[..bridge_section_start];
-    let post_bridge = &src[bridge_section_start + bridge_section_end..];
-    let outside_bridge_src = format!("{pre_bridge}{post_bridge}");
+    //   1. Class B engine-method callsite patterns
+    //      (`.project_type_surface_expr(`, `.project_type_surface_shape(`,
+    //      `.project_prepared_type_surface_expr(`,
+    //      `.project_prepared_type_surface_shape(`) MUST be ZERO in
+    //      every file EXCEPT `dispatch_helpers.rs`. The bridges live
+    //      there and only there. The §5.14.1 pre-flight gate sees zero
+    //      external engine-method callers post-5m.
+    //
+    //   2. The bridge section header
+    //      ("Phase 5l §5.14.2 — bridge helpers (post engine-method
+    //      deletion).") MUST be present in `dispatch_helpers.rs` —
+    //      the location anchor that names where bridges live.
+    //
+    //   3. The stale helper names `project_type_class_b_via_dispatch`
+    //      and `project_type_class_b_shape_via_dispatch` MUST NOT
+    //      appear in ANY file in the meta_resolve module. The
+    //      dispatch-only Class B helper was removed in 5d because it
+    //      regressed transitive heritage resolution; re-adding it
+    //      under any alias / location is a regression.
+    //
+    //   4. `host_manage.rs` Class B engine refs MUST be ZERO (the
+    //      JSX.IntrinsicElements site migrated through the bridge).
+    //
+    // The walkdir-based shape is robust under further folder splits:
+    // a future commit that adds a new sibling under `meta_resolve/`
+    // is automatically covered without test edits, AS LONG AS the
+    // new sibling does not reintroduce Class B engine callsites or
+    // stale helper aliases.
+    //
+    // Discrimination proofs (Stub Prevention §0p):
+    //   * Adding a single `.project_type_surface_expr(...)` line to
+    //     ANY sibling other than `dispatch_helpers.rs` (e.g.,
+    //     `meta_resolve/scoring.rs`) FAILS this test.
+    //   * Deleting the bridge section header from `dispatch_helpers.rs`
+    //     FAILS this test.
+    //   * Re-introducing `project_type_class_b_via_dispatch` under
+    //     any name in any sibling FAILS this test.
+    //   * Adding a Class B engine call in `host_manage.rs` FAILS
+    //     this test.
+    use walkdir::WalkDir;
+    let class_b_callsite_patterns: &[&str] = &[
+        ".project_type_surface_expr(",
+        ".project_type_surface_shape(",
+        ".project_prepared_type_surface_expr(",
+        ".project_prepared_type_surface_shape(",
+    ];
+    let stale_helper_patterns: &[&str] = &[
+        "project_type_class_b_via_dispatch",
+        "project_type_class_b_shape_via_dispatch",
+    ];
+    // The single allowed location for Class B bridge bodies.
+    const BRIDGE_FILE_REL: &str = "crates/verter_session/src/meta_resolve/dispatch_helpers.rs";
+    const BRIDGE_SECTION_MARKER: &str =
+        "Phase 5l §5.14.2 — bridge helpers (post engine-method deletion).";
 
-    let invocations_outside_bridges = count_callsites(
-        &outside_bridge_src,
-        &[
-            ".project_type_surface_expr(",
-            ".project_type_surface_shape(",
-            ".project_prepared_type_surface_expr(",
-            ".project_prepared_type_surface_shape(",
-        ],
-    );
-    assert_eq!(
-        invocations_outside_bridges, 0,
-        "Phase 5m §5.13a.2: meta_resolve.rs Class B engine refs must \
-         be ZERO outside the bridge-helpers section (all sites migrated \
-         through `*_via_host_threaded` bridges); found \
-         {invocations_outside_bridges}"
+    let module_root = workspace_root().join("crates/verter_session/src/meta_resolve");
+    let shell_path = workspace_root().join("crates/verter_session/src/meta_resolve.rs");
+    let mut scanned: Vec<PathBuf> = Vec::new();
+    if shell_path.is_file() {
+        scanned.push(shell_path);
+    }
+    if module_root.is_dir() {
+        for entry in WalkDir::new(&module_root) {
+            let entry = entry.expect("walkdir entry");
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            scanned.push(path.to_path_buf());
+        }
+    }
+    assert!(
+        !scanned.is_empty(),
+        "Phase 11a guard: expected to find at least the shell \
+         `crates/verter_session/src/meta_resolve.rs` (or its sibling \
+         folder); found none — the module surface vanished or moved \
+         without updating this guard"
     );
 
+    let mut bridge_file_seen = false;
+    let mut violations: Vec<String> = Vec::new();
+    for path in &scanned {
+        let rel = path
+            .strip_prefix(workspace_root())
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        let src = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("read {rel}: {e}"));
+
+        // Stale helper alias regression check — applies to EVERY file.
+        let stale_count = count_callsites(&src, stale_helper_patterns);
+        if stale_count != 0 {
+            violations.push(format!(
+                "{rel}: stale `project_type_class_b_via_dispatch` \
+                 helper alias found ({stale_count} occurrences). The \
+                 dispatch-only Class B helper was removed in 5d \
+                 because it regressed transitive heritage \
+                 resolution; do not re-introduce it under any name."
+            ));
+        }
+
+        // Class B engine-method callsite regression check.
+        let callsite_count = count_callsites(&src, class_b_callsite_patterns);
+        if rel == BRIDGE_FILE_REL {
+            bridge_file_seen = true;
+            // The bridge file is the single allowed home. The
+            // current 5l implementation composes surviving
+            // pub(crate) helpers (`dispatch_projected_surface` +
+            // `cached_prepared_root_surface`) instead of calling the
+            // deleted Class B engine methods, so callsite_count is
+            // 0 today. The test does NOT require non-zero here —
+            // the discriminating signal is "zero outside, allowed
+            // inside" — so a future bridge body that re-uses the
+            // legacy engine names would still pass this guard
+            // file-locally (the deletion-protected surface lives
+            // elsewhere). What this branch enforces is
+            // location-only: legacy callsites belong here, nowhere
+            // else.
+            if !src.contains(BRIDGE_SECTION_MARKER) {
+                violations.push(format!(
+                    "{rel}: bridge section header \
+                     \"{BRIDGE_SECTION_MARKER}\" missing — the file \
+                     is the named home for Class B bridges and must \
+                     retain the §5.14.2 anchor"
+                ));
+            }
+        } else if callsite_count != 0 {
+            violations.push(format!(
+                "{rel}: {callsite_count} Class B engine-method \
+                 callsite(s) found. Per Phase 5m §5.13a.2 the only \
+                 allowed location for Class B engine refs in the \
+                 meta_resolve module is `{BRIDGE_FILE_REL}` (the \
+                 bridge helpers file). Route Class B work through a \
+                 `*_via_host*` bridge instead of inlining a Class B \
+                 engine call here."
+            ));
+        }
+    }
+    assert!(
+        bridge_file_seen,
+        "Phase 11a guard: did not encounter \
+         `{BRIDGE_FILE_REL}` while walking the meta_resolve module \
+         surface. The bridge file must remain on disk so this guard \
+         can verify the §5.14.2 anchor."
+    );
+    assert!(
+        violations.is_empty(),
+        "Phase 5m §5.13a.2 / Phase 11a: Class B engine-method \
+         callers must live ONLY in `{BRIDGE_FILE_REL}` and the \
+         bridge section anchor must be present. Violations:\n{}",
+        violations.join("\n")
+    );
+
+    // Phase 5m §5.13a.2 invariant for `host_manage.rs`: zero Class B
+    // engine refs (the JSX.IntrinsicElements site migrated through
+    // the bridge helper). Outside the meta_resolve module surface so
+    // tracked separately.
     let host_manage_src = read_workspace_file("crates/verter_session/src/host_manage.rs");
-    let host_manage_b = count_callsites(
-        &host_manage_src,
-        &[
-            ".project_type_surface_expr(",
-            ".project_type_surface_shape(",
-            ".project_prepared_type_surface_expr(",
-            ".project_prepared_type_surface_shape(",
-        ],
-    );
+    let host_manage_b = count_callsites(&host_manage_src, class_b_callsite_patterns);
     assert_eq!(
         host_manage_b, 0,
         "Phase 5m §5.13a.2: host_manage.rs Class B engine refs must \
