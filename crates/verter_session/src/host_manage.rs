@@ -1983,11 +1983,12 @@ impl VerterHost {
     /// surfaces, reusing the host-cached parsed program and external type
     /// analysis so this path never parses raw source again.
     ///
-    /// This is the cached counterpart to
-    /// `project_macro_surfaces_from_source_type_name`, which allocates a fresh
-    /// arena and reparses the source on every call. Enrichment/lookup paths
-    /// (for example JSDoc collection for imported props) should use this
-    /// method so imported-file parses stay single-shot per content hash.
+    /// Pre-Phase-4b a raw-source projection helper allocated a fresh
+    /// oxc arena and reparsed the source on every call; that path
+    /// is deleted under the graph-only resolver. Enrichment/lookup
+    /// paths (for example JSDoc collection for imported props) use
+    /// this method so imported-file parses stay single-shot per
+    /// content hash.
     pub(crate) fn project_imported_macro_surfaces(
         &self,
         dep_canonical: &str,

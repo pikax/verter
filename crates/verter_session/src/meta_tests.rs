@@ -14922,14 +14922,13 @@ const props = defineProps<ButtonProps>()
 
 /// The JSDoc enrichment path for imported props goes through the host-
 /// cached parsed program + cached external type analysis. Pre-Phase-4b
-/// this test asserted that the enrichment path did NOT fall back to
-/// `project_macro_surfaces_from_source_type_name` (which allocated a
-/// fresh oxc arena and reparsed dependency source). Post-Phase-4b that
-/// raw-source reparse helper is deleted — the architectural guarantee
-/// is now enforced statically by the
-/// `no_text_based_macro_surface_projection_helpers` architecture
-/// guard. The behaviour assertion (JSDoc descriptions propagate
-/// through imported `Omit<>`) is preserved here.
+/// this test asserted that the enrichment path did NOT fall back to a
+/// raw-source reparse helper (which allocated a fresh oxc arena and
+/// reparsed dependency source). Post-Phase-4b that raw-source reparse
+/// helper is deleted — the architectural guarantee is now enforced
+/// statically by the `no_text_based_macro_surface_projection_helpers`
+/// architecture guard. The behaviour assertion (JSDoc descriptions
+/// propagate through imported `Omit<>`) is preserved here.
 ///
 /// This scenario triggers the JSDoc-enrichment fallback (not the main
 /// resolver path) by extending imported types through `Omit<>`, which leaves
@@ -15003,8 +15002,7 @@ defineProps<ButtonProps>()
     );
 
     // Architectural guard: under the graph-only resolver, the raw-
-    // source reparse helper (`project_macro_surfaces_from_source_type_name`)
-    // is deleted. The architecture guard
+    // source reparse helper is deleted. The architecture guard
     // `no_text_based_macro_surface_projection_helpers` enforces this
     // structurally; this behaviour assertion (JSDoc still flows
     // through imported `Omit<>`) ensures the graph-native enrichment

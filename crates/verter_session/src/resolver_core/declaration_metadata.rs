@@ -748,9 +748,9 @@ type Props = {
 
     // Phase 4b §4b.3 — `resolve_type_declaration_uses_cached_*_without_reparsing_source`
     // were negative tests asserting that cached reexport / local-import
-    // routes did NOT call `read_source` for the original (barrel /
+    // routes did NOT trigger source reparsing for the original (barrel /
     // owner) canonical id. Under the graph-only resolver, the
-    // resolver never calls `read_source` (the trait method is
+    // resolver no longer reads source at all (the trait method is
     // deleted), so these "did not reread" assertions are now
     // trivially satisfied. The tests are obsolete and removed.
 
@@ -780,33 +780,28 @@ type Props = {
 
     // ----------------------------------------------------------------------
     // Phase 4b §4b.2 — graph-only decoupling tests for the three
-    // production `read_source` callsites (lines 184, 261, 308). Each
-    // test seeds source AND graph metadata, then asserts the graph
-    // metadata is preserved while `declaration.text` is `None` —
-    // proving the source-reparse path is gone.
+    // production source-reading callsites (former lines 184, 261, 308).
+    // Each test seeds graph metadata and asserts the resolver returns
+    // graph kind/span/declaration_id while `declaration.text` is `None`
+    // — the architectural contract that resolver-core consumes only
+    // graph data, not raw source text.
     //
-    // Pre-Phase-4b: resolver.read_source() populates `text` from the
-    // sources map → these tests FAIL (text is `Some(_)`).
-    //
-    // Post-Phase-4b: read_source is deleted, the production path no
-    // longer threads source text through → these tests PASS (text is
-    // `None` while kind/span/declaration_id come from graph).
-    //
-    // The discrimination is intentional: it captures the architectural
-    // contract that resolver-core consumes only graph data, not raw
-    // source text.
+    // Pre-Phase-4b: the source-reparse path populated `text` from the
+    // sources map → these tests would have FAILED with `Some(_)`.
+    // Post-Phase-4b: the production path no longer threads source
+    // text through → tests PASS with `text == None`.
 
     #[test]
     fn declaration_metadata_resolves_local_symbol_via_graph_only() {
         // Phase 4b §4b.2 — discrimination test for the local-symbol
-        // resolution path (former callsite at
+        // resolution path (former source-reading callsite at
         // declaration_metadata.rs:184). The graph metadata
         // (`local_type_symbol_metadata`) is seeded; the resolver
         // returns kind/span/declaration_id from the graph and leaves
-        // `text` None. (The `read_source` trait method is deleted in
-        // commit 5; pre-deletion, this test failed at the `text ==
-        // None` assertion because the source-reparse path populated
-        // `text` to `Some(...)`.)
+        // `text` None. (The source-reading trait method was deleted
+        // in commit 5; pre-deletion, this test failed at the
+        // `text == None` assertion because the source-reparse path
+        // populated `text` to `Some(...)`.)
         let mut resolver = FakeResolver::default();
         let source_len = "type Props = { label: string };\n".len() as u32;
         resolver.local_type_symbol_metadata.insert(
