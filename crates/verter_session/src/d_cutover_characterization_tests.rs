@@ -2489,15 +2489,27 @@ fn migrate_owner_engine_project_expr_surface_as_type_expr_preserves_env() {
 /// dispatch before falling back to the legacy solver — checked by
 /// file-content grep so a regression that deletes the dispatch call
 /// surfaces immediately.
+///
+/// Phase 11b.5: scans all sibling files in the
+/// `component_meta_query_engine/` folder (mod.rs + child modules)
+/// because `materialize_member_surface_expr` and the dispatch-routed
+/// helpers may live in private child modules after the folder split.
 #[test]
 fn migrate_engine_lower_and_project_to_expanded_preserves_env() {
-    let cmqe_src = include_str!("resolver_core/component_meta_query_engine/mod.rs");
+    let cmqe_files: &[&str] = &[
+        include_str!("resolver_core/component_meta_query_engine/mod.rs"),
+        include_str!("resolver_core/component_meta_query_engine/registry_decl.rs"),
+        include_str!("resolver_core/component_meta_query_engine/shallow_preserve.rs"),
+        include_str!("resolver_core/component_meta_query_engine/surface.rs"),
+        include_str!("resolver_core/component_meta_query_engine/helpers.rs"),
+    ];
+    let combined = cmqe_files.join("\n");
     assert!(
-        cmqe_src.contains("dispatch.lower_type_expr_in_scope"),
+        combined.contains("dispatch.lower_type_expr_in_scope"),
         "lower_and_project_to_expanded must attempt dispatch-first lowering post-migration"
     );
     assert!(
-        cmqe_src.contains("ProjectPath"),
+        combined.contains("ProjectPath"),
         "lower_and_project_to_expanded must query ProjectPath post-migration"
     );
 }
@@ -2837,9 +2849,7 @@ fn phase_05e_commit_6_instantiate_local_generic_ref_callers_migrate_to_dispatch(
     let shell_src = include_str!("meta_resolve.rs");
     let registry_materialize_src = include_str!("meta_resolve/registry_materialize.rs");
     let dispatch_helpers_src = include_str!("meta_resolve/dispatch_helpers.rs");
-    let meta_src = format!(
-        "{shell_src}\n{registry_materialize_src}\n{dispatch_helpers_src}"
-    );
+    let meta_src = format!("{shell_src}\n{registry_materialize_src}\n{dispatch_helpers_src}");
 
     let meta_callsites = meta_src.matches(".instantiate_local_generic_ref(").count();
     assert_eq!(
