@@ -708,7 +708,7 @@ fn no_unbounded_recursion_in_resolver_core() {
 #[test]
 fn phase_05l_engine_resolver_methods_deleted() {
     let src = read_workspace_file(
-        "crates/verter_session/src/resolver_core/component_meta_query_engine.rs",
+        "crates/verter_session/src/resolver_core/component_meta_query_engine/mod.rs",
     );
     let retired_methods: &[&str] = &[
         "project_type_surface",

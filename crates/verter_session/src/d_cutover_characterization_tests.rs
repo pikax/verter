@@ -2491,7 +2491,7 @@ fn migrate_owner_engine_project_expr_surface_as_type_expr_preserves_env() {
 /// surfaces immediately.
 #[test]
 fn migrate_engine_lower_and_project_to_expanded_preserves_env() {
-    let cmqe_src = include_str!("resolver_core/component_meta_query_engine.rs");
+    let cmqe_src = include_str!("resolver_core/component_meta_query_engine/mod.rs");
     assert!(
         cmqe_src.contains("dispatch.lower_type_expr_in_scope"),
         "lower_and_project_to_expanded must attempt dispatch-first lowering post-migration"
