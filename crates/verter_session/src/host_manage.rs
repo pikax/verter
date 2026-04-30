@@ -33,6 +33,15 @@ use crate::shared::write_lock;
 use crate::types::*;
 use crate::VerterHost;
 
+// ──────────────────────────────────────────────────────────────────────────
+// Phase 11c (parent §11.3): private sub-modules under `host_manage/`. Public
+// surface remains rooted at `crate::host_manage::*`; siblings are
+// `pub(crate) mod` so any `pub(crate)` items they re-expose stay scoped to
+// the session crate.
+// ──────────────────────────────────────────────────────────────────────────
+
+pub(crate) mod eval_program;
+
 /// Resolve a relative import specifier to a canonical ID.
 ///
 /// If the specifier is relative (`./` or `../`), resolves it relative to
