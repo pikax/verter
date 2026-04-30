@@ -14920,11 +14920,16 @@ const props = defineProps<ButtonProps>()
     );
 }
 
-/// The JSDoc enrichment path for imported props must go through the
-/// host-cached parsed program + cached external type analysis. It must not
-/// fall back to `project_macro_surfaces_from_source_type_name`, which
-/// allocates a fresh oxc arena and reparses the dependency source from raw
-/// text — that violates the shallow / cache-owned recovery rule.
+/// The JSDoc enrichment path for imported props goes through the host-
+/// cached parsed program + cached external type analysis. Pre-Phase-4b
+/// this test asserted that the enrichment path did NOT fall back to
+/// `project_macro_surfaces_from_source_type_name` (which allocated a
+/// fresh oxc arena and reparsed dependency source). Post-Phase-4b that
+/// raw-source reparse helper is deleted — the architectural guarantee
+/// is now enforced statically by the
+/// `no_text_based_macro_surface_projection_helpers` architecture
+/// guard. The behaviour assertion (JSDoc descriptions propagate
+/// through imported `Omit<>`) is preserved here.
 ///
 /// This scenario triggers the JSDoc-enrichment fallback (not the main
 /// resolver path) by extending imported types through `Omit<>`, which leaves
@@ -14933,13 +14938,6 @@ const props = defineProps<ButtonProps>()
 /// run.
 #[test]
 fn imported_jsdoc_enrichment_uses_cached_parse_and_does_not_reparse_source() {
-    use crate::resolver_core::surface_projector::{
-        project_macro_surfaces_from_source_call_count,
-        reset_project_macro_surfaces_from_source_call_count,
-    };
-
-    reset_project_macro_surfaces_from_source_call_count();
-
     let project = make_project();
     project
         .upsert_base(
@@ -15004,15 +15002,13 @@ defineProps<ButtonProps>()
         "activeClass JSDoc should propagate through imported Omit"
     );
 
-    // Architectural guard: the enrichment path must not fall through to the
-    // raw-source reparse. This is the primary assertion — if the cached
-    // parsed program path is bypassed, the counter will be > 0.
-    assert_eq!(
-        project_macro_surfaces_from_source_call_count(),
-        0,
-        "JSDoc enrichment must use the host-cached parsed program, not the \
-         raw-source reparse path",
-    );
+    // Architectural guard: under the graph-only resolver, the raw-
+    // source reparse helper (`project_macro_surfaces_from_source_type_name`)
+    // is deleted. The architecture guard
+    // `no_text_based_macro_surface_projection_helpers` enforces this
+    // structurally; this behaviour assertion (JSDoc still flows
+    // through imported `Omit<>`) ensures the graph-native enrichment
+    // path remains correct.
 }
 
 // ===========================================================================

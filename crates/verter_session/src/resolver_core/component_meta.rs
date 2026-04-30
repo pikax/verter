@@ -13,7 +13,7 @@ use verter_span::Span;
 use crate::resolver_core::{
     component_meta_registry::component_meta_registry_has_non_object_top_level_surface,
     project_macro_surfaces, resolve_local_type_declaration, resolve_type_declaration,
-    surface_projector::{project_macro_surfaces_from_expanded_text, ProjectedMacroSurfaces},
+    surface_projector::ProjectedMacroSurfaces,
     DeclarationMetadataResolver, FactVersionRef, ResolvedNativeProp, ResolvedTypeDeclaration,
 };
 
@@ -531,12 +531,25 @@ where
                     eval_outputs.evaluated_types.as_ref(),
                     dep.macro_index,
                 );
-                let authoritative_resolved_local =
-                    macro_has_authoritative_resolved_local_surface(mac);
                 let projectable_owner_local = projectable_owner_local_surfaces
                     .get(dep.macro_index)
                     .copied()
                     .unwrap_or(false);
+                // Phase 4b §4b.4 — graph-native authoritative-owner-
+                // local detection. The legacy
+                // `macro_has_authoritative_resolved_local_surface`
+                // re-parsed `resolved.expanded` text via the
+                // expanded-text projector to decide whether the
+                // owner-local resolved-type surface could replace
+                // the imported dep. The graph equivalent is simply:
+                // does the host's
+                // `projectable_owner_local_macro_roots` (already
+                // computed into `projectable_owner_local_surfaces`)
+                // produce a non-empty set for this macro? If yes,
+                // the prepared owner-local surface IS authoritative
+                // and the imported dep is suppressible per the same
+                // rules below.
+                let authoritative_resolved_local = projectable_owner_local;
                 // When the dep's type name is not present in the macro's
                 // own type_references (e.g. `defineProps<ChildProps>()`
                 // where `interface ChildProps extends Omit<ButtonProps, …>`
@@ -771,9 +784,8 @@ where
             // Phase 4 — graph-native fallback. When `imported_elements`
             // is `None` the macro has no resolvable surface; emit empty
             // surfaces and proceed. The previous source-text reparse
-            // path (read source then call
-            // `project_macro_surfaces_from_source_type_name`) violated
-            // the cache-owned recovery rule and is deleted.
+            // path (read source then call the source-typed projector)
+            // violated the cache-owned recovery rule and is deleted.
             let projectable_owner_local = projectable_owner_local_surfaces
                 .get(dep.macro_index)
                 .copied()
@@ -857,6 +869,16 @@ where
                         | AnalyzedMacroKind::DefineEmits
                 );
 
+            // Phase 4b §4b.4 — the legacy first-pass text-projection
+            // over each `mac.resolved_local_types[i].expanded` string
+            // is deleted. The graph-native second pass below
+            // (`host.resolve_owner_local_macro_surface`) produces the
+            // authoritative surface for both purely-local and
+            // imported-heritage macros. The registry-seeding side
+            // effect (which the first pass's outer loop also
+            // performed) survives below — registry seeds are now
+            // published once per direct-local resolved-type via the
+            // graph metadata.
             for (resolved_index, resolved) in mac.resolved_local_types.iter().enumerate() {
                 if !is_direct_local_macro_type_reference(
                     mac,
@@ -864,66 +886,6 @@ where
                     resolved.name.as_str(),
                 ) {
                     continue;
-                }
-                {
-                    // Phase 4 — graph-native first-pass projection. The
-                    // owner-source-text reparse arm (read owner source
-                    // then call
-                    // `project_macro_surfaces_from_source_type_name`)
-                    // was deleted; the surviving arm projects from
-                    // `resolved.expanded` (semantic-data text-reparse,
-                    // retired by Phase 4b). The authoritative second
-                    // pass below (`prepared_surface_will_handle`) reuses
-                    // the prepared owner-local surface graph-natively.
-                    if let Some(projected) =
-                        project_macro_surfaces_from_expanded_text(mac.kind, &resolved.expanded)
-                    {
-                        if !projected.props.is_empty()
-                            || !projected.emits.is_empty()
-                            || !projected.slots.is_empty()
-                            || !projected.native_props.is_empty()
-                        {
-                            let declaration =
-                                if skip_macro_declaration_metadata_for_purpose(purpose) {
-                                    placeholder_type_declaration(
-                                        resolved.name.as_str(),
-                                        resolved.name.as_str(),
-                                    )
-                                } else {
-                                    resolve_local_type_declaration(
-                                        host,
-                                        owner_canonical,
-                                        resolved.name.as_str(),
-                                        resolved.span,
-                                    )
-                                };
-                            let jsdoc = if skip_macro_declaration_metadata_for_purpose(purpose) {
-                                None
-                            } else {
-                                host.resolve_jsdoc_block(
-                                    owner_canonical,
-                                    resolved.span,
-                                    true,
-                                    &mut tracked_deps,
-                                    &mut cache,
-                                    &mut visiting,
-                                )
-                            };
-                            resolved_macros.push(ResolvedMacroMeta {
-                                macro_index,
-                                macro_kind: mac.kind,
-                                type_name: resolved.name.clone(),
-                                import_source: String::new(),
-                                surface_is_authoritative: true,
-                                declaration,
-                                native_props: projected.native_props,
-                                props: projected.props,
-                                emits: projected.emits,
-                                slots: projected.slots,
-                                jsdoc,
-                            });
-                        }
-                    }
                 }
 
                 // Seed only the direct macro-local root into the registry up
@@ -967,13 +929,22 @@ where
                 }
             }
 
-            // Use the owner-local prepared surface to produce the
-            // authoritative macro entry.  For DefineEmits without imported
-            // deps this adds a new entry.  For DefineProps/WithDefaults
-            // with imported heritage, this REPLACES the source-text entry's
-            // surface with the full prepared projection (which resolves
-            // cross-file extends chains like `Omit<ExternalType, K>`).
+            // Graph-native authoritative projection. Runs for any
+            // macro whose owner-local prepared surface
+            // (`projectable_owner_local`) is non-empty — this covers:
+            //   - imported-heritage macros (`prepared_surface_will_handle`):
+            //     the full prepared projection REPLACES the same-file
+            //     source-text entry, resolving cross-file extends
+            //     chains like `Omit<ExternalType, K>`.
+            //   - purely-local macros (no cross-file deps): the
+            //     prepared projection is the only surface producer
+            //     after Phase 4b §4b.4 deleted the text-projection
+            //     first pass.
+            //   - DefineEmits with no imported deps under fallthrough
+            //     scope: separate carve-out for the emits inheritance
+            //     path.
             if prepared_surface_will_handle
+                || (projectable_owner_local && !macro_has_imported_type_deps)
                 || (mac.kind == AnalyzedMacroKind::DefineEmits
                     && (purpose == ComponentMetaResolutionPurpose::Fallthrough
                         || !macro_has_imported_type_deps))
@@ -1110,7 +1081,6 @@ fn macro_kind_needed_for_fallthrough(kind: AnalyzedMacroKind) -> bool {
 mod tests {
     use super::*;
     use crate::resolver_core::declaration_metadata::ResolvedExportTarget;
-    use crate::resolver_core::surface_projector::project_macro_surfaces_from_source_type_name;
     use std::collections::BTreeMap;
     use verter_compiler::utils::oxc::vue::resolve_type::{
         ResolvedEmit, ResolvedEmitSignature, ResolvedMemberVisibility, ResolvedProp, RuntimeType,
@@ -1131,10 +1101,17 @@ mod tests {
     }
 
     struct TestHost {
-        source: String,
         external_macro_elements: BTreeMap<(String, String), ResolvedElements>,
         eval_outputs: ComponentMetaEvalOutputs,
         projectable_owner_local_roots: BTreeSet<String>,
+        // Phase 4b §4b.4 — precomputed owner-local macro surfaces
+        // keyed by root name. The legacy TestHost derived these
+        // surfaces by re-parsing `source` text via the (now-deleted)
+        // source-typed projector; the graph-only resolver demands
+        // the surface up front, mirroring how production
+        // `host.resolve_owner_local_macro_surface` returns a
+        // graph-projected `ProjectedMacroSurfaces` value.
+        owner_local_macro_surfaces: BTreeMap<String, ProjectedMacroSurfaces>,
     }
 
     impl crate::resolver_core::DeclarationMetadataResolver for TestHost {
@@ -1216,18 +1193,9 @@ mod tests {
             &self,
             _owner_canonical: &str,
             root_name: &str,
-            macro_kind: AnalyzedMacroKind,
+            _macro_kind: AnalyzedMacroKind,
         ) -> Option<ProjectedMacroSurfaces> {
-            self.projectable_owner_local_roots
-                .contains(root_name)
-                .then(|| {
-                    project_macro_surfaces_from_source_type_name(
-                        self.source.as_str(),
-                        macro_kind,
-                        root_name,
-                    )
-                })
-                .flatten()
+            self.owner_local_macro_surfaces.get(root_name).cloned()
         }
 
         fn resolve_macro_elements(
@@ -1274,7 +1242,6 @@ mod tests {
     }
 
     struct CombinedSurfaceTestHost {
-        source: String,
         imported_surface_calls: std::cell::Cell<usize>,
         eval_outputs: ComponentMetaEvalOutputs,
     }
@@ -1446,7 +1413,6 @@ mod tests {
     #[test]
     fn resolve_component_meta_parts_prefers_combined_imported_macro_surface() {
         let host = CombinedSurfaceTestHost {
-            source: "export interface Props { label: string }".to_string(),
             imported_surface_calls: std::cell::Cell::new(0),
             eval_outputs: ComponentMetaEvalOutputs::default(),
         };
@@ -1516,7 +1482,6 @@ mod tests {
     #[test]
     fn resolve_component_meta_parts_fallthrough_reuses_combined_imported_macro_surface() {
         let host = CombinedSurfaceTestHost {
-            source: "export type Emits = { save: [value: string] }".to_string(),
             imported_surface_calls: std::cell::Cell::new(0),
             eval_outputs: ComponentMetaEvalOutputs::default(),
         };
@@ -1588,7 +1553,6 @@ mod tests {
     fn resolve_component_meta_parts_fallthrough_skips_imported_define_emits_when_eval_shape_exists()
     {
         let host = CombinedSurfaceTestHost {
-            source: "export type Emits = { save: [value: string] }".to_string(),
             imported_surface_calls: std::cell::Cell::new(0),
             eval_outputs: ComponentMetaEvalOutputs {
                 evaluated_types: Some(
@@ -1720,7 +1684,6 @@ interface Emits extends RootEmits {}
 defineEmits<Emits>()
 "#;
         let host = CombinedSurfaceTestHost {
-            source: source.to_string(),
             imported_surface_calls: std::cell::Cell::new(0),
             eval_outputs: ComponentMetaEvalOutputs::default(),
         };
@@ -1795,13 +1758,35 @@ defineEmits<Emits>()
 
     #[test]
     fn local_resolved_macro_types_project_into_resolved_macro_surfaces() {
-        let source =
-            "type AccordionEmits = { 'update:modelValue': [value: (T extends 'single' ? string : string[]) | undefined] }";
+        // Phase 4b §4b.4 — the legacy text-projection first pass
+        // would derive the projected surface by parsing
+        // `mac.resolved_local_types[i].expanded` text. Under the
+        // graph-only resolver the surface comes from
+        // `host.resolve_owner_local_macro_surface`, which the
+        // TestHost backs via the precomputed
+        // `owner_local_macro_surfaces` map.
         let host = TestHost {
-            source: source.to_string(),
             external_macro_elements: BTreeMap::new(),
             eval_outputs: ComponentMetaEvalOutputs::default(),
-            projectable_owner_local_roots: BTreeSet::new(),
+            projectable_owner_local_roots: BTreeSet::from(["AccordionEmits".to_string()]),
+            owner_local_macro_surfaces: BTreeMap::from([(
+                "AccordionEmits".to_string(),
+                ProjectedMacroSurfaces {
+                    props: Vec::new(),
+                    emits: vec![verter_semantic::analysis::AnalyzedEmitField {
+                        name: "update:modelValue".to_string(),
+                        span: Span::default(),
+                        payload_type: Some(
+                            "[value: (T extends 'single' ? string : string[]) | undefined]"
+                                .to_string(),
+                        ),
+                        description: None,
+                        tags: Vec::new(),
+                    }],
+                    slots: Vec::new(),
+                    native_props: Vec::new(),
+                },
+            )]),
         };
         let snapshot = TestSnapshot {
             imports: Vec::new(),
@@ -1824,10 +1809,10 @@ defineEmits<Emits>()
                         "{ 'update:modelValue': [value: (T extends 'single' ? string : string[]) | undefined] }"
                             .to_string(),
                     type_expr: None,
-                    span: Span::new(0, source.len() as u32),
+                    span: Span::new(0, 1),
                 }],
                 parsed_type_argument: None,
-                span: Span::new(0, source.len() as u32),
+                span: Span::new(0, 1),
             }],
             macro_type_deps: Vec::new(),
         };
@@ -1865,12 +1850,28 @@ defineEmits<Emits>()
 
     #[test]
     fn projectable_local_emit_roots_fill_resolved_macros_without_resolved_local_types() {
-        let source = "type AppEmits = { change: [value: string] }";
         let host = TestHost {
-            source: source.to_string(),
             external_macro_elements: BTreeMap::new(),
             eval_outputs: ComponentMetaEvalOutputs::default(),
             projectable_owner_local_roots: BTreeSet::from(["AppEmits".to_string()]),
+            // Phase 4b §4b.4 — graph-only: precomputed surface for
+            // `AppEmits` derived once and seeded directly. Pre-Phase-4b
+            // the TestHost re-derived this from `source` text.
+            owner_local_macro_surfaces: BTreeMap::from([(
+                "AppEmits".to_string(),
+                ProjectedMacroSurfaces {
+                    props: Vec::new(),
+                    emits: vec![verter_semantic::analysis::AnalyzedEmitField {
+                        name: "change".to_string(),
+                        span: Span::default(),
+                        payload_type: Some("[value: string]".to_string()),
+                        description: None,
+                        tags: Vec::new(),
+                    }],
+                    slots: Vec::new(),
+                    native_props: Vec::new(),
+                },
+            )]),
         };
         let snapshot = TestSnapshot {
             imports: Vec::new(),
@@ -1889,7 +1890,7 @@ defineEmits<Emits>()
                 expose_fields: Vec::new(),
                 resolved_local_types: Vec::new(),
                 parsed_type_argument: None,
-                span: Span::new(0, source.len() as u32),
+                span: Span::new(0, 1),
             }],
             macro_type_deps: Vec::new(),
         };
@@ -1917,25 +1918,21 @@ defineEmits<Emits>()
         // Pre-Phase-4 + pre-Phase-5l: this test asserted the symbolic
         // form `Some("CalendarCellTriggerProps['day']")`. The pre-
         // change pipeline read the owner source via the host source-
-        // text reader and ran
-        // `project_macro_surfaces_from_source_type_name(owner_source,
-        // mac.kind, "CalendarSlots")` against it; that walked the
-        // owner source (where `Pick<CalendarCellTriggerProps, 'day'>`
-        // is still symbolic) and `extract_slot_info_from_type_text`
-        // reduced `Pick<X, K>` down to the symbolic `X[K]` form
+        // text reader and ran the source-typed projector against it;
+        // that walked the owner source (where
+        // `Pick<CalendarCellTriggerProps, 'day'>` is still symbolic)
+        // and `extract_slot_info_from_type_text` reduced
+        // `Pick<X, K>` down to the symbolic `X[K]` form
         // `CalendarCellTriggerProps['day']`.
         //
-        // Post-Phase-4 + post-Phase-5l: the source-text reparse path
-        // (the host source-text reader +
-        // `project_macro_surfaces_from_source_type_name`) is gone.
-        // Owner-local resolved-type projection
-        // runs through the surviving
-        // `project_macro_surfaces_from_expanded_text(mac.kind,
-        // resolved.expanded)` arm. `resolved.expanded` is the
-        // semantically expanded form `{ day?: (props: { day: Date })
-        // => any }` — `Pick` is already resolved to `{ day: Date }`,
-        // so `extract_slot_info_from_type_text` produces the leaf
-        // `Date` for the binding's type-annotation.
+        // Post-Phase-4 + post-Phase-5l + post-Phase-4b: the
+        // source-text reparse path is gone (both the host source-
+        // text reader and the source-typed projector are deleted).
+        // Owner-local resolved-type projection runs through the
+        // graph-native owner-local macro surface API, which produces
+        // the leaf `Date` for the binding's type-annotation
+        // (`Pick` is already resolved to `{ day: Date }` in the
+        // expanded shape).
         //
         // The resolved leaf is the architecturally correct contract
         // for post-engine component-meta: `Pick<X,K>` is a source-
@@ -1956,10 +1953,34 @@ interface CalendarSlots {
 defineSlots<CalendarSlots>()
 "#;
         let host = TestHost {
-            source: source.to_string(),
             external_macro_elements: BTreeMap::new(),
             eval_outputs: ComponentMetaEvalOutputs::default(),
-            projectable_owner_local_roots: BTreeSet::new(),
+            projectable_owner_local_roots: BTreeSet::from(["CalendarSlots".to_string()]),
+            // Phase 4b §4b.4 — graph-only: the owner-local slot
+            // surface is precomputed (production derives the same
+            // shape via `host.resolve_owner_local_macro_surface` from
+            // the prepared graph projection).
+            owner_local_macro_surfaces: BTreeMap::from([(
+                "CalendarSlots".to_string(),
+                ProjectedMacroSurfaces {
+                    props: Vec::new(),
+                    emits: Vec::new(),
+                    slots: vec![verter_semantic::analysis::AnalyzedSlotField {
+                        name: "day".to_string(),
+                        is_required: false,
+                        span: Span::default(),
+                        bindings: vec![verter_semantic::analysis::AnalyzedSlotFieldBinding {
+                            name: "day".to_string(),
+                            type_annotation: Some("Date".to_string()),
+                            span: Span::default(),
+                        }],
+                        return_type: Some("any".to_string()),
+                        description: None,
+                        tags: Vec::new(),
+                    }],
+                    native_props: Vec::new(),
+                },
+            )]),
         };
         let snapshot = TestSnapshot {
             imports: Vec::new(),
@@ -2057,10 +2078,10 @@ type LocalItem = {
             },
         );
         let host = TestHost {
-            source: source.to_string(),
             external_macro_elements,
             eval_outputs: ComponentMetaEvalOutputs::default(),
             projectable_owner_local_roots: BTreeSet::new(),
+            owner_local_macro_surfaces: BTreeMap::new(),
         };
         let snapshot = TestSnapshot {
             imports: Vec::new(),
@@ -2138,11 +2159,15 @@ type LocalItem = {
     #[test]
     fn resolve_component_meta_parts_skips_transitive_imported_macro_resolution_when_eval_surface_is_authoritative(
     ) {
+        // Phase 4b §4b.4 — `authoritative_resolved_local` is now
+        // `projectable_owner_local`; configuring `Props` as a
+        // projectable owner-local root makes the transitive
+        // imported `ImportedBase` dep suppressible alongside the
+        // eval-surface authority signal.
         let source = r#"
 type Props = Pick<ImportedBase, 'href'>
 "#;
         let host = TestHost {
-            source: source.to_string(),
             external_macro_elements: BTreeMap::from([(
                 ("./types".to_string(), "ImportedBase".to_string()),
                 ResolvedElements {
@@ -2187,7 +2212,25 @@ type Props = Pick<ImportedBase, 'href'>
                 tracked_dependencies: BTreeSet::new(),
                 surface_identities: None,
             },
-            projectable_owner_local_roots: BTreeSet::new(),
+            projectable_owner_local_roots: BTreeSet::from(["Props".to_string()]),
+            owner_local_macro_surfaces: BTreeMap::from([(
+                "Props".to_string(),
+                ProjectedMacroSurfaces {
+                    props: vec![verter_semantic::analysis::AnalyzedPropField {
+                        name: "href".to_string(),
+                        is_optional: true,
+                        span: Span::default(),
+                        type_annotation: Some("string".to_string()),
+                        description: None,
+                        tags: Vec::new(),
+                        resolution_source: verter_semantic::analysis::TypeResolutionSource::Rust,
+                        resolution_error: None,
+                    }],
+                    emits: Vec::new(),
+                    slots: Vec::new(),
+                    native_props: Vec::new(),
+                },
+            )]),
         };
         let snapshot = TestSnapshot {
             imports: Vec::new(),
@@ -2255,11 +2298,15 @@ type Props = Pick<ImportedBase, 'href'>
     #[test]
     fn resolve_component_meta_parts_skips_transitive_imported_macro_resolution_when_raw_surface_is_authoritative(
     ) {
+        // Phase 4b §4b.4 — `authoritative_resolved_local` is now
+        // `projectable_owner_local`; configuring `Props` as a
+        // projectable owner-local root makes the owner-local
+        // surface authoritative and suppresses the transitive
+        // imported `ImportedBase` dep.
         let source = r#"
 type Props = Pick<ImportedBase, 'href'>
 "#;
         let host = TestHost {
-            source: source.to_string(),
             external_macro_elements: BTreeMap::from([(
                 ("./types".to_string(), "ImportedBase".to_string()),
                 ResolvedElements {
@@ -2279,7 +2326,25 @@ type Props = Pick<ImportedBase, 'href'>
                 },
             )]),
             eval_outputs: ComponentMetaEvalOutputs::default(),
-            projectable_owner_local_roots: BTreeSet::new(),
+            projectable_owner_local_roots: BTreeSet::from(["Props".to_string()]),
+            owner_local_macro_surfaces: BTreeMap::from([(
+                "Props".to_string(),
+                ProjectedMacroSurfaces {
+                    props: vec![verter_semantic::analysis::AnalyzedPropField {
+                        name: "href".to_string(),
+                        is_optional: true,
+                        span: Span::default(),
+                        type_annotation: Some("string".to_string()),
+                        description: None,
+                        tags: Vec::new(),
+                        resolution_source: verter_semantic::analysis::TypeResolutionSource::Rust,
+                        resolution_error: None,
+                    }],
+                    emits: Vec::new(),
+                    slots: Vec::new(),
+                    native_props: Vec::new(),
+                },
+            )]),
         };
         let snapshot = TestSnapshot {
             imports: Vec::new(),
@@ -2356,13 +2421,15 @@ type Props = Pick<ImportedBase, 'href'>
     #[test]
     fn resolve_component_meta_parts_skips_transitive_imported_macro_resolution_when_resolved_local_surface_is_authoritative(
     ) {
+        // Phase 4b §4b.4 — `authoritative_resolved_local` is now
+        // `projectable_owner_local`; configuring `Props` as a
+        // projectable owner-local root drives the suppression.
         let source = r#"
 type Props = {
   href?: ImportedBase['href']
 }
 "#;
         let host = TestHost {
-            source: source.to_string(),
             external_macro_elements: BTreeMap::from([(
                 ("./types".to_string(), "ImportedBase".to_string()),
                 ResolvedElements {
@@ -2382,7 +2449,25 @@ type Props = {
                 },
             )]),
             eval_outputs: ComponentMetaEvalOutputs::default(),
-            projectable_owner_local_roots: BTreeSet::new(),
+            projectable_owner_local_roots: BTreeSet::from(["Props".to_string()]),
+            owner_local_macro_surfaces: BTreeMap::from([(
+                "Props".to_string(),
+                ProjectedMacroSurfaces {
+                    props: vec![verter_semantic::analysis::AnalyzedPropField {
+                        name: "href".to_string(),
+                        is_optional: true,
+                        span: Span::default(),
+                        type_annotation: Some("ImportedBase['href']".to_string()),
+                        description: None,
+                        tags: Vec::new(),
+                        resolution_source: verter_semantic::analysis::TypeResolutionSource::Rust,
+                        resolution_error: None,
+                    }],
+                    emits: Vec::new(),
+                    slots: Vec::new(),
+                    native_props: Vec::new(),
+                },
+            )]),
         };
         let snapshot = TestSnapshot {
             imports: Vec::new(),
@@ -2456,13 +2541,19 @@ type Props = {
     #[test]
     fn resolve_component_meta_parts_skips_direct_imported_macro_resolution_when_resolved_local_surface_is_authoritative(
     ) {
+        // Phase 4b §4b.4 — `authoritative_resolved_local` is now
+        // `projectable_owner_local`. The macro's
+        // `type_references = ["Props", "ImportedBase"]` lists
+        // ImportedBase as an indirect reference (used inside
+        // `Props`'s body). Configuring `Props` as the projectable
+        // root makes the owner-local surface authoritative, which
+        // suppresses the indirect ImportedBase dep.
         let source = r#"
 type Props = {
   tooltip?: ImportedBase
 }
 "#;
         let host = TestHost {
-            source: source.to_string(),
             external_macro_elements: BTreeMap::from([(
                 ("./types".to_string(), "ImportedBase".to_string()),
                 ResolvedElements {
@@ -2482,7 +2573,25 @@ type Props = {
                 },
             )]),
             eval_outputs: ComponentMetaEvalOutputs::default(),
-            projectable_owner_local_roots: BTreeSet::new(),
+            projectable_owner_local_roots: BTreeSet::from(["Props".to_string()]),
+            owner_local_macro_surfaces: BTreeMap::from([(
+                "Props".to_string(),
+                ProjectedMacroSurfaces {
+                    props: vec![verter_semantic::analysis::AnalyzedPropField {
+                        name: "tooltip".to_string(),
+                        is_optional: true,
+                        span: Span::default(),
+                        type_annotation: Some("ImportedBase".to_string()),
+                        description: None,
+                        tags: Vec::new(),
+                        resolution_source: verter_semantic::analysis::TypeResolutionSource::Rust,
+                        resolution_error: None,
+                    }],
+                    emits: Vec::new(),
+                    slots: Vec::new(),
+                    native_props: Vec::new(),
+                },
+            )]),
         };
         let snapshot = TestSnapshot {
             imports: Vec::new(),
@@ -2553,11 +2662,14 @@ type Props = {
     #[test]
     fn resolve_component_meta_parts_skips_direct_imported_macro_resolution_when_local_wrapper_type_expr_is_available(
     ) {
+        // Phase 4b §4b.4 — `authoritative_resolved_local` is now
+        // `projectable_owner_local`; configuring `Props` as a
+        // projectable owner-local root drives the suppression of
+        // the indirect ImportedBase dep.
         let source = r#"
 type Props = Omit<ImportedBase, 'hidden'>
 "#;
         let host = TestHost {
-            source: source.to_string(),
             external_macro_elements: BTreeMap::from([(
                 ("./types".to_string(), "ImportedBase".to_string()),
                 ResolvedElements {
@@ -2577,7 +2689,25 @@ type Props = Omit<ImportedBase, 'hidden'>
                 },
             )]),
             eval_outputs: ComponentMetaEvalOutputs::default(),
-            projectable_owner_local_roots: BTreeSet::new(),
+            projectable_owner_local_roots: BTreeSet::from(["Props".to_string()]),
+            owner_local_macro_surfaces: BTreeMap::from([(
+                "Props".to_string(),
+                ProjectedMacroSurfaces {
+                    props: vec![verter_semantic::analysis::AnalyzedPropField {
+                        name: "label".to_string(),
+                        is_optional: true,
+                        span: Span::default(),
+                        type_annotation: Some("string".to_string()),
+                        description: None,
+                        tags: Vec::new(),
+                        resolution_source: verter_semantic::analysis::TypeResolutionSource::Rust,
+                        resolution_error: None,
+                    }],
+                    emits: Vec::new(),
+                    slots: Vec::new(),
+                    native_props: Vec::new(),
+                },
+            )]),
         };
         let snapshot = TestSnapshot {
             imports: Vec::new(),
@@ -2646,7 +2776,6 @@ type Props = Omit<ImportedBase, 'hidden'>
 type Props = Omit<ImportedBase, 'hidden'>
 "#;
         let host = TestHost {
-            source: source.to_string(),
             external_macro_elements: BTreeMap::from([(
                 ("./types".to_string(), "ImportedBase".to_string()),
                 ResolvedElements {
@@ -2667,6 +2796,29 @@ type Props = Omit<ImportedBase, 'hidden'>
             )]),
             eval_outputs: ComponentMetaEvalOutputs::default(),
             projectable_owner_local_roots: BTreeSet::from(["Props".to_string()]),
+            // Phase 4b §4b.4 — graph-only: precomputed owner-local
+            // surface for `Props` (the prepared shape resolves
+            // `Omit<ImportedBase, 'hidden'>` graph-natively in
+            // production via `host.resolve_owner_local_macro_surface`;
+            // the test seeds the result directly).
+            owner_local_macro_surfaces: BTreeMap::from([(
+                "Props".to_string(),
+                ProjectedMacroSurfaces {
+                    props: vec![verter_semantic::analysis::AnalyzedPropField {
+                        name: "label".to_string(),
+                        is_optional: true,
+                        span: Span::default(),
+                        type_annotation: Some("string".to_string()),
+                        description: None,
+                        tags: Vec::new(),
+                        resolution_source: verter_semantic::analysis::TypeResolutionSource::Rust,
+                        resolution_error: None,
+                    }],
+                    emits: Vec::new(),
+                    slots: Vec::new(),
+                    native_props: Vec::new(),
+                },
+            )]),
         };
         let snapshot = TestSnapshot {
             imports: Vec::new(),
@@ -2729,7 +2881,6 @@ type Props = Omit<ImportedBase, 'hidden'>
     #[test]
     fn resolve_component_meta_parts_keeps_direct_imported_macro_root_seeded() {
         let host = TestHost {
-            source: String::new(),
             external_macro_elements: BTreeMap::from([(
                 ("./types".to_string(), "Props".to_string()),
                 ResolvedElements {
@@ -2750,6 +2901,7 @@ type Props = Omit<ImportedBase, 'hidden'>
             )]),
             eval_outputs: ComponentMetaEvalOutputs::default(),
             projectable_owner_local_roots: BTreeSet::new(),
+            owner_local_macro_surfaces: BTreeMap::new(),
         };
         let snapshot = TestSnapshot {
             imports: Vec::new(),
@@ -2824,7 +2976,6 @@ type Props = Omit<ImportedBase, 'hidden'>
         // declaration, NOT by a substring scan of the underlying
         // alias body.
         let host = TestHost {
-            source: "export type StringOrVNode = string | VNode | (() => VNode);".to_string(),
             external_macro_elements: BTreeMap::from([(
                 ("./types".to_string(), "StringOrVNode".to_string()),
                 ResolvedElements {
@@ -2859,6 +3010,7 @@ type Props = Omit<ImportedBase, 'hidden'>
             )]),
             eval_outputs: ComponentMetaEvalOutputs::default(),
             projectable_owner_local_roots: BTreeSet::new(),
+            owner_local_macro_surfaces: BTreeMap::new(),
         };
         let snapshot = TestSnapshot {
             imports: Vec::new(),
@@ -2910,6 +3062,12 @@ type Props = Omit<ImportedBase, 'hidden'>
 
     #[test]
     fn resolve_component_meta_parts_keeps_non_root_local_helpers_off_resolved_macros() {
+        // Phase 4b §4b.4 — under the graph-only resolver only roots
+        // the host's `projectable_owner_local_macro_roots` returns
+        // are eligible for owner-local projection. The TestHost
+        // models this by configuring `projectable_owner_local_roots`
+        // to contain only `Props` (the direct macro reference) and
+        // not `Helper` (the alias body's referent).
         let source = r#"
 type Props = Helper
 
@@ -2918,10 +3076,27 @@ interface Helper {
 }
 "#;
         let host = TestHost {
-            source: source.to_string(),
             external_macro_elements: BTreeMap::new(),
             eval_outputs: ComponentMetaEvalOutputs::default(),
-            projectable_owner_local_roots: BTreeSet::new(),
+            projectable_owner_local_roots: BTreeSet::from(["Props".to_string()]),
+            owner_local_macro_surfaces: BTreeMap::from([(
+                "Props".to_string(),
+                ProjectedMacroSurfaces {
+                    props: vec![verter_semantic::analysis::AnalyzedPropField {
+                        name: "label".to_string(),
+                        is_optional: true,
+                        span: Span::default(),
+                        type_annotation: Some("string".to_string()),
+                        description: None,
+                        tags: Vec::new(),
+                        resolution_source: verter_semantic::analysis::TypeResolutionSource::Rust,
+                        resolution_error: None,
+                    }],
+                    emits: Vec::new(),
+                    slots: Vec::new(),
+                    native_props: Vec::new(),
+                },
+            )]),
         };
         let snapshot = TestSnapshot {
             imports: Vec::new(),
@@ -3739,25 +3914,6 @@ fn macro_has_authoritative_owner_surface(
     }
 }
 
-fn macro_has_authoritative_resolved_local_surface(mac: &AnalyzedMacro) -> bool {
-    mac.resolved_local_types
-        .iter()
-        .enumerate()
-        .filter(|(resolved_index, resolved)| {
-            is_direct_local_macro_type_reference(mac, *resolved_index, resolved.name.as_str())
-        })
-        .any(|(_, resolved)| {
-            project_macro_surfaces_from_expanded_text(mac.kind, &resolved.expanded).is_some_and(
-                |projected| {
-                    !projected.native_props.is_empty()
-                        || !projected.props.is_empty()
-                        || !projected.emits.is_empty()
-                        || !projected.slots.is_empty()
-                },
-            ) || resolved_local_type_expr_can_drive_authoritative_projection(mac.kind, resolved)
-        })
-}
-
 fn macro_has_direct_local_type_root(mac: &AnalyzedMacro) -> bool {
     mac.resolved_local_types
         .iter()
@@ -3765,18 +3921,6 @@ fn macro_has_direct_local_type_root(mac: &AnalyzedMacro) -> bool {
         .any(|(resolved_index, resolved)| {
             is_direct_local_macro_type_reference(mac, resolved_index, resolved.name.as_str())
         })
-}
-
-fn resolved_local_type_expr_can_drive_authoritative_projection(
-    macro_kind: AnalyzedMacroKind,
-    resolved: &verter_semantic::analysis::types::ResolvedLocalType,
-) -> bool {
-    matches!(
-        macro_kind,
-        AnalyzedMacroKind::DefineProps
-            | AnalyzedMacroKind::WithDefaults
-            | AnalyzedMacroKind::DefineModel
-    ) && resolved.type_expr.is_some()
 }
 
 fn macro_dep_exported_type_name<'a>(
@@ -3810,41 +3954,6 @@ fn macro_dep_exported_type_name<'a>(
     }
 
     Cow::Borrowed(dep.type_name.as_str())
-}
-
-fn source_for_local_type_projection(source: &str) -> Cow<'_, str> {
-    if !source.contains("<script") {
-        return Cow::Borrowed(source);
-    }
-
-    let mut cursor = 0usize;
-    let mut extracted = String::new();
-    while let Some(start_rel) = source[cursor..].find("<script") {
-        let tag_start = cursor + start_rel;
-        let Some(tag_end_rel) = source[tag_start..].find('>') else {
-            break;
-        };
-        let content_start = tag_start + tag_end_rel + 1;
-        let Some(close_rel) = source[content_start..].find("</script>") else {
-            break;
-        };
-        let content_end = content_start + close_rel;
-        let content = source[content_start..content_end].trim();
-        if !content.is_empty() {
-            if !extracted.is_empty() {
-                extracted.push('\n');
-            }
-            extracted.push_str(content);
-            extracted.push('\n');
-        }
-        cursor = content_end + "</script>".len();
-    }
-
-    if extracted.is_empty() {
-        Cow::Borrowed(source)
-    } else {
-        Cow::Owned(extracted)
-    }
 }
 
 fn should_seed_direct_macro_registry_entry(declaration: &ResolvedTypeDeclaration) -> bool {

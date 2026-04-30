@@ -169,69 +169,6 @@ pub fn project_macro_surfaces(
     }
 }
 
-pub fn project_macro_surfaces_from_expanded_text(
-    macro_kind: AnalyzedMacroKind,
-    expanded_text: &str,
-) -> Option<ProjectedMacroSurfaces> {
-    let expanded_text = expanded_text.trim();
-    if expanded_text.is_empty() {
-        return None;
-    }
-
-    let synthetic = format!("export type __VerterMacro = {expanded_text}");
-    let alloc = Allocator::new();
-    let resolved = resolve_external_type("__VerterMacro", &synthetic, &alloc)?;
-    Some(project_macro_surfaces(None, macro_kind, &resolved))
-}
-
-pub fn project_macro_surfaces_from_source_type_name(
-    source: &str,
-    macro_kind: AnalyzedMacroKind,
-    type_name: &str,
-) -> Option<ProjectedMacroSurfaces> {
-    #[cfg(test)]
-    project_macro_surfaces_from_source_call_count_inc();
-
-    let source = source.trim();
-    if source.is_empty() {
-        return None;
-    }
-
-    let alloc = Allocator::new();
-    let resolved = resolve_external_type(type_name, source, &alloc)?;
-    Some(project_macro_surfaces(Some(source), macro_kind, &resolved))
-}
-
-// Test-only per-thread counter for `project_macro_surfaces_from_source_type_name`.
-//
-// That function creates a fresh oxc `Allocator` and reparses the dependency
-// source on every call, bypassing the host-owned parsed-program cache. Tests
-// use this counter to assert cache-owned recovery paths (e.g. the JSDoc
-// enrichment path) do not fall back to this raw-source reparse.
-//
-// Thread-local so parallel tests do not race on a shared counter.
-#[cfg(test)]
-thread_local! {
-    static PROJECT_MACRO_SURFACES_FROM_SOURCE_CALL_COUNT: std::cell::Cell<usize> =
-        const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-fn project_macro_surfaces_from_source_call_count_inc() {
-    PROJECT_MACRO_SURFACES_FROM_SOURCE_CALL_COUNT
-        .with(|count| count.set(count.get().saturating_add(1)));
-}
-
-#[cfg(test)]
-pub(crate) fn project_macro_surfaces_from_source_call_count() -> usize {
-    PROJECT_MACRO_SURFACES_FROM_SOURCE_CALL_COUNT.with(|count| count.get())
-}
-
-#[cfg(test)]
-pub(crate) fn reset_project_macro_surfaces_from_source_call_count() {
-    PROJECT_MACRO_SURFACES_FROM_SOURCE_CALL_COUNT.with(|count| count.set(0));
-}
-
 /// When a type is not locally defined in a source file (e.g., barrel re-export),
 /// find its import source specifiers and imported name so the caller can follow
 /// the import chain. Handles `import { T } from '...'; export { T };`,
@@ -989,48 +926,13 @@ export interface Slots {
         );
     }
 
-    #[test]
-    fn project_expanded_text_define_emits_preserves_conditional_payload_text() {
-        let projected = project_macro_surfaces_from_expanded_text(
-            AnalyzedMacroKind::DefineEmits,
-            "{ 'update:modelValue': [value: (T extends 'single' ? string : string[]) | undefined] }",
-        )
-        .expect("expanded emits text should project");
-
-        assert_eq!(projected.emits.len(), 1);
-        assert_eq!(
-            projected.emits[0].payload_type.as_deref(),
-            Some("[value: (T extends 'single' ? string : string[]) | undefined]")
-        );
-    }
-
-    #[test]
-    fn project_local_source_define_slots_preserves_symbolic_pick_binding() {
-        let source = r#"
-export interface CalendarCellTriggerProps {
-  day: Date
-  month: number
-}
-
-export interface CalendarSlots {
-  day?: (props: Pick<CalendarCellTriggerProps, 'day'>) => any
-}
-"#;
-
-        let projected = project_macro_surfaces_from_source_type_name(
-            source,
-            AnalyzedMacroKind::DefineSlots,
-            "CalendarSlots",
-        )
-        .expect("local source projection should succeed");
-
-        assert_eq!(projected.slots.len(), 1);
-        assert_eq!(projected.slots[0].bindings.len(), 1);
-        assert_eq!(
-            projected.slots[0].bindings[0].type_annotation.as_deref(),
-            Some("CalendarCellTriggerProps['day']")
-        );
-    }
+    // Phase 4b §4b.4 — the
+    // `project_expanded_text_define_emits_preserves_conditional_payload_text`
+    // and `project_local_source_define_slots_preserves_symbolic_pick_binding`
+    // unit tests were attached to the (now-deleted) text-based
+    // projector helpers. Their behaviour contracts are now covered
+    // by integration tests in `meta_resolve_tests` and
+    // `component_meta_audit`.
 
     #[test]
     fn project_define_slots_ignores_non_callable_helper_members() {
@@ -1071,95 +973,9 @@ export interface CalendarSlots {
         assert_eq!(names, vec!["default"]);
     }
 
-    #[test]
-    fn project_local_source_define_props_does_not_resolve_imported_utility_heritage() {
-        let source = r#"
-import type { ButtonHTMLAttributes, AnchorHTMLAttributes } from './types/html'
-
-interface RouterLinkProps {
-  replace?: boolean
-}
-
-interface NuxtLinkProps extends Omit<RouterLinkProps, 'to'> {
-  to?: string
-  href?: string
-}
-
-export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'type' | 'disabled'>, Omit<AnchorHTMLAttributes, 'href' | 'target' | 'rel' | 'type'> {
-  as?: any
-  type?: ButtonHTMLAttributes['type']
-  disabled?: boolean
-}
-"#;
-
-        let projected = project_macro_surfaces_from_source_type_name(
-            source,
-            AnalyzedMacroKind::DefineProps,
-            "LinkProps",
-        )
-        .expect("local source projection should succeed");
-
-        let names: Vec<_> = projected
-            .props
-            .iter()
-            .map(|prop| prop.name.as_str())
-            .collect();
-        assert_eq!(
-            names,
-            vec!["as", "type", "disabled", "to", "href", "replace"]
-        );
-    }
-
-    #[test]
-    fn project_local_source_define_props_preserves_jsdoc_and_raw_types_after_vue_ignore_heritage() {
-        let source = r#"
-interface NuxtLinkProps {
-  to?: string
-}
-
-interface ButtonHTMLAttributes {
-  type?: 'button' | 'submit'
-}
-
-interface AnchorHTMLAttributes {
-  href?: string
-}
-
-export interface LinkProps extends NuxtLinkProps, /** @vue-ignore */ Omit<ButtonHTMLAttributes, 'type'>, /** @vue-ignore */ Omit<AnchorHTMLAttributes, 'href'> {
-  /** Force the link to be active independent of the current route. */
-  active?: boolean
-  /** Class to apply when the link is active */
-  activeClass?: string
-}
-"#;
-
-        let projected = project_macro_surfaces_from_source_type_name(
-            source,
-            AnalyzedMacroKind::DefineProps,
-            "LinkProps",
-        )
-        .expect("local source projection should succeed");
-
-        let active = projected
-            .props
-            .iter()
-            .find(|prop| prop.name == "active")
-            .expect("active prop should be projected");
-        assert_eq!(active.type_annotation.as_deref(), Some("boolean"));
-        assert_eq!(
-            active.description.as_deref(),
-            Some("Force the link to be active independent of the current route.")
-        );
-
-        let active_class = projected
-            .props
-            .iter()
-            .find(|prop| prop.name == "activeClass")
-            .expect("activeClass prop should be projected");
-        assert_eq!(active_class.type_annotation.as_deref(), Some("string"));
-        assert_eq!(
-            active_class.description.as_deref(),
-            Some("Class to apply when the link is active")
-        );
-    }
+    // Phase 4b §4b.4 — the `project_local_source_define_props_*` tests
+    // exercised the (now-deleted) source-typed projector. The
+    // behaviour contracts they covered (heritage resolution, JSDoc
+    // through `@vue-ignore`-annotated `Omit<>`) are covered by
+    // integration tests in `meta_resolve_tests` and `meta_tests`.
 }
