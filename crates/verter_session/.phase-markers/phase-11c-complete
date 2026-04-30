@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "phase": "phase-11c",
+  "status": "success",
+  "base_commit": "65a1bd773228f6cae426515f72ba9ba0325beb85",
+  "work_head_before_marker": "884a5673f464e6acd9c680c0e120a66c73b0f635",
+  "test_results": {
+    "workspace": {
+      "test_scope": "cargo test --workspace --tests --verbose",
+      "passed": 10283,
+      "failed": 0
+    },
+    "correctness": {
+      "test_scope": "cargo test -p verter_session --test correctness",
+      "passed": 18,
+      "failed": 0
+    }
+  },
+  "snapshot_drift": "none",
+  "guards_un_ignored": [],
+  "deferred": [],
+  "report_path": "phase-11c-report.md",
+  "derivation_notes_verified": false,
+  "atomic_gate_phase": true,
+  "summary": "host_manage.rs (9194 LOC) split into shell + 8 sibling files under crates/verter_session/src/host_manage/. Zero public-surface changes; one pub(crate) use re-export block."
+}

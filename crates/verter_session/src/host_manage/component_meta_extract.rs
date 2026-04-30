@@ -1,0 +1,1100 @@
+//! `host_manage::component_meta_extract` — component-meta extraction
+//! free functions: snapshot → ComponentMetaAnalysis projection,
+//! evaluated-type merge, JSDoc enrichment, and SFC sidecar population.
+//!
+//! Phase 11c sub-plan §11c.2 Domain K. Owns the public-facing
+//! `extract_component_meta_from_resolved` /
+//! `extract_component_meta_from_resolved_with_facts` entry points
+//! plus their internal helpers (`merge_evaluated_prop_types_into_meta`,
+//! `fill_missing_component_meta_prop_descriptions_from_imported_roots`,
+//! `populate_sfc_blocks_sidecar`, `populate_public_instance_sidecar`,
+//! etc.). The `crate::host_manage::*` import paths used by `meta.rs`,
+//! `component_meta_host.rs`, and
+//! `component_meta_resolution_policy.rs` are preserved by a `pub(crate)
+//! use` re-export block in the parent shell — see §11c.5.
+
+use std::sync::Arc;
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
+
+use crate::resolver_core::{
+    component_meta_resolved_macros as resolver_component_meta_resolved_macros,
+    component_meta_type_registry as resolver_component_meta_type_registry,
+};
+use crate::types::*;
+use crate::VerterHost;
+
+use super::{component_meta_debug, component_meta_debug_enabled, component_meta_trace_custom};
+
+// Legacy TypeExpr walkers (collect_required_owner_import_names, collect_slot_eval_import_names_*,
+// collect_surface_eval_import_names_*, collect_runtime_value_names_*, etc.) were deleted.
+// The solver host now resolves cross-file types on demand through prepared-decl caches.
+
+/// Collect the set of runtime value names referenced by the template.
+/// This reads pre-analyzed snapshot data (binding_occurrences, prop.referenced_bindings),
+/// NOT TypeExpr trees — it is not a walker.
+pub(in crate::host_manage) fn collect_required_template_runtime_value_names(
+    snapshot: &FileAnalysisSnapshot,
+) -> rustc_hash::FxHashSet<String> {
+    let mut required = rustc_hash::FxHashSet::default();
+    let Some(template) = snapshot.template.as_ref() else {
+        return required;
+    };
+
+    required.extend(
+        template
+            .binding_occurrences
+            .iter()
+            .map(|occurrence| occurrence.name.clone()),
+    );
+
+    for component in &template.components {
+        for prop in &component.props {
+            required.extend(prop.referenced_bindings.iter().cloned());
+            if prop.is_shorthand {
+                required.insert(prop.name.clone());
+            }
+        }
+    }
+
+    required
+}
+
+pub(in crate::host_manage) fn collect_required_root_fallthrough_runtime_value_names(
+    snapshot: &FileAnalysisSnapshot,
+    root_reachability: &verter_semantic::analysis::component_meta::RootReachability,
+) -> rustc_hash::FxHashSet<String> {
+    use verter_semantic::analysis::component_meta::{RootReachability, RootTargetRef};
+    use verter_semantic::analysis::template::BindingUsageKind;
+
+    let mut required = rustc_hash::FxHashSet::default();
+    let Some(template) = snapshot.template.as_ref() else {
+        return required;
+    };
+
+    let RootReachability::Branches { branches } = root_reachability else {
+        return required;
+    };
+
+    for branch in branches {
+        let element_index = match &branch.target {
+            RootTargetRef::NativeElement { element_index, .. }
+            | RootTargetRef::DynamicComponentUsage { element_index, .. }
+            | RootTargetRef::ComponentUsage { element_index, .. }
+            | RootTargetRef::UnresolvedTarget { element_index, .. } => *element_index as usize,
+        };
+
+        let Some(element) = template.elements.get(element_index) else {
+            continue;
+        };
+
+        for occurrence in &template.binding_occurrences {
+            if occurrence.span.start < element.span.start
+                || occurrence.span.end > element.tag_span_end
+            {
+                continue;
+            }
+            if matches!(
+                occurrence.usage_kind,
+                BindingUsageKind::DirectiveValue | BindingUsageKind::EventHandler,
+            ) {
+                required.insert(occurrence.name.clone());
+            }
+        }
+
+        let usage_index = match &branch.target {
+            RootTargetRef::DynamicComponentUsage { usage_index, .. }
+            | RootTargetRef::ComponentUsage { usage_index, .. } => Some(*usage_index as usize),
+            RootTargetRef::NativeElement { .. } | RootTargetRef::UnresolvedTarget { .. } => None,
+        };
+
+        let Some(usage) = usage_index.and_then(|usage_index| template.components.get(usage_index))
+        else {
+            continue;
+        };
+
+        for prop in &usage.props {
+            required.extend(prop.referenced_bindings.iter().cloned());
+            if prop.is_shorthand {
+                required.insert(prop.name.clone());
+            }
+        }
+    }
+
+    required
+}
+
+/// Extract slot bindings from a type_text that encodes a slot's function signature.
+///
+/// Handles property signature types like `(props: { row: Item; index: number }) => any`.
+/// Extract slot bindings and return type from a type_text encoding a slot function signature.
+///
+/// Handles both arrow-style (`(props: { row: Item }) => VNode[]`) and
+/// method-style (`(props: { row: Item }): VNode[]`) signatures.
+/// Returns `(bindings, return_type)`.
+/// Build a `ComponentMetaAnalysis` from a resolved-meta state.
+/// Shared by `get_component_meta` and `get_component_meta_with_resolution`.
+fn extract_component_meta_from_inputs(
+    host: &VerterHost,
+    canonical_or_alias: &str,
+    snapshot: &FileAnalysisSnapshot,
+    resolved_macros: &[verter_semantic::analysis::component_meta::ResolvedMacroInput],
+    resolved_type_registry: &[verter_semantic::analysis::component_meta::ResolvedTypeAnalysis],
+    evaluated_types: Option<&verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
+) -> verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
+    let started = component_meta_debug_enabled().then(Instant::now);
+    let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
+    component_meta_trace_custom!(
+        "extract_component_meta",
+        format!(
+            "owner={} macros={} resolved_macros={} resolved_type_registry={} has_evaluated_types={}",
+            canonical,
+            snapshot.macros.len(),
+            resolved_macros.len(),
+            resolved_type_registry.len(),
+            evaluated_types.is_some(),
+        ),
+    );
+    let canonical_source = host.read_analysis_source(&canonical);
+    let input = verter_semantic::analysis::component_meta::ComponentMetaInput {
+        macros: &snapshot.macros,
+        bindings: &snapshot.bindings,
+        imports: &snapshot.imports,
+        template: snapshot.template.as_deref(),
+        options_api: snapshot.options_api.as_ref(),
+        analysis_flags: verter_semantic::analysis::types::AnalysisFlags::from_bits_truncate(
+            snapshot.script_flags,
+        ),
+        styles: &snapshot.styles,
+        vue_api_calls: &snapshot.vue_api_calls,
+        store_usages: &snapshot.store_usages,
+        resolved_macros,
+        resolved_type_registry,
+        evaluated_types,
+        file_path: &canonical,
+        canonical_source: canonical_source.as_deref(),
+    };
+    let mut meta = verter_semantic::analysis::component_meta::extract_component_meta(input);
+    component_meta_trace_custom!(
+        "extract_component_meta_declared_surface",
+        format!(
+            "owner={} props={} events={} slots={}",
+            canonical,
+            meta.props.len(),
+            meta.events.len(),
+            meta.slots.len(),
+        ),
+    );
+
+    if let Some(started) = started {
+        component_meta_debug(format!(
+            "extract_component_meta owner={} took {:?}",
+            canonical,
+            started.elapsed(),
+        ));
+    }
+
+    populate_public_instance_sidecar(&mut meta);
+    populate_sfc_blocks_sidecar(host, &canonical, &mut meta);
+    meta
+}
+
+fn merge_evaluated_prop_types_into_meta(
+    host: &VerterHost,
+    owner_canonical: &str,
+    meta: &mut verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    evaluated_types: Option<&verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
+) {
+    let Some(evaluated_types) = evaluated_types else {
+        return;
+    };
+    fn collect_imported_props_like_raw_refs(
+        host: &VerterHost,
+        owner_canonical: &str,
+        raw_type: Option<&str>,
+    ) -> rustc_hash::FxHashSet<(String, usize)> {
+        fn collect(
+            expr: &verter_semantic::analysis::type_expr::TypeExpr,
+            refs: &mut rustc_hash::FxHashSet<(String, usize)>,
+        ) {
+            use verter_semantic::analysis::type_expr::TypeExpr;
+
+            match expr {
+                TypeExpr::Parenthesized(inner) => collect(inner, refs),
+                TypeExpr::Ref {
+                    name,
+                    type_arguments,
+                } => {
+                    if name.ends_with("Props") {
+                        refs.insert((name.to_string(), type_arguments.len()));
+                    }
+                    for arg in type_arguments.iter() {
+                        collect(arg, refs);
+                    }
+                }
+                TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
+                    for ty in types.iter() {
+                        collect(ty, refs);
+                    }
+                }
+                TypeExpr::Array { element, .. } => collect(element, refs),
+                TypeExpr::Tuple { elements, .. } => {
+                    for element in elements.iter() {
+                        collect(&element.ty, refs);
+                    }
+                }
+                TypeExpr::IndexedAccess { object, index } => {
+                    collect(object, refs);
+                    collect(index, refs);
+                }
+                _ => {}
+            }
+        }
+
+        let Some(raw_type) = raw_type else {
+            return rustc_hash::FxHashSet::default();
+        };
+        let parsed = verter_semantic::analysis::type_expr_lower::parse_type_annotation(raw_type);
+        let mut refs = rustc_hash::FxHashSet::default();
+        collect(&parsed, &mut refs);
+        refs.retain(|(name, _)| {
+            host.resolve_local_import_symbol_target(owner_canonical, name)
+                .is_some()
+                || {
+                    let declaration =
+                        crate::meta_resolve::resolve_type_declaration(host, owner_canonical, name);
+                    !declaration.canonical_source.is_empty()
+                        && declaration.canonical_source != owner_canonical
+                }
+        });
+        refs
+    }
+
+    fn expr_contains_public_ref(
+        expr: &verter_semantic::analysis::type_expr::TypeExpr,
+        name: &str,
+        type_argument_arity: usize,
+    ) -> bool {
+        use verter_semantic::analysis::type_expr::TypeExpr;
+
+        match expr {
+            TypeExpr::Parenthesized(inner) => {
+                expr_contains_public_ref(inner, name, type_argument_arity)
+            }
+            TypeExpr::Ref {
+                name: current_name,
+                type_arguments,
+            } => {
+                (current_name.as_ref() == name && type_arguments.len() == type_argument_arity)
+                    || type_arguments
+                        .iter()
+                        .any(|arg| expr_contains_public_ref(arg, name, type_argument_arity))
+            }
+            TypeExpr::Union(types) | TypeExpr::Intersection(types) => types
+                .iter()
+                .any(|ty| expr_contains_public_ref(ty, name, type_argument_arity)),
+            TypeExpr::Array { element, .. } => {
+                expr_contains_public_ref(element, name, type_argument_arity)
+            }
+            TypeExpr::Tuple { elements, .. } => elements
+                .iter()
+                .any(|element| expr_contains_public_ref(&element.ty, name, type_argument_arity)),
+            TypeExpr::IndexedAccess { object, index } => {
+                expr_contains_public_ref(object, name, type_argument_arity)
+                    || expr_contains_public_ref(index, name, type_argument_arity)
+            }
+            _ => false,
+        }
+    }
+
+    let evaluated_by_name = evaluated_types
+        .props
+        .iter()
+        .map(|field| (field.name.as_str(), &field.r#type))
+        .collect::<rustc_hash::FxHashMap<_, _>>();
+
+    for prop in &mut meta.props {
+        let Some(evaluated) = evaluated_by_name.get(prop.name.as_str()) else {
+            continue;
+        };
+        let imported_props_like_refs =
+            collect_imported_props_like_raw_refs(host, owner_canonical, prop.raw_type.as_deref());
+        if !imported_props_like_refs.is_empty()
+            && !imported_props_like_refs
+                .iter()
+                .all(|(name, type_argument_arity)| {
+                    expr_contains_public_ref(evaluated, name, *type_argument_arity)
+                })
+        {
+            // Allow the merge when the evaluated type is a materialized Object
+            // and the current type_expr is a bare Ref — the evaluate_types path
+            // already decided to materialize this imported type.
+            let evaluated_is_materialized_form = matches!(
+                (evaluated, &prop.type_expr),
+                (
+                    verter_semantic::analysis::type_expr::TypeExpr::Object(_),
+                    verter_semantic::analysis::type_expr::TypeExpr::Ref {
+                        type_arguments, ..
+                    }
+                ) if type_arguments.is_empty()
+            );
+            if !evaluated_is_materialized_form {
+                continue;
+            }
+        }
+        if crate::meta_resolve::compare_type_expr_improvement(evaluated, &prop.type_expr)
+            || matches!(
+                (&prop.type_expr, *evaluated),
+                (
+                    verter_semantic::analysis::type_expr::TypeExpr::Object(_),
+                    verter_semantic::analysis::type_expr::TypeExpr::Union(_)
+                        | verter_semantic::analysis::type_expr::TypeExpr::Primitive(_),
+                )
+            )
+        {
+            prop.type_expr = (*evaluated).clone();
+        }
+    }
+}
+
+fn fill_missing_component_meta_prop_descriptions_from_imported_roots(
+    host: &VerterHost,
+    owner_canonical: &str,
+    meta: &mut verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    resolved: &crate::meta_resolve::ResolvedComponentMetaState,
+) -> bool {
+    use verter_semantic::analysis::AnalyzedMacroKind;
+
+    if !meta.props.iter().any(|prop| prop.description.is_none()) {
+        return false;
+    }
+
+    let mut imported_roots = rustc_hash::FxHashSet::default();
+    let mut jsdoc_by_name: rustc_hash::FxHashMap<
+        String,
+        (
+            Option<String>,
+            Vec<verter_semantic::analysis::types::JsdocTag>,
+        ),
+    > = rustc_hash::FxHashMap::default();
+
+    for dep in resolved.snapshot.macro_type_deps.iter() {
+        if !matches!(
+            dep.macro_kind,
+            AnalyzedMacroKind::DefineProps
+                | AnalyzedMacroKind::WithDefaults
+                | AnalyzedMacroKind::DefineModel,
+        ) {
+            continue;
+        }
+        let Some((dep_canonical, exported_name)) =
+            host.resolve_local_import_symbol_target(owner_canonical, dep.type_name.as_str())
+        else {
+            continue;
+        };
+        if !imported_roots.insert((dep_canonical.clone(), exported_name.clone())) {
+            continue;
+        }
+        collect_jsdoc_descriptions_from_root(
+            host,
+            &dep_canonical,
+            &exported_name,
+            &mut imported_roots,
+            &mut jsdoc_by_name,
+        );
+    }
+
+    for mac in resolved.snapshot.macros.iter() {
+        if !matches!(
+            mac.kind,
+            AnalyzedMacroKind::DefineProps
+                | AnalyzedMacroKind::WithDefaults
+                | AnalyzedMacroKind::DefineModel,
+        ) {
+            continue;
+        }
+        for (resolved_index, resolved_local) in mac.resolved_local_types.iter().enumerate() {
+            if !(resolved_index == 0
+                || mac
+                    .type_references
+                    .iter()
+                    .any(|type_name| type_name == &resolved_local.name))
+            {
+                continue;
+            }
+            let local_expr = resolved_local.type_expr.clone().unwrap_or_else(|| {
+                verter_semantic::analysis::type_expr_lower::parse_type_annotation(
+                    &resolved_local.expanded,
+                )
+            });
+            let expanded_expr = verter_semantic::analysis::type_expr_lower::parse_type_annotation(
+                &resolved_local.expanded,
+            );
+            for dependency in host
+                .imported_symbol_dependencies_for_expr(owner_canonical, &expanded_expr)
+                .into_iter()
+                .chain(host.imported_symbol_dependencies_for_expr(owner_canonical, &local_expr))
+            {
+                if !imported_roots.insert((
+                    dependency.canonical_id.clone(),
+                    dependency.exported_name.clone(),
+                )) {
+                    continue;
+                }
+                collect_jsdoc_descriptions_from_root(
+                    host,
+                    &dependency.canonical_id,
+                    &dependency.exported_name,
+                    &mut imported_roots,
+                    &mut jsdoc_by_name,
+                );
+            }
+        }
+    }
+
+    let mut changed = false;
+    for prop in &mut meta.props {
+        if prop.description.is_some() {
+            continue;
+        }
+        if let Some((description, tags)) = jsdoc_by_name.get(prop.name.as_str()) {
+            if let Some(desc) = description {
+                prop.description = Some(desc.clone());
+            }
+            if prop.tags.is_empty() && !tags.is_empty() {
+                prop.tags = tags.clone();
+            }
+            changed = true;
+        }
+    }
+
+    changed
+}
+
+/// Try to project JSDoc descriptions from a resolved dependency file.
+/// When the type is not locally defined (barrel re-export), follows the
+/// re-export chain via `resolve_imported_type_root` to reach the
+/// actual defining file where JSDoc comments live.
+fn collect_jsdoc_descriptions_from_root(
+    host: &VerterHost,
+    dep_canonical: &str,
+    exported_name: &str,
+    imported_roots: &mut rustc_hash::FxHashSet<(String, String)>,
+    jsdoc_by_name: &mut rustc_hash::FxHashMap<
+        String,
+        (
+            Option<String>,
+            Vec<verter_semantic::analysis::types::JsdocTag>,
+        ),
+    >,
+) {
+    // Try projection in the initial resolved file first
+    if try_project_jsdoc_descriptions(host, dep_canonical, exported_name, jsdoc_by_name) {
+        // Projection succeeded, but inherited props from external types may still
+        // lack JSDoc. Follow heritage imports (e.g., LinkProps extends NuxtLinkProps
+        // extends Omit<RouterLinkProps, 'to'> where RouterLinkProps is from vue-router).
+        follow_heritage_type_imports(
+            host,
+            dep_canonical,
+            exported_name,
+            imported_roots,
+            jsdoc_by_name,
+        );
+        return;
+    }
+
+    // Type was not locally defined in dep_canonical (barrel re-export).
+    // BFS through the import chain to find the defining file. Handles:
+    //   `import { T } from './other'; export { T };`
+    //   `export { T } from './other';`
+    //   `export * from './other';` (wildcard — may fan out to multiple candidates)
+    let mut queue: Vec<(String, String)> =
+        vec![(dep_canonical.to_string(), exported_name.to_string())];
+    let mut steps = 0usize;
+    while let Some((current_canonical, current_name)) = queue.pop() {
+        steps += 1;
+        if steps > 16 {
+            break;
+        }
+        // Ambient-view-first ensure_loaded guard: BFS may reach canonicals not
+        // yet tracked by the request view (barrel re-export chains into
+        // external packages).
+        if !host.is_evalable(current_canonical.as_str())
+            && !host.ensure_loaded(current_canonical.as_str())
+        {
+            continue;
+        }
+        let Some((raw_source, cached_parse, _)) =
+            host.current_eval_state(current_canonical.as_str())
+        else {
+            continue;
+        };
+        let eval_source =
+            VerterHost::build_eval_script_source(&raw_source, cached_parse.as_deref());
+        let candidates =
+            crate::resolver_core::surface_projector::find_type_import_sources_in_source(
+                eval_source.as_ref(),
+                current_name.as_str(),
+            );
+        if candidates.is_empty() {
+            continue;
+        }
+        for (import_specifier, imported_name) in candidates {
+            let next_canonical = host
+                .resolve_route_type_edge(current_canonical.as_str(), import_specifier.as_str())
+                .or_else(|| {
+                    resolve_relative_type_specifier(
+                        current_canonical.as_str(),
+                        import_specifier.as_str(),
+                        |path| host.is_evalable(path),
+                    )
+                });
+            let Some(next_canonical) = next_canonical else {
+                continue;
+            };
+            if next_canonical == current_canonical {
+                continue;
+            }
+            if !imported_roots.insert((next_canonical.clone(), imported_name.clone())) {
+                continue;
+            }
+            if try_project_jsdoc_descriptions(host, &next_canonical, &imported_name, jsdoc_by_name)
+            {
+                // Also follow heritage imports from this file
+                follow_heritage_type_imports(
+                    host,
+                    &next_canonical,
+                    &imported_name,
+                    imported_roots,
+                    jsdoc_by_name,
+                );
+                return;
+            }
+            queue.push((next_canonical, imported_name));
+        }
+    }
+}
+
+/// After projection succeeds on a file, follow the type's heritage chain imports
+/// to collect JSDoc from external dependencies (e.g., vue-router's RouterLinkProps).
+/// Uses `collect_jsdoc_descriptions_from_root` for each heritage import so barrel
+/// chains within the external package are also followed.
+fn follow_heritage_type_imports(
+    host: &VerterHost,
+    defining_canonical: &str,
+    type_name: &str,
+    imported_roots: &mut rustc_hash::FxHashSet<(String, String)>,
+    jsdoc_by_name: &mut rustc_hash::FxHashMap<
+        String,
+        (
+            Option<String>,
+            Vec<verter_semantic::analysis::types::JsdocTag>,
+        ),
+    >,
+) {
+    // Ambient-view-first ensure_loaded guard: BFS may reach canonicals not yet
+    // tracked by the request view (heritage imports from external packages).
+    if !host.is_evalable(defining_canonical) && !host.ensure_loaded(defining_canonical) {
+        return;
+    }
+    let Some((raw_source, cached_parse, _)) = host.current_eval_state(defining_canonical) else {
+        return;
+    };
+    let eval_source = VerterHost::build_eval_script_source(&raw_source, cached_parse.as_deref());
+    let heritage_imports =
+        crate::resolver_core::surface_projector::find_heritage_type_imports_in_source(
+            eval_source.as_ref(),
+            type_name,
+        );
+    for (import_specifier, imported_name) in heritage_imports {
+        let next_canonical = host
+            .resolve_route_type_edge(defining_canonical, import_specifier.as_str())
+            .or_else(|| {
+                resolve_relative_type_specifier(
+                    defining_canonical,
+                    import_specifier.as_str(),
+                    |path| host.is_evalable(path),
+                )
+            });
+        let Some(next_canonical) = next_canonical else {
+            continue;
+        };
+        if !imported_roots.insert((next_canonical.clone(), imported_name.clone())) {
+            continue;
+        }
+        // Use full BFS collection so barrel chains within the external
+        // package are also traversed (e.g., vue-router.d.ts → index-*.d.ts).
+        collect_jsdoc_descriptions_from_root(
+            host,
+            &next_canonical,
+            &imported_name,
+            imported_roots,
+            jsdoc_by_name,
+        );
+    }
+}
+
+/// Resolve a relative import specifier against a canonical file path
+/// using TS-first extension mapping. For `./index3.js` from
+/// `.../dist/index.d.ts`, tries `.../dist/index3.d.ts` first, then
+/// `.../dist/index3.ts`, etc.
+fn resolve_relative_type_specifier(
+    owner_canonical: &str,
+    specifier: &str,
+    file_exists: impl Fn(&str) -> bool,
+) -> Option<String> {
+    if !specifier.starts_with("./") && !specifier.starts_with("../") {
+        return None; // Only relative specifiers
+    }
+
+    // Get parent directory of the owner file
+    let parent = owner_canonical.rsplit_once('/').map(|(dir, _)| dir)?;
+
+    // Strip the extension from the specifier
+    let base = specifier
+        .strip_suffix(".js")
+        .or_else(|| specifier.strip_suffix(".mjs"))
+        .or_else(|| specifier.strip_suffix(".cjs"))
+        .unwrap_or(specifier);
+
+    // Strip leading ./ for path joining
+    let relative = base.strip_prefix("./").unwrap_or(base);
+
+    // TS-first extension candidates
+    for ext in &[".d.ts", ".d.cts", ".d.mts", ".ts", ".tsx"] {
+        let candidate = format!("{parent}/{relative}{ext}");
+        if file_exists(&candidate) {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
+/// Resolve `exported_name` from `dep_canonical` as DefineProps and collect
+/// JSDoc descriptions/tags into `jsdoc_by_name`. Uses the host-cached parsed
+/// program and host-cached external type analysis — never reparses raw
+/// source. Returns true if the type was found and projected successfully.
+fn try_project_jsdoc_descriptions(
+    host: &VerterHost,
+    dep_canonical: &str,
+    exported_name: &str,
+    jsdoc_by_name: &mut rustc_hash::FxHashMap<
+        String,
+        (
+            Option<String>,
+            Vec<verter_semantic::analysis::types::JsdocTag>,
+        ),
+    >,
+) -> bool {
+    use verter_semantic::analysis::AnalyzedMacroKind;
+
+    let Some(projected) = host.project_imported_macro_surfaces(
+        dep_canonical,
+        exported_name,
+        AnalyzedMacroKind::DefineProps,
+    ) else {
+        return false;
+    };
+    for prop in projected.props {
+        if prop.description.is_some() || !prop.tags.is_empty() {
+            jsdoc_by_name
+                .entry(prop.name)
+                .or_insert((prop.description, prop.tags));
+        }
+    }
+    true
+}
+
+fn parse_annotation_or_unknown_for_public_instance(
+    raw: &str,
+) -> verter_semantic::analysis::type_expr::TypeExpr {
+    let parsed = verter_semantic::analysis::type_expr_lower::parse_type_annotation(raw);
+    if parsed.is_unknown() {
+        verter_semantic::analysis::type_expr::TypeExpr::Unknown {
+            raw: raw.to_string(),
+        }
+    } else {
+        parsed
+    }
+}
+
+fn build_public_instance_slot_type(
+    slot: &verter_semantic::analysis::component_meta::SlotAnalysis,
+) -> verter_semantic::analysis::type_expr::TypeExpr {
+    let parameter_type = verter_semantic::analysis::type_expr::TypeExpr::Object(Arc::new(
+        verter_semantic::analysis::type_expr::ObjectExpr {
+            properties: slot
+                .bindings
+                .iter()
+                .map(|binding| {
+                    verter_semantic::analysis::type_expr::ObjectMember::Property(
+                        verter_semantic::analysis::type_expr::ObjectProperty {
+                            name: binding.name.clone(),
+                            ty: binding.type_expr.clone(),
+                            optional: false,
+                            readonly: false,
+                        },
+                    )
+                })
+                .collect(),
+        },
+    ));
+    let return_type = slot
+        .return_type
+        .as_deref()
+        .map(parse_annotation_or_unknown_for_public_instance)
+        .unwrap_or(verter_semantic::analysis::type_expr::TypeExpr::Primitive(
+            verter_semantic::analysis::type_expr::PrimitiveName::Unknown,
+        ));
+    let function = verter_semantic::analysis::type_expr::TypeExpr::Function(Arc::new(
+        verter_semantic::analysis::type_expr::FunctionExpr {
+            parameters: if slot.bindings.is_empty() {
+                Vec::new()
+            } else {
+                vec![verter_semantic::analysis::type_expr::FunctionParam {
+                    name: Some("props".to_string()),
+                    ty: parameter_type,
+                    optional: false,
+                    rest: false,
+                }]
+            },
+            return_type: Some(Arc::new(return_type)),
+            type_parameters: Vec::new(),
+        },
+    ));
+    if slot.is_required {
+        function
+    } else {
+        verter_semantic::analysis::type_expr::TypeExpr::union(vec![
+            function,
+            verter_semantic::analysis::type_expr::TypeExpr::Primitive(
+                verter_semantic::analysis::type_expr::PrimitiveName::Undefined,
+            ),
+        ])
+    }
+}
+
+fn build_public_instance_slots_member(
+    slots: &[verter_semantic::analysis::component_meta::SlotAnalysis],
+) -> verter_semantic::analysis::component_meta::PublicInstanceMemberAnalysis {
+    let slot_properties = slots
+        .iter()
+        .map(|slot| {
+            verter_semantic::analysis::type_expr::ObjectMember::Property(
+                verter_semantic::analysis::type_expr::ObjectProperty {
+                    name: slot.name.clone(),
+                    ty: build_public_instance_slot_type(slot),
+                    optional: !slot.is_required,
+                    readonly: false,
+                },
+            )
+        })
+        .collect();
+
+    verter_semantic::analysis::component_meta::PublicInstanceMemberAnalysis {
+        name: "$slots".to_string(),
+        kind: verter_semantic::analysis::component_meta::PublicInstanceMemberKind::SlotContainer,
+        type_expr: verter_semantic::analysis::type_expr::TypeExpr::Object(Arc::new(
+            verter_semantic::analysis::type_expr::ObjectExpr {
+                properties: slot_properties,
+            },
+        )),
+        type_expansion: None,
+        raw_type: None,
+        description: None,
+    }
+}
+
+fn string_from_span(source: &str, span: Option<verter_compiler::common::Span>) -> Option<String> {
+    span.map(|span| source[span.start as usize..span.end as usize].to_string())
+}
+
+fn sfc_attributes_from_props(
+    props: &[verter_compiler::types::NodeProp],
+    source: &str,
+) -> Vec<verter_semantic::analysis::component_meta::SfcAttributeAnalysis> {
+    crate::parse::extract_attrs(props, source)
+        .into_iter()
+        .map(
+            |(name, value)| verter_semantic::analysis::component_meta::SfcAttributeAnalysis {
+                name: name.to_string(),
+                value: if value.is_empty() {
+                    None
+                } else {
+                    Some(value.to_string())
+                },
+            },
+        )
+        .collect()
+}
+
+fn sfc_custom_block_type(source: &str, tag_open: &verter_compiler::types::NodeTag) -> String {
+    source[tag_open.start as usize + 1..tag_open.name_end as usize].to_string()
+}
+
+pub(crate) fn populate_sfc_blocks_sidecar(
+    host: &VerterHost,
+    canonical_id: &str,
+    meta: &mut verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+) {
+    if !canonical_id.ends_with(".vue") {
+        return;
+    }
+
+    let Some((source, cached_parse, _)) = host.current_eval_state(canonical_id) else {
+        return;
+    };
+    let Some(parsed) = cached_parse.as_deref() else {
+        return;
+    };
+    let source = source.as_ref();
+
+    let template = parsed.template_ast().map(|template| {
+        let attrs = crate::parse::extract_attrs(&template.root.attributes, source);
+        verter_semantic::analysis::component_meta::TemplateBlockAnalysis {
+            lang: string_from_span(source, template.root.lang),
+            src: crate::parse::find_attr(&attrs, "src"),
+            attributes: sfc_attributes_from_props(&template.root.attributes, source),
+        }
+    });
+
+    let script = parsed.script().map(|script| {
+        let attrs = crate::parse::extract_attrs(&script.attributes, source);
+        verter_semantic::analysis::component_meta::ScriptBlockAnalysis {
+            lang: crate::parse::find_attr(&attrs, "lang").filter(|lang| lang != "true"),
+            src: crate::parse::find_attr(&attrs, "src"),
+            generic: string_from_span(source, script.generic),
+            attrs_type: string_from_span(source, script.attrs),
+            attributes: sfc_attributes_from_props(&script.attributes, source),
+        }
+    });
+
+    let script_setup = parsed.script_setup().map(|script| {
+        let attrs = crate::parse::extract_attrs(&script.attributes, source);
+        verter_semantic::analysis::component_meta::ScriptBlockAnalysis {
+            lang: crate::parse::find_attr(&attrs, "lang").filter(|lang| lang != "true"),
+            src: crate::parse::find_attr(&attrs, "src"),
+            generic: string_from_span(source, script.generic),
+            attrs_type: string_from_span(source, script.attrs),
+            attributes: sfc_attributes_from_props(&script.attributes, source),
+        }
+    });
+
+    let styles = parsed
+        .style_nodes()
+        .iter()
+        .enumerate()
+        .map(|(index, style)| {
+            let attrs = crate::parse::extract_attrs(&style.attributes, source);
+            verter_semantic::analysis::component_meta::StyleBlockInfoAnalysis {
+                index,
+                lang: crate::parse::find_attr(&attrs, "lang").filter(|lang| lang != "true"),
+                src: crate::parse::find_attr(&attrs, "src"),
+                scoped: style.scoped,
+                is_module: style.module,
+                module_name: crate::parse::find_attr(&attrs, "module")
+                    .filter(|value| value != "true"),
+                attributes: sfc_attributes_from_props(&style.attributes, source),
+            }
+        })
+        .collect();
+
+    let custom = parsed
+        .unknown_nodes()
+        .iter()
+        .enumerate()
+        .map(|(index, block)| {
+            let attrs = crate::parse::extract_attrs(&block.attributes, source);
+            verter_semantic::analysis::component_meta::CustomBlockAnalysis {
+                index,
+                block_type: sfc_custom_block_type(source, &block.tag_open),
+                lang: crate::parse::find_attr(&attrs, "lang").filter(|lang| lang != "true"),
+                src: crate::parse::find_attr(&attrs, "src"),
+                attributes: sfc_attributes_from_props(&block.attributes, source),
+            }
+        })
+        .collect();
+
+    meta.sfc_blocks = Some(
+        verter_semantic::analysis::component_meta::SfcBlocksAnalysis {
+            template,
+            script,
+            script_setup,
+            styles,
+            custom,
+        },
+    );
+}
+
+pub(crate) fn populate_public_instance_sidecar(
+    meta: &mut verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+) {
+    let mut members = Vec::new();
+
+    if !meta.slots.is_empty() {
+        members.push(build_public_instance_slots_member(&meta.slots));
+    }
+
+    members.extend(meta.props.iter().map(|prop| {
+        verter_semantic::analysis::component_meta::PublicInstanceMemberAnalysis {
+            name: prop.name.clone(),
+            kind: verter_semantic::analysis::component_meta::PublicInstanceMemberKind::Prop,
+            type_expr: prop.type_expr.clone(),
+            type_expansion: prop.type_expansion.clone(),
+            raw_type: prop.raw_type.clone(),
+            description: prop.description.clone(),
+        }
+    }));
+
+    for exposed in &meta.exposed {
+        let next = verter_semantic::analysis::component_meta::PublicInstanceMemberAnalysis {
+            name: exposed.name.clone(),
+            kind: verter_semantic::analysis::component_meta::PublicInstanceMemberKind::Exposed,
+            type_expr: exposed.type_expr.clone(),
+            type_expansion: exposed.type_expansion.clone(),
+            raw_type: None,
+            description: exposed.description.clone(),
+        };
+        if let Some(existing) = members.iter_mut().find(|member| member.name == next.name) {
+            *existing = next;
+        } else {
+            members.push(next);
+        }
+    }
+
+    meta.public_instance = if members.is_empty() {
+        None
+    } else {
+        Some(
+            verter_semantic::analysis::component_meta::PublicInstanceAnalysis {
+                members,
+                completeness:
+                    verter_semantic::analysis::component_meta::PublicInstanceCompleteness::Partial,
+            },
+        )
+    };
+}
+
+pub(crate) fn extract_component_meta_from_resolved(
+    host: &VerterHost,
+    canonical_or_alias: &str,
+    resolved: &crate::meta_resolve::ResolvedComponentMetaState,
+    include_fallthrough: bool,
+) -> verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
+    let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
+    let resolved_macros = resolver_component_meta_resolved_macros(
+        resolved.snapshot.macros.as_ref(),
+        &resolved.resolved_macros,
+    );
+    let resolved_type_registry =
+        resolver_component_meta_type_registry(&resolved.resolved_type_registry);
+    let mut meta = extract_component_meta_from_inputs(
+        host,
+        canonical_or_alias,
+        &resolved.snapshot,
+        &resolved_macros,
+        &resolved_type_registry,
+        resolved.evaluated_types.as_ref(),
+    );
+    merge_evaluated_prop_types_into_meta(
+        host,
+        canonical.as_str(),
+        &mut meta,
+        resolved.evaluated_types.as_ref(),
+    );
+    if fill_missing_component_meta_prop_descriptions_from_imported_roots(
+        host,
+        canonical.as_str(),
+        &mut meta,
+        resolved,
+    ) {
+        populate_public_instance_sidecar(&mut meta);
+    }
+    if include_fallthrough {
+        let mut visiting = rustc_hash::FxHashSet::default();
+        if let Some(resolution) = host.compute_fallthrough_surface_from_resolved_state(
+            &canonical,
+            resolved,
+            None,
+            &mut visiting,
+        ) {
+            meta.accepted_props = resolution.accepted_props;
+            meta.accepted_events = resolution.accepted_events;
+            meta.accepted_surface_completeness = resolution.accepted_surface_completeness;
+            meta.fallthrough_surface = resolution.fallthrough_surface;
+        }
+    }
+    // Phase 4B: apply the publication policy that commit `624b14d2` deleted.
+    // The pass is PURE over (resolved_type_registry, resolved_type_registry_meta);
+    // see docs/arch/debt-closure/06-step4b-consumer-surface.md.
+    crate::component_meta_resolution_policy::apply_component_meta_resolution_policy(
+        &mut meta,
+        &resolved.resolved_type_registry,
+        &resolved.resolved_type_registry_meta,
+        host,
+        canonical.as_str(),
+    );
+    meta
+}
+
+/// Like [`extract_component_meta_from_resolved`] with `include_fallthrough=true`,
+/// but also returns the fallthrough resolution's fact versions (if available).
+/// Used by the payload cache to store Full payloads with the correct fact set.
+pub(crate) fn extract_component_meta_from_resolved_with_facts(
+    host: &VerterHost,
+    canonical_or_alias: &str,
+    resolved: &crate::meta_resolve::ResolvedComponentMetaState,
+) -> (
+    verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    Option<Vec<crate::resolver_core::FactVersionRef>>,
+) {
+    let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
+    let resolved_macros = resolver_component_meta_resolved_macros(
+        resolved.snapshot.macros.as_ref(),
+        &resolved.resolved_macros,
+    );
+    let resolved_type_registry =
+        resolver_component_meta_type_registry(&resolved.resolved_type_registry);
+    let mut meta = extract_component_meta_from_inputs(
+        host,
+        canonical_or_alias,
+        &resolved.snapshot,
+        &resolved_macros,
+        &resolved_type_registry,
+        resolved.evaluated_types.as_ref(),
+    );
+    merge_evaluated_prop_types_into_meta(
+        host,
+        canonical.as_str(),
+        &mut meta,
+        resolved.evaluated_types.as_ref(),
+    );
+    let mut visiting = rustc_hash::FxHashSet::default();
+    let fallthrough_facts = if let Some(resolution) = host
+        .compute_fallthrough_surface_from_resolved_state(&canonical, resolved, None, &mut visiting)
+    {
+        let facts = resolution.fact_versions.clone();
+        meta.accepted_props = resolution.accepted_props;
+        meta.accepted_events = resolution.accepted_events;
+        meta.accepted_surface_completeness = resolution.accepted_surface_completeness;
+        meta.fallthrough_surface = resolution.fallthrough_surface;
+        Some(facts)
+    } else {
+        None
+    };
+    // Phase 4B: apply the publication policy AFTER fallthrough merge so the
+    // pass operates on the final accepted_props/events. PURE over
+    // (resolved_type_registry, resolved_type_registry_meta).
+    crate::component_meta_resolution_policy::apply_component_meta_resolution_policy(
+        &mut meta,
+        &resolved.resolved_type_registry,
+        &resolved.resolved_type_registry_meta,
+        host,
+        canonical.as_str(),
+    );
+    (meta, fallthrough_facts)
+}

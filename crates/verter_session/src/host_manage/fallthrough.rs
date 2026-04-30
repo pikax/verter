@@ -28,11 +28,13 @@ use crate::resolver_core::{
 use crate::types::*;
 use crate::VerterHost;
 
-use super::{
+use super::component_meta_extract::{
     collect_required_root_fallthrough_runtime_value_names,
-    collect_required_template_runtime_value_names, component_meta_debug,
-    component_meta_debug_enabled, component_meta_trace_custom, HostFallthroughResolver,
-    HostRuntimeValueResolver, STORE_VIEW_STABILITY_MAX_ATTEMPTS,
+    collect_required_template_runtime_value_names,
+};
+use super::{
+    component_meta_debug, component_meta_debug_enabled, component_meta_trace_custom,
+    HostFallthroughResolver, HostRuntimeValueResolver, STORE_VIEW_STABILITY_MAX_ATTEMPTS,
 };
 
 impl VerterHost {
