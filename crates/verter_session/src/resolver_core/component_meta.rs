@@ -1918,7 +1918,38 @@ defineEmits<Emits>()
     }
 
     #[test]
-    fn local_resolved_slot_types_project_symbolic_pick_bindings() {
+    fn local_resolved_slot_types_project_resolved_pick_bindings() {
+        // Phase 4 — slot binding type-annotations are now the resolved
+        // leaf, not the symbolic indexed-access form.
+        //
+        // Pre-Phase-4 + pre-Phase-5l: this test asserted the symbolic
+        // form `Some("CalendarCellTriggerProps['day']")`. The pre-
+        // change pipeline read the owner source via
+        // `host.read_source` and ran
+        // `project_macro_surfaces_from_source_type_name(owner_source,
+        // mac.kind, "CalendarSlots")` against it; that walked the
+        // owner source (where `Pick<CalendarCellTriggerProps, 'day'>`
+        // is still symbolic) and `extract_slot_info_from_type_text`
+        // reduced `Pick<X, K>` down to the symbolic `X[K]` form
+        // `CalendarCellTriggerProps['day']`.
+        //
+        // Post-Phase-4 + post-Phase-5l: the source-text reparse path
+        // (`host.read_source` + `project_macro_surfaces_from_source_
+        // type_name`) is gone. Owner-local resolved-type projection
+        // runs through the surviving
+        // `project_macro_surfaces_from_expanded_text(mac.kind,
+        // resolved.expanded)` arm. `resolved.expanded` is the
+        // semantically expanded form `{ day?: (props: { day: Date })
+        // => any }` — `Pick` is already resolved to `{ day: Date }`,
+        // so `extract_slot_info_from_type_text` produces the leaf
+        // `Date` for the binding's type-annotation.
+        //
+        // The resolved leaf is the architecturally correct contract
+        // for post-engine component-meta: `Pick<X,K>` is a source-
+        // text construct that the type system reduces; surfacing
+        // the reduction is what consumers (LSP, MCP, codegen) want.
+        // The symbolic form was an artefact of the old source-text
+        // reparse pathway, not a property the architecture targets.
         let source = r#"
 interface CalendarCellTriggerProps {
   day: Date
@@ -1980,7 +2011,7 @@ defineSlots<CalendarSlots>()
             resolved.resolved_macros[0].slots[0].bindings[0]
                 .type_annotation
                 .as_deref(),
-            Some("CalendarCellTriggerProps['day']")
+            Some("Date")
         );
     }
 
