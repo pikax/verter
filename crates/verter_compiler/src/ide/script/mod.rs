@@ -62,7 +62,6 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::ast::types::{AstNodeKind, ElementNode, TagType, TemplateAst};
 use crate::code_transform::CodeTransform;
-use crate::cursor::ScriptLanguage;
 use crate::parser::types::RootNodeScript;
 use crate::template::code_gen::binding::{is_simple_ident, BindingType};
 use crate::template::code_gen::types::CodeGenOutput;
@@ -135,6 +134,7 @@ mod event_inference;
 mod recovery;
 mod ts_assertions;
 mod type_constructs;
+mod wrapper;
 
 use detectors::{detect_get_current_instance, detect_use_attrs_calls};
 use event_inference::{apply_event_handler_param_inference, kebab_to_pascal_case};
@@ -142,6 +142,11 @@ use ts_assertions::rewrite_ts_type_assertions;
 use type_constructs::{
     build_binding_source_info, collect_builtin_components, emit_attrs_type_aliases,
     emit_helper_imports, emit_helper_imports_with_define_component, emit_type_constructs,
+};
+use wrapper::{
+    directive_accessor_declaration, emit_global_component_fallbacks, emit_minimal_wrapper,
+    instance_declaration, instance_declaration_ambient, instance_probe_line,
+    should_infer_function_types, to_pascal_case, PREFIX,
 };
 
 pub use type_constructs::{VERTER_TYPES_AMBIENT_MODULE, VERTER_TYPES_STANDALONE_DTS};
@@ -1381,10 +1386,6 @@ fn process_companion_for_tsx<'alloc>(
             out.overwrite(abs_start, abs_end, "");
         }
     }
-}
-
-fn should_infer_function_types(lang: Option<ScriptLanguage>) -> bool {
-    matches!(lang, Some(ScriptLanguage::TypeScript | ScriptLanguage::TSX))
 }
 
 fn collect_binding_names(
@@ -2761,225 +2762,6 @@ fn is_simple_type_reference(type_text: &str) -> bool {
             .chars()
             .next()
             .is_some_and(|c| c.is_alphabetic() || c == '_')
-}
-
-/// Emit global component fallback consts for unresolved components inside templateBindingFN.
-fn emit_global_component_fallbacks(
-    buf: &mut String,
-    template_ast: Option<&TemplateAst>,
-    source: &str,
-    bindings: &FxHashMap<&str, BindingType>,
-    is_jsx: bool,
-) {
-    let ast = match template_ast {
-        Some(a) => a,
-        None => return,
-    };
-
-    let binding_names: FxHashSet<&str> = bindings.keys().copied().collect();
-    let mut seen = FxHashSet::default();
-
-    for node in &ast.nodes {
-        if let AstNodeKind::Element(ref el) = node.kind {
-            if !el.tag_type.is_component() {
-                continue;
-            }
-            let tag_name = &source[(el.tag_open.start + 1) as usize..el.tag_open.name_end as usize];
-
-            // Skip builtins
-            if crate::template::code_gen::shared::helpers::is_builtin_component(tag_name).is_some()
-            {
-                continue;
-            }
-
-            // Convert to PascalCase for binding lookup
-            let pascal = to_pascal_case(tag_name);
-            if binding_names.contains(pascal.as_str()) || binding_names.contains(tag_name) {
-                continue;
-            }
-
-            // Skip member expressions like Foo.Bar
-            if tag_name.contains('.') {
-                continue;
-            }
-
-            if seen.insert(pascal.clone()) {
-                use std::fmt::Write;
-                if is_jsx {
-                    write!(
-                        buf,
-                        "\nconst {pascal} = /** @type {{unknown}} */ ({{}});",
-                        pascal = pascal,
-                    )
-                    .expect("write to String is infallible");
-                } else {
-                    write!(
-                        buf,
-                        "\nconst {pascal} = {{}} as import('vue').GlobalComponents extends {{ {pascal}: infer C }} ? C : unknown;",
-                        pascal = pascal,
-                    )
-                    .expect("write to String is infallible");
-                }
-            }
-        }
-    }
-}
-
-/// Convert a kebab-case or camelCase tag name to PascalCase.
-fn to_pascal_case(tag: &str) -> String {
-    if tag.contains('-') {
-        tag.split('-')
-            .map(|part| {
-                let mut chars = part.chars();
-                match chars.next() {
-                    Some(c) => {
-                        let upper: String = c.to_uppercase().collect();
-                        format!("{}{}", upper, chars.as_str())
-                    }
-                    None => String::new(),
-                }
-            })
-            .collect()
-    } else {
-        // Already PascalCase or camelCase — capitalize first letter
-        let mut chars = tag.chars();
-        match chars.next() {
-            Some(c) => {
-                let upper: String = c.to_uppercase().collect();
-                format!("{}{}", upper, chars.as_str())
-            }
-            None => String::new(),
-        }
-    }
-}
-
-// ── Helpers ───────────────────────────────────────────────────────
-
-fn emit_minimal_wrapper(
-    out: &mut CodeGenOutput<'_>,
-    options: &IdeScriptOptions<'_>,
-    pos: u32,
-    template_end: Option<u32>,
-) -> Option<String> {
-    if template_end.is_some() {
-        // Unified CT: function start at pos, close deferred
-        let mut start = format!("export function {}TemplateBindingFN() {{\n", PREFIX);
-        // Declare instance for instance property access in template.
-        // Minimal wrapper: no Comp functions, so no $attrs override
-        start.push_str(&instance_declaration(
-            options.filename,
-            options.is_jsx,
-            false,
-        ));
-        start.push_str(&directive_accessor_declaration(options.is_jsx));
-        out.prepend_alloc(pos, &start);
-        let mut close = String::from("\n");
-        close.push_str(&instance_probe_line());
-        close.push_str("return {};\n}\n");
-        Some(close)
-    } else {
-        // No template: emit everything at pos
-        let wrapper = format!(
-            "export function {}TemplateBindingFN() {{\nreturn {{}};\n}}\n",
-            PREFIX,
-        );
-        out.prepend_alloc(pos, &wrapper);
-        None
-    }
-}
-
-/// Prefix for all emitted ___VERTER___ types/functions.
-pub(super) const PREFIX: &str = "___VERTER___";
-
-/// Emit the `___VERTER___instance` declaration and void suppression.
-///
-/// Uses `import()` type expression to get the full component instance type from the
-/// `.vue.d.ts` default export, providing type checking for `$slots`, `$emit`, `$props`,
-/// `$attrs`, and any custom global properties (e.g., `$t`, `$router`).
-fn instance_declaration(filename: &str, is_jsx: bool, override_attrs: bool) -> String {
-    if is_jsx {
-        format!(
-            "\n/** @type {{any}} */\nvar {P}instance = /** @type {{any}} */ (null);\nvoid {P}instance;\n",
-            P = PREFIX,
-        )
-    } else if override_attrs {
-        // With Comp functions + attrs type aliases: override $attrs with composed type
-        format!(
-            "\n// @ts-ignore\nlet {P}instance!: Omit<InstanceType<import('./{filename}.ts')['default']>, '$attrs'> & {{ $attrs: {P}Attrs }};\nvoid {P}instance;\n",
-            P = PREFIX,
-            filename = filename,
-        )
-    } else {
-        format!(
-            "\n// @ts-ignore\nlet {P}instance!: InstanceType<import('./{filename}.ts')['default']>;\nvoid {P}instance;\n",
-            P = PREFIX,
-            filename = filename,
-        )
-    }
-}
-
-/// Ambient variant for Options API (file scope, no TDZ issues).
-///
-/// Uses `declare let` so the declaration is available regardless of position in file.
-/// Needed because template JSX may appear before the script block.
-///
-/// For JS mode with plain object exports (`needs_define_component_wrap = true`), we
-/// inline a `defineComponent(__sfc__)` call to get proper instance typing without
-/// relying on self-import (which TSGO cannot resolve for virtual `.vue.jsx` files).
-fn instance_declaration_ambient(
-    filename: &str,
-    is_jsx: bool,
-    needs_define_component_wrap: bool,
-) -> String {
-    if is_jsx {
-        if needs_define_component_wrap {
-            // Inline defineComponent wrapping — avoids self-import, works with TSGO + tsserver
-            format!(
-                "\nconst {P}dc = ({P}defineComponent)(__sfc__);\n/** @type {{InstanceType<typeof {P}dc>}} */\nvar {P}instance = /** @type {{*}} */ (null);\n",
-                P = PREFIX,
-            )
-        } else {
-            // Already has defineComponent — use self-import for the typed default export
-            format!(
-                "\n/** @type {{InstanceType<import('./{filename}.ts')['default']>}} */\nvar {P}instance = /** @type {{*}} */ (null);\n",
-                P = PREFIX,
-                filename = filename,
-            )
-        }
-    } else {
-        format!(
-            "\n// @ts-ignore\ndeclare let {P}instance: InstanceType<import('./{filename}.ts')['default']>;\n",
-            P = PREFIX,
-            filename = filename,
-        )
-    }
-}
-
-/// Emit the `___VERTER___directiveAccessor` declaration.
-///
-/// Extracts both local setup directives and global Vue directives from the
-/// component instance, providing type-safe access for custom directive
-/// type checking in template JSX output.
-fn directive_accessor_declaration(is_jsx: bool) -> String {
-    if is_jsx {
-        format!(
-            "var {P}directiveAccessor = {P}retrieveSetupDirectives({P}instance);\nvoid {P}directiveAccessor;\n",
-            P = PREFIX,
-        )
-    } else {
-        format!(
-            "const {P}directiveAccessor = {P}retrieveSetupDirectives({P}instance);\nvoid {P}directiveAccessor;\n",
-            P = PREFIX,
-        )
-    }
-}
-
-/// Emit the instance completion probe line.
-///
-/// Creates a member-access expression at a known position that the LSP can use
-/// to request TSGO completions for all instance members.
-fn instance_probe_line() -> String {
-    format!("\nvoid ({P}instance).valueOf;\n", P = PREFIX)
 }
 
 /// Emit Comp{offset} functions to a string buffer (inside templateBindingFN).
