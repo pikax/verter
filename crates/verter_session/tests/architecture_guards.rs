@@ -31,7 +31,6 @@ fn no_read_source_in_component_meta() {
 }
 
 #[test]
-#[ignore = "phase-04b pending"]
 fn no_read_source_in_declaration_metadata() {
     // After Phase 4b, the `read_source` trait method itself is deleted
     // from declaration_metadata.rs. Test impls in tests/ are out of
@@ -46,7 +45,6 @@ fn no_read_source_in_declaration_metadata() {
 }
 
 #[test]
-#[ignore = "phase-04b pending"]
 fn no_text_based_macro_surface_projection_helpers() {
     // After Phase 4b, the three text-projection helper functions are
     // deleted from the resolver_core. Their function names appearing
@@ -71,7 +69,6 @@ fn no_text_based_macro_surface_projection_helpers() {
 }
 
 #[test]
-#[ignore = "phase-04b pending"]
 fn no_macro_string_heuristics_in_resolver_core() {
     // The user's directive (Phase 4b origin): no regex, no string-based
     // macro detection. This guard catches the most common
