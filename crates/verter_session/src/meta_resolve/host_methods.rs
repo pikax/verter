@@ -53,7 +53,6 @@ use super::materialize::{
     materialize_component_meta_field_types, materialize_component_meta_type_expr_until_stable,
     produce_macro_object_shapes_for_purpose,
 };
-use super::scoring::component_meta_registry_prefers_structural_materialization;
 use super::request_host::{
     next_component_meta_audit_request_id, request_source_performed_compute,
     resolved_meta_cache_key, should_skip_imported_registry_seed_refresh, trace_request_source,
@@ -66,6 +65,7 @@ use super::resolved_state::{
     SurfaceNodeIdentities,
 };
 use super::scoring::compare_type_expr_improvement;
+use super::scoring::component_meta_registry_prefers_structural_materialization;
 use super::STORE_VIEW_STABILITY_MAX_ATTEMPTS;
 
 // Items that still live in the parent shell (`crate::meta_resolve`):

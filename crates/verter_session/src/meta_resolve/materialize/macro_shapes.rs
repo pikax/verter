@@ -47,9 +47,9 @@ use super::super::resolved_state::{
 use super::super::scoring::compare_type_expr_improvement;
 use super::field_types::{
     define_props_member_can_stay_symbolic_without_rescue,
-    field_should_preserve_shallow_symbolic_raw_type,
-    lowered_needs_member_route_materialization, materialize_component_meta_type_expr_until_stable,
-    parsed_field_raw_type, top_level_imported_ref_can_stay_symbolic,
+    field_should_preserve_shallow_symbolic_raw_type, lowered_needs_member_route_materialization,
+    materialize_component_meta_type_expr_until_stable, parsed_field_raw_type,
+    top_level_imported_ref_can_stay_symbolic,
 };
 
 /// Sole-authority producer for type-based macro object shapes.
@@ -2050,13 +2050,17 @@ pub(crate) fn produce_one_macro_object_shape_for_slots(
     }
 }
 
-pub(crate) fn has_shape_surface(shape: &verter_semantic::analysis::type_expand::ExpandedObjectShape) -> bool {
+pub(crate) fn has_shape_surface(
+    shape: &verter_semantic::analysis::type_expand::ExpandedObjectShape,
+) -> bool {
     !shape.properties.is_empty()
         || !shape.index_signatures.is_empty()
         || !shape.call_signatures.is_empty()
 }
 
-pub(crate) fn type_expr_symbolic_penalty(expr: &verter_semantic::analysis::type_expr::TypeExpr) -> usize {
+pub(crate) fn type_expr_symbolic_penalty(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> usize {
     use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
 
     match expr {
@@ -2199,7 +2203,10 @@ pub(crate) fn shape_symbolic_penalty(
             .sum::<usize>()
 }
 
-pub(crate) fn projection_result_beats_solver_shape(projected: &ShapeResult, solver: &ShapeResult) -> bool {
+pub(crate) fn projection_result_beats_solver_shape(
+    projected: &ShapeResult,
+    solver: &ShapeResult,
+) -> bool {
     let projected_count = shape_surface_count(projected);
     let solver_count = shape_surface_count(solver);
     projected_count > solver_count

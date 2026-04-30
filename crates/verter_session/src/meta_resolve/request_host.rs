@@ -19,9 +19,7 @@
 
 use super::ResolvedComponentMetaState;
 use crate::host_manage::component_meta_trace_custom;
-use crate::resolver_core::{
-    ComponentMetaRequestHost, RequestSource, SingleflightRole,
-};
+use crate::resolver_core::{ComponentMetaRequestHost, RequestSource, SingleflightRole};
 use crate::types::{FileAnalysisSnapshot, Hash16, ProjectionMode};
 use crate::VerterHost;
 

@@ -24,9 +24,8 @@ use super::dispatch_helpers::{
 use super::materialize::{
     define_props_member_can_stay_symbolic_without_rescue, expr_needs_projection_rescue,
     field_should_preserve_shallow_symbolic_raw_type, has_prop_shape_surface,
-    lowered_needs_member_route_materialization,
-    materialize_component_meta_type_expr_until_stable, projection_result_beats_solver_shape,
-    type_expr_is_slots_member_route,
+    lowered_needs_member_route_materialization, materialize_component_meta_type_expr_until_stable,
+    projection_result_beats_solver_shape, type_expr_is_slots_member_route,
 };
 use super::resolved_state::{
     lowered_root_reaches_transitive_cycle, select_imported_materialization_scope,

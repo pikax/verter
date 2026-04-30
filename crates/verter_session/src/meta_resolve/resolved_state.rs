@@ -627,11 +627,8 @@ pub(crate) fn lowered_root_reaches_transitive_cycle(
         _ => return false,
     };
     let mut fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
-    let result = super::ref_root_reaches_transitive_cycle_node(
-        &identity,
-        query_engine.host,
-        &mut fence,
-    );
+    let result =
+        super::ref_root_reaches_transitive_cycle_node(&identity, query_engine.host, &mut fence);
     accumulate_dispatch_dep_signature(&Arc::from(fence.into_boxed_slice()));
     result
 }

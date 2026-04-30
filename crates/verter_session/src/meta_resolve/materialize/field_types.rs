@@ -282,7 +282,9 @@ pub(crate) fn type_expr_has_package_backed_object_like_root(
         })
 }
 
-pub(crate) fn type_expr_is_slots_member_route(expr: &verter_semantic::analysis::type_expr::TypeExpr) -> bool {
+pub(crate) fn type_expr_is_slots_member_route(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> bool {
     use verter_semantic::analysis::type_expr::{LiteralValue, TypeExpr};
 
     match expr {

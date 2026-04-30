@@ -23,20 +23,15 @@ mod macro_shapes;
 
 pub(crate) use field_types::{
     define_props_member_can_stay_symbolic_without_rescue,
-    field_should_preserve_shallow_symbolic_raw_type,
-    lowered_needs_member_route_materialization,
-    lowered_preserve_package_backed_symbolic_refs,
-    materialize_component_meta_field_types,
+    field_should_preserve_shallow_symbolic_raw_type, lowered_needs_member_route_materialization,
+    lowered_preserve_package_backed_symbolic_refs, materialize_component_meta_field_types,
     materialize_component_meta_type_expr_until_stable,
-    materialize_component_meta_type_expr_until_stable_full,
-    parsed_field_raw_type, top_level_imported_ref_can_stay_symbolic,
-    type_expr_has_package_backed_object_like_root,
+    materialize_component_meta_type_expr_until_stable_full, parsed_field_raw_type,
+    top_level_imported_ref_can_stay_symbolic, type_expr_has_package_backed_object_like_root,
     type_expr_is_slots_member_route,
 };
 #[cfg(test)]
-pub(crate) use field_types::{
-    mtl_call_count_for_tests, reset_mtl_call_count_for_tests,
-};
+pub(crate) use field_types::{mtl_call_count_for_tests, reset_mtl_call_count_for_tests};
 
 pub(crate) use macro_shapes::{
     collect_type_expr_ref_names, define_props_fields_fast_path_allowed,
