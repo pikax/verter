@@ -76,13 +76,13 @@ use super::STORE_VIEW_STABILITY_MAX_ATTEMPTS;
 // in their final per-domain siblings in Phase 11a commits 10-14; until
 // then `host_methods.rs` reaches them via `super::*` so this commit is a
 // pure organisational move.
+use super::macro_member_walk::walk_component_meta_macro_shape_member_types;
 use super::{
     build_origin_graph, component_meta_registry_prefers_structural_materialization_node,
     component_meta_registry_should_keep_raw_symbolic_non_object_alias,
     materialize_component_meta_registry_structural_expr, preserve_nested_symbolic_member_routes,
     preserve_registry_callable_param_member_routes,
-    type_expr_needs_nested_symbolic_route_preservation,
-    walk_component_meta_macro_shape_member_types, HostComponentMetaResolver,
+    type_expr_needs_nested_symbolic_route_preservation, HostComponentMetaResolver,
 };
 
 use crate::resolver_core::component_meta_registry::{

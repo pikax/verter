@@ -36,16 +36,16 @@ use super::super::resolved_state::{
 use super::super::scoring::compare_type_expr_improvement;
 use super::macro_shapes::expr_needs_projection_rescue;
 
-// `component_meta_registry_should_keep_raw_symbolic_non_object_alias`,
+// `materialize_component_meta_macro_shape_member_type_expr` lives in the
+// `macro_member_walk` sibling (Phase 11a commit 10). Other items
+// (`component_meta_registry_should_keep_raw_symbolic_non_object_alias`,
 // `preserve_package_backed_symbolic_refs_node`,
-// `type_node_needs_member_route_materialization`, and
-// `materialize_component_meta_macro_shape_member_type_expr` are still
-// defined in the parent shell (`crate::meta_resolve`); the materializer
-// reaches them via `super::super::*` until those predicates / walker
-// land in their final per-domain siblings (Phase 11a commits 9-12).
+// `type_node_needs_member_route_materialization`) still live in the
+// parent shell (`crate::meta_resolve`) and migrate to per-domain siblings
+// in Phase 11a commits 11/12.
+use super::super::macro_member_walk::materialize_component_meta_macro_shape_member_type_expr;
 use super::super::{
     component_meta_registry_should_keep_raw_symbolic_non_object_alias,
-    materialize_component_meta_macro_shape_member_type_expr,
     preserve_package_backed_symbolic_refs_node, type_node_needs_member_route_materialization,
 };
 

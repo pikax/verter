@@ -10444,6 +10444,13 @@ defineProps<{
     /// invariant is observable directly from the function body.
     #[test]
     fn step6_2_member_route_fast_path_runs_before_eager_materialize() {
+        // Phase 11a — `materialize_component_meta_macro_shape_member_type_expr`
+        // moved from `meta_resolve.rs` to
+        // `meta_resolve/macro_member_walk.rs` (Phase 11a commit 10).
+        // The static-text discriminator (fast-path call before eager
+        // materialize call inside the function body) is preserved
+        // verbatim — only the literal file path moved. §0.6.1
+        // mechanical adjustment.
         let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(|p| p.parent())
@@ -10453,9 +10460,10 @@ defineProps<{
             .join("crates")
             .join("verter_session")
             .join("src")
-            .join("meta_resolve.rs");
+            .join("meta_resolve")
+            .join("macro_member_walk.rs");
         let raw_source = std::fs::read_to_string(&meta_resolve_path)
-            .unwrap_or_else(|e| panic!("read meta_resolve.rs: {e}"));
+            .unwrap_or_else(|e| panic!("read meta_resolve/macro_member_walk.rs: {e}"));
         // Normalize CRLF to LF so the marker matches on both Windows
         // (CRLF line endings) and Unix (LF). The static-text test
         // discriminates structural ordering, not byte-exact line
