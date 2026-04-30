@@ -33,12 +33,13 @@ use super::resolved_state::{
 };
 use super::scoring::compare_type_expr_improvement;
 
-// Items still defined in the parent shell (`crate::meta_resolve`) — the
-// graph-native predicates (`slot_binding_param_can_stay_symbolic_node`),
-// the registry-route preservers (`type_expr_contains_public_member_route`),
-// etc. — are reached via `super::*` until those domains land in their
-// final per-domain siblings (Phase 11a commits 11/12).
-use super::{slot_binding_param_can_stay_symbolic_node, type_expr_contains_public_member_route};
+// `type_expr_contains_public_member_route` lives in the
+// `registry_materialize` sibling (Phase 11a commit 11);
+// `slot_binding_param_can_stay_symbolic_node` still lives in the parent
+// shell (`crate::meta_resolve`) and migrates to the `graph_predicates`
+// sibling in Phase 11a commit 12.
+use super::registry_materialize::type_expr_contains_public_member_route;
+use super::slot_binding_param_can_stay_symbolic_node;
 
 use crate::resolver_core::component_meta_registry::{
     component_meta_registry_public_indexed_access_route,
