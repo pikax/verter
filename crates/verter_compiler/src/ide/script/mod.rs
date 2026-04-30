@@ -73,7 +73,7 @@ use crate::utils::oxc::vue::{
     ScriptItem, ScriptMacro, ScriptMode,
 };
 
-use super::{event_to_jsx_name, get_directive_name, IdeGenericInfo, IdeScriptOptions};
+use crate::ide::{event_to_jsx_name, get_directive_name, IdeGenericInfo, IdeScriptOptions};
 
 // ── Macro State Types ────────────────────────────────────────────
 
@@ -516,7 +516,7 @@ fn process_tsx_script_setup<'alloc>(
 
                 // Use tokenizer to detect macros in the broken tail region
                 let recovery =
-                    super::script_recover::ScriptTokenScanner::new(content_str, content_start)
+                    crate::ide::script_recover::ScriptTokenScanner::new(content_str, content_start)
                         .recover();
                 for m in &recovery.macros {
                     if m.call_span.end > content_start + truncate_at as u32 {
@@ -748,17 +748,24 @@ fn process_tsx_script_setup<'alloc>(
     // can still reference them.
     if !damaged_macro_spans.is_empty() {
         let recovery =
-            super::script_recover::ScriptTokenScanner::new(content_str, content_start).recover();
+            crate::ide::script_recover::ScriptTokenScanner::new(content_str, content_start)
+                .recover();
         for m in &recovery.macros {
             if let Some(name) = m.binding_name {
                 let bt = match m.kind {
-                    super::script_recover::RecoveredMacroKind::DefineProps => BindingType::Props,
-                    super::script_recover::RecoveredMacroKind::WithDefaults => BindingType::Props,
-                    super::script_recover::RecoveredMacroKind::DefineEmits => {
+                    crate::ide::script_recover::RecoveredMacroKind::DefineProps => {
+                        BindingType::Props
+                    }
+                    crate::ide::script_recover::RecoveredMacroKind::WithDefaults => {
+                        BindingType::Props
+                    }
+                    crate::ide::script_recover::RecoveredMacroKind::DefineEmits => {
                         BindingType::SetupConst
                     }
-                    super::script_recover::RecoveredMacroKind::DefineModel => BindingType::SetupRef,
-                    super::script_recover::RecoveredMacroKind::DefineSlots => {
+                    crate::ide::script_recover::RecoveredMacroKind::DefineModel => {
+                        BindingType::SetupRef
+                    }
+                    crate::ide::script_recover::RecoveredMacroKind::DefineSlots => {
                         BindingType::SetupConst
                     }
                     _ => BindingType::SetupConst,
@@ -770,7 +777,7 @@ fn process_tsx_script_setup<'alloc>(
         // Recover variable bindings from the broken tail
         for v in &recovery.variables {
             let bt = match v.kind {
-                super::script_recover::RecoveredVarKind::Const => BindingType::SetupConst,
+                crate::ide::script_recover::RecoveredVarKind::Const => BindingType::SetupConst,
                 _ => BindingType::SetupLet,
             };
             let alloc_name = alloc.alloc_str(v.name);
@@ -1219,7 +1226,8 @@ fn process_tsx_script_setup<'alloc>(
                     .iter()
                     .map(|(offset, _, cond)| (cond.as_deref(), *offset))
                     .collect();
-                super::condition_narrowing::analyze_conditional_chain(&conditions, &prop_names).ok()
+                crate::ide::condition_narrowing::analyze_conditional_chain(&conditions, &prop_names)
+                    .ok()
             } else {
                 None
             };
@@ -4247,7 +4255,7 @@ fn emit_get_root_component_to_string(
     gs: &str,
     gn: &str,
     root_comp_entries: &[(u32, String, Option<String>)],
-    narrowing: Option<&super::condition_narrowing::ConditionalRootNarrowing>,
+    narrowing: Option<&crate::ide::condition_narrowing::ConditionalRootNarrowing>,
 ) {
     use std::fmt::Write;
 
@@ -4511,7 +4519,7 @@ fn walk_children_for_comp(
     ast: &TemplateAst,
     source: &str,
     children: &[crate::types::NodeId],
-    parent_scopes: &[super::condition::ConditionScope],
+    parent_scopes: &[crate::ide::condition::ConditionScope],
     comp_scopes: &[CompScope],
     root_comp_entries: &mut Vec<(u32, String, Option<String>)>,
     all_comp_offsets: &mut Vec<u32>,
@@ -4718,7 +4726,7 @@ fn build_condition_scope_raw(
     ast: &TemplateAst,
     node_id: crate::types::NodeId,
     source: &str,
-) -> Option<super::condition::ConditionScope> {
+) -> Option<crate::ide::condition::ConditionScope> {
     use crate::ast::types::ElementNodeConditionKind;
 
     let condition = el.v_condition.as_ref()?;
@@ -4741,7 +4749,7 @@ fn build_condition_scope_raw(
         }
     };
 
-    Some(super::condition::ConditionScope {
+    Some(crate::ide::condition::ConditionScope {
         positive,
         sibling_negations,
     })
@@ -5184,7 +5192,7 @@ fn emit_comp_function_for_element(
     el: &ElementNode,
     source: &str,
     offset: u32,
-    condition_scopes: &[super::condition::ConditionScope],
+    condition_scopes: &[crate::ide::condition::ConditionScope],
     comp_scopes: &[CompScope],
     is_jsx: bool,
     props_literal: &str,
@@ -5199,7 +5207,7 @@ fn emit_comp_function_for_element(
     // so that getRootComponent/void chains still resolve.
     if raw_tag == "component" {
         use std::fmt::Write;
-        let guard = super::condition::generate_condition_text(condition_scopes)
+        let guard = crate::ide::condition::generate_condition_text(condition_scopes)
             .map(|text| {
                 let resolved = resolve_all_prop_refs_in_expr(&text, prop_names);
                 format!("\n  if(!({})) return null;", resolved)
@@ -5233,7 +5241,7 @@ fn emit_comp_function_for_element(
     // Generate narrowing guard from condition scopes.
     // Resolve prop names to __props.propName since Comp functions are outside the
     // template block scope where __props destructuring is available.
-    let guard = super::condition::generate_condition_text(condition_scopes)
+    let guard = crate::ide::condition::generate_condition_text(condition_scopes)
         .map(|text| {
             let resolved = resolve_all_prop_refs_in_expr(&text, prop_names);
             format!("\n  if(!({})) return null;", resolved)
@@ -5350,7 +5358,7 @@ fn emit_comp_function_for_element(
 }
 
 #[cfg(test)]
-#[path = "script_partial_tests.rs"]
+#[path = "../script_partial_tests.rs"]
 mod script_partial_tests;
 
 #[cfg(test)]
