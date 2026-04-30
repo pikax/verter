@@ -263,30 +263,31 @@ pub fn resolve_type_declaration<R: DeclarationMetadataResolver>(
             follow_direct_type_reexport_chain(resolver, dep_canonical, requested_name)
         {
             if followed_canonical != canonical_source || followed_name != resolved_name {
-                if let Some(source) = resolver.read_source(followed_canonical.as_str()) {
-                    let followed_details = resolve_local_symbol_details(
-                        resolver,
-                        followed_canonical.as_str(),
-                        followed_name.as_str(),
-                        export_span,
-                        Some(&source),
-                    );
-                    if followed_details.0 != ResolvedDeclarationKind::Unknown
-                        || followed_details.2.is_some()
-                    {
-                        return ResolvedTypeDeclaration {
-                            requested_name: requested_name.to_string(),
-                            declaration_id: resolver.type_declaration_id(
-                                followed_canonical.as_str(),
-                                followed_name.as_str(),
-                            ),
-                            resolved_name: followed_name,
-                            canonical_source: followed_canonical,
-                            span: followed_details.1,
-                            kind: followed_details.0,
-                            text: followed_details.2,
-                        };
-                    }
+                // Phase 4b §4b.3 — source-text reparse path retired.
+                // The leaf graph metadata
+                // (`resolve_local_type_symbol_metadata`) is the
+                // authoritative kind/span carrier when the chain
+                // moves; the leaf source is no longer reread.
+                let followed_details = resolve_local_symbol_details(
+                    resolver,
+                    followed_canonical.as_str(),
+                    followed_name.as_str(),
+                    export_span,
+                    None,
+                );
+                if followed_details.0 != ResolvedDeclarationKind::Unknown
+                    || followed_details.2.is_some()
+                {
+                    return ResolvedTypeDeclaration {
+                        requested_name: requested_name.to_string(),
+                        declaration_id: resolver
+                            .type_declaration_id(followed_canonical.as_str(), followed_name.as_str()),
+                        resolved_name: followed_name,
+                        canonical_source: followed_canonical,
+                        span: followed_details.1,
+                        kind: followed_details.0,
+                        text: followed_details.2,
+                    };
                 }
             }
         }
