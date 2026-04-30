@@ -817,3 +817,362 @@ fn no_scheduler_backed_workspace_shim_in_session_src() {
         violations.join("\n")
     );
 }
+
+// ----------------------------------------------------------------------
+// Phase 8 — `no_off_store_host_caches`
+//
+// Static guard for the "no caches outside ProjectTypeStore" architectural
+// rule documented in CLAUDE.md ("Project-global cache (final state)") and
+// re-stated by the universal preamble R4 of the architecture-cutover plan
+// ("Do not add caches outside ProjectTypeStore. Do not add request-local
+// mirrors of host state.").
+//
+// Phase 6b's classification of every cache-shaped `VerterHost` field is
+// the binding source of truth. Each `legitimate-authority` field is
+// recorded in `phase_8_allow_list()` with the §6b sub-plan citation and
+// the architectural rationale. Each `mirror`-classified field (F3
+// routes/imported_roots, F6 external_type_analysis_cache, F7
+// route_owned_shallow_cache) was already deleted by Phase 6b — this
+// guard verifies their continued absence.
+//
+// Body design (per §8.1 of the cutover plan):
+//   1. Parse `crates/verter_session/src/lib.rs` via `syn::parse_file`.
+//   2. Locate `pub struct VerterHost`.
+//   3. For each field, render the type signature to a string and
+//      classify by structural shape:
+//        - `DashMap<...>`, `Shared<FxHashMap...>`,
+//          `Mutex<...>`, `RwLock<...>` (with or without a
+//          `parking_lot::` qualifier) → cache-shape candidate.
+//        - `Atomic*`, `ArcSwap*`, simple `Arc<T>`, `Box<T>`,
+//          plain owned types → non-cache shape, PASS.
+//   4. For each cache-shape candidate, assert it is either:
+//        - on the allow-list below (with phase-report citation), OR
+//        - the `project_type_store` field itself (the destination).
+//   5. Re-verify that the deleted mirror field names do not reappear.
+//
+// Phase 8 ships this guard un-ignored: Phase 8 has full visibility into
+// the post-rehoming shape and is the sole author of this discipline.
+// Future commits that add a new cache-shaped field on `VerterHost` MUST
+// either rehome the field into `ProjectTypeStore` or extend the
+// allow-list with a phase-report citation justifying the exception.
+
+/// The Phase-8 allow-list for `no_off_store_host_caches`. Each entry is a
+/// `VerterHost` cache-shape field that Phase 6b classified as
+/// `legitimate-authority`, paired with a one-line phase-report citation
+/// and architectural rationale.
+fn phase_8_allow_list() -> std::collections::HashMap<&'static str, &'static str> {
+    [
+        // (a) Cache-shape fields explicitly classified by Phase 6b as
+        //     legitimate-authority — see phase-06b-report.md and the
+        //     phase-06b sub-plan §6b.2.
+        (
+            "alias_to_canonical",
+            "phase-06b-report.md §F12: caller-supplied virtual-alias map populated at upsert time, disjoint from VFS overlay and ProjectResolver. Host-scoped, no equivalent in ProjectTypeStore.",
+        ),
+        (
+            "last_const_prop_overrides",
+            "phase-06b-report.md §F13: Phase-7 invalidation state-diff record (NOT a cache of resolution results). No equivalent in ProjectTypeStore.",
+        ),
+        (
+            "compile_cache",
+            "phase-06b-report.md §F1: per-profile compile state with sub-mirror lifecycle on import_routes (compile-event invalidation differs from file-content-event invalidation that drives IndexedReady.import_routes).",
+        ),
+        (
+            "resolved_type_cache",
+            "phase-06b-report.md §F2: shared external-type cache with profile-gated writes; bounded clear-all at RESOLVED_TYPE_CACHE_CAP (NOT LRU). Distinct from SemanticGraphStore.HostResolvedNamedTypeKey identity.",
+        ),
+        (
+            "eval_env_cache",
+            "phase-06b-report.md §F4: owned-data EvalEnv snapshots; consumers are host-local, no project-global sharing benefit. Migration to a hypothetical ProjectTypeStore.EvalEnvDb is unmotivated by current consumer patterns.",
+        ),
+        (
+            "semantic_db",
+            "phase-06b-report.md §F5: different crate, different artifact than ProjectTypeStore.semantic_graph(). verter_semantic::db::SemanticDb is a separate query-memo DB serving the surfaces / bindings / reactivity provenance layer.",
+        ),
+        (
+            "query_profile",
+            "phase-06b-report.md §F10: execution-policy state, not a result memoiser. Different artifact type than anything in ProjectTypeStore.",
+        ),
+        // (b) Single-cell handles whose `RwLock<Arc<dyn>>` shape matches
+        //     the cache-detection pattern but whose semantics are
+        //     config-handle, not hashmap-cache. Documented here for
+        //     completeness so the guard's allow-list captures every
+        //     deviation.
+        (
+            "workspace",
+            "phase-06b-report.md §6b.2.F6.bypass: single-cell workspace handle (Arc<RwLock<Arc<dyn WorkspaceAccess>>>) shared with the scheduler's SourceLoader so the lock always reads through the latest workspace after set_workspace(). NOT a cache; a re-pointable handle.",
+        ),
+    ]
+    .into_iter()
+    .collect()
+}
+
+/// Classify a rendered type signature by structural shape. Returns true
+/// for cache-shape candidates (DashMap / Shared<HashMap> / Mutex<...> /
+/// RwLock<...>). Returns false for `Arc<T>`, `Box<T>`, `Atomic*`, owned
+/// scalars, and other non-cache-shape types.
+///
+/// The substring matches are deliberately broad: any field whose type
+/// signature contains `Mutex<` or `RwLock<` or `DashMap<` or
+/// `Shared<FxHashMap` or `Shared<HashMap` is treated as a cache-shape
+/// candidate. The token-stream renderer used by `render_type` emits both
+/// `Mutex <` (with the angle-bracket-padding syn produces) and `Mutex<`
+/// (after string normalisation), so we match both forms defensively.
+fn is_cache_shape(rendered_ty: &str) -> bool {
+    let r = rendered_ty;
+    r.contains("DashMap <")
+        || r.contains("DashMap<")
+        || r.contains("Shared < FxHashMap")
+        || r.contains("Shared<FxHashMap")
+        || r.contains("Shared < HashMap")
+        || r.contains("Shared<HashMap")
+        || r.contains("Mutex <")
+        || r.contains("Mutex<")
+        || r.contains("RwLock <")
+        || r.contains("RwLock<")
+}
+
+/// Render a `syn::Type` to a string via its `ToTokens` impl. Stable
+/// across rustc versions because syn's token stream emission is
+/// canonical (single-space-separated tokens).
+fn render_type(ty: &syn::Type) -> String {
+    use quote::ToTokens;
+    let tokens = ty.to_token_stream();
+    tokens.to_string()
+}
+
+/// The core algorithm of `no_off_store_host_caches`. Given a parsed
+/// `pub struct <ident> { ... }` named-fields struct and the allow-list,
+/// returns `(violations, surveyed_cache_fields)`. Pure function — no
+/// I/O — so it is reusable by the discriminator self-test.
+fn no_off_store_host_caches_inner(
+    parsed: &syn::File,
+    target_struct: &str,
+    allow_list: &std::collections::HashMap<&str, &str>,
+) -> (Vec<String>, Vec<(String, String)>) {
+    use syn::{Fields, Item};
+    let mut violations = Vec::<String>::new();
+    let mut surveyed_cache_fields = Vec::<(String, String)>::new();
+    let mut found_struct = false;
+    for item in &parsed.items {
+        let Item::Struct(s) = item else { continue };
+        if s.ident != target_struct {
+            continue;
+        }
+        found_struct = true;
+        let Fields::Named(named) = &s.fields else {
+            panic!(
+                "{target_struct} is expected to have named fields; found {:?}",
+                s.fields
+            );
+        };
+        for field in &named.named {
+            let field_name = field
+                .ident
+                .as_ref()
+                .map(|id| id.to_string())
+                .unwrap_or_default();
+            let rendered_ty = render_type(&field.ty);
+            // Skip the project_type_store destination field itself.
+            // It is an Arc<ProjectTypeStore> — by structural shape it
+            // is `Arc<...>`, not a cache pattern, but we name it
+            // explicitly so the guard's intent is unambiguous.
+            if field_name == "project_type_store" {
+                continue;
+            }
+            if !is_cache_shape(&rendered_ty) {
+                continue;
+            }
+            surveyed_cache_fields.push((field_name.clone(), rendered_ty.clone()));
+            // Check allow-list.
+            if allow_list.contains_key(field_name.as_str()) {
+                continue;
+            }
+            // Check whether the type signature points at
+            // ProjectTypeStore (i.e., the field IS a ProjectTypeStore
+            // handle even though its type contains RwLock/Mutex/DashMap
+            // by happenstance). The integration tip has no such field
+            // today; this branch is a forward-looking allowance for
+            // fields like `cache_root: Arc<ProjectTypeStore>` if a
+            // future commit restructures the host.
+            if rendered_ty.contains("ProjectTypeStore") {
+                continue;
+            }
+            violations.push(format!(
+                "{target_struct}::{field_name}: cache-shape field of type \
+                 `{rendered_ty}` is neither on the documented allow-list \
+                 (with a phase-report citation) nor on ProjectTypeStore. \
+                 Either rehome into ProjectTypeStore (preferred per \
+                 CLAUDE.md \"Project-global cache (final state)\" and \
+                 plan R4) or extend this guard's allow-list with a \
+                 phase-report citation justifying the exception."
+            ));
+        }
+        break;
+    }
+    assert!(
+        found_struct,
+        "no_off_store_host_caches: did not find `pub struct {target_struct}` \
+         in the parsed file — guard cannot verify the post-Phase-6b shape."
+    );
+    (violations, surveyed_cache_fields)
+}
+
+#[test]
+fn no_off_store_host_caches() {
+    use syn::parse_file;
+
+    let allow_list = phase_8_allow_list();
+
+    // Verify the source file we're parsing has not had a Phase-6b mirror
+    // field re-added by name. This is independent of the syn walk and is
+    // a belt-and-suspenders check against re-introducing the deleted
+    // F6/F7 field names.
+    let lib_src = read_workspace_file("crates/verter_session/src/lib.rs");
+    for forbidden in [
+        // F6 / F7 — deleted in 6b.D2a commit c6e7fbeb. Doc-comments
+        // referencing these names are allowed in this guard's view
+        // because the absent-from-struct check below is independently
+        // authoritative; the field-declaration grep is the strict gate.
+        "external_type_analysis_cache",
+        "route_owned_shallow_cache",
+    ] {
+        let declaration_pattern = format!("pub(crate) {forbidden}:");
+        assert!(
+            !lib_src.contains(&declaration_pattern),
+            "Phase 8 regression: VerterHost field `{forbidden}` was \
+             deleted by Phase 6b and must not be re-introduced. Found \
+             declaration `{declaration_pattern}` in lib.rs."
+        );
+    }
+
+    // Parse lib.rs via syn and walk VerterHost fields.
+    let parsed = parse_file(&lib_src).expect("parse verter_session/src/lib.rs via syn");
+    let (violations, surveyed_cache_fields) =
+        no_off_store_host_caches_inner(&parsed, "VerterHost", &allow_list);
+
+    // Discriminator-coverage check: the syn walk MUST surface at least
+    // one cache-shape field. If the count is zero, either the cache-shape
+    // detector is broken (the guard cannot detect re-introductions) or
+    // every cache-shape field has been moved — both worth flagging.
+    assert!(
+        !surveyed_cache_fields.is_empty(),
+        "no_off_store_host_caches: the syn walk found ZERO cache-shape \
+         fields on VerterHost, which means either the cache-shape \
+         detector is broken or every cache-shape field has been moved. \
+         Investigate before re-running."
+    );
+
+    assert!(
+        violations.is_empty(),
+        "no_off_store_host_caches violations:\n{}\n\nAllow-list reference \
+         (each entry must cite a phase-report rationale):\n{}",
+        violations.join("\n"),
+        allow_list
+            .iter()
+            .map(|(k, v)| format!("  {k}: {v}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+#[test]
+fn no_off_store_host_caches_discriminator_self_test() {
+    // Self-test: hand-craft a synthetic struct with one allow-listed
+    // cache field (must pass) and one un-allow-listed cache field (must
+    // fail). This proves the inner algorithm discriminates between the
+    // good and bad cases — i.e., the guard would actually catch a
+    // re-introduction. Without this, the empty-violations result of
+    // `no_off_store_host_caches` against the integration tip is
+    // indistinguishable from a broken detector that always passes.
+    //
+    // CLAUDE.md "Stub Prevention" — characterization-style discriminator
+    // test for the guard itself.
+    use syn::parse_file;
+    let allow_list = phase_8_allow_list();
+
+    // (a) Synthetic struct with ONLY allow-listed fields — must produce
+    //     zero violations.
+    let synthetic_pass = r#"
+        pub struct SyntheticHost {
+            pub(crate) instance_id: u64,
+            pub(crate) compile_cache: dashmap::DashMap<String, u64>,
+            pub(crate) workspace: Arc<parking_lot::RwLock<Arc<dyn WorkspaceAccess>>>,
+            pub(crate) tick: AtomicU64,
+        }
+    "#;
+    let parsed_pass = parse_file(synthetic_pass).expect("parse synthetic_pass");
+    let (pass_violations, pass_surveyed) =
+        no_off_store_host_caches_inner(&parsed_pass, "SyntheticHost", &allow_list);
+    assert!(
+        pass_violations.is_empty(),
+        "discriminator self-test: synthetic_pass should produce zero \
+         violations (compile_cache and workspace are allow-listed, the \
+         others are non-cache shapes), but got:\n{}",
+        pass_violations.join("\n")
+    );
+    // Both allow-listed fields must be SURVEYED (otherwise the cache
+    // detector is failing to flag them as candidates in the first place).
+    let surveyed_names: Vec<String> = pass_surveyed.iter().map(|(n, _)| n.clone()).collect();
+    assert!(
+        surveyed_names.contains(&"compile_cache".to_string()),
+        "discriminator self-test: synthetic_pass must surface \
+         `compile_cache` as a cache-shape candidate; surveyed: {surveyed_names:?}"
+    );
+    assert!(
+        surveyed_names.contains(&"workspace".to_string()),
+        "discriminator self-test: synthetic_pass must surface \
+         `workspace` as a cache-shape candidate; surveyed: {surveyed_names:?}"
+    );
+
+    // (b) Synthetic struct with ONE un-allow-listed cache-shape field —
+    //     must produce exactly one violation, naming that field.
+    let synthetic_fail = r#"
+        pub struct SyntheticHost {
+            pub(crate) instance_id: u64,
+            pub(crate) p8_probe_cache: parking_lot::Mutex<rustc_hash::FxHashMap<String, u64>>,
+            pub(crate) tick: AtomicU64,
+        }
+    "#;
+    let parsed_fail = parse_file(synthetic_fail).expect("parse synthetic_fail");
+    let (fail_violations, fail_surveyed) =
+        no_off_store_host_caches_inner(&parsed_fail, "SyntheticHost", &allow_list);
+    assert_eq!(
+        fail_violations.len(),
+        1,
+        "discriminator self-test: synthetic_fail should produce exactly \
+         one violation (`p8_probe_cache` is a cache-shape field that is \
+         not allow-listed and not on ProjectTypeStore), but got {} \
+         violations:\n{}\nSurveyed: {fail_surveyed:?}",
+        fail_violations.len(),
+        fail_violations.join("\n")
+    );
+    assert!(
+        fail_violations[0].contains("p8_probe_cache"),
+        "discriminator self-test: the violation must name the offending \
+         field (`p8_probe_cache`), but the message was: {}",
+        fail_violations[0]
+    );
+
+    // (c) Synthetic struct with a cache-shape field whose type points at
+    //     ProjectTypeStore — must NOT violate (the destination
+    //     allowance). Forward-looking branch.
+    let synthetic_destination = r#"
+        pub struct SyntheticHost {
+            pub(crate) instance_id: u64,
+            pub(crate) future_db: Arc<crate::project_type_store::ProjectTypeStore>,
+            pub(crate) future_cache: parking_lot::Mutex<crate::project_type_store::ProjectTypeStore>,
+        }
+    "#;
+    let parsed_destination =
+        parse_file(synthetic_destination).expect("parse synthetic_destination");
+    let (dest_violations, _) =
+        no_off_store_host_caches_inner(&parsed_destination, "SyntheticHost", &allow_list);
+    assert!(
+        dest_violations.is_empty(),
+        "discriminator self-test: synthetic_destination should produce \
+         zero violations (future_cache is a Mutex<ProjectTypeStore>, which \
+         is the destination allowance), but got:\n{}",
+        dest_violations.join("\n")
+    );
+}

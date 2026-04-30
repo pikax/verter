@@ -77,6 +77,12 @@ regex = "1"
 # that `VerterHost::workspace()` is gated behind `pub(crate)` and is not
 # callable from external compilation units.
 trybuild = "1"
+# Phase 8 — `no_off_store_host_caches` static guard parses
+# `crates/verter_session/src/lib.rs` via syn::parse_file to enumerate
+# `VerterHost` fields and assert each cache-shaped field is either
+# allow-listed (with phase-report citation) or lives on `ProjectTypeStore`.
+syn = { version = "2", features = ["full", "extra-traits"] }
+quote = "1"
 
 [[bench]]
 name = "host_bench"
