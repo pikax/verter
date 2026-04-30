@@ -12166,10 +12166,6 @@ impl crate::resolver_core::DeclarationMetadataResolver for HostComponentMetaReso
             .map(|(_, start, end)| verter_span::Span::new(start, end))
     }
 
-    fn read_source(&self, canonical_source: &str) -> Option<String> {
-        read_full_source(self.host, canonical_source)
-    }
-
     fn type_declaration_id(
         &self,
         canonical_source: &str,

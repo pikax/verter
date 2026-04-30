@@ -5609,13 +5609,6 @@ impl DeclarationMetadataResolver for DirectPreparedDeclarationResolver<'_> {
         None
     }
 
-    fn read_source(&self, canonical_source: &str) -> Option<String> {
-        self.host
-            .read_analysis_source(canonical_source)
-            .as_deref()
-            .map(str::to_string)
-    }
-
     fn type_declaration_id(
         &self,
         canonical_source: &str,

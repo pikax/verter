@@ -20,8 +20,6 @@ pub trait DeclarationMetadataResolver {
         requested_name: &str,
     ) -> Option<verter_span::Span>;
 
-    fn read_source(&self, canonical_source: &str) -> Option<String>;
-
     fn type_declaration_id(
         &self,
         canonical_source: &str,
@@ -556,14 +554,12 @@ mod tests {
     struct FakeResolver {
         exports: FxHashMap<(String, String), ResolvedExportTarget>,
         spans: FxHashMap<(String, String), verter_span::Span>,
-        sources: FxHashMap<String, String>,
         ids: FxHashMap<(String, String), DeclarationId>,
         dep_canonicals: FxHashMap<(String, String), String>,
         direct_reexports: FxHashMap<(String, String), (String, String)>,
         local_import_symbol_targets: FxHashMap<(String, String), (String, String)>,
         local_export_symbol_targets: FxHashMap<(String, String), String>,
         local_type_symbol_metadata: FxHashMap<(String, String), ResolvedLocalTypeSymbolMetadata>,
-        read_source_calls: std::cell::RefCell<Vec<String>>,
     }
 
     impl DeclarationMetadataResolver for FakeResolver {
@@ -585,13 +581,6 @@ mod tests {
             self.spans
                 .get(&(dep_canonical.to_string(), requested_name.to_string()))
                 .copied()
-        }
-
-        fn read_source(&self, canonical_source: &str) -> Option<String> {
-            self.read_source_calls
-                .borrow_mut()
-                .push(canonical_source.to_string());
-            self.sources.get(canonical_source).cloned()
         }
 
         fn type_declaration_id(
@@ -699,10 +688,6 @@ type Props = {
             ("/types.ts".to_string(), "Props".to_string()),
             ("/inner.ts".to_string(), "Props".to_string()),
         );
-        resolver.sources.insert(
-            "/inner.ts".to_string(),
-            "export interface Props { label: string }".to_string(),
-        );
         resolver.local_type_symbol_metadata.insert(
             ("/inner.ts".to_string(), "Props".to_string()),
             ResolvedLocalTypeSymbolMetadata {
@@ -732,9 +717,6 @@ type Props = {
             ("/inner.ts".to_string(), "Lt".to_string()),
             verter_span::Span::new(alias_start, alias_end),
         );
-        resolver
-            .sources
-            .insert("/inner.ts".to_string(), source.to_string());
         resolver.local_export_symbol_targets.insert(
             ("/inner.ts".to_string(), "Lt".to_string()),
             "RouteLocationRaw".to_string(),
@@ -764,73 +746,18 @@ type Props = {
         assert_eq!(resolved.text, None);
     }
 
-    #[test]
-    fn resolve_type_declaration_uses_cached_reexport_route_without_reparsing_source() {
-        let mut resolver = FakeResolver::default();
-        resolver.spans.insert(
-            ("/types.ts".to_string(), "Props".to_string()),
-            verter_span::Span::new(0, 32),
-        );
-        resolver.direct_reexports.insert(
-            ("/types.ts".to_string(), "Props".to_string()),
-            ("/inner.ts".to_string(), "Props".to_string()),
-        );
-        resolver.sources.insert(
-            "/inner.ts".to_string(),
-            "export interface Props { label: string }".to_string(),
-        );
-
-        let resolved = resolve_type_declaration(&resolver, "/types.ts", "Props");
-
-        assert_eq!(resolved.canonical_source, "/inner.ts");
-        assert_eq!(resolved.resolved_name, "Props");
-        assert!(
-            !resolver
-                .read_source_calls
-                .borrow()
-                .iter()
-                .any(|path| path == "/types.ts"),
-            "cached reexport routing should skip rereading the barrel source",
-        );
-    }
-
-    #[test]
-    fn resolve_type_declaration_uses_cached_local_import_symbol_target_without_reparsing_source() {
-        let mut resolver = FakeResolver::default();
-        resolver.spans.insert(
-            ("/types.ts".to_string(), "Props".to_string()),
-            verter_span::Span::new(0, 5),
-        );
-        resolver.local_import_symbol_targets.insert(
-            ("/types.ts".to_string(), "Props".to_string()),
-            ("/inner.ts".to_string(), "InnerProps".to_string()),
-        );
-        resolver.sources.insert(
-            "/inner.ts".to_string(),
-            "export interface InnerProps { label: string }".to_string(),
-        );
-
-        let resolved = resolve_type_declaration(&resolver, "/types.ts", "Props");
-
-        assert_eq!(resolved.canonical_source, "/inner.ts");
-        assert_eq!(resolved.resolved_name, "InnerProps");
-        assert!(
-            !resolver
-                .read_source_calls
-                .borrow()
-                .iter()
-                .any(|path| path == "/types.ts"),
-            "cached local symbol routing should skip rereading the owner source",
-        );
-    }
+    // Phase 4b §4b.3 — `resolve_type_declaration_uses_cached_*_without_reparsing_source`
+    // were negative tests asserting that cached reexport / local-import
+    // routes did NOT call `read_source` for the original (barrel /
+    // owner) canonical id. Under the graph-only resolver, the
+    // resolver never calls `read_source` (the trait method is
+    // deleted), so these "did not reread" assertions are now
+    // trivially satisfied. The tests are obsolete and removed.
 
     #[test]
     fn resolve_type_declaration_prefers_cached_local_symbol_metadata_for_text() {
         let mut resolver = FakeResolver::default();
         let source = "type Props = {\n  label: string\n};\n";
-        resolver
-            .sources
-            .insert("/types.ts".to_string(), source.to_string());
         resolver.local_type_symbol_metadata.insert(
             ("/types.ts".to_string(), "Props".to_string()),
             ResolvedLocalTypeSymbolMetadata {
@@ -871,21 +798,22 @@ type Props = {
 
     #[test]
     fn declaration_metadata_resolves_local_symbol_via_graph_only() {
-        // Targets resolve_local_symbol_details (callsite at
-        // declaration_metadata.rs:184). Seed source AND
-        // local_type_symbol_metadata. Pre-Phase-4b reads source and
-        // populates text; post-Phase-4b returns graph kind/span and
-        // `text: None`.
+        // Phase 4b §4b.2 — discrimination test for the local-symbol
+        // resolution path (former callsite at
+        // declaration_metadata.rs:184). The graph metadata
+        // (`local_type_symbol_metadata`) is seeded; the resolver
+        // returns kind/span/declaration_id from the graph and leaves
+        // `text` None. (The `read_source` trait method is deleted in
+        // commit 5; pre-deletion, this test failed at the `text ==
+        // None` assertion because the source-reparse path populated
+        // `text` to `Some(...)`.)
         let mut resolver = FakeResolver::default();
-        let source = "type Props = { label: string };\n";
-        resolver
-            .sources
-            .insert("/types.ts".to_string(), source.to_string());
+        let source_len = "type Props = { label: string };\n".len() as u32;
         resolver.local_type_symbol_metadata.insert(
             ("/types.ts".to_string(), "Props".to_string()),
             ResolvedLocalTypeSymbolMetadata {
                 kind: ResolvedDeclarationKind::TypeAlias,
-                span: verter_span::Span::new(0, source.len() as u32),
+                span: verter_span::Span::new(0, source_len),
             },
         );
         resolver
@@ -898,10 +826,7 @@ type Props = {
         assert_eq!(resolved.canonical_source, "/types.ts");
         assert_eq!(resolved.resolved_name, "Props");
         assert_eq!(resolved.kind, ResolvedDeclarationKind::TypeAlias);
-        assert_eq!(
-            resolved.span,
-            verter_span::Span::new(0, source.len() as u32)
-        );
+        assert_eq!(resolved.span, verter_span::Span::new(0, source_len));
         assert_eq!(resolved.declaration_id, Some(42));
 
         // Negative assertion: text MUST be None — proves the source-
@@ -915,35 +840,27 @@ type Props = {
 
     #[test]
     fn declaration_metadata_follows_reexport_chain_via_graph_only() {
-        // Targets the reexport-following branch (callsite at
-        // declaration_metadata.rs:261). Setup: a barrel
-        // (`/types.ts`) re-exports `Props` from `/inner.ts` via
-        // `direct_reexports`, but the FIRST call into `Props` lands
-        // with kind=Unknown (no metadata at /types.ts). The fallback
-        // chain walks via `follow_direct_type_reexport_chain` →
-        // line 261 reads source.
-        //
-        // We seed graph metadata at the leaf (/inner.ts) so the
-        // post-Phase-4b graph path produces the correct kind/span
-        // without text. Pre-Phase-4b the source-text path also
-        // succeeds AND sets text → test FAILS.
+        // Phase 4b §4b.2 — discrimination test for the reexport-
+        // following path (former callsite at
+        // declaration_metadata.rs:261). A barrel (`/types.ts`) re-
+        // exports `Props` from `/inner.ts` via `direct_reexports`;
+        // graph metadata at the leaf (`/inner.ts`) provides
+        // kind/span. The resolver follows the chain and returns the
+        // leaf's graph fields with `text == None`. Pre-deletion,
+        // the leaf source-reparse arm populated `text` to
+        // `Some(...)` and failed the negative assertion.
         let mut resolver = FakeResolver::default();
-        // No metadata at /types.ts → first attempt yields Unknown.
-        // Reexport chain follows /types.ts!Props → /inner.ts!Props.
         resolver.direct_reexports.insert(
             ("/types.ts".to_string(), "Props".to_string()),
             ("/inner.ts".to_string(), "Props".to_string()),
         );
-        let leaf_source = "interface Props { label: string }\n";
-        resolver
-            .sources
-            .insert("/inner.ts".to_string(), leaf_source.to_string());
+        let leaf_source_len = "interface Props { label: string }\n".len() as u32;
         // Graph metadata at leaf — what the post-Phase-4b path uses.
         resolver.local_type_symbol_metadata.insert(
             ("/inner.ts".to_string(), "Props".to_string()),
             ResolvedLocalTypeSymbolMetadata {
                 kind: ResolvedDeclarationKind::Interface,
-                span: verter_span::Span::new(0, leaf_source.len() as u32),
+                span: verter_span::Span::new(0, leaf_source_len),
             },
         );
         resolver
@@ -956,10 +873,7 @@ type Props = {
         assert_eq!(resolved.canonical_source, "/inner.ts");
         assert_eq!(resolved.resolved_name, "Props");
         assert_eq!(resolved.kind, ResolvedDeclarationKind::Interface);
-        assert_eq!(
-            resolved.span,
-            verter_span::Span::new(0, leaf_source.len() as u32)
-        );
+        assert_eq!(resolved.span, verter_span::Span::new(0, leaf_source_len));
         assert_eq!(resolved.declaration_id, Some(7));
 
         // Negative assertion: text MUST be None — proves the leaf
@@ -973,23 +887,16 @@ type Props = {
 
     #[test]
     fn declaration_metadata_extracts_details_via_graph_only() {
-        // Targets resolve_local_type_declaration (callsite at
-        // declaration_metadata.rs:308). Setup: seed source AND
-        // local_type_symbol_metadata. Pre-Phase-4b reads source and
-        // populates text; post-Phase-4b returns graph kind/span and
-        // `text: None`.
+        // Phase 4b §4b.2 — discrimination test for
+        // `resolve_local_type_declaration` (former callsite at
+        // declaration_metadata.rs:308). The graph metadata
+        // (`local_type_symbol_metadata`) provides kind/span; the
+        // resolver returns those plus `text == None`. Pre-deletion,
+        // the source-reparse path populated `text` to `Some(...)`
+        // and failed the negative assertion.
         let mut resolver = FakeResolver::default();
-        // Source without trailing newline so the source-reparse-
-        // derived span differs from the graph metadata span (which
-        // is just whatever the host stored). This makes the
-        // discriminating fail-mode unambiguous: pre-change the
-        // returned span is the source-reparse-trimmed span; post-
-        // change it is the graph metadata span.
-        let source = "interface Props { label: string }";
-        resolver
-            .sources
-            .insert("/types.ts".to_string(), source.to_string());
-        let graph_span = verter_span::Span::new(0, source.len() as u32);
+        let source_len = "interface Props { label: string }".len() as u32;
+        let graph_span = verter_span::Span::new(0, source_len);
         resolver.local_type_symbol_metadata.insert(
             ("/types.ts".to_string(), "Props".to_string()),
             ResolvedLocalTypeSymbolMetadata {

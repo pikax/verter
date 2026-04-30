@@ -1154,10 +1154,6 @@ mod tests {
             None
         }
 
-        fn read_source(&self, _canonical_source: &str) -> Option<String> {
-            Some(self.source.clone())
-        }
-
         fn type_declaration_id(
             &self,
             _canonical_source: &str,
@@ -1298,10 +1294,6 @@ mod tests {
             _requested_name: &str,
         ) -> Option<Span> {
             None
-        }
-
-        fn read_source(&self, _canonical_source: &str) -> Option<String> {
-            Some(self.source.clone())
         }
 
         fn type_declaration_id(
