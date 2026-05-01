@@ -14,7 +14,7 @@ Verter is designed as one shared optimized codebase. Consumers should reuse the 
 - Put reusable parsing, analysis, type-resolution, caching, and import-following behavior in the shared owner crate.
 - `verter_session` is the shared host/session/cache boundary for host-backed consumers.
 - `verter_semantic` and `verter_compiler` own reusable semantics, lowering, and codegen.
-- `verter_session::resolver_core` owns the host-backed resolver stack and type-resolution orchestration.
+- `verter_session::resolver_core` owns the host-backed resolver stack and type-resolution orchestration. Resolver-path methods receive `ctx: &dyn ResolverContext` (sealed super-trait at `resolver_core/resolver_context.rs`) — only `VerterHost` implements it, enforced by the `no_concrete_verter_host_in_seal_scope` arch-guard.
 - `verter_protocol` owns transport-facing schema DTOs, while `verter_ffi` stays a thin native/WASM adapter layer.
 - Consumer packages and apps should stay adapter-oriented: thin wrappers, public API shaping, transport glue, and UX-specific behavior.
 

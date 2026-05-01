@@ -1054,7 +1054,7 @@ fn host_resolved_id_to_napi(input: host::ResolvedId) -> NapiResolvedId {
 //         getVirtualFile, listVirtualFiles, remove, setImportDependencies,
 //         getAnalysis, getTsx, lint, getCodeActions, getLintRuleMetadata,
 //         getDocumentSymbols, matchCssSelectors, computeCrossFileOptimizations
-// - NAPI-only: processStyle (requires Node.js), getTsc, compileBatch, getMetrics
+// - NAPI-only: processStyle (requires Node.js), getTsc, compileMany, getMetrics
 // =============================================================================
 
 // ═══════════════════════════════════════════════════════════════════════════

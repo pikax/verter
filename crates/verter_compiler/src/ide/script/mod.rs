@@ -62,11 +62,7 @@ use crate::template::code_gen::types::CodeGenOutput;
 
 use crate::ide::IdeScriptOptions;
 
-// Re-export from compile::types for internal use (Phase 11d public-surface
-// preservation contract: callers may resolve these via
-// `crate::ide::script::DestructuredBindingInfo` / `…::DestructuredBlockMeta`).
-#[allow(unused_imports)]
-pub use crate::compile::types::{DestructuredBindingInfo, DestructuredBlockMeta};
+use crate::compile::types::DestructuredBlockMeta;
 
 mod comp_emit;
 mod detectors;

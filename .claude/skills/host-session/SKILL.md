@@ -26,6 +26,8 @@ Eviction hooks run on every `upsert`: `resolver.runtime.evict_canonical` + `proj
 
 Host view: resolver-path helpers receive `&HostStoreView` directly. The request-view-era `RequestStoreView` / `CURRENT_REQUEST_VIEW` thread-local / `EffectiveView` / `_in_view` helpers are retired; `IndexedReady` is the single canonical post-parse artifact (the former `ModuleFactsDb` has been deleted). Validated-cache writes record dep-signatures; warm hits revalidate through `HostFenceValidator` before returning.
 
+**Resolver-context seal (Phase 10a):** resolver-path code does NOT take `&VerterHost` directly. It takes `ctx: &'a dyn ResolverContext` — a `pub(crate)` sealed super-trait defined at `crates/verter_session/src/resolver_core/resolver_context.rs`. Only `VerterHost` implements `ResolverContext` (the `sealed::Sealed` marker is closed at trait definition). The architecture guard `no_concrete_verter_host_in_seal_scope` mechanically forbids re-introducing `&VerterHost` parameters under the resolver_core/meta_resolve/host_manage/component_meta_query_engine seal scope. New methods on the trait surface are an architectural decision, not a small-decision; widen with care.
+
 ## Language Server Architecture
 
 The LSP is a standalone Rust binary (`verter-lsp`) that communicates with VS Code over stdio.
@@ -33,7 +35,7 @@ The LSP is a standalone Rust binary (`verter-lsp`) that communicates with VS Cod
 ```
 main.rs (stdio transport + CLI args + provider selection)
     |
-server.rs (LSP message loop, request dispatch)
+server/ (LSP message loop, request dispatch — split post-Phase-11e into mod.rs + 8 siblings: handler_guard, provider_state, component_resolve, sync_orchestration, custom_methods, lifecycle, aux_features, nav_features)
     |
 documents/       -> Document tracking and synchronization
 features/        -> LSP feature handlers (see table below)
@@ -114,7 +116,7 @@ Only one provider runs at a time. Provider PID is sent to the extension via `$/v
 ### LSP Feature Flow
 
 ```
-Request (stdio) -> server.rs -> Find document in host cache -> Feature handler -> Response (stdio)
+Request (stdio) -> server/mod.rs -> Find document in host cache -> Feature handler -> Response (stdio)
 ```
 
 ## TypeProvider Architecture
@@ -192,7 +194,7 @@ The VFS publishes workspace snapshots atomically via `PublishedRoot`. Each snaps
 | --- | --- |
 | `crates/verter_workspace/src/published_state.rs` | `PublishedRoot`, `ownership_ready` |
 | `crates/verter_lsp/src/provider_sync.rs` | `ProviderOwnerBinding`, `ProviderSyncState` |
-| `crates/verter_lsp/src/server.rs` | `PublishedResolverSnapshot`, `ensure_current_file_synced` |
+| `crates/verter_lsp/src/server/sync_orchestration.rs` | `PublishedResolverSnapshot`, `ensure_current_file_synced` |
 
 ## Multi-Root Workspace & Per-Project Configuration
 
@@ -285,7 +287,7 @@ Native canonical loading goes through `ensure_loaded` — the scheduler is the s
 | `crates/verter_scheduler/src/edges.rs` | `EdgeManager` -- reverse index + blocker registry |
 | `crates/verter_session/src/lib.rs` | `VerterHost` -- holds `Arc<Scheduler>`, `compile_cache` |
 | `crates/verter_session/src/host_upsert.rs` | Scheduler-driven upsert path |
-| `crates/verter_lsp/src/server.rs` | LSP message loop, request dispatch |
+| `crates/verter_lsp/src/server/mod.rs` (+ 8 siblings) | LSP message loop, request dispatch (Phase 11e split) |
 | `crates/verter_lsp/src/sync_coordinator.rs` | Debounced type provider sync |
 | `crates/verter_lsp/src/workspace_scanner.rs` | Async priority-based workspace file scanner |
 | `crates/verter_lsp/src/provider_sync.rs` | `ProviderOwnerBinding`, `ProviderSyncState` |
