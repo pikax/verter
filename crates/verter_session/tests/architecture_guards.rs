@@ -116,7 +116,7 @@ fn no_deprecated_workspace_reexports() {
 #[test]
 fn no_local_vite_helpers_in_lsp() {
     for rel in [
-        "crates/verter_lsp/src/server.rs",
+        "crates/verter_lsp/src/server/mod.rs",
         "crates/verter_lsp/src/background_init.rs",
     ] {
         let src = read_workspace_file(rel);

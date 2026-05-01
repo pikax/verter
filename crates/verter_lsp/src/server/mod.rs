@@ -86,18 +86,18 @@ impl Drop for HandlerGuard {
     }
 }
 
-#[path = "protocol_types.rs"]
+#[path = "../protocol_types.rs"]
 pub(crate) mod protocol_types;
 pub use self::protocol_types::*;
 
-#[path = "server_utils.rs"]
+#[path = "../server_utils.rs"]
 mod server_utils;
 use self::server_utils::*;
 pub(crate) use self::server_utils::{
     compute_verter_diagnostics_for_with_views, prepare_non_vue_provider_sync, resolve_component_for,
 };
 
-#[path = "background_init.rs"]
+#[path = "../background_init.rs"]
 mod background_init;
 use self::background_init::*;
 pub(crate) use self::background_init::{
@@ -6986,5 +6986,5 @@ impl VerterLanguageServer {
     clippy::too_many_arguments,
     clippy::cloned_ref_to_slice_refs
 )]
-#[path = "server_tests.rs"]
+#[path = "../server_tests.rs"]
 mod server_tests;
