@@ -1628,13 +1628,14 @@ pub(crate) fn produce_one_macro_object_shape(
         // each intermediate hop instead of following the requested
         // path.
         //
-        // TODO(phase-5g): retain the engine helper in this generic
-        // (multi-macro-kind) callsite — the engine threads
-        // request-local fuse + scope-payload state that is
-        // load-bearing for `Partial<T>` optionality propagation
-        // across props/emits/slots in the same request. Migrate
-        // alongside the engine retirement in 5g, when the engine's
-        // load-bearing state can be ctx-promoted atomically.
+        // Phase 5l + 5m migration (post-cutover): this multi-macro-kind
+        // callsite routes through the bridge helper
+        // `project_expr_class_a_via_dispatch_threaded`, which threads
+        // `query_engine.ctx` so the request-local fuse + scope-payload
+        // state stays load-bearing for `Partial<T>` optionality
+        // propagation across props/emits/slots in the same request.
+        // The engine method itself was retired in Phase 5l; the bridge
+        // helper is the single production callsite shape per §5.13a.2.
         let projected = project_expr_class_a_via_dispatch_threaded(
             query_engine.ctx,
             Some(query_engine),

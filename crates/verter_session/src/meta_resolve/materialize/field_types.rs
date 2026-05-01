@@ -1501,15 +1501,15 @@ pub(crate) fn materialize_component_meta_field_types(
                         rewrite_named_self_refs_to_recursive_ref(&body, target_name.as_str())
                     })
                     .or_else(|| {
-                        // TODO(phase-5g): the Class B migration target
-                        // is `dispatch.execute(Instantiate { args: [],
+                        // Phase 5m §5.13a.2 (post-cutover): the Class B
+                        // migration completed by routing through the
+                        // bridge helper `project_type_surface_expr_via_host_threaded`.
+                        // The §5.14.1 pre-flight gate observes zero
+                        // external engine-method callers; the bridge
+                        // is the single production callsite shape.
+                        // The semantic target is
+                        // `dispatch.execute(Instantiate { args: [],
                         // body_mode: Expanded })` per sub-plan §4.1.
-                        // Phase 5m §5.13a.2 — route through the
-                        // bridge helper so the §5.14.1 pre-flight
-                        // gate sees zero external engine-method
-                        // callers. The bridge body retains the
-                        // engine call through the migration window
-                        // per §5.13a.2.
                         project_type_surface_expr_via_host_threaded(
                             query_engine,
                             target_scope.as_str(),
