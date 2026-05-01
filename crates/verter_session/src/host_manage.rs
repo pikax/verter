@@ -43,6 +43,12 @@ use crate::VerterHost;
 pub(crate) mod analysis_io;
 pub(crate) mod component_meta_entry;
 pub(crate) mod component_meta_extract;
+// Phase 10a: moved from `meta_resolve/host_methods.rs`. The file is a
+// large `impl VerterHost { ... }` block (~18 host methods including
+// `current_dependency_fact_versions`, `get_raw_analysis_snapshot`, and
+// the `*_inner` audited variants). Belongs in host-impl tier per
+// sub-plan §10a.0.A.
+pub(crate) mod component_meta_methods;
 pub(crate) mod eval_env;
 pub(crate) mod eval_program;
 pub(crate) mod fallthrough;

@@ -34,7 +34,6 @@ mod dep_signature;
 mod dispatch_helpers;
 mod field_state;
 mod graph_predicates;
-mod host_methods;
 mod jsdoc_resolve;
 mod macro_member_walk;
 mod materialize;
@@ -129,7 +128,11 @@ pub(crate) use resolved_state::{
 };
 pub use resolved_state::{ResolvedComponentMetaState, SurfaceNodeIdentities};
 pub(crate) use scoring::compare_type_expr_improvement;
-use scoring::component_meta_registry_prefers_structural_materialization;
+// Phase 10a: promoted to `pub(crate)` so the moved
+// `host_manage::component_meta_methods.rs` (formerly the in-tree
+// `host_methods.rs`) reaches the function via the `crate::meta_resolve`
+// re-export instead of the now-out-of-scope `super::scoring::...`.
+pub(crate) use scoring::component_meta_registry_prefers_structural_materialization;
 
 #[cfg(test)]
 #[path = "meta_resolve_tests.rs"]

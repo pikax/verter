@@ -40,46 +40,48 @@ use web_time::Instant;
 
 use verter_semantic::analysis::types::AnalyzedMacro;
 
-use super::dep_signature::{
+// Phase 10a: file moved from `meta_resolve/host_methods.rs` to
+// `host_manage/component_meta_methods.rs`. The original `super::X` paths
+// resolved through `meta_resolve`'s private siblings; after the move,
+// they rewrite to `crate::meta_resolve::X` (the parent module's
+// re-exported `pub(crate)` surface).
+use crate::meta_resolve::{
     drain_dispatch_dep_signature_accumulator, reset_dispatch_dep_signature_accumulator,
 };
-use super::dispatch_helpers::{
+use crate::meta_resolve::{
     instantiate_local_generic_ref_via_dispatch, pick_via_dispatch_pick_helper,
     project_expr_class_a_via_dispatch, project_expr_class_a_via_dispatch_threaded,
     project_type_surface_expr_via_host, project_type_surface_expr_via_host_threaded,
 };
-use super::materialize::{
+use crate::meta_resolve::{
     collect_type_expr_ref_names, lowered_preserve_package_backed_symbolic_refs,
     materialize_component_meta_field_types, materialize_component_meta_type_expr_until_stable,
     produce_macro_object_shapes_for_purpose,
 };
-use super::request_host::{
+use crate::meta_resolve::{
     next_component_meta_audit_request_id, request_source_performed_compute,
     resolved_meta_cache_key, should_skip_imported_registry_seed_refresh, trace_request_source,
     CapturedComponentMetaInputs, ResolvedComponentMetaComputeAudit, ResolvedMacroMeta,
     ResolvedTypeRegistryMeta,
 };
-use super::resolved_state::{
+use crate::meta_resolve::{
     component_meta_owner_local_shallow_substituted_alias_body, enrich_missing_slot_bindings,
     select_imported_materialization_scope, RegistryMaterialization, ResolvedComponentMetaState,
     SurfaceNodeIdentities,
 };
-use super::scoring::compare_type_expr_improvement;
-use super::scoring::component_meta_registry_prefers_structural_materialization;
-use super::STORE_VIEW_STABILITY_MAX_ATTEMPTS;
+use crate::meta_resolve::compare_type_expr_improvement;
+use crate::meta_resolve::component_meta_registry_prefers_structural_materialization;
+use crate::meta_resolve::STORE_VIEW_STABILITY_MAX_ATTEMPTS;
 
 // Items that still live in the parent shell (`crate::meta_resolve`):
 // the walker (`walk_component_meta_macro_shape_member_types`), the
 // registry-structural materialiser, the registry-route preservers, the
 // graph-native registry-route + cycle-BFS predicates, the origin-graph
-// builder, and the `HostComponentMetaResolver` adapter struct. They land
-// in their final per-domain siblings in Phase 11a commits 10-14; until
-// then `host_methods.rs` reaches them via `super::*` so this commit is a
-// pure organisational move.
-use super::jsdoc_resolve::HostComponentMetaResolver;
-use super::macro_member_walk::walk_component_meta_macro_shape_member_types;
-use super::origin_graph::build_origin_graph;
-use super::registry_materialize::{
+// builder, and the `HostComponentMetaResolver` adapter struct.
+use crate::meta_resolve::HostComponentMetaResolver;
+use crate::meta_resolve::walk_component_meta_macro_shape_member_types;
+use crate::meta_resolve::build_origin_graph;
+use crate::meta_resolve::{
     component_meta_registry_prefers_structural_materialization_node,
     component_meta_registry_should_keep_raw_symbolic_non_object_alias,
     materialize_component_meta_registry_structural_expr, preserve_nested_symbolic_member_routes,

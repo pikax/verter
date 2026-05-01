@@ -322,7 +322,13 @@ pub(crate) fn compare_type_expr_improvement(
             && count_generic_detail_in_expr(candidate) > count_generic_detail_in_expr(current))
 }
 
-pub(super) fn component_meta_registry_prefers_structural_materialization(
+// Phase 10a: promoted from `pub(super)` to `pub(crate)` so the moved
+// `host_manage::component_meta_methods.rs` (formerly the in-tree
+// `host_methods.rs`) reaches the function via the
+// `crate::meta_resolve::component_meta_registry_prefers_structural_materialization`
+// re-export. Without the promotion, the parent shell's `pub(crate) use`
+// would be rejected (E0364).
+pub(crate) fn component_meta_registry_prefers_structural_materialization(
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
 ) -> bool {
     use verter_semantic::analysis::type_expr::TypeExpr;

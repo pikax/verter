@@ -86,13 +86,16 @@ fn gate_text_includes_audit_enabled() {
     //
     // Phase 11a — `compute_component_meta_state_inner` (and the
     // surrounding `impl VerterHost` block) moved from
-    // `meta_resolve.rs` to `meta_resolve/host_methods.rs`. The test
-    // anchor (gate text in the function body) is unchanged — only the
-    // file path moved. This is a §0.6.1 mechanical path adjustment.
+    // `meta_resolve.rs` to `meta_resolve/host_methods.rs`.
+    // Phase 10a — moved again from `meta_resolve/host_methods.rs` to
+    // `host_manage/component_meta_methods.rs` (the seal puts host-impl
+    // code under host-impl tier). The test anchor (gate text in the
+    // function body) is unchanged — only the file path moved. This is
+    // a §0.6.1 mechanical path adjustment.
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("src")
-        .join("meta_resolve")
-        .join("host_methods.rs");
+        .join("host_manage")
+        .join("component_meta_methods.rs");
     let body = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("read {} failed: {e}", path.display()));
     // Normalize all whitespace runs to a single space so the test
@@ -103,7 +106,7 @@ fn gate_text_includes_audit_enabled() {
     let needle_b = "self.config.footprint_capture && audit_enabled";
     assert!(
         normalized.contains(needle_a) || normalized.contains(needle_b),
-        "F1 contract: meta_resolve/host_methods.rs must contain the gate \
+        "F1 contract: host_manage/component_meta_methods.rs must contain the gate \
          `audit_enabled && self.config.footprint_capture` (in either token \
          order) for `origin_graph` emission. Pre-fix that gate is absent \
          and `origin_graph` would emit under any audit configuration. \
