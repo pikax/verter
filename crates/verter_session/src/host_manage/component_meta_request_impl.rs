@@ -17,8 +17,13 @@
 //!   compute-audit sidecar
 //! - `resolved_meta_cache_key(canonical, mode)` cache-key builder
 
-use super::ResolvedComponentMetaState;
+// Phase 10a: file moved from `meta_resolve/request_host.rs` to
+// `host_manage/component_meta_request_impl.rs`. Original `super::X`
+// imports resolved through `meta_resolve` private siblings; after the
+// move, `super` is `host_manage`, so the rewrite goes via the parent
+// module's `pub(crate)`-re-exported surface.
 use crate::host_manage::component_meta_trace_custom;
+use crate::meta_resolve::ResolvedComponentMetaState;
 use crate::resolver_core::{ComponentMetaRequestHost, RequestSource, SingleflightRole};
 use crate::types::{FileAnalysisSnapshot, Hash16, ProjectionMode};
 use crate::VerterHost;

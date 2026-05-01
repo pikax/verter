@@ -29,7 +29,10 @@ use super::super::dispatch_helpers::{
     project_expr_class_a_via_dispatch, project_type_surface_expr_via_host_threaded,
 };
 use super::super::field_state::MacroFieldGraphState;
-use super::super::request_host::ResolvedMacroMeta;
+// Phase 10a: `request_host` source moved to
+// `host_manage/component_meta_request_impl.rs`. Import rewritten to
+// the new home.
+use crate::host_manage::component_meta_request_impl::ResolvedMacroMeta;
 use super::super::resolved_state::{
     lowered_root_reaches_transitive_cycle, select_imported_materialization_scope,
 };

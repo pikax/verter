@@ -33,7 +33,11 @@ use web_time::Instant;
 use super::dispatch_helpers::{
     project_expr_class_a_via_dispatch, project_prepared_type_surface_shape_via_host_threaded,
 };
-use super::request_host::{
+// Phase 10a: `request_host` source moved to
+// `host_manage/component_meta_request_impl.rs`. Imports are rewritten
+// to point at the new home; commit 4 will move this file too, after
+// which `super::` will refer to `host_manage`.
+use crate::host_manage::component_meta_request_impl::{
     CapturedComponentMetaInputs, ResolvedDeclarationKind, ResolvedJsdocBlock, ResolvedJsdocTag,
     ResolvedTypeDeclaration,
 };

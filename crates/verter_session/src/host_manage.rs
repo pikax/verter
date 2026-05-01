@@ -49,6 +49,11 @@ pub(crate) mod component_meta_extract;
 // the `*_inner` audited variants). Belongs in host-impl tier per
 // sub-plan §10a.0.A.
 pub(crate) mod component_meta_methods;
+// Phase 10a: moved from `meta_resolve/request_host.rs`. The file holds
+// `impl ComponentMetaRequestHost for VerterHost` and the session-scoped
+// variant `impl ComponentMetaRequestHost for SessionRequestHost<'_>`.
+// Belongs in host-impl tier per sub-plan §10a.0.A.
+pub(crate) mod component_meta_request_impl;
 pub(crate) mod eval_env;
 pub(crate) mod eval_program;
 pub(crate) mod fallthrough;

@@ -39,7 +39,6 @@ mod macro_member_walk;
 mod materialize;
 mod origin_graph;
 mod registry_materialize;
-mod request_host;
 mod resolved_state;
 mod scoring;
 pub(crate) use dep_signature::{
@@ -110,11 +109,15 @@ pub(crate) use registry_materialize::{
     preserve_package_backed_symbolic_refs_node, preserve_registry_callable_param_member_routes,
     type_expr_contains_public_member_route, type_expr_needs_nested_symbolic_route_preservation,
 };
-pub(crate) use request_host::{
+// Phase 10a: `request_host` source moved to
+// `host_manage/component_meta_request_impl.rs` (host-impl tier per
+// §10a.0.A). The re-export re-points at the new home so the
+// `crate::meta_resolve::*` public surface stays intact for callers.
+pub(crate) use crate::host_manage::component_meta_request_impl::{
     next_component_meta_audit_request_id, request_source_performed_compute,
     resolved_meta_cache_key, should_skip_imported_registry_seed_refresh, trace_request_source,
 };
-pub use request_host::{
+pub use crate::host_manage::component_meta_request_impl::{
     CapturedComponentMetaInputs, ResolvedComponentMetaComputeAudit, ResolvedDeclarationKind,
     ResolvedJsdocBlock, ResolvedJsdocTag, ResolvedMacroMeta, ResolvedNativeProp,
     ResolvedTypeDeclaration, ResolvedTypeRegistryMeta, SessionRequestHost,

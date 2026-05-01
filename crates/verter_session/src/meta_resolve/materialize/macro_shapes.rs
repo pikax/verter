@@ -39,7 +39,10 @@ use super::super::dispatch_helpers::{
     project_prepared_type_surface_shape_via_host_threaded,
     project_type_surface_expr_via_host_threaded, project_type_surface_shape_via_host_threaded,
 };
-use super::super::request_host::{ResolvedMacroMeta, ResolvedTypeRegistryMeta};
+// Phase 10a: `request_host` source moved to
+// `host_manage/component_meta_request_impl.rs`. Import rewritten to
+// the new home.
+use crate::host_manage::component_meta_request_impl::{ResolvedMacroMeta, ResolvedTypeRegistryMeta};
 use super::super::resolved_state::{
     collect_expanded_slot_binding_param_types, collect_expanded_slot_bindings_from_object_type,
     component_meta_substitute_typeexpr, lowered_root_reaches_transitive_cycle,
