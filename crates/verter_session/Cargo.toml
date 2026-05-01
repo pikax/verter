@@ -59,6 +59,14 @@ similar = "2"
 # #[test], not a feature gate. Binary-size overhead (~50KB on WASM worst
 # case) is documented in plan §1.4.
 ts-rs = "10"
+# Phase 10a — compile-time `assert_obj_safe!(ResolverContext)` lives in
+# the production `src/resolver_core/resolver_context.rs` module so the
+# dyn-compatibility check fails the build at any future trait edit that
+# would forfeit dyn-safety. Therefore `static_assertions` is a REGULAR
+# dependency, not a dev-dependency. Zero-cost: the macro expands to
+# trait-object construction inside an inert const, so no runtime code is
+# emitted.
+static_assertions = "1"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-time = "1"
@@ -81,7 +89,11 @@ trybuild = "1"
 # `crates/verter_session/src/lib.rs` via syn::parse_file to enumerate
 # `VerterHost` fields and assert each cache-shaped field is either
 # allow-listed (with phase-report citation) or lives on `ProjectTypeStore`.
-syn = { version = "2", features = ["full", "extra-traits"] }
+# Phase 10a — `no_concrete_verter_host_in_seal_scope` static guard parses
+# every file under the resolver-tier seal scope via `syn::Visit`,
+# requiring the `visit` and `parsing` features in addition to the
+# original `full`+`extra-traits` set.
+syn = { version = "2", features = ["full", "extra-traits", "visit", "parsing"] }
 quote = "1"
 
 [[bench]]

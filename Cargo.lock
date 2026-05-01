@@ -3952,6 +3952,7 @@ dependencies = [
  "similar",
  "smallvec",
  "sourcemap",
+ "static_assertions",
  "syn 2.0.117",
  "tempfile",
  "thiserror 2.0.18",

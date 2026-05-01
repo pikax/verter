@@ -1299,3 +1299,302 @@ fn no_off_store_host_caches_discriminator_self_test() {
         dest_violations.join("\n")
     );
 }
+
+// ===========================================================================
+// Phase 10a — `no_concrete_verter_host_in_seal_scope`
+// ===========================================================================
+//
+// The seal scope covers every resolver-tier file (see sub-plan §10a.0.A).
+// The architecture guard parses each file with `syn::parse_file` and
+// asserts no production reference to `crate::VerterHost`. Three classes
+// of violation are caught:
+//
+//   1. Use items: `use crate::VerterHost;`,
+//      `use crate::VerterHost as Host;` (pulls the type into scope).
+//   2. Type-position paths: `&VerterHost`, `Arc<VerterHost>`,
+//      `host: &VerterHost`, generic bounds — anything where the type
+//      name appears in a type context.
+//   3. Expression-position paths: `VerterHost::method`,
+//      `<VerterHost as Trait>::method`, `VerterHost::new` — the type
+//      name in an expression context (turbofish/qualified-path call).
+//
+// The visitor depth-tracks `#[cfg(test)]` items and `mod tests { ... }`
+// blocks so test code in the same file is whitelisted (tests in
+// resolver-tier modules legitimately construct `VerterHost`).
+//
+// The guard is `#[ignore]`'d on commit 1 of Phase 10a and remains so
+// through commits 2-12. Commit 13 removes the `#[ignore]` after the
+// migration completes.
+
+mod resolver_context_seal {
+    use std::path::{Path, PathBuf};
+
+    use syn::visit::Visit;
+    use syn::{Attribute, ExprPath, ItemFn, ItemMod, Meta, Path as SynPath, TypePath, UsePath};
+    use walkdir::WalkDir;
+
+    use super::workspace_root;
+
+    #[derive(Debug)]
+    pub(super) struct Violation {
+        pub(super) file: PathBuf,
+        pub(super) kind: ViolationKind,
+    }
+
+    #[derive(Debug)]
+    pub(super) enum ViolationKind {
+        UsePath,
+        TypePath,
+        ExprPath,
+    }
+
+    impl std::fmt::Display for ViolationKind {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Self::UsePath => write!(f, "use VerterHost"),
+                Self::TypePath => write!(f, "type-position VerterHost"),
+                Self::ExprPath => write!(f, "expr-position VerterHost"),
+            }
+        }
+    }
+
+    pub(super) struct SealVisitor<'a> {
+        path: &'a Path,
+        cfg_test_depth: u32,
+        violations: &'a mut Vec<Violation>,
+    }
+
+    impl<'a> SealVisitor<'a> {
+        pub(super) fn new(path: &'a Path, violations: &'a mut Vec<Violation>) -> Self {
+            Self {
+                path,
+                cfg_test_depth: 0,
+                violations,
+            }
+        }
+    }
+
+    /// True if any of the supplied attributes is `#[cfg(test)]`,
+    /// `#[cfg(any(test, ...))]`, or `#[cfg(all(..., test, ...))]` —
+    /// any cfg expression containing the bare predicate `test`.
+    fn has_cfg_test(attrs: &[Attribute]) -> bool {
+        attrs.iter().any(|a| {
+            if !a.path().is_ident("cfg") {
+                return false;
+            }
+            // Render the cfg meta tree as a string and look for the
+            // `test` token. False positives like a literal `"test"`
+            // string are harmless — they keep us safe-side, never
+            // flagging a real production violation.
+            let rendered = match &a.meta {
+                Meta::List(list) => list.tokens.to_string(),
+                _ => return false,
+            };
+            // Word-boundary check: `test` must appear as a separate token,
+            // not as a substring of e.g. `feature = "testbed"`.
+            for token in rendered.split(|c: char| !c.is_alphanumeric() && c != '_') {
+                if token == "test" {
+                    return true;
+                }
+            }
+            false
+        })
+    }
+
+    /// Final segment ident equals "VerterHost".
+    fn last_segment_is_verter_host(path: &SynPath) -> bool {
+        path.segments
+            .last()
+            .map(|s| s.ident == "VerterHost")
+            .unwrap_or(false)
+    }
+
+    /// Any segment ident equals "VerterHost". Used for use-paths so
+    /// `use crate::VerterHost::field` (which would not parse) and
+    /// `use crate::{VerterHost, X}` (where the use group does not include
+    /// the trailing `VerterHost` directly) both still register.
+    fn any_segment_is_verter_host(path: &SynPath) -> bool {
+        path.segments.iter().any(|s| s.ident == "VerterHost")
+    }
+
+    impl<'ast> Visit<'ast> for SealVisitor<'_> {
+        fn visit_item_mod(&mut self, m: &'ast ItemMod) {
+            let entered_test = has_cfg_test(&m.attrs) || m.ident == "tests";
+            if entered_test {
+                self.cfg_test_depth += 1;
+            }
+            syn::visit::visit_item_mod(self, m);
+            if entered_test {
+                self.cfg_test_depth -= 1;
+            }
+        }
+
+        fn visit_item_fn(&mut self, f: &'ast ItemFn) {
+            let entered_test = has_cfg_test(&f.attrs);
+            if entered_test {
+                self.cfg_test_depth += 1;
+            }
+            syn::visit::visit_item_fn(self, f);
+            if entered_test {
+                self.cfg_test_depth -= 1;
+            }
+        }
+
+        fn visit_use_path(&mut self, p: &'ast UsePath) {
+            if self.cfg_test_depth > 0 {
+                return;
+            }
+            if p.ident == "VerterHost" {
+                self.violations.push(Violation {
+                    file: self.path.to_path_buf(),
+                    kind: ViolationKind::UsePath,
+                });
+            }
+            syn::visit::visit_use_path(self, p);
+        }
+
+        fn visit_type_path(&mut self, tp: &'ast TypePath) {
+            if self.cfg_test_depth > 0 {
+                return;
+            }
+            if last_segment_is_verter_host(&tp.path) {
+                self.violations.push(Violation {
+                    file: self.path.to_path_buf(),
+                    kind: ViolationKind::TypePath,
+                });
+            }
+            syn::visit::visit_type_path(self, tp);
+        }
+
+        fn visit_expr_path(&mut self, ep: &'ast ExprPath) {
+            if self.cfg_test_depth > 0 {
+                return;
+            }
+            if any_segment_is_verter_host(&ep.path) {
+                self.violations.push(Violation {
+                    file: self.path.to_path_buf(),
+                    kind: ViolationKind::ExprPath,
+                });
+            }
+            syn::visit::visit_expr_path(self, ep);
+        }
+    }
+
+    pub(super) fn scan_file(path: &Path, violations: &mut Vec<Violation>) {
+        let src = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => panic!("read {}: {}", path.display(), e),
+        };
+        let parsed = syn::parse_file(&src)
+            .unwrap_or_else(|e| panic!("parse {}: {}", path.display(), e));
+        let mut visitor = SealVisitor::new(path, violations);
+        visitor.visit_file(&parsed);
+    }
+
+    pub(super) fn walk_rs_files(root: &Path) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        for entry in WalkDir::new(root).into_iter().filter_map(Result::ok) {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            // Skip sibling `*_tests.rs` files (whitelist test fixtures).
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.ends_with("_tests.rs") || name == "tests.rs" {
+                    continue;
+                }
+            }
+            files.push(path.to_path_buf());
+        }
+        files
+    }
+
+    pub(super) fn format_violations(violations: &[Violation]) -> String {
+        use std::collections::BTreeMap;
+        let mut by_file: BTreeMap<&Path, Vec<&ViolationKind>> = BTreeMap::new();
+        for v in violations {
+            by_file.entry(v.file.as_path()).or_default().push(&v.kind);
+        }
+        let mut lines = Vec::new();
+        for (file, kinds) in by_file {
+            let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+            for k in kinds {
+                *counts.entry(k.to_string()).or_default() += 1;
+            }
+            let summary = counts
+                .iter()
+                .map(|(k, n)| format!("{n}× {k}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            lines.push(format!("  {} -- {summary}", file.display()));
+        }
+        format!(
+            "found {} concrete VerterHost reference(s) in {} file(s):\n{}",
+            violations.len(),
+            lines.len(),
+            lines.join("\n")
+        )
+    }
+
+    /// `resolver_context.rs` is the bridging trait file: it must
+    /// reference `VerterHost` to register the trait impl
+    /// (`impl ResolverContext for crate::VerterHost`). Whitelisting it
+    /// is structural — without it the seal scope would be
+    /// self-violating.
+    fn is_seal_bridge_file(path: &Path) -> bool {
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n == "resolver_context.rs")
+            .unwrap_or(false)
+    }
+
+    pub(super) fn run() {
+        // Seal scope per sub-plan §10a.0.A. Three resolver-tier
+        // directories (recursive) plus two top-level files.
+        let crate_root = workspace_root().join("crates/verter_session/src");
+        let scope_roots = [
+            crate_root.join("resolver_core"),
+            crate_root.join("meta_resolve"),
+            crate_root.join("project_semantic_dispatch"),
+        ];
+        let scope_files = [
+            crate_root.join("component_meta_caches.rs"),
+            crate_root.join("component_meta_materialize.rs"),
+        ];
+
+        let mut violations: Vec<Violation> = Vec::new();
+        for root in &scope_roots {
+            for file in walk_rs_files(root) {
+                if is_seal_bridge_file(&file) {
+                    continue;
+                }
+                scan_file(&file, &mut violations);
+            }
+        }
+        for file in &scope_files {
+            scan_file(file, &mut violations);
+        }
+
+        if !violations.is_empty() {
+            panic!(
+                "Phase 10a seal violation:\n{}\n\nResolver-tier files \
+                 must reach host state through `&dyn ResolverContext` \
+                 (`crate::resolver_core::ResolverContext`), not through \
+                 the concrete `VerterHost` type. See sub-plan §10a for \
+                 the migration recipe.",
+                format_violations(&violations)
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "phase-10a: enforced after the seal-scope migration completes; \
+            workers run with --include-ignored to track progress, and the \
+            #[ignore] is removed in commit 13"]
+fn no_concrete_verter_host_in_seal_scope() {
+    resolver_context_seal::run();
+}
