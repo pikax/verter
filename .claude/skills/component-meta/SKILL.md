@@ -191,6 +191,12 @@ dispatch.execute(SemanticQueryKey::ProjectPath { base, path, mode: Expanded });
 - `TypeSolverHost`, `EvalEnvSolverHost`, `SessionSolverHost` traits/structs → DELETED; dispatch called directly
 - `TypeQueryEngine` → DELETED; `ProjectSemanticDispatch::new(host)` replaces
 
+**Phase 5 query-planner contract.** `ComponentMetaQueryEngine` no longer owns any resolver state. For every Vue macro call site (`defineProps`, `defineEmits`, `defineSlots`, `defineModel`, `defineExpose`, `defineOptions`, `withDefaults`) the engine builds a `SemanticQueryKey::ResolveMacroPayload { owner, macro_index, macro_kind, type_args, mode }` (the SOLE new variant added in Phase 5 §5.0) and dispatches through `ProjectSemanticDispatch::execute`. `ResolveMacroPayload` reuses the sidecar `AnalyzedMacro` (no AST re-walk per §A14) and lowers the body using the existing `Instantiate` / `NormalizeIntersection` / `Object` builders.
+
+The 3 originally-proposed variants — `MaterializeSurface`, `ResolvePublicInstance`, `ResolveFallthroughSurface` — landed as **non-variant dispatch helpers** that compose existing `SemanticQueryKey` variants and read the `ComponentMetaResultDb<ComponentMetaAnalysis>` sidecar. They are not enum variants on `SemanticQueryKey`. The cache-shape rule ("every `SemanticQueryKey` variant dispatches through `SemanticGraphStore::execute_cooperative`") therefore still holds with one new variant added.
+
+**Source-text fallbacks are guard-enforced (Phase 4 / 4b).** The pre-Phase-4 `host.read_source` callsites in `component_meta.rs` and the `DeclarationMetadataResolver::read_source` trait + the three text-projection helpers (`source_for_local_type_projection`, `project_macro_surfaces_from_expanded_text`, `project_macro_surfaces_from_source_type_name`) are deleted. Per-member JSDoc enrichment now flows through `enrich_projected_jsdoc` using `host.resolve_jsdoc_block` (graph-native). The architecture guards `no_read_source_in_component_meta`, `no_read_source_in_declaration_metadata`, `no_text_based_macro_surface_projection_helpers`, and `no_macro_string_heuristics_in_resolver_core` are un-ignored and mechanically enforce the no-fallback invariant on every commit.
+
 **Key resolver files (post-cutover):**
 
 | File | Purpose |
@@ -199,7 +205,7 @@ dispatch.execute(SemanticQueryKey::ProjectPath { base, path, mode: Expanded });
 | `crates/verter_session/src/semantic_query_memo.rs` | `SemanticGraphStore` (node memo + relation memo) |
 | `crates/verter_session/src/host_manage.rs` | `get_component_meta()` entry point, `HostNamedTypeCacheAdapter` (reads/writes `SemanticGraphStore` directly for Vue macro results) |
 | `crates/verter_session/src/host_resolve.rs` | `HostFrontierAdapter`, cross-file type resolution |
-| `crates/verter_session/src/resolver_core/component_meta_query_engine.rs` | `ComponentMetaQueryEngine` — pure `SemanticQueryApi` consumer; no `owner_engine` field, no private resolver/expander state |
+| `crates/verter_session/src/resolver_core/component_meta_query_engine/` | `ComponentMetaQueryEngine` — Phase 5 query-planner. Reduced from a resolver to a builder of `SemanticQueryKey` lists; the engine asks the shared dispatch and assembles `ComponentMetaAnalysis` from the returned `CacheRead<T>` results. No private resolver/expander state (Phase 11b.2 split helpers/prepared_surface/registry_decl/route_keys/routed_expr/shallow_preserve/surface child modules) |
 
 ## Component-Meta Perf / Debug Workflow
 
