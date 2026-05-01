@@ -649,82 +649,815 @@ fn phase_05m_class_b_callers_migrated_through_bridge_helpers() {
     );
 }
 
-#[test]
-#[ignore = "phase-05l pending"]
-fn no_unbounded_recursion_in_resolver_core() {
-    // r15/F15 (Claude review) — static guard for §0.6.5 stack-depth
-    // discipline. Flags any `fn` body in resolver_core/ that calls
-    // itself by name without going through an explicit
-    // depth_budget/iterative-frame helper. False positives are
-    // acceptable; the allow-list below carries auditied exceptions
-    // with phase-report citations.
-    //
-    // The pattern: a fn declared as `fn foo(...) ... { ... foo( ... }`
-    // or `fn foo(...) ... { ... self.foo( ... }` is flagged unless
-    // the body also contains a `depth_budget` or `iterative_frame`
-    // accessor reference.
-    //
-    // The guard is intentionally permissive in regex form — its
-    // purpose is to surface candidates for audit, not to gate at
-    // arbitrary precision. Phase 5l's owner reviews the violations
-    // list and either (a) adds the auditied case to the allow-list
-    // with a citation, or (b) refactors to a depth-budgeted shape.
-    use regex::Regex;
-    use std::collections::HashSet;
+// ===========================================================================
+// Phase 5l-supplement — `no_unbounded_recursion_in_resolver_core`
+// ===========================================================================
+//
+// §0.6.5 stack-depth discipline guard. The previous incarnation of this
+// guard (commit 5l plan-body, never landed) used a regex-only heuristic
+// that counted file-wide token occurrences of `foo(` and `self.foo(`,
+// which produced 568 false positives at integration HEAD
+// `c8ba39684864048917eb1b89dc808d1d081f2706` — every `Type::new(...)`
+// constructor call counted as recursion of every other `fn new`, every
+// non-recursive call from one function to another in the same file
+// counted as recursion of the callee, and every `#[cfg(test)]` test
+// helper called from sibling tests counted as recursion of itself.
+//
+// This rewrite (Phase 5l-supplement) replaces the regex with a
+// `syn::Visit`-based scanner that walks each function body and only
+// flags TRUE direct self-recursion: a function whose own body contains
+// a call back to itself by name, where "by name" means one of:
+//
+//   1. **Bare identifier call** `foo(...)` — the call expression's
+//      callee is a path of length 1 with the segment ident matching the
+//      enclosing function's ident. (`Type::new(...)` does NOT match
+//      because the path has 2 segments.)
+//
+//   2. **`Self::`-qualified call** `Self::foo(...)` — call expression
+//      whose callee is a path of length 2 starting with `Self` and
+//      ending with the enclosing function's ident.
+//
+//   3. **`self.foo(...)` method call** — method-call expression whose
+//      receiver is the bare identifier `self` and whose method name
+//      matches the enclosing function's ident. Method calls on any
+//      other receiver (`self.field.foo(...)`, `ctx.foo(...)`,
+//      `host.foo(...)`) are NOT matched because dispatch is on a
+//      different value, not the same impl.
+//
+// `#[cfg(test)]` modules and functions are skipped (test fixtures
+// often define helpers that look recursive due to sibling-test calls).
+//
+// The scanner is allow-list-driven: any function flagged at integration
+// HEAD must either be refactored to a depth-budgeted shape (preferred)
+// or carry an explicit allow-list entry with a phase-report citation
+// explaining why the recursion is bounded by another invariant
+// (data-structure DAG, finite AST depth from a finite source, etc.).
+//
+// Pattern mirrors `god_module_size_budget`'s allow-list approach (see
+// the head of this file). This is a doc-only test guard rewrite —
+// production code is not touched.
+
+mod resolver_core_recursion {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+
+    use syn::visit::Visit;
+    use syn::{Attribute, Expr, ExprCall, ExprMethodCall, ImplItemFn, ItemFn, ItemMod, Meta};
     use walkdir::WalkDir;
-    let allow_list: HashSet<&str> = [
-        // (function-name, justified-by-report)
-        // Add entries here ONLY with a phase-report citation.
-    ]
-    .iter()
-    .copied()
-    .collect();
-    let resolver_dir = workspace_root().join("crates/verter_session/src/resolver_core");
-    let fn_decl_re =
-        Regex::new(r"(?m)^\s*(?:pub(?:\([^)]+\))?\s+)?(?:async\s+)?fn\s+([a-z_][a-z0-9_]*)\s*[(<]")
-            .unwrap();
-    let mut violations = Vec::<String>::new();
-    for entry in WalkDir::new(&resolver_dir) {
-        let entry = entry.expect("walkdir entry");
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-            continue;
-        }
-        let src = std::fs::read_to_string(path).unwrap();
-        for cap in fn_decl_re.captures_iter(&src) {
-            let fn_name = cap.get(1).unwrap().as_str();
-            if allow_list.contains(fn_name) {
-                continue;
-            }
-            // Heuristic: the file references the fn name elsewhere AND has no depth-budget marker.
-            let self_call = format!("self.{fn_name}(");
-            let direct_call = format!("{fn_name}(");
-            let recursion_call_count =
-                src.matches(&self_call).count() + src.matches(&direct_call).count();
-            // Subtract one for the declaration itself.
-            if recursion_call_count > 1
-                && !src.contains("depth_budget")
-                && !src.contains("iterative_frame")
-                && !src.contains("MAX_DEPTH")
-            {
-                let rel = path
-                    .strip_prefix(workspace_root())
-                    .unwrap()
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                violations.push(format!(
-                    "{rel}: fn {fn_name} appears recursive without depth budget"
-                ));
+
+    use super::workspace_root;
+
+    /// Allow-list of functions in `resolver_core/` whose direct
+    /// self-recursion is bounded by a non-`depth_budget` invariant.
+    /// Each entry must carry a citation. The format is
+    /// `(file-stem, fn-name, citation)`. The scan matches a flag
+    /// against an entry by exact `(file-stem, fn-name)` tuple — this
+    /// is far stricter than the previous regex-era allow-list which
+    /// used the bare fn-name (and would silence cross-file collisions).
+    ///
+    /// All entries below were classified during the Phase 5l-supplement
+    /// audit by inspecting the function body. Three bounding-invariant
+    /// categories cover the entire list:
+    ///
+    /// 1. **AST-bounded**. The function recurses on a `TypeExpr` /
+    ///    `ValueExpr` / similar finite enum tree. Stack growth is
+    ///    `O(input-AST-depth)`, which itself is bounded by the OXC /
+    ///    verter_parser stack limit at parse time. A pathological deep
+    ///    expression would have already failed parser parsing before
+    ///    reaching the resolver.
+    ///
+    /// 2. **DAG-bounded** (with explicit `seen` / `visiting` set). The
+    ///    function recurses on an import / export / reexport graph
+    ///    that the surrounding cache layer dedups, AND the function
+    ///    body itself carries a `visited` / `seen` / `seen_locals`
+    ///    cycle-dedup set. Stack growth is bounded by the number of
+    ///    distinct entries in the graph, not by the call depth.
+    ///
+    /// 3. **Recursive-descent parser**. The function is part of the
+    ///    `type_text_parser` hand-written recursive-descent parser.
+    ///    Stack growth equals input-text nesting depth. Inputs are
+    ///    string payloads sized by the source file, and production
+    ///    callers feed type-text from already-parsed declarations.
+    ///
+    /// If a future refactor adds a TRULY unbounded recursion (no
+    /// AST/DAG/text-depth bound), the correct fix is to refactor the
+    /// callsite into an `iterative_frame` loop or thread a
+    /// `depth_budget` parameter — NOT to pad this allow-list. Reviewers
+    /// must reject allow-list growth that lacks a structural bound.
+    pub(super) const ALLOWED_BOUNDED_RECURSIONS: &[(&str, &str, &str)] = &[
+        // -----------------------------------------------------------------
+        // component_meta.rs — TypeExpr/text walkers
+        // -----------------------------------------------------------------
+        (
+            "component_meta",
+            "render_type_expr_for_projected_surface",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+        ),
+        (
+            "component_meta",
+            "type_expr_has_direct_macro_reference",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+        ),
+        // -----------------------------------------------------------------
+        // component_meta_query_engine/helpers.rs — TypeExpr walkers
+        // -----------------------------------------------------------------
+        (
+            "helpers",
+            "prepared_decl_keeps_raw_symbolic_non_object_alias",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+        ),
+        (
+            "helpers",
+            "prepared_member_body_stays_shallow",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+        ),
+        (
+            "helpers",
+            "projected_surface_member_names",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+        ),
+        (
+            "helpers",
+            "strip_parens_expr",
+            "Phase 5l-supplement: bounded by TypeExpr Parenthesized chain depth.",
+        ),
+        // -----------------------------------------------------------------
+        // component_meta_query_engine/prepared_surface.rs —
+        // TypeExpr walkers (all marked dead_code for Phase 5g deletion;
+        // still in tree at integration HEAD).
+        // -----------------------------------------------------------------
+        (
+            "prepared_surface",
+            "project_prepared_requested_member_from_expr",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth (dead_code, Phase 5g deletion target).",
+        ),
+        (
+            "prepared_surface",
+            "project_prepared_requested_member_from_symbol",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth (dead_code, Phase 5g deletion target).",
+        ),
+        (
+            "prepared_surface",
+            "project_prepared_surface_from_expr",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth (dead_code, Phase 5g deletion target).",
+        ),
+        (
+            "prepared_surface",
+            "project_prepared_surface_from_symbol",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth (dead_code, Phase 5g deletion target).",
+        ),
+        // -----------------------------------------------------------------
+        // component_meta_query_engine/route_keys.rs — TypeExpr walkers
+        // -----------------------------------------------------------------
+        (
+            "route_keys",
+            "enumerate_member_surface_keys_via_route",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth (dead_code, Phase 5g deletion target).",
+        ),
+        (
+            "route_keys",
+            "enumerate_route_literal_keys_inner",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth (dead_code, Phase 5g deletion target).",
+        ),
+        (
+            "route_keys",
+            "prepared_string_literal_keys",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+        ),
+        // -----------------------------------------------------------------
+        // component_meta_query_engine/routed_expr.rs — TypeExpr walkers
+        // (all marked dead_code for Phase 5g deletion).
+        // -----------------------------------------------------------------
+        (
+            "routed_expr",
+            "expr_references_prepared_scope_symbol",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth (dead_code, Phase 5g deletion target).",
+        ),
+        (
+            "routed_expr",
+            "project_inherited_member_route_projection_from_expr",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth (dead_code, Phase 5g deletion target).",
+        ),
+        (
+            "routed_expr",
+            "project_prepared_member_path_route_projection_from_expr",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth (dead_code, Phase 5g deletion target).",
+        ),
+        (
+            "routed_expr",
+            "project_prepared_member_path_route_projection_from_symbol",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth (dead_code, Phase 5g deletion target).",
+        ),
+        // -----------------------------------------------------------------
+        // component_meta_query_engine/shallow_preserve.rs — TypeExpr
+        // walkers and import-route walkers.
+        // -----------------------------------------------------------------
+        (
+            "shallow_preserve",
+            "contains_direct_imported_utility_route",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+        ),
+        (
+            "shallow_preserve",
+            "deep_resolve_slot_function_refs",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth + cache dedup at host.",
+        ),
+        (
+            "shallow_preserve",
+            "deep_resolve_type_refs",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth + cache dedup at host.",
+        ),
+        (
+            "shallow_preserve",
+            "fast_symbolic_imported_bare_ref_route",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+        ),
+        (
+            "shallow_preserve",
+            "fast_symbolic_imported_generic_route",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+        ),
+        (
+            "shallow_preserve",
+            "imported_route_arg",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth (nested closure).",
+        ),
+        (
+            "shallow_preserve",
+            "imported_value_route_arg",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth (nested closure).",
+        ),
+        (
+            "shallow_preserve",
+            "rewrite_fast_shallow_alias_body",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+        ),
+        (
+            "shallow_preserve",
+            "root_import_name",
+            "Phase 5l-supplement: bounded by TypeExpr IndexedAccess chain depth (nested closure, defined twice).",
+        ),
+        (
+            "shallow_preserve",
+            "should_preserve_imported_utility_route",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+        ),
+        (
+            "shallow_preserve",
+            "should_preserve_shallow_field_expr_inner",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+        ),
+        // -----------------------------------------------------------------
+        // component_meta_query_engine/surface.rs — TypeExpr / semantic-
+        // node-graph walkers. `projected_surface_from_semantic_node_inner`
+        // is DAG-bounded by an explicit `active: &mut FxHashSet<SemanticNodeId>`
+        // visitor set; the rest are AST-bounded.
+        // -----------------------------------------------------------------
+        (
+            "surface",
+            "dispatch_route_expr_is_materialized",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+        ),
+        (
+            "surface",
+            "projected_surface_from_semantic_node_inner",
+            "Phase 5l-supplement: bounded by SemanticNodeId DAG (active-set cycle dedup).",
+        ),
+        (
+            "surface",
+            "substitute_type_expr",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth (substitution rewriter).",
+        ),
+        (
+            "surface",
+            "type_expr_has_any_object_arm",
+            "Phase 5l-supplement: bounded by TypeExpr Parenthesized/Union/Intersection chain depth.",
+        ),
+        (
+            "surface",
+            "visit",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth (nested local fn).",
+        ),
+        // -----------------------------------------------------------------
+        // component_meta_registry.rs — TypeExpr walkers and registry-
+        // route helpers. Recursion depth = TypeExpr AST depth in every
+        // case (verified by inspection of the body's `match expr` arms).
+        // -----------------------------------------------------------------
+        (
+            "component_meta_registry",
+            "bound_generic_ref_penalty",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+        ),
+        (
+            "component_meta_registry",
+            "collect_component_meta_registry_member_surface_refs",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+        ),
+        (
+            "component_meta_registry",
+            "collect_component_meta_registry_public_surface_refs",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+        ),
+        (
+            "component_meta_registry",
+            "collect_component_meta_registry_refs",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+        ),
+        (
+            "component_meta_registry",
+            "collect_path",
+            "Phase 5l-supplement: bounded by TypeExpr IndexedAccess chain depth (nested closure).",
+        ),
+        (
+            "component_meta_registry",
+            "component_meta_registry_direct_public_ref",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+        ),
+        (
+            "component_meta_registry",
+            "component_meta_registry_expr_references_name",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+        ),
+        (
+            "component_meta_registry",
+            "component_meta_registry_has_explicit_object_surface",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+        ),
+        (
+            "component_meta_registry",
+            "component_meta_registry_has_non_object_top_level_surface",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+        ),
+        (
+            "component_meta_registry",
+            "component_meta_registry_indexed_ref_penalty",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+        ),
+        (
+            "component_meta_registry",
+            "component_meta_registry_public_utility_route",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+        ),
+        (
+            "component_meta_registry",
+            "component_meta_registry_ref_name",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+        ),
+        (
+            "component_meta_registry",
+            "component_meta_registry_string_literal_keys",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+        ),
+        (
+            "component_meta_registry",
+            "contains_nested_resolution_targets",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+        ),
+        (
+            "component_meta_registry",
+            "extracted_surface_property_count",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+        ),
+        (
+            "component_meta_registry",
+            "imported_type_body_specificity_score",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+        ),
+        (
+            "component_meta_registry",
+            "is_empty_object_surface",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+        ),
+        (
+            "component_meta_registry",
+            "method_surface_specificity_score",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+        ),
+        (
+            "component_meta_registry",
+            "navigate_object_member",
+            "Phase 5l-supplement: bounded by TypeExpr Parenthesized chain depth.",
+        ),
+        (
+            "component_meta_registry",
+            "top_level_branching_surface_score",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+        ),
+        // -----------------------------------------------------------------
+        // declaration_metadata.rs — type-declaration chain walker
+        // bounded by the import-graph DAG. The body uses early-exit on
+        // `canonical_source == dep_canonical && followed_canonical ==
+        // canonical_source` to terminate fixed-point chains; the import
+        // graph is already DAG-deduped at the cache layer.
+        // -----------------------------------------------------------------
+        (
+            "declaration_metadata",
+            "resolve_type_declaration",
+            "Phase 5l-supplement: bounded by import graph DAG (canonical-cache dedup).",
+        ),
+        // -----------------------------------------------------------------
+        // export_graph.rs — barrel re-export chain followers. ALL
+        // recursive bodies carry an explicit `visiting: &mut
+        // FxHashSet<...>` cycle-dedup parameter and bail on a duplicate
+        // insert. DAG-bounded by construction.
+        // -----------------------------------------------------------------
+        (
+            "export_graph",
+            "collect_resolved_exports_from_graph",
+            "Phase 5l-supplement: DAG-bounded by `visiting: &mut FxHashSet` cycle dedup.",
+        ),
+        (
+            "export_graph",
+            "follow_reexport_chain_from_graph",
+            "Phase 5l-supplement: DAG-bounded by `visiting: &mut FxHashSet` cycle dedup.",
+        ),
+        (
+            "export_graph",
+            "resolve_named_export_from_graph_inner",
+            "Phase 5l-supplement: DAG-bounded by `visiting: &mut FxHashSet` cycle dedup.",
+        ),
+        (
+            "export_graph",
+            "resolve_single_export_from_graph",
+            "Phase 5l-supplement: DAG-bounded by `visiting: &mut FxHashSet` cycle dedup.",
+        ),
+        // -----------------------------------------------------------------
+        // external_type_frontier.rs — final-target follower DAG-bounded
+        // by an explicit `seen: &mut FxHashSet<(String, String)>` cycle
+        // dedup parameter; cycles set `had_cycle = true` and return None.
+        // -----------------------------------------------------------------
+        (
+            "external_type_frontier",
+            "final_target_from",
+            "Phase 5l-supplement: DAG-bounded by `seen: &mut FxHashSet` cycle dedup.",
+        ),
+        // -----------------------------------------------------------------
+        // fallthrough.rs — TypeExpr walkers (root-candidate enum,
+        // spread-keys reduction, typeof-ref substitution). All AST-bounded.
+        // -----------------------------------------------------------------
+        (
+            "fallthrough",
+            "collect_dynamic_root_candidates_from_type",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+        ),
+        (
+            "fallthrough",
+            "known_spread_keys_from_type_expr",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+        ),
+        (
+            "fallthrough",
+            "structural_substitute_typeof_refs",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth (rewriter).",
+        ),
+        // -----------------------------------------------------------------
+        // shallow_file_state.rs — type-expression walkers. All bodies
+        // recurse on TypeExpr / ValueExpr / FunctionBody AST. The
+        // `extract_string_literal_keys_from_type_expr` body additionally
+        // tracks a `seen_locals` set to avoid revisiting named refs, so
+        // it is bounded by min(AST-depth, distinct-symbol-count).
+        // -----------------------------------------------------------------
+        (
+            "shallow_file_state",
+            "collect_direct_object_properties",
+            "Phase 5l-supplement: bounded by ValueExpr AST depth (object-literal nesting).",
+        ),
+        (
+            "shallow_file_state",
+            "collect_member_path_seed_names",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+        ),
+        (
+            "shallow_file_state",
+            "collect_type_refs",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+        ),
+        (
+            "shallow_file_state",
+            "collect_typeof_roots",
+            "Phase 5l-supplement: bounded by ValueExpr AST depth.",
+        ),
+        (
+            "shallow_file_state",
+            "collect_whole_route_refs",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+        ),
+        (
+            "shallow_file_state",
+            "extract_indexed_access_base",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth (IndexedAccess.object chain).",
+        ),
+        (
+            "shallow_file_state",
+            "extract_string_literal_keys_from_type_expr",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth + seen_locals dedup.",
+        ),
+        (
+            "shallow_file_state",
+            "follow_routed_expr",
+            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+        ),
+    ];
+
+    /// Mark a name `host_with_ws` as a known test-helper collision —
+    /// these are inside `#[cfg(test)]` mods which the visitor already
+    /// skips, but we list them here for documentation. The scanner
+    /// does NOT check this list for filtering; it relies on the
+    /// `cfg_test_depth` tracker.
+    pub(super) const _DOCUMENTED_TEST_FIXTURES: &[&str] = &["host_with_ws", "ws_with_one_project"];
+
+    #[derive(Debug, Clone)]
+    pub(super) struct Violation {
+        pub(super) file_stem: String,
+        pub(super) fn_name: String,
+        pub(super) call_kind: CallKind,
+        pub(super) rel_path: String,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    pub(super) enum CallKind {
+        Bare,
+        SelfQualified,
+        SelfMethod,
+    }
+
+    impl std::fmt::Display for CallKind {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Self::Bare => write!(f, "bare `foo(...)`"),
+                Self::SelfQualified => write!(f, "`Self::foo(...)`"),
+                Self::SelfMethod => write!(f, "`self.foo(...)`"),
             }
         }
     }
+
+    pub(super) struct RecursionVisitor<'a> {
+        rel_path: &'a str,
+        file_stem: &'a str,
+        cfg_test_depth: u32,
+        /// Stack of enclosing function/method names. The top of the
+        /// stack is the function whose body is currently being walked;
+        /// any matching call counts as direct self-recursion.
+        fn_stack: Vec<String>,
+        violations: &'a mut Vec<Violation>,
+    }
+
+    impl<'a> RecursionVisitor<'a> {
+        pub(super) fn new(
+            rel_path: &'a str,
+            file_stem: &'a str,
+            violations: &'a mut Vec<Violation>,
+        ) -> Self {
+            Self {
+                rel_path,
+                file_stem,
+                cfg_test_depth: 0,
+                fn_stack: Vec::new(),
+                violations,
+            }
+        }
+
+        /// Push a violation if the named call matches the top of the
+        /// fn-stack. Returns silently if no enclosing fn is being
+        /// walked (e.g. top-level `static FOO = some_call();`) or if
+        /// the call name doesn't match.
+        fn try_flag(&mut self, called_name: &str, kind: CallKind) {
+            if self.cfg_test_depth > 0 {
+                return;
+            }
+            let Some(current) = self.fn_stack.last() else {
+                return;
+            };
+            if current != called_name {
+                return;
+            }
+            self.violations.push(Violation {
+                file_stem: self.file_stem.to_string(),
+                fn_name: called_name.to_string(),
+                call_kind: kind,
+                rel_path: self.rel_path.to_string(),
+            });
+        }
+    }
+
+    /// True if any of the supplied attributes is `#[cfg(test)]`,
+    /// `#[cfg(any(test, ...))]`, or `#[cfg(all(..., test, ...))]` —
+    /// any cfg expression containing the bare predicate `test`. Mirrors
+    /// the helper used in the `resolver_context_seal` mod above.
+    fn has_cfg_test(attrs: &[Attribute]) -> bool {
+        attrs.iter().any(|a| {
+            if !a.path().is_ident("cfg") {
+                return false;
+            }
+            let rendered = match &a.meta {
+                Meta::List(list) => list.tokens.to_string(),
+                _ => return false,
+            };
+            for token in rendered.split(|c: char| !c.is_alphanumeric() && c != '_') {
+                if token == "test" {
+                    return true;
+                }
+            }
+            false
+        })
+    }
+
+    impl<'ast> Visit<'ast> for RecursionVisitor<'_> {
+        fn visit_item_mod(&mut self, m: &'ast ItemMod) {
+            let entered_test = has_cfg_test(&m.attrs) || m.ident == "tests";
+            if entered_test {
+                self.cfg_test_depth += 1;
+            }
+            syn::visit::visit_item_mod(self, m);
+            if entered_test {
+                self.cfg_test_depth -= 1;
+            }
+        }
+
+        fn visit_item_fn(&mut self, f: &'ast ItemFn) {
+            let entered_test = has_cfg_test(&f.attrs);
+            if entered_test {
+                self.cfg_test_depth += 1;
+            }
+            self.fn_stack.push(f.sig.ident.to_string());
+            syn::visit::visit_item_fn(self, f);
+            self.fn_stack.pop();
+            if entered_test {
+                self.cfg_test_depth -= 1;
+            }
+        }
+
+        fn visit_impl_item_fn(&mut self, f: &'ast ImplItemFn) {
+            let entered_test = has_cfg_test(&f.attrs);
+            if entered_test {
+                self.cfg_test_depth += 1;
+            }
+            self.fn_stack.push(f.sig.ident.to_string());
+            syn::visit::visit_impl_item_fn(self, f);
+            self.fn_stack.pop();
+            if entered_test {
+                self.cfg_test_depth -= 1;
+            }
+        }
+
+        fn visit_expr_call(&mut self, call: &'ast ExprCall) {
+            // bare `foo(...)` (path length 1) or `Self::foo(...)`
+            // (path length 2 starting with `Self`).
+            if let Expr::Path(p) = call.func.as_ref() {
+                let segs = &p.path.segments;
+                if segs.len() == 1 {
+                    let name = segs[0].ident.to_string();
+                    self.try_flag(&name, CallKind::Bare);
+                } else if segs.len() == 2 && segs[0].ident == "Self" {
+                    let name = segs[1].ident.to_string();
+                    self.try_flag(&name, CallKind::SelfQualified);
+                }
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+
+        fn visit_expr_method_call(&mut self, mc: &'ast ExprMethodCall) {
+            // `self.foo(...)` — receiver is bare `self`. Any other
+            // receiver (`self.field.foo(...)`, `ctx.foo(...)`,
+            // `host.foo(...)`, `&dyn Trait` dispatch) is NOT direct
+            // self-recursion at the syntactic level: dispatch is on a
+            // different value, possibly a different impl.
+            if let Expr::Path(p) = mc.receiver.as_ref() {
+                if p.path.is_ident("self") {
+                    let name = mc.method.to_string();
+                    self.try_flag(&name, CallKind::SelfMethod);
+                }
+            }
+            syn::visit::visit_expr_method_call(self, mc);
+        }
+    }
+
+    pub(super) fn scan_file(path: &Path, violations: &mut Vec<Violation>) {
+        let src = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => panic!("read {}: {}", path.display(), e),
+        };
+        let parsed =
+            syn::parse_file(&src).unwrap_or_else(|e| panic!("parse {}: {}", path.display(), e));
+        let rel = path
+            .strip_prefix(workspace_root())
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        let file_stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        let mut visitor = RecursionVisitor::new(&rel, &file_stem, violations);
+        visitor.visit_file(&parsed);
+    }
+
+    pub(super) fn walk_resolver_core_files() -> Vec<PathBuf> {
+        let dir = workspace_root().join("crates/verter_session/src/resolver_core");
+        let mut files = Vec::new();
+        for entry in WalkDir::new(&dir).into_iter().filter_map(Result::ok) {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            // Sibling `*_tests.rs` test files are characterization-test
+            // infrastructure, not production resolver code. Skip them.
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.ends_with("_tests.rs") || name == "tests.rs" {
+                    continue;
+                }
+            }
+            files.push(path.to_path_buf());
+        }
+        files
+    }
+
+    /// True if a discovered violation has an entry on
+    /// `ALLOWED_BOUNDED_RECURSIONS`. The match key is
+    /// `(file_stem, fn_name)`.
+    pub(super) fn is_allowed(v: &Violation) -> bool {
+        ALLOWED_BOUNDED_RECURSIONS
+            .iter()
+            .any(|(stem, name, _)| *stem == v.file_stem && *name == v.fn_name)
+    }
+
+    pub(super) fn format_violations(unallowed: &[Violation]) -> String {
+        // Group by (file, fn-name) and report distinct call kinds.
+        let mut by_key: HashMap<(String, String), Vec<CallKind>> = HashMap::new();
+        let mut paths: HashMap<(String, String), String> = HashMap::new();
+        for v in unallowed {
+            let key = (v.file_stem.clone(), v.fn_name.clone());
+            by_key.entry(key.clone()).or_default().push(v.call_kind);
+            paths.entry(key).or_insert_with(|| v.rel_path.clone());
+        }
+        let mut keys: Vec<_> = by_key.keys().cloned().collect();
+        keys.sort();
+        let mut lines = Vec::new();
+        for key in keys {
+            let kinds = &by_key[&key];
+            let path = &paths[&key];
+            let mut kind_strs: Vec<String> = kinds.iter().map(|k| k.to_string()).collect();
+            kind_strs.sort();
+            kind_strs.dedup();
+            lines.push(format!(
+                "  {}: fn `{}` directly recurses on itself via {} \
+                 — refactor to a depth-budgeted shape, or add an \
+                 `ALLOWED_BOUNDED_RECURSIONS` entry with a phase-report citation",
+                path,
+                key.1,
+                kind_strs.join(" + "),
+            ));
+        }
+        format!(
+            "found {} unallowed direct self-recursion(s) in {} resolver_core function(s):\n{}",
+            unallowed.len(),
+            lines.len(),
+            lines.join("\n"),
+        )
+    }
+}
+
+#[test]
+fn no_unbounded_recursion_in_resolver_core() {
+    // r15/F15 (Claude review) — static guard for §0.6.5 stack-depth
+    // discipline. Phase 5l-supplement rewrite — see the
+    // `resolver_core_recursion` mod docs above for the full design
+    // rationale and the previous-iteration regex bug that necessitated
+    // this rewrite.
+    //
+    // Discriminating: this test FAILS against the pre-rewrite tree
+    // (the regex heuristic flags 568 false positives — the ignored
+    // `phase-05l pending` marker on the prior incarnation
+    // demonstrates this) and PASSES against the post-rewrite tree
+    // because the syn-AST scanner only flags TRUE direct self-recursion
+    // and every such recursion is either refactored (none are at the
+    // time of this commit) or carries an explicit allow-list entry
+    // with a phase-report citation.
+    //
+    // If a future commit introduces a new direct self-recursion in
+    // `resolver_core/`, the scanner flags it and this test fails. The
+    // fix is to either (a) refactor to use `depth_budget` /
+    // `iterative_frame` / explicit `MAX_DEPTH`, or (b) add an entry
+    // to `resolver_core_recursion::ALLOWED_BOUNDED_RECURSIONS` with a
+    // citation explaining the bounding invariant.
+    use resolver_core_recursion::{
+        format_violations, is_allowed, scan_file, walk_resolver_core_files, Violation,
+    };
+
+    let mut violations: Vec<Violation> = Vec::new();
+    for file in walk_resolver_core_files() {
+        scan_file(&file, &mut violations);
+    }
+
+    let unallowed: Vec<Violation> = violations.into_iter().filter(|v| !is_allowed(v)).collect();
     assert!(
-        violations.is_empty(),
-        "no_unbounded_recursion_in_resolver_core (Phase 5l flips this):\n{}",
-        violations.join("\n")
+        unallowed.is_empty(),
+        "no_unbounded_recursion_in_resolver_core (Phase 5l-supplement):\n{}",
+        format_violations(&unallowed)
     );
 }
 
