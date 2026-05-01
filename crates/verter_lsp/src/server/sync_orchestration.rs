@@ -1,0 +1,1567 @@
+//! Provider-sync orchestration (phase 11e.5).
+//!
+//! Inherent-impl extension methods on [`super::VerterLanguageServer`]
+//! covering diagnostics publishing, IDE/API/non-Vue provider sync,
+//! background-init bootstrap, and provisional sync paths.
+//!
+//! All methods were moved verbatim from `server.rs` (now `server/mod.rs`).
+//! No behaviour change. The sibling lives as a private child module
+//! under `server/mod.rs` so it sees the parent's private struct fields
+//! without visibility widening.
+
+use std::collections::HashSet;
+use std::sync::Arc;
+
+use tower_lsp_server::ls_types::*;
+
+use verter_workspace::WorkspaceRead;
+
+use crate::documents::line_index::LineIndex;
+use crate::documents::position_map::PositionMapper;
+use crate::documents::sfc_scanner::scan_sfc_blocks;
+use crate::provider_sync::{commit_sync_transition, ProviderPathKind};
+use crate::tsgo::merge;
+
+use super::background_init::{
+    background_init, configure_provider_paths_for_source, BackgroundInitArgs,
+};
+use super::handler_guard::block_in_place_if_available;
+use super::server_utils::*;
+use super::{PublishedResolverSnapshot, VerterLanguageServer};
+
+impl VerterLanguageServer {
+    pub(super) async fn publish_full_diagnostics(&self, uri: &Uri) {
+        let verter_diags = self.compute_verter_diagnostics(uri);
+
+        let diagnostics = if let Some(tp) = &self.type_provider {
+            match self.ide_context(uri) {
+                Some((tsx_path, tsx_content, mapper)) => {
+                    let tsx_li = LineIndex::new(&tsx_content, self.documents.encoding());
+                    let vue_li = self.documents.get(uri).map(|d| d.line_index.clone());
+                    match (tp.get_diagnostics(&tsx_path).await, vue_li) {
+                        (Ok(type_diags), Some(vue_li)) => {
+                            tracing::debug!(
+                                "publish_full_diagnostics: type provider returned {} for {}",
+                                type_diags.len(),
+                                uri.as_str()
+                            );
+                            merge::merge_diagnostics(
+                                verter_diags,
+                                type_diags,
+                                &tsx_li,
+                                &mapper,
+                                &vue_li,
+                            )
+                        }
+                        (Err(e), _) => {
+                            tracing::warn!(
+                                "publish_full_diagnostics: type provider error for {}: {e}",
+                                uri.as_str()
+                            );
+                            verter_diags
+                        }
+                        _ => verter_diags,
+                    }
+                }
+                None => verter_diags,
+            }
+        } else {
+            verter_diags
+        };
+
+        self.publish_diagnostics_raw(uri, diagnostics).await;
+    }
+
+    /// Low-level: push pre-computed diagnostics to the client.
+    pub(super) async fn publish_diagnostics_raw(&self, uri: &Uri, diagnostics: Vec<Diagnostic>) {
+        let _timer = self
+            .statistics
+            .timer("diagnostics", Some(uri.as_str().to_string()));
+
+        tracing::info!(
+            "publish_diagnostics ENTER {} ({} diags)",
+            uri.as_str(),
+            diagnostics.len()
+        );
+
+        self.client
+            .publish_diagnostics(uri.clone(), diagnostics, None)
+            .await;
+
+        tracing::info!("publish_diagnostics EXIT {}", uri.as_str());
+    }
+
+    /// Build a TextEdit for inserting an import statement into the script block.
+    pub(super) fn build_auto_import_edit(
+        &self,
+        doc_uri_str: &str,
+        component_name: &str,
+        import_path: &str,
+    ) -> Option<TextEdit> {
+        let uri: Uri = doc_uri_str.parse().ok()?;
+        let doc = self.documents.get(&uri)?;
+        let blocks = scan_sfc_blocks(&doc.source);
+
+        // Find the script setup block
+        let script_block = blocks
+            .iter()
+            .find(|b| b.tag_name == "script" && b.attrs_raw.contains("setup"))?;
+
+        let (content_start, _content_end) = script_block.content_range();
+
+        // Check if the component is already imported
+        if let Some(analysis) = self.documents.get_analysis(&uri) {
+            for import in &analysis.imports {
+                if import.bindings.iter().any(|b| b.name == component_name) {
+                    return None; // Already imported
+                }
+            }
+
+            // Find the position after the last import statement
+            let last_import_end = analysis.imports.iter().map(|imp| imp.span.end).max();
+
+            let insert_offset = if let Some(end) = last_import_end {
+                // Insert after the last import — the span_end is relative to script content
+                let abs_offset = content_start + end;
+                // Skip past the newline after the import
+                let rest = &doc.source[abs_offset as usize..];
+                let newline_skip = rest
+                    .bytes()
+                    .take_while(|&b| b == b'\n' || b == b'\r')
+                    .count();
+                abs_offset + newline_skip as u32
+            } else {
+                // No existing imports — insert at the beginning of the script block
+                content_start
+            };
+
+            let import_stmt = format!("import {} from '{}'\n", component_name, import_path);
+            let pos = doc.line_index.offset_to_position(insert_offset)?;
+
+            Some(TextEdit {
+                range: Range::new(pos, pos),
+                new_text: import_stmt,
+            })
+        } else {
+            None
+        }
+    }
+
+    #[allow(dead_code)] // Used by sync_coordinator, may be useful for future callers
+    pub(super) async fn sync_ide_to_provider(&self, uri: &Uri) {
+        let _timer = self
+            .statistics
+            .timer("ide_sync", Some(uri.as_str().to_string()));
+        if let Some(sync) = &self.project_sync {
+            if let Some(canonical_id) = self.documents.get_canonical_id(uri) {
+                self.documents.host().ensure_loaded(&canonical_id);
+            }
+            if let Some(ide) = self.documents.get_ide(uri) {
+                let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
+                    return;
+                };
+                let Some(transition) =
+                    self.prepare_vue_provider_sync_transition(&canonical_id, ide.is_jsx)
+                else {
+                    self.pending_snapshot_provider_sync.insert(canonical_id);
+                    tracing::debug!(
+                        "sync_ide: resolver snapshot unavailable for {}",
+                        uri.as_str()
+                    );
+                    return;
+                };
+                self.close_provider_paths(&transition.stale_paths).await;
+                let committed_state = transition.next;
+                let Some(ide_path) = committed_state.ide_path.clone() else {
+                    return;
+                };
+                tracing::info!("sync_ide: {} ({} bytes)", ide_path, ide.code.len());
+                if let Err(e) = sync.sync_tsx(&ide_path, &ide.code).await {
+                    tracing::warn!("sync_ide: failed for {ide_path}: {e}");
+                } else {
+                    self.commit_provider_sync_state(&canonical_id, committed_state.clone());
+                    tracing::info!("sync_ide: ok for {}", ide_path);
+                }
+            } else {
+                tracing::debug!("sync_ide: no IDE output available for {}", uri.as_str());
+            }
+        }
+    }
+
+    /// Sync the public API (.vue.ts) to the type provider for cross-file component resolution.
+    pub(super) async fn sync_api_to_provider(&self, uri: &Uri) {
+        if let Some(sync) = &self.project_sync {
+            let canonical_id = match self.documents.get_canonical_id(uri) {
+                Some(id) => id,
+                None => return,
+            };
+            self.documents.host().ensure_loaded(&canonical_id);
+            if matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo) {
+                if let Some(snapshot) = self.published_resolver() {
+                    configure_provider_paths_for_source(sync, &snapshot, &canonical_id, false)
+                        .await;
+                }
+            }
+            let Some(transition) = self
+                .documents
+                .get_ide(uri)
+                .and_then(|ide| {
+                    self.prepare_vue_provider_sync_transition(&canonical_id, ide.is_jsx)
+                })
+                .or_else(|| {
+                    self.prepare_vue_provider_sync_transition(
+                        &canonical_id,
+                        self.documents.is_jsx(uri),
+                    )
+                })
+            else {
+                self.pending_snapshot_provider_sync.insert(canonical_id);
+                return;
+            };
+            self.close_provider_paths(&transition.stale_paths).await;
+            let mut committed_state = transition.next;
+            if let Some(dts_path) = committed_state.api_path.clone() {
+                if let Some(api) = self.documents.host.get_public_api(&canonical_id) {
+                    let result = if committed_state.api_background_loaded {
+                        sync.sync_dts(&dts_path, &api.code).await
+                    } else {
+                        sync.open_dts(&dts_path, &api.code).await
+                    };
+                    if let Err(e) = result {
+                        tracing::warn!("sync_api: failed for {dts_path}: {e}");
+                    } else {
+                        committed_state.set_background_loaded(ProviderPathKind::Api, true);
+                        self.commit_provider_sync_state(&canonical_id, committed_state);
+                    }
+                }
+            }
+        }
+    }
+
+    pub(super) async fn sync_vue_public_api_by_canonical_id(&self, canonical_id: &str) {
+        if let Some(uri) = self.documents.canonical_id_to_uri(canonical_id) {
+            self.sync_api_to_provider(&uri).await;
+        } else {
+            self.resync_background_vue_file(canonical_id).await;
+        }
+    }
+
+    pub(super) fn refresh_vue_dependency_tracking(&self, canonical_id: &str) {
+        let Some(snapshot) = self.published_resolver() else {
+            return;
+        };
+        let Some(analysis) = self.documents.host().get_analysis(canonical_id) else {
+            return;
+        };
+
+        let reader = LspProjectResolverReader::new(&self.documents);
+        let resolved_dependencies = collect_resolved_provider_dependencies_from_analyzed_refs(
+            &snapshot.resolver,
+            &reader,
+            canonical_id,
+            &analysis.module_references,
+        );
+
+        self.documents.host.set_import_dependencies(
+            canonical_id,
+            resolved_dependencies
+                .iter()
+                .map(|entry| verter_session::DependencyResolution {
+                    specifier: entry.provider_specifier.clone(),
+                    resolved_canonical_id: Some(entry.source_id.clone()),
+                    possible_canonical_ids: Vec::new(),
+                })
+                .collect(),
+        );
+    }
+
+    pub(super) async fn sync_non_vue_file_to_provider(
+        &self,
+        snapshot: &PublishedResolverSnapshot,
+        canonical_id: &str,
+        source: Arc<str>,
+        module_references: &[verter_session::ScriptModuleReference],
+    ) {
+        let reader = LspProjectResolverReader::new(&self.documents);
+        let Some(prepared) = prepare_non_vue_provider_sync(
+            Some(snapshot),
+            &reader,
+            canonical_id,
+            &source,
+            module_references,
+        ) else {
+            return;
+        };
+
+        if let Some(sync) = &self.project_sync {
+            if matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo) {
+                configure_provider_paths_for_source(sync, snapshot, canonical_id, false).await;
+            }
+            if let Some(transition) = self.prepare_non_vue_provider_sync_transition(canonical_id) {
+                self.close_provider_paths(&transition.stale_paths).await;
+                if let Err(error) = sync
+                    .sync_file(&prepared.provider_path, &prepared.rewritten)
+                    .await
+                {
+                    tracing::warn!(
+                        "failed to sync provider shadow file {}: {error}",
+                        prepared.provider_path
+                    );
+                } else {
+                    self.commit_provider_sync_state(canonical_id, transition.next);
+                }
+            } else if let Err(error) = sync
+                .sync_file(&prepared.provider_path, &prepared.rewritten)
+                .await
+            {
+                tracing::warn!(
+                    "failed to sync provider shadow file {}: {error}",
+                    prepared.provider_path
+                );
+            }
+        }
+
+        if !prepared.resolved_dependencies.is_empty() {
+            self.documents.host.set_import_dependencies(
+                canonical_id,
+                prepared
+                    .resolved_dependencies
+                    .iter()
+                    .map(|entry| verter_session::DependencyResolution {
+                        specifier: entry.provider_specifier.clone(),
+                        resolved_canonical_id: Some(entry.source_id.clone()),
+                        possible_canonical_ids: Vec::new(),
+                    })
+                    .collect(),
+            );
+        }
+
+        let vue_targets = prepared
+            .resolved_dependencies
+            .iter()
+            .filter(|dependency| {
+                dependency.provider_target == crate::project_resolver::ProviderTarget::VuePublicApi
+            })
+            .map(|dependency| dependency.source_id.clone())
+            .collect::<Vec<_>>();
+        for vue_target in vue_targets {
+            self.sync_vue_public_api_by_canonical_id(&vue_target).await;
+        }
+
+        let non_vue_targets = prepared
+            .resolved_dependencies
+            .iter()
+            .filter(|dependency| {
+                dependency.provider_target
+                    == crate::project_resolver::ProviderTarget::ShadowSourceFile
+                    || (dependency.provider_target
+                        == crate::project_resolver::ProviderTarget::SourceFile
+                        && dependency.source_id.contains("node_modules"))
+            })
+            .map(|dependency| dependency.source_id.clone())
+            .collect::<Vec<_>>();
+        self.sync_non_vue_provider_graph(&snapshot.resolver, non_vue_targets)
+            .await;
+    }
+
+    pub(super) async fn sync_non_vue_provider_graph(
+        &self,
+        resolver: &crate::project_resolver::NativeProjectResolver,
+        initial_ids: Vec<String>,
+    ) {
+        let Some(sync) = &self.project_sync else {
+            return;
+        };
+
+        let reader = LspProjectResolverReader::new(&self.documents);
+        let mut pending = initial_ids;
+        let mut seen = HashSet::new();
+
+        while let Some(canonical_id) = pending.pop() {
+            if !seen.insert(canonical_id.clone()) || canonical_id.ends_with(".vue") {
+                continue;
+            }
+
+            let Some(source) = reader.read_file(&canonical_id) else {
+                continue;
+            };
+
+            let module_references = self
+                .documents
+                .host
+                .upsert(verter_session::UpsertRequest {
+                    canonical_id: Some(canonical_id.clone()),
+                    input_id: canonical_id.clone(),
+                    source: Arc::clone(&source),
+                    file_kind: verter_session::FileKind::NonSfc,
+                    aliases: Vec::new(),
+                })
+                .map(|result| result.module_references)
+                .unwrap_or_default();
+
+            let Some(prepared) = prepare_non_vue_provider_sync(
+                Some(&PublishedResolverSnapshot {
+                    resolver: resolver.clone(),
+                    ownership_ready: true,
+                }),
+                &reader,
+                &canonical_id,
+                &source,
+                &module_references,
+            ) else {
+                continue;
+            };
+
+            if matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo) {
+                let snapshot = PublishedResolverSnapshot {
+                    resolver: resolver.clone(),
+                    ownership_ready: true,
+                };
+                configure_provider_paths_for_source(sync, &snapshot, &canonical_id, true).await;
+            }
+            if let Some(transition) = self.prepare_non_vue_provider_sync_transition(&canonical_id) {
+                self.close_provider_paths(&transition.stale_paths).await;
+                if let Err(error) = sync
+                    .sync_file(&prepared.provider_path, &prepared.rewritten)
+                    .await
+                {
+                    tracing::warn!(
+                        "failed to sync provider shadow file {}: {error}",
+                        prepared.provider_path
+                    );
+                } else {
+                    self.commit_provider_sync_state(&canonical_id, transition.next);
+                }
+            } else if let Err(error) = sync
+                .sync_file(&prepared.provider_path, &prepared.rewritten)
+                .await
+            {
+                tracing::warn!(
+                    "failed to sync provider shadow file {}: {error}",
+                    prepared.provider_path
+                );
+            }
+
+            let resolved_dependencies = prepared.resolved_dependencies;
+            if !resolved_dependencies.is_empty() {
+                self.documents.host.set_import_dependencies(
+                    &canonical_id,
+                    resolved_dependencies
+                        .iter()
+                        .map(|entry| verter_session::DependencyResolution {
+                            specifier: entry.provider_specifier.clone(),
+                            resolved_canonical_id: Some(entry.source_id.clone()),
+                            possible_canonical_ids: Vec::new(),
+                        })
+                        .collect(),
+                );
+            }
+
+            for dependency in resolved_dependencies {
+                if dependency.provider_target
+                    == crate::project_resolver::ProviderTarget::VuePublicApi
+                {
+                    self.sync_vue_public_api_by_canonical_id(&dependency.source_id)
+                        .await;
+                } else if dependency.provider_target
+                    == crate::project_resolver::ProviderTarget::ShadowSourceFile
+                {
+                    pending.push(dependency.source_id.clone());
+                } else if dependency.provider_target
+                    == crate::project_resolver::ProviderTarget::SourceFile
+                    && dependency.source_id.contains("node_modules")
+                {
+                    // Follow node_modules dependencies transitively
+                    pending.push(dependency.source_id.clone());
+                }
+            }
+        }
+    }
+
+    pub(super) fn sync_api_to_provider_in_background(&self, uri: Uri) {
+        let Some(sync) = self.project_sync.clone() else {
+            return;
+        };
+        let Some(canonical_id) = self.documents.get_canonical_id(&uri) else {
+            return;
+        };
+        let Some(snapshot) = self.published_resolver() else {
+            self.pending_snapshot_provider_sync.insert(canonical_id);
+            return;
+        };
+        let is_tsgo = matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo);
+        let Some(transition) =
+            self.prepare_vue_provider_sync_transition(&canonical_id, self.documents.is_jsx(&uri))
+        else {
+            self.pending_snapshot_provider_sync.insert(canonical_id);
+            return;
+        };
+        let dts_path = match transition.next.api_path.clone() {
+            Some(path) => path,
+            None => return,
+        };
+        let host = self.documents.host_arc();
+        let provider_sync_states = Arc::clone(&self.provider_sync_states);
+        tokio::spawn(async move {
+            if is_tsgo {
+                configure_provider_paths_for_source(&sync, &snapshot, &canonical_id, true).await;
+            }
+            for (kind, path) in &transition.stale_paths {
+                let result = match kind {
+                    ProviderPathKind::Ide => sync.close_tsx(path).await,
+                    ProviderPathKind::Api => sync.close_dts(path).await,
+                    ProviderPathKind::Shadow => sync.close_file(path).await,
+                };
+                if let Err(error) = result {
+                    tracing::warn!(
+                        "sync_api(background): failed to close stale provider path {path}: {error}"
+                    );
+                }
+            }
+            let api = block_in_place_if_available(|| host.get_public_api(&canonical_id));
+            if let Some(api) = api {
+                let mut committed_state = transition.next;
+                let result = if committed_state.api_background_loaded {
+                    sync.sync_dts(&dts_path, &api.code).await
+                } else {
+                    sync.open_dts(&dts_path, &api.code).await
+                };
+                if let Err(e) = result {
+                    tracing::warn!("sync_api(background): failed for {dts_path}: {e}");
+                } else {
+                    committed_state.set_background_loaded(ProviderPathKind::Api, true);
+                    commit_sync_transition(&provider_sync_states, &canonical_id, committed_state);
+                }
+            }
+        });
+    }
+
+    /// Flush the active file's IDE TSX to the type provider for interactive queries.
+    ///
+    /// Called by hover, completion, goto_definition, type_definition BEFORE making
+    /// a type provider query. Only syncs the IDE path (TSX) — API (.vue.ts) sync
+    /// is deferred to the coordinator.
+    ///
+    /// Runs when:
+    /// - File is in `needs_ide_sync`, OR
+    /// - No committed provider sync state exists (first open, timeout retry, failure recovery)
+    ///
+    /// **With resolver snapshot**: owner-aware IDE sync.
+    /// **Without snapshot**: pre-snapshot blocker hydration + provisional IDE sync.
+    pub(super) async fn ensure_current_file_synced(&self, uri: &Uri) {
+        let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
+            return;
+        };
+
+        // Touch MRU for snapshot drain ordering
+        self.touch_mru(&canonical_id);
+
+        let current_state = self.provider_sync_state_for_source(&canonical_id);
+        let has_committed_state = current_state.is_some();
+        let ide_already_synced = current_state
+            .as_ref()
+            .map(|s| s.ide_background_loaded)
+            .unwrap_or(false);
+        let ownership_ready = self
+            .published_resolver()
+            .map(|snapshot| snapshot.ownership_ready)
+            .unwrap_or(false);
+        let needs_owner_reconcile = current_state
+            .as_ref()
+            .map(|state| state.is_provisional() && ownership_ready)
+            .unwrap_or(false);
+        let needs_sync = self.needs_ide_sync.remove(&canonical_id).is_some();
+
+        if !needs_sync && has_committed_state && ide_already_synced && !needs_owner_reconcile {
+            return; // IDE is fresh
+        }
+
+        tracing::info!(
+            "ensure_current_file_synced: flushing IDE sync for {} (needs_sync={}, has_state={})",
+            uri.as_str(),
+            needs_sync,
+            has_committed_state,
+        );
+
+        let Some(sync) = &self.project_sync else {
+            return;
+        };
+
+        // Ensure file and its deps are loaded. The scheduler's extract_deps
+        // + auto-ingress handles recursive dependency walking.
+        self.documents.host().ensure_loaded(&canonical_id);
+
+        // Recompile + refresh mapper (in case blocker hydration changed TSX)
+        self.documents.recompile_and_refresh_mapper(uri);
+
+        let ide = self.documents.get_ide(uri);
+        let is_jsx = ide.as_ref().map(|r| r.is_jsx).unwrap_or(false);
+
+        // Determine sync plan: owner-aware, provisional, or skip.
+        let snapshot = self.published_resolver();
+        let (ide_path, provisional) = match &snapshot {
+            Some(snap) if snap.ownership_ready => {
+                // Ready snapshot: only sync if file has an owner.
+                let Some(ide_path) =
+                    provider_ide_path_for_source(&snap.resolver, &canonical_id, is_jsx)
+                else {
+                    // Non-Vue file: IDE sync not applicable.
+                    return;
+                };
+                match crate::provider_sync::vue_sync_state_for_source(
+                    &snap.resolver,
+                    &canonical_id,
+                    is_jsx,
+                ) {
+                    Some(_) => (ide_path, false),
+                    None => {
+                        // Ready snapshot but no owner: do NOT open/sync provider.
+                        self.clear_provider_sync_state(&canonical_id).await;
+                        self.pending_snapshot_provider_sync
+                            .insert(canonical_id.clone());
+                        return;
+                    }
+                }
+            }
+            Some(snap) => {
+                // Bootstrap snapshot (ownership_ready = false): provisional sync allowed.
+                let Some(ide_path) =
+                    provider_ide_path_for_source(&snap.resolver, &canonical_id, is_jsx)
+                else {
+                    // Non-Vue file: IDE sync not applicable.
+                    return;
+                };
+                if matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo) {
+                    configure_provider_paths_for_source(sync, snap, &canonical_id, false).await;
+                }
+                (ide_path, true)
+            }
+            None => {
+                // No VFS workspace at all: provisional
+                if !canonical_id.ends_with(".vue") {
+                    return;
+                }
+                let ext = if is_jsx { ".jsx" } else { ".tsx" };
+                (format!("{canonical_id}{ext}"), true)
+            }
+        };
+
+        let Some(ide) = ide else {
+            return;
+        };
+
+        let previous_ide_path = current_state
+            .as_ref()
+            .and_then(|state| state.ide_path.clone());
+        let ide_path_loaded = current_state
+            .as_ref()
+            .map(|state| {
+                state.ide_path.as_deref() == Some(ide_path.as_str()) && state.ide_background_loaded
+            })
+            .unwrap_or(false);
+
+        if let Some(stale_ide_path) = previous_ide_path
+            .as_ref()
+            .filter(|path| path.as_str() != ide_path.as_str())
+        {
+            if let Err(error) = sync.close_tsx(stale_ide_path).await {
+                tracing::warn!(
+                    "ensure_current_file_synced: failed to close stale IDE path {}: {error}",
+                    stale_ide_path
+                );
+            }
+        }
+
+        // Choose open_file vs update_file based on existing state
+        let result = if ide_path_loaded {
+            // Already known to provider — update
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                sync.sync_tsx(&ide_path, &ide.code),
+            )
+            .await
+        } else {
+            // First time — open
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                sync.open_tsx(&ide_path, &ide.code),
+            )
+            .await
+        };
+
+        match result {
+            Ok(Ok(())) => {
+                // Commit state
+                let mut state = if provisional {
+                    crate::provider_sync::ProviderSyncState {
+                        owner_binding: crate::provider_sync::ProviderOwnerBinding::Provisional,
+                        ide_path: Some(ide_path),
+                        api_path: None,
+                        ..Default::default()
+                    }
+                } else if let Some(snapshot) = &snapshot {
+                    crate::provider_sync::vue_sync_state_for_source(
+                        &snapshot.resolver,
+                        &canonical_id,
+                        is_jsx,
+                    )
+                    .unwrap_or_else(|| {
+                        crate::provider_sync::ProviderSyncState {
+                            owner_binding: crate::provider_sync::ProviderOwnerBinding::Provisional,
+                            ide_path: Some(ide_path.clone()),
+                            api_path: None,
+                            ..Default::default()
+                        }
+                    })
+                } else {
+                    // No VFS workspace (rare) — provisional fallback
+                    crate::provider_sync::ProviderSyncState {
+                        owner_binding: crate::provider_sync::ProviderOwnerBinding::Provisional,
+                        ide_path: Some(ide_path),
+                        api_path: None,
+                        ..Default::default()
+                    }
+                };
+                state.set_background_loaded(ProviderPathKind::Ide, true);
+                self.commit_provider_sync_state(&canonical_id, state);
+                if provisional {
+                    self.pending_snapshot_provider_sync
+                        .insert(canonical_id.clone());
+                }
+                // Queue deferred API sync
+                self.needs_deferred_sync.insert(canonical_id);
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    "ensure_current_file_synced: IDE sync failed for {}: {e}",
+                    uri.as_str()
+                );
+                self.needs_ide_sync.insert(canonical_id);
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "ensure_current_file_synced: IDE sync timed out for {}",
+                    uri.as_str()
+                );
+                self.needs_ide_sync.insert(canonical_id);
+            }
+        }
+    }
+
+    pub(super) async fn force_reopen_current_file_in_type_provider(&self, uri: &Uri) {
+        let Some(sync) = &self.project_sync else {
+            return;
+        };
+        let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
+            return;
+        };
+
+        self.documents.recompile_and_refresh_mapper(uri);
+
+        let Some(ide) = self.documents.get_ide(uri) else {
+            return;
+        };
+        let Some(ide_path) = self.active_ide_path_for_uri(uri) else {
+            return;
+        };
+
+        if let Err(error) = sync.close_tsx(&ide_path).await {
+            tracing::warn!(
+                "force_reopen_current_file_in_type_provider: failed to close {}: {error}",
+                ide_path
+            );
+        }
+
+        match sync.open_tsx(&ide_path, &ide.code).await {
+            Ok(()) => {
+                if let Some(mut state) = self.provider_sync_state_for_source(&canonical_id) {
+                    state.ide_path = Some(ide_path);
+                    self.commit_provider_sync_state(&canonical_id, state);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "force_reopen_current_file_in_type_provider: failed to reopen {}: {error}",
+                    uri.as_str()
+                );
+                self.needs_ide_sync.insert(canonical_id);
+            }
+        }
+    }
+
+    /// Legacy wrapper for backward compat — calls `ensure_current_file_synced`.
+    pub(super) async fn ensure_provider_synced(&self, uri: &Uri) {
+        self.ensure_current_file_synced(uri).await;
+        self.ensure_imported_vue_apis_synced(uri).await;
+        self.ensure_barrel_imports_synced_for_tsgo(uri).await;
+    }
+
+    pub(super) async fn ensure_imported_vue_apis_synced(&self, uri: &Uri) {
+        if matches!(self.type_provider_kind, crate::TypeProviderKind::None) {
+            return;
+        }
+
+        let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
+            return;
+        };
+        let Some(analysis) = self.documents.get_analysis(uri) else {
+            return;
+        };
+
+        let mut import_ids = collect_imported_vue_priority_ids_from_imports_with_fallback(
+            &analysis.imports,
+            Some(&canonical_id),
+            |parent, specifier| self.resolve_import_specifier(parent, specifier),
+        );
+
+        let snapshot = self.published_resolver();
+        let reader = LspProjectResolverReader::new(&self.documents);
+        let dynamic_ids = collect_priority_vue_targets_from_module_references(
+            snapshot.as_ref(),
+            &reader,
+            &canonical_id,
+            &analysis.module_references,
+        );
+        let mut seen: HashSet<String> = import_ids.iter().cloned().collect();
+        for import_id in dynamic_ids {
+            if seen.insert(import_id.clone()) {
+                import_ids.push(import_id);
+            }
+        }
+
+        for import_id in import_ids {
+            self.sync_imported_vue_api_lightweight(&import_id).await;
+        }
+    }
+
+    /// Sync barrel (non-Vue re-export) imports and their Vue dependencies to TSGO.
+    ///
+    /// When a Vue file imports components through a barrel (`import { Comp } from './components'`),
+    /// `ensure_imported_vue_apis_synced` misses both the barrel and its Vue re-export targets
+    /// because the barrel is a `.ts` file. This method discovers barrels from template component
+    /// usages, syncs their Vue dependencies first, then syncs the barrel itself.
+    pub(super) async fn ensure_barrel_imports_synced_for_tsgo(&self, uri: &Uri) {
+        if !matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo) {
+            return;
+        }
+        let Some(sync) = &self.project_sync else {
+            return;
+        };
+        let Some(snapshot) = self.published_resolver() else {
+            return;
+        };
+        let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
+            return;
+        };
+        let Some(analysis) = self.documents.get_analysis(uri) else {
+            return;
+        };
+        let Some(template) = analysis.template.as_ref() else {
+            return;
+        };
+
+        let host = self.documents.host();
+        let mut barrel_ids: Vec<String> = Vec::new();
+        let mut barrel_vue_deps: Vec<String> = Vec::new();
+        let mut seen_barrels = HashSet::new();
+        let mut seen_barrel_vue = HashSet::new();
+
+        for component in &template.components {
+            let Some(import_source) = component.import_source.as_deref() else {
+                continue;
+            };
+            let Some(resolved) = self.resolve_import_specifier(&canonical_id, import_source) else {
+                continue;
+            };
+            if resolved.ends_with(".vue") {
+                continue; // already handled by Vue sync
+            }
+            if !seen_barrels.insert(resolved.clone()) {
+                continue;
+            }
+
+            // Load barrel into host and scan its module references for Vue specifiers
+            host.ensure_loaded(&resolved);
+
+            if let Some(barrel_analysis) = host.get_analysis(&resolved) {
+                for module_ref in barrel_analysis.module_references.iter() {
+                    if let Some(specifier) = &module_ref.literal_specifier {
+                        if specifier.ends_with(".vue") {
+                            if let Some(vue_id) =
+                                self.resolve_import_specifier(&resolved, specifier)
+                            {
+                                if vue_id.ends_with(".vue")
+                                    && seen_barrel_vue.insert(vue_id.clone())
+                                {
+                                    barrel_vue_deps.push(vue_id);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            barrel_ids.push(resolved);
+        }
+
+        // Phase 1: Sync Vue dependencies first (so TSGO has .vue.ts targets)
+        for vue_id in &barrel_vue_deps {
+            self.sync_imported_vue_api_lightweight(vue_id).await;
+        }
+
+        // Phase 2: Sync barrel files (TSGO's rewrite_vue_imports_for_tsgo handles .vue → .vue.ts)
+        for barrel_id in &barrel_ids {
+            // Skip if already synced
+            if let Some(state) = self.provider_sync_state_for_source(barrel_id) {
+                if state.shadow_background_loaded {
+                    continue;
+                }
+            }
+
+            let Some(source) = host.get_source(barrel_id) else {
+                continue;
+            };
+            let module_references = block_in_place_if_available(|| {
+                host.upsert(verter_session::UpsertRequest {
+                    canonical_id: Some(barrel_id.clone()),
+                    input_id: barrel_id.clone(),
+                    source: source.clone(),
+                    file_kind: verter_session::FileKind::NonSfc,
+                    aliases: Vec::new(),
+                })
+                .map(|result| result.module_references)
+                .unwrap_or_default()
+            });
+            let reader = LspProjectResolverReader::new(&self.documents);
+            let Some(prepared) = prepare_non_vue_provider_sync(
+                Some(&snapshot),
+                &reader,
+                barrel_id,
+                &source,
+                &module_references,
+            ) else {
+                continue;
+            };
+
+            configure_provider_paths_for_source(sync, &snapshot, barrel_id, false).await;
+
+            if let Some(transition) = self.prepare_non_vue_provider_sync_transition(barrel_id) {
+                self.close_provider_paths(&transition.stale_paths).await;
+                if let Err(error) = sync
+                    .sync_file(&prepared.provider_path, &prepared.rewritten)
+                    .await
+                {
+                    tracing::warn!(
+                        "barrel sync: failed to sync {}: {error}",
+                        prepared.provider_path
+                    );
+                } else {
+                    self.commit_provider_sync_state(barrel_id, transition.next);
+                }
+            } else if let Err(error) = sync
+                .sync_file(&prepared.provider_path, &prepared.rewritten)
+                .await
+            {
+                tracing::warn!(
+                    "barrel sync: failed to sync {}: {error}",
+                    prepared.provider_path
+                );
+            }
+        }
+    }
+
+    pub(super) fn current_file_needs_inline_type_provider_sync(&self, uri: &Uri) -> bool {
+        let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
+            return false;
+        };
+
+        if self.needs_ide_sync.contains(&canonical_id) {
+            return true;
+        }
+
+        let Some(state) = self.provider_sync_state_for_source(&canonical_id) else {
+            return true;
+        };
+
+        if state.is_provisional()
+            && self
+                .published_resolver()
+                .map(|snapshot| snapshot.ownership_ready)
+                .unwrap_or(false)
+        {
+            return true;
+        }
+
+        if !state.ide_background_loaded {
+            return true;
+        }
+
+        let Some(ide_path) = self.target_ide_path_for_uri(uri) else {
+            return false;
+        };
+
+        state.ide_path.as_deref() != Some(ide_path.as_str())
+    }
+
+    /// Returns true if the user is actively typing (last change was within the cooldown window).
+    /// Used to suppress non-critical TSGO requests (diagnostics, semantic tokens, inlay hints)
+    /// during rapid typing.  TSGO processes requests serially, so queuing these during typing
+    /// blocks interactive requests like completions.
+    pub(super) fn is_typing_cooldown(&self) -> bool {
+        let last = self
+            .last_change_ms
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if last == 0 {
+            return false;
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        now.saturating_sub(last) < 300
+    }
+
+    /// Get IDE context for TypeProvider queries: (ide_path, ide_code, position_mapper).
+    pub(super) fn ide_context(&self, uri: &Uri) -> Option<(String, Arc<str>, PositionMapper)> {
+        let canonical_id = self.documents.get_canonical_id(uri);
+        if canonical_id.is_none() {
+            tracing::info!("ide_context: no canonical_id for {}", uri.as_str());
+            return None;
+        }
+        self.documents
+            .host()
+            .ensure_loaded(canonical_id.as_deref()?);
+        let Some(ide) = self.documents.get_ide(uri) else {
+            tracing::info!(
+                "ide_context: no IDE output for {} (canonical={})",
+                uri.as_str(),
+                canonical_id.as_deref().unwrap_or("?")
+            );
+            return None;
+        };
+
+        let Some(mapper) = self.documents.get_position_mapper(uri) else {
+            tracing::info!("ide_context: no position mapper for {}", uri.as_str());
+            return None;
+        };
+        let ide_path = self.active_ide_path_for_uri(uri)?;
+        Some((ide_path, ide.code, mapper))
+    }
+
+    /// Load the current workspace snapshot's resolver, if a published snapshot exists.
+    ///
+    /// Returns a `ResolverSnapshot`-like wrapper with a `.resolver` field for
+    /// compatibility with existing access patterns (`snapshot.resolver.method()`).
+    pub(super) fn published_resolver(&self) -> Option<PublishedResolverSnapshot> {
+        let ws = self.vfs_workspace.read();
+        let ws = ws.as_ref()?;
+        let published = ws.load_published()?;
+        Some(PublishedResolverSnapshot {
+            resolver: published.snapshot.resolver.clone(),
+            ownership_ready: published.ownership_ready,
+        })
+    }
+
+    /// Check if a file is in an SSR context using the published LspViews.
+    pub(super) fn is_ssr_context(&self, canonical_id: &str) -> bool {
+        let ws = self.vfs_workspace.read();
+        ws.as_ref()
+            .and_then(|ws| ws.load_published())
+            .and_then(|published| {
+                let views = published.ext::<crate::workspace_state::LspViews>()?;
+                Some(views.is_ssr_context(&published.snapshot, canonical_id))
+            })
+            .unwrap_or(false)
+    }
+
+    /// Find the project root for a file using the published LspViews.
+    #[allow(dead_code)]
+    pub(super) fn find_project_root(&self, canonical_id: &str) -> Option<String> {
+        let ws = self.vfs_workspace.read();
+        let ws = ws.as_ref()?;
+        let published = ws.load_published()?;
+        let views = published.ext::<crate::workspace_state::LspViews>()?;
+        views
+            .find_project_root(&published.snapshot, canonical_id)
+            .map(|s| s.to_string())
+    }
+
+    /// Get a linter for a file from the published LspViews. Returns a default linter
+    /// if no published snapshot exists or the file has no owner.
+    pub(super) fn linter_for_file(&self, canonical_id: &str) -> verter_diagnostics::Linter {
+        let ws = self.vfs_workspace.read();
+        if let Some(ws) = ws.as_ref() {
+            if let Some(published) = ws.load_published() {
+                if let Some(views) = published.ext::<crate::workspace_state::LspViews>() {
+                    if let Some(view) =
+                        views.linter_view_for_file(&published.snapshot, canonical_id)
+                    {
+                        return verter_diagnostics::Linter::new(view.lint_config.config.clone());
+                    }
+                }
+            }
+        }
+        verter_diagnostics::Linter::default()
+    }
+
+    /// Generate a provisional public API path (.vue.ts) without resolver ownership.
+    ///
+    /// Mirrors `provider_id_for_source()` for Vue files and is used during cold
+    /// start before `background_init()` has built the resolver snapshot.
+    pub(super) fn provisional_api_path_for_canonical_id(
+        &self,
+        canonical_id: &str,
+    ) -> Option<String> {
+        canonical_id
+            .ends_with(".vue")
+            .then(|| format!("{canonical_id}.ts"))
+    }
+
+    pub(super) async fn sync_vue_ide_provisionally(
+        &self,
+        canonical_id: &str,
+        ide_code: &str,
+        is_jsx: bool,
+    ) -> bool {
+        let Some(sync) = &self.project_sync else {
+            return false;
+        };
+        let ext = if is_jsx { ".jsx" } else { ".tsx" };
+        let ide_path = format!("{canonical_id}{ext}");
+
+        let mut state = self
+            .provider_sync_state_for_source(canonical_id)
+            .unwrap_or_else(|| crate::provider_sync::ProviderSyncState {
+                owner_binding: crate::provider_sync::ProviderOwnerBinding::Provisional,
+                ..Default::default()
+            });
+
+        let needs_open =
+            state.ide_path.as_deref() != Some(ide_path.as_str()) || !state.ide_background_loaded;
+        let result = if needs_open {
+            sync.open_tsx(&ide_path, ide_code).await
+        } else {
+            sync.sync_tsx(&ide_path, ide_code).await
+        };
+
+        match result {
+            Ok(()) => {
+                state.ide_path = Some(ide_path);
+                state.ide_background_loaded = true;
+                self.commit_provider_sync_state(canonical_id, state);
+                self.queue_snapshot_provider_sync(canonical_id.to_string());
+                true
+            }
+            Err(error) => {
+                tracing::warn!("sync_vue_ide_provisionally: failed for {canonical_id}: {error}");
+                self.queue_snapshot_provider_sync(canonical_id.to_string());
+                false
+            }
+        }
+    }
+
+    pub(super) async fn sync_vue_api_provisionally(
+        &self,
+        canonical_id: &str,
+        api_code: &str,
+    ) -> bool {
+        let Some(sync) = &self.project_sync else {
+            return false;
+        };
+        let Some(dts_path) = self.provisional_api_path_for_canonical_id(canonical_id) else {
+            return false;
+        };
+
+        let mut state = self
+            .provider_sync_state_for_source(canonical_id)
+            .unwrap_or_else(|| crate::provider_sync::ProviderSyncState {
+                owner_binding: crate::provider_sync::ProviderOwnerBinding::Provisional,
+                ..Default::default()
+            });
+
+        let needs_open =
+            state.api_path.as_deref() != Some(dts_path.as_str()) && !state.api_background_loaded;
+        let result = if needs_open {
+            sync.open_dts(&dts_path, api_code).await
+        } else {
+            sync.sync_dts(&dts_path, api_code).await
+        };
+
+        match result {
+            Ok(()) => {
+                state.api_path = Some(dts_path);
+                state.api_background_loaded = true;
+                self.commit_provider_sync_state(canonical_id, state);
+                self.queue_snapshot_provider_sync(canonical_id.to_string());
+                true
+            }
+            Err(error) => {
+                tracing::warn!("sync_vue_api_provisionally: failed for {canonical_id}: {error}");
+                self.queue_snapshot_provider_sync(canonical_id.to_string());
+                false
+            }
+        }
+    }
+
+    /// Get the active IDE file path (.tsx or .jsx) currently materialized in the provider.
+    ///
+    /// This must only return committed sync state, never a resolver-derived target path.
+    pub(super) fn active_ide_path_for_uri(&self, uri: &Uri) -> Option<String> {
+        let canonical = self
+            .documents
+            .get_canonical_id(uri)
+            .unwrap_or_else(|| uri.as_str().to_string());
+
+        self.provider_sync_states
+            .get(&canonical)
+            .and_then(|state| state.ide_path.clone())
+    }
+
+    /// Get the target IDE path formula for a Vue file URI.
+    ///
+    /// This is safe for sync planning, but not for live provider queries.
+    /// When no published resolver exists yet, fall back to the local
+    /// provisional `.vue.tsx` / `.vue.jsx` formula.
+    pub(super) fn target_ide_path_for_uri(&self, uri: &Uri) -> Option<String> {
+        let canonical = self
+            .documents
+            .get_canonical_id(uri)
+            .unwrap_or_else(|| uri.as_str().to_string());
+        let is_jsx = self.documents.is_jsx(uri);
+
+        self.published_resolver()
+            .and_then(|snapshot| {
+                provider_ide_path_for_source(&snapshot.resolver, &canonical, is_jsx)
+            })
+            .or_else(|| {
+                canonical
+                    .ends_with(".vue")
+                    .then(|| format!("{canonical}{}", if is_jsx { ".jsx" } else { ".tsx" }))
+            })
+    }
+
+    /// Returns the active IDE path only when the provider is already bound to
+    /// the current desired artifact path and can be updated in place.
+    pub(super) fn eager_syncable_ide_path_for_uri(&self, uri: &Uri) -> Option<String> {
+        let canonical_id = self.documents.get_canonical_id(uri)?;
+        let state = self.provider_sync_state_for_source(&canonical_id)?;
+        if !state.ide_background_loaded {
+            return None;
+        }
+        if state.is_provisional()
+            && self
+                .published_resolver()
+                .map(|snapshot| snapshot.ownership_ready)
+                .unwrap_or(false)
+        {
+            return None;
+        }
+        let desired_path = self.target_ide_path_for_uri(uri)?;
+        (state.ide_path.as_deref() == Some(desired_path.as_str())).then_some(desired_path)
+    }
+
+    /// Get IDE content and mapper by IDE path (reverse lookup).
+    pub(super) fn ide_context_by_path(
+        &self,
+        ide_path: &str,
+    ) -> Option<(String, Arc<str>, PositionMapper)> {
+        let snapshot = self.published_resolver()?;
+        let canonical_id =
+            source_id_from_provider_vue_path(&snapshot.resolver, self.documents.host(), ide_path)?;
+        let uri = self.documents.canonical_id_to_uri(&canonical_id)?;
+        self.ide_context(&uri)
+    }
+    pub(super) async fn spawn_background_init(
+        &self,
+        init_lint_opts: Option<serde_json::Value>,
+        context: &str,
+    ) {
+        let roots = self.workspace_roots.lock().await.clone();
+        if roots.is_empty() {
+            return;
+        }
+        let my_gen = self
+            .init_generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+            + 1;
+
+        let mut vite_opts = self.vite_config_options.lock().await.clone();
+        vite_opts.node_path = crate::tsserver::find_node();
+        let args = BackgroundInitArgs {
+            roots,
+            vite_opts,
+            init_lint_opts,
+            my_gen,
+            client: self.client.clone(),
+            type_provider: self.type_provider.clone(),
+            workspace_scanner: Arc::clone(&self.workspace_scanner),
+            init_generation: Arc::clone(&self.init_generation),
+            project_sync: self.project_sync.clone(),
+            documents: Arc::clone(&self.documents),
+            provider_sync_states: Arc::clone(&self.provider_sync_states),
+            pending_snapshot_provider_sync: Arc::clone(&self.pending_snapshot_provider_sync),
+            is_tsgo: matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo),
+            cached_verter_diags: Arc::clone(&self.cached_verter_diags),
+            position_encoding: Arc::clone(&self.position_encoding),
+            mru_canonical_ids: {
+                // Snapshot the MRU list at spawn time — background_init uses it for drain ordering
+                Arc::new(parking_lot::Mutex::new(
+                    self.mru_canonical_ids.lock().clone(),
+                ))
+            },
+            vfs_workspace: Arc::clone(&self.vfs_workspace),
+        };
+
+        let ctx = context.to_owned();
+        tokio::spawn(async move {
+            if let Err(e) = background_init(args).await {
+                tracing::error!("background {ctx} failed: {e}");
+            }
+        });
+    }
+
+    /// Trigger a full registry rebuild (same as did_change_workspace_folders).
+    /// Used when vite config files change on disk.
+    pub(super) async fn trigger_registry_rebuild(&self) {
+        self.spawn_background_init(None, "vite config rebuild")
+            .await;
+    }
+
+    /// Re-read a non-open .vue file from disk, upsert, compile, and sync it to the provider.
+    /// Lightweight imported-Vue sync for `did_open`.
+    ///
+    /// Tries to generate and sync the required Vue artifacts without disk I/O:
+    /// if the host already has the file in memory, `get_public_api` avoids
+    /// re-reading from disk. Falls back to `resync_background_vue_file` when
+    /// the file hasn't been upserted yet.
+    pub(super) async fn sync_imported_vue_api_lightweight(&self, canonical_id: &str) {
+        let is_tsgo = matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo);
+        let profile = self.documents.tsx_profile.read().clone();
+        let snapshot = self.published_resolver();
+        let ownership_ready = snapshot
+            .as_ref()
+            .map(|s| s.ownership_ready)
+            .unwrap_or(false);
+
+        // Fast path: host already has the file — sync directly from cached artifacts.
+        if let Some(api) = self.documents.host.get_public_api(canonical_id) {
+            let ide = if is_tsgo {
+                self.documents.host.get_ide(canonical_id, &profile)
+            } else {
+                None
+            };
+
+            if !ownership_ready {
+                // Bootstrap: provisional sync is allowed
+                if let Some(ide) = ide.as_ref() {
+                    let _ = self
+                        .sync_vue_ide_provisionally(canonical_id, &ide.code, ide.is_jsx)
+                        .await;
+                }
+                let _ = self
+                    .sync_vue_api_provisionally(canonical_id, &api.code)
+                    .await;
+                return;
+            }
+
+            if let Some(sync) = &self.project_sync {
+                let Some(transition) = self.prepare_vue_provider_sync_transition(
+                    canonical_id,
+                    ide.as_ref().map(|output| output.is_jsx).unwrap_or(false),
+                ) else {
+                    // Ready snapshot but no owner: queue and return.
+                    // Do NOT perform provisional provider I/O.
+                    self.clear_provider_sync_state(canonical_id).await;
+                    self.queue_snapshot_provider_sync(canonical_id.to_string());
+                    return;
+                };
+                self.close_provider_paths(&transition.stale_paths).await;
+                let mut committed_state = transition.next;
+                let mut synced_any = false;
+
+                if let Some(ide) = ide.as_ref() {
+                    if let Some(ide_path) = committed_state.ide_path.clone() {
+                        let result = if committed_state.ide_background_loaded {
+                            sync.sync_tsx(&ide_path, &ide.code).await
+                        } else {
+                            sync.open_tsx(&ide_path, &ide.code).await
+                        };
+                        if result.is_ok() {
+                            committed_state.set_background_loaded(ProviderPathKind::Ide, true);
+                            synced_any = true;
+                        } else if let Err(error) = result {
+                            tracing::warn!(
+                                "sync_imported_vue_api_lightweight: failed for {ide_path}: {error}"
+                            );
+                            self.queue_snapshot_provider_sync(canonical_id.to_string());
+                        }
+                    }
+                }
+
+                if let Some(dts_path) = committed_state.api_path.clone() {
+                    let result = if committed_state.api_background_loaded {
+                        sync.sync_dts(&dts_path, &api.code).await
+                    } else {
+                        sync.open_dts(&dts_path, &api.code).await
+                    };
+                    if result.is_ok() {
+                        committed_state.set_background_loaded(ProviderPathKind::Api, true);
+                        synced_any = true;
+                    } else if let Err(e) = result {
+                        tracing::warn!(
+                            "sync_imported_vue_api_lightweight: failed for {dts_path}: {e}"
+                        );
+                        self.queue_snapshot_provider_sync(canonical_id.to_string());
+                    }
+                }
+
+                if synced_any {
+                    self.commit_provider_sync_state(canonical_id, committed_state);
+                }
+            }
+            return;
+        }
+
+        if !ownership_ready {
+            // Bootstrap: no owner snapshot yet, provisional sync allowed.
+            let compiled = block_in_place_if_available(|| {
+                self.documents.host.remove(canonical_id);
+                if !self.documents.host.ensure_loaded(canonical_id) {
+                    return false;
+                }
+
+                self.documents.host().ensure_loaded(canonical_id);
+
+                let profile = self.documents.tsx_profile.read().clone();
+                self.documents
+                    .host
+                    .ensure_compiled(canonical_id, &profile)
+                    .is_ok()
+            });
+
+            if compiled {
+                if is_tsgo {
+                    if let Some(ide) = self.documents.host.get_ide(canonical_id, &profile) {
+                        let _ = self
+                            .sync_vue_ide_provisionally(canonical_id, &ide.code, ide.is_jsx)
+                            .await;
+                    }
+                }
+                if let Some(api) = self.documents.host.get_public_api(canonical_id) {
+                    let _ = self
+                        .sync_vue_api_provisionally(canonical_id, &api.code)
+                        .await;
+                    return;
+                }
+            }
+
+            self.queue_snapshot_provider_sync(canonical_id.to_string());
+            return;
+        }
+
+        // Slow path: file not in host yet — full disk read + upsert + compile + sync.
+        self.resync_background_vue_file(canonical_id).await;
+    }
+
+    pub(super) async fn resync_background_vue_file(&self, canonical_id: &str) {
+        tracing::info!(
+            "resync_background: START {canonical_id} thread={:?}",
+            std::thread::current().id()
+        );
+        // Load from disk + upsert + compile (all blocking) — wrapped in block_in_place
+        // to prevent tokio worker thread exhaustion during background sync.
+        let compile_result = block_in_place_if_available(|| {
+            self.documents.host.remove(canonical_id);
+            if !self.documents.host.ensure_loaded(canonical_id) {
+                tracing::debug!("resync_background: can't read {canonical_id}");
+                return None;
+            }
+
+            self.documents.host().ensure_loaded(canonical_id);
+
+            // Compile
+            let profile = self.documents.tsx_profile.read().clone();
+            if self
+                .documents
+                .host
+                .ensure_compiled(canonical_id, &profile)
+                .is_err()
+            {
+                return None;
+            }
+            Some(profile)
+        });
+        tracing::info!("resync_background: COMPILED {canonical_id}");
+
+        let Some(profile) = compile_result else {
+            return;
+        };
+
+        self.refresh_vue_dependency_tracking(canonical_id);
+
+        // Sync to type provider
+        if let Some(sync) = &self.project_sync {
+            let is_tsgo = matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo);
+            let Some(ide) = self.documents.host.get_ide(canonical_id, &profile) else {
+                return;
+            };
+            if is_tsgo {
+                if let Some(snapshot) = self.published_resolver() {
+                    configure_provider_paths_for_source(sync, &snapshot, canonical_id, true).await;
+                }
+            }
+            let Some(transition) =
+                self.prepare_vue_provider_sync_transition(canonical_id, ide.is_jsx)
+            else {
+                self.clear_provider_sync_state(canonical_id).await;
+                self.queue_snapshot_provider_sync(canonical_id.to_string());
+                return;
+            };
+            self.close_provider_paths(&transition.stale_paths).await;
+            let mut committed_state = transition.next;
+
+            if let Some(tsx_path) = committed_state.ide_path.clone() {
+                let is_bg =
+                    self.is_background_loaded_for_source_kind(canonical_id, ProviderPathKind::Ide);
+                let result = if is_bg {
+                    sync.sync_tsx(&tsx_path, &ide.code).await
+                } else {
+                    sync.open_tsx(&tsx_path, &ide.code).await
+                };
+                if result.is_ok() {
+                    committed_state.set_background_loaded(ProviderPathKind::Ide, true);
+                } else if let Err(e) = result {
+                    tracing::warn!("resync_background: failed to sync {canonical_id}: {e}");
+                }
+            }
+
+            // Sync .vue.ts as secondary provider support output.
+            if let Some(api) = self.documents.host.get_public_api(canonical_id) {
+                let Some(dts_path) = committed_state.api_path.clone() else {
+                    return;
+                };
+                let is_bg =
+                    self.is_background_loaded_for_source_kind(canonical_id, ProviderPathKind::Api);
+                let result = if is_tsgo {
+                    // TSGO: open/update DTS so it's in TSGO's virtual FS alongside the IDE file.
+                    if is_bg {
+                        sync.sync_dts(&dts_path, &api.code).await
+                    } else {
+                        sync.open_dts(&dts_path, &api.code).await
+                    }
+                } else if is_bg {
+                    sync.sync_dts(&dts_path, &api.code).await
+                } else {
+                    // First-time DTS sync: use open_dts to send to the type provider.
+                    // load_dts only caches locally (tsserver wouldn't know the file),
+                    // which breaks cross-file operations like rename.
+                    sync.open_dts(&dts_path, &api.code).await
+                };
+                if result.is_ok() {
+                    committed_state.set_background_loaded(ProviderPathKind::Api, true);
+                    self.commit_provider_sync_state(canonical_id, committed_state);
+                }
+            }
+        }
+    }
+}
