@@ -42,7 +42,6 @@ use dashmap::DashMap;
 use verter_semantic::analysis::type_expr::TypeExpr;
 use verter_semantic::analysis::type_solver::query_engine::ProjectedMember;
 
-use crate::completion_fence::FenceValidator;
 use crate::cooperative_admission::{cooperative_get_or_insert, InflightTable};
 use crate::project_semantic_dispatch::raise::MaterializedTypeExpr;
 use crate::resolver_core::cache_keys::{
@@ -50,21 +49,8 @@ use crate::resolver_core::cache_keys::{
     RoutedExprSurfaceCacheKey,
 };
 use crate::resolver_core::component_meta_query_engine::ResolvedImportedRegistrySymbol;
-use crate::resolver_core::ResolvedTypeDeclaration;
+use crate::resolver_core::{ResolverContext, ResolvedTypeDeclaration};
 use crate::semantic_query::{DepSignature, ProjectionMode};
-use crate::VerterHost;
-
-/// Validate every fact in a `DepSignature` against current host state.
-///
-/// Returns `true` only when every `(canonical_id, version)` pair in the
-/// signature still matches what the host reports — a single mismatch
-/// invalidates the entry.
-pub(crate) fn dep_signature_valid_for_host(signature: &DepSignature, host: &VerterHost) -> bool {
-    let validator = crate::host_manage::HostFenceValidator { host };
-    signature
-        .iter()
-        .all(|(canonical, version)| validator.validate(canonical.as_ref(), version))
-}
 
 // ===========================================================================
 // 1. ImportedRegistryDb — `(canonical, name) → Option<ResolvedImportedRegistrySymbol>`
@@ -100,7 +86,7 @@ impl ImportedRegistryDb {
     pub fn get_or_compute<F>(
         &self,
         key: &ImportedRegistryKey,
-        host: &VerterHost,
+        ctx: &dyn ResolverContext,
         compute: F,
     ) -> Option<Option<Arc<ResolvedImportedRegistrySymbol>>>
     where
@@ -112,7 +98,7 @@ impl ImportedRegistryDb {
             &self.inflight,
             key.clone(),
             |entry: &ImportedRegistryEntry| {
-                if dep_signature_valid_for_host(&entry.dep_signature, host) {
+                if ctx.validate_dep_signature(&entry.dep_signature) {
                     Some(entry.value.clone())
                 } else {
                     None
@@ -130,7 +116,7 @@ impl ImportedRegistryDb {
             },
             |entry: &ImportedRegistryEntry| entry.value.clone(),
             |entry: &ImportedRegistryEntry| {
-                dep_signature_valid_for_host(&entry.dep_signature, host)
+                ctx.validate_dep_signature(&entry.dep_signature)
             },
         )
     }
@@ -209,7 +195,7 @@ impl DeclarationLookupDb {
     pub fn get_or_compute<F>(
         &self,
         key: &DeclarationLookupKey,
-        host: &VerterHost,
+        ctx: &dyn ResolverContext,
         compute: F,
     ) -> Option<Arc<ResolvedTypeDeclaration>>
     where
@@ -221,7 +207,7 @@ impl DeclarationLookupDb {
             &self.inflight,
             key.clone(),
             |entry: &DeclarationLookupEntry| {
-                if dep_signature_valid_for_host(&entry.dep_signature, host) {
+                if ctx.validate_dep_signature(&entry.dep_signature) {
                     Some(entry.value.clone())
                 } else {
                     None
@@ -238,7 +224,7 @@ impl DeclarationLookupDb {
             },
             |entry: &DeclarationLookupEntry| entry.value.clone(),
             |entry: &DeclarationLookupEntry| {
-                dep_signature_valid_for_host(&entry.dep_signature, host)
+                ctx.validate_dep_signature(&entry.dep_signature)
             },
         )
     }
@@ -317,7 +303,7 @@ impl ResolvabilityDb {
     pub fn get_or_compute<F>(
         &self,
         key: &ResolvabilityKey,
-        host: &VerterHost,
+        ctx: &dyn ResolverContext,
         compute: F,
     ) -> Option<bool>
     where
@@ -329,7 +315,7 @@ impl ResolvabilityDb {
             &self.inflight,
             key.clone(),
             |entry: &ResolvabilityEntry| {
-                if dep_signature_valid_for_host(&entry.dep_signature, host) {
+                if ctx.validate_dep_signature(&entry.dep_signature) {
                     Some(entry.value)
                 } else {
                     None
@@ -345,7 +331,7 @@ impl ResolvabilityDb {
                 })
             },
             |entry: &ResolvabilityEntry| entry.value,
-            |entry: &ResolvabilityEntry| dep_signature_valid_for_host(&entry.dep_signature, host),
+            |entry: &ResolvabilityEntry| ctx.validate_dep_signature(&entry.dep_signature),
         )
     }
 
@@ -428,7 +414,7 @@ impl OwnerCollectionDb {
     pub fn get_or_compute<F>(
         &self,
         key: &OwnerCollectionKey,
-        host: &VerterHost,
+        ctx: &dyn ResolverContext,
         compute: F,
     ) -> Option<Option<Arc<TypeExpr>>>
     where
@@ -441,7 +427,7 @@ impl OwnerCollectionDb {
             &self.inflight,
             key.clone(),
             |entry: &OwnerCollectionEntry| {
-                if dep_signature_valid_for_host(&entry.dep_signature, host) {
+                if ctx.validate_dep_signature(&entry.dep_signature) {
                     Some(entry.value.clone())
                 } else {
                     None
@@ -458,7 +444,7 @@ impl OwnerCollectionDb {
                 })
             },
             |entry: &OwnerCollectionEntry| entry.value.clone(),
-            |entry: &OwnerCollectionEntry| dep_signature_valid_for_host(&entry.dep_signature, host),
+            |entry: &OwnerCollectionEntry| ctx.validate_dep_signature(&entry.dep_signature),
         )
     }
 
@@ -536,10 +522,10 @@ impl PreparedTargetDb {
     pub fn peek(
         &self,
         key: &PreparedTargetCacheKey,
-        host: &VerterHost,
+        ctx: &dyn ResolverContext,
     ) -> Option<Option<(Arc<str>, Arc<str>)>> {
         let entry_arc = self.entries.get(key).map(|e| e.clone())?;
-        if dep_signature_valid_for_host(&entry_arc.dep_signature, host) {
+        if ctx.validate_dep_signature(&entry_arc.dep_signature) {
             Some(entry_arc.value.clone())
         } else {
             None
@@ -549,7 +535,7 @@ impl PreparedTargetDb {
     pub fn get_or_compute<F>(
         &self,
         key: &PreparedTargetCacheKey,
-        host: &VerterHost,
+        ctx: &dyn ResolverContext,
         compute: F,
     ) -> Option<Option<(Arc<str>, Arc<str>)>>
     where
@@ -561,7 +547,7 @@ impl PreparedTargetDb {
             &self.inflight,
             key.clone(),
             |entry: &PreparedTargetEntry| {
-                if dep_signature_valid_for_host(&entry.dep_signature, host) {
+                if ctx.validate_dep_signature(&entry.dep_signature) {
                     Some(entry.value.clone())
                 } else {
                     None
@@ -577,7 +563,7 @@ impl PreparedTargetDb {
                 })
             },
             |entry: &PreparedTargetEntry| entry.value.clone(),
-            |entry: &PreparedTargetEntry| dep_signature_valid_for_host(&entry.dep_signature, host),
+            |entry: &PreparedTargetEntry| ctx.validate_dep_signature(&entry.dep_signature),
         )
     }
 
@@ -659,10 +645,10 @@ impl MaterializeMemoDb {
     pub fn peek(
         &self,
         key: &MaterializeMemoKey,
-        host: &VerterHost,
+        ctx: &dyn ResolverContext,
     ) -> Option<MaterializedTypeExpr> {
         let entry_arc = self.entries.get(key).map(|e| e.clone())?;
-        if dep_signature_valid_for_host(&entry_arc.dep_signature, host) {
+        if ctx.validate_dep_signature(&entry_arc.dep_signature) {
             Some(entry_arc.value.clone())
         } else {
             None
@@ -672,7 +658,7 @@ impl MaterializeMemoDb {
     pub fn get_or_compute<F>(
         &self,
         key: &MaterializeMemoKey,
-        host: &VerterHost,
+        ctx: &dyn ResolverContext,
         compute: F,
     ) -> Option<MaterializedTypeExpr>
     where
@@ -684,7 +670,7 @@ impl MaterializeMemoDb {
             &self.inflight,
             key.clone(),
             |entry: &MaterializeMemoEntry| {
-                if dep_signature_valid_for_host(&entry.dep_signature, host) {
+                if ctx.validate_dep_signature(&entry.dep_signature) {
                     Some(entry.value.clone())
                 } else {
                     None
@@ -700,7 +686,7 @@ impl MaterializeMemoDb {
                 })
             },
             |entry: &MaterializeMemoEntry| entry.value.clone(),
-            |entry: &MaterializeMemoEntry| dep_signature_valid_for_host(&entry.dep_signature, host),
+            |entry: &MaterializeMemoEntry| ctx.validate_dep_signature(&entry.dep_signature),
         )
     }
 
@@ -792,10 +778,10 @@ impl PreparedSurfaceDb {
     pub fn peek(
         &self,
         key: &PreparedSurfaceCacheKey,
-        host: &VerterHost,
+        ctx: &dyn ResolverContext,
     ) -> Option<PreparedSurfacePayload> {
         let entry_arc = self.entries.get(key).map(|e| e.clone())?;
-        if dep_signature_valid_for_host(&entry_arc.dep_signature, host) {
+        if ctx.validate_dep_signature(&entry_arc.dep_signature) {
             Some(entry_arc.value.clone())
         } else {
             None
@@ -805,7 +791,7 @@ impl PreparedSurfaceDb {
     pub fn get_or_compute<F>(
         &self,
         key: &PreparedSurfaceCacheKey,
-        host: &VerterHost,
+        ctx: &dyn ResolverContext,
         compute: F,
     ) -> Option<PreparedSurfacePayload>
     where
@@ -817,7 +803,7 @@ impl PreparedSurfaceDb {
             &self.inflight,
             key.clone(),
             |entry: &PreparedSurfaceEntry| {
-                if dep_signature_valid_for_host(&entry.dep_signature, host) {
+                if ctx.validate_dep_signature(&entry.dep_signature) {
                     Some(entry.value.clone())
                 } else {
                     None
@@ -833,7 +819,7 @@ impl PreparedSurfaceDb {
                 })
             },
             |entry: &PreparedSurfaceEntry| entry.value.clone(),
-            |entry: &PreparedSurfaceEntry| dep_signature_valid_for_host(&entry.dep_signature, host),
+            |entry: &PreparedSurfaceEntry| ctx.validate_dep_signature(&entry.dep_signature),
         )
     }
 
@@ -911,10 +897,10 @@ impl PreparedMemberDb {
     pub fn peek(
         &self,
         key: &PreparedMemberCacheKey,
-        host: &VerterHost,
+        ctx: &dyn ResolverContext,
     ) -> Option<Option<Arc<ProjectedMember>>> {
         let entry_arc = self.entries.get(key).map(|e| e.clone())?;
-        if dep_signature_valid_for_host(&entry_arc.dep_signature, host) {
+        if ctx.validate_dep_signature(&entry_arc.dep_signature) {
             Some(entry_arc.value.clone())
         } else {
             None
@@ -924,7 +910,7 @@ impl PreparedMemberDb {
     pub fn get_or_compute<F>(
         &self,
         key: &PreparedMemberCacheKey,
-        host: &VerterHost,
+        ctx: &dyn ResolverContext,
         compute: F,
     ) -> Option<Option<Arc<ProjectedMember>>>
     where
@@ -936,7 +922,7 @@ impl PreparedMemberDb {
             &self.inflight,
             key.clone(),
             |entry: &PreparedMemberEntry| {
-                if dep_signature_valid_for_host(&entry.dep_signature, host) {
+                if ctx.validate_dep_signature(&entry.dep_signature) {
                     Some(entry.value.clone())
                 } else {
                     None
@@ -952,7 +938,7 @@ impl PreparedMemberDb {
                 })
             },
             |entry: &PreparedMemberEntry| entry.value.clone(),
-            |entry: &PreparedMemberEntry| dep_signature_valid_for_host(&entry.dep_signature, host),
+            |entry: &PreparedMemberEntry| ctx.validate_dep_signature(&entry.dep_signature),
         )
     }
 
@@ -1030,10 +1016,10 @@ impl RoutedExprSurfaceDb {
     pub fn peek(
         &self,
         key: &RoutedExprSurfaceCacheKey,
-        host: &VerterHost,
+        ctx: &dyn ResolverContext,
     ) -> Option<Arc<TypeExpr>> {
         let entry_arc = self.entries.get(key).map(|e| e.clone())?;
-        if dep_signature_valid_for_host(&entry_arc.dep_signature, host) {
+        if ctx.validate_dep_signature(&entry_arc.dep_signature) {
             Some(entry_arc.value.clone())
         } else {
             None
@@ -1043,7 +1029,7 @@ impl RoutedExprSurfaceDb {
     pub fn get_or_compute<F>(
         &self,
         key: &RoutedExprSurfaceCacheKey,
-        host: &VerterHost,
+        ctx: &dyn ResolverContext,
         compute: F,
     ) -> Option<Arc<TypeExpr>>
     where
@@ -1055,7 +1041,7 @@ impl RoutedExprSurfaceDb {
             &self.inflight,
             key.clone(),
             |entry: &RoutedExprSurfaceEntry| {
-                if dep_signature_valid_for_host(&entry.dep_signature, host) {
+                if ctx.validate_dep_signature(&entry.dep_signature) {
                     Some(entry.value.clone())
                 } else {
                     None
@@ -1072,7 +1058,7 @@ impl RoutedExprSurfaceDb {
             },
             |entry: &RoutedExprSurfaceEntry| entry.value.clone(),
             |entry: &RoutedExprSurfaceEntry| {
-                dep_signature_valid_for_host(&entry.dep_signature, host)
+                ctx.validate_dep_signature(&entry.dep_signature)
             },
         )
     }
@@ -1198,10 +1184,10 @@ impl MaterializeStructureDb {
     pub fn peek(
         &self,
         key: &MaterializeStructureCacheKey,
-        host: &VerterHost,
+        ctx: &dyn ResolverContext,
     ) -> Option<crate::semantic_query::CacheRead<MaterializeOutcome>> {
         let entry_arc = self.entries.get(key).map(|e| e.clone())?;
-        if !dep_signature_valid_for_host(&entry_arc.dep_signature, host) {
+        if !ctx.validate_dep_signature(&entry_arc.dep_signature) {
             let removed = self
                 .entries
                 .remove_if(key, |_, e| Arc::ptr_eq(e, &entry_arc));
@@ -1378,8 +1364,8 @@ pub struct RefCycleEntry {
 /// [`cooperative_get_or_insert_with_post_publish`], whose `compute`
 /// closure runs synchronously on the caller's thread (see
 /// `cooperative_admission.rs:278` synchronous-compute contract).
-/// Borrow-capture of `&VerterHost` in the BFS compute closure is safe
-/// because no thread-hop occurs.
+/// Borrow-capture of `&dyn ResolverContext` in the BFS compute closure
+/// is safe because no thread-hop occurs.
 pub struct RefCycleResultDb {
     entries: DashMap<DeclIdentity, Arc<RefCycleEntry>>,
     inflight: InflightTable<DeclIdentity>,
@@ -1465,10 +1451,10 @@ impl RefCycleResultDb {
     pub fn peek(
         &self,
         id: &DeclIdentity,
-        host: &VerterHost,
+        ctx: &dyn ResolverContext,
     ) -> Option<crate::semantic_query::CacheRead<bool>> {
         let entry_arc = self.entries.get(id).map(|e| Arc::clone(&*e))?;
-        let current_gen = host.workspace().content_generation();
+        let current_gen = ctx.workspace_content_generation();
         let cached_gen = entry_arc.validated_at_generation.load(Ordering::Relaxed);
         if cached_gen == current_gen {
             return Some(crate::semantic_query::CacheRead {
@@ -1476,7 +1462,7 @@ impl RefCycleResultDb {
                 dep_signature: Arc::clone(&entry_arc.dep_signature),
             });
         }
-        if !dep_signature_valid_for_host(&entry_arc.dep_signature, host) {
+        if !ctx.validate_dep_signature(&entry_arc.dep_signature) {
             // Plan R8-5 — decrement live_counter on stale removal so
             // the shared counter tracks live entries, not stale ones.
             let removed = self
@@ -1563,16 +1549,16 @@ impl Default for RefCycleResultDb {
 pub(crate) fn ref_cycle_db_peek(
     db: &RefCycleResultDb,
     id: &DeclIdentity,
-    host: &VerterHost,
+    ctx: &dyn ResolverContext,
 ) -> Option<crate::semantic_query::CacheRead<bool>> {
-    db.peek(id, host)
+    db.peek(id, ctx)
 }
 
 /// Plan §4.8 / §4.20 — the cooperative-admission wrapper invoked by
 /// `meta_resolve::ref_root_reaches_transitive_cycle_node` on the cold
 /// path. The `compute` closure runs synchronously on the caller's
 /// thread (per cooperative_admission's synchronous-compute contract),
-/// so capturing `&VerterHost` and `&DeclIdentity` directly is safe.
+/// so capturing `&dyn ResolverContext` and `&DeclIdentity` directly is safe.
 ///
 /// On cooperative-admission success: bumps `live_counter`, registers
 /// the reverse-index, and returns `Some(CacheRead)`. On revalidation
@@ -1581,21 +1567,21 @@ pub(crate) fn ref_cycle_db_peek(
 pub(crate) fn ref_cycle_db_get_or_compute<C>(
     db: &RefCycleResultDb,
     id: &DeclIdentity,
-    host: &VerterHost,
+    ctx: &dyn ResolverContext,
     compute_bfs: C,
 ) -> Option<crate::semantic_query::CacheRead<bool>>
 where
     C: FnOnce(&mut Vec<(Arc<str>, crate::semantic_query::DepVersion)>) -> bool,
 {
     let key_for_register = id.clone();
-    let current_gen = host.workspace().content_generation();
+    let current_gen = ctx.workspace_content_generation();
     cooperative_get_or_insert_with_post_publish(
         db.entries(),
         db.inflight(),
         id.clone(),
         // validate(&Entry) -> Option<V>
         |entry: &RefCycleEntry| {
-            if dep_signature_valid_for_host(&entry.dep_signature, host) {
+            if ctx.validate_dep_signature(&entry.dep_signature) {
                 Some(crate::semantic_query::CacheRead {
                     value: entry.result,
                     dep_signature: Arc::clone(&entry.dep_signature),
@@ -1620,7 +1606,7 @@ where
             dep_signature: Arc::clone(&entry.dep_signature),
         },
         // revalidate_after_compute(&Entry) -> bool
-        |entry: &RefCycleEntry| dep_signature_valid_for_host(&entry.dep_signature, host),
+        |entry: &RefCycleEntry| ctx.validate_dep_signature(&entry.dep_signature),
         // post_publish(&Arc<Entry>, &K)
         move |entry_arc: &Arc<RefCycleEntry>, _k: &DeclIdentity| {
             db.bump_live_counter();

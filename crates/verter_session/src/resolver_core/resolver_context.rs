@@ -196,6 +196,14 @@ pub(crate) trait ResolverContext: sealed::Sealed {
 
     fn record_ambient_dependency(&self, consumer_canonical: &str, virtual_id: &str);
 
+    /// Workspace content generation — narrow capability used by
+    /// `component_meta_caches.rs::peek` for the validated_at_generation
+    /// fast path. Together with `lookup_ambient_symbol` and
+    /// `record_ambient_dependency`, this replaces the broad `workspace()`
+    /// accessor (which would expose the full `WorkspaceAccess` mutator
+    /// surface to seal-scope code).
+    fn workspace_content_generation(&self) -> u64;
+
     // -------- Dispatch facade --------------------------------------
 
     fn dispatch(&self) -> ProjectSemanticDispatch<'_>;
@@ -390,6 +398,11 @@ impl ResolverContext for crate::VerterHost {
             .record_ambient_dependency(consumer_canonical, virtual_id);
     }
 
+    #[inline]
+    fn workspace_content_generation(&self) -> u64 {
+        self.workspace().content_generation()
+    }
+
     // Dispatch facade ------------------------------------------------
 
     #[inline]
@@ -406,7 +419,7 @@ impl ResolverContext for crate::VerterHost {
 
     #[inline]
     fn validate_dep_signature(&self, signature: &DepSignature) -> bool {
-        crate::component_meta_caches::dep_signature_valid_for_host(signature, self)
+        crate::host_manage::dep_signature_valid_for_host(signature, self)
     }
 
     // Component-meta-tier bridges ------------------------------------

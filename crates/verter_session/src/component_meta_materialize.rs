@@ -81,7 +81,7 @@ pub enum MaterializeOutcome {
 impl MaterializeOutcome {
     /// Extract the carried node id. For `Error` variants returns
     /// the caller-supplied opaque-miss id (non-extractable from
-    /// QueryError directly — callers pass the host's opaque-miss
+    /// QueryError directly — callers pass the ctx's opaque-miss
     /// fallback).
     #[must_use]
     pub fn node_id(&self, opaque_miss_fallback: SemanticNodeId) -> SemanticNodeId {
@@ -189,8 +189,8 @@ use std::cell::{Cell, RefCell};
 use crate::component_meta_caches::MaterializeStructureEntry;
 use crate::cooperative_admission::cooperative_get_or_insert_with_post_publish;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+use crate::resolver_core::ResolverContext;
 use crate::semantic_query::{PathSegment, SemanticQueryKey};
-use crate::VerterHost;
 
 thread_local! {
     /// Plan §1.4 — per-thread stack of in-flight materialiser keys.
@@ -294,14 +294,14 @@ impl Drop for MaterializeInFlightGuard {
 /// - For cacheable outcomes (Value / Miss), returns `Some(MaterializeStructureEntry)`
 ///   so cooperative-admission publishes it.
 fn finish_cacheable(
-    host: &VerterHost,
+    ctx: &dyn ResolverContext,
     key: &MaterializeStructureCacheKey,
     outcome: MaterializeOutcome,
     mut local_fence: Vec<(Arc<str>, DepVersion)>,
     non_cacheable_slot: &NonCacheableSlot,
 ) -> Option<MaterializeStructureEntry> {
     if !key.scope_canonical_id.as_ref().is_empty() {
-        if let Some(indexed) = host
+        if let Some(indexed) = ctx
             .project_type_store()
             .indexed()
             .get_any(key.scope_canonical_id.as_ref())
@@ -349,21 +349,21 @@ fn finish_cacheable(
 /// `PackageRefTopLevel`, `FunctionPropertyAtNested`,
 /// `RegistryRouteCycleGuard`, or `RecursiveHelperCycleGuard`.
 pub fn materialize_component_meta_structure(
-    host: &VerterHost,
+    ctx: &dyn ResolverContext,
     key: MaterializeStructureCacheKey,
 ) -> crate::semantic_query::CacheRead<MaterializeOutcome> {
     crate::host_manage::record_materialize_structure_call();
 
-    let db = host.project_type_store().materialize_structure_db();
+    let db = ctx.project_type_store().materialize_structure_db();
 
     // Phase 1 — warm-hit peek with proactive stale removal.
-    if let Some(cached) = db.peek(&key, host) {
+    if let Some(cached) = db.peek(&key, ctx) {
         return cached;
     }
 
     // Phase 2 — same-key thread-local re-entry detection.
     if MaterializeInFlightGuard::contains_key(&key) {
-        let opaque = host.project_type_store().semantic_graph().intern_node(
+        let opaque = ctx.project_type_store().semantic_graph().intern_node(
             crate::semantic_query::SemanticNodeData::Opaque(QueryError::Miss),
         );
         return crate::semantic_query::CacheRead {
@@ -388,7 +388,7 @@ pub fn materialize_component_meta_structure(
     // kept these symbolic at every axis; expanding them would
     // publish package internals into the consumer's component-meta
     // surface).
-    if is_package_backed_ref(host, key.base) {
+    if is_package_backed_ref(ctx, key.base) {
         // Plan §4.14 / B1 — observability for kept-symbolic decision.
         crate::host_manage::emit_policy_skip(
             key.base,
@@ -407,7 +407,7 @@ pub fn materialize_component_meta_structure(
     // ProjectPath { mode: Expanded } would unfold function bodies
     // inside member positions.
     if key.scope_axis == MaterializationScope::Nested {
-        let graph = host.project_type_store().semantic_graph();
+        let graph = ctx.project_type_store().semantic_graph();
         if let Some(data) = graph.node_data(key.base) {
             if matches!(
                 data.as_ref(),
@@ -436,8 +436,8 @@ pub fn materialize_component_meta_structure(
     let key_for_compute = key.clone();
     let non_cacheable_for_compute = &non_cacheable_outcome;
     let compute = move || {
-        let dispatch = ProjectSemanticDispatch::new(host);
-        let graph = host.project_type_store().semantic_graph();
+        let dispatch = ctx.dispatch();
+        let graph = ctx.project_type_store().semantic_graph();
         let mut local_fence: Vec<(Arc<str>, DepVersion)> = Vec::new();
 
         // Plan §4.4 / B1 Step 1 — registry-route branch.
@@ -456,7 +456,7 @@ pub fn materialize_component_meta_structure(
             // not the wrapping Pick. See R8-2.
             if crate::meta_resolve::ref_root_reaches_transitive_cycle_node(
                 &extraction.root_identity,
-                host,
+                ctx,
                 &mut local_fence,
             ) {
                 crate::host_manage::emit_policy_skip(
@@ -465,7 +465,7 @@ pub fn materialize_component_meta_structure(
                     crate::component_meta_audit::MaterializeSkipReason::RegistryRouteCycleGuard,
                 );
                 return finish_cacheable(
-                    host,
+                    ctx,
                     &key_for_compute,
                     MaterializeOutcome::Value(key_for_compute.base),
                     local_fence,
@@ -482,7 +482,7 @@ pub fn materialize_component_meta_structure(
                     crate::component_meta_audit::MaterializeSkipReason::PackageRefTopLevel,
                 );
                 return finish_cacheable(
-                    host,
+                    ctx,
                     &key_for_compute,
                     MaterializeOutcome::Value(key_for_compute.base),
                     local_fence,
@@ -522,7 +522,7 @@ pub fn materialize_component_meta_structure(
                         QueryResult::Value(id) => id,
                         _ => {
                             return finish_cacheable(
-                                host,
+                                ctx,
                                 &key_for_compute,
                                 MaterializeOutcome::Value(key_for_compute.base),
                                 local_fence,
@@ -558,7 +558,7 @@ pub fn materialize_component_meta_structure(
                         QueryResult::Value(id) => id,
                         _ => {
                             return finish_cacheable(
-                                host,
+                                ctx,
                                 &key_for_compute,
                                 MaterializeOutcome::Value(key_for_compute.base),
                                 local_fence,
@@ -567,7 +567,7 @@ pub fn materialize_component_meta_structure(
                         }
                     };
                     return finish_cacheable(
-                        host,
+                        ctx,
                         &key_for_compute,
                         MaterializeOutcome::Value(projected_id),
                         local_fence,
@@ -611,7 +611,7 @@ pub fn materialize_component_meta_structure(
         if let Some(identity) = recursive_helper_identity {
             if crate::meta_resolve::ref_root_reaches_transitive_cycle_node(
                 &identity,
-                host,
+                ctx,
                 &mut local_fence,
             ) {
                 crate::host_manage::emit_policy_skip(
@@ -620,7 +620,7 @@ pub fn materialize_component_meta_structure(
                     crate::component_meta_audit::MaterializeSkipReason::RecursiveHelperCycleGuard,
                 );
                 return finish_cacheable(
-                    host,
+                    ctx,
                     &key_for_compute,
                     MaterializeOutcome::Value(key_for_compute.base),
                     local_fence,
@@ -669,7 +669,7 @@ pub fn materialize_component_meta_structure(
                             scope_axis: key_for_compute.scope_axis,
                             mode: key_for_compute.mode,
                         };
-                        let body_read = materialize_component_meta_structure(host, body_key);
+                        let body_read = materialize_component_meta_structure(ctx, body_key);
                         local_fence.extend(body_read.dep_signature.iter().cloned());
                         match body_read.value {
                             MaterializeOutcome::Value(id) | MaterializeOutcome::Miss(id) => {
@@ -708,7 +708,7 @@ pub fn materialize_component_meta_structure(
                 if let crate::semantic_query::SemanticNodeData::Object(surface) = data.as_ref() {
                     let surface = surface.clone();
                     Some(materialize_object_surface(
-                        host,
+                        ctx,
                         &key_for_compute,
                         &surface,
                         &mut local_fence,
@@ -747,7 +747,7 @@ pub fn materialize_component_meta_structure(
         // Seed local_fence with the root scope's whole_hash if
         // available — plan §1.9 dep-signature accumulation contract.
         if !key_for_compute.scope_canonical_id.as_ref().is_empty() {
-            if let Some(indexed) = host
+            if let Some(indexed) = ctx
                 .project_type_store()
                 .indexed()
                 .get_any(key_for_compute.scope_canonical_id.as_ref())
@@ -777,10 +777,7 @@ pub fn materialize_component_meta_structure(
         db.inflight(),
         key.clone(),
         |entry: &MaterializeStructureEntry| {
-            if crate::component_meta_caches::dep_signature_valid_for_host(
-                &entry.dep_signature,
-                host,
-            ) {
+            if ctx.validate_dep_signature(&entry.dep_signature) {
                 Some(crate::semantic_query::CacheRead {
                     value: entry.outcome.clone(),
                     dep_signature: entry.dep_signature.clone(),
@@ -796,7 +793,7 @@ pub fn materialize_component_meta_structure(
         },
         // Plan §1.5 race-closer — post-compute revalidation.
         |entry: &MaterializeStructureEntry| {
-            crate::component_meta_caches::dep_signature_valid_for_host(&entry.dep_signature, host)
+            ctx.validate_dep_signature(&entry.dep_signature)
         },
         // Plan §10.1 post_publish — register reverse-index AFTER
         // entries.insert AND AFTER successful revalidation.
@@ -851,8 +848,8 @@ fn empty_signature() -> DepSignature {
 /// [`canonical_resolves_to_package`](crate::meta_resolve::canonical_resolves_to_package)
 /// (commit C extracted this so the package check has one source of
 /// truth across graph-node and identity-based callers).
-pub(crate) fn is_package_backed_ref(host: &VerterHost, node: SemanticNodeId) -> bool {
-    let graph = host.project_type_store().semantic_graph();
+pub(crate) fn is_package_backed_ref(ctx: &dyn ResolverContext, node: SemanticNodeId) -> bool {
+    let graph = ctx.project_type_store().semantic_graph();
     let Some(data) = graph.node_data(node) else {
         return false;
     };
@@ -877,18 +874,18 @@ pub(crate) fn is_package_backed_ref(host: &VerterHost, node: SemanticNodeId) -> 
 /// carrying the new node id; falls back to the input id when the
 /// surface is unchanged).
 fn materialize_object_surface(
-    host: &VerterHost,
+    ctx: &dyn ResolverContext,
     key: &MaterializeStructureCacheKey,
     surface: &crate::semantic_query::SurfaceView,
     local_fence: &mut Vec<(Arc<str>, DepVersion)>,
 ) -> MaterializeOutcome {
     use crate::semantic_query::{IndexSignature, SemanticNodeData, SurfaceMember, SurfaceView};
-    let graph = host.project_type_store().semantic_graph();
+    let graph = ctx.project_type_store().semantic_graph();
 
     let mut new_members = Vec::with_capacity(surface.members.len());
     let mut any_changed = false;
     for member in surface.members.iter() {
-        let (sub_id, changed) = materialize_child_at_nested(host, key, member.value, local_fence);
+        let (sub_id, changed) = materialize_child_at_nested(ctx, key, member.value, local_fence);
         any_changed |= changed;
         new_members.push(SurfaceMember {
             name: Arc::clone(&member.name),
@@ -901,22 +898,22 @@ fn materialize_object_surface(
 
     let mut new_call_signatures = Vec::with_capacity(surface.call_signatures.len());
     for sig in surface.call_signatures.iter() {
-        let (sub_id, changed) = materialize_child_at_nested(host, key, *sig, local_fence);
+        let (sub_id, changed) = materialize_child_at_nested(ctx, key, *sig, local_fence);
         any_changed |= changed;
         new_call_signatures.push(sub_id);
     }
 
     let mut new_construct_signatures = Vec::with_capacity(surface.construct_signatures.len());
     for sig in surface.construct_signatures.iter() {
-        let (sub_id, changed) = materialize_child_at_nested(host, key, *sig, local_fence);
+        let (sub_id, changed) = materialize_child_at_nested(ctx, key, *sig, local_fence);
         any_changed |= changed;
         new_construct_signatures.push(sub_id);
     }
 
     let mut new_index_signatures = Vec::with_capacity(surface.index_signatures.len());
     for sig in surface.index_signatures.iter() {
-        let (sub_value, vc) = materialize_child_at_nested(host, key, sig.value_type, local_fence);
-        let (sub_key_ty, kc) = materialize_child_at_nested(host, key, sig.key_type, local_fence);
+        let (sub_value, vc) = materialize_child_at_nested(ctx, key, sig.value_type, local_fence);
+        let (sub_key_ty, kc) = materialize_child_at_nested(ctx, key, sig.key_type, local_fence);
         any_changed |= vc || kc;
         new_index_signatures.push(IndexSignature {
             key_type: sub_key_ty,
@@ -927,7 +924,7 @@ fn materialize_object_surface(
 
     let new_keyspace = match surface.keyspace {
         Some(k) => {
-            let (sub_id, changed) = materialize_child_at_nested(host, key, k, local_fence);
+            let (sub_id, changed) = materialize_child_at_nested(ctx, key, k, local_fence);
             any_changed |= changed;
             Some(sub_id)
         }
@@ -956,7 +953,7 @@ fn materialize_object_surface(
 /// changed)`. Non-Value outcomes resolve to the input id (Tainted /
 /// Recursive / Error keep the symbolic form).
 fn materialize_child_at_nested(
-    host: &VerterHost,
+    ctx: &dyn ResolverContext,
     parent_key: &MaterializeStructureCacheKey,
     child: SemanticNodeId,
     local_fence: &mut Vec<(Arc<str>, DepVersion)>,
@@ -967,7 +964,7 @@ fn materialize_child_at_nested(
         scope_axis: MaterializationScope::Nested,
         mode: parent_key.mode,
     };
-    let sub_read = materialize_component_meta_structure(host, sub_key);
+    let sub_read = materialize_component_meta_structure(ctx, sub_key);
     local_fence.extend(sub_read.dep_signature.iter().cloned());
     let new_value = match sub_read.value {
         MaterializeOutcome::Value(id) | MaterializeOutcome::Miss(id) => id,
@@ -1920,7 +1917,7 @@ export type C<T> = A<T>
         if let Some(read) = after_peek {
             // If we got Some, the dep_signature must be currently valid.
             assert!(
-                crate::component_meta_caches::dep_signature_valid_for_host(
+                crate::host_manage::dep_signature_valid_for_host(
                     &read.dep_signature,
                     host,
                 ),

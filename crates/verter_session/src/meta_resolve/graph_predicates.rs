@@ -27,7 +27,7 @@
 //! materialize/* / registry_materialize.rs siblings keep calling them
 //! via the shell's `pub(crate) use graph_predicates::*;` re-export.
 
-use crate::VerterHost;
+use crate::resolver_core::ResolverContext;
 use std::sync::Arc;
 
 // `dep_signature` module is accessed via path (`dep_signature::BFS_*_COUNTER`)
@@ -391,7 +391,7 @@ pub(crate) fn component_meta_ref_resolves_to_package_node(
 /// (Plan §4.11). Fuse returns `false` to match the conservative legacy
 /// behaviour.
 pub(crate) fn type_node_needs_member_route_materialization(
-    host: &VerterHost,
+    ctx: &dyn ResolverContext,
     node: crate::semantic_query::SemanticNodeId,
     local_fence: &mut Vec<(Arc<str>, crate::semantic_query::DepVersion)>,
     depth: u32,
@@ -401,7 +401,7 @@ pub(crate) fn type_node_needs_member_route_materialization(
     if depth > 256 {
         return false;
     }
-    let graph = host.project_type_store().semantic_graph();
+    let graph = ctx.project_type_store().semantic_graph();
     let Some(data) = graph.node_data(node) else {
         return false;
     };
@@ -428,7 +428,7 @@ pub(crate) fn type_node_needs_member_route_materialization(
                         Vec::new();
                     let result = ref_root_reaches_transitive_cycle_node(
                         &extraction.root_identity,
-                        host,
+                        ctx,
                         &mut sub_fence,
                     );
                     local_fence.extend(sub_fence);
@@ -437,21 +437,21 @@ pub(crate) fn type_node_needs_member_route_materialization(
             !cycle_reaches && !type_node_has_package_backed_root(graph, node, depth + 1)
         }
         SemanticNodeData::Array { element, .. } => {
-            type_node_needs_member_route_materialization(host, *element, local_fence, depth + 1)
+            type_node_needs_member_route_materialization(ctx, *element, local_fence, depth + 1)
         }
         SemanticNodeData::KeyOf { base } => {
-            type_node_needs_member_route_materialization(host, *base, local_fence, depth + 1)
+            type_node_needs_member_route_materialization(ctx, *base, local_fence, depth + 1)
         }
         SemanticNodeData::Tuple { elements, .. } => elements.iter().any(|element| {
             type_node_needs_member_route_materialization(
-                host,
+                ctx,
                 element.value,
                 local_fence,
                 depth + 1,
             )
         }),
         SemanticNodeData::Alias(inner) => {
-            type_node_needs_member_route_materialization(host, *inner, local_fence, depth + 1)
+            type_node_needs_member_route_materialization(ctx, *inner, local_fence, depth + 1)
         }
         _ => false,
     }
@@ -478,7 +478,7 @@ pub(crate) fn type_node_needs_member_route_materialization(
     reason = "Plan §6.11 / J2 — wired via slot_binding_param_can_stay_symbolic_node in K2/K3"
 )]
 pub(crate) fn node_has_non_object_top_level_surface(
-    host: &VerterHost,
+    ctx: &dyn ResolverContext,
     node: crate::semantic_query::SemanticNodeId,
     depth: u32,
 ) -> bool {
@@ -488,7 +488,7 @@ pub(crate) fn node_has_non_object_top_level_surface(
     if depth > 256 {
         return false;
     }
-    let graph = host.project_type_store().semantic_graph();
+    let graph = ctx.project_type_store().semantic_graph();
     let Some(data) = graph.node_data(node) else {
         return false;
     };
@@ -500,13 +500,13 @@ pub(crate) fn node_has_non_object_top_level_surface(
         | SemanticNodeData::KeyOf { .. }
         | SemanticNodeData::TemplateLiteral { .. } => true,
         SemanticNodeData::Alias(inner) => {
-            node_has_non_object_top_level_surface(host, *inner, depth + 1)
+            node_has_non_object_top_level_surface(ctx, *inner, depth + 1)
         }
         SemanticNodeData::DeclRef { identity } => {
             // Resolve declaration body via dispatch. Skeleton mode
             // preserves any open generic carriers in the body so the
             // top-level shape is observable structurally.
-            let dispatch = ProjectSemanticDispatch::new(host);
+            let dispatch = ctx.dispatch();
             let key = SemanticQueryKey::Instantiate {
                 base: identity.clone(),
                 args: Arc::from(
@@ -519,10 +519,10 @@ pub(crate) fn node_has_non_object_top_level_surface(
                 QueryResult::Value(id) => id,
                 QueryResult::Recursive(_) | QueryResult::Error(_) => return false,
             };
-            node_has_non_object_top_level_surface(host, body_id, depth + 1)
+            node_has_non_object_top_level_surface(ctx, body_id, depth + 1)
         }
         SemanticNodeData::InstantiationRef { base, .. } => {
-            let dispatch = ProjectSemanticDispatch::new(host);
+            let dispatch = ctx.dispatch();
             let key = SemanticQueryKey::Instantiate {
                 base: base.clone(),
                 args: Arc::from(
@@ -535,7 +535,7 @@ pub(crate) fn node_has_non_object_top_level_surface(
                 QueryResult::Value(id) => id,
                 QueryResult::Recursive(_) | QueryResult::Error(_) => return false,
             };
-            node_has_non_object_top_level_surface(host, body_id, depth + 1)
+            node_has_non_object_top_level_surface(ctx, body_id, depth + 1)
         }
         SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
             // Mirror the TypeExpr predicate's union/intersection rule:
@@ -551,7 +551,7 @@ pub(crate) fn node_has_non_object_top_level_surface(
                         saw_object = true;
                     }
                     SemanticNodeData::Alias(inner) => {
-                        if node_has_non_object_top_level_surface(host, *inner, depth + 1) {
+                        if node_has_non_object_top_level_surface(ctx, *inner, depth + 1) {
                             return true;
                         }
                         if matches!(
@@ -605,7 +605,7 @@ pub(crate) fn node_has_non_object_top_level_surface(
 /// Depth-fused at 256 per §4.11. Fuse returns `false` (conservative —
 /// runaway recursion does not allow staying symbolic).
 pub(crate) fn slot_binding_param_can_stay_symbolic_node(
-    host: &VerterHost,
+    ctx: &dyn ResolverContext,
     node: crate::semantic_query::SemanticNodeId,
     depth: u32,
 ) -> bool {
@@ -614,13 +614,13 @@ pub(crate) fn slot_binding_param_can_stay_symbolic_node(
     if depth > 256 {
         return false;
     }
-    let graph = host.project_type_store().semantic_graph();
+    let graph = ctx.project_type_store().semantic_graph();
     let Some(data) = graph.node_data(node) else {
         return false;
     };
     match data.as_ref() {
         SemanticNodeData::Alias(inner) => {
-            slot_binding_param_can_stay_symbolic_node(host, *inner, depth + 1)
+            slot_binding_param_can_stay_symbolic_node(ctx, *inner, depth + 1)
         }
         SemanticNodeData::Conditional { .. }
         | SemanticNodeData::Mapped { .. }
@@ -630,7 +630,7 @@ pub(crate) fn slot_binding_param_can_stay_symbolic_node(
         | SemanticNodeData::TemplateLiteral { .. } => true,
         SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => members
             .iter()
-            .all(|&m| slot_binding_param_can_stay_symbolic_node(host, m, depth + 1)),
+            .all(|&m| slot_binding_param_can_stay_symbolic_node(ctx, m, depth + 1)),
         // Lowered `Ref { name, type_arguments: [non-empty] }` —
         // mirrors the legacy TypeExpr `Ref { name, type_arguments }` arm
         // with the `!type_arguments.is_empty() && !package_backed` guard.
@@ -642,7 +642,7 @@ pub(crate) fn slot_binding_param_can_stay_symbolic_node(
             // top-level surface shape.
             use crate::project_semantic_dispatch::ProjectSemanticDispatch;
             use crate::semantic_query::{ProjectionMode, QueryResult, SemanticQueryKey};
-            let dispatch = ProjectSemanticDispatch::new(host);
+            let dispatch = ctx.dispatch();
             let key = SemanticQueryKey::Instantiate {
                 base: base.clone(),
                 args: Arc::from(
@@ -655,7 +655,7 @@ pub(crate) fn slot_binding_param_can_stay_symbolic_node(
                 QueryResult::Value(id) => id,
                 QueryResult::Recursive(_) | QueryResult::Error(_) => return false,
             };
-            node_has_non_object_top_level_surface(host, body_id, depth + 1)
+            node_has_non_object_top_level_surface(ctx, body_id, depth + 1)
         }
         _ => false,
     }
@@ -761,7 +761,7 @@ pub(crate) fn declaration_body_prefers_inline_materialization_node(
 }
 
 /// Plan §1.12 / §4.8 / Commit R — graph-native BFS for transitive cycle
-/// detection, with host-owned cache.
+/// detection, with ctx-owned cache.
 ///
 /// Architecture:
 ///   1. **Fast path (§4.9)** — `RefCycleResultDb::peek` consults the
@@ -771,7 +771,7 @@ pub(crate) fn declaration_body_prefers_inline_materialization_node(
 ///      `ref_cycle_db_get_or_compute`; the BFS body
 ///      ([`bfs_compute_inner`]) runs synchronously in the
 ///      `compute` closure (per cooperative_admission's synchronous-
-///      compute contract), capturing `&VerterHost` directly. On
+///      compute contract), capturing `&dyn ResolverContext` directly. On
 ///      cooperative-admission failure (revalidation rejected the entry),
 ///      falls back to an uncached recompute so the caller never sees
 ///      a publishing miss.
@@ -801,21 +801,21 @@ pub(crate) fn declaration_body_prefers_inline_materialization_node(
 /// recursive-helper guards (plan §4.13).
 pub(crate) fn ref_root_reaches_transitive_cycle_node(
     root_identity: &crate::semantic_query::DeclIdentity,
-    host: &VerterHost,
+    ctx: &dyn ResolverContext,
     local_fence: &mut Vec<(Arc<str>, crate::semantic_query::DepVersion)>,
 ) -> bool {
-    let db = host.project_type_store().ref_cycle_db();
+    let db = ctx.project_type_store().ref_cycle_db();
 
     // Fast path: peek with generation-local validity. On hit, extend
     // the caller's local_fence and return without dispatching any
     // Instantiate query.
-    if let Some(read) = crate::component_meta_caches::ref_cycle_db_peek(db, root_identity, host) {
+    if let Some(read) = crate::component_meta_caches::ref_cycle_db_peek(db, root_identity, ctx) {
         local_fence.extend(read.dep_signature.iter().cloned());
         return read.value;
     }
 
     // Slow path: cooperative-admission with synchronous compute. The
-    // closure captures `&VerterHost` by reference — Rust borrow safe
+    // closure captures `&dyn ResolverContext` by reference — Rust borrow safe
     // because `cooperative_get_or_insert_with_post_publish` runs the
     // compute closure on the calling thread (per its
     // synchronous-compute contract documented at
@@ -823,8 +823,8 @@ pub(crate) fn ref_root_reaches_transitive_cycle_node(
     let read_opt = crate::component_meta_caches::ref_cycle_db_get_or_compute(
         db,
         root_identity,
-        host,
-        |compute_fence| bfs_compute_inner(root_identity, host, compute_fence),
+        ctx,
+        |compute_fence| bfs_compute_inner(root_identity, ctx, compute_fence),
     );
 
     match read_opt {
@@ -839,7 +839,7 @@ pub(crate) fn ref_root_reaches_transitive_cycle_node(
             // cache: the same revalidation race that just rejected
             // the entry would reject the next attempt too.
             let mut fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
-            let result = bfs_compute_inner(root_identity, host, &mut fence);
+            let result = bfs_compute_inner(root_identity, ctx, &mut fence);
             local_fence.extend(fence);
             result
         }
@@ -859,7 +859,7 @@ pub(crate) fn ref_root_reaches_transitive_cycle_node(
 /// revalidation rejects the freshly-built entry.
 pub(crate) fn bfs_compute_inner(
     root_identity: &crate::semantic_query::DeclIdentity,
-    host: &VerterHost,
+    ctx: &dyn ResolverContext,
     local_fence: &mut Vec<(Arc<str>, crate::semantic_query::DepVersion)>,
 ) -> bool {
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
@@ -872,8 +872,8 @@ pub(crate) fn bfs_compute_inner(
     #[cfg(test)]
     dep_signature::BFS_COMPUTE_COUNTER.with(|c| c.set(c.get() + 1));
 
-    let dispatch = ProjectSemanticDispatch::new(host);
-    let graph = host.project_type_store().semantic_graph();
+    let dispatch = ctx.dispatch();
+    let graph = ctx.project_type_store().semantic_graph();
     let mut visited: FxHashSet<crate::semantic_query::DeclIdentity> = FxHashSet::default();
     let mut queue: VecDeque<(crate::semantic_query::DeclIdentity, bool)> = VecDeque::new();
     visited.insert(root_identity.clone());
@@ -918,7 +918,7 @@ pub(crate) fn bfs_compute_inner(
         };
 
         let body_has_complex_signal =
-            path_has_complex_signal || has_complex_cycle_guard_surface_node(host, body_id, 0);
+            path_has_complex_signal || has_complex_cycle_guard_surface_node(ctx, body_id, 0);
 
         // Dispatch's recursive-ref back-edge is published as
         // `Opaque(RecursiveRef { name })` — not a DeclRef — so a
@@ -1100,7 +1100,7 @@ pub(crate) fn body_contains_recursive_ref_to_name(
 /// hit — a runaway recursion is treated as "not complex" so the
 /// caller continues the BFS rather than terminating prematurely.
 pub(crate) fn has_complex_cycle_guard_surface_node(
-    host: &VerterHost,
+    ctx: &dyn ResolverContext,
     node: crate::semantic_query::SemanticNodeId,
     depth: u32,
 ) -> bool {
@@ -1108,18 +1108,18 @@ pub(crate) fn has_complex_cycle_guard_surface_node(
     if depth > 256 {
         return false;
     }
-    let graph = host.project_type_store().semantic_graph();
+    let graph = ctx.project_type_store().semantic_graph();
     let Some(data) = graph.node_data(node) else {
         return false;
     };
     match data.as_ref() {
         SemanticNodeData::Alias(inner) => {
-            has_complex_cycle_guard_surface_node(host, *inner, depth + 1)
+            has_complex_cycle_guard_surface_node(ctx, *inner, depth + 1)
         }
         SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
             members
                 .iter()
-                .any(|&m| has_complex_cycle_guard_surface_node(host, m, depth + 1))
+                .any(|&m| has_complex_cycle_guard_surface_node(ctx, m, depth + 1))
                 || members.iter().any(|&m| {
                     let d = graph.node_data(m);
                     !matches!(d.as_deref(), Some(SemanticNodeData::Object(_)))

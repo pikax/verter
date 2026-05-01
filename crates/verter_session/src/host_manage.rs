@@ -487,6 +487,27 @@ pub(crate) fn component_meta_options_fingerprint(options: &ComponentMetaOptions)
     crate::hash::hash_16(&buf)
 }
 
+/// Validate every fact in a `DepSignature` against current host state.
+///
+/// Returns `true` only when every `(canonical_id, version)` pair in the
+/// signature still matches what the host reports — a single mismatch
+/// invalidates the entry.
+///
+/// Phase 10a: moved from `component_meta_caches.rs` to host-impl tier.
+/// Resolver-tier callers reach the validation through the
+/// [`ResolverContext::validate_dep_signature`](crate::resolver_core::ResolverContext::validate_dep_signature)
+/// trait method, whose body delegates here with a concrete `&VerterHost`.
+pub(crate) fn dep_signature_valid_for_host(
+    signature: &crate::semantic_query::DepSignature,
+    host: &VerterHost,
+) -> bool {
+    use crate::completion_fence::FenceValidator;
+    let validator = HostFenceValidator { host };
+    signature
+        .iter()
+        .all(|(canonical, version)| validator.validate(canonical.as_ref(), version))
+}
+
 /// [`FenceValidator`](crate::completion_fence::FenceValidator) backed by a
 /// live [`VerterHost`]. Reports whether an observed dep-fact still matches
 /// the host's current state — used by Phase 3 cache revalidation and
