@@ -186,7 +186,7 @@ pub fn resolved_macro_to_expansion(macro_meta: &ResolvedMacroMeta) -> TypeExpans
 /// during solving (for registry publishing).
 pub fn resolved_macro_to_expansion_via_solver(
     macro_meta: &ResolvedMacroMeta,
-    host: &crate::VerterHost,
+    ctx: &dyn crate::resolver_core::ResolverContext,
 ) -> (
     TypeExpansionResult,
     Vec<verter_semantic::analysis::type_solver::host::ResolvedRootIdentity>,
@@ -210,7 +210,7 @@ pub fn resolved_macro_to_expansion_via_solver(
         if scope.is_empty() {
             return parsed;
         }
-        crate::meta_resolve::project_expr_class_a_via_dispatch(host, scope, &parsed)
+        crate::meta_resolve::project_expr_class_a_via_dispatch(ctx, scope, &parsed)
             .unwrap_or(parsed)
     };
 
@@ -266,7 +266,7 @@ pub fn resolved_macro_to_expansion_via_solver(
 
     let type_expr = if !macro_meta.type_name.is_empty() && !scope.is_empty() {
         let parsed = TypeExpr::named(&macro_meta.type_name);
-        crate::meta_resolve::project_expr_class_a_via_dispatch(host, scope, &parsed)
+        crate::meta_resolve::project_expr_class_a_via_dispatch(ctx, scope, &parsed)
             .unwrap_or(parsed)
     } else if !macro_meta.type_name.is_empty() {
         TypeExpr::named(&macro_meta.type_name)

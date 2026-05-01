@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use crate::resolver_core::RouteDemand;
 use crate::types::FileAnalysisSnapshot;
-use crate::VerterHost;
+use crate::resolver_core::ResolverContext;
 use verter_semantic::analysis::type_expr::{FunctionExpr, ObjectMember, PrimitiveName, TypeExpr};
 
 /// Work item for the unified registry publication queue.
@@ -126,12 +126,12 @@ pub(crate) fn should_collect_component_meta_registry_nested_refs(
 }
 
 pub(crate) fn owner_component_meta_registry_import_root(
-    host: &VerterHost,
+    ctx: &dyn ResolverContext,
     owner_canonical: &str,
     _snapshot: &FileAnalysisSnapshot,
     local_name: &str,
 ) -> Option<(String, String)> {
-    host.resolve_owner_direct_import(owner_canonical, local_name)
+    ctx.resolve_owner_direct_import(owner_canonical, local_name)
 }
 
 pub(crate) fn enqueue_component_meta_registry_ref(
@@ -1520,7 +1520,7 @@ pub(crate) fn collect_component_meta_registry_function_surface_refs(
 }
 
 pub(crate) fn collect_component_meta_registry_public_field_refs(
-    host: &VerterHost,
+    ctx: &dyn ResolverContext,
     owner_canonical: &str,
     snapshot: &FileAnalysisSnapshot,
     field: &verter_semantic::analysis::type_expand::ExpandedField,
@@ -1550,17 +1550,17 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
     let expr = parsed_raw.as_ref().unwrap_or(&field.r#type);
 
     let skip_direct_plain_ref = component_meta_registry_ref_name(expr).is_some_and(|name| {
-        host.prepared_type_decl(owner_canonical, name)
+        ctx.prepared_type_decl(owner_canonical, name)
             .is_some_and(|prepared| {
                 matches!(
                     prepared.body,
                     verter_semantic::analysis::type_expr::TypeExpr::TypeParameter(_),
                 )
             })
-            || owner_component_meta_registry_import_root(host, owner_canonical, snapshot, name)
+            || owner_component_meta_registry_import_root(ctx, owner_canonical, snapshot, name)
                 .and_then(|(canonical_id, exported_name)| {
                     (!canonical_id.is_empty() && !canonical_id.contains("/node_modules/")).then(
-                        || host.prepared_type_decl(canonical_id.as_str(), exported_name.as_str()),
+                        || ctx.prepared_type_decl(canonical_id.as_str(), exported_name.as_str()),
                     )
                 })
                 .flatten()
@@ -1568,9 +1568,9 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
                     component_meta_registry_has_non_object_top_level_surface(&prepared.body)
                         && !component_meta_registry_has_explicit_object_surface(&prepared.body)
                 })
-            || owner_component_meta_registry_import_root(host, owner_canonical, snapshot, name)
+            || owner_component_meta_registry_import_root(ctx, owner_canonical, snapshot, name)
                 .is_some_and(|(canonical_id, _)| canonical_id.contains("/node_modules/"))
-            || crate::meta_resolve::resolve_type_declaration(host, owner_canonical, name)
+            || ctx.resolve_type_declaration_for_dep(owner_canonical, name)
                 .canonical_source
                 .contains("/node_modules/")
     });
@@ -1580,14 +1580,14 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
                 return false;
             }
             let Some((canonical_id, exported_name)) =
-                owner_component_meta_registry_import_root(host, owner_canonical, snapshot, name)
+                owner_component_meta_registry_import_root(ctx, owner_canonical, snapshot, name)
             else {
                 return false;
             };
             if canonical_id.is_empty() || canonical_id.contains("/node_modules/") {
                 return false;
             }
-            host.prepared_type_decl(canonical_id.as_str(), exported_name.as_str())
+            ctx.prepared_type_decl(canonical_id.as_str(), exported_name.as_str())
                 .is_some_and(|prepared| {
                     component_meta_registry_has_non_object_top_level_surface(&prepared.body)
                         && !component_meta_registry_has_explicit_object_surface(&prepared.body)
@@ -1597,7 +1597,7 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
     if (skip_direct_plain_ref || skip_imported_generic_non_object_ref)
         && direct_ref.is_some_and(|(name, _)| {
             let local_type_parameter =
-                host.prepared_type_decl(owner_canonical, name)
+                ctx.prepared_type_decl(owner_canonical, name)
                     .is_some_and(|prepared| {
                         matches!(
                             prepared.body,
@@ -1605,11 +1605,11 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
                         )
                     });
             let import_root =
-                owner_component_meta_registry_import_root(host, owner_canonical, snapshot, name);
+                owner_component_meta_registry_import_root(ctx, owner_canonical, snapshot, name);
             let package_backed = import_root
                 .as_ref()
                 .is_some_and(|(canonical_id, _)| canonical_id.contains("/node_modules/"))
-                || crate::meta_resolve::resolve_type_declaration(host, owner_canonical, name)
+                || ctx.resolve_type_declaration_for_dep(owner_canonical, name)
                     .canonical_source
                     .contains("/node_modules/");
             !local_type_parameter && !package_backed
@@ -1638,7 +1638,7 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
     }
 
     collect_component_meta_registry_public_indexed_access_roots(
-        host,
+        ctx,
         owner_canonical,
         expr,
         published_names,
@@ -1824,7 +1824,7 @@ pub(crate) fn collect_component_meta_registry_public_surface_refs(
 }
 
 pub(crate) fn collect_component_meta_registry_public_indexed_access_roots(
-    host: &VerterHost,
+    ctx: &dyn ResolverContext,
     owner_canonical: &str,
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
     published_names: &rustc_hash::FxHashSet<String>,
@@ -1835,7 +1835,7 @@ pub(crate) fn collect_component_meta_registry_public_indexed_access_roots(
     let Some((root_name, route)) = component_meta_registry_public_indexed_access_route(expr) else {
         return;
     };
-    let Some(prepared) = host.prepared_type_decl(owner_canonical, root_name.as_str()) else {
+    let Some(prepared) = ctx.prepared_type_decl(owner_canonical, root_name.as_str()) else {
         return;
     };
     if matches!(

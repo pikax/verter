@@ -16,7 +16,7 @@
 use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
 use verter_workspace::ProjectStableKey;
 
-use crate::VerterHost;
+use crate::resolver_core::ResolverContext;
 
 /// Resolve a bare-name symbol against the consumer project's ambient lib
 /// registry. Returns `None` when no registered lib in the project exposes
@@ -34,14 +34,17 @@ use crate::VerterHost;
 /// First production caller lands in 5b's bare-name resolver fallback.
 #[allow(dead_code)]
 pub(crate) fn resolve_ambient_global(
-    host: &VerterHost,
+    ctx: &dyn ResolverContext,
     consumer_canonical: &str,
     consumer_project_stable_key: ProjectStableKey,
     symbol: &str,
 ) -> Option<ResolvedRootIdentity> {
-    let workspace = host.workspace();
-    let hit = workspace.lookup_ambient_symbol(consumer_project_stable_key, symbol)?;
-    workspace.record_ambient_dependency(consumer_canonical, hit.virtual_id.as_ref());
+    // Phase 10a: workspace mutators are NOT exposed on `ResolverContext`.
+    // The two narrow ambient capabilities `lookup_ambient_symbol` and
+    // `record_ambient_dependency` replace the broad `workspace()` accessor
+    // that the previous `&VerterHost` callsite consulted.
+    let hit = ctx.lookup_ambient_symbol(consumer_project_stable_key, symbol)?;
+    ctx.record_ambient_dependency(consumer_canonical, hit.virtual_id.as_ref());
     Some(ResolvedRootIdentity::new(hit.virtual_id.as_ref(), symbol))
 }
 
