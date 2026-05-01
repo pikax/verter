@@ -24,9 +24,9 @@ use super::declaration_metadata::{
     ResolvedTypeDeclaration,
 };
 use crate::resolver_core::bare_name_resolve::DeclarationScopePayload;
+use crate::resolver_core::ResolverContext;
 use crate::resolver_core::{FuseBudgets, FuseState};
 use crate::semantic_query::SemanticNodeId;
-use crate::resolver_core::ResolverContext;
 
 // Phase 11b.2 — surface-projection helpers, prepared-substitution
 // machinery, and arc cache-key constructors live in the private

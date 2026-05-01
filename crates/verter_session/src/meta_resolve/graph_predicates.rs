@@ -443,12 +443,7 @@ pub(crate) fn type_node_needs_member_route_materialization(
             type_node_needs_member_route_materialization(ctx, *base, local_fence, depth + 1)
         }
         SemanticNodeData::Tuple { elements, .. } => elements.iter().any(|element| {
-            type_node_needs_member_route_materialization(
-                ctx,
-                element.value,
-                local_fence,
-                depth + 1,
-            )
+            type_node_needs_member_route_materialization(ctx, element.value, local_fence, depth + 1)
         }),
         SemanticNodeData::Alias(inner) => {
             type_node_needs_member_route_materialization(ctx, *inner, local_fence, depth + 1)

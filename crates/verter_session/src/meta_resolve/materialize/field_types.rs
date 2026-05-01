@@ -20,8 +20,8 @@ use crate::resolver_core::component_meta_registry::{
     component_meta_registry_public_indexed_access_route,
     component_meta_registry_public_utility_route,
 };
-use crate::types::FileAnalysisSnapshot;
 use crate::resolver_core::ResolverContext;
+use crate::types::FileAnalysisSnapshot;
 use std::sync::Arc;
 
 use super::super::dep_signature::accumulate_dispatch_dep_signature;
@@ -32,12 +32,12 @@ use super::super::field_state::MacroFieldGraphState;
 // Phase 10a: `request_host` source moved to
 // `host_manage/component_meta_request_impl.rs`. Import rewritten to
 // the new home.
-use crate::host_manage::component_meta_request_impl::ResolvedMacroMeta;
 use super::super::resolved_state::{
     lowered_root_reaches_transitive_cycle, select_imported_materialization_scope,
 };
 use super::super::scoring::compare_type_expr_improvement;
 use super::macro_shapes::expr_needs_projection_rescue;
+use crate::host_manage::component_meta_request_impl::ResolvedMacroMeta;
 
 // `materialize_component_meta_macro_shape_member_type_expr` lives in the
 // `macro_member_walk` sibling (Phase 11a commit 10);

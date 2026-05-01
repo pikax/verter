@@ -54,10 +54,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         key: &ResolveDeclKey,
     ) -> (QueryResult<SemanticNodeId>, DepSignature) {
-        let shallow = match self
-            .ctx
-            .shallow_file_state(key.scope.canonical_id.as_ref())
-        {
+        let shallow = match self.ctx.shallow_file_state(key.scope.canonical_id.as_ref()) {
             Some(state) => state,
             None => return (QueryResult::Error(QueryError::Miss), empty_signature()),
         };

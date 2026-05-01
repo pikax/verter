@@ -51,11 +51,11 @@ use super::{
     DirectPreparedDeclarationResolver, ResolvedImportedRegistrySymbol, ResolvedTypeDeclaration,
 };
 use crate::project_semantic_dispatch::{resolve_decl_key, ProjectSemanticDispatch};
+use crate::resolver_core::ResolverContext;
 use crate::resolver_core::{FuseTrip, RouteDemand};
 use crate::semantic_query::{
     PathSegment, ProjectionMode, QueryResult, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
 };
-use crate::resolver_core::ResolverContext;
 
 impl<'a> ComponentMetaQueryEngine<'a> {
     pub fn resolve_imported_registry_symbol(
@@ -103,11 +103,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         resolved_name: &str,
     ) -> Option<ResolvedTypeDeclaration> {
         self.prepared_type_decl(canonical_source, resolved_name)?;
-        let metadata = local_type_symbol_metadata_for_known_source(
-            self.ctx,
-            canonical_source,
-            resolved_name,
-        )?;
+        let metadata =
+            local_type_symbol_metadata_for_known_source(self.ctx, canonical_source, resolved_name)?;
         let resolver = DirectPreparedDeclarationResolver { ctx: self.ctx };
         Some(crate::resolver_core::resolve_local_type_declaration(
             &resolver,
@@ -123,11 +120,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         resolved_name: &str,
     ) -> Option<ResolvedTypeDeclaration> {
         self.prepared_type_decl(canonical_source, resolved_name)?;
-        let metadata = local_type_symbol_metadata_for_known_source(
-            self.ctx,
-            canonical_source,
-            resolved_name,
-        )?;
+        let metadata =
+            local_type_symbol_metadata_for_known_source(self.ctx, canonical_source, resolved_name)?;
         Some(ResolvedTypeDeclaration {
             requested_name: resolved_name.to_string(),
             declaration_id: self

@@ -32,8 +32,8 @@
 //! `project_routed_expr_surface_expr`, `project_direct_utility_surface_shape`,
 //! etc.) plus the surface→expr / surface→shape raises.
 
-use crate::types::ProjectionMode;
 use crate::resolver_core::ResolverContext;
+use crate::types::ProjectionMode;
 use std::sync::Arc;
 
 /// Class A surface projection (Phase 5d §4.1) — dispatch-equivalent

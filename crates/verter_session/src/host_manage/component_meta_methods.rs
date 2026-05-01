@@ -45,6 +45,19 @@ use verter_semantic::analysis::types::AnalyzedMacro;
 // resolved through `meta_resolve`'s private siblings; after the move,
 // they rewrite to `crate::meta_resolve::X` (the parent module's
 // re-exported `pub(crate)` surface).
+use crate::meta_resolve::compare_type_expr_improvement;
+use crate::meta_resolve::component_meta_registry_prefers_structural_materialization;
+use crate::meta_resolve::STORE_VIEW_STABILITY_MAX_ATTEMPTS;
+use crate::meta_resolve::{
+    collect_type_expr_ref_names, lowered_preserve_package_backed_symbolic_refs,
+    materialize_component_meta_field_types, materialize_component_meta_type_expr_until_stable,
+    produce_macro_object_shapes_for_purpose,
+};
+use crate::meta_resolve::{
+    component_meta_owner_local_shallow_substituted_alias_body, enrich_missing_slot_bindings,
+    select_imported_materialization_scope, RegistryMaterialization, ResolvedComponentMetaState,
+    SurfaceNodeIdentities,
+};
 use crate::meta_resolve::{
     drain_dispatch_dep_signature_accumulator, reset_dispatch_dep_signature_accumulator,
 };
@@ -54,24 +67,11 @@ use crate::meta_resolve::{
     project_type_surface_expr_via_host, project_type_surface_expr_via_host_threaded,
 };
 use crate::meta_resolve::{
-    collect_type_expr_ref_names, lowered_preserve_package_backed_symbolic_refs,
-    materialize_component_meta_field_types, materialize_component_meta_type_expr_until_stable,
-    produce_macro_object_shapes_for_purpose,
-};
-use crate::meta_resolve::{
     next_component_meta_audit_request_id, request_source_performed_compute,
     resolved_meta_cache_key, should_skip_imported_registry_seed_refresh, trace_request_source,
     CapturedComponentMetaInputs, ResolvedComponentMetaComputeAudit, ResolvedMacroMeta,
     ResolvedTypeRegistryMeta,
 };
-use crate::meta_resolve::{
-    component_meta_owner_local_shallow_substituted_alias_body, enrich_missing_slot_bindings,
-    select_imported_materialization_scope, RegistryMaterialization, ResolvedComponentMetaState,
-    SurfaceNodeIdentities,
-};
-use crate::meta_resolve::compare_type_expr_improvement;
-use crate::meta_resolve::component_meta_registry_prefers_structural_materialization;
-use crate::meta_resolve::STORE_VIEW_STABILITY_MAX_ATTEMPTS;
 
 // Items that live in the parent shell (`crate::meta_resolve`): the
 // walker (`walk_component_meta_macro_shape_member_types`), the
@@ -80,8 +80,8 @@ use crate::meta_resolve::STORE_VIEW_STABILITY_MAX_ATTEMPTS;
 // origin-graph builder. The `HostComponentMetaResolver` adapter moved
 // to `host_manage/jsdoc_resolve.rs` in commit 4 (host-impl tier).
 use crate::host_manage::jsdoc_resolve::HostComponentMetaResolver;
-use crate::meta_resolve::walk_component_meta_macro_shape_member_types;
 use crate::meta_resolve::build_origin_graph;
+use crate::meta_resolve::walk_component_meta_macro_shape_member_types;
 use crate::meta_resolve::{
     component_meta_registry_prefers_structural_materialization_node,
     component_meta_registry_should_keep_raw_symbolic_non_object_alias,

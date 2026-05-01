@@ -792,9 +792,7 @@ pub fn materialize_component_meta_structure(
             dep_signature: entry.dep_signature.clone(),
         },
         // Plan §1.5 race-closer — post-compute revalidation.
-        |entry: &MaterializeStructureEntry| {
-            ctx.validate_dep_signature(&entry.dep_signature)
-        },
+        |entry: &MaterializeStructureEntry| ctx.validate_dep_signature(&entry.dep_signature),
         // Plan §10.1 post_publish — register reverse-index AFTER
         // entries.insert AND AFTER successful revalidation.
         move |entry_arc: &Arc<MaterializeStructureEntry>, k: &MaterializeStructureCacheKey| {
@@ -1917,10 +1915,7 @@ export type C<T> = A<T>
         if let Some(read) = after_peek {
             // If we got Some, the dep_signature must be currently valid.
             assert!(
-                crate::host_manage::dep_signature_valid_for_host(
-                    &read.dep_signature,
-                    host,
-                ),
+                crate::host_manage::dep_signature_valid_for_host(&read.dep_signature, host,),
                 "peek returned a stale dep_signature — invariant violation"
             );
         }

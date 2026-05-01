@@ -68,6 +68,7 @@ use verter_semantic::analysis::type_solver::{PreparedTypeDecl, PreparedValueDecl
 use verter_semantic::analysis::ScriptAnalysisSnapshot;
 use verter_workspace::{AmbientSymbolHit, ProjectStableKey};
 
+use crate::host_manage::ValueDeclIdentity;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::project_type_store::{IndexedReady, ProjectTypeStore};
 use crate::resolver_core::prepared_decl::PreparedDeclBundle;
@@ -75,7 +76,6 @@ use crate::resolver_core::{FactVersionRef, ShallowFileState};
 use crate::resolver_store::HostStoreView;
 use crate::semantic_query::{DepSignature, SemanticNodeData, SemanticNodeId};
 use crate::types::Hash16;
-use crate::host_manage::ValueDeclIdentity;
 use crate::FileAnalysisSnapshot;
 use crate::HostConfig;
 
@@ -122,10 +122,8 @@ pub(crate) trait ResolverContext: sealed::Sealed {
 
     fn ensure_loaded(&self, canonical_id: &str) -> bool;
 
-    fn external_type_analysis(
-        &self,
-        canonical_id: &str,
-    ) -> Option<Arc<AnalyzedExternalTypeSource>>;
+    fn external_type_analysis(&self, canonical_id: &str)
+        -> Option<Arc<AnalyzedExternalTypeSource>>;
 
     fn shallow_file_state(&self, canonical_id: &str) -> Option<Arc<ShallowFileState>>;
 
@@ -143,10 +141,7 @@ pub(crate) trait ResolverContext: sealed::Sealed {
 
     fn config(&self) -> &HostConfig;
 
-    fn analyzed_macro_snapshot(
-        &self,
-        canonical_id: &str,
-    ) -> Option<Arc<ScriptAnalysisSnapshot>>;
+    fn analyzed_macro_snapshot(&self, canonical_id: &str) -> Option<Arc<ScriptAnalysisSnapshot>>;
 
     // -------- Symbol / route resolution ----------------------------
 
@@ -342,10 +337,7 @@ impl ResolverContext for crate::VerterHost {
     }
 
     #[inline]
-    fn analyzed_macro_snapshot(
-        &self,
-        canonical_id: &str,
-    ) -> Option<Arc<ScriptAnalysisSnapshot>> {
+    fn analyzed_macro_snapshot(&self, canonical_id: &str) -> Option<Arc<ScriptAnalysisSnapshot>> {
         crate::VerterHost::analyzed_macro_snapshot(self, canonical_id)
     }
 
@@ -447,7 +439,8 @@ impl ResolverContext for crate::VerterHost {
         consumer_project: ProjectStableKey,
         symbol: &str,
     ) -> Option<AmbientSymbolHit> {
-        self.workspace().lookup_ambient_symbol(consumer_project, symbol)
+        self.workspace()
+            .lookup_ambient_symbol(consumer_project, symbol)
     }
 
     #[inline]

@@ -93,7 +93,11 @@ pub(crate) fn materialize_component_meta_registry_structural_expr(
     /// non-Ref node — the closure's structural recursion path then
     /// projects through `project_type_surface_expr` like any other
     /// local Ref.
-    fn ref_is_package_backed_node(ctx: &dyn ResolverContext, scope_canonical_id: &str, name: &str) -> bool {
+    fn ref_is_package_backed_node(
+        ctx: &dyn ResolverContext,
+        scope_canonical_id: &str,
+        name: &str,
+    ) -> bool {
         let dispatch = ProjectSemanticDispatch::new(ctx);
         let probe = verter_semantic::analysis::type_expr::TypeExpr::Ref {
             name: Arc::from(name),

@@ -1487,8 +1487,8 @@ mod resolver_context_seal {
             Ok(s) => s,
             Err(e) => panic!("read {}: {}", path.display(), e),
         };
-        let parsed = syn::parse_file(&src)
-            .unwrap_or_else(|e| panic!("parse {}: {}", path.display(), e));
+        let parsed =
+            syn::parse_file(&src).unwrap_or_else(|e| panic!("parse {}: {}", path.display(), e));
         let mut visitor = SealVisitor::new(path, violations);
         visitor.visit_file(&parsed);
     }
@@ -1594,9 +1594,13 @@ mod resolver_context_seal {
 }
 
 #[test]
-#[ignore = "phase-10a: enforced after the seal-scope migration completes; \
-            workers run with --include-ignored to track progress, and the \
-            #[ignore] is removed in commit 13"]
 fn no_concrete_verter_host_in_seal_scope() {
+    // Phase 10a — un-ignored at commit 13 after the resolver-context
+    // seal migration landed. Resolver-tier files
+    // (`resolver_core/`, `meta_resolve/`, `project_semantic_dispatch/`,
+    // `component_meta_caches.rs`, `component_meta_materialize.rs`)
+    // must reach host state through `&dyn ResolverContext`, never
+    // through the concrete `VerterHost` type. Re-introduction of a
+    // `VerterHost` reference in a seal-scope file fails this test.
     resolver_context_seal::run();
 }

@@ -42,7 +42,6 @@ use super::super::dispatch_helpers::{
 // Phase 10a: `request_host` source moved to
 // `host_manage/component_meta_request_impl.rs`. Import rewritten to
 // the new home.
-use crate::host_manage::component_meta_request_impl::{ResolvedMacroMeta, ResolvedTypeRegistryMeta};
 use super::super::resolved_state::{
     collect_expanded_slot_binding_param_types, collect_expanded_slot_bindings_from_object_type,
     component_meta_substitute_typeexpr, lowered_root_reaches_transitive_cycle,
@@ -53,6 +52,9 @@ use super::field_types::{
     field_should_preserve_shallow_symbolic_raw_type, lowered_needs_member_route_materialization,
     materialize_component_meta_type_expr_until_stable, parsed_field_raw_type,
     top_level_imported_ref_can_stay_symbolic,
+};
+use crate::host_manage::component_meta_request_impl::{
+    ResolvedMacroMeta, ResolvedTypeRegistryMeta,
 };
 
 /// Sole-authority producer for type-based macro object shapes.
@@ -1821,9 +1823,8 @@ pub(crate) fn resolve_named_ref_prepared_projection_target(
                 import_target.canonical_id.clone()
             };
             let target_name = import_target.imported_name.clone();
-            if let Some((routed_canonical, routed_name)) = query_engine
-                .ctx()
-                .resolve_named_type_export_target_shallow(
+            if let Some((routed_canonical, routed_name)) =
+                query_engine.ctx().resolve_named_type_export_target_shallow(
                     target_canonical.as_str(),
                     target_name.as_str(),
                 )

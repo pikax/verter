@@ -49,7 +49,7 @@ use crate::resolver_core::cache_keys::{
     RoutedExprSurfaceCacheKey,
 };
 use crate::resolver_core::component_meta_query_engine::ResolvedImportedRegistrySymbol;
-use crate::resolver_core::{ResolverContext, ResolvedTypeDeclaration};
+use crate::resolver_core::{ResolvedTypeDeclaration, ResolverContext};
 use crate::semantic_query::{DepSignature, ProjectionMode};
 
 // ===========================================================================
@@ -115,9 +115,7 @@ impl ImportedRegistryDb {
                 })
             },
             |entry: &ImportedRegistryEntry| entry.value.clone(),
-            |entry: &ImportedRegistryEntry| {
-                ctx.validate_dep_signature(&entry.dep_signature)
-            },
+            |entry: &ImportedRegistryEntry| ctx.validate_dep_signature(&entry.dep_signature),
         )
     }
 
@@ -223,9 +221,7 @@ impl DeclarationLookupDb {
                 })
             },
             |entry: &DeclarationLookupEntry| entry.value.clone(),
-            |entry: &DeclarationLookupEntry| {
-                ctx.validate_dep_signature(&entry.dep_signature)
-            },
+            |entry: &DeclarationLookupEntry| ctx.validate_dep_signature(&entry.dep_signature),
         )
     }
 
@@ -1057,9 +1053,7 @@ impl RoutedExprSurfaceDb {
                 })
             },
             |entry: &RoutedExprSurfaceEntry| entry.value.clone(),
-            |entry: &RoutedExprSurfaceEntry| {
-                ctx.validate_dep_signature(&entry.dep_signature)
-            },
+            |entry: &RoutedExprSurfaceEntry| ctx.validate_dep_signature(&entry.dep_signature),
         )
     }
 

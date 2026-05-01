@@ -61,13 +61,13 @@ use verter_semantic::analysis::type_solver::host::{
 };
 use verter_semantic::analysis::type_solver::PreparedTypeDecl;
 
+use crate::resolver_core::ResolverContext;
 use crate::semantic_query::{
     BranchSelection, CacheRead, DeclIdentity, DepSignature, DepVersion, IndexKey, LiteralValue,
     NodeScopeId, OriginEdgeKind, OriginMeta, PathSegment, PrimitiveKind, ProjectionMode,
     QueryError, QueryResult, ResolveDeclKey, ScopeId, SemanticNodeData, SemanticNodeId,
     SemanticQueryApi, SemanticQueryKey, SurfaceView,
 };
-use crate::resolver_core::ResolverContext;
 use crate::semantic_query_memo::SemanticGraphStore;
 use verter_semantic::analysis::type_expr::{PrimitiveName, TypeExpr};
 

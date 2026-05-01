@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "phase": "phase-10a",
+  "status": "success",
+  "base_commit": "b0a998986319fab80ba87ebf0a2ce1f45d10b892",
+  "work_head_before_marker": "82e2bda2c51cfd9dfd1ae727ef0bd81d6beade1f",
+  "test_results": {
+    "workspace": {
+      "test_scope": "cargo test --workspace --tests --verbose",
+      "passed": 10285,
+      "failed": 0
+    },
+    "correctness": {
+      "test_scope": "cargo test -p verter_session --test correctness",
+      "passed": 18,
+      "failed": 0
+    }
+  },
+  "snapshot_drift": "none",
+  "guards_un_ignored": ["no_concrete_verter_host_in_seal_scope"],
+  "deferred": [],
+  "report_path": "phase-10a-report.md",
+  "derivation_notes_verified": false,
+  "atomic_gate_phase": false,
+  "summary": "Introduced sealed ResolverContext trait (28 members composing the resolver-tier facade) + impl for VerterHost. Migrated ~25 production files in seal scope (resolver_core/, meta_resolve/, project_semantic_dispatch/, component_meta_caches.rs, component_meta_materialize.rs) from &VerterHost to &dyn ResolverContext. Three host-impl files moved meta_resolve→host_manage. Architecture guard no_concrete_verter_host_in_seal_scope active and passing un-ignored."
+}

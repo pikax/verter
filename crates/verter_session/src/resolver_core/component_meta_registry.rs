@@ -8,9 +8,9 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
+use crate::resolver_core::ResolverContext;
 use crate::resolver_core::RouteDemand;
 use crate::types::FileAnalysisSnapshot;
-use crate::resolver_core::ResolverContext;
 use verter_semantic::analysis::type_expr::{FunctionExpr, ObjectMember, PrimitiveName, TypeExpr};
 
 /// Work item for the unified registry publication queue.
@@ -1570,7 +1570,8 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
                 })
             || owner_component_meta_registry_import_root(ctx, owner_canonical, snapshot, name)
                 .is_some_and(|(canonical_id, _)| canonical_id.contains("/node_modules/"))
-            || ctx.resolve_type_declaration_for_dep(owner_canonical, name)
+            || ctx
+                .resolve_type_declaration_for_dep(owner_canonical, name)
                 .canonical_source
                 .contains("/node_modules/")
     });
@@ -1609,7 +1610,8 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
             let package_backed = import_root
                 .as_ref()
                 .is_some_and(|(canonical_id, _)| canonical_id.contains("/node_modules/"))
-                || ctx.resolve_type_declaration_for_dep(owner_canonical, name)
+                || ctx
+                    .resolve_type_declaration_for_dep(owner_canonical, name)
                     .canonical_source
                     .contains("/node_modules/");
             !local_type_parameter && !package_backed
