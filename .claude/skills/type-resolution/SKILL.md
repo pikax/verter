@@ -375,7 +375,7 @@ When a budget trips, the system returns a structured `BudgetExceededFailure` wit
 The reusable semantic layer lives in `crates/verter_session/src/project_semantic_dispatch/` (module tree split in Phase D §5.2). Each sub-module owns a distinct responsibility:
 
 - `mod.rs` — `ProjectSemanticDispatch` struct + `SemanticQueryApi::execute` impl
-- `build.rs` — `build_instantiate`, `build_mapped_type`, `build_conditional`, `build_key_of`, `build_project_path`, `build_typeof`, `build_builtin_utility`
+- `build.rs` — `build_instantiate`, `build_mapped_type`, `build_conditional`, `build_key_of`, `build_project_path` (Phase 1B path-prefix peek + linear-step backfill, plan §1.B), `build_typeof`, `build_builtin_utility`
 - `walk.rs` — `PathWalker` + `walk_path` (iterative worklist per plan §2)
 - `guards.rs` — `SubstitutionGuard`, `EvaluationGuard`, `WalkGuard`, `KeyEnumerationGuard`, `RelationGuard` (per-call RAII cycle detection)
 - `enumerate.rs` — `KeyEnumeration`, `EnumeratedKey`, `key_names_*` helpers
