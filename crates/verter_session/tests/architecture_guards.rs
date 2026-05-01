@@ -242,26 +242,49 @@ fn god_module_size_budget() {
 // ----------------------------------------------------------------------
 // Phase 5d — Class A + Class B callsite migration guards.
 //
+// POST-CUTOVER NOTE (final state — refer here first): the migration
+// completed in Phase 5l (engine-method deletion) + Phase 5m §5.13a.2
+// (bridge helpers as the single production callsite shape). The engine
+// trampoline methods named below are deleted; every Class A and Class B
+// caller routes through `*_via_host_threaded` bridges under
+// `meta_resolve/dispatch_helpers.rs`. The post-cutover invariant
+// asserted by the guards in this section is uniform: ZERO Class A or
+// Class B engine-method callsites in any production file under the
+// `meta_resolve` and `host_manage` module surfaces.
+//
+// HISTORICAL CONTEXT (Phase 5d→5g→5l→5m migration window — preserved
+// for archeology):
+//
 // The engine trampoline methods (`project_expr_surface_expr`,
 // `project_expr_surface_shape`,
 // `project_expr_surface_expr_with_compound_objects`,
 // `project_type_surface_expr`, `project_type_surface_shape`,
 // `project_prepared_type_surface_expr`,
-// `project_prepared_type_surface_shape`) are scheduled for retirement
-// in Phase 5g. Phase 5d migrates Class A (Props + Slots surfaces) and
-// Class B (type-decl projection) consumers off the engine helpers and
-// onto `dispatch.execute_to_type_expr(SemanticQueryKey::ProjectPath {
+// `project_prepared_type_surface_shape`) were originally scheduled for
+// retirement in Phase 5g. Phase 5d migrated Class A (Props + Slots
+// surfaces) and Class B (type-decl projection) consumers off the engine
+// helpers and onto `dispatch.execute_to_type_expr(SemanticQueryKey::ProjectPath {
 // .., mode: Expanded })` (Class A) / `Instantiate { .. } -> ProjectPath`
 // (Class B) per sub-plan §4.1.
 //
-// Per the brief, route-loop sites (sub-plan §4.1 row
+// Per the original brief, route-loop sites (sub-plan §4.1 row
 // `lower_and_project_to_expanded`: 6012/6309/6323/8329) and route-target
-// sites (`project_route_surface_expr`: 6267/6361/8934/8940) are
+// sites (`project_route_surface_expr`: 6267/6361/8934/8940) were
 // DEFERRED to Phase 5e (5e/5f scope). Line `4942`
 // (`project_expr_surface_expr_with_compound_objects` inside
-// `produce_one_macro_object_shape_for_slots`) is ALSO deferred per the
-// brief note. So these tests count only Class A/B callsites covered by
-// 5d; remaining sites are out of scope until 5e/5f.
+// `produce_one_macro_object_shape_for_slots`) was ALSO deferred per
+// the brief note. The pre-Phase-11 versions of these guards counted
+// only Class A/B callsites covered by 5d, with remaining sites out of
+// scope until 5e/5f.
+//
+// That history is now subsumed: Phase 5l deleted the engine methods
+// atomically, and Phase 5m re-chartered the migration to route every
+// caller through bridge helpers (rather than direct dispatch) so the
+// `Partial<T>` optionality propagation that pre-5l blocked the
+// multi-macro-kind sites is preserved by threading `query_engine.ctx`
+// through the bridges. The line-number anchors and the
+// "deferred to 5g" labels above describe the migration window, not
+// the current tree.
 
 /// Count occurrences of any of the supplied needles in `src`.
 /// Returns the total number of byte-substring hits across all needles.
@@ -580,60 +603,83 @@ fn phase_05d_4b_class_a_slots_callers_migrated() {
 
 #[test]
 fn phase_05m_class_b_callers_migrated_through_bridge_helpers() {
-    // Phase 5m §5.13a.2 (re-charter of Phase 5d 4c): migrate the 11
-    // Class B caller sites + 1 test in meta_resolve.rs through bridge
-    // helpers in `meta_resolve.rs` (named `*_via_host_threaded`) so
-    // the §5.14.1 pre-flight gate sees zero external engine-method
-    // callers. The bridge bodies internally call the deprecated
-    // engine methods inside `#[allow(deprecated)]` for the migration
-    // window per §5.13a.2; 5l's atomic engine deletion will replace
-    // the bridge bodies with dispatch-only equivalents (consuming
-    // the host helpers added in 5m.1 / 5m.2 / 5m.3).
+    // POST-CUTOVER NOTE (final state — Phase 5l + 5m + 11a):
+    // The Class B engine methods (`project_type_surface_expr`,
+    // `_shape`, `project_prepared_type_surface_expr`, `_shape`) are
+    // deleted. Every Class B production callsite routes through bridge
+    // helpers in `meta_resolve/dispatch_helpers.rs` (named
+    // `*_via_host_threaded`). The §5.14.1 pre-flight gate observes
+    // zero external engine-method callers. The architectural finding
+    // logged below (the dispatch-vs-prepared-decl-fallback regression)
+    // is resolved: the bridges thread `query_engine.ctx` so the
+    // prepared-decl path is preserved without an `#[allow(deprecated)]`
+    // engine call.
     //
-    // The guard's pre-5m invariant — "11 Class B engine refs in
-    // meta_resolve.rs (deferred-to-5g)" — is invalidated by 5m's
-    // migration. The post-5m invariant: zero external engine-method
-    // callsites in meta_resolve.rs (and host_manage.rs); all
-    // engine method calls live inside the bridge helpers which
-    // themselves are private free functions in meta_resolve.rs.
+    // HISTORICAL CONTEXT (Phase 5d→5g→5l→5m migration window —
+    // preserved because the design rationale matters for archeology):
     //
-    // ARCHITECTURAL FINDING (TODO(phase-5g)): the trampoline's
-    // `project_type_surface` body is dispatch-first then
-    // prepared-decl-second — `dispatch_projected_surface(...).or_else(||
-    // cached_prepared_root_surface(...))`. The prepared-decl
-    // fallback is essential for re-exported / barrel-routed
-    // declarations (transitive heritage chains, namespace-qualified
-    // imports like `JSX.IntrinsicElements`). A dispatch-only Class
-    // B helper without that fallback regresses 47 workspace tests
-    // (heritage chain resolution, barrel imports, complex
-    // generic Pick/Omit on multi-file types). Even threading the
-    // engine's prepared-decl helper inside a Class B helper does
-    // not match the trampoline's
-    // `dispatch_projected_surface → projected_surface_to_type_expr`
-    // path because that path flattens heritage members through the
-    // surface walker; `raise_node_to_type_expr` over a
-    // dispatch-Instantiate result does not.
+    //   Phase 5m §5.13a.2 (re-charter of Phase 5d 4c) migrated the 11
+    //   Class B caller sites + 1 test in meta_resolve.rs through bridge
+    //   helpers (named `*_via_host_threaded`) so the §5.14.1 pre-flight
+    //   gate would see zero external engine-method callers. Mid-
+    //   migration, the bridge bodies internally called the deprecated
+    //   engine methods inside `#[allow(deprecated)]` blocks per
+    //   §5.13a.2; 5l's atomic engine deletion replaced those bridge
+    //   bodies with dispatch-only equivalents (consuming the host
+    //   helpers added in 5m.1 / 5m.2 / 5m.3).
     //
-    // Per CLAUDE.md "Fix Quality":
-    //   > If the fix would be a workaround, patch, or shim → do NOT
-    //   > apply it. Instead: add a TODO(follow-up) comment
-    //   > explaining the proper fix needed, note it in the feedback
-    //   > file, and continue with the plan.
+    //   The pre-5m invariant — "11 Class B engine refs in
+    //   meta_resolve.rs (deferred-to-5g)" — was invalidated by 5m's
+    //   migration. The post-5m invariant (asserted by this test): zero
+    //   external engine-method callsites in meta_resolve.rs and
+    //   host_manage.rs; all engine method calls were briefly contained
+    //   inside the bridge helpers as private free functions in
+    //   meta_resolve.rs.
     //
-    // The proper fix is to thread the prepared-decl resolver
-    // through dispatch atomically with the engine retirement in
-    // Phase 5g (sub-plan §5 commit 11). Until then, Class B caller
-    // sites stay on the engine helper with a `TODO(phase-5g)`
-    // marker in-source.
+    //   ARCHITECTURAL FINDING logged at Phase 5d 4c (TODO(phase-5g)
+    //   marker, since resolved): the trampoline's
+    //   `project_type_surface` body was dispatch-first then
+    //   prepared-decl-second —
+    //   `dispatch_projected_surface(...).or_else(||
+    //   cached_prepared_root_surface(...))`. The prepared-decl
+    //   fallback is essential for re-exported / barrel-routed
+    //   declarations (transitive heritage chains, namespace-qualified
+    //   imports like `JSX.IntrinsicElements`). A dispatch-only Class B
+    //   helper without that fallback regressed 47 workspace tests
+    //   (heritage chain resolution, barrel imports, complex generic
+    //   Pick/Omit on multi-file types). Even threading the engine's
+    //   prepared-decl helper inside a Class B helper did not match the
+    //   trampoline's
+    //   `dispatch_projected_surface → projected_surface_to_type_expr`
+    //   path because that path flattens heritage members through the
+    //   surface walker; `raise_node_to_type_expr` over a
+    //   dispatch-Instantiate result did not.
     //
-    // Discriminating: pre-4c, no `TODO(phase-5g)` markers existed
-    // for the Class B sites. Post-4c, every site that the brief
-    // listed for migration but stays on the engine has a
-    // `TODO(phase-5g)` marker. This test asserts the markers exist
-    // — a regression that drops a marker (or accidentally deletes a
-    // site) fails this test.
-    // Phase 11a — `meta_resolve.rs` was split into a folder module;
-    // the bridge helpers now live in `meta_resolve/dispatch_helpers.rs`.
+    //   Per CLAUDE.md "Fix Quality":
+    //     > If the fix would be a workaround, patch, or shim → do NOT
+    //     > apply it. Instead: add a TODO(follow-up) comment
+    //     > explaining the proper fix needed, note it in the feedback
+    //     > file, and continue with the plan.
+    //
+    //   The proper fix — threading the prepared-decl resolver through
+    //   dispatch atomically with the engine retirement — was scheduled
+    //   for Phase 5g (sub-plan §5 commit 11). It landed in Phase 5l
+    //   instead (5g was rolled into 5l's atomic engine deletion).
+    //   Class B caller sites no longer carry `TODO(phase-5g)` markers;
+    //   the original `TODO(phase-5g)` markers in production code were
+    //   converted to past-tense bridge documentation in the
+    //   post-cutover review-fix sweep.
+    //
+    //   Pre-Phase-11 version of this guard asserted that
+    //   `TODO(phase-5g)` markers existed at every site the §4.1 brief
+    //   listed for migration that stayed on the engine — i.e., the
+    //   markers were the load-bearing characterization. Post-cutover,
+    //   the markers are gone (the work they tracked landed in 5l/5m),
+    //   and this guard's load-bearing characterization is the absence
+    //   of Class B engine callsites outside the bridge file.
+    //
+    // Phase 11a split `meta_resolve.rs` into a folder module; the
+    // bridge helpers now live in `meta_resolve/dispatch_helpers.rs`.
     //
     // The redesigned test (post-split) walks every .rs file under the
     // meta_resolve module surface (the shell `meta_resolve.rs` plus
