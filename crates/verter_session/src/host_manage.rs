@@ -12,24 +12,12 @@ use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
-use crate::hash::compile_profile_hash;
 use crate::id::canonicalize_id;
 use crate::resolver_core::{
-    collect_dynamic_root_candidates_from_type,
-    component_meta_resolved_macros as resolver_component_meta_resolved_macros,
-    component_meta_type_registry as resolver_component_meta_type_registry, fallthrough_cache_key,
-    get_export_span_follow_reexports_from_graph as resolver_get_export_span_follow_reexports_from_graph,
-    known_spread_keys_from_type_expr, materialize_imported_runtime_values_into_env,
-    push_partial_reason,
-    resolve_exports_from_graph_best_effort as resolver_resolve_exports_from_graph_best_effort,
-    resolve_fallthrough_surface as resolver_resolve_fallthrough_surface,
-    resolve_named_export_from_graph as resolver_resolve_named_export_from_graph,
-    resolve_usage_prop_type, DynamicRootCandidate, ExportGraphFileKind, ExportGraphResolver,
+    fallthrough_cache_key, DynamicRootCandidate, ExportGraphFileKind, ExportGraphResolver,
     ExportSurface, FallthroughComputeHost, FallthroughRequestHost, FallthroughResolutionView,
-    FallthroughResolverHost, ImportedRuntimeValueResolver, RequestSource, ResolvedConsumedBindings,
-    SingleflightRole, StoreView,
+    FallthroughResolverHost, ImportedRuntimeValueResolver, ResolvedConsumedBindings, StoreView,
 };
-use crate::shared::write_lock;
 use crate::types::*;
 use crate::VerterHost;
 
@@ -73,8 +61,13 @@ pub(crate) mod prepared_decl;
 // after the Domain K free functions moved to `component_meta_extract.rs`.
 pub(crate) use self::component_meta_extract::{
     extract_component_meta_from_resolved, extract_component_meta_from_resolved_with_facts,
-    populate_public_instance_sidecar, populate_sfc_blocks_sidecar,
+    populate_public_instance_sidecar,
 };
+// Test-only re-export — `populate_sfc_blocks_sidecar` is exercised by
+// `meta_tests.rs` via the `crate::host_manage::*` path. Gated `#[cfg(test)]`
+// so the non-test build surface stays minimal.
+#[cfg(test)]
+pub(crate) use self::component_meta_extract::populate_sfc_blocks_sidecar;
 
 /// Resolve a relative import specifier to a canonical ID.
 ///

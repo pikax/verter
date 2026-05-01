@@ -2597,6 +2597,17 @@ impl VerterHost {
     /// required). After Phase 5m, dispatch-side helpers consume this
     /// directly to subsume the engine route fast-path's barrel
     /// routing.
+    ///
+    /// Test-only — exercised by the in-tree
+    /// `host_resolve_tests::resolve_prepared_decl_target_*` cases
+    /// included via the `#[cfg(test)] #[path] mod host_resolve_tests`
+    /// declaration at the bottom of this file. The dispatch path no
+    /// longer calls this helper directly (subsumed by the cooperative
+    /// `PreparedTargetDb` / barrel-chain pipeline), so the helper is
+    /// gated `#[cfg(test)]` to keep the non-test dead-code surface
+    /// minimal while preserving the regression-test contract for
+    /// Phase 5m §5.13a.1.1.
+    #[cfg(test)]
     pub(crate) fn resolve_prepared_decl_target(
         &self,
         canonical_source: &str,
@@ -2631,6 +2642,13 @@ impl VerterHost {
     /// Returns `None` only when the bare name cannot be resolved at
     /// all and the requested scope is itself missing a shallow
     /// state.
+    ///
+    /// Test-only — exercised by the in-tree
+    /// `host_resolve_tests::resolve_decl_in_scope_with_reexport_chain_*`
+    /// cases. The dispatch pipeline subsumed the helper into the
+    /// cooperative bare-name resolution path; the helper is retained
+    /// only for Phase 5m §5.13a.1.3 regression coverage.
+    #[cfg(test)]
     pub(crate) fn resolve_decl_in_scope_with_reexport_chain(
         &self,
         scope_canonical_id: &str,

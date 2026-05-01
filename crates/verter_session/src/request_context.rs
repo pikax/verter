@@ -66,7 +66,21 @@ pub struct RequestBudget {
 impl RequestBudget {
     /// Construct a new per-request budget with a zeroed counter and
     /// the supplied cap.
+    ///
+    /// The returned `Arc<RequestBudget>` is request-scoped and lives
+    /// behind the request-context TLS axis; it never crosses a thread
+    /// boundary, so the `!Sync` `Cell<usize>` counter is safe even
+    /// though `Arc::new` triggers the
+    /// [`clippy::arc_with_non_send_sync`] lint. Switching to `Rc`
+    /// would lose the structural compatibility with the rest of the
+    /// resolver-core API surface (which threads `Arc<…>` everywhere
+    /// else), so the canonical fix is the explicit allow with this
+    /// rationale anchor.
     #[must_use]
+    #[allow(
+        clippy::arc_with_non_send_sync,
+        reason = "request-scoped, TLS-pinned; Arc retained for resolver-core API symmetry"
+    )]
     pub fn new(projection_op_budget: usize) -> Arc<Self> {
         Arc::new(Self {
             projection_op_budget,

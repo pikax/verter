@@ -18,7 +18,6 @@
 //! and `meta_resolve_tests.rs` can keep calling them via the shell's
 //! `pub(crate) use registry_materialize::*;` re-export.
 
-use crate::resolver_core::ComponentMetaQueryEngine;
 use crate::resolver_core::ResolverContext;
 use std::sync::Arc;
 

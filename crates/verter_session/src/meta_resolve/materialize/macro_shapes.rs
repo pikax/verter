@@ -14,15 +14,8 @@
 //! apart from `pub(crate)` visibility escalation on the formerly-private
 //! items the parent shell still calls.
 
-use crate::host_manage::{
-    component_meta_debug, component_meta_debug_enabled, component_meta_trace_custom,
-};
-use crate::resolver_core::ComponentMetaQueryEngine;
-use crate::resolver_core::ComponentMetaResolutionPurpose;
-use crate::resolver_core::ResolvedDeclarationKind;
+use crate::host_manage::component_meta_trace_custom;
 use crate::types::FileAnalysisSnapshot;
-use std::collections::{BTreeSet, VecDeque};
-use std::sync::Arc;
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
@@ -42,17 +35,7 @@ use super::super::dispatch_helpers::{
 // Phase 10a: `request_host` source moved to
 // `host_manage/component_meta_request_impl.rs`. Import rewritten to
 // the new home.
-use super::super::resolved_state::{
-    collect_expanded_slot_binding_param_types, collect_expanded_slot_bindings_from_object_type,
-    component_meta_substitute_typeexpr, lowered_root_reaches_transitive_cycle,
-};
-use super::super::scoring::compare_type_expr_improvement;
-use super::field_types::{
-    define_props_member_can_stay_symbolic_without_rescue,
-    field_should_preserve_shallow_symbolic_raw_type, lowered_needs_member_route_materialization,
-    materialize_component_meta_type_expr_until_stable, parsed_field_raw_type,
-    top_level_imported_ref_can_stay_symbolic,
-};
+use super::super::resolved_state::lowered_root_reaches_transitive_cycle;
 use crate::host_manage::component_meta_request_impl::{
     ResolvedMacroMeta, ResolvedTypeRegistryMeta,
 };

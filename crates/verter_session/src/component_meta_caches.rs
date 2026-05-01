@@ -83,7 +83,7 @@ impl ImportedRegistryDb {
         }
     }
 
-    pub fn get_or_compute<F>(
+    pub(crate) fn get_or_compute<F>(
         &self,
         key: &ImportedRegistryKey,
         ctx: &dyn ResolverContext,
@@ -190,7 +190,7 @@ impl DeclarationLookupDb {
         }
     }
 
-    pub fn get_or_compute<F>(
+    pub(crate) fn get_or_compute<F>(
         &self,
         key: &DeclarationLookupKey,
         ctx: &dyn ResolverContext,
@@ -296,7 +296,7 @@ impl ResolvabilityDb {
         }
     }
 
-    pub fn get_or_compute<F>(
+    pub(crate) fn get_or_compute<F>(
         &self,
         key: &ResolvabilityKey,
         ctx: &dyn ResolverContext,
@@ -407,7 +407,7 @@ impl OwnerCollectionDb {
         }
     }
 
-    pub fn get_or_compute<F>(
+    pub(crate) fn get_or_compute<F>(
         &self,
         key: &OwnerCollectionKey,
         ctx: &dyn ResolverContext,
@@ -515,7 +515,7 @@ impl PreparedTargetDb {
 
     /// Peek-only lookup: returns the cached value only if its
     /// dep_signature is still valid against `host`.
-    pub fn peek(
+    pub(crate) fn peek(
         &self,
         key: &PreparedTargetCacheKey,
         ctx: &dyn ResolverContext,
@@ -528,7 +528,7 @@ impl PreparedTargetDb {
         }
     }
 
-    pub fn get_or_compute<F>(
+    pub(crate) fn get_or_compute<F>(
         &self,
         key: &PreparedTargetCacheKey,
         ctx: &dyn ResolverContext,
@@ -638,7 +638,7 @@ impl MaterializeMemoDb {
 
     /// Peek-only lookup: returns the cached value only if its
     /// dep_signature is still valid against `host`.
-    pub fn peek(
+    pub(crate) fn peek(
         &self,
         key: &MaterializeMemoKey,
         ctx: &dyn ResolverContext,
@@ -651,7 +651,7 @@ impl MaterializeMemoDb {
         }
     }
 
-    pub fn get_or_compute<F>(
+    pub(crate) fn get_or_compute<F>(
         &self,
         key: &MaterializeMemoKey,
         ctx: &dyn ResolverContext,
@@ -771,7 +771,7 @@ impl PreparedSurfaceDb {
 
     /// Peek-only lookup: returns the cached payload only if its
     /// dep_signature is still valid against `host`.
-    pub fn peek(
+    pub(crate) fn peek(
         &self,
         key: &PreparedSurfaceCacheKey,
         ctx: &dyn ResolverContext,
@@ -784,7 +784,7 @@ impl PreparedSurfaceDb {
         }
     }
 
-    pub fn get_or_compute<F>(
+    pub(crate) fn get_or_compute<F>(
         &self,
         key: &PreparedSurfaceCacheKey,
         ctx: &dyn ResolverContext,
@@ -890,7 +890,7 @@ impl PreparedMemberDb {
 
     /// Peek-only lookup: returns the cached value only if its
     /// dep_signature is still valid against `host`.
-    pub fn peek(
+    pub(crate) fn peek(
         &self,
         key: &PreparedMemberCacheKey,
         ctx: &dyn ResolverContext,
@@ -903,7 +903,7 @@ impl PreparedMemberDb {
         }
     }
 
-    pub fn get_or_compute<F>(
+    pub(crate) fn get_or_compute<F>(
         &self,
         key: &PreparedMemberCacheKey,
         ctx: &dyn ResolverContext,
@@ -1009,7 +1009,7 @@ impl RoutedExprSurfaceDb {
 
     /// Peek-only lookup: returns the cached value only if its
     /// dep_signature is still valid against `host`.
-    pub fn peek(
+    pub(crate) fn peek(
         &self,
         key: &RoutedExprSurfaceCacheKey,
         ctx: &dyn ResolverContext,
@@ -1022,7 +1022,7 @@ impl RoutedExprSurfaceDb {
         }
     }
 
-    pub fn get_or_compute<F>(
+    pub(crate) fn get_or_compute<F>(
         &self,
         key: &RoutedExprSurfaceCacheKey,
         ctx: &dyn ResolverContext,
@@ -1175,7 +1175,7 @@ impl MaterializeStructureDb {
     /// `live_counter` so it tracks live entries (not lifetime inserts).
     /// Without this, every stale peek inflates the shared counter
     /// permanently.
-    pub fn peek(
+    pub(crate) fn peek(
         &self,
         key: &MaterializeStructureCacheKey,
         ctx: &dyn ResolverContext,
@@ -1442,7 +1442,7 @@ impl RefCycleResultDb {
     /// update `validated_at_generation` and return; on failure, remove
     /// the stale entry (with `live_counter` decrement per R8-5) and
     /// return `None`.
-    pub fn peek(
+    pub(crate) fn peek(
         &self,
         id: &DeclIdentity,
         ctx: &dyn ResolverContext,

@@ -51,7 +51,6 @@ use super::{
     DirectPreparedDeclarationResolver, ResolvedImportedRegistrySymbol, ResolvedTypeDeclaration,
 };
 use crate::project_semantic_dispatch::{resolve_decl_key, ProjectSemanticDispatch};
-use crate::resolver_core::ResolverContext;
 use crate::resolver_core::{FuseTrip, RouteDemand};
 use crate::semantic_query::{
     PathSegment, ProjectionMode, QueryResult, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
@@ -577,6 +576,14 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .find(|member| member.name == member_name)
     }
 
+    /// Post-cutover clippy cleanup — paired with `dispatch_projected_member`
+    /// and `dispatch_projected_surface` as part of the ComponentMetaQueryEngine
+    /// surface contract. No call site in the landed tree, but the helper is
+    /// retained for symmetry with the projection/keyspace surface API; the
+    /// dispatch path uses keyspace shape directly via `surface.members`
+    /// elsewhere. `#[allow(dead_code)]` keeps the API symmetry without
+    /// triggering the unused-method lint.
+    #[allow(dead_code)]
     pub(crate) fn dispatch_projected_keyspace(
         &mut self,
         scope_canonical_id: &str,

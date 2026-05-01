@@ -8,7 +8,6 @@ use verter_semantic::analysis::type_expr::{ObjectExpr, ObjectMember, ObjectPrope
 use verter_semantic::analysis::types::{
     AnalyzedImport, AnalyzedMacro, AnalyzedMacroKind, MacroTypeDep,
 };
-use verter_span::Span;
 
 use crate::resolver_core::{
     component_meta_registry::component_meta_registry_has_non_object_top_level_surface,
@@ -3623,134 +3622,12 @@ fn keep_direct_imported_vue_macro(
         && declaration.canonical_source.ends_with(".vue")
 }
 
-fn direct_macro_type_reference_expr(source: &str, span: Span) -> Option<TypeExpr> {
-    let snippet = source.get(span.start as usize..span.end as usize)?.trim();
-    let open_angle = snippet.find('<')?;
-    let close_angle = find_matching_angle(snippet, open_angle)?;
-    let type_args = snippet.get(open_angle + 1..close_angle)?.trim();
-    if type_args.is_empty() {
-        return None;
-    }
-
-    let first_type_arg = split_top_level_type_args(type_args)
-        .into_iter()
-        .next()
-        .unwrap_or(type_args)
-        .trim();
-    if first_type_arg.is_empty() {
-        return None;
-    }
-
-    Some(verter_semantic::analysis::type_expr_lower::parse_type_annotation(first_type_arg))
-}
-
-fn find_matching_angle(text: &str, open_index: usize) -> Option<usize> {
-    let mut angle_depth = 0i32;
-    let mut paren_depth = 0i32;
-    let mut bracket_depth = 0i32;
-    let mut brace_depth = 0i32;
-    let mut in_string = false;
-    let mut string_delim = '\0';
-    let mut escape = false;
-
-    for (index, ch) in text.char_indices().skip(open_index) {
-        if in_string {
-            if escape {
-                escape = false;
-                continue;
-            }
-            if ch == '\\' {
-                escape = true;
-                continue;
-            }
-            if ch == string_delim {
-                in_string = false;
-            }
-            continue;
-        }
-
-        match ch {
-            '\'' | '"' | '`' => {
-                in_string = true;
-                string_delim = ch;
-            }
-            '(' => paren_depth += 1,
-            ')' => paren_depth -= 1,
-            '[' => bracket_depth += 1,
-            ']' => bracket_depth -= 1,
-            '{' => brace_depth += 1,
-            '}' => brace_depth -= 1,
-            '<' if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
-                angle_depth += 1;
-            }
-            '>' if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
-                angle_depth -= 1;
-                if angle_depth == 0 {
-                    return Some(index);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    None
-}
-
-fn split_top_level_type_args(text: &str) -> Vec<&str> {
-    let mut parts = Vec::new();
-    let mut start = 0usize;
-    let mut angle_depth = 0i32;
-    let mut paren_depth = 0i32;
-    let mut bracket_depth = 0i32;
-    let mut brace_depth = 0i32;
-    let mut in_string = false;
-    let mut string_delim = '\0';
-    let mut escape = false;
-
-    for (index, ch) in text.char_indices() {
-        if in_string {
-            if escape {
-                escape = false;
-                continue;
-            }
-            if ch == '\\' {
-                escape = true;
-                continue;
-            }
-            if ch == string_delim {
-                in_string = false;
-            }
-            continue;
-        }
-
-        match ch {
-            '\'' | '"' | '`' => {
-                in_string = true;
-                string_delim = ch;
-            }
-            '(' => paren_depth += 1,
-            ')' => paren_depth -= 1,
-            '[' => bracket_depth += 1,
-            ']' => bracket_depth -= 1,
-            '{' => brace_depth += 1,
-            '}' => brace_depth -= 1,
-            '<' => angle_depth += 1,
-            '>' => angle_depth -= 1,
-            ',' if angle_depth == 0
-                && paren_depth == 0
-                && bracket_depth == 0
-                && brace_depth == 0 =>
-            {
-                parts.push(text[start..index].trim());
-                start = index + ch.len_utf8();
-            }
-            _ => {}
-        }
-    }
-
-    parts.push(text[start..].trim());
-    parts.into_iter().filter(|part| !part.is_empty()).collect()
-}
+// Phase 11a / post-cutover clippy cleanup — `direct_macro_type_reference_expr`,
+// `find_matching_angle`, and `split_top_level_type_args` were post-cutover
+// orphans (no caller in the landed tree). They originated as the legacy
+// span-extraction path for cross-file `defineProps<T>()` macros before
+// the dispatch-backed resolver took over. Removed in the post-cutover
+// clippy cleanup; the dispatch path is the sole canonical resolution.
 
 fn type_expr_has_direct_macro_reference(expr: &TypeExpr, needle: &str) -> bool {
     match expr {

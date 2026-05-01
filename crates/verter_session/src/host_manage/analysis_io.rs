@@ -24,7 +24,6 @@ use crate::resolver_core::{
     get_export_span_follow_reexports_from_graph as resolver_get_export_span_follow_reexports_from_graph,
     resolve_exports_from_graph_best_effort as resolver_resolve_exports_from_graph_best_effort,
     resolve_named_export_from_graph as resolver_resolve_named_export_from_graph,
-    ExportGraphFileKind,
 };
 use crate::shared::write_lock;
 use crate::types::*;

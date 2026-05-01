@@ -370,23 +370,17 @@ pub(crate) fn instantiate_local_generic_ref_via_dispatch(
 
 // =============================================================================
 // Phase 5l §5.14.2 — bridge helpers (post engine-method deletion).
+//
+// The threaded `_threaded(engine, …)` variants are the production
+// callsite shape (engine threaded through caller). The non-threaded sync
+// variants (`project_type_surface_expr_via_host`,
+// `project_type_surface_shape_via_host`,
+// `project_prepared_type_surface_shape_via_host`) had no caller — neither
+// in production nor in tests — and were removed in the post-cutover
+// clippy cleanup. The threaded `_via_host_threaded` variants below are
+// the canonical entrypoints; one (`_prepared_type_surface_expr_via_host_threaded`)
+// is gated `#[cfg(test)]` because tests are its only consumer.
 // =============================================================================
-
-pub(crate) fn project_type_surface_expr_via_host(
-    ctx: &dyn ResolverContext,
-    scope_canonical_id: &str,
-    symbol_name: &str,
-) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
-    use crate::resolver_core::projected_surface_to_type_expr;
-    let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(ctx);
-    if engine.projection_op_budget_exhausted() {
-        return None;
-    }
-    let surface = engine
-        .dispatch_projected_surface(scope_canonical_id, symbol_name)
-        .or_else(|| engine.cached_prepared_root_surface(scope_canonical_id, symbol_name))?;
-    projected_surface_to_type_expr(&surface)
-}
 
 pub(crate) fn project_type_surface_expr_via_host_threaded<'ctx>(
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
@@ -401,22 +395,6 @@ pub(crate) fn project_type_surface_expr_via_host_threaded<'ctx>(
         .dispatch_projected_surface(scope_canonical_id, symbol_name)
         .or_else(|| engine.cached_prepared_root_surface(scope_canonical_id, symbol_name))?;
     projected_surface_to_type_expr(&surface)
-}
-
-pub(crate) fn project_type_surface_shape_via_host(
-    ctx: &dyn ResolverContext,
-    scope_canonical_id: &str,
-    symbol_name: &str,
-) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
-    use crate::resolver_core::projected_surface_to_expanded_shape;
-    let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(ctx);
-    if engine.projection_op_budget_exhausted() {
-        return None;
-    }
-    let surface = engine
-        .dispatch_projected_surface(scope_canonical_id, symbol_name)
-        .or_else(|| engine.cached_prepared_root_surface(scope_canonical_id, symbol_name))?;
-    Some(projected_surface_to_expanded_shape(&surface))
 }
 
 pub(crate) fn project_type_surface_shape_via_host_threaded<'ctx>(
@@ -434,17 +412,7 @@ pub(crate) fn project_type_surface_shape_via_host_threaded<'ctx>(
     Some(projected_surface_to_expanded_shape(&surface))
 }
 
-pub(crate) fn project_prepared_type_surface_shape_via_host(
-    ctx: &dyn ResolverContext,
-    scope_canonical_id: &str,
-    symbol_name: &str,
-) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
-    use crate::resolver_core::projected_surface_to_expanded_shape;
-    let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(ctx);
-    let surface = engine.cached_prepared_root_surface(scope_canonical_id, symbol_name)?;
-    Some(projected_surface_to_expanded_shape(&surface))
-}
-
+#[cfg(test)]
 pub(crate) fn project_prepared_type_surface_expr_via_host_threaded<'ctx>(
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
     scope_canonical_id: &str,
@@ -533,9 +501,7 @@ pub(crate) fn lower_and_project_to_expanded_via_host_threaded<'ctx>(
 ) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::resolver_core::{type_expr_contains_semantic_miss, type_expr_is_expanded_surface};
-    use crate::semantic_query::{
-        PathSegment, ProjectionMode, QueryResult, SemanticQueryApi, SemanticQueryKey,
-    };
+    use crate::semantic_query::{PathSegment, ProjectionMode, QueryResult, SemanticQueryKey};
 
     if engine.projection_op_budget_exhausted() {
         return None;
@@ -579,9 +545,7 @@ pub(crate) fn project_expr_surface_expr_via_host_threaded<'ctx>(
         component_meta_registry_public_utility_route,
     };
     use crate::resolver_core::{type_expr_contains_semantic_miss, type_expr_is_expanded_surface};
-    use crate::semantic_query::{
-        PathSegment, ProjectionMode, QueryResult, SemanticQueryApi, SemanticQueryKey,
-    };
+    use crate::semantic_query::{PathSegment, ProjectionMode, QueryResult, SemanticQueryKey};
 
     if engine.projection_op_budget_exhausted() {
         return None;
@@ -626,9 +590,7 @@ pub(crate) fn project_expr_surface_expr_with_compound_objects_via_host_threaded<
 ) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::resolver_core::type_expr_has_any_object_arm;
-    use crate::semantic_query::{
-        PathSegment, ProjectionMode, QueryResult, SemanticQueryApi, SemanticQueryKey,
-    };
+    use crate::semantic_query::{PathSegment, ProjectionMode, QueryResult, SemanticQueryKey};
 
     if engine.projection_op_budget_exhausted() {
         return None;

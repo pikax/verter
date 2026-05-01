@@ -32,9 +32,7 @@ use super::super::field_state::MacroFieldGraphState;
 // Phase 10a: `request_host` source moved to
 // `host_manage/component_meta_request_impl.rs`. Import rewritten to
 // the new home.
-use super::super::resolved_state::{
-    lowered_root_reaches_transitive_cycle, select_imported_materialization_scope,
-};
+use super::super::resolved_state::select_imported_materialization_scope;
 use super::super::scoring::compare_type_expr_improvement;
 use super::macro_shapes::expr_needs_projection_rescue;
 use crate::host_manage::component_meta_request_impl::ResolvedMacroMeta;

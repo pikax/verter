@@ -36,8 +36,7 @@ use web_time::Instant;
 // move, `super` is `host_manage`, so the rewrite goes via the
 // `crate::meta_resolve` re-export surface.
 use crate::host_manage::component_meta_request_impl::{
-    CapturedComponentMetaInputs, ResolvedDeclarationKind, ResolvedJsdocBlock, ResolvedJsdocTag,
-    ResolvedTypeDeclaration,
+    CapturedComponentMetaInputs, ResolvedJsdocBlock, ResolvedJsdocTag, ResolvedTypeDeclaration,
 };
 use crate::meta_resolve::{
     project_expr_class_a_via_dispatch, project_prepared_type_surface_shape_via_host_threaded,

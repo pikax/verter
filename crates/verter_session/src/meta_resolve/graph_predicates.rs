@@ -31,36 +31,21 @@ use crate::resolver_core::ResolverContext;
 use std::sync::Arc;
 
 // `dep_signature` module is accessed via path (`dep_signature::BFS_*_COUNTER`)
-// inside `bfs_compute_inner` for thread-local counter access.
+// inside `bfs_compute_inner` for thread-local counter access. The bare
+// module-name use is gated `#[cfg(test)]` because the BFS instrumentation
+// counters are themselves test-only (`#[cfg(test)]` thread-locals).
+#[cfg(test)]
 use super::dep_signature;
 #[cfg(test)]
 use super::dep_signature::record_bfs_child_refs_count_for_test;
 
-/// Plan §6.14 / L — graph-native variant of
-/// [`component_meta_registry_prefers_structural_materialization`].
-///
-/// Returns `true` when `node`'s top-level shape is one the materializer
-/// should expand structurally rather than preserve as a reference.
-///
-/// Mirrors the TypeExpr predicate's classification:
-///
-/// - **Structural (returns `true`):** `Array`, `Tuple`, `Union`,
-///   `Intersection`, `Conditional`, `Mapped`, `TemplateLiteral`,
-///   `Function`, `KeyOf` — these shapes need structural expansion to
-///   render meaningful component-meta surface.
-/// - **Reference-shaped (returns `false`):** `DeclRef`,
-///   `InstantiationRef`, `Object`, `IndexedAccess`, `Primitive`,
-///   `Literal`, `Opaque`, `TypeOf`, `TypeParam` — these shapes are
-///   either already concrete (Object, Primitive) or are
-///   reference-carrying (DeclRef, IndexedAccess) and the materializer
-///   handles them via dedicated paths.
-/// - **Pass-through:** `Alias(inner)` — graph-native shape with no
-///   TypeExpr counterpart; matches the TypeExpr predicate's
-///   `Parenthesized(inner)` arm semantics (recurse through wrapper).
-///
-/// `depth` is fused at 256 per §4.11. Fuse returns `false`
-/// (conservative — runaway recursion does NOT route through the
-/// structural-materialisation fast path).
+// Plan §6.14 / L — historical doc-block for the graph-native variant
+// of `component_meta_registry_prefers_structural_materialization`. The
+// predicate it documented was extracted during the structural
+// materialisation refactor; the prose is kept as a non-doc comment to
+// preserve the design rationale (structural vs. reference-shaped vs.
+// pass-through classification) for future maintainers.
+//
 // Plan §1.12 — graph-native registry-route + cycle-BFS predicates.
 //
 // These `_node` variants operate on `SemanticNodeId` directly instead of
@@ -477,7 +462,6 @@ pub(crate) fn node_has_non_object_top_level_surface(
     node: crate::semantic_query::SemanticNodeId,
     depth: u32,
 ) -> bool {
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::semantic_query::{ProjectionMode, QueryResult, SemanticNodeData, SemanticQueryKey};
 
     if depth > 256 {
@@ -635,7 +619,7 @@ pub(crate) fn slot_binding_param_can_stay_symbolic_node(
             }
             // Resolve declaration body via dispatch, then check
             // top-level surface shape.
-            use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+
             use crate::semantic_query::{ProjectionMode, QueryResult, SemanticQueryKey};
             let dispatch = ctx.dispatch();
             let key = SemanticQueryKey::Instantiate {
@@ -857,7 +841,6 @@ pub(crate) fn bfs_compute_inner(
     ctx: &dyn ResolverContext,
     local_fence: &mut Vec<(Arc<str>, crate::semantic_query::DepVersion)>,
 ) -> bool {
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::semantic_query::{ProjectionMode, QueryResult, SemanticNodeId, SemanticQueryKey};
     use rustc_hash::FxHashSet;
     use std::collections::VecDeque;

@@ -24,10 +24,7 @@
 use crate::host_manage::{
     component_meta_debug, component_meta_debug_enabled, component_meta_trace_custom,
 };
-use crate::resolver_core::{
-    run_component_meta_request, ComponentMetaEvalOutputs, ComponentMetaRequestHost, RequestSource,
-    SingleflightRole,
-};
+use crate::resolver_core::{run_component_meta_request, RequestSource, SingleflightRole};
 use crate::types::{FileAnalysisSnapshot, Hash16, ProjectionMode};
 use crate::VerterHost;
 use std::collections::{BTreeSet, VecDeque};
@@ -37,8 +34,6 @@ use std::sync::Arc;
 use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
-
-use verter_semantic::analysis::types::AnalyzedMacro;
 
 // Phase 10a: file moved from `meta_resolve/host_methods.rs` to
 // `host_manage/component_meta_methods.rs`. The original `super::X` paths
@@ -56,7 +51,6 @@ use crate::meta_resolve::{
 use crate::meta_resolve::{
     component_meta_owner_local_shallow_substituted_alias_body, enrich_missing_slot_bindings,
     select_imported_materialization_scope, RegistryMaterialization, ResolvedComponentMetaState,
-    SurfaceNodeIdentities,
 };
 use crate::meta_resolve::{
     drain_dispatch_dep_signature_accumulator, reset_dispatch_dep_signature_accumulator,
@@ -64,13 +58,12 @@ use crate::meta_resolve::{
 use crate::meta_resolve::{
     instantiate_local_generic_ref_via_dispatch, pick_via_dispatch_pick_helper,
     project_expr_class_a_via_dispatch, project_expr_class_a_via_dispatch_threaded,
-    project_type_surface_expr_via_host, project_type_surface_expr_via_host_threaded,
+    project_type_surface_expr_via_host_threaded,
 };
 use crate::meta_resolve::{
     next_component_meta_audit_request_id, request_source_performed_compute,
     resolved_meta_cache_key, should_skip_imported_registry_seed_refresh, trace_request_source,
-    CapturedComponentMetaInputs, ResolvedComponentMetaComputeAudit, ResolvedMacroMeta,
-    ResolvedTypeRegistryMeta,
+    CapturedComponentMetaInputs, ResolvedComponentMetaComputeAudit, ResolvedTypeRegistryMeta,
 };
 
 // Items that live in the parent shell (`crate::meta_resolve`): the

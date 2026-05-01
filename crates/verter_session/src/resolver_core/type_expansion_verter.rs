@@ -184,7 +184,12 @@ pub fn resolved_macro_to_expansion(macro_meta: &ResolvedMacroMeta) -> TypeExpans
 ///
 /// Returns the expansion result and a list of external declarations visited
 /// during solving (for registry publishing).
-pub fn resolved_macro_to_expansion_via_solver(
+///
+/// Test-only — exercised only by the in-tree `mod tests { … }` solver-path
+/// comparison harness in this file. Gated `#[cfg(test)]` so the non-test
+/// build's dead-code surface is minimal.
+#[cfg(test)]
+pub(crate) fn resolved_macro_to_expansion_via_solver(
     macro_meta: &ResolvedMacroMeta,
     ctx: &dyn crate::resolver_core::ResolverContext,
 ) -> (

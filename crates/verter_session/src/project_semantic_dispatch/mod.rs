@@ -145,7 +145,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// type-erasure at the call site because `impl ResolverContext for
     /// VerterHost` is registered in `resolver_core/resolver_context.rs`.
     #[must_use]
-    pub fn new(ctx: &'a dyn ResolverContext) -> Self {
+    pub(crate) fn new(ctx: &'a dyn ResolverContext) -> Self {
         Self {
             ctx,
             instantiate_active: std::cell::RefCell::new(smallvec::SmallVec::new()),
@@ -577,7 +577,7 @@ pub fn resolve_decl_key(canonical_id: &str, name: &str) -> ResolveDeclKey {
 /// `dispatch_node_data` provides the same access from any context.
 /// Existing callers passing `&VerterHost` upcast implicitly.
 #[must_use]
-pub fn node_data_for(
+pub(crate) fn node_data_for(
     ctx: &dyn ResolverContext,
     node: SemanticNodeId,
 ) -> Option<Arc<SemanticNodeData>> {
@@ -1005,7 +1005,7 @@ impl<'a> SessionDispatchHost<'a> {
     /// Existing call sites pass `&host` (concrete `&VerterHost`) and
     /// upcast implicitly because `impl ResolverContext for VerterHost`.
     #[must_use]
-    pub fn new(ctx: &'a dyn ResolverContext) -> Self {
+    pub(crate) fn new(ctx: &'a dyn ResolverContext) -> Self {
         Self { ctx }
     }
 

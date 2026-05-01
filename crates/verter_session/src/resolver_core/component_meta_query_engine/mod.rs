@@ -484,7 +484,7 @@ pub(crate) fn prepared_structural_substitution_slow_lane_forbidden_for_current_t
 fn assert_prepared_structural_substitution_slow_lane_allowed(_expr: &TypeExpr) {}
 
 impl<'a> ComponentMetaQueryEngine<'a> {
-    pub fn new(ctx: &'a dyn ResolverContext) -> Self {
+    pub(crate) fn new(ctx: &'a dyn ResolverContext) -> Self {
         Self {
             ctx,
             current_prepared_request_root: None,

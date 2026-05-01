@@ -188,6 +188,11 @@ use std::cell::{Cell, RefCell};
 
 use crate::component_meta_caches::MaterializeStructureEntry;
 use crate::cooperative_admission::cooperative_get_or_insert_with_post_publish;
+// Test-only — the in-tree `mod tests { … }` block at the bottom of this
+// file constructs `ProjectSemanticDispatch::new(host)` directly to drive
+// dispatch-pipeline assertions. Gated `#[cfg(test)]` to keep the
+// non-test build's used-imports surface minimal.
+#[cfg(test)]
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::resolver_core::ResolverContext;
 use crate::semantic_query::{PathSegment, SemanticQueryKey};
@@ -348,7 +353,7 @@ fn finish_cacheable(
 /// emits `MaterializeStructurePolicySkip` events with one of:
 /// `PackageRefTopLevel`, `FunctionPropertyAtNested`,
 /// `RegistryRouteCycleGuard`, or `RecursiveHelperCycleGuard`.
-pub fn materialize_component_meta_structure(
+pub(crate) fn materialize_component_meta_structure(
     ctx: &dyn ResolverContext,
     key: MaterializeStructureCacheKey,
 ) -> crate::semantic_query::CacheRead<MaterializeOutcome> {

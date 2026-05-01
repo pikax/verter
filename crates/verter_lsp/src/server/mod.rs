@@ -155,8 +155,6 @@ pub(crate) struct ResolvedComponentDocument {
 ///
 /// Wraps `verter_session` for SFC analysis and optionally a `TypeProvider`
 /// (e.g., TSGO) for richer type information.
-///
-
 pub struct VerterLanguageServer {
     client: Client,
     documents: Arc<DocumentRegistry>,

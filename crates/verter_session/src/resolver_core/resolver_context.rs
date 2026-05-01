@@ -238,13 +238,25 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     fn validate_dep_signature(&self, signature: &DepSignature) -> bool;
 
     // -------- Component-meta-tier bridges --------------------------
+    //
+    // Post-cutover clippy cleanup — these two trait methods are part of
+    // the resolver-context surface contract for component-meta-tier
+    // adapters but have no caller in the landed tree. The trait is
+    // sealed (only `VerterHost` implements it) and the methods are
+    // retained for symmetry with the dependency-fact and analysis-snap
+    // bridges defined in the impl block below. `#[allow(dead_code)]` is
+    // applied at the trait definition so the corresponding
+    // `impl ResolverContext for VerterHost` definitions do not need
+    // their own `#[allow]` annotations.
 
+    #[allow(dead_code)]
     fn current_dependency_fact_versions(
         &self,
         canonical: &str,
         tracked_deps: &BTreeSet<String>,
     ) -> Vec<FactVersionRef>;
 
+    #[allow(dead_code)]
     fn get_raw_analysis_snapshot(&self, canonical: &str) -> Option<FileAnalysisSnapshot>;
 }
 
