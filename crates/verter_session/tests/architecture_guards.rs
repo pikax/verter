@@ -134,7 +134,6 @@ fn no_local_vite_helpers_in_lsp() {
 }
 
 #[test]
-#[ignore = "phase-11 pending"]
 fn god_module_size_budget() {
     // Target-root walkdir scan, production files only.
     //
