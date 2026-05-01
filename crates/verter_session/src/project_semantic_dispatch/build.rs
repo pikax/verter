@@ -55,7 +55,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         key: &ResolveDeclKey,
     ) -> (QueryResult<SemanticNodeId>, DepSignature) {
         let shallow = match self
-            .host
+            .ctx
             .shallow_file_state(key.scope.canonical_id.as_ref())
         {
             Some(state) => state,
@@ -102,7 +102,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         value_root: &ValueRootKey,
     ) -> (QueryResult<SemanticNodeId>, DepSignature) {
         let shallow = match self
-            .host
+            .ctx
             .shallow_file_state(value_root.scope.canonical_id.as_ref())
         {
             Some(state) => state,
@@ -138,7 +138,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             local_scope: value_root.scope.local_scope,
         };
         let scope_payload = self
-            .host
+            .ctx
             .prepared_decl_bundle(value_root.scope.canonical_id.as_ref())
             .map(|bundle| {
                 crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
@@ -153,7 +153,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         );
         let root_identity =
             match crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
-                self.host,
+                self.ctx,
                 value_root.scope.canonical_id.as_ref(),
                 scope_payload.as_ref(),
                 value_root.name.as_ref(),
@@ -162,7 +162,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 None => return (QueryResult::Error(QueryError::Miss), empty_signature()),
             };
         let prepared = match self
-            .host
+            .ctx
             .prepared_value_decl(&root_identity.canonical_id, &root_identity.symbol_name)
             .or_else(|| {
                 // Fallback to export-target walk when prepared cache misses
@@ -171,7 +171,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if root_identity.canonical_id.is_empty() {
                     return None;
                 }
-                let target = self.host.resolve_value_export_target(
+                let target = self.ctx.resolve_value_export_target(
                     &root_identity.canonical_id,
                     &root_identity.symbol_name,
                 )?;
@@ -180,7 +180,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 {
                     return None;
                 }
-                self.host
+                self.ctx
                     .prepared_value_decl(&target.canonical_id, &target.name)
             }) {
             Some(prepared) => prepared,
@@ -311,7 +311,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .graph()
             .intern_node_with_scope(SemanticNodeData::Opaque(QueryError::Miss), scope.clone());
 
-        let adapter = SessionDispatchHost::new(self.host);
+        let adapter = SessionDispatchHost::new(self.ctx);
 
         // 2. Built-in utility dispatch (plan §3 C7 + §2 built-in utilities).
         // A utility name (Partial, Pick, ReturnType, etc.) that the user
@@ -346,7 +346,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // it — mirrors the solver's `resolve_type_parameters_in_body`
         // behaviour at solve.rs:2580 (plan §5.7 step 3).
         let scope_payload = self
-            .host
+            .ctx
             .prepared_decl_bundle(decl_canonical.as_ref())
             .map(|bundle| {
                 crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
@@ -2095,7 +2095,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // Also pin the project-generation so the fence catches
         // workspace-wide changes that could invalidate the lowering
         // basis (mirrors `dep_signature_for` semantics).
-        let project_gen = self.host.project_type_store().project_generation();
+        let project_gen = self.ctx.project_type_store().project_generation();
         local_fence.push((
             Arc::clone(&owner.canonical_id),
             crate::semantic_query::DepVersion::ProjectGeneration(project_gen),
@@ -2123,7 +2123,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // A14: anchor the result in the sidecar (no AST re-walk).
                 // The accessor returns `None` if the file is not indexed,
                 // which collapses to a Miss per the sketch.
-                let snapshot = match self.host.analyzed_macro_snapshot(&owner.canonical_id) {
+                let snapshot = match self.ctx.analyzed_macro_snapshot(&owner.canonical_id) {
                     Some(s) => s,
                     None => {
                         return (

@@ -4,7 +4,7 @@
 //! `SessionSolverHost::root_identity` logic, extracted so the project
 //! semantic dispatcher can resolve a bare `TypeExpr::Ref` to a stable
 //! `(canonical_id, symbol_name)` pair without constructing a
-//! `SessionSolverHost`. It reads directly from the host's cached
+//! `SessionSolverHost`. It reads directly from the ctx's cached
 //! shallow-file-state, prepared-decl bundles, and resolver stack —
 //! the same substrate `SessionSolverHost` wraps.
 //!
@@ -13,11 +13,11 @@
 //!    bindings, scope type/value names, import bindings).
 //! 2. Host's cached `IndexedReady` shallow state for the scope's canonical.
 //! 3. Import-target + barrel/re-export walk via
-//!    `VerterHost::resolve_imported_type_root`.
+//!    `ResolverContext::resolve_imported_type_root`.
 //! 4. Namespace-qualified `Ns.Member` dereference through the prefix's
 //!    import binding.
 //! 5. Public export-target resolution via
-//!    `VerterHost::resolve_named_type_export_target` /
+//!    `ResolverContext::resolve_named_type_export_target` /
 //!    `resolve_value_export_target`.
 //!
 //! `DeclarationScopePayload` lives here (not in `solver_host.rs`) so it
@@ -31,7 +31,7 @@ use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
 use verter_semantic::analysis::type_solver::PreparedTypeDecl;
 
 use super::prepared_decl::{ImportBinding, TypeParamBinding};
-use crate::VerterHost;
+use crate::resolver_core::ResolverContext;
 
 /// Declaration-scope context used by bare-name root-identity resolution.
 ///
@@ -83,12 +83,12 @@ impl DeclarationScopePayload {
 ///    symbols, locally exported symbols, import targets from the
 ///    shallow state.
 /// 3. Else walk prefix imports for namespace-qualified names.
-/// 4. Else ask the host's export-target resolvers.
+/// 4. Else ask the ctx's export-target resolvers.
 ///
 /// Returns `None` when the name cannot be located through any
-/// host-owned state.
+/// ctx-owned state.
 pub(crate) fn resolve_bare_name_in_scope(
-    host: &VerterHost,
+    ctx: &dyn ResolverContext,
     scope_canonical_id: &str,
     scope_payload: Option<&DeclarationScopePayload>,
     name: &str,
@@ -109,7 +109,7 @@ pub(crate) fn resolve_bare_name_in_scope(
     }
 
     // 2. Scope's cached IndexedReady — local symbols + local exports.
-    if let Some(entry) = host.ensure_indexed_ready(scope_canonical_id) {
+    if let Some(entry) = ctx.ensure_indexed_ready(scope_canonical_id) {
         if symbol_exists_in_facts(&entry, name) {
             return Some(ResolvedRootIdentity::new(scope_canonical_id, name));
         }
@@ -123,21 +123,21 @@ pub(crate) fn resolve_bare_name_in_scope(
 
     // 3. Import-target walk (shallow state + prepared-bundle bindings).
     if let Some(resolved) =
-        resolve_import_binding_from_facts(host, scope_canonical_id, scope_payload, name)
+        resolve_import_binding_from_facts(ctx, scope_canonical_id, scope_payload, name)
     {
         return Some(resolved);
     }
 
     // 4. Namespace-qualified: `Ns.Member`.
     if let Some(resolved) =
-        resolve_namespace_member_from_facts(host, scope_canonical_id, scope_payload, name)
+        resolve_namespace_member_from_facts(ctx, scope_canonical_id, scope_payload, name)
     {
         return Some(resolved);
     }
 
     // 5. Cross-owner export target.
     if let Some((canonical_id, exported_name)) =
-        host.resolve_named_type_export_target(scope_canonical_id, name)
+        ctx.resolve_named_type_export_target(scope_canonical_id, name)
     {
         return Some(ResolvedRootIdentity::new(&canonical_id, &exported_name));
     }
@@ -154,23 +154,23 @@ fn symbol_exists_in_facts(
 }
 
 fn resolve_import_binding_from_facts(
-    host: &VerterHost,
+    ctx: &dyn ResolverContext,
     canonical_id: &str,
     scope_payload: Option<&DeclarationScopePayload>,
     local_name: &str,
 ) -> Option<ResolvedRootIdentity> {
     // a) Try the shallow-state import_targets map first (the cached
     //    parse facts are the canonical authority).
-    if let Some(entry) = host.ensure_indexed_ready(canonical_id) {
+    if let Some(entry) = ctx.ensure_indexed_ready(canonical_id) {
         let state = &entry.shallow_state;
         if let Some(target) = state.import_target(local_name) {
             let resolved_id = if target.canonical_id.is_empty() {
-                host.resolve_type_dependency_canonical(canonical_id, &target.source_specifier)?
+                ctx.resolve_type_dependency_canonical(canonical_id, &target.source_specifier)?
             } else {
                 target.canonical_id.clone()
             };
             return Some(resolve_imported_type_root_identity(
-                host,
+                ctx,
                 &resolved_id,
                 &target.imported_name,
             ));
@@ -183,7 +183,7 @@ fn resolve_import_binding_from_facts(
     if let Some(payload) = scope_payload {
         if let Some(binding) = payload.import_bindings.get(local_name) {
             return Some(resolve_imported_type_root_identity(
-                host,
+                ctx,
                 &binding.canonical_id,
                 &binding.exported_name,
             ));
@@ -191,17 +191,17 @@ fn resolve_import_binding_from_facts(
     }
 
     // c) Final fallback: fetch the prepared-decl bundle directly.
-    let bundle = host.prepared_decl_bundle(canonical_id)?;
+    let bundle = ctx.prepared_decl_bundle(canonical_id)?;
     let binding = bundle.import_bindings.get(local_name)?;
     Some(resolve_imported_type_root_identity(
-        host,
+        ctx,
         &binding.canonical_id,
         &binding.exported_name,
     ))
 }
 
 fn resolve_namespace_member_from_facts(
-    host: &VerterHost,
+    ctx: &dyn ResolverContext,
     canonical_id: &str,
     scope_payload: Option<&DeclarationScopePayload>,
     symbol_name: &str,
@@ -209,9 +209,9 @@ fn resolve_namespace_member_from_facts(
     let dot_pos = symbol_name.find('.')?;
     let prefix = &symbol_name[..dot_pos];
     let member = &symbol_name[dot_pos + 1..];
-    let binding = resolve_import_binding_from_facts(host, canonical_id, scope_payload, prefix)?;
+    let binding = resolve_import_binding_from_facts(ctx, canonical_id, scope_payload, prefix)?;
 
-    if let Some(target_entry) = host.ensure_indexed_ready(&binding.canonical_id) {
+    if let Some(target_entry) = ctx.ensure_indexed_ready(&binding.canonical_id) {
         if symbol_exists_in_facts(&target_entry, member) {
             return Some(ResolvedRootIdentity::new(&binding.canonical_id, member));
         }
@@ -227,7 +227,7 @@ fn resolve_namespace_member_from_facts(
     }
 
     if let Some((resolved_canonical_id, exported_name)) =
-        host.resolve_named_type_export_target(&binding.canonical_id, member)
+        ctx.resolve_named_type_export_target(&binding.canonical_id, member)
     {
         return Some(ResolvedRootIdentity::new(
             &resolved_canonical_id,
@@ -235,12 +235,12 @@ fn resolve_namespace_member_from_facts(
         ));
     }
 
-    host.resolve_value_export_target(&binding.canonical_id, member)
+    ctx.resolve_value_export_target(&binding.canonical_id, member)
         .map(|target| ResolvedRootIdentity::new(&target.canonical_id, &target.name))
 }
 
 fn resolve_imported_type_root_identity(
-    host: &VerterHost,
+    ctx: &dyn ResolverContext,
     canonical_id: &str,
     exported_name: &str,
 ) -> ResolvedRootIdentity {
@@ -249,11 +249,11 @@ fn resolve_imported_type_root_identity(
     }
 
     let (resolved_canonical_id, resolved_symbol_name) =
-        host.resolve_imported_type_root(canonical_id, exported_name);
+        ctx.resolve_imported_type_root(canonical_id, exported_name);
     ResolvedRootIdentity::new(resolved_canonical_id, resolved_symbol_name)
 }
 
-/// Resolve a `PreparedTypeDecl` for a root identity using host-owned
+/// Resolve a `PreparedTypeDecl` for a root identity using ctx-owned
 /// caches. Mirrors `SessionSolverHost::resolve_prepared_type_decl`:
 ///
 /// 1. Direct `prepared_type_decl` lookup at the root's canonical.
@@ -275,13 +275,13 @@ fn resolve_imported_type_root_identity(
 /// does not need to construct a `SessionSolverHost` just to reach the
 /// prepared-decl cache (plan §5.7 step 3 / §5.8).
 pub(crate) fn resolve_prepared_type_decl_via_host(
-    host: &VerterHost,
+    ctx: &dyn ResolverContext,
     _scope_canonical_id: Option<&str>,
     _scope_payload: Option<&DeclarationScopePayload>,
     root_identity: &ResolvedRootIdentity,
 ) -> Option<Arc<PreparedTypeDecl>> {
     if let Some(prepared) =
-        host.prepared_type_decl(&root_identity.canonical_id, &root_identity.symbol_name)
+        ctx.prepared_type_decl(&root_identity.canonical_id, &root_identity.symbol_name)
     {
         return Some(prepared);
     }
@@ -291,12 +291,12 @@ pub(crate) fn resolve_prepared_type_decl_via_host(
     }
 
     let (final_canonical_id, final_symbol_name) =
-        host.resolve_imported_type_root(&root_identity.canonical_id, &root_identity.symbol_name);
+        ctx.resolve_imported_type_root(&root_identity.canonical_id, &root_identity.symbol_name);
     if final_canonical_id == root_identity.canonical_id
         && final_symbol_name == root_identity.symbol_name
     {
         return None;
     }
 
-    host.prepared_type_decl(&final_canonical_id, &final_symbol_name)
+    ctx.prepared_type_decl(&final_canonical_id, &final_symbol_name)
 }

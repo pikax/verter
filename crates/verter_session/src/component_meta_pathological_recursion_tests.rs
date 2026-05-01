@@ -149,7 +149,7 @@ fn pathological_self_shadowing_userland_pick() {
             // arg types because the body re-dispatches to
             // `Instantiate(Pick, [T_arg, K_arg])` for the type
             // params, which collides with the active stack entry.
-            let dispatch = ProjectSemanticDispatch::new(&host_for_thread);
+            let dispatch = ProjectSemanticDispatch::new(&*host_for_thread);
             let shallow = host_for_thread
                 .shallow_file_state("/A.vue")
                 .expect("/A.vue must have shallow file state");
@@ -274,7 +274,7 @@ fn pathological_exclude_self_recursive() {
         .name("pathological_exclude_self_recursive".to_string())
         .stack_size(32 * 1024 * 1024)
         .spawn(move || {
-            let dispatch = ProjectSemanticDispatch::new(&host_for_thread);
+            let dispatch = ProjectSemanticDispatch::new(&*host_for_thread);
             let shallow = host_for_thread
                 .shallow_file_state("/A.vue")
                 .expect("/A.vue must have shallow file state");
@@ -464,7 +464,7 @@ fn pathological_template_literal_key_recursion() {
         .name("pathological_template_literal_key_recursion".to_string())
         .stack_size(32 * 1024 * 1024)
         .spawn(move || {
-            let dispatch = ProjectSemanticDispatch::new(&host_for_thread);
+            let dispatch = ProjectSemanticDispatch::new(&*host_for_thread);
             let shallow = host_for_thread
                 .shallow_file_state("/A.vue")
                 .expect("/A.vue must have shallow file state");

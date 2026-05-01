@@ -67,8 +67,8 @@ use crate::semantic_query::{
     QueryError, QueryResult, ResolveDeclKey, ScopeId, SemanticNodeData, SemanticNodeId,
     SemanticQueryApi, SemanticQueryKey, SurfaceView,
 };
+use crate::resolver_core::ResolverContext;
 use crate::semantic_query_memo::SemanticGraphStore;
-use crate::VerterHost;
 use verter_semantic::analysis::type_expr::{PrimitiveName, TypeExpr};
 
 // Phase D §5.2 WIP-Split — module tree. Extracted sub-modules are `pub(crate)`
@@ -111,7 +111,7 @@ pub(super) type InstantiateIdentity = (Arc<str>, Arc<str>);
 /// and closes the stack-bound recursion hole Session 4 traced down to
 /// the `type TreeNode = { children: TreeNode[] }` materialisation path.
 pub struct ProjectSemanticDispatch<'a> {
-    pub(super) host: &'a VerterHost,
+    pub(super) ctx: &'a dyn ResolverContext,
     pub(super) instantiate_active: std::cell::RefCell<smallvec::SmallVec<[InstantiateIdentity; 8]>>,
     /// Path C C6a item 3 — per-dispatcher mapped-binder ordinal
     /// counter. Increments on every `TypeExpr::Mapped` binder
@@ -136,11 +136,18 @@ pub struct ProjectSemanticDispatch<'a> {
 }
 
 impl<'a> ProjectSemanticDispatch<'a> {
-    /// Create a dispatcher bound to `host`.
+    /// Create a dispatcher bound to `ctx`.
+    ///
+    /// Phase 10a — locked-in signature: takes `&dyn ResolverContext`,
+    /// not concrete `&VerterHost`. External callers (test fixtures and
+    /// `component_meta_materialize.rs`) pass `&host` directly; the
+    /// implicit `&host as &dyn ResolverContext` upcast handles
+    /// type-erasure at the call site because `impl ResolverContext for
+    /// VerterHost` is registered in `resolver_core/resolver_context.rs`.
     #[must_use]
-    pub fn new(host: &'a VerterHost) -> Self {
+    pub fn new(ctx: &'a dyn ResolverContext) -> Self {
         Self {
-            host,
+            ctx,
             instantiate_active: std::cell::RefCell::new(smallvec::SmallVec::new()),
             mapped_binder_ordinal: std::cell::Cell::new(0),
         }
@@ -189,7 +196,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 
     pub(super) fn graph(&self) -> &Arc<SemanticGraphStore> {
-        self.host.project_type_store().semantic_graph()
+        self.ctx.project_type_store().semantic_graph()
     }
 
     /// Intern an opaque node carrying the supplied query error. Used as the
@@ -207,7 +214,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         canonical_id: &Arc<str>,
         hash: [u8; 16],
     ) -> DepSignature {
-        let project_gen = self.host.project_type_store().project_generation();
+        let project_gen = self.ctx.project_type_store().project_generation();
         Arc::from(
             vec![
                 (canonical_id.clone(), DepVersion::WholeHash(hash)),
@@ -226,7 +233,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// dep signatures flow in through the warm memo hits of the bases the
     /// caller already supplied.
     pub(super) fn project_generation_signature(&self) -> DepSignature {
-        let project_gen = self.host.project_type_store().project_generation();
+        let project_gen = self.ctx.project_type_store().project_generation();
         Arc::from(
             vec![(
                 Arc::<str>::from("<project>"),
@@ -283,7 +290,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         expr: &verter_semantic::analysis::type_expr::TypeExpr,
         mode: crate::semantic_query::ProjectionMode,
     ) -> Option<SemanticNodeId> {
-        let shallow = self.host.shallow_file_state(scope_canonical_id)?;
+        let shallow = self.ctx.shallow_file_state(scope_canonical_id)?;
         let scope = NodeScopeId::File {
             canonical_id: Arc::from(scope_canonical_id),
             whole_hash: shallow.whole_hash,
@@ -292,7 +299,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let env = rustc_hash::FxHashMap::default();
         let name_resolution = rustc_hash::FxHashMap::default();
         let scope_payload = self
-            .host
+            .ctx
             .prepared_decl_bundle(scope_canonical_id)
             .map(|bundle| {
                 crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
@@ -565,9 +572,16 @@ pub fn resolve_decl_key(canonical_id: &str, name: &str) -> ResolveDeclKey {
 
 /// Convenience: fetch the resolved semantic-node payload for a previously
 /// executed key. Returns `None` if the memo has not warmed the key yet.
+///
+/// Phase 10a — accepts `&dyn ResolverContext`; the trait method
+/// `dispatch_node_data` provides the same access from any context.
+/// Existing callers passing `&VerterHost` upcast implicitly.
 #[must_use]
-pub fn node_data_for(host: &VerterHost, node: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
-    host.project_type_store().semantic_graph().node_data(node)
+pub fn node_data_for(
+    ctx: &dyn ResolverContext,
+    node: SemanticNodeId,
+) -> Option<Arc<SemanticNodeData>> {
+    ctx.project_type_store().semantic_graph().node_data(node)
 }
 
 // Small helper to let the dispatcher express "this node has no member of
@@ -653,7 +667,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         key: crate::component_meta_materialize::MaterializeStructureCacheKey,
     ) -> CacheRead<crate::component_meta_materialize::MaterializeOutcome> {
-        crate::component_meta_materialize::materialize_component_meta_structure(self.host, key)
+        crate::component_meta_materialize::materialize_component_meta_structure(self.ctx, key)
     }
 
     /// Phase 5 §3.3 — `Pick<base, members>` via the existing builtin
@@ -816,7 +830,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // Per the slot-binding semantics (Verter macros §slots), every
         // slot key surfaces as a slot whose bindings live on the slot
         // function's first parameter Object literal.
-        let param0_ty = match node_data_for(self.host, slot_node).as_deref() {
+        let param0_ty = match node_data_for(self.ctx, slot_node).as_deref() {
             Some(SemanticNodeData::Function { params, .. }) => match params.first() {
                 Some(param) => param.ty,
                 None => {
@@ -979,16 +993,20 @@ pub trait DispatchHost {
 /// The adapter holds only a host reference; scope is resolved fresh per
 /// call so the adapter stays `Send + Sync` and cheap to construct.
 pub struct SessionDispatchHost<'a> {
-    host: &'a VerterHost,
+    ctx: &'a dyn ResolverContext,
 }
 
 impl<'a> SessionDispatchHost<'a> {
-    /// Construct an adapter bound to `host`. The adapter does not retain a
+    /// Construct an adapter bound to `ctx`. The adapter does not retain a
     /// base node or a scope payload — it re-resolves per-base scope on
     /// every call via [`Self::base_scope`].
+    ///
+    /// Phase 10a — locked-in signature: takes `&dyn ResolverContext`.
+    /// Existing call sites pass `&host` (concrete `&VerterHost`) and
+    /// upcast implicitly because `impl ResolverContext for VerterHost`.
     #[must_use]
-    pub fn new(host: &'a VerterHost) -> Self {
-        Self { host }
+    pub fn new(ctx: &'a dyn ResolverContext) -> Self {
+        Self { ctx }
     }
 
     /// Public accessor for `base`'s recorded origin scope. Returns
@@ -999,7 +1017,7 @@ impl<'a> SessionDispatchHost<'a> {
     /// a scope payload directly.
     #[must_use]
     pub fn base_scope(&self, base: SemanticNodeId) -> NodeScopeId {
-        self.host
+        self.ctx
             .project_type_store()
             .semantic_graph()
             .node_scope(base)
@@ -1021,7 +1039,7 @@ impl<'a> SessionDispatchHost<'a> {
     ) {
         match self.base_scope(base) {
             NodeScopeId::File { canonical_id, .. } => {
-                let payload = self.host.prepared_decl_bundle(canonical_id.as_ref()).map(
+                let payload = self.ctx.prepared_decl_bundle(canonical_id.as_ref()).map(
                     |bundle| {
                         crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
                             &bundle,
@@ -1043,7 +1061,7 @@ impl<'a> DispatchHost for SessionDispatchHost<'a> {
     ) -> Option<Arc<PreparedTypeDecl>> {
         let (scope_canonical, payload) = self.scope_payload_for_base(base);
         crate::resolver_core::bare_name_resolve::resolve_prepared_type_decl_via_host(
-            self.host,
+            self.ctx,
             scope_canonical.as_deref(),
             payload.as_ref(),
             root_identity,
@@ -1065,7 +1083,7 @@ impl<'a> DispatchHost for SessionDispatchHost<'a> {
             canonical_id
         };
         crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
-            self.host,
+            self.ctx,
             resolution_scope,
             payload.as_ref(),
             symbol_name,
@@ -1087,7 +1105,7 @@ impl<'a> DispatchHost for SessionDispatchHost<'a> {
         // SDK-declared intrinsics always classify as `Builtin` regardless
         // of shadowing — matches `SessionSolverHost::utility_source`.
         if let crate::intrinsic_registry::IntrinsicLookup::Found(_) = self
-            .host
+            .ctx
             .project_type_store()
             .intrinsic_registry()
             .lookup(name)

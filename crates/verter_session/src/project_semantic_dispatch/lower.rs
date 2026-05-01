@@ -387,7 +387,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     ))
                 } else if let NodeScopeId::File { canonical_id, .. } = scope {
                     resolve_bare_name_in_scope(
-                        self.host,
+                        self.ctx,
                         canonical_id.as_ref(),
                         scope_payload,
                         name.as_ref(),
@@ -434,7 +434,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // (D28) treats `DeclRef` as transparent through alias
                 // chains and `InstantiationRef` as terminal.
                 let whole_hash = self
-                    .host
+                    .ctx
                     .shallow_file_state(resolved_canonical_clone.as_ref())
                     .map_or(HashValue::default(), |s| s.whole_hash);
                 let decl_identity = DeclIdentity {
@@ -502,7 +502,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // (defaults must apply). Non-generic declarations with
                 // no args short-circuit to the bare ResolveDecl result.
                 let decl_routes_through_instantiate = self
-                    .host
+                    .ctx
                     .prepared_type_decl(
                         resolved_canonical_clone.as_ref(),
                         resolved_name_clone.as_ref(),

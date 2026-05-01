@@ -247,7 +247,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         node: SemanticNodeId,
         active: &mut FxHashSet<SemanticNodeId>,
     ) -> Option<TypeExpr> {
-        let data = super::node_data_for(self.host, node)?;
+        let data = super::node_data_for(self.ctx, node)?;
         Some(match data.as_ref() {
             SemanticNodeData::Primitive(kind) => semantic_primitive_to_type_expr(*kind),
             SemanticNodeData::Literal(value) => TypeExpr::Literal(value.clone()),
@@ -321,7 +321,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
             SemanticNodeData::Object(surface) => projected_surface_to_type_expr(
-                &surface_view_to_projected_surface(self.host, surface),
+                &surface_view_to_projected_surface(self.ctx, surface),
             )
             .unwrap_or(TypeExpr::Unknown {
                 raw: SEMANTIC_OBJECT_SURFACE.to_string(),
@@ -377,14 +377,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // `TypeExpr::Mapped { parameter }` field. C7's interner
                 // dedups only structurally-identical binders, so the
                 // representative's display_name is well-defined.
-                parameter: match super::node_data_for(self.host, mapper.parameter_node).as_deref() {
+                parameter: match super::node_data_for(self.ctx, mapper.parameter_node).as_deref() {
                     Some(SemanticNodeData::TypeParam { display_name, .. }) => {
                         display_name.as_ref().to_string()
                     }
                     _ => String::new(),
                 },
                 source: std::sync::Arc::new(
-                    match super::node_data_for(self.host, mapper.key_space)?.as_ref() {
+                    match super::node_data_for(self.ctx, mapper.key_space)?.as_ref() {
                         SemanticNodeData::KeyOf { base } => TypeExpr::KeyOf(std::sync::Arc::new(
                             self.raise_node_to_type_expr_inner(*base, active)?,
                         )),
@@ -777,7 +777,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 continue;
             }
             topo.push(node);
-            let Some(data) = super::node_data_for(self.host, node) else {
+            let Some(data) = super::node_data_for(self.ctx, node) else {
                 continue;
             };
             // Push children for traversal. Operator-shape children
@@ -824,7 +824,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         mode: ProjectionMode,
         state: &mut ReduceState,
     ) -> SemanticNodeId {
-        let Some(data) = super::node_data_for(self.host, node) else {
+        let Some(data) = super::node_data_for(self.ctx, node) else {
             return node;
         };
         match data.as_ref() {
@@ -1228,7 +1228,7 @@ fn rebuild_object(
     node: SemanticNodeId,
     mapping: &rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId>,
 ) -> Option<SemanticNodeId> {
-    let data = super::node_data_for(dispatch.host, node)?;
+    let data = super::node_data_for(dispatch.ctx, node)?;
     let SemanticNodeData::Object(view) = data.as_ref() else {
         return None;
     };
