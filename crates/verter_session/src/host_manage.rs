@@ -54,6 +54,13 @@ pub(crate) mod component_meta_methods;
 // variant `impl ComponentMetaRequestHost for SessionRequestHost<'_>`.
 // Belongs in host-impl tier per sub-plan §10a.0.A.
 pub(crate) mod component_meta_request_impl;
+// Phase 10a: moved from `meta_resolve/jsdoc_resolve.rs`. The file
+// defines `HostComponentMetaResolver<'a> { host: &'a VerterHost }` plus
+// `impl crate::resolver_core::{DeclarationMetadataResolver,ComponentMetaResolverHost}
+// for HostComponentMetaResolver<'_>`. The `read_full_source` helper
+// (line 488) calls the `pub(crate)` `host.read_analysis_source(...)`,
+// which is permitted from host-impl tier. Belongs here.
+pub(crate) mod jsdoc_resolve;
 pub(crate) mod eval_env;
 pub(crate) mod eval_program;
 pub(crate) mod fallthrough;

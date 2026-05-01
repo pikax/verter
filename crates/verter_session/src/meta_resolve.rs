@@ -34,7 +34,6 @@ mod dep_signature;
 mod dispatch_helpers;
 mod field_state;
 mod graph_predicates;
-mod jsdoc_resolve;
 mod macro_member_walk;
 mod materialize;
 mod origin_graph;
@@ -76,7 +75,11 @@ pub(crate) use graph_predicates::{
     slot_binding_param_can_stay_symbolic_node, type_node_has_package_backed_root,
     type_node_needs_member_route_materialization, RouteExtraction,
 };
-pub(crate) use jsdoc_resolve::{
+// Phase 10a: `jsdoc_resolve` source moved to
+// `host_manage/jsdoc_resolve.rs` (host-impl tier; the
+// `HostComponentMetaResolver` adapter and `read_full_source` helper
+// belong with the host).
+pub(crate) use crate::host_manage::jsdoc_resolve::{
     resolve_jsdoc_tag_type, resolve_type_declaration, HostComponentMetaResolver,
 };
 pub(crate) use macro_member_walk::{

@@ -73,12 +73,13 @@ use crate::meta_resolve::compare_type_expr_improvement;
 use crate::meta_resolve::component_meta_registry_prefers_structural_materialization;
 use crate::meta_resolve::STORE_VIEW_STABILITY_MAX_ATTEMPTS;
 
-// Items that still live in the parent shell (`crate::meta_resolve`):
-// the walker (`walk_component_meta_macro_shape_member_types`), the
+// Items that live in the parent shell (`crate::meta_resolve`): the
+// walker (`walk_component_meta_macro_shape_member_types`), the
 // registry-structural materialiser, the registry-route preservers, the
-// graph-native registry-route + cycle-BFS predicates, the origin-graph
-// builder, and the `HostComponentMetaResolver` adapter struct.
-use crate::meta_resolve::HostComponentMetaResolver;
+// graph-native registry-route + cycle-BFS predicates, and the
+// origin-graph builder. The `HostComponentMetaResolver` adapter moved
+// to `host_manage/jsdoc_resolve.rs` in commit 4 (host-impl tier).
+use crate::host_manage::jsdoc_resolve::HostComponentMetaResolver;
 use crate::meta_resolve::walk_component_meta_macro_shape_member_types;
 use crate::meta_resolve::build_origin_graph;
 use crate::meta_resolve::{

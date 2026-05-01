@@ -30,16 +30,17 @@ use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
-use super::dispatch_helpers::{
-    project_expr_class_a_via_dispatch, project_prepared_type_surface_shape_via_host_threaded,
-};
-// Phase 10a: `request_host` source moved to
-// `host_manage/component_meta_request_impl.rs`. Imports are rewritten
-// to point at the new home; commit 4 will move this file too, after
-// which `super::` will refer to `host_manage`.
+// Phase 10a: file moved from `meta_resolve/jsdoc_resolve.rs` to
+// `host_manage/jsdoc_resolve.rs`. The original `super::dispatch_helpers`
+// import resolved through `meta_resolve` private siblings; after the
+// move, `super` is `host_manage`, so the rewrite goes via the
+// `crate::meta_resolve` re-export surface.
 use crate::host_manage::component_meta_request_impl::{
     CapturedComponentMetaInputs, ResolvedDeclarationKind, ResolvedJsdocBlock, ResolvedJsdocTag,
     ResolvedTypeDeclaration,
+};
+use crate::meta_resolve::{
+    project_expr_class_a_via_dispatch, project_prepared_type_surface_shape_via_host_threaded,
 };
 
 pub(crate) struct HostComponentMetaResolver<'a> {
