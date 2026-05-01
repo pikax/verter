@@ -271,81 +271,224 @@ fn count_callsites(src: &str, needles: &[&str]) -> usize {
 
 #[test]
 fn phase_05d_4a_class_a_props_callers_migrated_in_meta_resolve() {
-    // After commit 4a, the Props-surface Class A callsites in
-    // meta_resolve.rs MUST no longer call the engine trampoline
-    // methods. The slot-cluster sites (4b) and the deferred 4942 site
-    // (5e/5f) are accounted for as the only allowed remaining
-    // engine-trampoline calls in this file at the end of 4a.
+    // Post-Phase-11a + Phase 5l + Phase 5m §5.13a.2 (final state):
+    // `meta_resolve.rs` was split into a folder module; every Class A
+    // engine method (`project_expr_surface_expr`, `_shape`,
+    // `_expr_with_compound_objects`) was deleted in Phase 5l, and every
+    // production caller routes through the bridge helpers
+    // (`*_via_host_threaded`) under `meta_resolve/dispatch_helpers.rs`.
+    // The bridge bodies use dispatch directly — they no longer call the
+    // (now-deleted) engine methods inside `#[allow(deprecated)]` blocks.
     //
-    // Discriminating: pre-4a, 11 Props sites all call
-    // `query_engine.project_expr_surface_expr` / `_shape`. Post-4a,
-    // those 11 sites have been rewritten to dispatch and only the
-    // slot-cluster sites (4b, 5 sites) + deferred 4942 site remain.
+    // The post-cutover invariant: ZERO Class A engine-method callsites
+    // (`.project_expr_surface_*(`) in ANY production file under the
+    // `meta_resolve` module surface (the shell `meta_resolve.rs` plus
+    // every sibling under `meta_resolve/`).
     //
-    // Allowed remainder POST-4a:
-    //   - 4b slots (5): 4631, 4646, 4881, 4940, 4955
-    //   - deferred (1): 4942
-    // = 6.
-    let src = read_workspace_file("crates/verter_session/src/meta_resolve.rs");
-    let total_class_a = count_callsites(
-        &src,
-        &[
-            ".project_expr_surface_expr(",
-            ".project_expr_surface_shape(",
-            ".project_expr_surface_expr_with_compound_objects(",
-        ],
-    );
+    // The walkdir-based shape is robust under further folder splits: a
+    // future commit that adds a new sibling under `meta_resolve/` is
+    // automatically covered without test edits AS LONG AS the new
+    // sibling does not reintroduce Class A engine callsites.
+    //
+    // Discrimination proof (Stub Prevention §0p): adding a single
+    // `.project_expr_surface_expr(...)` line to ANY file under the
+    // `meta_resolve` module surface (e.g., `meta_resolve/scoring.rs` or
+    // `meta_resolve/materialize/macro_shapes.rs`) FAILS this test. The
+    // bridge file is NOT allow-listed because Phase 5l deleted the
+    // engine methods entirely; even bridge bodies must stay clean.
+    let class_a_callsite_patterns: &[&str] = &[
+        ".project_expr_surface_expr(",
+        ".project_expr_surface_shape(",
+        ".project_expr_surface_expr_with_compound_objects(",
+    ];
+    let scanned = collect_meta_resolve_module_surface();
     assert!(
-        total_class_a <= 6,
-        "Phase 5d 4a: meta_resolve.rs must have <= 6 Class A engine refs \
-         after 4a (4b slot-cluster + deferred 4942); found {total_class_a}"
+        !scanned.is_empty(),
+        "Phase 5d 4a guard: expected to find at least the shell \
+         `crates/verter_session/src/meta_resolve.rs` (or its sibling \
+         folder); found none — the module surface vanished or moved \
+         without updating this guard"
     );
+    let mut violations: Vec<String> = Vec::new();
+    for path in &scanned {
+        let rel = path
+            .strip_prefix(workspace_root())
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
+        let count = count_callsites(&src, class_a_callsite_patterns);
+        if count != 0 {
+            violations.push(format!(
+                "{rel}: {count} Class A engine-method callsite(s) found \
+                 (one of `.project_expr_surface_expr(`, \
+                 `.project_expr_surface_shape(`, \
+                 `.project_expr_surface_expr_with_compound_objects(`). \
+                 Phase 5l deleted these engine methods; route Class A \
+                 work through the bridge helpers \
+                 (`*_via_host_threaded` under \
+                 `meta_resolve/dispatch_helpers.rs`) instead."
+            ));
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "Phase 5d 4a / Phase 5l final state: meta_resolve module \
+         surface must have ZERO Class A engine-method callsites. \
+         Violations:\n{}",
+        violations.join("\n")
+    );
+}
+
+/// Walk the `meta_resolve` module surface — the shell file
+/// `crates/verter_session/src/meta_resolve.rs` plus every `.rs` file
+/// under `crates/verter_session/src/meta_resolve/`. Test files
+/// (`*_tests.rs` and entries under a `tests/` subdir) are excluded so
+/// the architecture guard scans production-only.
+fn collect_meta_resolve_module_surface() -> Vec<PathBuf> {
+    use walkdir::WalkDir;
+    let module_root = workspace_root().join("crates/verter_session/src/meta_resolve");
+    let shell_path = workspace_root().join("crates/verter_session/src/meta_resolve.rs");
+    let mut scanned: Vec<PathBuf> = Vec::new();
+    if shell_path.is_file() {
+        scanned.push(shell_path);
+    }
+    if module_root.is_dir() {
+        for entry in WalkDir::new(&module_root) {
+            let entry = entry.expect("walkdir entry");
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let file_name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+            if file_name.ends_with("_tests.rs") {
+                continue;
+            }
+            scanned.push(path.to_path_buf());
+        }
+    }
+    scanned
+}
+
+/// Walk the `host_manage` module surface — the shell file
+/// `crates/verter_session/src/host_manage.rs` plus every `.rs` file
+/// under `crates/verter_session/src/host_manage/`. Test files
+/// (`*_tests.rs`) are excluded.
+fn collect_host_manage_module_surface() -> Vec<PathBuf> {
+    use walkdir::WalkDir;
+    let module_root = workspace_root().join("crates/verter_session/src/host_manage");
+    let shell_path = workspace_root().join("crates/verter_session/src/host_manage.rs");
+    let mut scanned: Vec<PathBuf> = Vec::new();
+    if shell_path.is_file() {
+        scanned.push(shell_path);
+    }
+    if module_root.is_dir() {
+        for entry in WalkDir::new(&module_root) {
+            let entry = entry.expect("walkdir entry");
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let file_name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+            if file_name.ends_with("_tests.rs") {
+                continue;
+            }
+            scanned.push(path.to_path_buf());
+        }
+    }
+    scanned
 }
 
 #[test]
 fn phase_05d_4a_class_a_props_callers_migrated_in_host_manage() {
-    // host_manage.rs has 4 engine-method invocations pre-5d:
-    //   - 1 Class B `project_type_surface_expr` at
-    //     `expand_project_intrinsic_shape_for_canonical` (the §4.1
-    //     row labels this site as B; it migrates in commit 4c with
-    //     the rest of Class B sites).
-    //   - 3 Class A `project_expr_surface_expr` (4a scope per §4.1
-    //     "all A" annotation on rows 2266/2297/2311).
+    // Post-Phase-11 + Phase 5l + Phase 5m §5.13a.2 (final state):
+    // `host_manage.rs` was split into a folder module; every Class A
+    // engine method was deleted in Phase 5l, and the (formerly
+    // deferred-to-4c) Class B `project_type_surface_expr` site
+    // migrated through the bridge helper in Phase 5m.
     //
-    // Per sub-plan §4.1 strictly, only the 3 A sites migrate in 4a;
-    // the lone B site migrates with Class B in 4c. The Class A engine
-    // refs in this file MUST be 0 after 4a.
-    let src = read_workspace_file("crates/verter_session/src/host_manage.rs");
-    let class_a = count_callsites(
-        &src,
-        &[
-            ".project_expr_surface_expr(",
-            ".project_expr_surface_shape(",
-            ".project_expr_surface_expr_with_compound_objects(",
-        ],
-    );
-    assert_eq!(
-        class_a, 0,
-        "Phase 5d 4a: host_manage.rs must have 0 Class A engine \
-         invocations after 4a; found {class_a}"
-    );
-    // The Class B `project_type_surface_expr` site is allowed (≤ 1)
-    // post-4a as the deferred-to-4c B site. Post-4c it is 0. The
-    // dedicated `phase_05d_4c_class_b_type_decl_callers_migrated`
-    // test asserts the post-4c state explicitly.
-    let class_b = count_callsites(
-        &src,
-        &[
-            ".project_type_surface_expr(",
-            ".project_type_surface_shape(",
-            ".project_prepared_type_surface_expr(",
-            ".project_prepared_type_surface_shape(",
-        ],
-    );
+    // The post-cutover invariant: ZERO Class A engine-method callsites
+    // (`.project_expr_surface_*(`) AND ZERO Class B engine-method
+    // callsites (`.project_type_surface_expr(`, `_shape(`,
+    // `_prepared_type_surface_expr(`, `_shape(`) in ANY production file
+    // under the `host_manage` module surface (the shell
+    // `host_manage.rs` plus every sibling under `host_manage/`).
+    //
+    // Class B coverage in this guard tracks the original guard's intent
+    // (it carried both A and B assertions for `host_manage.rs`); the
+    // Phase 5m guard `phase_05m_class_b_callers_migrated_through_bridge_helpers`
+    // also asserts host_manage.rs is Class-B-clean, but that one only
+    // reads the shell file. This walkdir variant is robust to
+    // post-Phase-11d folder splits.
+    //
+    // Discrimination proof (Stub Prevention §0p): adding a single
+    // `.project_expr_surface_expr(...)` or `.project_type_surface_expr(...)`
+    // line to ANY file under the `host_manage` module surface (e.g.,
+    // `host_manage/component_meta_methods.rs`) FAILS this test.
+    let class_a_callsite_patterns: &[&str] = &[
+        ".project_expr_surface_expr(",
+        ".project_expr_surface_shape(",
+        ".project_expr_surface_expr_with_compound_objects(",
+    ];
+    let class_b_callsite_patterns: &[&str] = &[
+        ".project_type_surface_expr(",
+        ".project_type_surface_shape(",
+        ".project_prepared_type_surface_expr(",
+        ".project_prepared_type_surface_shape(",
+    ];
+    let scanned = collect_host_manage_module_surface();
     assert!(
-        class_b <= 1,
-        "Phase 5d 4a: host_manage.rs Class B engine refs must be \
-         <= 1 (the deferred-to-4c B site); found {class_b}"
+        !scanned.is_empty(),
+        "Phase 5d 4a guard: expected to find at least the shell \
+         `crates/verter_session/src/host_manage.rs` (or its sibling \
+         folder); found none — the module surface vanished or moved \
+         without updating this guard"
+    );
+    let mut violations: Vec<String> = Vec::new();
+    for path in &scanned {
+        let rel = path
+            .strip_prefix(workspace_root())
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
+        let class_a = count_callsites(&src, class_a_callsite_patterns);
+        if class_a != 0 {
+            violations.push(format!(
+                "{rel}: {class_a} Class A engine-method callsite(s) \
+                 found. Phase 5l deleted these engine methods; route \
+                 Class A work through `*_via_host_threaded` bridges \
+                 under `meta_resolve/dispatch_helpers.rs`."
+            ));
+        }
+        let class_b = count_callsites(&src, class_b_callsite_patterns);
+        if class_b != 0 {
+            violations.push(format!(
+                "{rel}: {class_b} Class B engine-method callsite(s) \
+                 found. Phase 5m §5.13a.2 routes Class B work through \
+                 bridge helpers under \
+                 `meta_resolve/dispatch_helpers.rs`."
+            ));
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "Phase 5d 4a / Phase 5l + 5m final state: host_manage module \
+         surface must have ZERO Class A and ZERO Class B engine-method \
+         callsites. Violations:\n{}",
+        violations.join("\n")
     );
 }
 
@@ -372,48 +515,66 @@ fn phase_05d_4a_class_a_props_callers_migrated_in_type_expansion_verter() {
 
 #[test]
 fn phase_05d_4b_class_a_slots_callers_migrated() {
-    // After 4b, the slot-only Class A sites in meta_resolve.rs are
-    // migrated. The slot-only sites live inside
-    // `produce_one_macro_object_shape_for_slots` (sub-plan §4.1
-    // lines 4940 / 4955 at the pre-5d HEAD).
+    // Post-Phase-11a + Phase 5l + Phase 5m §5.13a.2 (final state):
+    // every Class A engine-method site (slots, props, multi-macro-kind
+    // generic helpers, and the deferred-5e/5f compound-object site)
+    // migrated. Phase 5l deleted the engine methods; Phase 5m routed
+    // every caller through bridge helpers (`*_via_host_threaded`)
+    // under `meta_resolve/dispatch_helpers.rs`. The `Partial<T>`
+    // optionality propagation that pre-5l blocked the
+    // `produce_one_macro_object_shape` / `project_named_ref_imported_scope_shape`
+    // sites is now handled by `project_expr_class_a_via_dispatch_threaded`
+    // — it threads `query_engine.ctx` so the request-local fuse and
+    // scope-payload state remain load-bearing.
     //
-    // The §4.1 row also lists lines 4631, 4646, 4881 for migration
-    // in 4b. These live inside the GENERIC multi-macro-kind helper
-    // (`produce_one_macro_object_shape` and
-    // `project_named_ref_imported_scope_shape`) — they serve all
-    // macro kinds, not just slots, and the engine threads
-    // request-local fuse + scope-payload state that is load-bearing
-    // for `Partial<T>` optionality propagation. Migrating these
-    // sites without atomically promoting the engine state caused a
-    // regression in `solver_host_resolves_generic_imported_partial_props`
-    // and `evaluate_types_hydrates_transitive_imported_pick_dependencies_from_dual_script_vue_deps`.
-    // Per CLAUDE.md fix-quality, those sites stay on the engine
-    // helper with a TODO(phase-5g) comment in the code; they
-    // migrate in 5g atomically with the engine retirement.
+    // The post-cutover invariant matches the 5d 4a guard: ZERO Class A
+    // engine-method callsites in ANY production file under the
+    // `meta_resolve` module surface. This 4b guard's narrower remit
+    // (slot-only sites in the original 4b commit) collapses into the
+    // same module-surface walk because there is no longer a per-macro
+    // partition; every Class A site routes through dispatch.
     //
-    // Allowed remainder POST-4b in meta_resolve.rs:
-    //   - 3 multi-macro-kind sites (deferred to 5g): the
-    //     `project_expr_surface_expr` in
-    //     `produce_one_macro_object_shape`, the
-    //     `project_expr_surface_shape` in same, and the
-    //     `project_expr_surface_shape` in
-    //     `project_named_ref_imported_scope_shape`.
-    //   - 1 deferred 4942 site (5e/5f scope per brief note).
-    // = 4.
-    let src = read_workspace_file("crates/verter_session/src/meta_resolve.rs");
-    let total_class_a = count_callsites(
-        &src,
-        &[
-            ".project_expr_surface_expr(",
-            ".project_expr_surface_shape(",
-            ".project_expr_surface_expr_with_compound_objects(",
-        ],
-    );
+    // Discrimination proof (Stub Prevention §0p): adding a single
+    // `.project_expr_surface_expr(...)` line to e.g.
+    // `meta_resolve/materialize/macro_shapes.rs` (the file that owns
+    // the post-Phase-11a slot-cluster code) FAILS this test.
+    let class_a_callsite_patterns: &[&str] = &[
+        ".project_expr_surface_expr(",
+        ".project_expr_surface_shape(",
+        ".project_expr_surface_expr_with_compound_objects(",
+    ];
+    let scanned = collect_meta_resolve_module_surface();
     assert!(
-        total_class_a <= 4,
-        "Phase 5d 4b: meta_resolve.rs must have <= 4 Class A engine \
-         refs after 4b (3 multi-macro-kind sites deferred to 5g + 1 \
-         deferred 4942 site); found {total_class_a}"
+        !scanned.is_empty(),
+        "Phase 5d 4b guard: expected to find at least the shell \
+         `crates/verter_session/src/meta_resolve.rs` (or its sibling \
+         folder); found none — the module surface vanished or moved \
+         without updating this guard"
+    );
+    let mut violations: Vec<String> = Vec::new();
+    for path in &scanned {
+        let rel = path
+            .strip_prefix(workspace_root())
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
+        let count = count_callsites(&src, class_a_callsite_patterns);
+        if count != 0 {
+            violations.push(format!(
+                "{rel}: {count} Class A engine-method callsite(s) \
+                 found. Phase 5l deleted these engine methods; the \
+                 multi-macro-kind sites that were 4b/5g-deferred now \
+                 route through `project_expr_class_a_via_dispatch_threaded`."
+            ));
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "Phase 5d 4b / Phase 5l final state: meta_resolve module \
+         surface must have ZERO Class A engine-method callsites \
+         (slots and multi-macro-kind sites included). Violations:\n{}",
+        violations.join("\n")
     );
 }
 
