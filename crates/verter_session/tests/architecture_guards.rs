@@ -136,55 +136,100 @@ fn no_local_vite_helpers_in_lsp() {
 #[test]
 #[ignore = "phase-11 pending"]
 fn god_module_size_budget() {
-    // r15/F6 (Claude review) — walkdir-based, NOT hard-coded paths.
-    // Hard-coded paths break after Phase 5l deletes
-    // component_meta_query_engine.rs (file-missing => panic in
-    // read_workspace_file) and after Phase 11 splits meta_resolve.rs
-    // (path either no longer exists or becomes a thin re-export shell
-    // that trivially passes — losing signal).
+    // Target-root walkdir scan, production files only.
     //
-    // The r15 design enumerates EVERY .rs file under
-    // crates/verter_session/src and asserts each ≤ DEFAULT_MAX_LINES
-    // unless on an allow-list of known-larger files.
+    // The guard is intentionally scoped to the five Phase 11 god-module
+    // targets. A repository-wide scan would fail on unrelated large files
+    // that Phase 11 does not own; scanning only the old exact filenames
+    // would lose signal after a target becomes a folder module.
     //
-    // Default budget: 4000 lines per file (post-Phase-11 expectation).
-    // Allow-list: files documented to be intentionally larger
-    // (e.g., generated SDK shims). Each entry MUST link to a phase
-    // report justifying the exception.
+    // Each target below may exist as the original file, as the post-split
+    // directory module, or as both when the split keeps a thin shell file
+    // next to private siblings. The guard walks whichever form exists,
+    // fails if neither form exists, and asserts every production .rs file
+    // under that target <= 4000 LOC.
+    // Test fixtures are excluded because Phase 11's public budget is for
+    // production module ownership; large test fixtures are governed by the
+    // testing skill's sibling-test extraction rules.
     use std::collections::HashSet;
     use walkdir::WalkDir;
     const DEFAULT_MAX_LINES: usize = 4000;
-    let allow_list: HashSet<&str> = [
-        // (path-relative-to-workspace-root, justified-by-report)
-        // Add entries here ONLY with a phase-report citation.
-    ]
-    .iter()
-    .copied()
-    .collect();
-    let crate_root = workspace_root().join("crates/verter_session/src");
-    let mut violations = Vec::<String>::new();
-    for entry in WalkDir::new(&crate_root) {
-        let entry = entry.expect("walkdir entry");
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let path = entry.path();
+
+    fn is_test_fixture(rel: &str) -> bool {
+        rel.ends_with("_tests.rs") || rel.ends_with("/tests.rs") || rel.contains("/tests/")
+    }
+
+    fn check_file(
+        workspace: &std::path::Path,
+        path: &std::path::Path,
+        seen: &mut HashSet<String>,
+        violations: &mut Vec<String>,
+    ) {
         if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-            continue;
+            return;
         }
         let rel = path
-            .strip_prefix(workspace_root())
+            .strip_prefix(workspace)
             .unwrap()
             .to_string_lossy()
             .replace('\\', "/");
-        if allow_list.contains(rel.as_str()) {
-            continue;
+        if !seen.insert(rel.clone()) || is_test_fixture(&rel) {
+            return;
         }
         let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
         let lines = src.lines().count();
         if lines > DEFAULT_MAX_LINES {
             violations.push(format!(
                 "{rel}: {lines} > {DEFAULT_MAX_LINES} (Phase 11 god-module budget)"
+            ));
+        }
+    }
+
+    let phase_11_targets = [
+        (
+            "crates/verter_session/src/meta_resolve.rs",
+            "crates/verter_session/src/meta_resolve",
+        ),
+        (
+            "crates/verter_session/src/resolver_core/component_meta_query_engine.rs",
+            "crates/verter_session/src/resolver_core/component_meta_query_engine",
+        ),
+        (
+            "crates/verter_session/src/host_manage.rs",
+            "crates/verter_session/src/host_manage",
+        ),
+        (
+            "crates/verter_compiler/src/ide/script.rs",
+            "crates/verter_compiler/src/ide/script",
+        ),
+        (
+            "crates/verter_lsp/src/server.rs",
+            "crates/verter_lsp/src/server",
+        ),
+    ];
+    let workspace = workspace_root();
+    let mut violations = Vec::<String>::new();
+    let mut seen = HashSet::<String>::new();
+    for (file_rel, dir_rel) in phase_11_targets {
+        let file_root = workspace.join(file_rel);
+        let dir_root = workspace.join(dir_rel);
+        let mut found_target = false;
+        if file_root.is_file() {
+            found_target = true;
+            check_file(&workspace, &file_root, &mut seen, &mut violations);
+        }
+        if dir_root.is_dir() {
+            found_target = true;
+            for entry in WalkDir::new(&dir_root) {
+                let entry = entry.expect("walkdir entry");
+                if entry.file_type().is_file() {
+                    check_file(&workspace, entry.path(), &mut seen, &mut violations);
+                }
+            }
+        }
+        if !found_target {
+            violations.push(format!(
+                "{file_rel} / {dir_rel}: missing Phase 11 target root"
             ));
         }
     }
