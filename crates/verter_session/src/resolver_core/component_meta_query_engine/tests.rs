@@ -854,7 +854,7 @@ defineProps<Omit<SelectMenuProps<SelectMenuItem[]>, 'items'>>()
 
     let mut query_engine = ComponentMetaQueryEngine::new(&host);
     let expanded_target = crate::meta_resolve::instantiate_local_generic_ref_via_dispatch(
-        query_engine.host,
+        query_engine.ctx,
         "/src/App.vue",
         &target_expr,
     );

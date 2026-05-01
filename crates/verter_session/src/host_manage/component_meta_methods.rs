@@ -823,7 +823,7 @@ impl VerterHost {
                                         // (`SemanticQueryKey::Instantiate`).
                                         let expanded =
                                             instantiate_local_generic_ref_via_dispatch(
-                                                query_engine.host,
+                                                query_engine.ctx,
                                                 materialize_scope.as_str(),
                                                 &stabilized,
                                             )
@@ -839,7 +839,7 @@ impl VerterHost {
                                         // (still on the engine until commit 6
                                         // alongside instantiate_local_generic_ref).
                                         project_expr_class_a_via_dispatch_threaded(
-                                            query_engine.host,
+                                            query_engine.ctx,
                                             Some(query_engine),
                                             materialize_scope.as_str(),
                                             &expanded,
@@ -913,7 +913,7 @@ impl VerterHost {
                 if !component_meta_registry_has_non_object_top_level_surface(expr) {
                     return false;
                 }
-                let host = query_engine.host;
+                let host = query_engine.ctx;
                 let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
                 if let Some(node) = dispatch.lower_type_expr_in_scope_with_mode(
                     scope_canonical_id,
@@ -1051,7 +1051,7 @@ impl VerterHost {
                     }
                     let route_expr = build_registry_indexed_access_expr(symbol_name, path);
                     let leaf = project_expr_class_a_via_dispatch(
-                        query_engine.host,
+                        query_engine.ctx,
                         scope_canonical_id,
                         &route_expr,
                     )
@@ -1100,7 +1100,7 @@ impl VerterHost {
                         // collapses to a single dispatch call.
                         let _ = &member_route; // route demand carrier retained for parity
                         let projected = project_expr_class_a_via_dispatch_threaded(
-                            query_engine.host,
+                            query_engine.ctx,
                             Some(query_engine),
                             scope_canonical_id,
                             &route_expr,
@@ -1134,7 +1134,7 @@ impl VerterHost {
                                 // Phase 5e commit 6 — migrate the generic-Ref
                                 // instantiation to dispatch.
                                 let expanded = instantiate_local_generic_ref_via_dispatch(
-                                    query_engine.host,
+                                    query_engine.ctx,
                                     materialize_scope_canonical_id.as_str(),
                                     &stabilized_surface,
                                 )
@@ -1142,7 +1142,7 @@ impl VerterHost {
                                 // Phase 5e commit 5 — migrate the route-loop
                                 // call to the Class A dispatch helper.
                                 let solved_opt = project_expr_class_a_via_dispatch_threaded(
-                                    query_engine.host,
+                                    query_engine.ctx,
                                     Some(query_engine),
                                     materialize_scope_canonical_id.as_str(),
                                     &expanded,
@@ -1160,7 +1160,7 @@ impl VerterHost {
                                 // Phase 5e commit 5 — migrate the route-loop
                                 // call to the Class A dispatch helper.
                                 let solved_opt = project_expr_class_a_via_dispatch_threaded(
-                                    query_engine.host,
+                                    query_engine.ctx,
                                     Some(query_engine),
                                     scope_canonical_id,
                                     &stabilized_surface,

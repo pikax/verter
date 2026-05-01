@@ -40,7 +40,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// symbolic form (as a bare `Ref` / `IndexedAccess`) instead of
     /// materialising through dispatch. Routes through
     /// `bare_name_resolve::resolve_bare_name_in_scope` +
-    /// `host.prepared_type_decl` — no `SessionSolverHost`/`TypeSolverHost`
+    /// `ctx.prepared_type_decl` — no `SessionSolverHost`/`TypeSolverHost`
     /// dependency.
     pub fn should_preserve_shallow_field_expr(
         &mut self,
@@ -258,7 +258,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             return true;
         }
         let Some(prepared) = self
-            .host
+            .ctx
             .prepared_type_decl(&root_identity.canonical_id, &root_identity.symbol_name)
         else {
             return false;
@@ -389,7 +389,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             return false;
         }
         let result = self
-            .host
+            .ctx
             .prepared_type_decl(&root_identity.canonical_id, &root_identity.symbol_name)
             .is_some_and(|prepared| {
                 if matches!(prepared.body, TypeExpr::TypeParameter(_)) {
@@ -1091,7 +1091,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     ) -> Option<verter_semantic::analysis::type_solver::host::ResolvedRootIdentity> {
         let payload = self.scope_payload_for_scope(scope_canonical_id);
         crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
-            self.host,
+            self.ctx,
             scope_canonical_id,
             payload.as_deref(),
             name,

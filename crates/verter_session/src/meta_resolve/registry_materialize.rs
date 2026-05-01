@@ -19,7 +19,7 @@
 //! `pub(crate) use registry_materialize::*;` re-export.
 
 use crate::resolver_core::ComponentMetaQueryEngine;
-use crate::VerterHost;
+use crate::resolver_core::ResolverContext;
 use std::sync::Arc;
 
 use super::dispatch_helpers::{
@@ -93,8 +93,8 @@ pub(crate) fn materialize_component_meta_registry_structural_expr(
     /// non-Ref node — the closure's structural recursion path then
     /// projects through `project_type_surface_expr` like any other
     /// local Ref.
-    fn ref_is_package_backed_node(host: &VerterHost, scope_canonical_id: &str, name: &str) -> bool {
-        let dispatch = ProjectSemanticDispatch::new(host);
+    fn ref_is_package_backed_node(ctx: &dyn ResolverContext, scope_canonical_id: &str, name: &str) -> bool {
+        let dispatch = ProjectSemanticDispatch::new(ctx);
         let probe = verter_semantic::analysis::type_expr::TypeExpr::Ref {
             name: Arc::from(name),
             type_arguments: Arc::from(Vec::new().into_boxed_slice()),
@@ -106,7 +106,7 @@ pub(crate) fn materialize_component_meta_registry_structural_expr(
         ) else {
             return false;
         };
-        let graph = host.project_type_store().semantic_graph();
+        let graph = ctx.project_type_store().semantic_graph();
         let Some(data) = graph.node_data(node_id) else {
             return false;
         };
@@ -137,7 +137,7 @@ pub(crate) fn materialize_component_meta_registry_structural_expr(
         // tracking for this visit (TypeExpr-equality cycle tracking
         // would not have terminated either; the structural recursion
         // remains safe under the existing structural bounds).
-        let dispatch_for_cycle = ProjectSemanticDispatch::new(engine.host);
+        let dispatch_for_cycle = ProjectSemanticDispatch::new(engine.ctx);
         let cycle_key = dispatch_for_cycle.lower_type_expr_in_scope_with_mode(
             scope_canonical_id,
             expr,
@@ -166,7 +166,7 @@ pub(crate) fn materialize_component_meta_registry_structural_expr(
             // declarations resolve correctly.
             let _ = &route; // route demand carrier preserved for parity reads
             project_expr_class_a_via_dispatch_threaded(
-                engine.host,
+                engine.ctx,
                 Some(engine),
                 scope_canonical_id,
                 expr,
@@ -176,7 +176,7 @@ pub(crate) fn materialize_component_meta_registry_structural_expr(
                 (!declaration.canonical_source.is_empty())
                     .then(|| {
                         project_expr_class_a_via_dispatch_threaded(
-                            engine.host,
+                            engine.ctx,
                             Some(engine),
                             declaration.canonical_source.as_str(),
                             expr,
@@ -192,7 +192,7 @@ pub(crate) fn materialize_component_meta_registry_structural_expr(
                     type_arguments,
                 } if type_arguments.is_empty() => {
                     // Plan §6.11 / J3 — graph-native package check.
-                    if ref_is_package_backed_node(engine.host, scope_canonical_id, name) {
+                    if ref_is_package_backed_node(engine.ctx, scope_canonical_id, name) {
                         expr.clone()
                     } else {
                         // Phase 5m §5.13a.2 — bridge via per-engine
@@ -444,7 +444,7 @@ pub(crate) fn materialize_component_meta_registry_structural_expr(
 /// Depth fused at 256 per §4.11. Fuse returns `materialized`
 /// unchanged.
 pub(crate) fn preserve_package_backed_symbolic_refs_node(
-    host: &VerterHost,
+    ctx: &dyn ResolverContext,
     materialized: crate::semantic_query::SemanticNodeId,
     raw: crate::semantic_query::SemanticNodeId,
     depth: u32,
@@ -455,7 +455,7 @@ pub(crate) fn preserve_package_backed_symbolic_refs_node(
     if depth > 256 {
         return materialized;
     }
-    let graph = host.project_type_store().semantic_graph();
+    let graph = ctx.project_type_store().semantic_graph();
     let materialized_data = graph.node_data(materialized);
     let raw_data = graph.node_data(raw);
     let (Some(m_data), Some(r_data)) = (materialized_data, raw_data) else {
@@ -508,7 +508,7 @@ pub(crate) fn preserve_package_backed_symbolic_refs_node(
                 }
                 // Recurse into the parallel pair.
                 let recursed = preserve_package_backed_symbolic_refs_node(
-                    host,
+                    ctx,
                     materialised_member.value,
                     raw_member.value,
                     depth + 1,

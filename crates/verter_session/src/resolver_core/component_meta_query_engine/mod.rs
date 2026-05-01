@@ -2,7 +2,7 @@
 //!
 //! `ComponentMetaQueryEngine` is a request-scoped cache bag for one
 //! `get_component_meta()` request. It owns per-request projection caches
-//! and resolves type declarations lazily from the host's prepared-decl
+//! and resolves type declarations lazily from the ctx's prepared-decl
 //! bundles. All solve-like operations dispatch through
 //! [`ProjectSemanticDispatch`]; D-Cutover §5.8 WIP-W retired the
 //! previously embedded `TypeQueryEngine` + `TypeSolverHost` bridge.
@@ -26,7 +26,7 @@ use super::declaration_metadata::{
 use crate::resolver_core::bare_name_resolve::DeclarationScopePayload;
 use crate::resolver_core::{FuseBudgets, FuseState};
 use crate::semantic_query::SemanticNodeId;
-use crate::VerterHost;
+use crate::resolver_core::ResolverContext;
 
 // Phase 11b.2 — surface-projection helpers, prepared-substitution
 // machinery, and arc cache-key constructors live in the private
@@ -70,15 +70,15 @@ pub(crate) const SEMANTIC_OBJECT_SURFACE: &str = "semanticObjectSurface";
 pub(crate) const SEMANTIC_SURFACE_MEMBER: &str = "semanticSurfaceMember";
 
 /// Build a single-fact `DepSignature` for a canonical's current
-/// `whole_hash`. Used by Step 3 closure's host-DB read-through call
+/// `whole_hash`. Used by Step 3 closure's ctx-DB read-through call
 /// sites — each cache entry's dep_signature mirrors the canonical(s)
 /// the entry depends on so [`HostFenceValidator`](crate::host_manage::HostFenceValidator)
 /// can revalidate it on warm hit and post-compute.
 pub(crate) fn engine_dep_signature_for_canonical(
-    host: &VerterHost,
+    ctx: &dyn ResolverContext,
     canonical_id: &str,
 ) -> crate::semantic_query::DepSignature {
-    let whole_hash = host
+    let whole_hash = ctx
         .shallow_file_state(canonical_id)
         .map(|state| state.whole_hash)
         .unwrap_or_default();
@@ -93,13 +93,13 @@ pub(crate) fn engine_dep_signature_for_canonical(
 /// validity depends on both an active scope and a declaration source).
 #[allow(dead_code)]
 pub(crate) fn engine_dep_signature_for_two_canonicals(
-    host: &VerterHost,
+    ctx: &dyn ResolverContext,
     canonical_a: &str,
     canonical_b: &str,
 ) -> crate::semantic_query::DepSignature {
     let mut entries: Vec<(std::sync::Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
     let push = |entries: &mut Vec<_>, c: &str| {
-        let whole_hash = host
+        let whole_hash = ctx
             .shallow_file_state(c)
             .map(|state| state.whole_hash)
             .unwrap_or_default();
@@ -243,21 +243,21 @@ pub(crate) struct FastShallowFieldExpr {
 /// retained; fields marked **(b)** are pre-lowering-level memos that
 /// genuinely complement dispatch's post-lowering memo (the two operate
 /// on different identity spaces — `TypeExpr` vs. `SemanticNodeId` — so
-/// dispatch cannot subsume them). The CLAUDE.md "host-owned cache
+/// dispatch cannot subsume them). The CLAUDE.md "ctx-owned cache
 /// principle" violation (these are `FxHashMap` rather than DashMap-backed
-/// host caches) is documented architectural debt distinct from the
+/// ctx caches) is documented architectural debt distinct from the
 /// dispatch-routing scope of this commit; migrating the (b) entries to
-/// host-owned `DashMap`s is its own follow-up plan.
+/// ctx-owned `DashMap`s is its own follow-up plan.
 ///
 /// | Field | Class | Rationale |
 /// |---|---|---|
-/// | `host` | (a) | Borrowed runtime reference, not a cache. |
+/// | `ctx` | (a) | Borrowed runtime reference, not a cache. |
 /// | `current_prepared_request_root` | (a) | Call-scoped recursion-guard. |
 /// | `imported_registry_symbols` | (b) | Caches `(canonical, name) → ResolvedImportedRegistrySymbol` at TypeExpr level. Dispatch's `ResolveDecl` memo operates on `SemanticNodeId`s; cannot subsume the pre-lowering identity. |
 /// | `declarations` / `resolvable` / `owner_collection_exprs` | (b) | Same kind — pre-lowering memos keyed on `(canonical, name)` strings. |
-/// | `scope_payloads` | (a) | Per-request `Arc<DeclarationScopePayload>` clones; the bundle is host-owned, this just reuses the Arc within one request. |
+/// | `scope_payloads` | (a) | Per-request `Arc<DeclarationScopePayload>` clones; the bundle is ctx-owned, this just reuses the Arc within one request. |
 /// | `prepared_surface_cache` / `prepared_member_cache` / `prepared_target_cache` / `routed_expr_surface_cache` | (b) | All four are pre-lowering route projections — same justification as above. |
-/// | `prepared_type_decls` | (a) | Arc-cache for `Arc<PreparedTypeDecl>` from host; no semantic computation — only refcount avoidance. |
+/// | `prepared_type_decls` | (a) | Arc-cache for `Arc<PreparedTypeDecl>` from ctx; no semantic computation — only refcount avoidance. |
 /// | `materialize_memo` | (b) | Plan §3 Step 6.3 — `(scope, expr, navigate_flag) → MaterializedTypeExpr` memo. Dispatch's post-lowering memo cannot replace this because the key is the un-lowered `TypeExpr`. |
 /// | `prepared_*_query_count`, `prepared_*_hit_count` | (a) | `#[cfg(test)]` instrumentation counters. |
 /// | `fuse_budgets` / `fuse_state` | (a) | Engine-construction-scoped fuse rails (§1.4). |
@@ -269,22 +269,22 @@ pub(crate) struct FastShallowFieldExpr {
 /// duplicates of dispatch's work; they are a complementary memoization
 /// layer. The plan's "delete (b) fields" directive applies only when
 /// dispatch can replace the work — for these fields it cannot. The
-/// (b) → host-owned migration is documented architectural debt
-/// (CLAUDE.md host-owned cache principle) addressed in a separate
+/// (b) → ctx-owned migration is documented architectural debt
+/// (CLAUDE.md ctx-owned cache principle) addressed in a separate
 /// follow-up plan.
 pub struct ComponentMetaQueryEngine<'a> {
-    pub(crate) host: &'a VerterHost,
+    pub(crate) ctx: &'a dyn ResolverContext,
     current_prepared_request_root: Option<String>,
     // Step 3 closure (architectural-debt-closure rev 10) — the 10 caches
     // below were authoritative `FxHashMap` storage prior to this commit.
-    // Authority moves to host-owned typed DBs on
+    // Authority moves to ctx-owned typed DBs on
     // `ProjectTypeStore` (see `crate::component_meta_caches`); each
     // engine field below is a per-request **non-authoritative
-    // read-through view** that mirrors the host DB result for repeated
+    // read-through view** that mirrors the ctx DB result for repeated
     // lookups within one request. `RefCell` provides interior
-    // mutability so `&self` lookups can populate the view after a host
+    // mutability so `&self` lookups can populate the view after a ctx
     // DB hit. Per the D3.2 contract: NO independent invalidation, NO
-    // independent dep_signature, NO entries the host DB doesn't have.
+    // independent dep_signature, NO entries the ctx DB doesn't have.
     imported_registry_symbols:
         RefCell<FxHashMap<(String, String), Option<ResolvedImportedRegistrySymbol>>>,
     /// Cached type declarations (read-through view; authority is
@@ -484,9 +484,9 @@ pub(crate) fn prepared_structural_substitution_slow_lane_forbidden_for_current_t
 fn assert_prepared_structural_substitution_slow_lane_allowed(_expr: &TypeExpr) {}
 
 impl<'a> ComponentMetaQueryEngine<'a> {
-    pub fn new(host: &'a VerterHost) -> Self {
+    pub fn new(ctx: &'a dyn ResolverContext) -> Self {
         Self {
-            host,
+            ctx,
             current_prepared_request_root: None,
             imported_registry_symbols: RefCell::new(FxHashMap::default()),
             declarations: RefCell::new(FxHashMap::default()),
@@ -526,18 +526,18 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         &mut self,
         scope_canonical_id: &str,
     ) -> Option<std::sync::Arc<DeclarationScopePayload>> {
-        let host = self.host;
+        let ctx = self.ctx;
         self.scope_payloads
             .entry(scope_canonical_id.to_string())
             .or_insert_with(|| {
-                host.prepared_decl_bundle(scope_canonical_id)
+                ctx.prepared_decl_bundle(scope_canonical_id)
                     .or_else(|| {
                         // Lazy first-time loading for dependency files discovered
                         // during resolution. This is NOT re-walking cached state —
                         // it triggers the normal load/parse/cache pipeline for files
-                        // not yet in the host's cache.
-                        host.ensure_loaded(scope_canonical_id)
-                            .then(|| host.prepared_decl_bundle(scope_canonical_id))
+                        // not yet in the ctx's cache.
+                        ctx.ensure_loaded(scope_canonical_id)
+                            .then(|| ctx.prepared_decl_bundle(scope_canonical_id))
                             .flatten()
                     })
                     .map(|bundle| {
@@ -549,11 +549,11 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 }
 
 fn local_type_symbol_metadata_for_known_source(
-    host: &VerterHost,
+    ctx: &dyn ResolverContext,
     canonical_source: &str,
     resolved_name: &str,
 ) -> Option<ResolvedLocalTypeSymbolMetadata> {
-    let analysis = host.external_type_analysis(canonical_source)?;
+    let analysis = ctx.external_type_analysis(canonical_source)?;
     let symbol = analysis.local_type_symbol(resolved_name)?;
     let kind = match symbol.kind {
         verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSymbolKind::TypeAlias => {
@@ -573,7 +573,7 @@ fn local_type_symbol_metadata_for_known_source(
 }
 
 struct DirectPreparedDeclarationResolver<'a> {
-    host: &'a VerterHost,
+    ctx: &'a dyn ResolverContext,
 }
 
 impl DeclarationMetadataResolver for DirectPreparedDeclarationResolver<'_> {
@@ -598,7 +598,7 @@ impl DeclarationMetadataResolver for DirectPreparedDeclarationResolver<'_> {
         canonical_source: &str,
         resolved_name: &str,
     ) -> Option<DeclarationId> {
-        self.host
+        self.ctx
             .local_type_declaration_id(canonical_source, resolved_name)
     }
 
@@ -615,7 +615,7 @@ impl DeclarationMetadataResolver for DirectPreparedDeclarationResolver<'_> {
         canonical_source: &str,
         resolved_name: &str,
     ) -> Option<super::declaration_metadata::ResolvedLocalTypeSymbolMetadata> {
-        local_type_symbol_metadata_for_known_source(self.host, canonical_source, resolved_name)
+        local_type_symbol_metadata_for_known_source(self.ctx, canonical_source, resolved_name)
     }
 }
 

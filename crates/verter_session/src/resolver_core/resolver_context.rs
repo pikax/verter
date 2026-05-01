@@ -180,6 +180,34 @@ pub(crate) trait ResolverContext: sealed::Sealed {
         import_source: &str,
     ) -> Option<String>;
 
+    /// Phase 10a — resolve a route-type-edge through the workspace's
+    /// type-import phase. Used by macro-shape materialisation
+    /// (`meta_resolve/materialize/macro_shapes.rs`) when projecting
+    /// runtime values into structural surfaces.
+    fn resolve_route_type_edge(
+        &self,
+        owner_canonical: &str,
+        source_specifier: &str,
+    ) -> Option<String>;
+
+    /// Phase 10a — fetch the routed shallow state for a canonical id.
+    /// Used by macro-shape materialisation when re-resolving paths
+    /// through cross-file type-import edges.
+    fn route_owned_shallow_state(
+        &self,
+        canonical_id: &str,
+    ) -> Option<std::sync::Arc<crate::resolver_core::ShallowFileState>>;
+
+    /// Phase 10a — resolve a type declaration via the
+    /// `meta_resolve::resolve_type_declaration` host-tier helper. Used by
+    /// the component-meta query engine and `component_meta_registry` to
+    /// resolve named declarations through the host's symbol resolver.
+    fn resolve_type_declaration_for_dep(
+        &self,
+        dep_canonical: &str,
+        requested_name: &str,
+    ) -> crate::resolver_core::ResolvedTypeDeclaration;
+
     fn resolve_value_export_target(
         &self,
         dep_canonical_id: &str,
@@ -370,6 +398,36 @@ impl ResolverContext for crate::VerterHost {
         import_source: &str,
     ) -> Option<String> {
         crate::VerterHost::resolve_type_dependency_canonical(self, owner_canonical, import_source)
+    }
+
+    #[inline]
+    fn resolve_route_type_edge(
+        &self,
+        owner_canonical: &str,
+        source_specifier: &str,
+    ) -> Option<String> {
+        crate::VerterHost::resolve_route_type_edge(self, owner_canonical, source_specifier)
+    }
+
+    #[inline]
+    fn route_owned_shallow_state(
+        &self,
+        canonical_id: &str,
+    ) -> Option<Arc<crate::resolver_core::ShallowFileState>> {
+        crate::VerterHost::route_owned_shallow_state(self, canonical_id)
+    }
+
+    #[inline]
+    fn resolve_type_declaration_for_dep(
+        &self,
+        dep_canonical: &str,
+        requested_name: &str,
+    ) -> crate::resolver_core::ResolvedTypeDeclaration {
+        crate::host_manage::jsdoc_resolve::resolve_type_declaration(
+            self,
+            dep_canonical,
+            requested_name,
+        )
     }
 
     #[inline]

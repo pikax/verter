@@ -44,7 +44,8 @@ use std::sync::Arc;
 
 use crate::resolver_core::bare_name_resolve::DeclarationScopePayload;
 use crate::resolver_core::prepared_decl::PreparedDeclBundle;
-use crate::VerterHost;
+// Phase 10a: `from_host_scope` migrates to `&dyn ResolverContext`; the
+// `crate::VerterHost` type is no longer needed in this file.
 
 /// Captures, once per resolver context, the set of bare type names
 /// the owner scope already declares. Consumed by the dispatch
@@ -100,8 +101,11 @@ impl ScopeShadowing {
     /// for the canonical id (e.g. the file is unknown to the
     /// scheduler). This matches the dispatch path's behaviour when
     /// `scope_payload` is `None`.
-    pub(crate) fn from_host_scope(host: &VerterHost, scope_canonical_id: &str) -> Self {
-        match host.prepared_decl_bundle(scope_canonical_id) {
+    pub(crate) fn from_host_scope(
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        scope_canonical_id: &str,
+    ) -> Self {
+        match ctx.prepared_decl_bundle(scope_canonical_id) {
             Some(bundle) => Self::from_prepared_decl_bundle(bundle.as_ref()),
             None => Self::empty(),
         }

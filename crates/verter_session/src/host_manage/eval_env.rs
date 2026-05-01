@@ -712,7 +712,7 @@ impl VerterHost {
                             Some(verter_semantic::analysis::AnalyzedMacroKind::DefineModel)
                         ) {
                             if let Some(macro_type_arg) = macro_type_arg.as_ref() {
-                                let dispatch = ProjectSemanticDispatch::new(engine.host());
+                                let dispatch = ProjectSemanticDispatch::new(engine.ctx());
                                 if let Some(base_id) = dispatch.lower_type_expr_in_scope_with_mode(
                                     canonical,
                                     macro_type_arg.as_ref(),
@@ -760,7 +760,7 @@ impl VerterHost {
                                     symbolic_fallback()
                                 }
                                 (false, Some(macro_type_arg)) => {
-                                    let dispatch = ProjectSemanticDispatch::new(engine.host());
+                                    let dispatch = ProjectSemanticDispatch::new(engine.ctx());
                                     let lowered = dispatch.lower_type_expr_in_scope_with_mode(
                                         canonical,
                                         macro_type_arg.as_ref(),
@@ -928,7 +928,7 @@ impl VerterHost {
                     if audit_enabled {
                         let dispatch =
                             crate::project_semantic_dispatch::ProjectSemanticDispatch::new(
-                                engine.host(),
+                                engine.ctx(),
                             );
                         let node_id =
                             dispatch.lower_type_expr_in_scope(canonical, &expansion.value.expr);

@@ -381,25 +381,25 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             }
             TypeExpr::TypeOf(value_ref) => {
                 // D-Cutover §5.8: resolve the value root via the
-                // dispatch-aligned bare-name resolver + host
+                // dispatch-aligned bare-name resolver + ctx
                 // prepared_value_decl directly. Mirrors `build_typeof`.
                 let scope_payload = self.scope_payload_for_scope(active_scope_canonical_id);
                 let root_name = value_ref.path.first()?;
                 let root_identity =
                     crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
-                        self.host,
+                        self.ctx,
                         active_scope_canonical_id,
                         scope_payload.as_deref(),
                         root_name,
                     )?;
                 let prepared_value = self
-                    .host
+                    .ctx
                     .prepared_value_decl(&root_identity.canonical_id, &root_identity.symbol_name)
                     .or_else(|| {
                         if root_identity.canonical_id.is_empty() {
                             return None;
                         }
-                        let target = self.host.resolve_value_export_target(
+                        let target = self.ctx.resolve_value_export_target(
                             &root_identity.canonical_id,
                             &root_identity.symbol_name,
                         )?;
@@ -408,7 +408,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         {
                             return None;
                         }
-                        self.host
+                        self.ctx
                             .prepared_value_decl(&target.canonical_id, &target.name)
                     })?;
 

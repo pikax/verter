@@ -257,11 +257,11 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         {
             return Some(cached);
         }
-        // Step 3 closure: peek host-owned RoutedExprSurfaceDb.
+        // Step 3 closure: peek ctx-owned RoutedExprSurfaceDb.
         let arc_key =
             arc_routed_expr_surface_cache_key(scope_canonical_id, root_symbol, route.clone());
-        let host_db = self.host.project_type_store().routed_expr_surface_db();
-        let arc_value = host_db.peek(&arc_key, self.host)?;
+        let host_db = self.ctx.project_type_store().routed_expr_surface_db();
+        let arc_value = host_db.peek(&arc_key, self.ctx)?;
         let value = arc_value.as_ref().clone();
         self.routed_expr_surface_cache
             .borrow_mut()
@@ -282,15 +282,15 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             root_symbol: root_symbol.to_owned(),
             route: route.clone(),
         };
-        // Step 3 closure: write-through to host-owned RoutedExprSurfaceDb.
+        // Step 3 closure: write-through to ctx-owned RoutedExprSurfaceDb.
         let arc_key =
             arc_routed_expr_surface_cache_key(scope_canonical_id, root_symbol, route.clone());
-        let host = self.host;
-        let host_db = host.project_type_store().routed_expr_surface_db();
+        let ctx = self.ctx;
+        let host_db = ctx.project_type_store().routed_expr_surface_db();
         let captured_value = projected_expr.clone();
         let captured_canonical = scope_canonical_id.to_string();
-        let _ = host_db.get_or_compute(&arc_key, host, move || {
-            let dep_sig = engine_dep_signature_for_canonical(host, captured_canonical.as_str());
+        let _ = host_db.get_or_compute(&arc_key, ctx, move || {
+            let dep_sig = engine_dep_signature_for_canonical(ctx, captured_canonical.as_str());
             Some((captured_value, dep_sig))
         });
         self.routed_expr_surface_cache
@@ -1298,7 +1298,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         if let Some(cached) = self.prepared_member_cache.borrow().get(&cache_key).cloned() {
             return cached;
         }
-        // Step 3 closure: peek host-owned PreparedMemberDb (InheritedRoute).
+        // Step 3 closure: peek ctx-owned PreparedMemberDb (InheritedRoute).
         {
             let arc_key = arc_prepared_member_cache_key(
                 scope_canonical_id,
@@ -1307,8 +1307,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 crate::resolver_core::cache_keys::PreparedMemberCacheKind::InheritedRoute,
                 &FxHashMap::default(),
             );
-            let host_db = self.host.project_type_store().prepared_member_db();
-            if let Some(opt_arc) = host_db.peek(&arc_key, self.host) {
+            let host_db = self.ctx.project_type_store().prepared_member_db();
+            if let Some(opt_arc) = host_db.peek(&arc_key, self.ctx) {
                 let value = opt_arc.map(|arc_member| arc_member.as_ref().clone());
                 self.prepared_member_cache
                     .borrow_mut()
@@ -1533,14 +1533,14 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         &self,
         scope_canonical_id: &str,
     ) -> Option<Vec<crate::resolver_core::FactVersionRef>> {
-        let store_view = self.host.resolver_store_view();
+        let store_view = self.ctx.resolver_store_view();
         let mut facts = Vec::new();
-        // Post-cut: live-host whole-hash with store-view as the first
-        // consultation, falling back to the live host probe for
+        // Post-cut: live-ctx whole-hash with store-view as the first
+        // consultation, falling back to the live ctx probe for
         // untracked-but-present canonicals.
         let hash = store_view
             .whole_hash(scope_canonical_id)
-            .or_else(|| self.host.get_whole_hash(scope_canonical_id));
+            .or_else(|| self.ctx.get_whole_hash(scope_canonical_id));
         if let Some(hash) = hash {
             facts.push(crate::resolver_core::FactVersionRef::FileWholeHash {
                 canonical_id: scope_canonical_id.to_string(),

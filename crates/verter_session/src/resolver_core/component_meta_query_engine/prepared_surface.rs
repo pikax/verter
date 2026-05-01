@@ -1,10 +1,10 @@
-//! Prepared root/member surface projection and host-cache publication
+//! Prepared root/member surface projection and ctx-cache publication
 //! methods extracted from `component_meta_query_engine/mod.rs` in
 //! Phase 11b.6.
 //!
 //! These methods operate on prepared type declarations
 //! (`PreparedTypeDecl`) and project their root surface or requested
-//! members. They publish results into the host-owned
+//! members. They publish results into the ctx-owned
 //! `PreparedSurfaceDb` and `PreparedMemberDb` caches via `post_publish`
 //! cooperative-admission, then mirror the publication in the engine's
 //! per-request read-through view.
@@ -53,7 +53,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// projection (`cached_prepared_root_surface`) when dispatch
     /// returns `None` for re-exported / barrel-routed declarations.
     /// The prepared-decl helper itself is a dispatch consumer (it
-    /// reads via the host store and reduces the prepared decl body
+    /// reads via the ctx store and reduces the prepared decl body
     /// without embedding a separate resolver). Callers migrate off
     /// this method in 5d-5f; the method retires in 5g along with the
     /// prepared-projection helpers per §F call-graph closure.
@@ -139,7 +139,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         {
             return cached;
         }
-        // Step 3 closure: peek host-owned PreparedSurfaceDb. The compute
+        // Step 3 closure: peek ctx-owned PreparedSurfaceDb. The compute
         // path below is non-trivial (recursion, active-set), so we
         // peek-then-compute rather than wrapping the whole compute in
         // get_or_compute. Cold-compute writes back through
@@ -147,8 +147,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         {
             let arc_key =
                 arc_prepared_surface_cache_key(scope_canonical_id, symbol_name, substitutions);
-            let host_db = self.host.project_type_store().prepared_surface_db();
-            if let Some(payload) = host_db.peek(&arc_key, self.host) {
+            let host_db = self.ctx.project_type_store().prepared_surface_db();
+            if let Some(payload) = host_db.peek(&arc_key, self.ctx) {
                 let projection = match payload {
                     crate::component_meta_caches::PreparedSurfacePayload::Surface(arc_surface) => {
                         PreparedSurfaceProjection::Surface(arc_surface)
@@ -246,7 +246,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         result
     }
 
-    /// Step 3 closure helper: write-through to host-owned
+    /// Step 3 closure helper: write-through to ctx-owned
     /// PreparedSurfaceDb. Called after compute publishes a result so
     /// the next request (or a concurrent reader) gets the warm hit.
     #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
@@ -270,11 +270,11 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 crate::component_meta_caches::PreparedSurfacePayload::Unsupported
             }
         };
-        let host = self.host;
-        let host_db = host.project_type_store().prepared_surface_db();
+        let ctx = self.ctx;
+        let host_db = ctx.project_type_store().prepared_surface_db();
         let captured_canonical = scope_canonical_id.to_string();
-        let _ = host_db.get_or_compute(&arc_key, host, move || {
-            let dep_sig = engine_dep_signature_for_canonical(host, captured_canonical.as_str());
+        let _ = host_db.get_or_compute(&arc_key, ctx, move || {
+            let dep_sig = engine_dep_signature_for_canonical(ctx, captured_canonical.as_str());
             Some((payload, dep_sig))
         });
     }
@@ -552,7 +552,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         if let Some(cached) = self.prepared_member_cache.borrow().get(&cache_key).cloned() {
             return cached;
         }
-        // Step 3 closure: peek host-owned PreparedMemberDb.
+        // Step 3 closure: peek ctx-owned PreparedMemberDb.
         {
             let arc_key = arc_prepared_member_cache_key(
                 scope_canonical_id,
@@ -561,8 +561,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 crate::resolver_core::cache_keys::PreparedMemberCacheKind::Requested,
                 substitutions,
             );
-            let host_db = self.host.project_type_store().prepared_member_db();
-            if let Some(opt_arc) = host_db.peek(&arc_key, self.host) {
+            let host_db = self.ctx.project_type_store().prepared_member_db();
+            if let Some(opt_arc) = host_db.peek(&arc_key, self.ctx) {
                 let value = opt_arc.map(|arc_member| arc_member.as_ref().clone());
                 self.prepared_member_cache
                     .borrow_mut()
@@ -672,7 +672,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         result
     }
 
-    /// Step 3 closure helper: write-through to host-owned
+    /// Step 3 closure helper: write-through to ctx-owned
     /// PreparedMemberDb.
     pub(super) fn publish_prepared_member_to_host_db(
         &self,
@@ -690,12 +690,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             kind,
             substitutions,
         );
-        let host = self.host;
-        let host_db = host.project_type_store().prepared_member_db();
+        let ctx = self.ctx;
+        let host_db = ctx.project_type_store().prepared_member_db();
         let captured_value = result.clone();
         let captured_canonical = scope_canonical_id.to_string();
-        let _ = host_db.get_or_compute(&arc_key, host, move || {
-            let dep_sig = engine_dep_signature_for_canonical(host, captured_canonical.as_str());
+        let _ = host_db.get_or_compute(&arc_key, ctx, move || {
+            let dep_sig = engine_dep_signature_for_canonical(ctx, captured_canonical.as_str());
             Some((captured_value, dep_sig))
         });
     }
@@ -901,7 +901,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         if let Some(cached) = self.prepared_target_cache.borrow().get(&cache_key).cloned() {
             return cached;
         }
-        // Step 3 closure: peek host-owned PreparedTargetDb.
+        // Step 3 closure: peek ctx-owned PreparedTargetDb.
         {
             let arc_key = arc_prepared_target_cache_key(
                 scope_canonical_id,
@@ -909,8 +909,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 prepared.root_identity.symbol_name.as_str(),
                 name,
             );
-            let host_db = self.host.project_type_store().prepared_target_db();
-            if let Some(opt_arc_pair) = host_db.peek(&arc_key, self.host) {
+            let host_db = self.ctx.project_type_store().prepared_target_db();
+            if let Some(opt_arc_pair) = host_db.peek(&arc_key, self.ctx) {
                 let value: Option<(String, String)> =
                     opt_arc_pair.map(|(c, n)| (c.as_ref().to_string(), n.as_ref().to_string()));
                 self.prepared_target_cache
@@ -935,7 +935,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 
                 if canonical_source != scope_canonical_id {
                     if let Some((routed_source, routed_name)) =
-                        this.host.resolve_named_type_export_target_shallow(
+                        this.ctx.resolve_named_type_export_target_shallow(
                             canonical_source.as_str(),
                             resolved_name.as_str(),
                         )
@@ -972,7 +972,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     declaration.resolved_name,
                 )
             });
-        // Step 3 closure: write-through to host-owned PreparedTargetDb.
+        // Step 3 closure: write-through to ctx-owned PreparedTargetDb.
         {
             let arc_key = arc_prepared_target_cache_key(
                 scope_canonical_id,
@@ -980,8 +980,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 prepared.root_identity.symbol_name.as_str(),
                 name,
             );
-            let host = self.host;
-            let host_db = host.project_type_store().prepared_target_db();
+            let ctx = self.ctx;
+            let host_db = ctx.project_type_store().prepared_target_db();
             let captured_value: Option<(std::sync::Arc<str>, std::sync::Arc<str>)> =
                 resolved.as_ref().map(|(c, n)| {
                     (
@@ -990,8 +990,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     )
                 });
             let captured_canonical = scope_canonical_id.to_string();
-            let _ = host_db.get_or_compute(&arc_key, host, move || {
-                let dep_sig = engine_dep_signature_for_canonical(host, captured_canonical.as_str());
+            let _ = host_db.get_or_compute(&arc_key, ctx, move || {
+                let dep_sig = engine_dep_signature_for_canonical(ctx, captured_canonical.as_str());
                 Some((captured_value, dep_sig))
             });
         }

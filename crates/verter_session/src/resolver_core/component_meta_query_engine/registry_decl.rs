@@ -1,10 +1,10 @@
 //! Imported registry symbol resolution, direct prepared declaration
-//! access, fuse/state/debug accessors, and host/dispatch entry helpers
+//! access, fuse/state/debug accessors, and ctx/dispatch entry helpers
 //! extracted from `component_meta_query_engine/mod.rs` in Phase 11b.5.
 //!
 //! These methods are inherent methods on `ComponentMetaQueryEngine<'a>`
 //! defined in a sibling `impl<'a>` block; they read the engine's
-//! private read-through caches and dispatch to the host store, then
+//! private read-through caches and dispatch to the ctx store, then
 //! return resolved declarations or imported registry symbols.
 //!
 //! Visibility:
@@ -25,7 +25,7 @@
 //!   `pub(crate) fn imported_registry_symbol_cache_len`,
 //!   `pub(crate) fn materialized_member_surface_cache_len`,
 //!   `pub(crate) fn debug_*`, `pub(crate) fn prepared_type_decl`,
-//!   `pub(crate) fn host`,
+//!   `pub(crate) fn ctx`,
 //!   `pub(crate) fn dispatch_projected_surface`,
 //!   `pub(crate) fn dispatch_projected_member`,
 //!   `pub(crate) fn dispatch_projected_keyspace`,
@@ -55,7 +55,7 @@ use crate::resolver_core::{FuseTrip, RouteDemand};
 use crate::semantic_query::{
     PathSegment, ProjectionMode, QueryResult, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
 };
-use crate::VerterHost;
+use crate::resolver_core::ResolverContext;
 
 impl<'a> ComponentMetaQueryEngine<'a> {
     pub fn resolve_imported_registry_symbol(
@@ -69,22 +69,22 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         if let Some(cached) = self.imported_registry_symbols.borrow().get(&key).cloned() {
             return cached;
         }
-        // Step 3 closure: route through host-owned ImportedRegistryDb.
+        // Step 3 closure: route through ctx-owned ImportedRegistryDb.
         // The local RefCell view above is non-authoritative scratch; the
         // DashMap-backed DB is the authoritative cross-request cache.
         let arc_key = (
             std::sync::Arc::<str>::from(canonical_id),
             std::sync::Arc::<str>::from(exported_name),
         );
-        let host_db = self.host.project_type_store().imported_registry_db();
-        let host_value = host_db.get_or_compute(&arc_key, self.host, || {
+        let host_db = self.ctx.project_type_store().imported_registry_db();
+        let host_value = host_db.get_or_compute(&arc_key, self.ctx, || {
             let computed = resolve_imported_registry_symbol_with_budget(
-                self.host,
+                self.ctx,
                 canonical_id,
                 exported_name,
                 || self.allow_wildcard_route(),
             );
-            let dep_sig = engine_dep_signature_for_canonical(self.host, canonical_id);
+            let dep_sig = engine_dep_signature_for_canonical(self.ctx, canonical_id);
             Some((computed, dep_sig))
         });
         let resolved: Option<ResolvedImportedRegistrySymbol> = match host_value {
@@ -104,11 +104,11 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     ) -> Option<ResolvedTypeDeclaration> {
         self.prepared_type_decl(canonical_source, resolved_name)?;
         let metadata = local_type_symbol_metadata_for_known_source(
-            self.host,
+            self.ctx,
             canonical_source,
             resolved_name,
         )?;
-        let resolver = DirectPreparedDeclarationResolver { host: self.host };
+        let resolver = DirectPreparedDeclarationResolver { ctx: self.ctx };
         Some(crate::resolver_core::resolve_local_type_declaration(
             &resolver,
             canonical_source,
@@ -124,14 +124,14 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     ) -> Option<ResolvedTypeDeclaration> {
         self.prepared_type_decl(canonical_source, resolved_name)?;
         let metadata = local_type_symbol_metadata_for_known_source(
-            self.host,
+            self.ctx,
             canonical_source,
             resolved_name,
         )?;
         Some(ResolvedTypeDeclaration {
             requested_name: resolved_name.to_string(),
             declaration_id: self
-                .host
+                .ctx
                 .local_type_declaration_id(canonical_source, resolved_name),
             resolved_name: resolved_name.to_string(),
             canonical_source: canonical_source.to_string(),
@@ -159,7 +159,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         use crate::project_semantic_dispatch::ProjectSemanticDispatch;
         use crate::semantic_query::ProjectionMode;
 
-        let dispatch = ProjectSemanticDispatch::new(self.host);
+        let dispatch = ProjectSemanticDispatch::new(self.ctx);
         let Some(base) = dispatch.lower_type_expr_in_scope_with_mode(
             scope_canonical_id,
             expr,
@@ -177,7 +177,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             },
             mode: ProjectionMode::Expanded,
         };
-        let read = materialize_component_meta_structure(self.host, key);
+        let read = materialize_component_meta_structure(self.ctx, key);
         crate::meta_resolve::accumulate_dispatch_dep_signature(&read.dep_signature);
         let materialised_id = match read.value {
             MaterializeOutcome::Value(id)
@@ -203,23 +203,20 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         if let Some(cached) = self.declarations.borrow().get(&key).cloned() {
             return cached;
         }
-        // Step 3 closure: route through host-owned DeclarationLookupDb.
+        // Step 3 closure: route through ctx-owned DeclarationLookupDb.
         let arc_key = (
             std::sync::Arc::<str>::from(canonical_source),
             std::sync::Arc::<str>::from(requested_name),
         );
-        let host_db = self.host.project_type_store().declaration_db();
-        let host_value = host_db.get_or_compute(&arc_key, self.host, || {
+        let host_db = self.ctx.project_type_store().declaration_db();
+        let host_value = host_db.get_or_compute(&arc_key, self.ctx, || {
             let computed = self
                 .resolve_direct_prepared_type_declaration(canonical_source, requested_name)
                 .unwrap_or_else(|| {
-                    crate::meta_resolve::resolve_type_declaration(
-                        self.host,
-                        canonical_source,
-                        requested_name,
-                    )
+                    self.ctx
+                        .resolve_type_declaration_for_dep(canonical_source, requested_name)
                 });
-            let dep_sig = engine_dep_signature_for_canonical(self.host, canonical_source);
+            let dep_sig = engine_dep_signature_for_canonical(self.ctx, canonical_source);
             Some((computed, dep_sig))
         });
         let declaration = match host_value {
@@ -227,11 +224,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             None => self
                 .resolve_direct_prepared_type_declaration(canonical_source, requested_name)
                 .unwrap_or_else(|| {
-                    crate::meta_resolve::resolve_type_declaration(
-                        self.host,
-                        canonical_source,
-                        requested_name,
-                    )
+                    self.ctx
+                        .resolve_type_declaration_for_dep(canonical_source, requested_name)
                 }),
         };
         self.declarations
@@ -252,7 +246,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             return (canonical_source.to_string(), resolved_name.to_string());
         }
 
-        self.host
+        self.ctx
             .resolve_named_type_export_target_shallow(canonical_source, resolved_name)
             .filter(|(target_canonical, target_name)| {
                 self.prepared_type_decl(target_canonical.as_str(), target_name.as_str())
@@ -280,20 +274,20 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         if let Some(cached) = self.resolvable.borrow().get(&key).copied() {
             return cached;
         }
-        // Step 3 closure: route through host-owned ResolvabilityDb.
+        // Step 3 closure: route through ctx-owned ResolvabilityDb.
         let arc_key = (
             std::sync::Arc::<str>::from(source_key),
             std::sync::Arc::<str>::from(exported_name),
         );
-        let host_db = self.host.project_type_store().resolvable_db();
-        let host_value = host_db.get_or_compute(&arc_key, self.host, || {
+        let host_db = self.ctx.project_type_store().resolvable_db();
+        let host_value = host_db.get_or_compute(&arc_key, self.ctx, || {
             let computed = if self.prepared_type_decl(source_key, exported_name).is_some() {
                 true
             } else {
                 self.resolve_imported_registry_symbol(source_key, exported_name)
                     .is_some()
             };
-            let dep_sig = engine_dep_signature_for_canonical(self.host, source_key);
+            let dep_sig = engine_dep_signature_for_canonical(self.ctx, source_key);
             Some((computed, dep_sig))
         });
         let resolved = host_value.unwrap_or(false);
@@ -313,17 +307,17 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             return cached;
         }
 
-        // Step 3 closure: route through host-owned OwnerCollectionDb.
+        // Step 3 closure: route through ctx-owned OwnerCollectionDb.
         let arc_key = (
             std::sync::Arc::<str>::from(owner_canonical),
             std::sync::Arc::<str>::from(name),
         );
-        let host_db = self.host.project_type_store().owner_collection_db();
-        let host_value = host_db.get_or_compute(&arc_key, self.host, || {
+        let host_db = self.ctx.project_type_store().owner_collection_db();
+        let host_value = host_db.get_or_compute(&arc_key, self.ctx, || {
             let computed = self
                 .prepared_type_decl(owner_canonical, name)
                 .map(|prepared| prepared.body.clone());
-            let dep_sig = engine_dep_signature_for_canonical(self.host, owner_canonical);
+            let dep_sig = engine_dep_signature_for_canonical(self.ctx, owner_canonical);
             Some((computed, dep_sig))
         });
         let body: Option<verter_semantic::analysis::type_expr::TypeExpr> = match host_value {
@@ -430,19 +424,19 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// Phase 9 cutover (plan §11.2 / §1.5): the legacy walker's
     /// per-request `materialized_member_surfaces` mirror is dead
     /// post-cutover. Tests asking for the materialiser's cache size
-    /// now read the host-owned `MaterializeStructureDb::live_count()`
+    /// now read the ctx-owned `MaterializeStructureDb::live_count()`
     /// — the final-result cache that the new structural materialiser
     /// publishes into.
     #[cfg(test)]
     pub(crate) fn materialized_member_surface_cache_len(&self) -> usize {
-        self.host
+        self.ctx
             .project_type_store()
             .materialize_structure_db()
             .live_count()
     }
 
     /// Phase 5c (sub-plan §A9 (b/c)): the corresponding test
-    /// assertions migrated to behavior assertions / host
+    /// assertions migrated to behavior assertions / ctx
     /// `prepared_surface_db().live_count()` checks. Field + accessor
     /// retained until the broader counter cleanup in 5g.
     #[cfg(test)]
@@ -488,25 +482,31 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
 
         let resolved = self
-            .host
+            .ctx
             .prepared_type_decl(canonical_id, symbol_name)
             .or_else(|| {
                 // Lazy first-time loading (see scope_payload_for_scope comment).
-                self.host
+                self.ctx
                     .ensure_loaded(canonical_id)
-                    .then(|| self.host.prepared_type_decl(canonical_id, symbol_name))
+                    .then(|| self.ctx.prepared_type_decl(canonical_id, symbol_name))
                     .flatten()
             });
         self.prepared_type_decls.insert(key, resolved.clone());
         resolved
     }
 
-    pub(crate) fn host(&self) -> &VerterHost {
-        self.host
+    /// Phase 10a — single accessor returning the engine's resolver
+    /// context. Replaces the legacy `ctx()` accessor (which returned
+    /// `&VerterHost`) now that the engine field is `&dyn ResolverContext`.
+    /// Out-of-seal-scope callers (`host_manage/*`) accept the trait
+    /// object because every method they reach (project_type_store,
+    /// prepared_decl_bundle, dispatch, etc.) is on the trait surface.
+    pub(crate) fn ctx(&self) -> &dyn crate::resolver_core::ResolverContext {
+        self.ctx
     }
 
     fn semantic_dispatch(&self) -> ProjectSemanticDispatch<'_> {
-        ProjectSemanticDispatch::new(self.host)
+        ProjectSemanticDispatch::new(self.ctx)
     }
 
     fn dispatch_root_instantiated(
@@ -520,7 +520,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // lowering path in `shallow_lower_type_expr`.
         let scope_payload_arc = self.scope_payload_for_scope(scope_canonical_id);
         let resolved_root = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
-            self.host,
+            self.ctx,
             scope_canonical_id,
             scope_payload_arc.as_deref(),
             symbol_name,
@@ -538,7 +538,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // C16: Instantiate.base is DeclIdentity. Build from resolved root +
         // shallow state whole_hash.
         let whole_hash = self
-            .host
+            .ctx
             .shallow_file_state(resolved_root.0.as_str())
             .map(|s| s.whole_hash)
             .unwrap_or_default();
@@ -568,7 +568,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         symbol_name: &str,
     ) -> Option<ProjectedSurface> {
         let root = self.dispatch_root_instantiated(scope_canonical_id, symbol_name)?;
-        projected_surface_from_semantic_node(self.host, root)
+        projected_surface_from_semantic_node(self.ctx, root)
     }
 
     pub(crate) fn dispatch_projected_member(

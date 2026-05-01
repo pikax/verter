@@ -2,7 +2,7 @@
 //!
 //! Phase 11a domain 9 — owns:
 //! - `walk_component_meta_macro_shape_member_types` (the per-field driver
-//!   the host method calls into),
+//!   the ctx method calls into),
 //! - `materialize_component_meta_macro_shape_member_type_expr` (the
 //!   member-route fast path with route-vs-project reconciliation),
 //! - `MEMBER_ROUTE_FAST_PATH_HITS` (the test-only counter incremented when
@@ -151,8 +151,8 @@ pub(crate) fn walk_component_meta_macro_shape_member_types(
         scope_canonical_id: &str,
         query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     ) -> bool {
-        let host = query_engine.host;
-        let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+        let ctx = query_engine.ctx;
+        let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         let Some(node) = dispatch.lower_type_expr_in_scope_with_mode(
             scope_canonical_id,
             ty,
@@ -160,7 +160,7 @@ pub(crate) fn walk_component_meta_macro_shape_member_types(
         ) else {
             return false;
         };
-        slot_binding_param_can_stay_symbolic_node(host, node, 0)
+        slot_binding_param_can_stay_symbolic_node(ctx, node, 0)
     }
 
     fn slot_member_binding_rescue_can_stay_symbolic(
@@ -255,7 +255,7 @@ pub(crate) fn walk_component_meta_macro_shape_member_types(
                             {
                                 if let Some(projected_shape) =
                                     project_expr_class_a_shape_via_dispatch(
-                                        query_engine.host,
+                                        query_engine.ctx,
                                         scope_canonical_id,
                                         lowered,
                                     )
@@ -353,7 +353,7 @@ pub(crate) fn walk_component_meta_macro_shape_member_types(
                                 && define_emits.result.value.properties.is_empty()
                             {
                                 if let Some(projected_shape) = project_expr_class_a_shape_via_dispatch(
-                                    query_engine.host,
+                                    query_engine.ctx,
                                     scope_canonical_id,
                                     lowered,
                                 )
@@ -428,7 +428,7 @@ pub(crate) fn walk_component_meta_macro_shape_member_types(
                                 && define_slots.result.value.properties.is_empty()
                             {
                                 if let Some(projected_shape) = project_expr_class_a_shape_via_dispatch(
-                                    query_engine.host,
+                                    query_engine.ctx,
                                     scope_canonical_id,
                                     lowered,
                                 )
@@ -607,7 +607,7 @@ pub(crate) fn materialize_component_meta_macro_shape_member_type_expr(
         {
             // Phase 5e commit 6 — migrate to dispatch (sub-plan §C.3 D-T recipe).
             instantiate_local_generic_ref_via_dispatch(
-                query_engine.host,
+                query_engine.ctx,
                 materialize_scope_canonical_id.as_str(),
                 lowered,
             )
@@ -677,7 +677,7 @@ pub(crate) fn materialize_component_meta_macro_shape_member_type_expr(
                     ),
                 );
                 project_expr_class_a_via_dispatch(
-                    query_engine.host,
+                    query_engine.ctx,
                     candidate_scope.as_str(),
                     &route_expr,
                 )
@@ -697,7 +697,7 @@ pub(crate) fn materialize_component_meta_macro_shape_member_type_expr(
                 // `project_expr_class_a_via_dispatch_threaded` filter at
                 // `meta_resolve.rs` lines 156-157).
                 project_expr_class_a_via_dispatch_threaded(
-                    query_engine.host,
+                    query_engine.ctx,
                     Some(query_engine),
                     candidate_scope.as_str(),
                     &route_expr,

@@ -1649,9 +1649,9 @@ pub(crate) fn produce_one_macro_object_shape(
         // load-bearing for `Partial<T>` optionality propagation
         // across props/emits/slots in the same request. Migrate
         // alongside the engine retirement in 5g, when the engine's
-        // load-bearing state can be host-promoted atomically.
+        // load-bearing state can be ctx-promoted atomically.
         let projected = project_expr_class_a_via_dispatch_threaded(
-            query_engine.host,
+            query_engine.ctx,
             Some(query_engine),
             owner_canonical,
             lowered,
@@ -1796,7 +1796,7 @@ pub(crate) fn resolve_named_ref_prepared_projection_target(
     requested_name: &str,
 ) -> Option<(String, String)> {
     if query_engine
-        .host()
+        .ctx()
         .prepared_type_decl(owner_canonical, requested_name)
         .is_some()
     {
@@ -1804,7 +1804,7 @@ pub(crate) fn resolve_named_ref_prepared_projection_target(
     }
 
     if let Some(state) = query_engine
-        .host()
+        .ctx()
         .route_owned_shallow_state(owner_canonical)
     {
         if state.symbol(requested_name).is_some() {
@@ -1813,7 +1813,7 @@ pub(crate) fn resolve_named_ref_prepared_projection_target(
 
         if let Some(import_target) = state.import_target(requested_name) {
             let target_canonical = if import_target.canonical_id.is_empty() {
-                query_engine.host().resolve_route_type_edge(
+                query_engine.ctx().resolve_route_type_edge(
                     owner_canonical,
                     import_target.source_specifier.as_str(),
                 )?
@@ -1822,14 +1822,14 @@ pub(crate) fn resolve_named_ref_prepared_projection_target(
             };
             let target_name = import_target.imported_name.clone();
             if let Some((routed_canonical, routed_name)) = query_engine
-                .host()
+                .ctx()
                 .resolve_named_type_export_target_shallow(
                     target_canonical.as_str(),
                     target_name.as_str(),
                 )
             {
                 if query_engine
-                    .host()
+                    .ctx()
                     .prepared_type_decl(routed_canonical.as_str(), routed_name.as_str())
                     .is_some()
                 {
@@ -1837,7 +1837,7 @@ pub(crate) fn resolve_named_ref_prepared_projection_target(
                 }
             }
             if query_engine
-                .host()
+                .ctx()
                 .prepared_type_decl(target_canonical.as_str(), target_name.as_str())
                 .is_some()
             {
@@ -1984,7 +1984,7 @@ pub(crate) fn produce_one_macro_object_shape_for_slots(
     // DEFERRED to 5e/5f per the brief note and stays on the engine
     // for now.
     let projected_body =
-        project_expr_class_a_via_dispatch(query_engine.host, owner_canonical, lowered)
+        project_expr_class_a_via_dispatch(query_engine.ctx, owner_canonical, lowered)
             .or_else(|| {
                 // Phase 5m §5.13a.2 — bridge via per-engine helper.
                 project_expr_surface_expr_with_compound_objects_via_host_threaded(
@@ -2004,7 +2004,7 @@ pub(crate) fn produce_one_macro_object_shape_for_slots(
     let solver_count = shape_surface_count(&solver_result);
 
     let projected =
-        project_expr_class_a_shape_via_dispatch(query_engine.host, owner_canonical, lowered)
+        project_expr_class_a_shape_via_dispatch(query_engine.ctx, owner_canonical, lowered)
             .and_then(|shape| {
                 let projected_expr = expanded_shape_to_type_expr(&shape);
                 let resolved_expr =

@@ -151,7 +151,7 @@ impl VerterHost {
         // dispatch helper. The engine here is still kept on the
         // calling intrinsic member-surface materialiser path.
         crate::meta_resolve::project_expr_class_a_via_dispatch(
-            engine.host(),
+            engine.ctx(),
             scope_canonical_id,
             expr,
         )

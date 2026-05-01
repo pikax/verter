@@ -18,7 +18,7 @@ use verter_semantic::analysis::type_expr::TypeExpr;
 
 use super::surface::type_expr_references_names;
 use super::ResolvedImportedRegistrySymbol;
-use crate::VerterHost;
+use crate::resolver_core::ResolverContext;
 
 #[allow(dead_code)]
 pub(super) fn routed_expr_surface_key_expr(
@@ -220,7 +220,7 @@ pub(super) fn prepared_type_decl_canonical_dependencies(
 }
 
 pub(super) fn resolve_imported_registry_symbol_with_budget<F>(
-    host: &VerterHost,
+    ctx: &dyn ResolverContext,
     canonical_id: &str,
     exported_name: &str,
     mut allow_route: F,
@@ -228,7 +228,7 @@ pub(super) fn resolve_imported_registry_symbol_with_budget<F>(
 where
     F: FnMut() -> bool,
 {
-    let (resolved_id, resolved_name) = if host
+    let (resolved_id, resolved_name) = if ctx
         .prepared_type_decl(canonical_id, exported_name)
         .is_some()
     {
@@ -237,10 +237,10 @@ where
         if !allow_route() {
             return None;
         }
-        host.resolve_named_type_export_target_shallow(canonical_id, exported_name)?
+        ctx.resolve_named_type_export_target_shallow(canonical_id, exported_name)?
     };
 
-    let prepared = host.prepared_type_decl(&resolved_id, &resolved_name)?;
+    let prepared = ctx.prepared_type_decl(&resolved_id, &resolved_name)?;
 
     Some(ResolvedImportedRegistrySymbol {
         canonical_id: resolved_id.clone(),

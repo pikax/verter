@@ -33,7 +33,7 @@
 //! etc.) plus the surface→expr / surface→shape raises.
 
 use crate::types::ProjectionMode;
-use crate::VerterHost;
+use crate::resolver_core::ResolverContext;
 use std::sync::Arc;
 
 /// Class A surface projection (Phase 5d §4.1) — dispatch-equivalent
@@ -58,11 +58,11 @@ use std::sync::Arc;
 /// `Mapped` / `TypeOf` / `Conditional` shells). This matches the
 /// trampoline's post-filter so Class A parity is preserved.
 pub(crate) fn project_expr_class_a_via_dispatch(
-    host: &VerterHost,
+    ctx: &dyn ResolverContext,
     scope_canonical_id: &str,
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
 ) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
-    project_expr_class_a_via_dispatch_threaded(host, None, scope_canonical_id, expr)
+    project_expr_class_a_via_dispatch_threaded(ctx, None, scope_canonical_id, expr)
 }
 
 /// Engine-threaded variant of [`project_expr_class_a_via_dispatch`].
@@ -85,9 +85,9 @@ pub(crate) fn project_expr_class_a_via_dispatch(
 /// member-path test family). The engine method itself remains a
 /// Phase 5c trampoline (already routes through dispatch), so the
 /// fast-path remains semantically aligned with dispatch.
-pub(crate) fn project_expr_class_a_via_dispatch_threaded<'host>(
-    host: &'host VerterHost,
-    engine: Option<&mut crate::resolver_core::ComponentMetaQueryEngine<'host>>,
+pub(crate) fn project_expr_class_a_via_dispatch_threaded<'ctx>(
+    ctx: &'ctx dyn ResolverContext,
+    engine: Option<&mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>>,
     scope_canonical_id: &str,
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
 ) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
@@ -121,7 +121,7 @@ pub(crate) fn project_expr_class_a_via_dispatch_threaded<'host>(
     // per call from the same prepared-decl bundle the dispatch path
     // consumes, so the two paths observe identical shadow sets.
     let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_host_scope(
-        host,
+        ctx,
         scope_canonical_id,
     );
     let route = component_meta_registry_public_indexed_access_route(expr)
@@ -131,7 +131,7 @@ pub(crate) fn project_expr_class_a_via_dispatch_threaded<'host>(
         let mut transient_engine: Option<ComponentMetaQueryEngine<'_>> = None;
         let engine_ref: &mut ComponentMetaQueryEngine<'_> = match engine {
             Some(e) => e,
-            None => transient_engine.insert(ComponentMetaQueryEngine::new(host)),
+            None => transient_engine.insert(ComponentMetaQueryEngine::new(ctx)),
         };
         // Phase 5m §5.13a.2 — route engine.project_route_surface_expr
         // and engine.lower_and_project_to_expanded through the bridge
@@ -173,7 +173,7 @@ pub(crate) fn project_expr_class_a_via_dispatch_threaded<'host>(
     // boundary, lower only the innermost (non-IndexedAccess) base, then
     // dispatch `ProjectPath { base, path: [..segments], Expanded }`.
     let (base_expr, path_segments) = decompose_indexed_access_chain(expr);
-    let dispatch = ProjectSemanticDispatch::new(host);
+    let dispatch = ProjectSemanticDispatch::new(ctx);
     let (base, project_path) = if path_segments.is_empty() {
         let base = dispatch.lower_type_expr_in_scope(scope_canonical_id, expr)?;
         (
@@ -245,23 +245,23 @@ fn decompose_indexed_access_chain(
 /// one property or call signature (matching the trampoline's
 /// shape-has-surface filter).
 pub(crate) fn project_expr_class_a_shape_via_dispatch(
-    host: &VerterHost,
+    ctx: &dyn ResolverContext,
     scope_canonical_id: &str,
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
 ) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
-    project_expr_class_a_shape_via_dispatch_threaded(host, None, scope_canonical_id, expr)
+    project_expr_class_a_shape_via_dispatch_threaded(ctx, None, scope_canonical_id, expr)
 }
 
 /// Engine-threaded variant of
 /// [`project_expr_class_a_shape_via_dispatch`].
-pub(crate) fn project_expr_class_a_shape_via_dispatch_threaded<'host>(
-    host: &'host VerterHost,
-    engine: Option<&mut crate::resolver_core::ComponentMetaQueryEngine<'host>>,
+pub(crate) fn project_expr_class_a_shape_via_dispatch_threaded<'ctx>(
+    ctx: &'ctx dyn ResolverContext,
+    engine: Option<&mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>>,
     scope_canonical_id: &str,
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
 ) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
     let projected =
-        project_expr_class_a_via_dispatch_threaded(host, engine, scope_canonical_id, expr)?;
+        project_expr_class_a_via_dispatch_threaded(ctx, engine, scope_canonical_id, expr)?;
     let shape = verter_semantic::analysis::type_expand::type_expr_to_object_shape(&projected);
     (!shape.properties.is_empty() || !shape.call_signatures.is_empty()).then_some(shape)
 }
@@ -297,7 +297,7 @@ pub(crate) fn pick_via_dispatch_pick_helper(
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::semantic_query::{ProjectionMode, QueryResult};
 
-    let dispatch = ProjectSemanticDispatch::new(query_engine.host);
+    let dispatch = ProjectSemanticDispatch::new(query_engine.ctx());
     let symbol_ref = verter_semantic::analysis::type_expr::TypeExpr::Ref {
         name: Arc::from(symbol_name),
         type_arguments: Arc::from(Vec::new().into_boxed_slice()),
@@ -339,7 +339,7 @@ pub(crate) fn pick_via_dispatch_pick_helper(
 /// - the raised body differs from the input expression (matches the
 ///   engine method's "no change ⇒ caller falls back" semantics).
 pub(crate) fn instantiate_local_generic_ref_via_dispatch(
-    host: &VerterHost,
+    ctx: &dyn ResolverContext,
     scope_canonical_id: &str,
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
 ) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
@@ -354,7 +354,7 @@ pub(crate) fn instantiate_local_generic_ref_via_dispatch(
         return None;
     }
 
-    let dispatch = ProjectSemanticDispatch::new(host);
+    let dispatch = ProjectSemanticDispatch::new(ctx);
     let lowered = dispatch.lower_type_expr_in_scope(scope_canonical_id, expr)?;
     let raised = dispatch.raise_node_to_type_expr(lowered)?;
     // Engine-method parity: callers use `.unwrap_or_else(|| original.clone())`,
@@ -373,12 +373,12 @@ pub(crate) fn instantiate_local_generic_ref_via_dispatch(
 // =============================================================================
 
 pub(crate) fn project_type_surface_expr_via_host(
-    host: &VerterHost,
+    ctx: &dyn ResolverContext,
     scope_canonical_id: &str,
     symbol_name: &str,
 ) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
     use crate::resolver_core::projected_surface_to_type_expr;
-    let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
+    let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(ctx);
     if engine.projection_op_budget_exhausted() {
         return None;
     }
@@ -388,8 +388,8 @@ pub(crate) fn project_type_surface_expr_via_host(
     projected_surface_to_type_expr(&surface)
 }
 
-pub(crate) fn project_type_surface_expr_via_host_threaded<'host>(
-    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'host>,
+pub(crate) fn project_type_surface_expr_via_host_threaded<'ctx>(
+    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
     scope_canonical_id: &str,
     symbol_name: &str,
 ) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
@@ -404,12 +404,12 @@ pub(crate) fn project_type_surface_expr_via_host_threaded<'host>(
 }
 
 pub(crate) fn project_type_surface_shape_via_host(
-    host: &VerterHost,
+    ctx: &dyn ResolverContext,
     scope_canonical_id: &str,
     symbol_name: &str,
 ) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
     use crate::resolver_core::projected_surface_to_expanded_shape;
-    let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
+    let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(ctx);
     if engine.projection_op_budget_exhausted() {
         return None;
     }
@@ -419,8 +419,8 @@ pub(crate) fn project_type_surface_shape_via_host(
     Some(projected_surface_to_expanded_shape(&surface))
 }
 
-pub(crate) fn project_type_surface_shape_via_host_threaded<'host>(
-    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'host>,
+pub(crate) fn project_type_surface_shape_via_host_threaded<'ctx>(
+    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
     scope_canonical_id: &str,
     symbol_name: &str,
 ) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
@@ -435,18 +435,18 @@ pub(crate) fn project_type_surface_shape_via_host_threaded<'host>(
 }
 
 pub(crate) fn project_prepared_type_surface_shape_via_host(
-    host: &VerterHost,
+    ctx: &dyn ResolverContext,
     scope_canonical_id: &str,
     symbol_name: &str,
 ) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
     use crate::resolver_core::projected_surface_to_expanded_shape;
-    let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
+    let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(ctx);
     let surface = engine.cached_prepared_root_surface(scope_canonical_id, symbol_name)?;
     Some(projected_surface_to_expanded_shape(&surface))
 }
 
-pub(crate) fn project_prepared_type_surface_expr_via_host_threaded<'host>(
-    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'host>,
+pub(crate) fn project_prepared_type_surface_expr_via_host_threaded<'ctx>(
+    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
     scope_canonical_id: &str,
     symbol_name: &str,
 ) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
@@ -455,8 +455,8 @@ pub(crate) fn project_prepared_type_surface_expr_via_host_threaded<'host>(
     projected_surface_to_type_expr(&surface)
 }
 
-pub(crate) fn project_prepared_type_surface_shape_via_host_threaded<'host>(
-    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'host>,
+pub(crate) fn project_prepared_type_surface_shape_via_host_threaded<'ctx>(
+    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
     scope_canonical_id: &str,
     symbol_name: &str,
 ) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
@@ -465,8 +465,8 @@ pub(crate) fn project_prepared_type_surface_shape_via_host_threaded<'host>(
     Some(projected_surface_to_expanded_shape(&surface))
 }
 
-pub(crate) fn project_expr_surface_shape_via_host_threaded<'host>(
-    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'host>,
+pub(crate) fn project_expr_surface_shape_via_host_threaded<'ctx>(
+    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
     scope_canonical_id: &str,
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
 ) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
@@ -499,8 +499,8 @@ pub(crate) fn project_expr_surface_shape_via_host_threaded<'host>(
     if let Some(shape) = engine.project_direct_utility_surface_shape(scope_canonical_id, expr) {
         return Some(shape);
     }
-    let host = engine.host();
-    let dispatch = ProjectSemanticDispatch::new(host);
+    let ctx = engine.ctx();
+    let dispatch = ProjectSemanticDispatch::new(ctx);
     let base = dispatch.lower_type_expr_in_scope(scope_canonical_id, expr)?;
     let QueryResult::Value(node) = dispatch.execute(SemanticQueryKey::ProjectPath {
         base,
@@ -509,13 +509,13 @@ pub(crate) fn project_expr_surface_shape_via_host_threaded<'host>(
     }) else {
         return None;
     };
-    let surface = projected_surface_from_semantic_node(host, node)?;
+    let surface = projected_surface_from_semantic_node(ctx, node)?;
     let shape = projected_surface_to_expanded_shape(&surface);
     (!shape.properties.is_empty() || !shape.call_signatures.is_empty()).then_some(shape)
 }
 
-pub(crate) fn project_route_surface_expr_via_host_threaded<'host>(
-    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'host>,
+pub(crate) fn project_route_surface_expr_via_host_threaded<'ctx>(
+    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
     scope_canonical_id: &str,
     root_symbol: &str,
     route: &crate::resolver_core::RouteDemand,
@@ -526,8 +526,8 @@ pub(crate) fn project_route_surface_expr_via_host_threaded<'host>(
     engine.project_routed_expr_surface_expr(scope_canonical_id, root_symbol, route)
 }
 
-pub(crate) fn lower_and_project_to_expanded_via_host_threaded<'host>(
-    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'host>,
+pub(crate) fn lower_and_project_to_expanded_via_host_threaded<'ctx>(
+    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
     scope_canonical_id: &str,
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
 ) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
@@ -540,8 +540,8 @@ pub(crate) fn lower_and_project_to_expanded_via_host_threaded<'host>(
     if engine.projection_op_budget_exhausted() {
         return None;
     }
-    let host = engine.host();
-    let dispatch = ProjectSemanticDispatch::new(host);
+    let ctx = engine.ctx();
+    let dispatch = ProjectSemanticDispatch::new(ctx);
     let base = dispatch.lower_type_expr_in_scope(scope_canonical_id, expr)?;
     let read = dispatch.execute_to_type_expr(&SemanticQueryKey::ProjectPath {
         base,
@@ -568,8 +568,8 @@ pub(crate) fn lower_and_project_to_expanded_via_host_threaded<'host>(
 /// matching the engine method's "lower the whole expr, dispatch with
 /// empty path" semantics for callers that depend on it (e.g.
 /// `solve_or_project_leaf_expr_until_stable`).
-pub(crate) fn project_expr_surface_expr_via_host_threaded<'host>(
-    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'host>,
+pub(crate) fn project_expr_surface_expr_via_host_threaded<'ctx>(
+    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
     scope_canonical_id: &str,
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
 ) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
@@ -603,8 +603,8 @@ pub(crate) fn project_expr_surface_expr_via_host_threaded<'host>(
             return Some(solved);
         }
     }
-    let host = engine.host();
-    let dispatch = ProjectSemanticDispatch::new(host);
+    let ctx = engine.ctx();
+    let dispatch = ProjectSemanticDispatch::new(ctx);
     let base = dispatch.lower_type_expr_in_scope(scope_canonical_id, expr)?;
     let read = dispatch.execute_to_type_expr(&SemanticQueryKey::ProjectPath {
         base,
@@ -619,8 +619,8 @@ pub(crate) fn project_expr_surface_expr_via_host_threaded<'host>(
         .then_some(projected)
 }
 
-pub(crate) fn project_expr_surface_expr_with_compound_objects_via_host_threaded<'host>(
-    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'host>,
+pub(crate) fn project_expr_surface_expr_with_compound_objects_via_host_threaded<'ctx>(
+    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
     scope_canonical_id: &str,
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
 ) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
@@ -633,8 +633,8 @@ pub(crate) fn project_expr_surface_expr_with_compound_objects_via_host_threaded<
     if engine.projection_op_budget_exhausted() {
         return None;
     }
-    let host = engine.host();
-    let dispatch = ProjectSemanticDispatch::new(host);
+    let ctx = engine.ctx();
+    let dispatch = ProjectSemanticDispatch::new(ctx);
     let base = dispatch.lower_type_expr_in_scope(scope_canonical_id, expr)?;
     let read = dispatch.execute_to_type_expr(&SemanticQueryKey::ProjectPath {
         base,

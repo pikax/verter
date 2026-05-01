@@ -795,13 +795,15 @@ fn phase_05l_engine_resolver_methods_deleted() {
     // any reintroduction. We sanity-check that the assertion can
     // detect a re-introduction by scanning for a method that we know
     // SURVIVES the deletion (`pub fn new` is the engine constructor
-    // and stays in mod.rs after the Phase 11b folder split). If this
-    // assert fails, the discriminator is broken — we'd miss real
-    // re-introductions.
+    // and stays in mod.rs after the Phase 11b folder split). Phase
+    // 10a renamed the parameter from `host: &'a VerterHost` to
+    // `ctx: &'a dyn ResolverContext` (the resolver-context seal); the
+    // discriminator follows the rename. If this assert fails, the
+    // discriminator is broken — we'd miss real re-introductions.
     assert!(
-        src.contains("pub fn new(host: &'a VerterHost)"),
+        src.contains("pub fn new(ctx: &'a dyn ResolverContext)"),
         "discriminator check: the surviving engine constructor \
-         `pub fn new(host: &'a VerterHost)` must still appear in \
+         `pub fn new(ctx: &'a dyn ResolverContext)` must still appear in \
          component_meta_query_engine/mod.rs — its absence means the \
          discriminator is broken and this test cannot detect \
          re-introductions of the retired methods"

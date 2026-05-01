@@ -11,7 +11,7 @@ use std::sync::Arc;
 // `ResolvedDeclarationKind`, `ResolvedTypeDeclaration`,
 // `ResolvedTypeRegistryMeta`, `ResolvedMacroMeta`, `ResolvedNativeProp`,
 // `ResolvedJsdocBlock`, `ResolvedJsdocTag`, and
-// `ResolvedComponentMetaComputeAudit` live in the request-host sibling
+// `ResolvedComponentMetaComputeAudit` live in the request-ctx sibling
 // (`super::request_host`); this module imports them via `super::*`
 // re-exports through the shell.
 use super::{ResolvedComponentMetaComputeAudit, ResolvedMacroMeta, ResolvedTypeRegistryMeta};
@@ -76,7 +76,7 @@ pub struct ResolvedComponentMetaState {
     /// Origin subgraph for semantic results. Populated in `Expanded` mode
     /// by walking the `SemanticGraphStore` after dispatch resolution.
     pub origin_graph: Option<verter_protocol::types::OriginGraphDto>,
-    /// Request identifier stamped by the host at the entry of
+    /// Request identifier stamped by the ctx at the entry of
     /// `get_component_meta_with_resolution`. Non-zero. Consumers (the
     /// `AuditedRequest` harness and NAPI/WASM/LSP wrappers) use this
     /// to retrieve the matching `RustAuditRecord` via
@@ -607,7 +607,7 @@ pub(crate) fn lowered_root_reaches_transitive_cycle(
 ) -> bool {
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::semantic_query::{ProjectionMode, SemanticNodeData};
-    let dispatch = ProjectSemanticDispatch::new(query_engine.host);
+    let dispatch = ProjectSemanticDispatch::new(query_engine.ctx);
     let Some(node_id) = dispatch.lower_type_expr_in_scope_with_mode(
         scope_canonical_id,
         expr,
@@ -616,7 +616,7 @@ pub(crate) fn lowered_root_reaches_transitive_cycle(
         return false;
     };
     let identity = match query_engine
-        .host
+        .ctx
         .project_type_store()
         .semantic_graph()
         .node_data(node_id)
@@ -628,7 +628,7 @@ pub(crate) fn lowered_root_reaches_transitive_cycle(
     };
     let mut fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
     let result =
-        super::ref_root_reaches_transitive_cycle_node(&identity, query_engine.host, &mut fence);
+        super::ref_root_reaches_transitive_cycle_node(&identity, query_engine.ctx, &mut fence);
     accumulate_dispatch_dep_signature(&Arc::from(fence.into_boxed_slice()));
     result
 }

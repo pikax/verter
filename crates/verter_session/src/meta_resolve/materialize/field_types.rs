@@ -21,7 +21,7 @@ use crate::resolver_core::component_meta_registry::{
     component_meta_registry_public_utility_route,
 };
 use crate::types::FileAnalysisSnapshot;
-use crate::VerterHost;
+use crate::resolver_core::ResolverContext;
 use std::sync::Arc;
 
 use super::super::dep_signature::accumulate_dispatch_dep_signature;
@@ -131,16 +131,16 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
         return cached;
     }
 
-    // Step 3 closure: peek host-owned MaterializeMemoDb.
+    // Step 3 closure: peek ctx-owned MaterializeMemoDb.
     {
-        let host = query_engine.host();
+        let ctx = query_engine.ctx();
         let arc_key = (
             std::sync::Arc::<str>::from(scope_canonical_id),
             std::sync::Arc::new(expr.clone()),
             mode,
         );
-        let host_db = host.project_type_store().materialize_memo_db();
-        if let Some(cached) = host_db.peek(&arc_key, host) {
+        let host_db = ctx.project_type_store().materialize_memo_db();
+        if let Some(cached) = host_db.peek(&arc_key, ctx) {
             query_engine
                 .materialize_memo
                 .borrow_mut()
@@ -152,10 +152,10 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
     // Step 1.5 thin dispatch wrapper. Build NodeScopeId for the file
     // scope, then lower → raise_and_reduce in the caller's mode.
     let scope_payload = query_engine.scope_payload_for_scope(scope_canonical_id);
-    let host = query_engine.host();
-    let dispatch = ProjectSemanticDispatch::new(host);
+    let ctx = query_engine.ctx();
+    let dispatch = ProjectSemanticDispatch::new(ctx);
     let env: FxHashMap<String, crate::semantic_query::SemanticNodeId> = FxHashMap::default();
-    let whole_hash = host
+    let whole_hash = ctx
         .shallow_file_state(scope_canonical_id)
         .map(|state| state.whole_hash)
         .unwrap_or_default();
@@ -198,19 +198,19 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
         dep_signature: dispatch_materialized.dep_signature,
     };
 
-    // Step 3 closure: write-through to host-owned MaterializeMemoDb.
+    // Step 3 closure: write-through to ctx-owned MaterializeMemoDb.
     {
         let arc_key = (
             std::sync::Arc::<str>::from(scope_canonical_id),
             std::sync::Arc::new(expr.clone()),
             mode,
         );
-        let host_db = host.project_type_store().materialize_memo_db();
+        let host_db = ctx.project_type_store().materialize_memo_db();
         let captured_value = materialized.clone();
         let captured_canonical = scope_canonical_id.to_string();
-        let _ = host_db.get_or_compute(&arc_key, host, move || {
+        let _ = host_db.get_or_compute(&arc_key, ctx, move || {
             let dep_sig = crate::resolver_core::component_meta_query_engine::engine_dep_signature_for_canonical(
-                host,
+                ctx,
                 captured_canonical.as_str(),
             );
             Some((captured_value, dep_sig))
@@ -453,8 +453,8 @@ pub(crate) fn lowered_needs_member_route_materialization(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
 ) -> bool {
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    let host = query_engine.host;
-    let dispatch = ProjectSemanticDispatch::new(host);
+    let ctx = query_engine.ctx;
+    let dispatch = ProjectSemanticDispatch::new(ctx);
     let Some(node) = dispatch.lower_type_expr_in_scope_with_mode(
         scope_canonical_id,
         expr,
@@ -463,7 +463,7 @@ pub(crate) fn lowered_needs_member_route_materialization(
         return false;
     };
     let mut local_fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
-    let result = type_node_needs_member_route_materialization(host, node, &mut local_fence, 0);
+    let result = type_node_needs_member_route_materialization(ctx, node, &mut local_fence, 0);
     if !local_fence.is_empty() {
         accumulate_dispatch_dep_signature(&Arc::from(local_fence.into_boxed_slice()));
     }
@@ -486,8 +486,8 @@ pub(crate) fn lowered_preserve_package_backed_symbolic_refs(
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
 ) -> verter_semantic::analysis::type_expr::TypeExpr {
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    let host = engine.host;
-    let dispatch = ProjectSemanticDispatch::new(host);
+    let ctx = engine.ctx;
+    let dispatch = ProjectSemanticDispatch::new(ctx);
     let Some(materialized_node) = dispatch.lower_type_expr_in_scope_with_mode(
         scope_canonical_id,
         materialized,
@@ -503,7 +503,7 @@ pub(crate) fn lowered_preserve_package_backed_symbolic_refs(
         return materialized.clone();
     };
     let preserved_node =
-        preserve_package_backed_symbolic_refs_node(host, materialized_node, raw_node, 0);
+        preserve_package_backed_symbolic_refs_node(ctx, materialized_node, raw_node, 0);
     if preserved_node == materialized_node {
         return materialized.clone();
     }
@@ -631,21 +631,21 @@ pub(crate) fn materialize_component_meta_field_types(
     /// "conservative not-needed" fallback when no canonical node id
     /// exists for the input).
     fn current_needs_member_route_materialization(
-        host: &VerterHost,
+        ctx: &dyn ResolverContext,
         field_state: &mut MacroFieldGraphState<'_>,
     ) -> bool {
         let Some(node) = field_state.current_node() else {
             return false;
         };
         let mut local_fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
-        type_node_needs_member_route_materialization(host, node, &mut local_fence, 0)
+        type_node_needs_member_route_materialization(ctx, node, &mut local_fence, 0)
     }
 
     /// Plan §6.14 / K2 — call the J1 `_node` predicate via the
     /// field-state's lazy-lowered raw_node. Returns `false` when
     /// lowering fails.
     fn raw_needs_member_route_materialization(
-        host: &VerterHost,
+        ctx: &dyn ResolverContext,
         field_state: &mut MacroFieldGraphState<'_>,
         raw: &verter_semantic::analysis::type_expr::TypeExpr,
     ) -> bool {
@@ -653,7 +653,7 @@ pub(crate) fn materialize_component_meta_field_types(
             return false;
         };
         let mut local_fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
-        type_node_needs_member_route_materialization(host, node, &mut local_fence, 0)
+        type_node_needs_member_route_materialization(ctx, node, &mut local_fence, 0)
     }
 
     fn route_leaf_beats_wrapper_object(
@@ -1324,8 +1324,8 @@ pub(crate) fn materialize_component_meta_field_types(
         // graph-native rewrites (K2) will route through
         // `set_current_node_rewrite`. Final write-back via `publish()`
         // at iteration exit.
-        let host = query_engine.host;
-        let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+        let ctx = query_engine.ctx;
+        let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         let mut field_state =
             MacroFieldGraphState::new(field.r#type.clone(), scope_canonical_id, &dispatch);
         if let Some(candidate) = evaluated_types
@@ -1345,7 +1345,7 @@ pub(crate) fn materialize_component_meta_field_types(
         // Plan §6.14 / K2 — migrate predicate to graph-native J1 _node
         // version via field_state.raw_node().
         let raw_needs_member_route = parsed_field_raw_type(field).as_ref().is_some_and(|raw| {
-            raw_needs_member_route_materialization(host, &mut field_state, raw)
+            raw_needs_member_route_materialization(ctx, &mut field_state, raw)
                 || component_meta_registry_public_utility_route(raw).is_some()
         });
         let raw_is_unpreserved_top_level_ref =
@@ -1359,7 +1359,7 @@ pub(crate) fn materialize_component_meta_field_types(
         if crate::host_manage::component_meta_debug_enabled() {
             // Plan §6.14 / K2 — debug log uses the J1 _node predicate
             // through field_state.current_node().
-            let current_needs = current_needs_member_route_materialization(host, &mut field_state);
+            let current_needs = current_needs_member_route_materialization(ctx, &mut field_state);
             crate::host_manage::component_meta_debug(format!(
                 "FIELD_MATERIALIZE_POST_RESCUE owner={} field={} current={:?} raw_needs_member_route={} raw_is_unpreserved_top_level_ref={} current_needs_member_route={}",
                 scope_canonical_id,
@@ -1374,7 +1374,7 @@ pub(crate) fn materialize_component_meta_field_types(
         // version via field_state.current_node().
         if !(raw_needs_member_route
             || raw_is_unpreserved_top_level_ref
-            || current_needs_member_route_materialization(host, &mut field_state))
+            || current_needs_member_route_materialization(ctx, &mut field_state))
         {
             field.r#type = field_state.publish();
             continue;
@@ -1430,7 +1430,7 @@ pub(crate) fn materialize_component_meta_field_types(
                 if let Some(raw_route_surface) =
                     parsed_field_raw_type(field).as_ref().and_then(|raw| {
                         project_expr_class_a_via_dispatch(
-                            query_engine.host,
+                            query_engine.ctx,
                             materialize_scope_canonical_id.as_str(),
                             raw,
                         )
@@ -1452,7 +1452,7 @@ pub(crate) fn materialize_component_meta_field_types(
                     }
                 }
                 if let Some(projected_route_surface) = project_expr_class_a_via_dispatch(
-                    query_engine.host,
+                    query_engine.ctx,
                     materialize_scope_canonical_id.as_str(),
                     field_state.published_type(),
                 ) {
@@ -1708,8 +1708,8 @@ pub(crate) fn materialize_component_meta_field_types(
     }
     for field in &mut evaluated_types.emits {
         // Plan §4.10 / K1 — wrap field.r#type in MacroFieldGraphState.
-        let host = query_engine.host;
-        let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+        let ctx = query_engine.ctx;
+        let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         let mut field_state =
             MacroFieldGraphState::new(field.r#type.clone(), scope_canonical_id, &dispatch);
         rescue_field(scope_canonical_id, field, &mut field_state, query_engine);
@@ -1717,8 +1717,8 @@ pub(crate) fn materialize_component_meta_field_types(
     }
     for field in &mut evaluated_types.slot_bindings {
         // Plan §4.10 / K1 — wrap field.r#type in MacroFieldGraphState.
-        let host = query_engine.host;
-        let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+        let ctx = query_engine.ctx;
+        let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         let mut field_state =
             MacroFieldGraphState::new(field.r#type.clone(), scope_canonical_id, &dispatch);
         rescue_field(scope_canonical_id, field, &mut field_state, query_engine);
@@ -1735,10 +1735,10 @@ pub(crate) fn materialize_component_meta_field_types(
                 Some(field_state.published_type().clone()),
                 parsed_raw.clone(),
                 parsed_raw.as_ref().and_then(|raw| {
-                    project_expr_class_a_via_dispatch(query_engine.host, scope_hint, raw)
+                    project_expr_class_a_via_dispatch(query_engine.ctx, scope_hint, raw)
                 }),
                 project_expr_class_a_via_dispatch(
-                    query_engine.host,
+                    query_engine.ctx,
                     scope_hint,
                     field_state.published_type(),
                 ),
@@ -1766,8 +1766,8 @@ pub(crate) fn materialize_component_meta_field_types(
     }
     for field in &mut evaluated_types.bindings {
         // Plan §4.10 / K1 — wrap field.r#type in MacroFieldGraphState.
-        let host = query_engine.host;
-        let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+        let ctx = query_engine.ctx;
+        let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         let mut field_state =
             MacroFieldGraphState::new(field.r#type.clone(), scope_canonical_id, &dispatch);
         rescue_field(scope_canonical_id, field, &mut field_state, query_engine);

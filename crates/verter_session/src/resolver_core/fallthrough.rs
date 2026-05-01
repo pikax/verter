@@ -964,7 +964,7 @@ pub fn evaluate_value_expression_via_env_or_dispatch(
         }
     }
     crate::meta_resolve::project_expr_class_a_via_dispatch_threaded(
-        engine.host,
+        engine.ctx,
         Some(engine),
         canonical_id,
         &lowered,
