@@ -19,43 +19,42 @@ use verter_semantic::analysis::type_solver::query_engine::{ProjectedMember, Proj
 use super::{
     PreparedSubstitutionKey, SEMANTIC_MISS, SEMANTIC_OBJECT_SURFACE, SEMANTIC_SURFACE_MEMBER,
 };
-use crate::project_semantic_dispatch::{node_data_for, ProjectSemanticDispatch};
+use crate::resolver_core::ResolverContext;
 use crate::semantic_query::{QueryError, SemanticNodeData, SemanticNodeId, SurfaceView};
-use crate::VerterHost;
 
 pub(crate) fn projected_surface_from_semantic_node(
-    host: &VerterHost,
+    ctx: &dyn ResolverContext,
     node: SemanticNodeId,
 ) -> Option<ProjectedSurface> {
     let mut active = FxHashSet::default();
-    projected_surface_from_semantic_node_inner(host, node, &mut active)
+    projected_surface_from_semantic_node_inner(ctx, node, &mut active)
 }
 
 fn projected_surface_from_semantic_node_inner(
-    host: &VerterHost,
+    ctx: &dyn ResolverContext,
     node: SemanticNodeId,
     active: &mut FxHashSet<SemanticNodeId>,
 ) -> Option<ProjectedSurface> {
-    let data = node_data_for(host, node)?;
+    let data = ctx.dispatch_node_data(node)?;
     match data.as_ref() {
         SemanticNodeData::Alias(target) => {
             if !active.insert(node) {
                 return None;
             }
-            let result = projected_surface_from_semantic_node_inner(host, *target, active);
+            let result = projected_surface_from_semantic_node_inner(ctx, *target, active);
             active.remove(&node);
             result
         }
-        SemanticNodeData::Object(surface) => Some(surface_view_to_projected_surface(host, surface)),
+        SemanticNodeData::Object(surface) => Some(surface_view_to_projected_surface(ctx, surface)),
         _ => None,
     }
 }
 
 pub(crate) fn surface_view_to_projected_surface(
-    host: &VerterHost,
+    ctx: &dyn ResolverContext,
     surface: &SurfaceView,
 ) -> ProjectedSurface {
-    let dispatch = ProjectSemanticDispatch::new(host);
+    let dispatch = ctx.dispatch();
     let members = surface
         .members
         .iter()
