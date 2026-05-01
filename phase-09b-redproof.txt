@@ -1,0 +1,796 @@
+warning: failed to parse serde attribute
+  | 
+  | #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  | 
+  = note: ts-rs failed to parse this attribute. It will be ignored.
+warning: unused import: `crate::project_semantic_dispatch::ProjectSemanticDispatch`
+   --> crates\verter_session\src\component_meta_materialize.rs:191:5
+    |
+191 | use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `crate::hash::compile_profile_hash`
+  --> crates\verter_session\src\host_manage.rs:15:5
+   |
+15 | use crate::hash::compile_profile_hash;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `RequestSource`, `SingleflightRole`, `collect_dynamic_root_candidates_from_type`, `component_meta_resolved_macros as resolver_component_meta_resolved_macros`, `component_meta_type_registry as resolver_component_meta_type_registry`, `get_export_span_follow_reexports_from_graph as resolver_get_export_span_follow_reexports_from_graph`, `known_spread_keys_from_type_expr`, `materialize_imported_runtime_values_into_env`, `push_partial_reason`, `resolve_exports_from_graph_best_effort as resolver_resolve_exports_from_graph_best_effort`, `resolve_fallthrough_surface as resolver_resolve_fallthrough_surface`, `resolve_named_export_from_graph as resolver_resolve_named_export_from_graph`, and `resolve_usage_prop_type`
+  --> crates\verter_session\src\host_manage.rs:18:5
+   |
+18 |     collect_dynamic_root_candidates_from_type,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+19 |     component_meta_resolved_macros as resolver_component_meta_resolved_macros,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+20 |     component_meta_type_registry as resolver_component_meta_type_registry, fallthrough_cache_key,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+21 |     get_export_span_follow_reexports_from_graph as resolver_get_export_span_follow_reexports_from_graph,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+22 |     known_spread_keys_from_type_expr, materialize_imported_runtime_values_into_env,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+23 |     push_partial_reason,
+   |     ^^^^^^^^^^^^^^^^^^^
+24 |     resolve_exports_from_graph_best_effort as resolver_resolve_exports_from_graph_best_effort,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+25 |     resolve_fallthrough_surface as resolver_resolve_fallthrough_surface,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+26 |     resolve_named_export_from_graph as resolver_resolve_named_export_from_graph,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+27 |     resolve_usage_prop_type, DynamicRootCandidate, ExportGraphFileKind, ExportGraphResolver,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^
+28 |     ExportSurface, FallthroughComputeHost, FallthroughRequestHost, FallthroughResolutionView,
+29 |     FallthroughResolverHost, ImportedRuntimeValueResolver, RequestSource, ResolvedConsumedBindings,
+   |                                                            ^^^^^^^^^^^^^
+30 |     SingleflightRole, StoreView,
+   |     ^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::shared::write_lock`
+  --> crates\verter_session\src\host_manage.rs:32:5
+   |
+32 | use crate::shared::write_lock;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ExportGraphFileKind`
+  --> crates\verter_session\src\host_manage\analysis_io.rs:27:5
+   |
+27 |     ExportGraphFileKind,
+   |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `ComponentMetaEvalOutputs` and `ComponentMetaRequestHost`
+  --> crates\verter_session\src\host_manage\component_meta_methods.rs:28:33
+   |
+28 |     run_component_meta_request, ComponentMetaEvalOutputs, ComponentMetaRequestHost, RequestSource,
+   |                                 ^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `verter_semantic::analysis::types::AnalyzedMacro`
+  --> crates\verter_session\src\host_manage\component_meta_methods.rs:41:5
+   |
+41 | use verter_semantic::analysis::types::AnalyzedMacro;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `SurfaceNodeIdentities`
+  --> crates\verter_session\src\host_manage\component_meta_methods.rs:59:5
+   |
+59 |     SurfaceNodeIdentities,
+   |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `project_type_surface_expr_via_host`
+  --> crates\verter_session\src\host_manage\component_meta_methods.rs:67:5
+   |
+67 |     project_type_surface_expr_via_host, project_type_surface_expr_via_host_threaded,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ResolvedMacroMeta`
+  --> crates\verter_session\src\host_manage\component_meta_methods.rs:72:69
+   |
+72 |     CapturedComponentMetaInputs, ResolvedComponentMetaComputeAudit, ResolvedMacroMeta,
+   |                                                                     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ResolvedDeclarationKind`
+  --> crates\verter_session\src\host_manage\jsdoc_resolve.rs:39:34
+   |
+39 |     CapturedComponentMetaInputs, ResolvedDeclarationKind, ResolvedJsdocBlock, ResolvedJsdocTag,
+   |                                  ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `populate_sfc_blocks_sidecar`
+  --> crates\verter_session\src\host_manage.rs:76:39
+   |
+76 |     populate_public_instance_sidecar, populate_sfc_blocks_sidecar,
+   |                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `SemanticQueryApi`
+   --> crates\verter_session\src\meta_resolve\dispatch_helpers.rs:537:51
+    |
+537 |         PathSegment, ProjectionMode, QueryResult, SemanticQueryApi, SemanticQueryKey,
+    |                                                   ^^^^^^^^^^^^^^^^
+
+warning: unused import: `SemanticQueryApi`
+   --> crates\verter_session\src\meta_resolve\dispatch_helpers.rs:583:51
+    |
+583 |         PathSegment, ProjectionMode, QueryResult, SemanticQueryApi, SemanticQueryKey,
+    |                                                   ^^^^^^^^^^^^^^^^
+
+warning: unused import: `SemanticQueryApi`
+   --> crates\verter_session\src\meta_resolve\dispatch_helpers.rs:630:51
+    |
+630 |         PathSegment, ProjectionMode, QueryResult, SemanticQueryApi, SemanticQueryKey,
+    |                                                   ^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::dep_signature`
+  --> crates\verter_session\src\meta_resolve\graph_predicates.rs:35:5
+   |
+35 | use super::dep_signature;
+   |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::project_semantic_dispatch::ProjectSemanticDispatch`
+   --> crates\verter_session\src\meta_resolve\graph_predicates.rs:480:9
+    |
+480 |     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::project_semantic_dispatch::ProjectSemanticDispatch`
+   --> crates\verter_session\src\meta_resolve\graph_predicates.rs:638:17
+    |
+638 |             use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::project_semantic_dispatch::ProjectSemanticDispatch`
+   --> crates\verter_session\src\meta_resolve\graph_predicates.rs:860:9
+    |
+860 |     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `lowered_root_reaches_transitive_cycle`
+  --> crates\verter_session\src\meta_resolve\materialize\field_types.rs:36:5
+   |
+36 |     lowered_root_reaches_transitive_cycle, select_imported_materialization_scope,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `component_meta_debug_enabled` and `component_meta_debug`
+  --> crates\verter_session\src\meta_resolve\materialize\macro_shapes.rs:18:5
+   |
+18 |     component_meta_debug, component_meta_debug_enabled, component_meta_trace_custom,
+   |     ^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::resolver_core::ComponentMetaQueryEngine`
+  --> crates\verter_session\src\meta_resolve\materialize\macro_shapes.rs:20:5
+   |
+20 | use crate::resolver_core::ComponentMetaQueryEngine;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::resolver_core::ComponentMetaResolutionPurpose`
+  --> crates\verter_session\src\meta_resolve\materialize\macro_shapes.rs:21:5
+   |
+21 | use crate::resolver_core::ComponentMetaResolutionPurpose;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::resolver_core::ResolvedDeclarationKind`
+  --> crates\verter_session\src\meta_resolve\materialize\macro_shapes.rs:22:5
+   |
+22 | use crate::resolver_core::ResolvedDeclarationKind;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `BTreeSet` and `VecDeque`
+  --> crates\verter_session\src\meta_resolve\materialize\macro_shapes.rs:24:24
+   |
+24 | use std::collections::{BTreeSet, VecDeque};
+   |                        ^^^^^^^^  ^^^^^^^^
+
+warning: unused import: `std::sync::Arc`
+  --> crates\verter_session\src\meta_resolve\materialize\macro_shapes.rs:25:5
+   |
+25 | use std::sync::Arc;
+   |     ^^^^^^^^^^^^^^
+
+warning: unused imports: `collect_expanded_slot_binding_param_types`, `collect_expanded_slot_bindings_from_object_type`, and `component_meta_substitute_typeexpr`
+  --> crates\verter_session\src\meta_resolve\materialize\macro_shapes.rs:46:5
+   |
+46 |     collect_expanded_slot_binding_param_types, collect_expanded_slot_bindings_from_object_type,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+47 |     component_meta_substitute_typeexpr, lowered_root_reaches_transitive_cycle,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::super::scoring::compare_type_expr_improvement`
+  --> crates\verter_session\src\meta_resolve\materialize\macro_shapes.rs:49:5
+   |
+49 | use super::super::scoring::compare_type_expr_improvement;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `define_props_member_can_stay_symbolic_without_rescue`, `field_should_preserve_shallow_symbolic_raw_type`, `lowered_needs_member_route_materialization`, `materialize_component_meta_type_expr_until_stable`, `parsed_field_raw_type`, and `top_level_imported_ref_can_stay_symbolic`
+  --> crates\verter_session\src\meta_resolve\materialize\macro_shapes.rs:51:5
+   |
+51 |     define_props_member_can_stay_symbolic_without_rescue,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+52 |     field_should_preserve_shallow_symbolic_raw_type, lowered_needs_member_route_materialization,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+53 |     materialize_component_meta_type_expr_until_stable, parsed_field_raw_type,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^
+54 |     top_level_imported_ref_can_stay_symbolic,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::resolver_core::ComponentMetaQueryEngine`
+  --> crates\verter_session\src\meta_resolve\registry_materialize.rs:21:5
+   |
+21 | use crate::resolver_core::ComponentMetaQueryEngine;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `project_expr_class_a_shape_via_dispatch_threaded`, `project_expr_class_a_shape_via_dispatch`, `project_expr_surface_expr_with_compound_objects_via_host_threaded`, `project_prepared_type_surface_expr_via_host_threaded`, `project_prepared_type_surface_shape_via_host`, `project_route_surface_expr_via_host_threaded`, `project_type_surface_shape_via_host_threaded`, and `project_type_surface_shape_via_host`
+  --> crates\verter_session\src\meta_resolve.rs:55:36
+   |
+55 |     pick_via_dispatch_pick_helper, project_expr_class_a_shape_via_dispatch,
+   |                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+56 |     project_expr_class_a_shape_via_dispatch_threaded, project_expr_class_a_via_dispatch,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+57 |     project_expr_class_a_via_dispatch_threaded, project_expr_surface_expr_via_host_threaded,
+58 |     project_expr_surface_expr_with_compound_objects_via_host_threaded,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+59 |     project_expr_surface_shape_via_host_threaded,
+60 |     project_prepared_type_surface_expr_via_host_threaded,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+61 |     project_prepared_type_surface_shape_via_host,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+62 |     project_prepared_type_surface_shape_via_host_threaded,
+63 |     project_route_surface_expr_via_host_threaded, project_type_surface_expr_via_host,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+64 |     project_type_surface_expr_via_host_threaded, project_type_surface_shape_via_host,
+   |                                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+65 |     project_type_surface_shape_via_host_threaded,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `field_state::MacroFieldGraphState`
+  --> crates\verter_session\src\meta_resolve.rs:67:16
+   |
+67 | pub(crate) use field_state::MacroFieldGraphState;
+   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `RouteExtraction`, `collect_ref_identities_node`, `declaration_body_prefers_inline_materialization_node`, `node_has_non_object_top_level_surface`, `slot_binding_param_can_stay_symbolic_node`, `type_node_has_package_backed_root`, and `type_node_needs_member_route_materialization`
+  --> crates\verter_session\src\meta_resolve.rs:71:59
+   |
+71 |     build_keys_union_node, canonical_resolves_to_package, collect_ref_identities_node,
+   |                                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+72 |     component_meta_ref_resolves_to_package_node,
+73 |     declaration_body_prefers_inline_materialization_node, extract_route_root_identity_node,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+74 |     node_has_non_object_top_level_surface, ref_root_reaches_transitive_cycle_node,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+75 |     slot_binding_param_can_stay_symbolic_node, type_node_has_package_backed_root,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+76 |     type_node_needs_member_route_materialization, RouteExtraction,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^
+
+warning: unused imports: `HostComponentMetaResolver` and `resolve_jsdoc_tag_type`
+  --> crates\verter_session\src\meta_resolve.rs:83:5
+   |
+83 |     resolve_jsdoc_tag_type, resolve_type_declaration, HostComponentMetaResolver,
+   |     ^^^^^^^^^^^^^^^^^^^^^^                            ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `materialize_component_meta_macro_shape_member_type_expr`
+  --> crates\verter_session\src\meta_resolve.rs:86:5
+   |
+86 |     materialize_component_meta_macro_shape_member_type_expr,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `MacroShapeSource`, `define_props_fields_fast_path_allowed`, `define_props_member_can_stay_symbolic_without_rescue`, `expr_needs_projection_rescue`, `field_should_preserve_shallow_symbolic_raw_type`, `has_prop_shape_surface`, `lowered_needs_member_route_materialization`, `materialize_component_meta_type_expr_until_stable_full`, `parsed_field_raw_type`, `produce_macro_object_shapes`, `produce_one_macro_object_shape`, `projection_result_beats_solver_shape`, `registry_entry_to_expanded_shape`, `synthesize_define_props_shape_from_known_surface_with_authority`, `top_level_imported_ref_can_stay_symbolic`, `type_expr_has_non_object_top_level_surface`, `type_expr_has_package_backed_object_like_root`, and `type_expr_is_slots_member_route`
+   --> crates\verter_session\src\meta_resolve.rs:90:34
+    |
+ 90 |     collect_type_expr_ref_names, define_props_fields_fast_path_allowed,
+    |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ 91 |     define_props_member_can_stay_symbolic_without_rescue, expr_needs_projection_rescue,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ 92 |     field_should_preserve_shallow_symbolic_raw_type, has_prop_shape_surface,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^
+ 93 |     lowered_needs_member_route_materialization, lowered_preserve_package_backed_symbolic_refs,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ 94 |     materialize_component_meta_field_types, materialize_component_meta_type_expr_until_stable,
+ 95 |     materialize_component_meta_type_expr_until_stable_full, parsed_field_raw_type,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^
+ 96 |     produce_macro_object_shapes, produce_macro_object_shapes_for_purpose,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ 97 |     produce_one_macro_object_shape, projection_result_beats_solver_shape,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ 98 |     registry_entry_to_expanded_shape,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ 99 |     synthesize_define_props_shape_from_known_surface_with_authority,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+100 |     top_level_imported_ref_can_stay_symbolic, type_expr_has_non_object_top_level_surface,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+101 |     type_expr_has_package_backed_object_like_root, type_expr_is_slots_member_route,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+102 |     MacroShapeSource,
+    |     ^^^^^^^^^^^^^^^^
+
+warning: unused imports: `nested_symbolic_member_route_should_stay_symbolic`, `preserve_package_backed_symbolic_refs_node`, and `type_expr_contains_public_member_route`
+   --> crates\verter_session\src\meta_resolve.rs:111:5
+    |
+111 |     nested_symbolic_member_route_should_stay_symbolic, preserve_nested_symbolic_member_routes,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+112 |     preserve_package_backed_symbolic_refs_node, preserve_registry_callable_param_member_routes,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+113 |     type_expr_contains_public_member_route, type_expr_needs_nested_symbolic_route_preservation,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `collect_expanded_slot_binding_param_types`, `collect_expanded_slot_bindings_from_object_type`, `component_meta_substitute_typeexpr`, `decide_typeexpr_conditional_with_function_extends`, `lowered_root_reaches_transitive_cycle`, `substitute_infer_in_typeexpr`, and `walk_substitute_typeexpr`
+   --> crates\verter_session\src\meta_resolve.rs:129:5
+    |
+129 |     collect_expanded_slot_binding_param_types, collect_expanded_slot_bindings_from_object_type,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+130 |     component_meta_owner_local_shallow_substituted_alias_body, component_meta_substitute_typeexpr,
+    |                                                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+131 |     decide_typeexpr_conditional_with_function_extends, enrich_missing_slot_bindings,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+132 |     lowered_root_reaches_transitive_cycle, select_imported_materialization_scope,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+133 |     substitute_infer_in_typeexpr, walk_substitute_typeexpr, RegistryMaterialization,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::resolver_core::ResolverContext`
+  --> crates\verter_session\src\resolver_core\component_meta_query_engine\registry_decl.rs:54:5
+   |
+54 | use crate::resolver_core::ResolverContext;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `resolver_context::ResolverContext` is more private than the item `ImportedRegistryDb::get_or_compute`
+   --> crates\verter_session\src\component_meta_caches.rs:86:5
+    |
+ 86 | /     pub fn get_or_compute<F>(
+ 87 | |         &self,
+ 88 | |         key: &ImportedRegistryKey,
+ 89 | |         ctx: &dyn ResolverContext,
+...   |
+ 92 | |     where
+ 93 | |         F: FnOnce() -> Option<(Option<ResolvedImportedRegistrySymbol>, DepSignature)>,
+    | |______________________________________________________________________________________^ method `ImportedRegistryDb::get_or_compute` is reachable at visibility `pub`
+    |
+note: but trait `resolver_context::ResolverContext` is only usable at visibility `pub(crate)`
+   --> crates\verter_session\src\resolver_core\resolver_context.rs:104:1
+    |
+104 | pub(crate) trait ResolverContext: sealed::Sealed {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = note: `#[warn(private_interfaces)]` on by default
+
+warning: trait `resolver_context::ResolverContext` is more private than the item `DeclarationLookupDb::get_or_compute`
+   --> crates\verter_session\src\component_meta_caches.rs:193:5
+    |
+193 | /     pub fn get_or_compute<F>(
+194 | |         &self,
+195 | |         key: &DeclarationLookupKey,
+196 | |         ctx: &dyn ResolverContext,
+...   |
+199 | |     where
+200 | |         F: FnOnce() -> Option<(ResolvedTypeDeclaration, DepSignature)>,
+    | |_______________________________________________________________________^ method `DeclarationLookupDb::get_or_compute` is reachable at visibility `pub`
+    |
+note: but trait `resolver_context::ResolverContext` is only usable at visibility `pub(crate)`
+   --> crates\verter_session\src\resolver_core\resolver_context.rs:104:1
+    |
+104 | pub(crate) trait ResolverContext: sealed::Sealed {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `resolver_context::ResolverContext` is more private than the item `ResolvabilityDb::get_or_compute`
+   --> crates\verter_session\src\component_meta_caches.rs:299:5
+    |
+299 | /     pub fn get_or_compute<F>(
+300 | |         &self,
+301 | |         key: &ResolvabilityKey,
+302 | |         ctx: &dyn ResolverContext,
+...   |
+305 | |     where
+306 | |         F: FnOnce() -> Option<(bool, DepSignature)>,
+    | |____________________________________________________^ method `ResolvabilityDb::get_or_compute` is reachable at visibility `pub`
+    |
+note: but trait `resolver_context::ResolverContext` is only usable at visibility `pub(crate)`
+   --> crates\verter_session\src\resolver_core\resolver_context.rs:104:1
+    |
+104 | pub(crate) trait ResolverContext: sealed::Sealed {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `resolver_context::ResolverContext` is more private than the item `OwnerCollectionDb::get_or_compute`
+   --> crates\verter_session\src\component_meta_caches.rs:410:5
+    |
+410 | /     pub fn get_or_compute<F>(
+411 | |         &self,
+412 | |         key: &OwnerCollectionKey,
+413 | |         ctx: &dyn ResolverContext,
+...   |
+416 | |     where
+417 | |         F: FnOnce() -> Option<(Option<TypeExpr>, DepSignature)>,
+    | |________________________________________________________________^ method `OwnerCollectionDb::get_or_compute` is reachable at visibility `pub`
+    |
+note: but trait `resolver_context::ResolverContext` is only usable at visibility `pub(crate)`
+   --> crates\verter_session\src\resolver_core\resolver_context.rs:104:1
+    |
+104 | pub(crate) trait ResolverContext: sealed::Sealed {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `resolver_context::ResolverContext` is more private than the item `PreparedTargetDb::peek`
+   --> crates\verter_session\src\component_meta_caches.rs:518:5
+    |
+518 | /     pub fn peek(
+519 | |         &self,
+520 | |         key: &PreparedTargetCacheKey,
+521 | |         ctx: &dyn ResolverContext,
+522 | |     ) -> Option<Option<(Arc<str>, Arc<str>)>> {
+    | |_____________________________________________^ method `PreparedTargetDb::peek` is reachable at visibility `pub`
+    |
+note: but trait `resolver_context::ResolverContext` is only usable at visibility `pub(crate)`
+   --> crates\verter_session\src\resolver_core\resolver_context.rs:104:1
+    |
+104 | pub(crate) trait ResolverContext: sealed::Sealed {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `resolver_context::ResolverContext` is more private than the item `PreparedTargetDb::get_or_compute`
+   --> crates\verter_session\src\component_meta_caches.rs:531:5
+    |
+531 | /     pub fn get_or_compute<F>(
+532 | |         &self,
+533 | |         key: &PreparedTargetCacheKey,
+534 | |         ctx: &dyn ResolverContext,
+...   |
+537 | |     where
+538 | |         F: FnOnce() -> Option<(Option<(Arc<str>, Arc<str>)>, DepSignature)>,
+    | |____________________________________________________________________________^ method `PreparedTargetDb::get_or_compute` is reachable at visibility `pub`
+    |
+note: but trait `resolver_context::ResolverContext` is only usable at visibility `pub(crate)`
+   --> crates\verter_session\src\resolver_core\resolver_context.rs:104:1
+    |
+104 | pub(crate) trait ResolverContext: sealed::Sealed {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `resolver_context::ResolverContext` is more private than the item `MaterializeMemoDb::peek`
+   --> crates\verter_session\src\component_meta_caches.rs:641:5
+    |
+641 | /     pub fn peek(
+642 | |         &self,
+643 | |         key: &MaterializeMemoKey,
+644 | |         ctx: &dyn ResolverContext,
+645 | |     ) -> Option<MaterializedTypeExpr> {
+    | |_____________________________________^ method `MaterializeMemoDb::peek` is reachable at visibility `pub`
+    |
+note: but trait `resolver_context::ResolverContext` is only usable at visibility `pub(crate)`
+   --> crates\verter_session\src\resolver_core\resolver_context.rs:104:1
+    |
+104 | pub(crate) trait ResolverContext: sealed::Sealed {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `resolver_context::ResolverContext` is more private than the item `MaterializeMemoDb::get_or_compute`
+   --> crates\verter_session\src\component_meta_caches.rs:654:5
+    |
+654 | /     pub fn get_or_compute<F>(
+655 | |         &self,
+656 | |         key: &MaterializeMemoKey,
+657 | |         ctx: &dyn ResolverContext,
+...   |
+660 | |     where
+661 | |         F: FnOnce() -> Option<(MaterializedTypeExpr, DepSignature)>,
+    | |____________________________________________________________________^ method `MaterializeMemoDb::get_or_compute` is reachable at visibility `pub`
+    |
+note: but trait `resolver_context::ResolverContext` is only usable at visibility `pub(crate)`
+   --> crates\verter_session\src\resolver_core\resolver_context.rs:104:1
+    |
+104 | pub(crate) trait ResolverContext: sealed::Sealed {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `resolver_context::ResolverContext` is more private than the item `PreparedSurfaceDb::peek`
+   --> crates\verter_session\src\component_meta_caches.rs:774:5
+    |
+774 | /     pub fn peek(
+775 | |         &self,
+776 | |         key: &PreparedSurfaceCacheKey,
+777 | |         ctx: &dyn ResolverContext,
+778 | |     ) -> Option<PreparedSurfacePayload> {
+    | |_______________________________________^ method `PreparedSurfaceDb::peek` is reachable at visibility `pub`
+    |
+note: but trait `resolver_context::ResolverContext` is only usable at visibility `pub(crate)`
+   --> crates\verter_session\src\resolver_core\resolver_context.rs:104:1
+    |
+104 | pub(crate) trait ResolverContext: sealed::Sealed {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `resolver_context::ResolverContext` is more private than the item `PreparedSurfaceDb::get_or_compute`
+   --> crates\verter_session\src\component_meta_caches.rs:787:5
+    |
+787 | /     pub fn get_or_compute<F>(
+788 | |         &self,
+789 | |         key: &PreparedSurfaceCacheKey,
+790 | |         ctx: &dyn ResolverContext,
+...   |
+793 | |     where
+794 | |         F: FnOnce() -> Option<(PreparedSurfacePayload, DepSignature)>,
+    | |______________________________________________________________________^ method `PreparedSurfaceDb::get_or_compute` is reachable at visibility `pub`
+    |
+note: but trait `resolver_context::ResolverContext` is only usable at visibility `pub(crate)`
+   --> crates\verter_session\src\resolver_core\resolver_context.rs:104:1
+    |
+104 | pub(crate) trait ResolverContext: sealed::Sealed {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `resolver_context::ResolverContext` is more private than the item `PreparedMemberDb::peek`
+   --> crates\verter_session\src\component_meta_caches.rs:893:5
+    |
+893 | /     pub fn peek(
+894 | |         &self,
+895 | |         key: &PreparedMemberCacheKey,
+896 | |         ctx: &dyn ResolverContext,
+897 | |     ) -> Option<Option<Arc<ProjectedMember>>> {
+    | |_____________________________________________^ method `PreparedMemberDb::peek` is reachable at visibility `pub`
+    |
+note: but trait `resolver_context::ResolverContext` is only usable at visibility `pub(crate)`
+   --> crates\verter_session\src\resolver_core\resolver_context.rs:104:1
+    |
+104 | pub(crate) trait ResolverContext: sealed::Sealed {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `resolver_context::ResolverContext` is more private than the item `PreparedMemberDb::get_or_compute`
+   --> crates\verter_session\src\component_meta_caches.rs:906:5
+    |
+906 | /     pub fn get_or_compute<F>(
+907 | |         &self,
+908 | |         key: &PreparedMemberCacheKey,
+909 | |         ctx: &dyn ResolverContext,
+...   |
+912 | |     where
+913 | |         F: FnOnce() -> Option<(Option<ProjectedMember>, DepSignature)>,
+    | |_______________________________________________________________________^ method `PreparedMemberDb::get_or_compute` is reachable at visibility `pub`
+    |
+note: but trait `resolver_context::ResolverContext` is only usable at visibility `pub(crate)`
+   --> crates\verter_session\src\resolver_core\resolver_context.rs:104:1
+    |
+104 | pub(crate) trait ResolverContext: sealed::Sealed {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `resolver_context::ResolverContext` is more private than the item `RoutedExprSurfaceDb::peek`
+    --> crates\verter_session\src\component_meta_caches.rs:1012:5
+     |
+1012 | /     pub fn peek(
+1013 | |         &self,
+1014 | |         key: &RoutedExprSurfaceCacheKey,
+1015 | |         ctx: &dyn ResolverContext,
+1016 | |     ) -> Option<Arc<TypeExpr>> {
+     | |______________________________^ method `RoutedExprSurfaceDb::peek` is reachable at visibility `pub`
+     |
+note: but trait `resolver_context::ResolverContext` is only usable at visibility `pub(crate)`
+    --> crates\verter_session\src\resolver_core\resolver_context.rs:104:1
+     |
+ 104 | pub(crate) trait ResolverContext: sealed::Sealed {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `resolver_context::ResolverContext` is more private than the item `RoutedExprSurfaceDb::get_or_compute`
+    --> crates\verter_session\src\component_meta_caches.rs:1025:5
+     |
+1025 | /     pub fn get_or_compute<F>(
+1026 | |         &self,
+1027 | |         key: &RoutedExprSurfaceCacheKey,
+1028 | |         ctx: &dyn ResolverContext,
+...    |
+1031 | |     where
+1032 | |         F: FnOnce() -> Option<(TypeExpr, DepSignature)>,
+     | |________________________________________________________^ method `RoutedExprSurfaceDb::get_or_compute` is reachable at visibility `pub`
+     |
+note: but trait `resolver_context::ResolverContext` is only usable at visibility `pub(crate)`
+    --> crates\verter_session\src\resolver_core\resolver_context.rs:104:1
+     |
+ 104 | pub(crate) trait ResolverContext: sealed::Sealed {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `resolver_context::ResolverContext` is more private than the item `MaterializeStructureDb::peek`
+    --> crates\verter_session\src\component_meta_caches.rs:1178:5
+     |
+1178 | /     pub fn peek(
+1179 | |         &self,
+1180 | |         key: &MaterializeStructureCacheKey,
+1181 | |         ctx: &dyn ResolverContext,
+1182 | |     ) -> Option<crate::semantic_query::CacheRead<MaterializeOutcome>> {
+     | |_____________________________________________________________________^ method `MaterializeStructureDb::peek` is reachable at visibility `pub`
+     |
+note: but trait `resolver_context::ResolverContext` is only usable at visibility `pub(crate)`
+    --> crates\verter_session\src\resolver_core\resolver_context.rs:104:1
+     |
+ 104 | pub(crate) trait ResolverContext: sealed::Sealed {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `resolver_context::ResolverContext` is more private than the item `RefCycleResultDb::peek`
+    --> crates\verter_session\src\component_meta_caches.rs:1445:5
+     |
+1445 | /     pub fn peek(
+1446 | |         &self,
+1447 | |         id: &DeclIdentity,
+1448 | |         ctx: &dyn ResolverContext,
+1449 | |     ) -> Option<crate::semantic_query::CacheRead<bool>> {
+     | |_______________________________________________________^ method `RefCycleResultDb::peek` is reachable at visibility `pub`
+     |
+note: but trait `resolver_context::ResolverContext` is only usable at visibility `pub(crate)`
+    --> crates\verter_session\src\resolver_core\resolver_context.rs:104:1
+     |
+ 104 | pub(crate) trait ResolverContext: sealed::Sealed {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `resolver_context::ResolverContext` is more private than the item `materialize_component_meta_structure`
+   --> crates\verter_session\src\component_meta_materialize.rs:351:1
+    |
+351 | / pub fn materialize_component_meta_structure(
+352 | |     ctx: &dyn ResolverContext,
+353 | |     key: MaterializeStructureCacheKey,
+354 | | ) -> crate::semantic_query::CacheRead<MaterializeOutcome> {
+    | |_________________________________________________________^ function `materialize_component_meta_structure` is reachable at visibility `pub`
+    |
+note: but trait `resolver_context::ResolverContext` is only usable at visibility `pub(crate)`
+   --> crates\verter_session\src\resolver_core\resolver_context.rs:104:1
+    |
+104 | pub(crate) trait ResolverContext: sealed::Sealed {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `resolver_context::ResolverContext` is more private than the item `project_semantic_dispatch::ProjectSemanticDispatch::<'a>::new`
+   --> crates\verter_session\src\project_semantic_dispatch\mod.rs:148:5
+    |
+148 |     pub fn new(ctx: &'a dyn ResolverContext) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ associated function `project_semantic_dispatch::ProjectSemanticDispatch::<'a>::new` is reachable at visibility `pub`
+    |
+note: but trait `resolver_context::ResolverContext` is only usable at visibility `pub(crate)`
+   --> crates\verter_session\src\resolver_core\resolver_context.rs:104:1
+    |
+104 | pub(crate) trait ResolverContext: sealed::Sealed {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `resolver_context::ResolverContext` is more private than the item `node_data_for`
+   --> crates\verter_session\src\project_semantic_dispatch\mod.rs:580:1
+    |
+580 | / pub fn node_data_for(
+581 | |     ctx: &dyn ResolverContext,
+582 | |     node: SemanticNodeId,
+583 | | ) -> Option<Arc<SemanticNodeData>> {
+    | |__________________________________^ function `node_data_for` is reachable at visibility `pub`
+    |
+note: but trait `resolver_context::ResolverContext` is only usable at visibility `pub(crate)`
+   --> crates\verter_session\src\resolver_core\resolver_context.rs:104:1
+    |
+104 | pub(crate) trait ResolverContext: sealed::Sealed {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `resolver_context::ResolverContext` is more private than the item `SessionDispatchHost::<'a>::new`
+    --> crates\verter_session\src\project_semantic_dispatch\mod.rs:1008:5
+     |
+1008 |     pub fn new(ctx: &'a dyn ResolverContext) -> Self {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ associated function `SessionDispatchHost::<'a>::new` is reachable at visibility `pub`
+     |
+note: but trait `resolver_context::ResolverContext` is only usable at visibility `pub(crate)`
+    --> crates\verter_session\src\resolver_core\resolver_context.rs:104:1
+     |
+ 104 | pub(crate) trait ResolverContext: sealed::Sealed {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `resolver_context::ResolverContext` is more private than the item `ComponentMetaQueryEngine::<'a>::new`
+   --> crates\verter_session\src\resolver_core\component_meta_query_engine\mod.rs:487:5
+    |
+487 |     pub fn new(ctx: &'a dyn ResolverContext) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ associated function `ComponentMetaQueryEngine::<'a>::new` is reachable at visibility `pub`
+    |
+note: but trait `resolver_context::ResolverContext` is only usable at visibility `pub(crate)`
+   --> crates\verter_session\src\resolver_core\resolver_context.rs:104:1
+    |
+104 | pub(crate) trait ResolverContext: sealed::Sealed {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `resolver_context::ResolverContext` is more private than the item `resolved_macro_to_expansion_via_solver`
+   --> crates\verter_session\src\resolver_core\type_expansion_verter.rs:187:1
+    |
+187 | / pub fn resolved_macro_to_expansion_via_solver(
+188 | |     macro_meta: &ResolvedMacroMeta,
+189 | |     ctx: &dyn crate::resolver_core::ResolverContext,
+190 | | ) -> (
+191 | |     TypeExpansionResult,
+192 | |     Vec<verter_semantic::analysis::type_solver::host::ResolvedRootIdentity>,
+193 | | ) {
+    | |_^ function `resolved_macro_to_expansion_via_solver` is reachable at visibility `pub`
+    |
+note: but trait `resolver_context::ResolverContext` is only usable at visibility `pub(crate)`
+   --> crates\verter_session\src\resolver_core\resolver_context.rs:104:1
+    |
+104 | pub(crate) trait ResolverContext: sealed::Sealed {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `resolve_prepared_decl_target` and `resolve_decl_in_scope_with_reexport_chain` are never used
+    --> crates\verter_session\src\host_resolve.rs:2600:19
+     |
+ 564 | impl VerterHost {
+     | --------------- methods in this implementation
+...
+2600 |     pub(crate) fn resolve_prepared_decl_target(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2634 |     pub(crate) fn resolve_decl_in_scope_with_reexport_chain(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `project_type_surface_expr_via_host` is never used
+   --> crates\verter_session\src\meta_resolve\dispatch_helpers.rs:375:15
+    |
+375 | pub(crate) fn project_type_surface_expr_via_host(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `project_type_surface_shape_via_host` is never used
+   --> crates\verter_session\src\meta_resolve\dispatch_helpers.rs:406:15
+    |
+406 | pub(crate) fn project_type_surface_shape_via_host(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `project_prepared_type_surface_shape_via_host` is never used
+   --> crates\verter_session\src\meta_resolve\dispatch_helpers.rs:437:15
+    |
+437 | pub(crate) fn project_prepared_type_surface_shape_via_host(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `project_prepared_type_surface_expr_via_host_threaded` is never used
+   --> crates\verter_session\src\meta_resolve\dispatch_helpers.rs:448:15
+    |
+448 | pub(crate) fn project_prepared_type_surface_expr_via_host_threaded<'ctx>(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `direct_macro_type_reference_expr` is never used
+    --> crates\verter_session\src\resolver_core\component_meta.rs:3626:4
+     |
+3626 | fn direct_macro_type_reference_expr(source: &str, span: Span) -> Option<TypeExpr> {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `find_matching_angle` is never used
+    --> crates\verter_session\src\resolver_core\component_meta.rs:3647:4
+     |
+3647 | fn find_matching_angle(text: &str, open_index: usize) -> Option<usize> {
+     |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `split_top_level_type_args` is never used
+    --> crates\verter_session\src\resolver_core\component_meta.rs:3699:4
+     |
+3699 | fn split_top_level_type_args(text: &str) -> Vec<&str> {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `dispatch_projected_keyspace` is never used
+   --> crates\verter_session\src\resolver_core\component_meta_query_engine\registry_decl.rs:580:19
+    |
+ 60 | impl<'a> ComponentMetaQueryEngine<'a> {
+    | ------------------------------------- method in this implementation
+...
+580 |     pub(crate) fn dispatch_projected_keyspace(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `current_dependency_fact_versions` and `get_raw_analysis_snapshot` are never used
+   --> crates\verter_session\src\resolver_core\resolver_context.rs:242:8
+    |
+104 | pub(crate) trait ResolverContext: sealed::Sealed {
+    |                  --------------- methods in this trait
+...
+242 |     fn current_dependency_fact_versions(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+248 |     fn get_raw_analysis_snapshot(&self, canonical: &str) -> Option<FileAnalysisSnapshot>;
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `verter_session` (lib) generated 71 warnings (run `cargo fix --lib -p verter_session` to apply 38 suggestions)
+   Compiling verter_session v0.0.1-beta.1 (D:\dev\wt\phase-09b-host-backed-compile-cutover\crates\verter_session)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.14s
+     Running tests\architecture_guards.rs (target\debug\deps\architecture_guards-8ea90cb84f94c452.exe)
+
+running 1 test
+test no_napi_direct_verter_compiler_emitters ... FAILED
+
+failures:
+
+---- no_napi_direct_verter_compiler_emitters stdout ----
+
+thread 'no_napi_direct_verter_compiler_emitters' (3391856) panicked at crates\verter_session\tests\architecture_guards.rs:1929:13:
+Phase 9b architecture guard violation:
+found 1 verter_compiler::compile{,_parallel} reference(s) in 1 file(s):
+  D:\dev\wt\phase-09b-host-backed-compile-cutover\crates/verter_napi/src\lib.rs -- use `compile`
+
+NAPI production sources MUST NOT reference `verter_compiler::compile::{compile, compile_from_parsed}` or any symbol under `verter_compiler::compile_parallel::*`. Batch and single SFC compile must route through `VerterHost::compile_many` / `VerterHost::get_virtual_file`. See sub-plan §5 for the full rule set.
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    no_napi_direct_verter_compiler_emitters
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.04s
+
+error: test failed, to rerun pass `-p verter_session --test architecture_guards`

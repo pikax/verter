@@ -31,7 +31,6 @@ napi = { version = "2", default-features = false, features = ["napi8", "serde-js
 napi-derive = "2"
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-rayon = "1.8"
 oxc_allocator = { workspace = true }
 tokio = { version = "1", features = ["io-util", "process", "sync", "time", "rt", "macros"] }
 

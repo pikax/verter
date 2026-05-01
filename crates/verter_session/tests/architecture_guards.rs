@@ -1027,6 +1027,19 @@ fn phase_8_allow_list() -> std::collections::HashMap<&'static str, &'static str>
             "workspace",
             "phase-06b-report.md §6b.2.F6.bypass: single-cell workspace handle (Arc<RwLock<Arc<dyn WorkspaceAccess>>>) shared with the scheduler's SourceLoader so the lock always reads through the latest workspace after set_workspace(). NOT a cache; a re-pointable handle.",
         ),
+        // (c) Phase 9b test-only observable. `#[cfg(test)] last_upsert_priority`
+        //     is a single-cell `Mutex<Option<Priority>>` test mailbox written
+        //     by `upsert_with_priority` and read by the
+        //     `compile_many_propagates_*_priority` tests on `VerterHost::compile_many`.
+        //     Production builds compile this field out completely; allow-listed
+        //     here because the guard parses `lib.rs` whose `#[cfg(test)]`-gated
+        //     declaration is structurally a `Mutex<...>` field that the cache
+        //     shape detector flags. NOT a cache; a per-host single-cell test
+        //     observable.
+        (
+            "last_upsert_priority",
+            "phase-09b-report.md §0 row \"Test-only observables on VerterHost\": Mutex<Option<Priority>> test mailbox written by upsert_with_priority and read by compile_many_propagates_*_priority. Compiled out in production builds. NOT a cache.",
+        ),
     ]
     .into_iter()
     .collect()
@@ -1603,4 +1616,347 @@ fn no_concrete_verter_host_in_seal_scope() {
     // through the concrete `VerterHost` type. Re-introduction of a
     // `VerterHost` reference in a seal-scope file fails this test.
     resolver_context_seal::run();
+}
+
+// ===========================================================================
+// Phase 9b — `no_napi_direct_verter_compiler_emitters`
+// ===========================================================================
+//
+// `crates/verter_napi/src/**/*.rs` (production sources only — sibling
+// `*_tests.rs` and `tests.rs` whitelisted) MUST NOT reference any
+// compile-emitter symbol from `verter_compiler::compile::*` or
+// `verter_compiler::compile_parallel::*`. The NAPI leaf must route
+// batch/single SFC compile through the host-backed
+// `VerterHost::compile_many` / `get_virtual_file` substrate.
+//
+// Forbidden inside `verter_compiler::compile::*` (explicit deny-list,
+// no regex):
+//   - `compile`
+//   - `compile_from_parsed`
+//
+// The entire `verter_compiler::compile_parallel::*` namespace is
+// forward-defense-forbidden — the module is intentionally never
+// created.
+//
+// Allow-listed pure-data exports from `verter_compiler::compile::*`:
+//   `CodegenOptions`, `VerterCompileOptions`, `VerterCompileResult`,
+//   `TypesParserConfig`, `ParsedSfc`. Anything else inside the
+//   `compile` namespace is default-deny.
+//
+// Three visitor methods (`visit_item_use`, `visit_expr_path`,
+// `visit_type_path`) call shared `classify(segments)` to detect
+// violations. Glob arms reject any glob whose prefix matches either
+// compile namespace. `Rename` arms match on the ORIGINAL ident.
+//
+// Violation messages report file path + ident kind + leaf ident. No
+// line numbers — `proc-macro2/span-locations` is not enabled in this
+// workspace's `syn` dev-dep (see Cargo.toml:96).
+
+mod napi_compiler_emitters {
+    use std::path::{Path, PathBuf};
+
+    use syn::visit::Visit;
+    use syn::{
+        ExprPath, ItemUse, Path as SynPath, PathSegment, TypePath, UseGlob, UseGroup, UseName,
+        UsePath, UseRename, UseTree,
+    };
+    use walkdir::WalkDir;
+
+    use super::workspace_root;
+
+    /// Forbidden idents directly inside `verter_compiler::compile::*`.
+    /// Inside `verter_compiler::compile_parallel::*` ALL leaves are
+    /// forbidden (entire namespace).
+    const COMPILE_DENY_LIST: &[&str] = &["compile", "compile_from_parsed"];
+
+    /// Pure-data allow-list inside `verter_compiler::compile::*`.
+    const COMPILE_ALLOW_LIST: &[&str] = &[
+        "CodegenOptions",
+        "VerterCompileOptions",
+        "VerterCompileResult",
+        "TypesParserConfig",
+        "ParsedSfc",
+    ];
+
+    #[derive(Debug)]
+    pub(super) struct Violation {
+        pub(super) file: PathBuf,
+        pub(super) kind: ViolationKind,
+        pub(super) leaf: String,
+    }
+
+    // Same-postfix lint silenced — variant names are deliberate
+    // taxonomy markers ("UsePath", "TypePath", "ExprPath" all refer to
+    // distinct `syn::Visit` hooks; renaming would obscure the mapping).
+    #[allow(clippy::enum_variant_names)]
+    #[derive(Debug)]
+    pub(super) enum ViolationKind {
+        UsePath,
+        UseGlob,
+        TypePath,
+        ExprPath,
+    }
+
+    impl std::fmt::Display for ViolationKind {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Self::UsePath => write!(f, "use"),
+                Self::UseGlob => write!(f, "use ::*"),
+                Self::TypePath => write!(f, "type"),
+                Self::ExprPath => write!(f, "expr"),
+            }
+        }
+    }
+
+    /// What `classify` returns for a sequence of path segment idents.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Classification<'a> {
+        /// Forbidden symbol inside one of the two compile namespaces.
+        Forbidden(&'a str),
+        /// Allowed pure-data import from `verter_compiler::compile`.
+        AllowedDataType,
+        /// Reference outside both namespaces — uninteresting.
+        OutsideNamespace,
+    }
+
+    /// Classify a path by its leading two segments and final segment.
+    /// `segments` is the leaf-relative ident chain after any
+    /// `crate::` / `self::` / `super::` are skipped.
+    fn classify<'a>(segments: &'a [String]) -> Classification<'a> {
+        if segments.len() < 2 {
+            return Classification::OutsideNamespace;
+        }
+        if segments[0] != "verter_compiler" {
+            return Classification::OutsideNamespace;
+        }
+        let last: &'a str = segments.last().unwrap();
+        match segments[1].as_str() {
+            "compile_parallel" => {
+                // Entire namespace is forward-defense-forbidden.
+                Classification::Forbidden(last)
+            }
+            "compile" => {
+                if COMPILE_DENY_LIST.contains(&last) {
+                    Classification::Forbidden(last)
+                } else if COMPILE_ALLOW_LIST.contains(&last) {
+                    Classification::AllowedDataType
+                } else {
+                    // Default-deny inside the compile namespace.
+                    Classification::Forbidden(last)
+                }
+            }
+            _ => Classification::OutsideNamespace,
+        }
+    }
+
+    /// Render a `syn::Path` to a flat list of segment ident strings,
+    /// skipping leading `crate` / `self` / `super` to match the
+    /// classifier's expected absolute-ish shape.
+    fn path_idents(path: &SynPath) -> Vec<String> {
+        let mut out: Vec<String> = path
+            .segments
+            .iter()
+            .map(|s: &PathSegment| s.ident.to_string())
+            .collect();
+        while matches!(
+            out.first().map(String::as_str),
+            Some("crate" | "self" | "super")
+        ) {
+            out.remove(0);
+        }
+        out
+    }
+
+    pub(super) struct EmitterVisitor<'a> {
+        path: &'a Path,
+        violations: &'a mut Vec<Violation>,
+    }
+
+    impl<'a> EmitterVisitor<'a> {
+        pub(super) fn new(path: &'a Path, violations: &'a mut Vec<Violation>) -> Self {
+            Self { path, violations }
+        }
+
+        /// Recursively walk a `UseTree` accumulating prefix segments,
+        /// flagging Forbidden-classification leaves and Glob arms whose
+        /// prefix matches either compile namespace.
+        fn walk_use_tree(&mut self, tree: &UseTree, prefix: &mut Vec<String>) {
+            match tree {
+                UseTree::Path(UsePath { ident, tree, .. }) => {
+                    prefix.push(ident.to_string());
+                    self.walk_use_tree(tree, prefix);
+                    prefix.pop();
+                }
+                UseTree::Name(UseName { ident, .. }) => {
+                    prefix.push(ident.to_string());
+                    self.classify_use_leaf(prefix);
+                    prefix.pop();
+                }
+                UseTree::Rename(UseRename { ident, .. }) => {
+                    // Match on the ORIGINAL ident, not the alias.
+                    prefix.push(ident.to_string());
+                    self.classify_use_leaf(prefix);
+                    prefix.pop();
+                }
+                UseTree::Glob(UseGlob { .. }) => {
+                    // A glob whose prefix is compile or compile_parallel
+                    // is rejected outright.
+                    let stripped = strip_use_anchors(prefix);
+                    let is_target = stripped.len() >= 2
+                        && stripped[0] == "verter_compiler"
+                        && (stripped[1] == "compile" || stripped[1] == "compile_parallel");
+                    if is_target {
+                        self.violations.push(Violation {
+                            file: self.path.to_path_buf(),
+                            kind: ViolationKind::UseGlob,
+                            leaf: format!("{}::*", stripped.join("::")),
+                        });
+                    }
+                }
+                UseTree::Group(UseGroup { items, .. }) => {
+                    for item in items {
+                        self.walk_use_tree(item, prefix);
+                    }
+                }
+            }
+        }
+
+        fn classify_use_leaf(&mut self, prefix: &[String]) {
+            let stripped = strip_use_anchors(prefix);
+            if let Classification::Forbidden(leaf) = classify(&stripped) {
+                self.violations.push(Violation {
+                    file: self.path.to_path_buf(),
+                    kind: ViolationKind::UsePath,
+                    leaf: leaf.to_string(),
+                });
+            }
+        }
+    }
+
+    fn strip_use_anchors(prefix: &[String]) -> Vec<String> {
+        let mut out = prefix.to_vec();
+        while matches!(
+            out.first().map(String::as_str),
+            Some("crate" | "self" | "super")
+        ) {
+            out.remove(0);
+        }
+        out
+    }
+
+    impl<'ast> Visit<'ast> for EmitterVisitor<'_> {
+        fn visit_item_use(&mut self, item_use: &'ast ItemUse) {
+            let mut prefix: Vec<String> = Vec::new();
+            // Leading `::` doesn't change the absolute-ish form;
+            // `tree` walks from the topmost crate ident.
+            self.walk_use_tree(&item_use.tree, &mut prefix);
+            syn::visit::visit_item_use(self, item_use);
+        }
+
+        fn visit_type_path(&mut self, tp: &'ast TypePath) {
+            let segments = path_idents(&tp.path);
+            if let Classification::Forbidden(leaf) = classify(&segments) {
+                self.violations.push(Violation {
+                    file: self.path.to_path_buf(),
+                    kind: ViolationKind::TypePath,
+                    leaf: leaf.to_string(),
+                });
+            }
+            syn::visit::visit_type_path(self, tp);
+        }
+
+        fn visit_expr_path(&mut self, ep: &'ast ExprPath) {
+            let segments = path_idents(&ep.path);
+            if let Classification::Forbidden(leaf) = classify(&segments) {
+                self.violations.push(Violation {
+                    file: self.path.to_path_buf(),
+                    kind: ViolationKind::ExprPath,
+                    leaf: leaf.to_string(),
+                });
+            }
+            syn::visit::visit_expr_path(self, ep);
+        }
+    }
+
+    pub(super) fn scan_file(path: &Path, violations: &mut Vec<Violation>) {
+        let src = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => panic!("read {}: {}", path.display(), e),
+        };
+        let parsed =
+            syn::parse_file(&src).unwrap_or_else(|e| panic!("parse {}: {}", path.display(), e));
+        let mut visitor = EmitterVisitor::new(path, violations);
+        visitor.visit_file(&parsed);
+    }
+
+    pub(super) fn walk_rs_files(root: &Path) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        for entry in WalkDir::new(root).into_iter().filter_map(Result::ok) {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            // Skip sibling `*_tests.rs` and `tests.rs` files (production
+            // sources only).
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.ends_with("_tests.rs") || name == "tests.rs" {
+                    continue;
+                }
+            }
+            files.push(path.to_path_buf());
+        }
+        files
+    }
+
+    pub(super) fn format_violations(violations: &[Violation]) -> String {
+        use std::collections::BTreeMap;
+        let mut by_file: BTreeMap<&Path, Vec<String>> = BTreeMap::new();
+        for v in violations {
+            by_file
+                .entry(v.file.as_path())
+                .or_default()
+                .push(format!("{} `{}`", v.kind, v.leaf));
+        }
+        let mut lines = Vec::new();
+        for (file, kinds) in by_file {
+            lines.push(format!("  {} -- {}", file.display(), kinds.join(", ")));
+        }
+        format!(
+            "found {} verter_compiler::compile{{,_parallel}} reference(s) in {} file(s):\n{}",
+            violations.len(),
+            lines.len(),
+            lines.join("\n")
+        )
+    }
+
+    pub(super) fn run() {
+        let napi_root = workspace_root().join("crates/verter_napi/src");
+        let mut violations: Vec<Violation> = Vec::new();
+        for file in walk_rs_files(&napi_root) {
+            scan_file(&file, &mut violations);
+        }
+        if !violations.is_empty() {
+            panic!(
+                "Phase 9b architecture guard violation:\n{}\n\nNAPI \
+                 production sources MUST NOT reference \
+                 `verter_compiler::compile::{{compile, compile_from_parsed}}` \
+                 or any symbol under `verter_compiler::compile_parallel::*`. \
+                 Batch and single SFC compile must route through \
+                 `VerterHost::compile_many` / `VerterHost::get_virtual_file`. \
+                 See sub-plan §5 for the full rule set.",
+                format_violations(&violations)
+            );
+        }
+    }
+}
+
+#[test]
+fn no_napi_direct_verter_compiler_emitters() {
+    // Phase 9b — un-ignored on commit 1 (RED on HEAD against the
+    // bypass at `crates/verter_napi/src/lib.rs:2314`). Commit 3 deletes
+    // the bypass, after which this test PASSES.
+    napi_compiler_emitters::run();
 }

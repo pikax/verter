@@ -95,37 +95,42 @@ export declare function processStyle(
 ): ProcessStyleResult;
 
 // =============================================================================
-// Batch Compilation (Rayon parallel)
+// Host-backed batch compile — VerterHost.compileMany
+//
+// Replaces the previous free-fn `compileBatch` (Rayon-direct,
+// stateless, bypassing VerterHost). The new entry point is the
+// `host.compileMany(files, options)` instance method, which routes
+// through the host's scheduler + dispatch + compile_cache.
 // =============================================================================
 
-export interface BatchFile {
-  filename: string;
-  source: string;
+export interface CompileBatchInput {
+  canonicalId: string;
+  /** SFC source. Accepts a string or a Buffer (UTF-8 bytes). */
+  source: string | Buffer;
 }
 
-export interface BatchOptions {
-  /** Number of Rayon threads (0 or undefined = all logical CPUs) */
+export interface CompileBatchOptions {
+  /** Number of host orchestration threads. 0 or undefined = all logical CPUs. */
   threads?: number;
+  /**
+   * Scheduler priority for batch upserts. Default: "background" (yields to
+   * concurrent interactive work). Use "interactive" when there is no
+   * concurrent interactive work and you want full-throttle execution
+   * (benchmarks, CI cold-start measurement).
+   */
+  priority?: "interactive" | "background";
 }
 
-export interface BatchResult {
-  filename: string;
-  /** Combined script + template code */
+export interface CompileBatchEntry {
+  canonicalId: string;
   code: string;
-  /** First error message if compilation failed */
-  error?: string;
+  sourceMap?: string;
+  /** All compilation errors for this file. Empty on success. */
+  errors: string[];
   durationMs: number;
+  /** True iff the slot was already warm in compile_cache before this call. */
+  cacheHit: boolean;
 }
-
-/**
- * Compile a batch of Vue SFC files in parallel using Rayon.
- *
- * Each file is compiled independently with its own allocator — no shared
- * mutable state. No caching, no analysis — compile-only for maximum throughput.
- *
- * Equivalent to Vize's `compileSfcBatch` for fair benchmark comparison.
- */
-export declare function compileBatch(files: BatchFile[], options?: BatchOptions): BatchResult[];
 
 // =============================================================================
 // VerterHost (in-memory virtual file host)
@@ -323,6 +328,16 @@ export declare class VerterHost {
 
   resolve(rawId: string): import("./host-types").HostResolvedId | null;
   upsert(request: HostUpsertRequest): import("./host-types").HostUpdateResult;
+  /**
+   * Compile a batch of Vue SFC inputs through the production host
+   * path (scheduler + dispatch + compile_cache).
+   *
+   * Returns one [`CompileBatchEntry`] per input, in the original
+   * input order. Per-input panic isolation: if codegen panics for
+   * one input, only that input's entry receives a `compiler panic:
+   * ...` error message; the rest of the batch completes normally.
+   */
+  compileMany(files: CompileBatchInput[], options?: CompileBatchOptions): CompileBatchEntry[];
   applyBlockOverrides(request: NativeBlockOverrideRequest): import("./host-types").HostUpdateResult;
   getPublicApi(
     canonicalId: string,

@@ -122,7 +122,6 @@ function toBuffer(v) {
 
 const {
   processStyle: _processStyle,
-  compileBatch,
   VerterHost,
   Workspace,
   MetaProject,
@@ -142,6 +141,17 @@ VerterHost.prototype.upsert = function (request) {
     request = { ...request, source: Buffer.from(request.source) };
   }
   return _upsert.call(this, request);
+};
+
+const _compileMany = VerterHost.prototype.compileMany;
+VerterHost.prototype.compileMany = function (files, options) {
+  // The native binding expects each input.source as Buffer. Mirror
+  // the existing upsert wrapper convention: coerce string → Buffer
+  // before crossing the FFI boundary; canonicalId is always a string.
+  const coerced = files.map((f) =>
+    typeof f.source === "string" ? { ...f, source: Buffer.from(f.source) } : f,
+  );
+  return _compileMany.call(this, coerced, options);
 };
 
 const _applyBlockOverrides = VerterHost.prototype.applyBlockOverrides;
@@ -172,7 +182,6 @@ if (MetaSession) {
 }
 
 module.exports.processStyle = processStyle;
-module.exports.compileBatch = compileBatch;
 module.exports.VerterHost = VerterHost;
 module.exports.Workspace = Workspace;
 module.exports.ComponentMetaHost = ComponentMetaHost;

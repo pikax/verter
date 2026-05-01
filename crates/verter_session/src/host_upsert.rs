@@ -20,6 +20,7 @@ use crate::types::*;
 use crate::upsert::compute_upsert_changes_from_parse;
 use crate::upsert::{build_upsert_result, UpsertResultData};
 use crate::VerterHost;
+use verter_scheduler::stage::Priority;
 
 impl VerterHost {
     /// Insert or update a file in the host.
@@ -32,22 +33,68 @@ impl VerterHost {
     /// submits to the scheduler, waits for Source+Analysis to commit, then reads
     /// back the result and populates the compile cache. The `files` map is also
     /// populated for the WASM path (non-scheduler).
+    ///
+    /// Phase 9b sub-plan §0/§3: `upsert` is now a one-line forwarder onto
+    /// `upsert_with_priority` at `Priority::Interactive` (the priority the
+    /// existing implementation hard-coded at the scheduler submission
+    /// site). Batch callers (`compile_many`) instead call
+    /// `upsert_with_priority` directly with the caller-configured
+    /// priority. The pre-invalidation invariant is now owned by
+    /// `upsert_with_priority`.
     pub fn upsert(&self, req: UpsertRequest) -> Result<HostUpdateResult, HostError> {
+        self.upsert_with_priority(req, Priority::Interactive)
+    }
+
+    /// Insert or update a file with caller-configured scheduler priority.
+    ///
+    /// Performs the semantic-cache pre-invalidation that `upsert` always
+    /// performs (delete the canonical's semantic-db entries before
+    /// re-parsing), records the priority into the test-only
+    /// `last_upsert_priority` observable, then delegates to
+    /// `upsert_via_scheduler_with_priority`.
+    ///
+    /// Batch callers (`VerterHost::compile_many`) reach this method via
+    /// `host_compile::upsert_with_priority_for_batch`.
+    pub(crate) fn upsert_with_priority(
+        &self,
+        req: UpsertRequest,
+        priority: Priority,
+    ) -> Result<HostUpdateResult, HostError> {
         // Invalidate semantic cache for this file before re-parsing.
+        // Mandatory invariant per Phase 9b §0 row "Pre-invalidation
+        // invariant" — batch upserts route through here, NOT through
+        // `upsert_via_scheduler_with_priority` directly.
         if let Some(ref id) = req.canonical_id {
             self.semantic_db.lock().invalidate(id);
         }
 
+        // Test-only observable: lets `compile_many_propagates_*_priority`
+        // tests confirm the priority that flowed to the scheduler.
+        // Production builds compile this branch out completely.
+        #[cfg(test)]
         {
-            self.upsert_via_scheduler(req)
+            *self.last_upsert_priority.lock() = Some(priority);
         }
+
+        self.upsert_via_scheduler_with_priority(req, priority)
     }
 
-    /// Scheduler-backed upsert: submits to scheduler (sole parser), waits for
-    /// Source+Analysis to commit, reads back the result, populates compile_cache
-    /// and the compile_cache.
+    /// Priority-parameterized inner helper for the scheduler-backed
+    /// upsert path. Body is the same scheduler-submit, wait-for-commit,
+    /// and post-process flow that previously lived in the unparameterized
+    /// inner helper; the only change is the `priority` parameter which
+    /// replaces the previously hard-coded `Priority::Interactive` at the
+    /// scheduler submission site.
+    ///
+    /// Callers MUST go through `upsert_with_priority` (which performs
+    /// the semantic-db pre-invalidation invariant) — direct callers of
+    /// this inner helper bypass that invariant.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    fn upsert_via_scheduler(&self, req: UpsertRequest) -> Result<HostUpdateResult, HostError> {
+    pub(crate) fn upsert_via_scheduler_with_priority(
+        &self,
+        req: UpsertRequest,
+        priority: Priority,
+    ) -> Result<HostUpdateResult, HostError> {
         use crate::host_executor::HostSourceData;
         use verter_scheduler::job::CompletionState;
 
@@ -78,7 +125,7 @@ impl VerterHost {
             .submit_request(verter_scheduler::scheduler::Request {
                 file_id: canonical_id.clone(),
                 target: verter_scheduler::stage::TargetStage::Analysis,
-                priority: verter_scheduler::stage::Priority::Interactive,
+                priority,
                 source: Some(req.source.clone()),
                 file_kind: Some(match req.file_kind {
                     FileKind::VueSfc => verter_scheduler::source_loader::FileKind::VueSfc,

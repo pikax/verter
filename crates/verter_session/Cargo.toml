@@ -71,6 +71,11 @@ static_assertions = "1"
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-time = "1"
 
+# Phase 9b — Rayon-backed batch compile (`host_compile.rs`) is native-only.
+# WASM continues to use the single-file `upsert` + `get_virtual_file` path.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rayon = { workspace = true }
+
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
 verter_parser = { path = "../verter_parser" }

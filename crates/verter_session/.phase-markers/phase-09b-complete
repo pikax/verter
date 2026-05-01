@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "phase": "phase-09b",
+  "status": "success",
+  "base_commit": "4cc68fdafe39ea24921ce220ed80f9e347ae1789",
+  "work_head_before_marker": "867df3208f1cc83618c4fec2475f7fc3444c39d4",
+  "test_results": {
+    "workspace": {
+      "test_scope": "cargo test --workspace --tests --verbose",
+      "passed": 10296,
+      "failed": 0
+    },
+    "correctness": {
+      "test_scope": "cargo test -p verter_session --test correctness",
+      "passed": 18,
+      "failed": 0
+    }
+  },
+  "snapshot_drift": "none",
+  "guards_un_ignored": ["no_napi_direct_verter_compiler_emitters"],
+  "deferred": [],
+  "report_path": "phase-09b-report.md",
+  "derivation_notes_verified": false,
+  "atomic_gate_phase": true,
+  "summary": "compileBatch bypass deleted from verter_napi. New host-backed VerterHost::compile_many + NapiVerterHost::compile_many instance method. Three-phase batch algorithm (dedupe + cache-hit short-circuit + parallel compile). Architecture guard no_napi_direct_verter_compiler_emitters active. Bench/CLI consumers migrated."
+}

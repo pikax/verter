@@ -2956,6 +2956,66 @@ impl VerterHost {
         Ok(())
     }
 
+    /// Read-only predicate: would `get_virtual_file(query)` for this
+    /// `(canonical_id, profile)` hit the compile cache without doing any
+    /// work?
+    ///
+    /// Body mirrors the freshness predicate the writer uses inside
+    /// `get_virtual_file` (see this file at the start of the
+    /// `cache_miss` block — `slot.semantic_hash == parse.semantic_hash
+    /// && slot.style_override_hash == soh && slot.content_override_hash
+    /// == coh`). Phase 9b sub-plan §3.2 binds this predicate to remain
+    /// in lockstep with the writer; if the writer's predicate ever
+    /// changes, this accessor changes with it.
+    ///
+    /// Eviction in the host fast path (`host_upsert.rs` byte-identical
+    /// branch) calls `cc.compile_slots.clear()`; a missing slot makes
+    /// this accessor return `false`, which matches the writer's
+    /// observable behavior on an evicted entry. The predicate
+    /// therefore intentionally does NOT carry an `if cc.evicted`
+    /// early-return — the writer doesn't either.
+    pub(crate) fn compile_slot_is_warm(
+        &self,
+        canonical_id: &str,
+        profile: &CompileProfile,
+    ) -> bool {
+        use crate::host_executor::HostSourceData;
+        let canonical = self.resolve_alias_or_canonical(canonical_id);
+        let profile_hash = compile_profile_hash(profile);
+
+        let snap = match self.scheduler.try_get_source(&canonical) {
+            Some(s) => s,
+            None => return false,
+        };
+        let hd = match snap.downcast_data::<HostSourceData>() {
+            Some(h) => h,
+            None => return false,
+        };
+        let parse = &hd.parse;
+
+        let cc = match self.compile_cache.get(&canonical) {
+            Some(c) => c,
+            None => return false,
+        };
+        let soh = cc
+            .style_overrides
+            .get(&profile_hash)
+            .map(|o| o.hash)
+            .unwrap_or(0);
+        let coh = cc
+            .content_overrides
+            .get(&profile_hash)
+            .map(|o| o.layer.hash)
+            .unwrap_or(0);
+        let slot = match cc.compile_slots.get(&profile_hash) {
+            Some(s) => s,
+            None => return false,
+        };
+        slot.semantic_hash == parse.semantic_hash
+            && slot.style_override_hash == soh
+            && slot.content_override_hash == coh
+    }
+
     /// Retrieve a compiled virtual file (script, template, style, or main bundle).
     ///
     /// On cache hit, returns immediately. On cache miss, compiles the file using

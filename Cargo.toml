@@ -21,6 +21,7 @@ oxc_allocator = "0.117.0"
 oxc_ast = "0.117.0"
 oxc_parser = "0.117.0"
 oxc_span = "0.117.0"
+rayon = "1.8"
 rustc-hash = "2.1"
 self_cell = "1.2.2"
 serde = { version = "1.0", features = ["derive", "rc"] }

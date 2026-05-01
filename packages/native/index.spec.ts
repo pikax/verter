@@ -530,6 +530,7 @@ describe("VerterHost type declarations in sync with native binary", () => {
       "applyBlockOverrides",
       "close",
       "collectResolvableModuleReferenceSpecifiers",
+      "compileMany",
       "configureProjects",
       "evaluateTypes",
       "getAnalysis",
@@ -566,11 +567,14 @@ describe("VerterHost type declarations in sync with native binary", () => {
     ).toEqual([]);
   });
 
-  it("top-level exports should include processStyle and compileBatch", () => {
+  it("top-level exports should include processStyle and VerterHost", () => {
     const native = require("./index.js");
     expect(typeof native.processStyle).toBe("function");
-    expect(typeof native.compileBatch).toBe("function");
     expect(typeof native.VerterHost).toBe("function");
+    // Phase 9b — `compileBatch` was deleted; batch SFC compile is now
+    // the `host.compileMany` instance method. Negative assertion to
+    // catch any future re-export attempt.
+    expect((native as { compileBatch?: unknown }).compileBatch).toBeUndefined();
   });
 
   it("prefers the canonical verter-native binary when loading from dist", () => {
@@ -614,5 +618,70 @@ describe("processStyle", () => {
     });
 
     expect(result.code).toContain("abc123");
+  });
+});
+
+// =============================================================================
+// Phase 9b — VerterHost.compileMany E2E
+// =============================================================================
+
+describe("VerterHost.compileMany", () => {
+  it("compiles a single SFC end-to-end", () => {
+    const host = new VerterHost();
+    const r = host.compileMany(
+      [{ canonicalId: "/A.vue", source: "<template><div>x</div></template>" }],
+      { threads: 1 },
+    );
+    expect(r).toHaveLength(1);
+    expect(r[0].errors).toEqual([]);
+    expect(r[0].code.length).toBeGreaterThan(0);
+    expect(r[0].canonicalId).toBe("/A.vue");
+    expect(r[0].cacheHit).toBe(false);
+  });
+
+  it("isolates per-file errors", () => {
+    const host = new VerterHost();
+    const r = host.compileMany(
+      [
+        { canonicalId: "/A.vue", source: "<template><div>good</div></template>" },
+        { canonicalId: "/B.vue", source: "<template><div>{{ unclosed </template>" },
+        { canonicalId: "/C.vue", source: "<template><div>also good</div></template>" },
+      ],
+      { threads: 2 },
+    );
+    expect(r).toHaveLength(3);
+    expect(r[0].errors).toEqual([]);
+    expect(r[1].errors.length).toBeGreaterThanOrEqual(1);
+    expect(r[2].errors).toEqual([]);
+  });
+
+  it("warm-hits compile_cache on second call", () => {
+    const host = new VerterHost();
+    const inputs = [{ canonicalId: "/A.vue", source: "<template><div>x</div></template>" }];
+    const r1 = host.compileMany(inputs, {});
+    const r2 = host.compileMany(inputs, {});
+    expect(r1[0].cacheHit).toBe(false);
+    expect(r2[0].cacheHit).toBe(true);
+    expect(r1[0].code).toBe(r2[0].code);
+  });
+
+  it("accepts priority='interactive'", () => {
+    const host = new VerterHost();
+    const r = host.compileMany(
+      [{ canonicalId: "/A.vue", source: "<template><div>x</div></template>" }],
+      { priority: "interactive" },
+    );
+    expect(r[0].errors).toEqual([]);
+  });
+
+  it("rejects invalid priority", () => {
+    const host = new VerterHost();
+    expect(() =>
+      host.compileMany(
+        [{ canonicalId: "/A.vue", source: "<template></template>" }],
+        // @ts-expect-error — testing runtime validation of an invalid string
+        { priority: "urgent" },
+      ),
+    ).toThrow(/invalid priority/);
   });
 });

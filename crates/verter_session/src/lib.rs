@@ -79,6 +79,14 @@ pub mod cross_file;
 mod d_cutover_characterization_tests;
 mod deps;
 mod hash;
+// Phase 9b — `host_compile` is the host-backed parallel SFC batch
+// compile module. It is bundler/runtime-only and uses Rayon, which is
+// not available on WASM, so the module is gated to native targets.
+// WASM continues to use single-file `upsert` + `get_virtual_file`.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod host_compile;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod host_compile_tests;
 pub mod host_executor;
 pub mod host_manage;
 mod host_resolve;
@@ -395,6 +403,22 @@ pub struct VerterHost {
     /// the graph store's existing `stats_snapshot`.
     #[cfg(test)]
     pub(crate) test_audit: Arc<crate::host_test_audit::HostTestAuditState>,
+    /// Phase 9b test-only observable: records the most recent priority
+    /// passed to [`VerterHost::upsert_with_priority`]. Read by
+    /// `compile_many_propagates_interactive_priority` and
+    /// `compile_many_priority_default_is_background` to confirm that
+    /// `compile_many` propagates the caller-configured priority into
+    /// the scheduler submit site. **Compiled out in production builds.**
+    #[cfg(test)]
+    pub(crate) last_upsert_priority: parking_lot::Mutex<Option<verter_scheduler::stage::Priority>>,
+    /// Phase 9b test-only observable: incremented at the very top of
+    /// `host_compile::compile_one_in_batch` (BEFORE the precomputed-error
+    /// short-circuit so every invocation is counted). Read by
+    /// `compile_many_compiles_each_canonical_once` to discriminate the
+    /// "compile each unique canonical group exactly once" invariant.
+    /// **Compiled out in production builds.**
+    #[cfg(test)]
+    pub(crate) compile_one_call_count: std::sync::atomic::AtomicUsize,
 }
 
 // Manual Debug impl because Arc<dyn WorkspaceAccess> doesn't implement Debug.
@@ -523,6 +547,11 @@ impl VerterHost {
             audit_records: Arc::new(crate::component_meta_audit::AuditRecordsStore::default()),
             #[cfg(test)]
             test_audit,
+            // Phase 9b test-only observables — see field docs.
+            #[cfg(test)]
+            last_upsert_priority: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            compile_one_call_count: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 

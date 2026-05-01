@@ -2027,6 +2027,67 @@ impl NapiVerterHost {
 
         Ok(results)
     }
+
+    /// Phase 9b host-backed batch compile.
+    ///
+    /// Compiles a batch of Vue SFC inputs through the production host
+    /// path (scheduler + dispatch + compile_cache). Returns one
+    /// [`NapiCompileBatchEntry`] per input, in the original input
+    /// order.
+    ///
+    /// Per-input panic isolation: if codegen panics for one input,
+    /// only that input's entry receives a `compiler panic: ...`
+    /// error message; the rest of the batch completes normally.
+    ///
+    /// `options.priority` is `"interactive"` or `"background"`;
+    /// invalid strings return a NAPI error. Default is `"background"`.
+    #[napi(js_name = "compileMany")]
+    pub fn compile_many(
+        &self,
+        files: Vec<NapiCompileBatchInput>,
+        options: Option<NapiCompileBatchOptions>,
+    ) -> Result<Vec<NapiCompileBatchEntry>> {
+        use verter_scheduler::stage::Priority;
+        let opts = options.unwrap_or_default();
+        let priority = match opts.priority.as_deref() {
+            None | Some("background") => Some(Priority::Background),
+            Some("interactive") => Some(Priority::Interactive),
+            Some(other) => {
+                return Err(ffi_err(format!(
+                    "invalid priority '{other}', expected 'interactive' or 'background'"
+                )));
+            }
+        };
+        let inputs: Vec<host_compile::CompileBatchInput> = files
+            .into_iter()
+            .map(|f| {
+                Ok(host_compile::CompileBatchInput {
+                    canonical_id: f.canonicalId,
+                    source: std::sync::Arc::from(buffer_to_string(f.source)?),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let entries = catch_panic(std::panic::AssertUnwindSafe(|| {
+            self.inner.compile_many(
+                inputs,
+                host_compile::CompileBatchOptions {
+                    threads: opts.threads.map(|n| n as usize),
+                    priority,
+                },
+            )
+        }))?;
+        Ok(entries
+            .into_iter()
+            .map(|e| NapiCompileBatchEntry {
+                canonicalId: e.canonical_id,
+                code: e.code.to_string(),
+                sourceMap: e.source_map.map(|s| s.to_string()),
+                errors: e.errors,
+                durationMs: e.duration_ms,
+                cacheHit: e.cache_hit,
+            })
+            .collect())
+    }
 }
 
 // =============================================================================
@@ -2302,106 +2363,49 @@ fn build_selector_match_results(
 }
 
 // =============================================================================
-// Batch Compilation (Rayon parallel)
+// Phase 9b — host-backed batch compile (NAPI surface)
 //
-// compile_batch() is a pure stateless parallel compiler: no VerterHost, no
-// caching. Each file gets its own bumpalo Allocator per Rayon thread.
-// This matches Vize's compileSfcBatch() API for a fair benchmark comparison.
+// Replaces the previous free-fn `compileBatch` (Rayon-direct,
+// stateless, bypassing VerterHost). The new entry point is the
+// `NapiVerterHost::compile_many` instance method, which routes
+// through the host's scheduler + dispatch + compile_cache and
+// preserves the read/parse/process-once invariant. See sub-plan
+// `D:/tmp/verter-architecture-cutover-phase-09.md` §3.4.
 // =============================================================================
 
-use oxc_allocator::Allocator;
-use rayon::prelude::*;
-use verter_compiler::compile::{compile as compile_sfc, CodegenOptions, VerterCompileOptions};
+use verter_session::host_compile;
 
-/// A single file to compile in a batch.
+/// One file in a batch compile call.
 #[napi(object)]
-#[derive(Default)]
-pub struct BatchFile {
-    pub filename: String,
-    pub source: String,
+pub struct NapiCompileBatchInput {
+    pub canonicalId: String,
+    pub source: Buffer,
 }
 
-/// Options for batch compilation.
+/// Caller-configurable options for [`NapiVerterHost::compile_many`].
 #[napi(object)]
 #[derive(Default)]
-pub struct BatchOptions {
-    /// Number of Rayon threads (0 or None = all logical CPUs).
+pub struct NapiCompileBatchOptions {
+    /// Worker thread count. `None` / `Some(0)` = `available_parallelism()`.
     pub threads: Option<u32>,
+    /// Scheduler priority for batch upserts. Default: `"background"`.
+    /// Use `"interactive"` when there is no concurrent interactive
+    /// work (benchmarks / CI cold-start measurement).
+    pub priority: Option<String>,
 }
 
-/// Result for a single file in a batch compilation.
+/// Result for a single original input position.
 #[napi(object)]
-pub struct BatchResult {
-    pub filename: String,
-    /// Combined script + template code.
+pub struct NapiCompileBatchEntry {
+    pub canonicalId: String,
     pub code: String,
-    /// First error message if compilation failed, otherwise None.
-    pub error: Option<String>,
+    pub sourceMap: Option<String>,
+    /// All compilation errors for this file. Empty on success.
+    pub errors: Vec<String>,
     pub durationMs: f64,
-}
-
-/// Internal helper: compile a slice of (filename, source) pairs using Rayon.
-/// Pure Rust types — no NAPI, testable with `cargo test`.
-fn compile_batch_files(files: &[(String, String)], skip_source_map: bool) -> Vec<BatchResult> {
-    files
-        .par_iter()
-        .map(|(filename, source)| {
-            let start = std::time::Instant::now();
-            let allocator = Allocator::default();
-            let codegen_opts = CodegenOptions {
-                filename: Some(filename.clone()),
-                skip_source_map,
-                ..CodegenOptions::default()
-            };
-            let verter_opts = VerterCompileOptions {
-                source_map: false,
-                ..Default::default()
-            };
-            let result = compile_sfc(source, &codegen_opts, &verter_opts, &allocator);
-            let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
-            let error = result.errors.first().map(|e| e.message.clone());
-            let mut code = String::new();
-            if let Some(script) = result.script {
-                code.push_str(&script.code);
-            }
-            if let Some(tmpl) = result.template {
-                code.push_str(&tmpl.code);
-            }
-            BatchResult {
-                filename: filename.clone(),
-                code,
-                error,
-                durationMs: duration_ms,
-            }
-        })
-        .collect()
-}
-
-/// Compile a batch of Vue SFC files in parallel using Rayon.
-///
-/// Each file is compiled independently with its own allocator — no shared
-/// mutable state. No caching, no analysis — compile-only for maximum throughput.
-///
-/// Equivalent to Vize's `compileSfcBatch` for fair benchmark comparison.
-#[napi]
-pub fn compile_batch(
-    files: Vec<BatchFile>,
-    options: Option<BatchOptions>,
-) -> Result<Vec<BatchResult>> {
-    let threads = options.and_then(|o| o.threads).unwrap_or(0) as usize;
-    catch_panic(std::panic::AssertUnwindSafe(move || {
-        let file_pairs: Vec<(String, String)> =
-            files.into_iter().map(|f| (f.filename, f.source)).collect();
-        if threads > 0 {
-            let pool = rayon::ThreadPoolBuilder::new()
-                .num_threads(threads)
-                .build()
-                .expect("failed to build Rayon thread pool");
-            pool.install(|| compile_batch_files(&file_pairs, true))
-        } else {
-            compile_batch_files(&file_pairs, true)
-        }
-    }))
+    /// `true` iff the slot was already warm in compile_cache before
+    /// this call.
+    pub cacheHit: bool,
 }
 
 #[cfg(test)]
@@ -2516,66 +2520,10 @@ mod tests {
         );
     }
 
-    // @ai-generated — Tests compile_batch_files() helper: multi-file parallel compilation
-
-    #[test]
-    fn test_compile_batch_files_basic() {
-        let files = vec![
-            (
-                "test1.vue".to_string(),
-                "<template><div>hello</div></template>".to_string(),
-            ),
-            (
-                "test2.vue".to_string(),
-                "<template><span>world</span></template>".to_string(),
-            ),
-        ];
-        let results = compile_batch_files(&files, true);
-        assert_eq!(results.len(), 2);
-        // Positive: output contains compiled code
-        assert!(!results[0].code.is_empty(), "file 1 should produce code");
-        assert!(!results[1].code.is_empty(), "file 2 should produce code");
-        // Negative: raw Vue template syntax must not leak into output
-        assert!(
-            !results[0].code.contains("<template>"),
-            "template tag must not appear in output"
-        );
-        assert!(
-            !results[1].code.contains("<template>"),
-            "template tag must not appear in output"
-        );
-    }
-
-    #[test]
-    fn test_compile_batch_files_empty_input() {
-        let files: Vec<(String, String)> = vec![];
-        let results = compile_batch_files(&files, true);
-        assert_eq!(results.len(), 0, "empty input returns empty output");
-    }
-
-    #[test]
-    fn test_compile_batch_files_parallel_independence() {
-        // 50 files compiled in parallel must not share allocator state
-        let files: Vec<(String, String)> = (0..50)
-            .map(|i| {
-                (
-                    format!("comp{i}.vue"),
-                    format!(
-                        "<template><div>{{{{ msg }}}}</div></template>\
-                         <script setup>const msg = 'hello{i}'</script>"
-                    ),
-                )
-            })
-            .collect();
-        let results = compile_batch_files(&files, true);
-        assert_eq!(results.len(), 50);
-        for (i, r) in results.iter().enumerate() {
-            assert!(!r.code.is_empty(), "file {i} must produce code");
-            // Negative: no raw template tags should appear in output
-            assert!(
-                !r.code.contains("<template>"),
-                "file {i} must not contain raw template tag"
-            );
-        }
-    }
+    // Phase 9b — the inline `compile_batch_files` helper smoke tests
+    // were deleted along with the helper itself (host-bypassing
+    // free-fn `compileBatch` is now `host.compileMany`). The
+    // host-backed batch path is fully exercised by the host_compile
+    // tests in verter_session and the JS-side E2E tests in
+    // packages/native/index.spec.ts (commit 4 of Phase 9b).
 }
