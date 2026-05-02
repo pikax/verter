@@ -97,7 +97,10 @@ pub(crate) use crate::host_manage::jsdoc_resolve::resolve_type_declaration;
 pub(crate) use crate::host_manage::jsdoc_resolve::{
     resolve_jsdoc_tag_type, HostComponentMetaResolver,
 };
-pub(crate) use macro_member_walk::walk_component_meta_macro_shape_member_types;
+pub(crate) use macro_member_walk::{
+    collect_define_props_root_names, slot_binding_targets_define_props_root,
+    walk_component_meta_macro_shape_member_types, SLOT_BINDING_REGISTRY_COLLECTION_SKIP_COUNTER,
+};
 pub(crate) use materialize::{
     collect_type_expr_ref_names, lowered_preserve_package_backed_symbolic_refs,
     materialize_component_meta_field_types, materialize_component_meta_type_expr_until_stable,

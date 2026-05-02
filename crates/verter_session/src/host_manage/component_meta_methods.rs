@@ -44,13 +44,14 @@ use crate::meta_resolve::compare_type_expr_improvement;
 use crate::meta_resolve::component_meta_registry_prefers_structural_materialization;
 use crate::meta_resolve::STORE_VIEW_STABILITY_MAX_ATTEMPTS;
 use crate::meta_resolve::{
+    collect_define_props_root_names, component_meta_owner_local_shallow_substituted_alias_body,
+    enrich_missing_slot_bindings, select_imported_materialization_scope,
+    slot_binding_targets_define_props_root, RegistryMaterialization, ResolvedComponentMetaState,
+};
+use crate::meta_resolve::{
     collect_type_expr_ref_names, lowered_preserve_package_backed_symbolic_refs,
     materialize_component_meta_field_types, materialize_component_meta_type_expr_until_stable,
     produce_macro_object_shapes_for_purpose,
-};
-use crate::meta_resolve::{
-    component_meta_owner_local_shallow_substituted_alias_body, enrich_missing_slot_bindings,
-    select_imported_materialization_scope, RegistryMaterialization, ResolvedComponentMetaState,
 };
 use crate::meta_resolve::{
     drain_dispatch_dep_signature_accumulator, reset_dispatch_dep_signature_accumulator,
@@ -1484,7 +1485,17 @@ impl VerterHost {
                     Some(owner_canonical),
                 );
             }
+            let define_props_roots = collect_define_props_root_names(snapshot);
             for field in &evaluated_types.slot_bindings {
+                if slot_binding_targets_define_props_root(field, &define_props_roots) {
+                    crate::capture_token::with_active_capture(|t| {
+                        t.record_counter(
+                            crate::meta_resolve::SLOT_BINDING_REGISTRY_COLLECTION_SKIP_COUNTER,
+                            1,
+                        );
+                    });
+                    continue;
+                }
                 collect_component_meta_registry_public_field_refs(
                     self,
                     owner_canonical,

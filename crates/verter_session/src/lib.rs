@@ -72,6 +72,8 @@ mod component_meta_read_once_tests;
 pub mod component_meta_resolution_policy;
 pub mod component_meta_result_db;
 #[cfg(test)]
+mod component_meta_slot_binding_skip_tests;
+#[cfg(test)]
 mod component_meta_terminal_mode_tests;
 pub mod cooperative_admission;
 pub mod cross_file;
