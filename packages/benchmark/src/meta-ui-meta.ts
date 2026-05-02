@@ -54,8 +54,14 @@ export function refineMetaForBenchmark(meta: any) {
 }
 
 function benchmarkTypeDescriptorToString(type: any): string {
-  if (!type || typeof type !== "object") {
+  if (type == null) {
     return "unknown";
+  }
+  if (typeof type === "string") {
+    return type;
+  }
+  if (typeof type !== "object") {
+    return String(type);
   }
 
   switch (type.kind) {
@@ -69,8 +75,16 @@ function benchmarkTypeDescriptorToString(type: any): string {
         : [];
       return args.length > 0 ? `${type.name}<${args.join(", ")}>` : String(type.name ?? "unknown");
     }
-    case "array":
-      return `${benchmarkTypeDescriptorToString(type.elementType)}[]`;
+    case "recursiveRef": {
+      const args = Array.isArray(type.typeArguments)
+        ? type.typeArguments.map((entry: any) => benchmarkTypeDescriptorToString(entry))
+        : [];
+      return args.length > 0 ? `${type.name}<${args.join(", ")}>` : String(type.name ?? "unknown");
+    }
+    case "array": {
+      const element = type.element ?? type.elementType;
+      return `${benchmarkTypeDescriptorToString(element)}[]`;
+    }
     case "tuple":
       return `[${(type.elements ?? [])
         .map((entry: any) => benchmarkTypeDescriptorToString(entry))
@@ -83,9 +97,37 @@ function benchmarkTypeDescriptorToString(type: any): string {
       return (type.types ?? [])
         .map((entry: any) => benchmarkTypeDescriptorToString(entry))
         .join(" & ");
+    case "object":
+      return "object";
+    case "function":
+      return "Function";
+    case "enum":
+      return String(type.name ?? "enum");
+    case "typeParameter":
+      return String(type.name ?? "unknown");
+    case "unknown":
+      return typeof type.rawType === "string" ? type.rawType : "unknown";
     default:
       return String(type.name ?? type.kind ?? "unknown");
   }
+}
+
+/**
+ * Coerce a type field that may be either a flat string (legacy Volar shape)
+ * or a structured native descriptor into a string suitable for the regex/string
+ * normalisers in `convertPropertyMetaToJsonSchema`.
+ */
+export function typeMetaToString(type: unknown): string {
+  if (type == null) {
+    return "";
+  }
+  if (typeof type === "string") {
+    return type;
+  }
+  if (typeof type === "object") {
+    return benchmarkTypeDescriptorToString(type);
+  }
+  return String(type);
 }
 
 function stripInternalSchemaNoise(value: any): any {
@@ -124,7 +166,7 @@ export function propsToJsonSchema(props: Array<any>): Record<string, unknown> {
   const properties: Record<string, unknown> = {};
 
   for (const prop of props ?? []) {
-    const schema = convertPropertyMetaToJsonSchema(prop.type, prop.schema);
+    const schema = convertPropertyMetaToJsonSchema(prop.rawType ?? prop.type, prop.schema);
     if (!schema) {
       continue;
     }
@@ -143,10 +185,10 @@ export function propsToJsonSchema(props: Array<any>): Record<string, unknown> {
 }
 
 function convertPropertyMetaToJsonSchema(
-  typeText: string | undefined,
+  typeText: unknown,
   schema: any,
 ): Record<string, unknown> | null {
-  const normalizedType = (typeText ?? "").replace(/\s+/g, " ").trim();
+  const normalizedType = typeMetaToString(typeText).replace(/\s+/g, " ").trim();
 
   if (schema && typeof schema === "object") {
     if (schema.kind === "enum" && Array.isArray(schema.schema)) {
@@ -163,7 +205,10 @@ function convertPropertyMetaToJsonSchema(
         type: "array",
         ...(itemSchema
           ? {
-              items: convertPropertyMetaToJsonSchema(itemSchema.type ?? normalizedType, itemSchema),
+              items: convertPropertyMetaToJsonSchema(
+                itemSchema.rawType ?? itemSchema.type ?? normalizedType,
+                itemSchema,
+              ),
             }
           : {}),
       };
@@ -174,7 +219,10 @@ function convertPropertyMetaToJsonSchema(
       const properties: Record<string, unknown> = {};
       for (const key of Object.keys(nested).sort()) {
         const entry = nested[key];
-        const next = convertPropertyMetaToJsonSchema(entry?.type, entry?.schema ?? entry);
+        const next = convertPropertyMetaToJsonSchema(
+          entry?.rawType ?? entry?.type,
+          entry?.schema ?? entry,
+        );
         if (next) {
           properties[key] = {
             ...next,

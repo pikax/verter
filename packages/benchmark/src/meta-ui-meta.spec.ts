@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { refineMetaForBenchmark } from "./meta-ui-meta.js";
+import { propsToJsonSchema, refineMetaForBenchmark } from "./meta-ui-meta.js";
 
 describe("refineMetaForBenchmark", () => {
   it("strips function-typed getDeclarations and getTypeObject from schema members", () => {
@@ -146,5 +146,111 @@ describe("refineMetaForBenchmark", () => {
     };
     const result = refineMetaForBenchmark(meta);
     expect(result.componentName).toBeNull();
+  });
+});
+
+describe("propsToJsonSchema with native structured type descriptors", () => {
+  it("accepts a primitive descriptor for prop.type via prop.rawType fallback", () => {
+    const props = [
+      {
+        name: "title",
+        type: { kind: "primitive", name: "string" },
+        rawType: "string",
+        required: false,
+      },
+    ];
+    const schema = propsToJsonSchema(props);
+    expect(schema.title).toEqual({ type: "string" });
+  });
+
+  it("accepts a ref descriptor with type-arguments without throwing", () => {
+    const props = [
+      {
+        name: "model",
+        type: {
+          kind: "ref",
+          name: "Foo",
+          typeArguments: [{ kind: "primitive", name: "string" }],
+        },
+        rawType: "Foo<string>",
+        required: false,
+      },
+    ];
+    const schema = propsToJsonSchema(props);
+    // Foo<string> is a non-primitive ref, so it must not throw and must
+    // emit an empty/unknown shape rather than crashing on `.replace`.
+    expect(schema.model).toBeDefined();
+  });
+
+  it("accepts an array descriptor via the `element` field", () => {
+    const props = [
+      {
+        name: "items",
+        type: {
+          kind: "array",
+          element: { kind: "primitive", name: "number" },
+        },
+        rawType: "number[]",
+        required: false,
+      },
+    ];
+    const schema = propsToJsonSchema(props);
+    expect(schema.items).toBeDefined();
+  });
+
+  it("accepts an object descriptor with a nested schema entry", () => {
+    const props = [
+      {
+        name: "config",
+        type: { kind: "primitive", name: "object" },
+        rawType: "{ name: string }",
+        required: false,
+        schema: {
+          kind: "object",
+          schema: {
+            name: {
+              name: "name",
+              // Nested entry uses a structured descriptor — not a string.
+              type: { kind: "primitive", name: "string" },
+              rawType: "string",
+            },
+          },
+        },
+      },
+    ];
+    const schema = propsToJsonSchema(props);
+    const config = schema.config as { type: string; properties?: Record<string, unknown> };
+    expect(config.type).toBe("object");
+    expect(config.properties?.name).toEqual({ type: "string" });
+  });
+
+  it("accepts a recursiveRef descriptor without throwing", () => {
+    const props = [
+      {
+        name: "node",
+        type: {
+          kind: "recursiveRef",
+          name: "TreeNode",
+          typeArguments: [],
+          conditionalContext: [],
+        },
+        rawType: "TreeNode",
+        required: false,
+      },
+    ];
+    const schema = propsToJsonSchema(props);
+    expect(schema.node).toBeDefined();
+  });
+
+  it("preserves back-compat with old flat-string prop.type", () => {
+    const props = [
+      {
+        name: "color",
+        type: "string",
+        required: false,
+      },
+    ];
+    const schema = propsToJsonSchema(props);
+    expect(schema.color).toEqual({ type: "string" });
   });
 });
