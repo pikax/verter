@@ -70,6 +70,8 @@ pub mod component_meta_host;
 #[cfg(test)]
 mod component_meta_indexed_access_early_out_tests;
 #[cfg(test)]
+mod component_meta_invalidation_tests;
+#[cfg(test)]
 mod component_meta_lazy_rescue_tests;
 pub mod component_meta_materialize;
 #[cfg(test)]

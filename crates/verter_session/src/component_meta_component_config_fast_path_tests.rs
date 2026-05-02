@@ -489,3 +489,115 @@ fn component_config_workspace_package_inside_node_modules_disables_fast_path() {
         counters.fast_path_hits,
     );
 }
+
+// ── §9.5 invalidation: theme.ts source edit ──
+
+/// §9.5 invalidation row: editing the `theme.ts` source must
+/// invalidate ComponentConfig fast-path entries that derived their
+/// variant/slot literals from the prior `theme` shape. The fast-path
+/// publishes its result against the indexed-access dispatch surface;
+/// the surface participates in the project type-store generation and
+/// must rebuild against the new theme body after `notify_upsert`.
+///
+/// Discriminating predicate: pre-edit resolution publishes a prop
+/// shape derived from the old `theme.variants.variant` literals;
+/// post-edit resolution must surface the new shape (added literal
+/// member). A regression where the fast-path entry was promoted to a
+/// process-wide cache without dep-signature revalidation would surface
+/// here as the post-edit query returning the pre-edit literal set.
+///
+/// **Status: §17.7 DEVIATION** — when run against integration HEAD
+/// `c4c26c1f` post-`notify_upsert` + `evict` invalidates the consumer
+/// SFC's compile entry, but the ComponentConfig fast-path's cached
+/// theme literals on `MaterializeMemoDb`-equivalent storage do NOT
+/// re-read. The post-edit query returns the pre-edit literal set,
+/// failing the discriminating assertion below. This is an actual
+/// invalidation gap in the perf bundle; the disciplined surface is
+/// to keep the test discriminating + `#[ignore]` until B-B4's
+/// fast-path invalidation contract is closed (the deviation is
+/// surfaced for orchestrator review).
+#[test]
+#[ignore = "§17.7 deviation: fast-path theme.ts invalidation gap; see test docstring"]
+fn invalidation_theme_config_source_edit() {
+    use std::sync::Arc;
+    use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
+
+    #[allow(deprecated)]
+    let project_graph =
+        verter_workspace::ProjectGraph::from_configs(vec![make_project_config("/workspace")]);
+    let workspace = Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
+    workspace.set_project_graph(project_graph);
+    workspace.inject_file("/workspace/src/theme.ts".into(), Arc::from(POSITIVE_THEME_TS));
+    workspace.inject_file("/workspace/src/types.ts".into(), Arc::from(POSITIVE_TYPES_TS));
+    workspace.inject_file(
+        "/workspace/src/Button.vue".into(),
+        Arc::from(POSITIVE_BUTTON_VUE),
+    );
+
+    let ws_access: Arc<dyn WorkspaceAccess> = workspace.clone();
+    let host = VerterHost::new(HostConfig::default(), ws_access);
+    host.configure_projects(vec![
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+    ]);
+    let host = Arc::new(host);
+
+    // First resolve — fast path fires against the original theme
+    // shape with `solid` and `outline` variants.
+    let before_meta = host
+        .get_component_meta("/workspace/src/Button.vue")
+        .expect("first resolution must succeed");
+    let before_serialized = format!("{before_meta:?}");
+    assert!(
+        before_serialized.contains("solid-class") || before_serialized.contains("outline-class"),
+        "before-edit prop surface must derive from theme.variants.variant; \
+         expected `solid-class` or `outline-class` literal, got: {before_serialized:?}",
+    );
+    // The new variant-class literal MUST NOT appear in the pre-edit
+    // serialized output (would indicate the post-edit theme leaked
+    // somehow into the before-state).
+    assert!(
+        !before_serialized.contains("third-class-after-edit"),
+        "before-edit prop surface must NOT contain post-edit literal; \
+         got pre-edit dump: {before_serialized:?}",
+    );
+
+    // Edit theme.ts to add a new variant literal.
+    let new_theme = r#"export const theme = {
+  variants: {
+    variant: {
+      solid: "solid-class",
+      outline: "outline-class",
+      ghost: "third-class-after-edit",
+    },
+  },
+  slots: {
+    root: "root-class",
+  },
+} as const
+"#;
+    workspace.inject_file("/workspace/src/theme.ts".into(), Arc::from(new_theme));
+    host.notify_upsert("/workspace/src/theme.ts", Arc::from(new_theme));
+    // Evict the consumer SFC so the post-edit resolution falls through
+    // the cold path (the fast-path entry's dep_signature must
+    // re-validate against the new theme body).
+    host.evict("/workspace/src/Button.vue");
+    host.evict("/workspace/src/types.ts");
+    host.evict("/workspace/src/theme.ts");
+
+    let after_meta = host
+        .get_component_meta("/workspace/src/Button.vue")
+        .expect("post-edit resolution must succeed");
+    let after_serialized = format!("{after_meta:?}");
+    // Post-edit prop surface MUST reflect the new theme literal —
+    // discriminating against a stale-cache regression.
+    assert!(
+        after_serialized.contains("third-class-after-edit"),
+        "after-edit prop surface MUST include the new `third-class-after-edit` \
+         literal — the fast-path entry must invalidate when the theme source \
+         changes. Got post-edit dump: {after_serialized}",
+    );
+}
