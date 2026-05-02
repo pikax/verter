@@ -64,6 +64,8 @@ pub mod component_meta_caches;
 mod component_meta_caches_tests;
 #[cfg(test)]
 mod component_meta_canonical_reuse_tests;
+#[cfg(test)]
+mod component_meta_component_config_fast_path_tests;
 pub mod component_meta_host;
 #[cfg(test)]
 mod component_meta_indexed_access_early_out_tests;
@@ -72,6 +74,8 @@ mod component_meta_lazy_rescue_tests;
 pub mod component_meta_materialize;
 #[cfg(test)]
 mod component_meta_no_cache_promotion_tests;
+#[cfg(test)]
+mod component_meta_owner_local_registry_route_tests;
 #[cfg(test)]
 mod component_meta_pathological_recursion_tests;
 #[cfg(test)]
