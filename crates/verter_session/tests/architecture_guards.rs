@@ -3602,6 +3602,10 @@ mod foundations_guards {
             "crates/verter_session/src/component_meta_audit/mod.rs",
             "crates/verter_session/src/component_meta_caches.rs",
             "crates/verter_session/src/component_meta_materialize.rs",
+            // B-C5 / §12.A4 will split this file in Wave 4. The cumulative additions from
+            // B-B5 (selective Pick / symbolic Omit) and B-Bm Phase 11 (canonical-reuse helper)
+            // pushed it to ~1564 lines. Remove this exemption when the split lands.
+            "crates/verter_session/src/component_meta_resolution_policy.rs",
             "crates/verter_session/src/host_manage.rs",
             "crates/verter_session/src/host_manage/analysis_io.rs",
             "crates/verter_session/src/host_manage/component_meta_methods.rs",
