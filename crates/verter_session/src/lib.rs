@@ -61,6 +61,8 @@ mod component_meta_cache_discipline_tests;
 pub mod component_meta_caches;
 #[cfg(test)]
 mod component_meta_caches_tests;
+#[cfg(test)]
+mod component_meta_canonical_reuse_tests;
 pub mod component_meta_host;
 #[cfg(test)]
 mod component_meta_indexed_access_early_out_tests;
