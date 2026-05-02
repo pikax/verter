@@ -1,11 +1,14 @@
 //! Parity test — ensures the committed corpus audit tests tree
 //! matches what `scripts/gen-corpus-audit-tests.mjs` would produce
-//! against the current nuxt-ui fixture set. Plan §3 Commit 12 (F10 WIP)
-//! + Commit 13 (F10 squash).
+//! against the vendored Vue fixture set under
+//! `crates/verter_session/tests/component_meta_audit_corpus/fixtures/`.
 //!
 //! Fails with a readable diff when the committed tree drifts from
 //! the generator output. Remediation: rerun
 //! `node scripts/gen-corpus-audit-tests.mjs` and commit the result.
+//!
+//! Hermetic: the generator and fixtures both live inside the
+//! checkout, so this test runs without `.integration-tests/`.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -13,17 +16,17 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Locate the workspace root (the ancestor that contains
-/// `.integration-tests/repos/nuxt-ui`).
+/// `scripts/gen-corpus-audit-tests.mjs`).
 fn workspace_root() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     loop {
-        if p.join(".integration-tests/repos/nuxt-ui").exists() {
+        if p.join("scripts/gen-corpus-audit-tests.mjs").exists() {
             return p;
         }
         if !p.pop() {
             panic!(
-                "unable to locate `.integration-tests/repos/nuxt-ui` from `{}`; \
-                 is the integration-tests submodule present?",
+                "unable to locate `scripts/gen-corpus-audit-tests.mjs` from `{}`; \
+                 is the workspace root reachable from CARGO_MANIFEST_DIR?",
                 env!("CARGO_MANIFEST_DIR"),
             );
         }
@@ -129,10 +132,22 @@ fn corpus_generator_output_matches_committed_files() {
     let generated_files = snapshot_dir(&generated_subdir);
     let committed_files = snapshot_dir(&committed_subdir);
 
-    let gen_names: std::collections::BTreeSet<_> =
-        generated_files.iter().map(|(rel, _)| rel.clone()).collect();
-    let com_names: std::collections::BTreeSet<_> =
-        committed_files.iter().map(|(rel, _)| rel.clone()).collect();
+    // The vendored fixture set under `fixtures/` is the input the
+    // generator reads, not output it produces. Filter it out of the
+    // structural-drift check so the parity test stays focused on
+    // generator output.
+    let is_generator_output =
+        |rel: &str| !rel.starts_with("fixtures/") && rel != "fixtures";
+    let gen_names: std::collections::BTreeSet<_> = generated_files
+        .iter()
+        .map(|(rel, _)| rel.clone())
+        .filter(|rel| is_generator_output(rel))
+        .collect();
+    let com_names: std::collections::BTreeSet<_> = committed_files
+        .iter()
+        .map(|(rel, _)| rel.clone())
+        .filter(|rel| is_generator_output(rel))
+        .collect();
 
     let mut errors = Vec::new();
     for rel in gen_names.difference(&com_names) {
@@ -178,11 +193,11 @@ fn slug_for(vue_rel: &str) -> String {
 }
 
 fn runtime_components_dir(root: &Path) -> PathBuf {
-    root.join(".integration-tests/repos/nuxt-ui/src/runtime/components")
+    root.join("crates/verter_session/tests/component_meta_audit_corpus/fixtures")
 }
 
-/// Walk `.integration-tests/repos/nuxt-ui/src/runtime/components/**/*.vue`
-/// and return the set of component slugs the generator MUST emit.
+/// Walk the vendored Vue fixtures and return the set of component
+/// slugs the generator MUST emit.
 fn expected_slugs(root: &Path) -> BTreeSet<String> {
     let components_dir = runtime_components_dir(root);
     let mut slugs = BTreeSet::new();
@@ -206,18 +221,18 @@ fn expected_slugs(root: &Path) -> BTreeSet<String> {
     slugs
 }
 
-/// Plan §3 Commit 13 (F10 squash) test list entry. Asserts the
-/// committed corpus tree covers EVERY `.vue` component under
-/// `.integration-tests/repos/nuxt-ui/src/runtime/components/` — no
-/// missing slugs, no extra ones. The generator is the trusted source
-/// of slug derivation; this test guards against the generator
+/// Asserts the committed corpus tree covers EVERY vendored `.vue`
+/// component under
+/// `crates/verter_session/tests/component_meta_audit_corpus/fixtures/`
+/// — no missing slugs, no extra ones. The generator is the trusted
+/// source of slug derivation; this test guards against the generator
 /// regressing to a subset pass.
 ///
 /// Discriminating: if a future edit narrows the component sweep
 /// (e.g. adds a filter that drops nested-subdir components), the
 /// missing slugs surface in the diff below.
 #[test]
-fn corpus_audit_coverage_covers_every_nuxt_ui_component_under_runtime_components() {
+fn corpus_audit_coverage_covers_every_vendored_component() {
     let root = workspace_root();
     let expected = expected_slugs(&root);
     assert!(
@@ -253,13 +268,12 @@ fn corpus_audit_coverage_covers_every_nuxt_ui_component_under_runtime_components
     );
 }
 
-/// Plan §3 Commit 13 (F10 squash) test list entry. Asserts the
-/// generator's output is deterministic: running the generator twice
-/// into two separate tempdirs MUST produce byte-identical
-/// `corpus_audit_tests.rs` entry files AND byte-identical
-/// per-component test files. This pins the cross-platform
-/// determinism requirement (plan §3 Commit 12 — "Sorts input files
-/// lexicographically").
+/// Asserts the generator's output is deterministic: running the
+/// generator twice into two separate tempdirs MUST produce
+/// byte-identical `corpus_audit_tests.rs` entry files AND
+/// byte-identical per-component test files. Pins the cross-platform
+/// determinism requirement that the generator sorts input files
+/// lexicographically.
 ///
 /// Discriminating: if `readdirSync` starts returning OS-dependent
 /// order (the generator sorts after discovery, so this is the guard

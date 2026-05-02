@@ -12,6 +12,13 @@ publish = false
 [features]
 default = []
 session_metrics = []
+# Opt-in: enables tests that read from `.integration-tests/repos/...`
+# alongside the workspace. The default `cargo test --workspace --tests`
+# run MUST stay hermetic — it does NOT enable this feature. Tests that
+# need a live third-party clone (e.g., property-based corpus parity vs.
+# the upstream nuxt-ui submodule) must gate themselves behind
+# `#[cfg(feature = "external-corpus")]`.
+external-corpus = []
 # Debug-mode audit: on every `HostNamedTypeCacheAdapter::get` hit, recompute
 # the slow-path resolution and assert structural equality against the cached
 # value. Catches cache-key insufficiencies (a cached entry returned for a
