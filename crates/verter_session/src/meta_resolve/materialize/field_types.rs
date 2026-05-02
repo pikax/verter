@@ -767,6 +767,31 @@ pub(crate) fn materialize_component_meta_field_types(
         }
     }
 
+    /// Issue #9 — recognises a replacement body whose top-level shape
+    /// is `Pick<…>` or `Omit<…>` and whose type-argument tree mentions
+    /// `RecursiveRef { name == target_name }`. The combination is
+    /// irreducible: `Pick`/`Omit` builtins re-derive their result by
+    /// re-substituting the target into themselves, so any single-layer
+    /// expansion produces another `Pick`/`Omit` of the same target.
+    /// The materializer publishes a `semanticMiss` sentinel for these
+    /// shapes rather than expanding into a nested cycle.
+    fn pick_or_omit_with_recursive_ref(
+        expr: &verter_semantic::analysis::type_expr::TypeExpr,
+        target_name: &str,
+    ) -> bool {
+        use verter_semantic::analysis::type_expr::TypeExpr;
+        match expr {
+            TypeExpr::Parenthesized(inner) => pick_or_omit_with_recursive_ref(inner, target_name),
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } if name.as_ref() == "Pick" || name.as_ref() == "Omit" => type_arguments
+                .iter()
+                .any(|arg| type_expr_contains_named_recursive_ref(arg, target_name)),
+            _ => false,
+        }
+    }
+
     fn expand_named_recursive_refs_one_layer(
         expr: &verter_semantic::analysis::type_expr::TypeExpr,
         target_name: &str,
@@ -984,8 +1009,32 @@ pub(crate) fn materialize_component_meta_field_types(
                     })
                     .collect(),
             },
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } => {
+                // Ref does not name the recursive target by definition
+                // (the `RecursiveRef` arm at the top would have matched
+                // first); we still recurse into the ref's type
+                // arguments so a `Pick<RecursiveRef<R>, …>` shape
+                // expands the inner backedge correctly.
+                if type_arguments.is_empty() {
+                    return expr.clone();
+                }
+                let mut next = Vec::with_capacity(type_arguments.len());
+                for arg in type_arguments.iter() {
+                    next.push(expand_named_recursive_refs_one_layer(
+                        arg,
+                        target_name,
+                        replacement,
+                    ));
+                }
+                TypeExpr::Ref {
+                    name: name.clone(),
+                    type_arguments: Arc::from(next),
+                }
+            }
             TypeExpr::RecursiveRef { .. }
-            | TypeExpr::Ref { .. }
             | TypeExpr::Primitive(_)
             | TypeExpr::Literal(_)
             | TypeExpr::TypeOf(_)
@@ -1176,8 +1225,36 @@ pub(crate) fn materialize_component_meta_field_types(
                     .map(|expr| rewrite_named_self_refs_to_recursive_ref(expr, target_name))
                     .collect(),
             },
-            TypeExpr::Ref { .. }
-            | TypeExpr::RecursiveRef { .. }
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } => {
+                // The empty-type-arguments self-ref case is handled by
+                // the dedicated arm above. Here we either:
+                // * rewrite a self-ref *with* type arguments to a
+                //   parameterized `RecursiveRef` (preserves
+                //   `Pick<R<T>, 'x'>`-style shapes when R is the
+                //   recursive target), or
+                // * descend into the type arguments to surface
+                //   self-refs nested inside other generics
+                //   (`Pick<R, 'x'>` where R is the target — the inner
+                //   R gets rewritten to `RecursiveRef`).
+                let mut next = Vec::with_capacity(type_arguments.len());
+                for arg in type_arguments.iter() {
+                    next.push(rewrite_named_self_refs_to_recursive_ref(arg, target_name));
+                }
+                if name.as_ref() == target_name {
+                    TypeExpr::recursive_ref(target_name, next)
+                } else if type_arguments.is_empty() {
+                    expr.clone()
+                } else {
+                    TypeExpr::Ref {
+                        name: name.clone(),
+                        type_arguments: Arc::from(next),
+                    }
+                }
+            }
+            TypeExpr::RecursiveRef { .. }
             | TypeExpr::Primitive(_)
             | TypeExpr::Literal(_)
             | TypeExpr::TypeOf(_)
@@ -1592,7 +1669,23 @@ pub(crate) fn materialize_component_meta_field_types(
                             replacement,
                         ));
                     }
-                    if matches!(
+                    // Issue #9 guard: a body whose top-level shape is
+                    // `Pick<…>` or `Omit<…>` and whose recursion arms
+                    // mention `RecursiveRef { name == target_name }` is
+                    // an irreducible cycle — chasing further would
+                    // recurse without bound. Publish a `semanticMiss`
+                    // sentinel keyed on the resolved declaration
+                    // identity so the outer macro keeps a discoverable
+                    // shape while the recursive arm is signalled as
+                    // unresolved.
+                    if pick_or_omit_with_recursive_ref(&replacement, target_name.as_str()) {
+                        field_state.set_current_type(
+                            verter_semantic::analysis::type_expr::TypeExpr::Unknown {
+                                raw: String::from("semanticMiss"),
+                            },
+                        );
+                        raw_ref_branch_handled = true;
+                    } else if matches!(
                         replacement,
                         verter_semantic::analysis::type_expr::TypeExpr::Union(_)
                             | verter_semantic::analysis::type_expr::TypeExpr::Primitive(_),

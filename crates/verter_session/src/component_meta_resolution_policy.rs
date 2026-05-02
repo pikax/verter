@@ -32,7 +32,7 @@
 
 use std::sync::Arc;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use verter_semantic::analysis::component_meta::{ComponentMetaAnalysis, ResolvedTypeAnalysis};
 use verter_semantic::analysis::type_expr::{
     FunctionExpr, FunctionParam, IndexSignature, MethodSignature, ObjectExpr, ObjectMember,
@@ -69,6 +69,9 @@ pub fn apply_component_meta_resolution_policy(
         registry: &registry,
         engine: &mut engine,
         owner_canonical,
+        host,
+        active_refs: FxHashSet::default(),
+        active_refs_max_depth: 0,
     };
 
     let mut changed = false;
@@ -337,6 +340,20 @@ struct PolicyCtx<'a, 'h> {
     registry: &'a PolicyRegistry<'a>,
     engine: &'a mut ComponentMetaQueryEngine<'h>,
     owner_canonical: &'a str,
+    host: &'a VerterHost,
+    /// Cycle-guard active set keyed on `(DeclIdentity, NormalizedTypeArgs)`
+    /// per Invariant #20. Bare-name keying is forbidden because:
+    /// * Two `Foo`s in different files would collide under name keying.
+    /// * `Pick<X, 'a'>` and `Pick<X, 'b'>` would collide under name-only
+    ///   keying — but they are distinct instantiations and must navigate
+    ///   independently.
+    /// * Anonymous-type cycles re-entering through identical structural
+    ///   shapes need an identity that is stable across syntactic clones.
+    active_refs: FxHashSet<(DeclIdentity, NormalizedTypeArgs)>,
+    /// Greatest observed depth of `active_refs` during the walk. Used
+    /// to surface a `policy_active_refs_max_depth` counter under
+    /// `CaptureToken` for cycle-guard fixtures.
+    active_refs_max_depth: u64,
 }
 
 impl<'a, 'h> PolicyCtx<'a, 'h> {
@@ -392,6 +409,26 @@ impl<'a, 'h> PolicyCtx<'a, 'h> {
             }
         }
         None
+    }
+
+    /// Build a `DeclIdentity` for `(canonical_source, name)` by reading
+    /// the file's `whole_hash` from the host's shallow file state. Files
+    /// that have no shallow state (e.g. synthetic test fixtures, the
+    /// owner SFC before parse, or registry-meta entries pointing at
+    /// not-yet-loaded paths) fall back to `HashValue::default()` — the
+    /// `(canonical_source, name)` pair is still a deterministic identity
+    /// for the cycle guard within a single policy invocation.
+    fn decl_identity_for(&self, canonical_source: &str, name: &str) -> DeclIdentity {
+        let whole_hash = self
+            .host
+            .shallow_file_state(canonical_source)
+            .map(|state| state.whole_hash)
+            .unwrap_or_default();
+        DeclIdentity {
+            canonical_id: Arc::from(canonical_source),
+            whole_hash,
+            decl_name: Arc::from(name),
+        }
     }
 }
 
@@ -572,15 +609,59 @@ fn rewrite_ref(
         return rewrite_type_arguments(name, type_arguments, ctx, /*recurse*/ false);
     }
 
+    // Build the `(DeclIdentity, NormalizedTypeArgs)` cycle-guard key. The
+    // identity is keyed on resolved declaration source, not the bare
+    // name — two `Foo`s in different files produce different identities;
+    // `Pick<X, 'a'>` and `Pick<X, 'b'>` produce different normalized
+    // type-args so they navigate independently.
+    let decl_identity = ctx.decl_identity_for(&canonical_source, name);
+    let normalized_args = NormalizedTypeArgs::normalize(type_arguments, ctx);
+    let guard_key = (decl_identity, normalized_args);
+
+    // Re-entry on the same key bails with `semanticMiss`: the prior
+    // invocation is still resolving this declaration, and continuing
+    // would recurse forever. The published shape is `Unknown` so the
+    // outer surface stays observable while the recursive arm is
+    // transparently signalled as unresolved.
+    if ctx.active_refs.contains(&guard_key) {
+        return Some(TypeExpr::Unknown {
+            raw: String::from("semanticMiss"),
+        });
+    }
+
+    ctx.active_refs.insert(guard_key.clone());
+    if (ctx.active_refs.len() as u64) > ctx.active_refs_max_depth {
+        ctx.active_refs_max_depth = ctx.active_refs.len() as u64;
+        crate::capture_token::with_active_capture(|t| {
+            t.record_counter("policy_active_refs_max_depth", 1)
+        });
+    }
+
+    let result = rewrite_ref_body_with_guard(&body, name, type_arguments, ctx);
+
+    ctx.active_refs.remove(&guard_key);
+    result
+}
+
+/// Body-chase logic invoked under the active-refs cycle guard. Consumes
+/// the resolved declaration body and either returns the rewritten shape
+/// (Rule 3 / project-local non-Props) or falls through to type-argument
+/// recursion (Rule 5).
+fn rewrite_ref_body_with_guard(
+    body: &TypeExpr,
+    name: &str,
+    type_arguments: &[TypeExpr],
+    ctx: &mut PolicyCtx<'_, '_>,
+) -> Option<TypeExpr> {
     // Rule 3: project-local non-Props with empty type_arguments → chase to
     // body if the body is structurally resolvable (not just another Ref).
-    if type_arguments.is_empty() && body_is_resolvable(&body) {
+    if type_arguments.is_empty() && body_is_resolvable(body) {
         // The body itself may contain other Refs that need policy treatment
         // (e.g. an Object whose property is `Ref(OtherImported)`). Apply
         // the policy to the body before publishing.
-        let cloned = match rewrite_expr(&body, ctx) {
+        let cloned = match rewrite_expr(body, ctx) {
             Some(rewritten) => rewritten,
-            None => body,
+            None => body.clone(),
         };
         return Some(cloned);
     }
@@ -769,16 +850,12 @@ fn body_is_resolvable(body: &TypeExpr) -> bool {
 // ---------------------------------------------------------------------------
 //
 // Recursion guards inside the policy walker (e.g. `rewrite_ref`'s active-ref
-// stack) must key on `(DeclId, NormalizedTypeArgs)` rather than bare name
-// strings: bare names collide across scopes and cannot distinguish
-// `Pick<X, 'a'>` from `Pick<X, 'b'>` inside a generic instantiation chain.
-//
-// The TYPE definitions land here so consumers can begin keying on them; the
-// actual swap of the existing bare-name `active_refs` set into a
-// `(DeclIdentity, NormalizedTypeArgs)` set is owned by the policy guard
-// bundle that consumes this surface. `#[allow(dead_code)]` covers the gap
-// between "type defined" and "type consumed" — these items have a known
-// downstream consumer that lands in a sibling bundle.
+// stack) key on `(DeclIdentity, NormalizedTypeArgs)`. Bare-name strings
+// collide across scopes (two `Foo`s in different files) and cannot
+// distinguish `Pick<X, 'a'>` from `Pick<X, 'b'>` inside a generic
+// instantiation chain. The active-refs set on `PolicyCtx` consumes these
+// types; `NormalizedTypeArgs::normalize` is the constructor that the cycle
+// guard uses to discriminate generic instantiations.
 
 use crate::semantic_query::DeclIdentity;
 use smallvec::SmallVec;
@@ -788,12 +865,10 @@ use verter_semantic::analysis::type_expr::LiteralValue;
 /// across structurally-identical inline type expressions. Phases that need
 /// to distinguish anonymous shapes attach a stable hash; identity equality
 /// of the hash is what `NormalizedTypeArg` checks.
-#[allow(dead_code)]
 pub(crate) type ShapeHash = u64;
 
 /// Hash of a `LiteralValue` used as a cheap discriminator for literal-arg
 /// cycle-guard keys (e.g. `Pick<X, 'a'>` vs `Pick<X, 'b'>`).
-#[allow(dead_code)]
 pub(crate) type LiteralHash = u64;
 
 /// One normalized type argument for the cycle-guard key. The four variants
@@ -812,7 +887,6 @@ pub(crate) type LiteralHash = u64;
 /// - `None` — empty / missing argument slot. Reserved for ambient
 ///   reductions where the caller wants to discriminate between "no arg"
 ///   and "a real arg that happens to hash to zero".
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum NormalizedTypeArg {
     Decl(DeclIdentity),
@@ -830,11 +904,9 @@ pub(crate) enum NormalizedTypeArg {
 /// `NormalizedTypeArgs` value, regardless of the syntactic shape of the
 /// original `TypeExpr` arguments. The ordering of arguments IS preserved
 /// (positional arguments) — different positions are different keys.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct NormalizedTypeArgs(SmallVec<[NormalizedTypeArg; 4]>);
 
-#[allow(dead_code)]
 impl NormalizedTypeArgs {
     /// Build an empty `NormalizedTypeArgs`. Used as the cycle-guard key
     /// for a declaration entered with no type arguments.
@@ -847,6 +919,7 @@ impl NormalizedTypeArgs {
     /// arguments. Caller is responsible for resolving each input
     /// `TypeExpr` to its `NormalizedTypeArg` (the resolver-aware
     /// constructor lives in the bundle that consumes this type).
+    #[allow(dead_code)]
     #[must_use]
     pub(crate) fn from_normalized<I>(args: I) -> Self
     where
@@ -855,22 +928,98 @@ impl NormalizedTypeArgs {
         Self(args.into_iter().collect())
     }
 
+    /// Resolver-aware constructor — normalizes a slice of `TypeExpr`
+    /// arguments into the cycle-guard key form. Each input maps to one
+    /// `NormalizedTypeArg`:
+    ///
+    /// * `Ref { name, args }` resolves through the policy's declaration
+    ///   lookup and produces `Decl(DeclIdentity)` keyed on the resolved
+    ///   declaration's canonical source. Refs the resolver cannot
+    ///   locate fall back to `AnonymousShape(hash)` so unresolved
+    ///   references still discriminate by name.
+    /// * `Literal(v)` produces `Literal(hash_literal(v))` so
+    ///   `Pick<X, 'a'>` and `Pick<X, 'b'>` produce distinct keys.
+    /// * `Infer` / unknown-shape arguments produce
+    ///   `AnonymousShape(structural_hash)` — a stable hash of the
+    ///   `TypeExpr` (which derives `Hash`) so structurally-identical
+    ///   inline shapes share an identity but distinct shapes do not
+    ///   collide.
+    ///
+    /// The function is `&mut PolicyCtx` because resolving a `Ref`
+    /// argument may consult the same declaration cache the cycle guard
+    /// itself uses.
+    ///
+    /// Visibility is `pub(super)` so the constructor stays inside the
+    /// `component_meta_resolution_policy` module — the consumer is
+    /// `rewrite_ref` plus structural normalization helpers in the same
+    /// file. `PolicyCtx` is module-private; widening the constructor's
+    /// visibility past the module boundary would leak the policy's
+    /// resolver state through the type signature.
+    #[must_use]
+    fn normalize(args: &[TypeExpr], ctx: &mut PolicyCtx<'_, '_>) -> Self {
+        let mut out: SmallVec<[NormalizedTypeArg; 4]> = SmallVec::new();
+        for arg in args {
+            out.push(normalize_one_arg(arg, ctx));
+        }
+        Self(out)
+    }
+
     /// Number of arguments (zero for `empty`).
+    #[allow(dead_code)]
     #[must_use]
     pub(crate) fn len(&self) -> usize {
         self.0.len()
     }
 
     /// True when no arguments are present.
+    #[allow(dead_code)]
     #[must_use]
     pub(crate) fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
     /// Iterator over the normalized arguments in positional order.
+    #[allow(dead_code)]
     pub(crate) fn iter(&self) -> impl Iterator<Item = &NormalizedTypeArg> {
         self.0.iter()
     }
+}
+
+/// Resolve one `TypeExpr` argument into its `NormalizedTypeArg` shape.
+fn normalize_one_arg(arg: &TypeExpr, ctx: &mut PolicyCtx<'_, '_>) -> NormalizedTypeArg {
+    match arg {
+        TypeExpr::Parenthesized(inner) => normalize_one_arg(inner, ctx),
+        TypeExpr::Ref { name, .. } => {
+            // Try to resolve the ref to a declaration identity. When
+            // the lookup succeeds the canonical source uniquely keys
+            // the argument; otherwise fall back to a structural hash
+            // so the cycle guard still discriminates by name.
+            if let Some(DeclLookup {
+                canonical_source, ..
+            }) = ctx.locate_declaration(name.as_ref())
+            {
+                NormalizedTypeArg::Decl(ctx.decl_identity_for(&canonical_source, name.as_ref()))
+            } else {
+                NormalizedTypeArg::AnonymousShape(hash_type_expr(arg))
+            }
+        }
+        TypeExpr::Literal(value) => NormalizedTypeArg::Literal(hash_literal(value)),
+        TypeExpr::Infer { .. } => NormalizedTypeArg::None,
+        _ => NormalizedTypeArg::AnonymousShape(hash_type_expr(arg)),
+    }
+}
+
+/// Compute a deterministic 64-bit hash of a `TypeExpr`. The structural
+/// `Hash` derivation on `TypeExpr` is stable across builds because all
+/// component hashers are deterministic; this function routes through
+/// `xxh3` so the digest is the same shape used elsewhere in the cycle
+/// guard's identity space.
+fn hash_type_expr(expr: &TypeExpr) -> ShapeHash {
+    use std::hash::Hash;
+    let mut hasher = xxhash_rust::xxh3::Xxh3::new();
+    let mut bridge = LiteralHashBridge(&mut hasher);
+    expr.hash(&mut bridge);
+    hasher.digest()
 }
 
 impl Default for NormalizedTypeArgs {
@@ -882,7 +1031,6 @@ impl Default for NormalizedTypeArgs {
 /// Stable hash of a `LiteralValue` for use inside `NormalizedTypeArg::Literal`.
 /// Mirrors the manual `Hash` impl on `LiteralValue` — same input bytes
 /// produce the same digest across builds.
-#[allow(dead_code)]
 #[must_use]
 pub(crate) fn hash_literal(value: &LiteralValue) -> LiteralHash {
     use std::hash::Hash;
@@ -892,7 +1040,6 @@ pub(crate) fn hash_literal(value: &LiteralValue) -> LiteralHash {
     hasher.digest()
 }
 
-#[allow(dead_code)]
 struct LiteralHashBridge<'a>(&'a mut xxhash_rust::xxh3::Xxh3);
 
 impl<'a> std::hash::Hasher for LiteralHashBridge<'a> {
@@ -908,3 +1055,7 @@ impl<'a> std::hash::Hasher for LiteralHashBridge<'a> {
 #[cfg(test)]
 #[path = "component_meta_resolution_policy_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "component_meta_resolution_policy_cycle_tests.rs"]
+mod cycle_tests;
