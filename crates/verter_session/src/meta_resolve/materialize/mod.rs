@@ -23,6 +23,8 @@ mod field_types;
 mod macro_shapes;
 pub(crate) mod utility_types;
 
+#[cfg(test)]
+pub(crate) use field_types::MEMBER_ROUTE_CALLS_COUNTER;
 pub(crate) use field_types::{
     define_props_member_can_stay_symbolic_without_rescue,
     field_should_preserve_shallow_symbolic_raw_type, lowered_needs_member_route_materialization,

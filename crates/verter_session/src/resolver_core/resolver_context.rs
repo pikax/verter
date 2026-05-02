@@ -227,6 +227,20 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     /// surface to seal-scope code).
     fn workspace_content_generation(&self) -> u64;
 
+    /// Whether `canonical_id` is workspace-owned per the workspace's
+    /// resolver-classification (NOT a path-substring check on
+    /// `node_modules`). True for workspace package sources, including
+    /// pnpm-symlink hops whose realpath resolves into a workspace
+    /// project, and workspace-linked packages that happen to live under
+    /// `node_modules/`.
+    ///
+    /// Used by Issue #5 (indexed-access early-out) and Issue #11
+    /// (workspace-local canonical cache reuse) to gate fast paths on
+    /// actual workspace ownership. Per CLAUDE.md macro-traversal rule,
+    /// callers MUST NOT substitute `path.contains("/node_modules/")`
+    /// for this method.
+    fn workspace_is_workspace_owned(&self, canonical_id: &str) -> bool;
+
     // -------- Dispatch facade --------------------------------------
 
     fn dispatch(&self) -> ProjectSemanticDispatch<'_>;
@@ -464,6 +478,11 @@ impl ResolverContext for crate::VerterHost {
     #[inline]
     fn workspace_content_generation(&self) -> u64 {
         self.workspace().content_generation()
+    }
+
+    #[inline]
+    fn workspace_is_workspace_owned(&self, canonical_id: &str) -> bool {
+        self.workspace().is_workspace_owned(canonical_id)
     }
 
     // Dispatch facade ------------------------------------------------

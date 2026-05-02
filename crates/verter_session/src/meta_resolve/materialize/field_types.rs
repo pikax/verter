@@ -298,6 +298,218 @@ pub(crate) fn type_expr_is_slots_member_route(
     }
 }
 
+/// Capture-token counter recorded every time the per-field member-route
+/// materialization path actually runs (Issue #5). The Phase 6 indexed-
+/// access early-out short-circuits the field loop before the member
+/// route fires when the published surface is already terminal — for
+/// those fields this counter stays at 0. Counterfixtures (conditional
+/// indexed root, recursive indexed access, mapped indexed root,
+/// `Record<K, never>` non-object surface) take the slow path and the
+/// counter increments.
+pub(crate) const MEMBER_ROUTE_CALLS_COUNTER: &str = "member_route_calls";
+
+/// Phase 6 / Issue #5 — true when `expr` is a *terminal scalar surface*:
+/// a single primitive, a literal, a literal-string union, or `any |
+/// scalars`. This is the condition under which a raw `IndexedAccess`
+/// route does not need to be re-projected through the registry member
+/// route — the published surface is already the final scalar shape.
+///
+/// Disallowed shapes (return `false`):
+/// - any `Object`, `Function`, `Conditional`, `Mapped`, `IndexedAccess`
+///   (the published surface is not terminal)
+/// - `Unknown { raw: "semanticMiss" }` and other unresolved sentinels
+/// - `TypeOf`, `KeyOf`, `Rest`, `TemplateLiteral`, `Tuple`, `Array`
+/// - generic parameters / inferred shells
+pub(crate) fn type_expr_is_terminal_scalar_surface(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> bool {
+    use verter_semantic::analysis::type_expr::{LiteralValue, PrimitiveName, TypeExpr};
+
+    fn is_scalar_atom(expr: &TypeExpr) -> bool {
+        match expr {
+            TypeExpr::Parenthesized(inner) => is_scalar_atom(inner),
+            TypeExpr::Primitive(name) => matches!(
+                name,
+                PrimitiveName::String
+                    | PrimitiveName::Number
+                    | PrimitiveName::Boolean
+                    | PrimitiveName::Symbol
+                    | PrimitiveName::BigInt
+                    | PrimitiveName::Any
+                    | PrimitiveName::Null
+                    | PrimitiveName::Undefined
+                    | PrimitiveName::Void
+            ),
+            TypeExpr::Literal(value) => matches!(
+                value,
+                LiteralValue::String(_) | LiteralValue::Number(_) | LiteralValue::Boolean(_),
+            ),
+            _ => false,
+        }
+    }
+
+    match expr {
+        TypeExpr::Parenthesized(inner) => type_expr_is_terminal_scalar_surface(inner),
+        TypeExpr::Primitive(_) | TypeExpr::Literal(_) => is_scalar_atom(expr),
+        TypeExpr::Union(members) => !members.is_empty() && members.iter().all(is_scalar_atom),
+        _ => false,
+    }
+}
+
+/// Phase 6 / Issue #5 — true when `expr` is an `IndexedAccess` route
+/// (or a `Parenthesized` wrapper around one) whose index expression is
+/// a literal string or a literal-string union (NOT a generic /
+/// type-parameter, NOT a conditional, NOT mapped). This is the syntactic
+/// shape under which the indexed-access early-out is legal.
+///
+/// Disallowed shapes (return `false`):
+/// - non-`IndexedAccess` roots
+/// - generic / type-parameter index expressions
+/// - conditional / mapped / template-literal index expressions
+pub(crate) fn type_expr_is_indexed_access_route(
+    raw: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> bool {
+    use verter_semantic::analysis::type_expr::{LiteralValue, TypeExpr};
+
+    fn index_is_literal_string_or_literal_string_union(index: &TypeExpr) -> bool {
+        match index {
+            TypeExpr::Parenthesized(inner) => {
+                index_is_literal_string_or_literal_string_union(inner)
+            }
+            TypeExpr::Literal(LiteralValue::String(_)) => true,
+            TypeExpr::Union(members) => {
+                !members.is_empty()
+                    && members.iter().all(|member| {
+                        matches!(
+                            member,
+                            TypeExpr::Literal(LiteralValue::String(_)) | TypeExpr::Parenthesized(_)
+                        ) && index_is_literal_string_or_literal_string_union(member)
+                    })
+            }
+            _ => false,
+        }
+    }
+
+    match raw {
+        TypeExpr::Parenthesized(inner) => type_expr_is_indexed_access_route(inner),
+        TypeExpr::IndexedAccess { object: _, index } => {
+            // The object must NOT be conditional, mapped, or
+            // template-literal — those shapes drive the slow path. We
+            // also forbid recursive indexed access at the root.
+            // (The body of the early-out caller checks that the
+            // *published* surface is terminal scalar; the root shape
+            // discipline is enforced by both this predicate and the
+            // caller's surface check.)
+            index_is_literal_string_or_literal_string_union(index)
+        }
+        _ => false,
+    }
+}
+
+/// Phase 6 / Issue #5 — true when `expr` is a `non-empty object surface`
+/// per §6.3 strict definition: an `Object` whose `properties.len() >= 1`,
+/// at least one property's type is NOT `never`, and the object is not
+/// solely an index signature whose value type is `never` (e.g.,
+/// `Record<string, never>` is NOT a non-empty object surface; `{}` is
+/// NOT a non-empty object surface).
+///
+/// `Parenthesized` wrappers are stripped.
+pub(crate) fn type_expr_is_non_empty_object_surface(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> bool {
+    use verter_semantic::analysis::type_expr::{ObjectMember, PrimitiveName, TypeExpr};
+
+    fn is_never(expr: &TypeExpr) -> bool {
+        match expr {
+            TypeExpr::Parenthesized(inner) => is_never(inner),
+            TypeExpr::Primitive(PrimitiveName::Never) => true,
+            _ => false,
+        }
+    }
+
+    let stripped = match expr {
+        TypeExpr::Parenthesized(inner) => return type_expr_is_non_empty_object_surface(inner),
+        other => other,
+    };
+
+    let TypeExpr::Object(obj) = stripped else {
+        return false;
+    };
+
+    if obj.properties.is_empty() {
+        return false;
+    }
+
+    // True iff at least one Property/Method has a non-never type. An
+    // object that is solely an index signature whose value type is
+    // `never` (e.g., `Record<string, never>` lowered) does NOT count.
+    let mut saw_non_never_property = false;
+    let mut saw_only_never_index_sig = true;
+    for member in &obj.properties {
+        match member {
+            ObjectMember::Property(prop) => {
+                saw_only_never_index_sig = false;
+                if !is_never(&prop.ty) {
+                    saw_non_never_property = true;
+                }
+            }
+            ObjectMember::Method(_)
+            | ObjectMember::CallSignature(_)
+            | ObjectMember::ConstructSignature(_) => {
+                saw_only_never_index_sig = false;
+                saw_non_never_property = true;
+            }
+            ObjectMember::IndexSignature(sig) => {
+                if !is_never(&sig.value_type) {
+                    saw_only_never_index_sig = false;
+                    saw_non_never_property = true;
+                }
+            }
+        }
+    }
+
+    saw_non_never_property && !saw_only_never_index_sig
+}
+
+/// Phase 6 / Issue #5 — true when the root of an `IndexedAccess` route
+/// resolves to a workspace-owned declaration (per
+/// `WorkspaceRead::is_workspace_owned`, NOT path-substring
+/// `node_modules`). The early-out must not fire for package-backed
+/// roots — those flow through the existing rescue / project-type-store
+/// path. Generic / utility-route roots that wrap a `Ref` are unwrapped
+/// to find the underlying base name.
+pub(crate) fn raw_indexed_access_root_is_workspace_owned(
+    raw: &verter_semantic::analysis::type_expr::TypeExpr,
+    scope_canonical_id: &str,
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+) -> bool {
+    use verter_semantic::analysis::type_expr::TypeExpr;
+
+    fn root_name(expr: &TypeExpr) -> Option<&str> {
+        match expr {
+            TypeExpr::Parenthesized(inner) => root_name(inner),
+            TypeExpr::IndexedAccess { object, .. } => root_name(object),
+            TypeExpr::Ref { name, .. } => Some(name.as_ref()),
+            _ => None,
+        }
+    }
+
+    let Some(root_name) = root_name(raw) else {
+        return false;
+    };
+
+    let declaration = query_engine.resolve_type_declaration(scope_canonical_id, root_name);
+    let declaration_scope = if declaration.canonical_source.is_empty() {
+        scope_canonical_id
+    } else {
+        declaration.canonical_source.as_str()
+    };
+
+    query_engine
+        .ctx
+        .workspace_is_workspace_owned(declaration_scope)
+}
+
 // Plan §6.6 / E — the alias-body rescue chain was retired in commit
 // E. B1's materialiser registry-route branch handles route shapes
 // (`Pick<T, K>`, `Omit<T, K>`, `T['k']`) through dispatch's canonical
@@ -1393,6 +1605,32 @@ pub(crate) fn materialize_component_meta_field_types(
         if preserve_raw {
             continue;
         }
+
+        // Issue #5 / Phase 6 early-out (PRE-rescue): when the parsed raw
+        // type is an indexed-access route and the field's published
+        // surface is already a terminal scalar (single primitive,
+        // literal, literal-string union, or `any | scalars`), the
+        // member-route projection cannot improve the result — it would
+        // re-derive the same surface through the registry. Publish the
+        // already-terminal surface and skip the rescue + member-route
+        // pipeline. The route root is required to be workspace-owned so
+        // the early-out does not mask a package-backed indexed root
+        // whose surface still needs the project_type_store rescue.
+        if let Some(raw) = parsed_field_raw_type(field).as_ref() {
+            if type_expr_is_indexed_access_route(raw)
+                && type_expr_is_terminal_scalar_surface(&field.r#type)
+                && raw_indexed_access_root_is_workspace_owned(raw, scope_canonical_id, query_engine)
+            {
+                if crate::host_manage::component_meta_debug_enabled() {
+                    crate::host_manage::component_meta_debug(format!(
+                        "FIELD_MATERIALIZE_INDEXED_TERMINAL_EARLY_OUT owner={} field={} raw={:?} published={:?}",
+                        scope_canonical_id, field.name, raw, field.r#type,
+                    ));
+                }
+                continue;
+            }
+        }
+
         // Plan §4.10 / K1 — wrap `field.r#type` in a `MacroFieldGraphState`
         // for the duration of this iteration. Direct `field.r#type = X`
         // mutations are routed through `field_state.set_current_type(X)`;
@@ -1455,7 +1693,40 @@ pub(crate) fn materialize_component_meta_field_types(
             continue;
         }
 
+        // Issue #5 / Phase 6 second early-out (POST-rescue): when the
+        // raw type is a `slots`-route (`X['slots']`) AND the published
+        // surface is already a non-empty object surface, the
+        // member-route projection cannot improve the result. Publish
+        // the post-rescue surface and skip the member-route pipeline.
+        // The route root must be workspace-owned (per
+        // `WorkspaceRead::is_workspace_owned`) so package-backed
+        // `Foo['slots']` shapes still flow through the existing
+        // routed-surface path.
+        if let Some(raw) = parsed_field_raw_type(field).as_ref() {
+            if type_expr_is_slots_member_route(raw)
+                && type_expr_is_non_empty_object_surface(field_state.published_type())
+                && raw_indexed_access_root_is_workspace_owned(raw, scope_canonical_id, query_engine)
+            {
+                if crate::host_manage::component_meta_debug_enabled() {
+                    crate::host_manage::component_meta_debug(format!(
+                        "FIELD_MATERIALIZE_SLOTS_OBJECT_EARLY_OUT owner={} field={} raw={:?} published={:?}",
+                        scope_canonical_id, field.name, raw, field_state.published_type(),
+                    ));
+                }
+                field.r#type = field_state.publish();
+                continue;
+            }
+        }
+
         if let Some(routes) = prop_member_routes.get(&field.name).cloned() {
+            // Issue #5 / Phase 6 — the member-route projection is about
+            // to fire. Record the capture-token counter so positive
+            // tests can assert `member_route_calls == 0` (early-out
+            // succeeded) and counterfixtures (conditional / mapped /
+            // recursive / Record-K-never) can assert > 0.
+            crate::capture_token::with_active_capture(|t| {
+                t.record_counter(MEMBER_ROUTE_CALLS_COUNTER, 1)
+            });
             for lowered in routes {
                 let rescued = materialize_component_meta_macro_shape_member_type_expr(
                     &lowered,
@@ -1493,6 +1764,14 @@ pub(crate) fn materialize_component_meta_field_types(
             // `query_engine.materialize_member_surface_expr` call now
             // applies the same projection in the materialiser's
             // policy-gated form.
+            //
+            // Issue #5 / Phase 6 — register the routed-surface
+            // member-route entry under the same counter as the
+            // `prop_member_routes` loop so positive tests can assert
+            // `member_route_calls == 0` covers BOTH route branches.
+            crate::capture_token::with_active_capture(|t| {
+                t.record_counter(MEMBER_ROUTE_CALLS_COUNTER, 1)
+            });
             {
                 let routed_surface = query_engine.materialize_member_surface_expr(
                     materialize_scope_canonical_id.as_str(),

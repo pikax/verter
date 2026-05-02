@@ -107,6 +107,15 @@ pub(crate) use materialize::{
     materialize_component_meta_field_types, materialize_component_meta_type_expr_until_stable,
     produce_macro_object_shapes_for_purpose,
 };
+// Test-only re-export — `MEMBER_ROUTE_CALLS_COUNTER` is consumed by the
+// `component_meta_indexed_access_early_out_tests` capture-token
+// assertions. The constant lives in `materialize/field_types.rs`
+// (`pub(crate)` always-on, since the production wiring sites in
+// `materialize_component_meta_field_types` reference it from
+// non-`cfg(test)` code), but the only OUTSIDE consumer is the test
+// module — so the re-export at the meta_resolve.rs surface is gated.
+#[cfg(test)]
+pub(crate) use materialize::MEMBER_ROUTE_CALLS_COUNTER;
 // Test-only re-exports — exercised by `meta_resolve_tests.rs` via
 // `super::*` glob import from the `meta_resolve_tests` child mod
 // (`#[path = "meta_resolve_tests.rs"] mod meta_resolve_tests;` at the
