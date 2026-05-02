@@ -11852,6 +11852,146 @@ defineSlots<CalendarSlots>()
     );
 }
 
+/// Issue #1 (partial): a slot binding whose raw type is
+/// `IndexedAccess { object: <project-local Props>, index: <literal> }`
+/// must stay symbolic when the underlying property body resolves
+/// through to an imported declaration that carries an open
+/// `[k: string]: any` index signature. Otherwise the evaluator
+/// re-expands the indexed access through the index signature and the
+/// public surface widens to `any`.
+///
+/// Fixture shape:
+///   * `/src/avatar.ts` exports `interface ImportedProps { src: string }`.
+///   * `/src/Comp.vue`'s script-setup declares
+///     `interface AppProps { avatar: ImportedProps & { [k: string]: any } }`
+///     and `defineSlots<{ leading(props: { avatar: AppProps['avatar'] }): any }>()`.
+///
+/// The slot binding `avatar` must publish `type_expr` shaped as
+/// `IndexedAccess { object: Ref(AppProps), index: 'avatar' }`. The raw
+/// type contract `AppProps['avatar']` is the canonical form consumers
+/// re-resolve from.
+#[test]
+fn slot_binding_imported_props_with_any_index_signature_stays_symbolic() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/avatar.ts",
+            r#"
+export interface ImportedProps {
+  src: string
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Comp.vue",
+            r#"<script setup lang="ts">
+import type { ImportedProps } from './avatar'
+
+interface AppProps {
+  avatar: ImportedProps & { [k: string]: any }
+}
+
+defineSlots<{
+  leading(props: { avatar: AppProps['avatar'] }): any
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/Comp.vue")
+        .expect("should return component meta for the slot fixture");
+    let leading_slot = meta
+        .slots
+        .iter()
+        .find(|slot| slot.name == "leading")
+        .expect("leading slot should be extracted");
+    let avatar_binding = leading_slot
+        .bindings
+        .iter()
+        .find(|binding| binding.name == "avatar")
+        .expect("leading slot should expose the avatar binding");
+
+    // Symbolic raw-type contract: consumers can re-resolve through this
+    // member path on demand.
+    assert_eq!(
+        avatar_binding.raw_type.as_deref(),
+        Some("AppProps['avatar']"),
+        "slot binding must preserve the symbolic raw-type form"
+    );
+    // Public type_expr stays as the indexed access — no expansion
+    // through the imported `[k: string]: any` index signature.
+    assert!(
+        matches!(&avatar_binding.type_expr, TypeExpr::IndexedAccess { .. }),
+        "slot binding type_expr must stay IndexedAccess (no widening through the imported index \
+         signature); got {:?}",
+        avatar_binding.type_expr
+    );
+}
+
+/// Counterfixture for the slot-binding indexed-access policy: when the
+/// indexed root is workspace-local AND non-imported AND not in a
+/// route-preservation context, the policy should NOT preserve
+/// `IndexedAccess` symbolically — the evaluator's expanded shape is
+/// the intended public surface.
+///
+/// Fixture: `interface AppProps { kind: 'a' | 'b' }` declared in the
+/// owner SFC's script-setup, with no imported helpers in the binding
+/// chain. `defineSlots<{ leading(props: { kind: AppProps['kind'] }): any }>()`
+/// publishes the union literal `'a' | 'b'` as the slot binding's
+/// `type_expr` — symbolic preservation would suppress information the
+/// consumer expects.
+#[test]
+fn slot_binding_local_props_without_index_signature_takes_slow_path() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/Comp.vue",
+            r#"<script setup lang="ts">
+interface AppProps {
+  kind: 'a' | 'b'
+}
+
+defineSlots<{
+  leading(props: { kind: AppProps['kind'] }): any
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/Comp.vue")
+        .expect("should return component meta for the slot counterfixture");
+    let leading_slot = meta
+        .slots
+        .iter()
+        .find(|slot| slot.name == "leading")
+        .expect("leading slot should be extracted");
+    let kind_binding = leading_slot
+        .bindings
+        .iter()
+        .find(|binding| binding.name == "kind")
+        .expect("leading slot should expose the kind binding");
+
+    // The slow path expands the indexed access into the literal union
+    // — that is the intended public surface for purely-local props
+    // with no imported index signature in the chain. Symbolic
+    // preservation here would suppress the resolved literal union the
+    // consumer expects.
+    assert!(
+        !matches!(&kind_binding.type_expr, TypeExpr::IndexedAccess { .. }),
+        "purely-local slot binding without imported helpers must take the slow path \
+         (no symbolic IndexedAccess preservation); got {:?}",
+        kind_binding.type_expr
+    );
+}
+
 #[test]
 fn imported_slot_binding_indexed_access_helpers_resolve_to_concrete_members() {
     let project = make_project();
