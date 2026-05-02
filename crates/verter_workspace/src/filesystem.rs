@@ -397,6 +397,18 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
         self.engine.owner_for_file(canonical_id)
     }
 
+    fn is_workspace_owned(&self, canonical_id: &str) -> bool {
+        let resolved = self.realpath(canonical_id);
+        let target = resolved.as_deref().unwrap_or(canonical_id);
+        self.engine.is_workspace_owned(target)
+    }
+
+    fn is_package_backed(&self, canonical_id: &str) -> bool {
+        let resolved = self.realpath(canonical_id);
+        let target = resolved.as_deref().unwrap_or(canonical_id);
+        self.engine.is_package_backed(target)
+    }
+
     fn content_generation(&self) -> u64 {
         self.engine.current_content_generation()
     }

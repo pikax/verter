@@ -128,6 +128,43 @@ pub trait WorkspaceRead: Send + Sync {
         None
     }
 
+    /// Whether `canonical_id` is a workspace-owned source file.
+    ///
+    /// Routes through the resolver's existing ownership classification:
+    /// - True when the file (or its `realpath` resolution) sits inside
+    ///   any registered project's `root`. This includes:
+    ///   - regular workspace packages,
+    ///   - workspace packages that happen to live under `node_modules/`,
+    ///   - pnpm-symlink hops where `realpath()` resolves a
+    ///     `node_modules/.pnpm/...` path back to a workspace location.
+    /// - False otherwise (third-party `node_modules` packages, paths
+    ///   outside every registered project).
+    ///
+    /// Callers MUST NOT substitute `path.contains("/node_modules/")`
+    /// for this method — that heuristic mis-classifies every
+    /// pnpm-symlink and workspace-inside-node_modules case.
+    ///
+    /// Default: `false` (no project ownership).
+    fn is_workspace_owned(&self, _canonical_id: &str) -> bool {
+        false
+    }
+
+    /// Whether `canonical_id` is backed by a third-party package
+    /// installation (i.e., reachable through `node_modules` and NOT
+    /// claimed by any registered workspace project).
+    ///
+    /// Routes through the resolver's existing ownership classification:
+    /// - True when the realpath sits under `node_modules/` AND no
+    ///   registered project root claims the file.
+    /// - False for workspace sources, pnpm-symlink hops that resolve
+    ///   into a workspace project, and paths outside any
+    ///   `node_modules` directory.
+    ///
+    /// Default: `false` (nothing is package-backed without a resolver).
+    fn is_package_backed(&self, _canonical_id: &str) -> bool {
+        false
+    }
+
     /// Monotonic content generation. Bumped when workspace file content or
     /// overlays change, so long-lived consumers can invalidate cached reads.
     fn content_generation(&self) -> u64 {

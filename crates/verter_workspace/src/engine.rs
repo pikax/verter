@@ -22,6 +22,10 @@ use crate::types::{
 };
 use crate::workspace_snapshot::{SnapshotGeneration, WorkspaceSnapshot};
 
+/// Path-segment marker used by the package classification helpers to
+/// detect node_modules-rooted paths.
+const NODE_MODULES_SEGMENT: &str = "/node_modules/";
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct LazyResolutionCacheKey {
     importer_id: String,
@@ -515,6 +519,66 @@ impl Engine {
                     .map(|p| p.as_str().to_string()),
             }
         })
+    }
+
+    /// Whether `canonical_id` (or its realpath) is claimed by any
+    /// registered workspace project.
+    ///
+    /// This consults the published snapshot's `OwnershipProject`
+    /// list. A path is workspace-owned when it sits inside some
+    /// project's `root` AND the suffix between that root and the
+    /// path contains no further `/node_modules/` segment. The
+    /// suffix-check preserves two important corner cases:
+    ///
+    /// - A workspace package whose root happens to live inside
+    ///   `node_modules/` (uncommon but legal in pnpm) IS
+    ///   workspace-owned for files under that root.
+    /// - A third-party `node_modules/` source under an outer
+    ///   project's root is NOT workspace-owned, because the
+    ///   suffix between the outer root and the file contains
+    ///   `/node_modules/`.
+    ///
+    /// Pnpm-symlink hops are handled by the caller resolving
+    /// `realpath` before invoking this method.
+    ///
+    /// Returns `false` before the workspace publishes its first
+    /// snapshot.
+    pub(crate) fn is_workspace_owned(&self, canonical_id: &str) -> bool {
+        let Some(root) = self.published_state.load_full() else {
+            return false;
+        };
+        let path = crate::canonical_path::CanonicalPath::new(canonical_id);
+        let path_str = path.as_str();
+        root.snapshot.projects.iter().any(|project| {
+            let project_root = project.root.as_str();
+            if !path.starts_with_dir(&project.root) {
+                return false;
+            }
+            // Suffix between project.root and path. Empty suffix
+            // (path == project.root) is workspace-owned.
+            let Some(suffix) = path_str.strip_prefix(project_root) else {
+                return false;
+            };
+            !suffix.contains(NODE_MODULES_SEGMENT)
+        })
+    }
+
+    /// Whether `canonical_id` (or its realpath) sits inside a
+    /// `node_modules/` directory AND no registered project root
+    /// claims the path.
+    ///
+    /// Discriminating cases:
+    /// - third-party `node_modules/lodash/...` → `true`
+    /// - workspace package linked via `node_modules/` → `false`
+    ///   (the project root claims it via [`is_workspace_owned`])
+    /// - workspace source outside `node_modules/` → `false`
+    /// - path with no `node_modules/` segment → `false`
+    pub(crate) fn is_package_backed(&self, canonical_id: &str) -> bool {
+        let path = crate::canonical_path::CanonicalPath::new(canonical_id);
+        if !path.as_str().contains(NODE_MODULES_SEGMENT) {
+            return false;
+        }
+        !self.is_workspace_owned(canonical_id)
     }
 
     /// Compute the preferred alias-based import specifier for a target file.
