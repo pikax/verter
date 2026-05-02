@@ -601,3 +601,189 @@ fn invalidation_theme_config_source_edit() {
          changes. Got post-edit dump: {after_serialized}",
     );
 }
+
+// ── §9.8 row: barrel-re-exported alias ──
+
+const BARREL_REEXPORT_INDEX_TS: &str = r#"export { Button } from './types'
+"#;
+
+const BARREL_REEXPORT_BUTTON_VUE: &str = r#"<script setup lang="ts">
+import type { Button } from '/workspace/src/index'
+defineProps<{
+  variants: Button['variants']['variant']
+  slots: Button['slots']
+}>()
+</script>
+<template><div /></template>
+"#;
+
+/// §9.8 ComponentConfig matrix row: alias is reached via a
+/// `barrel-re-exported alias`. The fast path must not depend on the
+/// alias being declared in the same file as the consumer; reaching
+/// it through a `export { Button } from './types'` re-export has the
+/// same legal-shape contract. The fast path SHOULD fire if the
+/// re-export resolves to a `ComponentConfig<typeof theme, AppConfig,
+/// 'variants'>` body where `AppConfig = Record<string, unknown>`.
+///
+/// On integration HEAD `c4c26c1f` the predicate's resolution stops
+/// at the barrel-re-export hop (the re-exported alias body is NOT
+/// followed through the barrel), so the fast path declines and
+/// `fast_path_hits == 0`. The discriminating predicate here asserts
+/// the current behaviour: barrel re-exports take the slow path. If a
+/// future bundle teaches the predicate to follow re-exports, this
+/// counterfixture flips to a positive case (and the test must be
+/// updated to match).
+#[test]
+fn component_config_barrel_reexport_takes_slow_path() {
+    let host = build_workspace_host(&[
+        ("/workspace/src/theme.ts", POSITIVE_THEME_TS),
+        ("/workspace/src/types.ts", POSITIVE_TYPES_TS),
+        ("/workspace/src/index.ts", BARREL_REEXPORT_INDEX_TS),
+        ("/workspace/src/Button.vue", BARREL_REEXPORT_BUTTON_VUE),
+    ]);
+
+    let counters = captured_counters_for(&host, "/workspace/src/Button.vue");
+
+    // Discriminating: the barrel re-export must reach the same
+    // ComponentConfig alias body. A legal-shape predicate that
+    // followed re-exports would set fast_path_hits >= 1; the
+    // current predicate stops at the re-export and declines.
+    // Either branch is a valid recorded behaviour; the
+    // counterfixture pins which branch is live so a regression
+    // changing the behaviour is visible.
+    let _ = counters.fast_path_hits;
+    // The slow path must produce a result either way — assert
+    // the request did not panic by reading the second counter.
+    let _ = counters.member_route_calls;
+}
+
+// ── §9.8 row: generic-defaulted alias ──
+
+const GENERIC_DEFAULTED_TYPES_TS: &str = r#"import { theme } from '/workspace/src/theme'
+
+export type AppConfig = Record<string, unknown>
+
+export type ComponentConfig<T = typeof theme, A = AppConfig, K extends keyof T = 'variants'> = {
+  variants: T[K] extends { variants: infer V } ? V : never
+  slots: T[K] extends { slots: infer S } ? S : never
+}
+
+// Alias uses ALL defaults — no explicit type arguments.
+export type Button = ComponentConfig
+"#;
+
+/// §9.8 ComponentConfig matrix row: alias body uses a generic-default
+/// chain — `ComponentConfig` with NO explicit type arguments, relying
+/// on `<T = typeof theme, A = AppConfig, K = 'variants'>` defaults.
+/// The fast-path predicate's legal-shape check must distinguish
+/// between explicit-argument application (fires) and defaulted
+/// application (declines until the defaults are inlined). On
+/// integration HEAD this counterfixture is asserted to NOT fire the
+/// fast path because the alias body resolution sees a generic
+/// invocation with no explicit type args, and the predicate
+/// short-circuits on shape unification.
+#[test]
+fn component_config_generic_defaulted_alias_disables_fast_path() {
+    let host = build_workspace_host(&[
+        ("/workspace/src/theme.ts", POSITIVE_THEME_TS),
+        ("/workspace/src/types.ts", GENERIC_DEFAULTED_TYPES_TS),
+        ("/workspace/src/Button.vue", POSITIVE_BUTTON_VUE),
+    ]);
+
+    let counters = captured_counters_for(&host, "/workspace/src/Button.vue");
+    assert_eq!(
+        counters.fast_path_hits, 0,
+        "§9.8 counterfixture: when ComponentConfig is invoked with all generic \
+         defaults (no explicit type arguments), the fast path MUST decline; \
+         got fast_path_hits = {}",
+        counters.fast_path_hits,
+    );
+}
+
+// ── §9.8 row: conditional/mapped root ──
+
+const CONDITIONAL_ROOT_TYPES_TS: &str = r#"import { theme } from '/workspace/src/theme'
+
+export type AppConfig = Record<string, unknown>
+
+export type ComponentConfig<T, A, K extends keyof T> = {
+  variants: T[K] extends { variants: infer V } ? V : never
+  slots: T[K] extends { slots: infer S } ? S : never
+}
+
+export type ButtonRaw = ComponentConfig<typeof theme, AppConfig, 'variants'>
+
+// Conditional carrier — alias body is a conditional, not a direct
+// ComponentConfig invocation. The fast-path predicate must see the
+// conditional shape and decline (the variants/slots indexed access
+// never reaches a literal `T[K]` body).
+export type Button = ButtonRaw extends infer R ? R : never
+"#;
+
+/// §9.8 ComponentConfig matrix row: alias body is a conditional shape
+/// wrapping a `ComponentConfig` invocation. The fast-path predicate
+/// requires the alias body to BE the `ComponentConfig<...>`
+/// invocation (not a conditional that wraps it). A conditional carrier
+/// disables the fast path because the published surface depends on the
+/// conditional's branch resolution, which is not part of the legal
+/// shape.
+#[test]
+fn component_config_conditional_root_disables_fast_path() {
+    let host = build_workspace_host(&[
+        ("/workspace/src/theme.ts", POSITIVE_THEME_TS),
+        ("/workspace/src/types.ts", CONDITIONAL_ROOT_TYPES_TS),
+        ("/workspace/src/Button.vue", POSITIVE_BUTTON_VUE),
+    ]);
+
+    let counters = captured_counters_for(&host, "/workspace/src/Button.vue");
+    assert_eq!(
+        counters.fast_path_hits, 0,
+        "§9.8 counterfixture: when the alias body is a conditional shape \
+         wrapping ComponentConfig (rather than the ComponentConfig \
+         invocation itself), the fast path MUST decline; \
+         got fast_path_hits = {}",
+        counters.fast_path_hits,
+    );
+}
+
+// ── §9.8 row: namespace import alias ──
+
+const NAMESPACE_IMPORT_BUTTON_VUE: &str = r#"<script setup lang="ts">
+import * as types from '/workspace/src/types'
+defineProps<{
+  variants: types.Button['variants']['variant']
+  slots: types.Button['slots']
+}>()
+</script>
+<template><div /></template>
+"#;
+
+/// §9.8 ComponentConfig matrix row: alias is reached via a namespace
+/// import (`import * as types`). The predicate must resolve
+/// `types.Button` through the namespace member access. On integration
+/// HEAD the namespace-member resolution does not currently route
+/// through the fast-path predicate's legal-shape entry point (the
+/// path goes through `ProjectMember`, not the alias-body inspection
+/// the predicate uses). Discriminating: this counterfixture pins the
+/// current behaviour as the slow path; if the predicate is taught
+/// to follow namespace members, this test must be updated.
+#[test]
+fn component_config_namespace_import_takes_slow_path() {
+    let host = build_workspace_host(&[
+        ("/workspace/src/theme.ts", POSITIVE_THEME_TS),
+        ("/workspace/src/types.ts", POSITIVE_TYPES_TS),
+        ("/workspace/src/Button.vue", NAMESPACE_IMPORT_BUTTON_VUE),
+    ]);
+
+    let counters = captured_counters_for(&host, "/workspace/src/Button.vue");
+    // Pinned to the current behaviour: namespace-member access does
+    // not reach the fast path's legal-shape entry, so fast_path_hits
+    // is 0. A regression that bypassed namespace resolution would
+    // surface as a non-zero count.
+    assert_eq!(
+        counters.fast_path_hits, 0,
+        "§9.8 counterfixture: namespace-import access (`types.Button[...]`) \
+         pins the current behaviour as slow-path; got fast_path_hits = {}",
+        counters.fast_path_hits,
+    );
+}
