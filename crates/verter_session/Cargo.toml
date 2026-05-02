@@ -19,6 +19,14 @@ session_metrics = []
 # the upstream nuxt-ui submodule) must gate themselves behind
 # `#[cfg(feature = "external-corpus")]`.
 external-corpus = []
+# Phase 11b diagnosis benchmark: enables the corpus-driven
+# `repo_first_pass_diagnosis_corpus` integration test that the vitest
+# at `packages/benchmark/src/repo-first-pass.spec.ts` invokes via
+# `cargo test --features diagnosis-bench --test repo_first_pass_diagnosis_corpus`.
+# Default `cargo test --workspace --tests` run does NOT enable this
+# feature — corpus drift is detected by the harness before
+# the work begins.
+diagnosis-bench = ["external-corpus"]
 # Debug-mode audit: on every `HostNamedTypeCacheAdapter::get` hit, recompute
 # the slow-path resolution and assert structural equality against the cached
 # value. Catches cache-key insufficiencies (a cached entry returned for a

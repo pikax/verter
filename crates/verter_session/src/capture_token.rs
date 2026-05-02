@@ -376,6 +376,31 @@ pub struct CaptureToken {
     intern_returned_new: Mutex<u64>,
     cache_provenance: Mutex<CacheProvenance>,
     dispatch_log: Mutex<Vec<DispatchEntry>>,
+    // -------------------------------------------------------------------
+    // Phase 11b — diagnosis counters
+    //
+    // These counters profile cost contributors to the
+    // `repo_first_pass` semantic-state regression. They are read
+    // directly off the snapshot via the corresponding accessors;
+    // delta-accumulated under capture only (no workspace-wide
+    // statics). Hooks are no-ops when no token is bound.
+    // -------------------------------------------------------------------
+    /// Total wall-clock time (ns) spent inside `record_origin_edge`.
+    record_origin_edge_total_ns: Mutex<u128>,
+    /// Number of `record_origin_edge` invocations.
+    origin_edge_count: Mutex<u64>,
+    /// Snapshot of the derivation-signature pool size at capture-end.
+    derivation_signature_pool_size: Mutex<u64>,
+    /// Number of `intern_signature` invocations.
+    derivation_signature_intern_calls: Mutex<u64>,
+    /// Number of `intern_signature` invocations that returned an
+    /// already-interned `Arc<DepSignature>` (no allocation).
+    derivation_signature_intern_returned_existing: Mutex<u64>,
+    /// Total wall-clock time (ns) threads waited to acquire the entries
+    /// mutex on the `SemanticGraphStore`.
+    entries_mutex_wait_total_ns: Mutex<u128>,
+    /// Total wall-clock time (ns) threads held the entries mutex.
+    entries_mutex_hold_total_ns: Mutex<u128>,
 }
 
 impl CaptureToken {
@@ -406,6 +431,13 @@ impl CaptureToken {
                 intern_returned_new: Mutex::new(0),
                 cache_provenance: Mutex::new(CacheProvenance::default()),
                 dispatch_log: Mutex::new(Vec::new()),
+                record_origin_edge_total_ns: Mutex::new(0),
+                origin_edge_count: Mutex::new(0),
+                derivation_signature_pool_size: Mutex::new(0),
+                derivation_signature_intern_calls: Mutex::new(0),
+                derivation_signature_intern_returned_existing: Mutex::new(0),
+                entries_mutex_wait_total_ns: Mutex::new(0),
+                entries_mutex_hold_total_ns: Mutex::new(0),
             });
             *slot = Some(Arc::clone(&token));
             CaptureGuard { token }
@@ -479,6 +511,49 @@ impl CaptureToken {
         let entry = prov.misses.entry(db).or_insert(0);
         *entry = entry.saturating_add(1);
     }
+
+    // ---------------------------------------------------------------
+    // Phase 11b — diagnosis recorders
+    // ---------------------------------------------------------------
+
+    /// Record one `record_origin_edge` invocation with its measured
+    /// wall-clock cost in nanoseconds. Bumps the call counter and the
+    /// total-cost accumulator under capture; no-op outside capture.
+    pub fn record_origin_edge_call(&self, elapsed_ns: u128) {
+        let mut total = self.record_origin_edge_total_ns.lock();
+        *total = total.saturating_add(elapsed_ns);
+        let mut count = self.origin_edge_count.lock();
+        *count = count.saturating_add(1);
+    }
+
+    /// Record one signature-interning invocation. `returned_existing`
+    /// is true when the lookup returned an already-interned
+    /// `Arc<DepSignature>` (no allocation).
+    pub fn record_signature_intern(&self, returned_existing: bool) {
+        let mut calls = self.derivation_signature_intern_calls.lock();
+        *calls = calls.saturating_add(1);
+        if returned_existing {
+            let mut hits = self.derivation_signature_intern_returned_existing.lock();
+            *hits = hits.saturating_add(1);
+        }
+    }
+
+    /// Record the size of the derivation-signature pool at the moment
+    /// the capture closes. Called at most once per capture; later
+    /// writes overwrite the prior snapshot.
+    pub fn record_signature_pool_size(&self, size: u64) {
+        *self.derivation_signature_pool_size.lock() = size;
+    }
+
+    /// Record a single entries-mutex acquisition: wait time + hold time
+    /// in nanoseconds. Both deltas accumulate; a zero value for either
+    /// is acceptable (uncontended fast path).
+    pub fn record_entries_mutex_timing(&self, wait_ns: u128, hold_ns: u128) {
+        let mut total_wait = self.entries_mutex_wait_total_ns.lock();
+        *total_wait = total_wait.saturating_add(wait_ns);
+        let mut total_hold = self.entries_mutex_hold_total_ns.lock();
+        *total_hold = total_hold.saturating_add(hold_ns);
+    }
 }
 
 /// RAII guard for a bound capture token. Drop unbinds the thread-local
@@ -506,6 +581,14 @@ impl CaptureGuard {
         let intern_returned_new = *token.intern_returned_new.lock();
         let cache_provenance = token.cache_provenance.lock().clone();
         let dispatch_log = token.dispatch_log.lock().clone();
+        let record_origin_edge_total_ns = *token.record_origin_edge_total_ns.lock();
+        let origin_edge_count = *token.origin_edge_count.lock();
+        let derivation_signature_pool_size = *token.derivation_signature_pool_size.lock();
+        let derivation_signature_intern_calls = *token.derivation_signature_intern_calls.lock();
+        let derivation_signature_intern_returned_existing =
+            *token.derivation_signature_intern_returned_existing.lock();
+        let entries_mutex_wait_total_ns = *token.entries_mutex_wait_total_ns.lock();
+        let entries_mutex_hold_total_ns = *token.entries_mutex_hold_total_ns.lock();
         CaptureSnapshot {
             request_id: token.request_id,
             label: token.label,
@@ -519,6 +602,13 @@ impl CaptureGuard {
             intern_returned_new,
             cache_provenance,
             dispatch_log,
+            record_origin_edge_total_ns,
+            origin_edge_count,
+            derivation_signature_pool_size,
+            derivation_signature_intern_calls,
+            derivation_signature_intern_returned_existing,
+            entries_mutex_wait_total_ns,
+            entries_mutex_hold_total_ns,
         }
     }
 }
@@ -557,6 +647,29 @@ pub struct CaptureSnapshot {
     pub intern_returned_new: u64,
     pub cache_provenance: CacheProvenance,
     pub dispatch_log: Vec<DispatchEntry>,
+    // -------------------------------------------------------------------
+    // Phase 11b — diagnosis counter snapshots
+    // -------------------------------------------------------------------
+    /// Total wall-clock cost (ns) of all `record_origin_edge` calls
+    /// during this capture window.
+    pub record_origin_edge_total_ns: u128,
+    /// Number of `record_origin_edge` calls during this capture window.
+    pub origin_edge_count: u64,
+    /// Size of the derivation-signature pool at capture-end (a
+    /// snapshot rather than a delta — the pool is process-wide, but
+    /// recorded by the producer at end-of-capture).
+    pub derivation_signature_pool_size: u64,
+    /// Number of `intern_signature` invocations during this capture.
+    pub derivation_signature_intern_calls: u64,
+    /// Number of `intern_signature` invocations that returned an
+    /// already-interned `Arc` (no fresh allocation).
+    pub derivation_signature_intern_returned_existing: u64,
+    /// Total wall-clock time (ns) threads waited to acquire the
+    /// `SemanticGraphStore::entries` mutex during this capture.
+    pub entries_mutex_wait_total_ns: u128,
+    /// Total wall-clock time (ns) threads held the
+    /// `SemanticGraphStore::entries` mutex during this capture.
+    pub entries_mutex_hold_total_ns: u128,
 }
 
 impl CaptureSnapshot {
@@ -828,5 +941,26 @@ mod self_tests {
         // return None (no closure invocation).
         let invoked = with_active_capture_returning(|_t| 42usize);
         assert!(invoked.is_none());
+    }
+
+    #[test]
+    fn diagnosis_counters_round_trip_through_snapshot() {
+        let guard = CaptureToken::start_for_query("self_test_diagnosis");
+        with_active_capture(|t| t.record_origin_edge_call(1_500));
+        with_active_capture(|t| t.record_origin_edge_call(2_500));
+        with_active_capture(|t| t.record_signature_intern(false));
+        with_active_capture(|t| t.record_signature_intern(true));
+        with_active_capture(|t| t.record_signature_intern(true));
+        with_active_capture(|t| t.record_signature_pool_size(42));
+        with_active_capture(|t| t.record_entries_mutex_timing(100, 800));
+        with_active_capture(|t| t.record_entries_mutex_timing(50, 200));
+        let snap = guard.end();
+        assert_eq!(snap.origin_edge_count, 2);
+        assert_eq!(snap.record_origin_edge_total_ns, 4_000);
+        assert_eq!(snap.derivation_signature_intern_calls, 3);
+        assert_eq!(snap.derivation_signature_intern_returned_existing, 2);
+        assert_eq!(snap.derivation_signature_pool_size, 42);
+        assert_eq!(snap.entries_mutex_wait_total_ns, 150);
+        assert_eq!(snap.entries_mutex_hold_total_ns, 1_000);
     }
 }
