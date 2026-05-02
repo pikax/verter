@@ -13,6 +13,26 @@ use crate::resolver_core::RouteDemand;
 use crate::types::FileAnalysisSnapshot;
 use verter_semantic::analysis::type_expr::{FunctionExpr, ObjectMember, PrimitiveName, TypeExpr};
 
+/// Issue #7 / Phase 8 — capture-token counters for route-demand
+/// emission. Recorded inside [`enqueue_component_meta_registry_ref`]
+/// so every enqueue site reports the route variant it pushed onto
+/// the queue.
+pub(crate) const ROUTE_DEMAND_EMITTED_WHOLE_COUNTER: &str = "route_demand_emitted::Whole";
+pub(crate) const ROUTE_DEMAND_EMITTED_PICK_COUNTER: &str = "route_demand_emitted::Pick";
+pub(crate) const ROUTE_DEMAND_EMITTED_MEMBER_PATH_COUNTER: &str =
+    "route_demand_emitted::MemberPath";
+pub(crate) const ROUTE_DEMAND_EMITTED_OMIT_COUNTER: &str = "route_demand_emitted::Omit";
+
+/// Map a `RouteDemand` variant to its capture-token counter name.
+fn route_demand_counter_name(route: &RouteDemand) -> &'static str {
+    match route {
+        RouteDemand::Whole => ROUTE_DEMAND_EMITTED_WHOLE_COUNTER,
+        RouteDemand::Pick(_) => ROUTE_DEMAND_EMITTED_PICK_COUNTER,
+        RouteDemand::MemberPath(_) => ROUTE_DEMAND_EMITTED_MEMBER_PATH_COUNTER,
+        RouteDemand::Omit(_) => ROUTE_DEMAND_EMITTED_OMIT_COUNTER,
+    }
+}
+
 /// Work item for the unified registry publication queue.
 ///
 /// Combines initial entries and transitive references into a single
@@ -134,6 +154,135 @@ pub(crate) fn owner_component_meta_registry_import_root(
     ctx.resolve_owner_direct_import(owner_canonical, local_name)
 }
 
+/// Issue #7 / Phase 8 — extract the route's root name when `expr` is
+/// either an `IndexedAccess` (`Foo['variants']['variant']`) or a
+/// utility wrapper (`Pick<Foo, ...>` / `Omit<Foo, ...>`).
+fn component_meta_registry_route_root_name(expr: &TypeExpr) -> Option<String> {
+    if let Some((root, _)) = component_meta_registry_public_utility_route(expr) {
+        return Some(root);
+    }
+    if let Some((root, _)) = component_meta_registry_public_indexed_access_route(expr) {
+        return Some(root);
+    }
+    None
+}
+
+/// Issue #7 / Phase 8 — true when the named alias's prepared body
+/// resolves (modulo single alias-of-alias indirection) to a `Ref {
+/// name: "ComponentConfig", type_arguments: nonempty }`.
+///
+/// Returns `false` for:
+/// - missing prepared decl
+/// - body is a `TypeParameter`
+/// - body is a non-generic `Ref` to anything other than another local
+///   alias whose body satisfies the rule (alias-of-alias depth 1)
+/// - body is a `Ref` to `ComponentConfig` with no type arguments
+pub(crate) fn component_meta_registry_owner_local_component_config_alias_name(
+    ctx: &dyn ResolverContext,
+    owner_canonical: &str,
+    name: &str,
+) -> bool {
+    /// Strip leading `Parenthesized` wrappers iteratively (no recursion;
+    /// satisfies `no_unbounded_recursion_in_resolver_core`).
+    fn unwrap_paren(mut expr: &TypeExpr) -> &TypeExpr {
+        while let TypeExpr::Parenthesized(inner) = expr {
+            expr = inner;
+        }
+        expr
+    }
+
+    let Some(prepared) = ctx.prepared_type_decl(owner_canonical, name) else {
+        return false;
+    };
+    if matches!(prepared.body, TypeExpr::TypeParameter(_)) {
+        return false;
+    }
+    let body = unwrap_paren(&prepared.body);
+    if let TypeExpr::Ref {
+        name: ref_name,
+        type_arguments,
+    } = body
+    {
+        if ref_name.as_ref() == "ComponentConfig" && !type_arguments.is_empty() {
+            return true;
+        }
+        // Single alias-of-alias indirection — follow once.
+        if type_arguments.is_empty() {
+            if let Some(next) = ctx.prepared_type_decl(owner_canonical, ref_name.as_ref()) {
+                if matches!(next.body, TypeExpr::TypeParameter(_)) {
+                    return false;
+                }
+                if let TypeExpr::Ref {
+                    name: nested_name,
+                    type_arguments: nested_args,
+                } = unwrap_paren(&next.body)
+                {
+                    return nested_name.as_ref() == "ComponentConfig" && !nested_args.is_empty();
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Issue #7 / Phase 8 — predicate for the registry public-route
+/// rewrite. Returns `Some(root_name)` when ALL of:
+/// - the route root has no import binding on the owner (so the alias
+///   resolves to a workspace-local declaration)
+/// - the prepared body is not a `TypeParameter`
+/// - the alias body is `ComponentConfig<...>` (or alias-of-alias to
+///   that)
+/// - `ComponentConfig` itself is not imported in the owner's scope
+///
+/// On owner-local hit, the caller MUST emit `RouteDemand::Whole`
+/// instead of the standard `MemberPath`/`Pick` route.
+pub(crate) fn component_meta_registry_public_route_owner_local_root(
+    ctx: &dyn ResolverContext,
+    owner_canonical: &str,
+    snapshot: &FileAnalysisSnapshot,
+    expr: &TypeExpr,
+    source_hint: Option<&str>,
+) -> Option<String> {
+    // Source hint must be either None (component-local) or match the
+    // owner — anything else is from a different owner's scope.
+    if let Some(source) = source_hint.filter(|source| !source.is_empty()) {
+        if source != owner_canonical {
+            return None;
+        }
+    }
+
+    // Extract the route's root name (either utility or indexed
+    // access).
+    let root_name = component_meta_registry_route_root_name(expr)?;
+
+    // Owner-local rule: no import binding on `root_name`. If the
+    // resolver routes the name to an external file, it is imported.
+    if owner_component_meta_registry_import_root(ctx, owner_canonical, snapshot, root_name.as_str())
+        .is_some()
+    {
+        return None;
+    }
+
+    // ComponentConfig itself must NOT be imported in the owner's
+    // scope.
+    if owner_component_meta_registry_import_root(ctx, owner_canonical, snapshot, "ComponentConfig")
+        .is_some()
+    {
+        return None;
+    }
+
+    // Alias body must be `ComponentConfig<...>`.
+    if !component_meta_registry_owner_local_component_config_alias_name(
+        ctx,
+        owner_canonical,
+        root_name.as_str(),
+    ) {
+        return None;
+    }
+
+    Some(root_name)
+}
+
 pub(crate) fn enqueue_component_meta_registry_ref(
     published_names: &rustc_hash::FxHashSet<String>,
     queued_names: &mut rustc_hash::FxHashSet<String>,
@@ -146,6 +295,13 @@ pub(crate) fn enqueue_component_meta_registry_ref(
     if published_names.contains(name) {
         return;
     }
+    // Issue #7 / Phase 8 — record the route-demand variant on every
+    // queue admission. Tests assert
+    // `route_demand_emitted::Whole >= 1` and
+    // `route_demand_emitted::Pick + ::MemberPath == 0` for owner-local
+    // ComponentConfig aliases (and the inverse for external imports).
+    let counter_name = route_demand_counter_name(&route);
+    crate::capture_token::with_active_capture(|t| t.record_counter(counter_name, 1));
     let source_hint = source_hint
         .filter(|source| !source.is_empty())
         .map(str::to_string);
@@ -1548,6 +1704,34 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
             !deep_indexed_path || component_meta_registry_has_explicit_object_surface(&field.r#type)
         });
     let expr = parsed_raw.as_ref().unwrap_or(&field.r#type);
+
+    // Issue #7 / Phase 8 — owner-local ComponentConfig alias rewrite.
+    // When the indexed-access or utility route's root resolves to an
+    // owner-local alias whose body is `ComponentConfig<...>`, emit a
+    // `RouteDemand::Whole(root)` instead of `MemberPath`/`Pick`. The
+    // registry materialises the alias once and reuses the result for
+    // every later projection.
+    //
+    // External imports preserve `MemberPath`/`Pick` (the predicate
+    // declines when the route root has an import binding).
+    if let Some(owner_local_root) = component_meta_registry_public_route_owner_local_root(
+        ctx,
+        owner_canonical,
+        snapshot,
+        expr,
+        source_hint,
+    ) {
+        enqueue_component_meta_registry_ref(
+            published_names,
+            queued_names,
+            output,
+            owner_local_root.as_str(),
+            source_hint,
+            None,
+            RouteDemand::Whole,
+        );
+        return;
+    }
 
     let skip_direct_plain_ref = component_meta_registry_ref_name(expr).is_some_and(|name| {
         ctx.prepared_type_decl(owner_canonical, name)
