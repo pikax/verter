@@ -70,3 +70,11 @@ mod resolver_coverage_slot_shapes;
 // `build_hermetic_host_with_lib`.
 #[path = "component_meta_audit/lib_parity.rs"]
 mod lib_parity;
+
+// Phase 4 (Issue #3) — field-level fast-path counterfixtures.
+// Asserts the Phase 4 gate's two sub-assertions
+// (Expanded-mode dispatch counter, heritage canonical not in
+// loaded-files) plus a counterfixture for the predicate's
+// negative branch and an owner-edit invalidation regression.
+#[path = "component_meta_audit/phase_4_field_fast_path.rs"]
+mod phase_4_field_fast_path;
