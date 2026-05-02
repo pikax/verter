@@ -861,6 +861,17 @@ pub struct ProjectTypeStore {
     /// `route_owned_shallow.remove(canonical)`); bulk eviction uses
     /// [`RouteOwnedShallowDb::clear_all`].
     route_owned_shallow: RouteOwnedShallowDb,
+    /// Issue #6 — host-owned proof cache for the ComponentConfig
+    /// theme variant fast path. Keyed by
+    /// `(app_config_decl_canonical_id, component_key_literal)`. An
+    /// entry asserts "no `ui[component_key_literal]` override exists
+    /// for this `AppConfig`" and is populated by the slow path's
+    /// canonical materialization as a side effect (deferred until
+    /// `IndexedReady::declares_interface_app_config` lands). The fast
+    /// path consults this DB before projecting the prepared theme
+    /// value directly. See
+    /// [`crate::app_config_proof_db::AppConfigNoOverrideProofDb`].
+    app_config_no_override_proof: crate::app_config_proof_db::AppConfigNoOverrideProofDb,
     /// Debug / diagnostic counters.
     pub counters: ProjectTypeStoreCounters,
 }
@@ -950,6 +961,10 @@ impl ProjectTypeStore {
             Arc::clone(&counters.route_owned_shallow_live),
             Arc::clone(&counters.route_owned_shallow_stale_sweeps),
         );
+        let app_config_no_override_proof =
+            crate::app_config_proof_db::AppConfigNoOverrideProofDb::with_counter(Arc::clone(
+                &counters.component_meta_cache_live,
+            ));
         Self {
             project_generation: AtomicU64::new(0),
             indexed,
@@ -972,6 +987,7 @@ impl ProjectTypeStore {
             prepared_member_db,
             routed_expr_surface_db,
             route_owned_shallow,
+            app_config_no_override_proof,
             counters,
         }
     }
@@ -1128,6 +1144,15 @@ impl ProjectTypeStore {
         &self.routed_expr_surface_db
     }
 
+    /// Issue #6 / Phase 7 — accessor for the `AppConfigNoOverrideProof`
+    /// cache consulted by the ComponentConfig theme variant fast path.
+    /// On miss, the fast path declines and the slow path runs.
+    pub fn app_config_no_override_proof_db(
+        &self,
+    ) -> &crate::app_config_proof_db::AppConfigNoOverrideProofDb {
+        &self.app_config_no_override_proof
+    }
+
     /// Build a `(project_generation, whole_hash)` dep-signature pair that
     /// downstream callers merge into their active
     /// [`CompletionFence`](crate::completion_fence::CompletionFence).
@@ -1193,6 +1218,11 @@ impl ProjectTypeStore {
         // Phase 6b.D1 — F6/F7 destination DB participates in the
         // per-canonical eviction cascade.
         self.route_owned_shallow.remove(canonical_id);
+        // Issue #6 / Phase 7 — drop any AppConfigNoOverrideProof entry
+        // whose dep_signature references this canonical or whose
+        // app_config_decl_canonical_id IS this canonical.
+        self.app_config_no_override_proof
+            .invalidate_canonical(canonical_id);
     }
 
     /// Targeted invalidation of a project-generation bump.
@@ -1237,6 +1267,10 @@ impl ProjectTypeStore {
         self.prepared_surface_db.invalidate_all();
         self.prepared_member_db.invalidate_all();
         self.routed_expr_surface_db.invalidate_all();
+        // Issue #6 / Phase 7 — project-shape change invalidates every
+        // proof entry; the proof's dep signature includes routes and
+        // workspace-level interface-merging state.
+        self.app_config_no_override_proof.invalidate_all();
         generation
     }
 }

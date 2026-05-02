@@ -49,6 +49,7 @@
 //! - [`shared`] â€” feature-gated `RwLock`/`RefCell` abstraction
 //! - [`upsert`] â€” change detection, result building, export signature diffing
 
+mod app_config_proof_db;
 #[cfg(test)]
 mod audit_warm_cache_tests;
 pub mod audited_request;
