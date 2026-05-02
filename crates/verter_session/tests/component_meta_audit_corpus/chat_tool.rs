@@ -12,9 +12,7 @@ use verter_session::audited_request::{AuditedRequest, AuditedRequestError};
 
 #[test]
 fn corpus_audit_chat_tool_produces_audit_record_or_documents_skip() {
-    let src = include_str!(
-        "fixtures/ChatTool.vue"
-    );
+    let src = include_str!("fixtures/ChatTool.vue");
     let result = AuditedRequest::builder()
         .files([("/ChatTool.vue", src)])
         .resolve("/ChatTool.vue");

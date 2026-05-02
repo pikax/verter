@@ -12,9 +12,7 @@ use verter_session::audited_request::{AuditedRequest, AuditedRequestError};
 
 #[test]
 fn corpus_audit_prose_prompt_produces_audit_record_or_documents_skip() {
-    let src = include_str!(
-        "fixtures/prose/Prompt.vue"
-    );
+    let src = include_str!("fixtures/prose/Prompt.vue");
     let result = AuditedRequest::builder()
         .files([("/prose/Prompt.vue", src)])
         .resolve("/prose/Prompt.vue");

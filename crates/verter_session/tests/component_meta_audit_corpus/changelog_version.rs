@@ -12,9 +12,7 @@ use verter_session::audited_request::{AuditedRequest, AuditedRequestError};
 
 #[test]
 fn corpus_audit_changelog_version_produces_audit_record_or_documents_skip() {
-    let src = include_str!(
-        "fixtures/ChangelogVersion.vue"
-    );
+    let src = include_str!("fixtures/ChangelogVersion.vue");
     let result = AuditedRequest::builder()
         .files([("/ChangelogVersion.vue", src)])
         .resolve("/ChangelogVersion.vue");

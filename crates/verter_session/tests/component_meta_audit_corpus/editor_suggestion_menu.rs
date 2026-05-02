@@ -12,9 +12,7 @@ use verter_session::audited_request::{AuditedRequest, AuditedRequestError};
 
 #[test]
 fn corpus_audit_editor_suggestion_menu_produces_audit_record_or_documents_skip() {
-    let src = include_str!(
-        "fixtures/EditorSuggestionMenu.vue"
-    );
+    let src = include_str!("fixtures/EditorSuggestionMenu.vue");
     let result = AuditedRequest::builder()
         .files([("/EditorSuggestionMenu.vue", src)])
         .resolve("/EditorSuggestionMenu.vue");

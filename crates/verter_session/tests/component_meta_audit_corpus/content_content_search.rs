@@ -12,9 +12,7 @@ use verter_session::audited_request::{AuditedRequest, AuditedRequestError};
 
 #[test]
 fn corpus_audit_content_content_search_produces_audit_record_or_documents_skip() {
-    let src = include_str!(
-        "fixtures/content/ContentSearch.vue"
-    );
+    let src = include_str!("fixtures/content/ContentSearch.vue");
     let result = AuditedRequest::builder()
         .files([("/content/ContentSearch.vue", src)])
         .resolve("/content/ContentSearch.vue");

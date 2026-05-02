@@ -136,8 +136,7 @@ fn corpus_generator_output_matches_committed_files() {
     // generator reads, not output it produces. Filter it out of the
     // structural-drift check so the parity test stays focused on
     // generator output.
-    let is_generator_output =
-        |rel: &str| !rel.starts_with("fixtures/") && rel != "fixtures";
+    let is_generator_output = |rel: &str| !rel.starts_with("fixtures/") && rel != "fixtures";
     let gen_names: std::collections::BTreeSet<_> = generated_files
         .iter()
         .map(|(rel, _)| rel.clone())

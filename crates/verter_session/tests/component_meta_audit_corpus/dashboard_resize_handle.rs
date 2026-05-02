@@ -12,9 +12,7 @@ use verter_session::audited_request::{AuditedRequest, AuditedRequestError};
 
 #[test]
 fn corpus_audit_dashboard_resize_handle_produces_audit_record_or_documents_skip() {
-    let src = include_str!(
-        "fixtures/DashboardResizeHandle.vue"
-    );
+    let src = include_str!("fixtures/DashboardResizeHandle.vue");
     let result = AuditedRequest::builder()
         .files([("/DashboardResizeHandle.vue", src)])
         .resolve("/DashboardResizeHandle.vue");

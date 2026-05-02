@@ -12,9 +12,7 @@ use verter_session::audited_request::{AuditedRequest, AuditedRequestError};
 
 #[test]
 fn corpus_audit_tooltip_produces_audit_record_or_documents_skip() {
-    let src = include_str!(
-        "fixtures/Tooltip.vue"
-    );
+    let src = include_str!("fixtures/Tooltip.vue");
     let result = AuditedRequest::builder()
         .files([("/Tooltip.vue", src)])
         .resolve("/Tooltip.vue");

@@ -12,9 +12,7 @@ use verter_session::audited_request::{AuditedRequest, AuditedRequestError};
 
 #[test]
 fn corpus_audit_editor_drag_handle_produces_audit_record_or_documents_skip() {
-    let src = include_str!(
-        "fixtures/EditorDragHandle.vue"
-    );
+    let src = include_str!("fixtures/EditorDragHandle.vue");
     let result = AuditedRequest::builder()
         .files([("/EditorDragHandle.vue", src)])
         .resolve("/EditorDragHandle.vue");

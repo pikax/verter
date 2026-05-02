@@ -12,9 +12,7 @@ use verter_session::audited_request::{AuditedRequest, AuditedRequestError};
 
 #[test]
 fn corpus_audit_radio_group_produces_audit_record_or_documents_skip() {
-    let src = include_str!(
-        "fixtures/RadioGroup.vue"
-    );
+    let src = include_str!("fixtures/RadioGroup.vue");
     let result = AuditedRequest::builder()
         .files([("/RadioGroup.vue", src)])
         .resolve("/RadioGroup.vue");

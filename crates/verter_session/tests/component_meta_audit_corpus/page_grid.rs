@@ -12,9 +12,7 @@ use verter_session::audited_request::{AuditedRequest, AuditedRequestError};
 
 #[test]
 fn corpus_audit_page_grid_produces_audit_record_or_documents_skip() {
-    let src = include_str!(
-        "fixtures/PageGrid.vue"
-    );
+    let src = include_str!("fixtures/PageGrid.vue");
     let result = AuditedRequest::builder()
         .files([("/PageGrid.vue", src)])
         .resolve("/PageGrid.vue");

@@ -24,7 +24,9 @@ use std::path::PathBuf;
 fn workspace_root() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     loop {
-        if p.join(".integration-tests/repos/nuxt-ui-codex-bench").exists() {
+        if p.join(".integration-tests/repos/nuxt-ui-codex-bench")
+            .exists()
+        {
             return p;
         }
         if !p.pop() {

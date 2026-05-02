@@ -59,10 +59,10 @@ pub mod memory;
 pub mod native_fs;
 pub mod normalized_glob;
 pub mod overlay;
-pub mod package_index;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[path = "package_classification_tests.rs"]
 mod package_classification_tests;
+pub mod package_index;
 pub(crate) mod project_graph;
 pub mod project_key;
 pub mod published_state;

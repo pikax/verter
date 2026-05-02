@@ -12,9 +12,7 @@ use verter_session::audited_request::{AuditedRequest, AuditedRequestError};
 
 #[test]
 fn corpus_audit_color_mode_color_mode_select_produces_audit_record_or_documents_skip() {
-    let src = include_str!(
-        "fixtures/color-mode/ColorModeSelect.vue"
-    );
+    let src = include_str!("fixtures/color-mode/ColorModeSelect.vue");
     let result = AuditedRequest::builder()
         .files([("/color-mode/ColorModeSelect.vue", src)])
         .resolve("/color-mode/ColorModeSelect.vue");

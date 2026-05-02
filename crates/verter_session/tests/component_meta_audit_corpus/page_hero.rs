@@ -12,9 +12,7 @@ use verter_session::audited_request::{AuditedRequest, AuditedRequestError};
 
 #[test]
 fn corpus_audit_page_hero_produces_audit_record_or_documents_skip() {
-    let src = include_str!(
-        "fixtures/PageHero.vue"
-    );
+    let src = include_str!("fixtures/PageHero.vue");
     let result = AuditedRequest::builder()
         .files([("/PageHero.vue", src)])
         .resolve("/PageHero.vue");

@@ -12,9 +12,7 @@ use verter_session::audited_request::{AuditedRequest, AuditedRequestError};
 
 #[test]
 fn corpus_audit_form_field_produces_audit_record_or_documents_skip() {
-    let src = include_str!(
-        "fixtures/FormField.vue"
-    );
+    let src = include_str!("fixtures/FormField.vue");
     let result = AuditedRequest::builder()
         .files([("/FormField.vue", src)])
         .resolve("/FormField.vue");

@@ -12,9 +12,7 @@ use verter_session::audited_request::{AuditedRequest, AuditedRequestError};
 
 #[test]
 fn corpus_audit_input_tags_produces_audit_record_or_documents_skip() {
-    let src = include_str!(
-        "fixtures/InputTags.vue"
-    );
+    let src = include_str!("fixtures/InputTags.vue");
     let result = AuditedRequest::builder()
         .files([("/InputTags.vue", src)])
         .resolve("/InputTags.vue");

@@ -12,9 +12,7 @@ use verter_session::audited_request::{AuditedRequest, AuditedRequestError};
 
 #[test]
 fn corpus_audit_stepper_produces_audit_record_or_documents_skip() {
-    let src = include_str!(
-        "fixtures/Stepper.vue"
-    );
+    let src = include_str!("fixtures/Stepper.vue");
     let result = AuditedRequest::builder()
         .files([("/Stepper.vue", src)])
         .resolve("/Stepper.vue");

@@ -12,9 +12,7 @@ use verter_session::audited_request::{AuditedRequest, AuditedRequestError};
 
 #[test]
 fn corpus_audit_dashboard_toolbar_produces_audit_record_or_documents_skip() {
-    let src = include_str!(
-        "fixtures/DashboardToolbar.vue"
-    );
+    let src = include_str!("fixtures/DashboardToolbar.vue");
     let result = AuditedRequest::builder()
         .files([("/DashboardToolbar.vue", src)])
         .resolve("/DashboardToolbar.vue");

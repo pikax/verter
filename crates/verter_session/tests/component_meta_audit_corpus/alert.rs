@@ -12,9 +12,7 @@ use verter_session::audited_request::{AuditedRequest, AuditedRequestError};
 
 #[test]
 fn corpus_audit_alert_produces_audit_record_or_documents_skip() {
-    let src = include_str!(
-        "fixtures/Alert.vue"
-    );
+    let src = include_str!("fixtures/Alert.vue");
     let result = AuditedRequest::builder()
         .files([("/Alert.vue", src)])
         .resolve("/Alert.vue");

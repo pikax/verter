@@ -2950,7 +2950,11 @@ mod foundations_guards {
                 let path = entry.path();
                 if path.is_dir() {
                     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                    if name == "tests" || name == "benches" || name == "examples" || name == "target" {
+                    if name == "tests"
+                        || name == "benches"
+                        || name == "examples"
+                        || name == "target"
+                    {
                         continue;
                     }
                     stack.push(path);
@@ -3175,7 +3179,10 @@ mod foundations_guards {
         let bad_std = "use std::fs::read_to_string;";
         let bad_tokio = "use tokio::fs::File;";
         assert!(file_uses_os_file_api(bad_std), "guard 2 must flag std::fs");
-        assert!(file_uses_os_file_api(bad_tokio), "guard 2 must flag tokio::fs");
+        assert!(
+            file_uses_os_file_api(bad_tokio),
+            "guard 2 must flag tokio::fs"
+        );
         assert!(
             !file_uses_os_file_api("use crate::workspace::WorkspaceAccess;"),
             "guard 2 must NOT flag WorkspaceAccess users",
@@ -3345,10 +3352,7 @@ mod foundations_guards {
         // string `.integration-tests/repos/` — otherwise the guard
         // we just defined would scan its own source and report this
         // file as a violation.
-        let forbidden_segment = format!(
-            ".{}{}{}/repos/",
-            "integration", "-", "tests"
-        );
+        let forbidden_segment = format!(".{}{}{}/repos/", "integration", "-", "tests");
         let bad = format!(
             "#[test]\nfn t() {{ let _ = include_str!(\"../{}nuxt-ui/src/Foo.vue\"); }}",
             forbidden_segment
@@ -3634,7 +3638,10 @@ mod foundations_guards {
     /// Walk the production tree; return `(rel_path, line_count)`
     /// pairs for every file that exceeds `target` lines AND is not
     /// in `exempt`.
-    pub fn guard6_violations(target: usize, exempt: &BTreeSet<&'static str>) -> Vec<(String, usize)> {
+    pub fn guard6_violations(
+        target: usize,
+        exempt: &BTreeSet<&'static str>,
+    ) -> Vec<(String, usize)> {
         let crates_root = workspace_root().join("crates");
         let mut violations = Vec::new();
         let entries = match fs::read_dir(&crates_root) {
@@ -3692,7 +3699,11 @@ mod foundations_guards {
     fn guard6_predicate_counts_lines_correctly() {
         assert_eq!(count_lines(""), 0, "empty string has zero lines");
         assert_eq!(count_lines("a"), 1, "single line without newline");
-        assert_eq!(count_lines("a\n"), 1, "trailing newline does not add a line");
+        assert_eq!(
+            count_lines("a\n"),
+            1,
+            "trailing newline does not add a line"
+        );
         assert_eq!(count_lines("a\nb"), 2, "two lines, no trailing newline");
         assert_eq!(count_lines("a\nb\n"), 2, "two lines with trailing newline");
         let oversize: String = (0..(guard6_target_line_count() + 1))

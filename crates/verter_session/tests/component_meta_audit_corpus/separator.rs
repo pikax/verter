@@ -12,9 +12,7 @@ use verter_session::audited_request::{AuditedRequest, AuditedRequestError};
 
 #[test]
 fn corpus_audit_separator_produces_audit_record_or_documents_skip() {
-    let src = include_str!(
-        "fixtures/Separator.vue"
-    );
+    let src = include_str!("fixtures/Separator.vue");
     let result = AuditedRequest::builder()
         .files([("/Separator.vue", src)])
         .resolve("/Separator.vue");

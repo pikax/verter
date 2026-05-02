@@ -12,9 +12,7 @@ use verter_session::audited_request::{AuditedRequest, AuditedRequestError};
 
 #[test]
 fn corpus_audit_locale_locale_select_produces_audit_record_or_documents_skip() {
-    let src = include_str!(
-        "fixtures/locale/LocaleSelect.vue"
-    );
+    let src = include_str!("fixtures/locale/LocaleSelect.vue");
     let result = AuditedRequest::builder()
         .files([("/locale/LocaleSelect.vue", src)])
         .resolve("/locale/LocaleSelect.vue");

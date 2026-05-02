@@ -12,9 +12,7 @@ use verter_session::audited_request::{AuditedRequest, AuditedRequestError};
 
 #[test]
 fn corpus_audit_main_produces_audit_record_or_documents_skip() {
-    let src = include_str!(
-        "fixtures/Main.vue"
-    );
+    let src = include_str!("fixtures/Main.vue");
     let result = AuditedRequest::builder()
         .files([("/Main.vue", src)])
         .resolve("/Main.vue");

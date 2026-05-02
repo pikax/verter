@@ -12,9 +12,7 @@ use verter_session::audited_request::{AuditedRequest, AuditedRequestError};
 
 #[test]
 fn corpus_audit_dashboard_sidebar_toggle_produces_audit_record_or_documents_skip() {
-    let src = include_str!(
-        "fixtures/DashboardSidebarToggle.vue"
-    );
+    let src = include_str!("fixtures/DashboardSidebarToggle.vue");
     let result = AuditedRequest::builder()
         .files([("/DashboardSidebarToggle.vue", src)])
         .resolve("/DashboardSidebarToggle.vue");

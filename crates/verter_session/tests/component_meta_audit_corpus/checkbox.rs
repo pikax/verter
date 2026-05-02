@@ -12,9 +12,7 @@ use verter_session::audited_request::{AuditedRequest, AuditedRequestError};
 
 #[test]
 fn corpus_audit_checkbox_produces_audit_record_or_documents_skip() {
-    let src = include_str!(
-        "fixtures/Checkbox.vue"
-    );
+    let src = include_str!("fixtures/Checkbox.vue");
     let result = AuditedRequest::builder()
         .files([("/Checkbox.vue", src)])
         .resolve("/Checkbox.vue");

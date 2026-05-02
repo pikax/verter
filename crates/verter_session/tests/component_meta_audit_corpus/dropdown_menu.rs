@@ -12,9 +12,7 @@ use verter_session::audited_request::{AuditedRequest, AuditedRequestError};
 
 #[test]
 fn corpus_audit_dropdown_menu_produces_audit_record_or_documents_skip() {
-    let src = include_str!(
-        "fixtures/DropdownMenu.vue"
-    );
+    let src = include_str!("fixtures/DropdownMenu.vue");
     let result = AuditedRequest::builder()
         .files([("/DropdownMenu.vue", src)])
         .resolve("/DropdownMenu.vue");

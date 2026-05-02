@@ -12,9 +12,7 @@ use verter_session::audited_request::{AuditedRequest, AuditedRequestError};
 
 #[test]
 fn corpus_audit_toast_produces_audit_record_or_documents_skip() {
-    let src = include_str!(
-        "fixtures/Toast.vue"
-    );
+    let src = include_str!("fixtures/Toast.vue");
     let result = AuditedRequest::builder()
         .files([("/Toast.vue", src)])
         .resolve("/Toast.vue");

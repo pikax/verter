@@ -12,9 +12,7 @@ use verter_session::audited_request::{AuditedRequest, AuditedRequestError};
 
 #[test]
 fn corpus_audit_modal_produces_audit_record_or_documents_skip() {
-    let src = include_str!(
-        "fixtures/Modal.vue"
-    );
+    let src = include_str!("fixtures/Modal.vue");
     let result = AuditedRequest::builder()
         .files([("/Modal.vue", src)])
         .resolve("/Modal.vue");

@@ -12,9 +12,7 @@ use verter_session::audited_request::{AuditedRequest, AuditedRequestError};
 
 #[test]
 fn corpus_audit_chat_shimmer_produces_audit_record_or_documents_skip() {
-    let src = include_str!(
-        "fixtures/ChatShimmer.vue"
-    );
+    let src = include_str!("fixtures/ChatShimmer.vue");
     let result = AuditedRequest::builder()
         .files([("/ChatShimmer.vue", src)])
         .resolve("/ChatShimmer.vue");

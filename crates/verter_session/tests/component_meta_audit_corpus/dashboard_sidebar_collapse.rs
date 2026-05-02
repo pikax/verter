@@ -12,9 +12,7 @@ use verter_session::audited_request::{AuditedRequest, AuditedRequestError};
 
 #[test]
 fn corpus_audit_dashboard_sidebar_collapse_produces_audit_record_or_documents_skip() {
-    let src = include_str!(
-        "fixtures/DashboardSidebarCollapse.vue"
-    );
+    let src = include_str!("fixtures/DashboardSidebarCollapse.vue");
     let result = AuditedRequest::builder()
         .files([("/DashboardSidebarCollapse.vue", src)])
         .resolve("/DashboardSidebarCollapse.vue");

@@ -12,9 +12,7 @@ use verter_session::audited_request::{AuditedRequest, AuditedRequestError};
 
 #[test]
 fn corpus_audit_color_picker_produces_audit_record_or_documents_skip() {
-    let src = include_str!(
-        "fixtures/ColorPicker.vue"
-    );
+    let src = include_str!("fixtures/ColorPicker.vue");
     let result = AuditedRequest::builder()
         .files([("/ColorPicker.vue", src)])
         .resolve("/ColorPicker.vue");

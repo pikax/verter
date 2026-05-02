@@ -12,9 +12,7 @@ use verter_session::audited_request::{AuditedRequest, AuditedRequestError};
 
 #[test]
 fn corpus_audit_popover_produces_audit_record_or_documents_skip() {
-    let src = include_str!(
-        "fixtures/Popover.vue"
-    );
+    let src = include_str!("fixtures/Popover.vue");
     let result = AuditedRequest::builder()
         .files([("/Popover.vue", src)])
         .resolve("/Popover.vue");

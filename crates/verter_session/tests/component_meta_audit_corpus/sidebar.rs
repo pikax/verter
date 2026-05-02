@@ -12,9 +12,7 @@ use verter_session::audited_request::{AuditedRequest, AuditedRequestError};
 
 #[test]
 fn corpus_audit_sidebar_produces_audit_record_or_documents_skip() {
-    let src = include_str!(
-        "fixtures/Sidebar.vue"
-    );
+    let src = include_str!("fixtures/Sidebar.vue");
     let result = AuditedRequest::builder()
         .files([("/Sidebar.vue", src)])
         .resolve("/Sidebar.vue");

@@ -12,9 +12,7 @@ use verter_session::audited_request::{AuditedRequest, AuditedRequestError};
 
 #[test]
 fn corpus_audit_scroll_area_produces_audit_record_or_documents_skip() {
-    let src = include_str!(
-        "fixtures/ScrollArea.vue"
-    );
+    let src = include_str!("fixtures/ScrollArea.vue");
     let result = AuditedRequest::builder()
         .files([("/ScrollArea.vue", src)])
         .resolve("/ScrollArea.vue");

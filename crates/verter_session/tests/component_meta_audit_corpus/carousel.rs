@@ -12,9 +12,7 @@ use verter_session::audited_request::{AuditedRequest, AuditedRequestError};
 
 #[test]
 fn corpus_audit_carousel_produces_audit_record_or_documents_skip() {
-    let src = include_str!(
-        "fixtures/Carousel.vue"
-    );
+    let src = include_str!("fixtures/Carousel.vue");
     let result = AuditedRequest::builder()
         .files([("/Carousel.vue", src)])
         .resolve("/Carousel.vue");
