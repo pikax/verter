@@ -160,7 +160,7 @@ impl StageExecutor for HostStageExecutor {
 
         let parse_start = Instant::now();
 
-        if is_vue {
+        let snapshot = if is_vue {
             let (parse_snapshot, parsed_sfc) = crate::parse::parse_vue_snapshot(
                 canonical_id,
                 &content,
@@ -169,7 +169,7 @@ impl StageExecutor for HostStageExecutor {
             let parse_duration_ms = parse_start.elapsed().as_secs_f64() * 1000.0;
             let source_type =
                 imported_eval_source_type(canonical_id, content.as_ref(), Some(&parsed_sfc));
-            Ok(SourceSnapshot {
+            SourceSnapshot {
                 source: content,
                 whole_hash: parse_snapshot.whole_hash,
                 semantic_hash: parse_snapshot.semantic_hash,
@@ -181,12 +181,12 @@ impl StageExecutor for HostStageExecutor {
                     source_type,
                     parse_duration_ms,
                 }),
-            })
+            }
         } else {
             let parse_snapshot = crate::parse::parse_non_sfc_snapshot(canonical_id, &content);
             let parse_duration_ms = parse_start.elapsed().as_secs_f64() * 1000.0;
             let source_type = imported_eval_source_type(canonical_id, content.as_ref(), None);
-            Ok(SourceSnapshot {
+            SourceSnapshot {
                 source: content,
                 whole_hash: parse_snapshot.whole_hash,
                 semantic_hash: parse_snapshot.semantic_hash,
@@ -198,8 +198,24 @@ impl StageExecutor for HostStageExecutor {
                     source_type,
                     parse_duration_ms,
                 }),
-            })
-        }
+            }
+        };
+
+        // Test harness hook: when a CaptureToken is bound on the current
+        // thread, increment the parse-count for `canonical_id`. The
+        // scheduler invokes this path on rayon worker threads, so the
+        // harness's thread-local lookup is ABSENT on workers — tests
+        // that assert on parse counts must arrange to bind the token on
+        // the same thread that calls back into the parse path. Tests in
+        // the smoke suite call `with_active_capture(...)` directly to
+        // simulate a parse-completion event without touching the
+        // scheduler. Returns immediately when no token is bound (the
+        // production hot path).
+        crate::capture_token::with_active_capture(|t| {
+            t.record_parse(canonical_id);
+        });
+
+        Ok(snapshot)
     }
 
     fn extract_deps(&self, canonical_id: &str, source: &SourceSnapshot) -> ExtractedDeps {

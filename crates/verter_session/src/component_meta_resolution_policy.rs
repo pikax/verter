@@ -764,6 +764,147 @@ fn body_is_resolvable(body: &TypeExpr) -> bool {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Cycle-guard normalized type-argument identity
+// ---------------------------------------------------------------------------
+//
+// Recursion guards inside the policy walker (e.g. `rewrite_ref`'s active-ref
+// stack) must key on `(DeclId, NormalizedTypeArgs)` rather than bare name
+// strings: bare names collide across scopes and cannot distinguish
+// `Pick<X, 'a'>` from `Pick<X, 'b'>` inside a generic instantiation chain.
+//
+// The TYPE definitions land here so consumers can begin keying on them; the
+// actual swap of the existing bare-name `active_refs` set into a
+// `(DeclIdentity, NormalizedTypeArgs)` set is owned by the policy guard
+// bundle that consumes this surface. `#[allow(dead_code)]` covers the gap
+// between "type defined" and "type consumed" — these items have a known
+// downstream consumer that lands in a sibling bundle.
+
+use crate::semantic_query::DeclIdentity;
+use smallvec::SmallVec;
+use verter_semantic::analysis::type_expr::LiteralValue;
+
+/// Hash of an opaque anonymous shape used to discriminate cycle-guard keys
+/// across structurally-identical inline type expressions. Phases that need
+/// to distinguish anonymous shapes attach a stable hash; identity equality
+/// of the hash is what `NormalizedTypeArg` checks.
+#[allow(dead_code)]
+pub(crate) type ShapeHash = u64;
+
+/// Hash of a `LiteralValue` used as a cheap discriminator for literal-arg
+/// cycle-guard keys (e.g. `Pick<X, 'a'>` vs `Pick<X, 'b'>`).
+#[allow(dead_code)]
+pub(crate) type LiteralHash = u64;
+
+/// One normalized type argument for the cycle-guard key. The four variants
+/// cover every shape the cycle guard observes:
+///
+/// - `Decl(DeclIdentity)` — a named declaration reference (resolved by the
+///   resolver). Two args resolve to the same `DeclIdentity` when their
+///   bare-name lookups land on the same declaration.
+/// - `Literal(LiteralHash)` — a literal value (`'a'`, `42`, `true`).
+///   Different literal values produce different hashes, so `Pick<X, 'a'>`
+///   and `Pick<X, 'b'>` produce different `NormalizedTypeArgs`.
+/// - `AnonymousShape(ShapeHash)` — an inline anonymous shape that has no
+///   declaration identity (e.g. `{ a: string }` passed inline as a type
+///   argument). The hash carries enough structural information to
+///   distinguish unrelated inline shapes.
+/// - `None` — empty / missing argument slot. Reserved for ambient
+///   reductions where the caller wants to discriminate between "no arg"
+///   and "a real arg that happens to hash to zero".
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum NormalizedTypeArg {
+    Decl(DeclIdentity),
+    Literal(LiteralHash),
+    AnonymousShape(ShapeHash),
+    None,
+}
+
+/// Normalized form of a type-argument list, used as the second component
+/// of cycle-guard keys (the first is the resolved `DeclIdentity` of the
+/// declaration being entered).
+///
+/// Normalization is deterministic: two argument lists that resolve to the
+/// same declaration identities and literal values produce the same
+/// `NormalizedTypeArgs` value, regardless of the syntactic shape of the
+/// original `TypeExpr` arguments. The ordering of arguments IS preserved
+/// (positional arguments) — different positions are different keys.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct NormalizedTypeArgs(SmallVec<[NormalizedTypeArg; 4]>);
+
+#[allow(dead_code)]
+impl NormalizedTypeArgs {
+    /// Build an empty `NormalizedTypeArgs`. Used as the cycle-guard key
+    /// for a declaration entered with no type arguments.
+    #[must_use]
+    pub(crate) fn empty() -> Self {
+        Self(SmallVec::new())
+    }
+
+    /// Build a `NormalizedTypeArgs` from an iterator of normalized
+    /// arguments. Caller is responsible for resolving each input
+    /// `TypeExpr` to its `NormalizedTypeArg` (the resolver-aware
+    /// constructor lives in the bundle that consumes this type).
+    #[must_use]
+    pub(crate) fn from_normalized<I>(args: I) -> Self
+    where
+        I: IntoIterator<Item = NormalizedTypeArg>,
+    {
+        Self(args.into_iter().collect())
+    }
+
+    /// Number of arguments (zero for `empty`).
+    #[must_use]
+    pub(crate) fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// True when no arguments are present.
+    #[must_use]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Iterator over the normalized arguments in positional order.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &NormalizedTypeArg> {
+        self.0.iter()
+    }
+}
+
+impl Default for NormalizedTypeArgs {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+/// Stable hash of a `LiteralValue` for use inside `NormalizedTypeArg::Literal`.
+/// Mirrors the manual `Hash` impl on `LiteralValue` — same input bytes
+/// produce the same digest across builds.
+#[allow(dead_code)]
+#[must_use]
+pub(crate) fn hash_literal(value: &LiteralValue) -> LiteralHash {
+    use std::hash::Hash;
+    let mut hasher = xxhash_rust::xxh3::Xxh3::new();
+    let mut bridge = LiteralHashBridge(&mut hasher);
+    value.hash(&mut bridge);
+    hasher.digest()
+}
+
+#[allow(dead_code)]
+struct LiteralHashBridge<'a>(&'a mut xxhash_rust::xxh3::Xxh3);
+
+impl<'a> std::hash::Hasher for LiteralHashBridge<'a> {
+    fn finish(&self) -> u64 {
+        self.0.digest()
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        self.0.update(bytes);
+    }
+}
+
 #[cfg(test)]
 #[path = "component_meta_resolution_policy_tests.rs"]
 mod tests;

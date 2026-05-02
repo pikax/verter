@@ -123,6 +123,44 @@ mod types;
 pub(crate) mod u64_as_decimal_string;
 mod upsert;
 
+// Test harness module — defines the per-request `CaptureToken` API
+// consumed by counter assertions across the verter_session test suite.
+// The module is NOT `cfg(test)`-gated because integration tests in
+// `crates/verter_session/tests/*.rs` build the lib WITHOUT `cfg(test)`
+// set; the production-cost discipline is enforced via `pub(crate)` on
+// the module itself plus the empty-thread-local fast path inside
+// `with_active_capture` (no token bound → immediate return, no lock
+// acquisition, no allocation).
+pub(crate) mod capture_token;
+
+// `for_tests` re-export shim for integration tests in
+// `crates/verter_session/tests/*.rs`. Integration tests build the lib
+// WITHOUT `cfg(test)` set, so a `cfg(test)`-gated `pub mod for_tests`
+// would be invisible to them. The module is therefore gated by
+// `cfg(any(test, debug_assertions))` — release builds do not extend
+// the public surface because debug_assertions is OFF in release.
+//
+// The harness module itself stays `pub(crate)` so the production
+// public crate surface is not extended; this re-export is a thin shim
+// that routes test-only access through a name `for_tests` that callers
+// can grep for.
+#[cfg(any(test, debug_assertions))]
+pub mod for_tests {
+    //! Re-export shim for integration tests in
+    //! `crates/verter_session/tests/*.rs` — those build as a separate
+    //! crate target and cannot reach `pub(crate)` items directly.
+    //!
+    //! All re-exports are gated `cfg(any(test, debug_assertions))` so
+    //! release builds do not extend the public surface — `debug_assertions`
+    //! is OFF in `cargo build --release`, so the module is absent from
+    //! release artifacts consumed downstream.
+    pub use crate::capture_token::{
+        assert_no_stack_overflow, with_active_capture, with_active_capture_returning, CacheId,
+        CacheKeyFilter, CacheProvenance, CanonicalId, CaptureGuard, CaptureSnapshot, CaptureToken,
+        DispatchEntry, EdgeIdentity, InternedId, KeyFamily, SignatureHash, StackOverflow,
+    };
+}
+
 pub use types::*;
 
 // Re-export for the LSP: standalone @verter/types .d.ts content.

@@ -1647,8 +1647,27 @@ impl SemanticGraphStore {
         // request so the footprint miner sees every derivation hop.
         // No-op when no request context is installed.
         if let Some(acc) = crate::request_context::current_accumulator() {
-            acc.push_derivation_edge(result, kind, edge);
+            acc.push_derivation_edge(result, kind, edge.clone());
         }
+        // Test harness hook: when a CaptureToken is bound on the current
+        // thread, record the edge identity tuple in the per-request
+        // ledger so duplicate-derivation tests can read snapshots. The
+        // closure runs OUTSIDE the derivation lock (released above).
+        // The `with_active_capture` call returns immediately when no
+        // token is bound (the production hot path) — no lock, no
+        // allocation, one thread-local lookup.
+        crate::capture_token::with_active_capture(|t| {
+            let dep_signature_hash =
+                crate::capture_token::stable_hash_slice(&edge.edge_dep_signature);
+            let identity = crate::capture_token::EdgeIdentity::from_record(
+                result,
+                kind,
+                edge.sources.as_ref(),
+                &edge.meta,
+                dep_signature_hash,
+            );
+            t.record_edge(identity);
+        });
     }
 
     /// Read-only origin walk for a result node — yields every edge
