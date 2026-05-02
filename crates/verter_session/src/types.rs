@@ -1198,8 +1198,8 @@ pub(crate) struct CompileCacheEntry {
     pub(crate) cached_tsc_extract: Option<(Hash16, Arc<verter_compiler::tsc::ExtractedTscState>)>,
     /// Mode-aware cached resolved component-meta sidecar keyed by owner/dependency hashes.
     pub(crate) cached_resolved_meta: FxHashMap<ProjectionMode, ResolvedComponentMetaCacheEntry>,
-    /// Cached encoded protobuf payloads for component-meta queries.
-    pub(crate) cached_meta_payloads: FxHashMap<MetaPayloadKind, CachedMetaPayload>,
+    /// Cached encoded protobuf payload for the canonical component-meta query.
+    pub(crate) cached_meta_payload: Option<CachedMetaPayload>,
 
     /// Raw template analysis (source-derived, profileless).
     /// Computed by compute_template_analysis_if_missing() from raw scheduler data.
@@ -1380,15 +1380,6 @@ pub(crate) struct CachedFallthroughEntry {
     pub fact_versions: Vec<crate::resolver_core::FactVersionRef>,
     pub generic_root_propagation: bool,
     pub resolution: Arc<FallthroughResolution>,
-}
-
-/// Which kind of component-meta payload is cached.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum MetaPayloadKind {
-    /// Declared-only meta (no enrichment).
-    Declared,
-    /// Full meta with enrichment + fallthrough.
-    Full,
 }
 
 /// Cached encoded protobuf payload for a component-meta query.

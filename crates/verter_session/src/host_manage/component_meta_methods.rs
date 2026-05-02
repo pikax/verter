@@ -2344,16 +2344,13 @@ impl VerterHost {
     // Encoded payload cache (shared by NAPI/WASM)
     // ───────────────────────────────────────────────────────────────────────
 
-    /// Try to return a cached encoded payload for the given meta kind.
-    /// Validates fact versions against the live host state.
-    pub(crate) fn try_get_cached_meta_payload(
-        &self,
-        canonical: &str,
-        kind: crate::types::MetaPayloadKind,
-    ) -> Option<Vec<u8>> {
+    /// Try to return a cached encoded payload for the canonical
+    /// component-meta query. Validates fact versions against the live host
+    /// state.
+    pub(crate) fn try_get_cached_meta_payload(&self, canonical: &str) -> Option<Vec<u8>> {
         use crate::resolver_core::StoreView;
         let entry = self.compile_cache.get(canonical)?;
-        let cached = entry.cached_meta_payloads.get(&kind)?;
+        let cached = entry.cached_meta_payload.as_ref()?;
         let view = self.resolver_store_view();
         if cached.fact_versions.iter().all(|fact| view.validates(fact)) {
             return Some(cached.payload.clone());
@@ -2365,7 +2362,6 @@ impl VerterHost {
     pub(crate) fn store_meta_payload(
         &self,
         canonical: &str,
-        kind: crate::types::MetaPayloadKind,
         fact_versions: &[crate::resolver_core::FactVersionRef],
         payload: Vec<u8>,
     ) {
@@ -2376,7 +2372,7 @@ impl VerterHost {
 
         {
             if let Some(mut entry) = self.compile_cache.get_mut(canonical) {
-                entry.cached_meta_payloads.insert(kind, cached);
+                entry.cached_meta_payload = Some(cached);
             }
         }
     }

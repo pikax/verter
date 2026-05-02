@@ -82,16 +82,18 @@ everything becomes `{ kind: "object", schema }`. **But** for Ref descriptors wit
 no Object body, `schema` is `{}` (empty placeholder). Downstream consumers that
 walk `schema.schema` see no properties.
 
-### 2.2 `compat/checker.ts:2201-2216` (PREFERRED public path)
+### 2.2 `compat/checker.ts:2201-2216` (public path)
 
 ```ts
-const declared = host.getDeclaredComponentMeta(canonical);
-if (declared) { return declared; /* fast path */ }
-const full = host.getComponentMeta(canonical); /* fallback */
+const fullNative = host.getComponentMeta(canonical);
+const declared = projectDeclaredOnlyNativeResult(fullNative);
+if (declared) { return declared; /* projection over the canonical query */ }
 ```
 
-**Verdict:** compat prefers `getDeclaredComponentMeta`. If the policy pass is
-not wired into `get_declared_component_meta_payload`, the regression survives.
+**Verdict:** compat now drives one canonical native query and projects to
+the declared surface in TypeScript. The Rust side has a single query
+identity (no separate declared cache lane). Migration guide:
+`docs/migration/getDeclaredComponentMeta-removal.md`.
 
 ### 2.3 `compat/checker.spec.ts:2682, :2797`
 

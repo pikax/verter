@@ -685,65 +685,9 @@ impl MetaSession {
         Ok(results)
     }
 
-    /// Single native declared-surface component-meta query through this
-    /// session's overlay view.
-    ///
-    /// This skips accepted-surface and fallthrough resolution while preserving
-    /// the same budget/error behavior as `get_component_meta()`.
-    pub fn get_declared_component_meta(
-        &self,
-        canonical_or_alias: &str,
-    ) -> Result<Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis>, MetaError>
-    {
-        self.get_declared_component_meta_with_resolution(canonical_or_alias)
-            .map(|result| result.map(|(analysis, _resolved)| analysis))
-    }
-
-    /// Declared-surface component-meta plus the resolved-meta sidecar in one
-    /// overlay-aware query. This preserves declared-only component semantics
-    /// while keeping the shared resolved type registry available to callers.
-    pub fn get_declared_component_meta_with_resolution(
-        &self,
-        canonical_or_alias: &str,
-    ) -> Result<
-        Option<(
-            verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
-            crate::meta_resolve::ResolvedComponentMetaState,
-        )>,
-        MetaError,
-    > {
-        self.check_alive()?;
-        self.with_overlay_target_context(canonical_or_alias, |runtime| {
-            let host = runtime.host();
-            let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
-            let Some(resolved) = runtime
-                .resolve_component_meta(canonical.as_str(), crate::types::ProjectionMode::Expanded)
-            else {
-                return Ok(None);
-            };
-            let analysis = crate::host_manage::extract_component_meta_from_resolved(
-                host,
-                canonical.as_str(),
-                &resolved,
-                false,
-            );
-
-            if let Some(err) = component_meta_resolution_budget_error(
-                canonical.as_str(),
-                Some(&analysis),
-                &resolved,
-            ) {
-                return Err(err);
-            }
-
-            Ok(Some((analysis, resolved)))
-        })?
-    }
-
     /// Combined component-meta query: returns BOTH the analysis projection AND
     /// the resolved-meta sidecar in a single call, avoiding a duplicate
     /// resolved-state query when callers need both views.
-    #[allow(dead_code)]
     pub fn get_component_meta_with_resolution(
         &self,
         canonical_or_alias: &str,
@@ -778,66 +722,6 @@ impl MetaSession {
     // Payload cache helpers (shared by NAPI/WASM — skip encode on cache hit)
     // ───────────────────────────────────────────────────────────────────────
 
-    /// Attempt to return a cached declared-meta payload, or compute + encode
-    /// via the provided `encode_fn`. The caller owns the FFI conversion and
-    /// protobuf encoding (which live in downstream crates).
-    pub fn get_declared_component_meta_payload(
-        &self,
-        canonical_or_alias: &str,
-        encode_fn: impl FnOnce(
-            verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
-            &crate::meta_resolve::ResolvedComponentMetaState,
-        ) -> Vec<u8>,
-    ) -> Result<Option<Vec<u8>>, MetaError> {
-        use std::sync::atomic::Ordering::Relaxed;
-        self.check_alive()?;
-        self.with_overlay_target_context(canonical_or_alias, |runtime| {
-            let host = runtime.host();
-            let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
-
-            if let Some(cached) = host.try_get_cached_meta_payload(
-                canonical.as_str(),
-                crate::types::MetaPayloadKind::Declared,
-            ) {
-                host.provenance().payload_cache_hits.fetch_add(1, Relaxed);
-                return Ok(Some(cached));
-            }
-            host.provenance().payload_cache_misses.fetch_add(1, Relaxed);
-
-            let Some(resolved) = runtime
-                .resolve_component_meta(canonical.as_str(), crate::types::ProjectionMode::Expanded)
-            else {
-                return Ok(None);
-            };
-            let analysis = crate::host_manage::extract_component_meta_from_resolved(
-                host,
-                canonical.as_str(),
-                &resolved,
-                false,
-            );
-
-            if let Some(err) = component_meta_resolution_budget_error(
-                canonical.as_str(),
-                Some(&analysis),
-                &resolved,
-            ) {
-                return Err(err);
-            }
-
-            let payload = encode_fn(analysis, &resolved);
-            host.provenance().payload_encodes.fetch_add(1, Relaxed);
-
-            host.store_meta_payload(
-                canonical.as_str(),
-                crate::types::MetaPayloadKind::Declared,
-                &resolved.fact_versions,
-                payload.clone(),
-            );
-
-            Ok(Some(payload))
-        })?
-    }
-
     /// Attempt to return a cached full-meta payload, or compute + encode
     /// via the provided `encode_fn`.
     ///
@@ -857,10 +741,7 @@ impl MetaSession {
             let host = runtime.host();
             let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
 
-            if let Some(cached) = host.try_get_cached_meta_payload(
-                canonical.as_str(),
-                crate::types::MetaPayloadKind::Full,
-            ) {
+            if let Some(cached) = host.try_get_cached_meta_payload(canonical.as_str()) {
                 host.provenance().payload_cache_hits.fetch_add(1, Relaxed);
                 return Ok(Some(cached));
             }
@@ -891,12 +772,7 @@ impl MetaSession {
             host.provenance().payload_encodes.fetch_add(1, Relaxed);
 
             let facts = fallthrough_fact_versions.unwrap_or_else(|| resolved.fact_versions.clone());
-            host.store_meta_payload(
-                canonical.as_str(),
-                crate::types::MetaPayloadKind::Full,
-                &facts,
-                payload.clone(),
-            );
+            host.store_meta_payload(canonical.as_str(), &facts, payload.clone());
 
             Ok(Some(payload))
         })?

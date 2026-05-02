@@ -926,7 +926,7 @@ impl VerterHost {
         if let Some(mut cc) = self.compile_cache.get_mut(&canonical) {
             cc.compile_slots.clear();
             cc.cached_resolved_meta.clear();
-            cc.cached_meta_payloads.clear();
+            cc.cached_meta_payload = None;
         }
     }
 
@@ -968,7 +968,7 @@ impl VerterHost {
             if let Some(mut cc) = self.compile_cache.get_mut(owner) {
                 cc.compile_slots.clear();
                 cc.cached_resolved_meta.clear();
-                cc.cached_meta_payloads.clear();
+                cc.cached_meta_payload = None;
             }
         }
 

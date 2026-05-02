@@ -362,7 +362,7 @@ pub(crate) fn smart_invalidate_dependents_via_scheduler(
             if should_clear {
                 cc.compile_slots.clear();
                 cc.cached_resolved_meta.clear();
-                cc.cached_meta_payloads.clear();
+                cc.cached_meta_payload = None;
                 cc.cached_fallthrough = None;
                 cleared.insert(owner.clone());
             }

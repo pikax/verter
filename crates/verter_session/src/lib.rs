@@ -1345,7 +1345,7 @@ impl VerterHost {
                 entry.raw_template_analysis = None;
                 entry.cached_tsc_extract = None;
                 entry.cached_resolved_meta.clear();
-                entry.cached_meta_payloads.clear();
+                entry.cached_meta_payload = None;
                 entry.cached_fallthrough = None;
             }
         }
@@ -1699,7 +1699,7 @@ impl VerterHost {
                 cc.cached_tsc_extract = None;
                 cc.raw_template_analysis = None;
                 cc.cached_resolved_meta.clear();
-                cc.cached_meta_payloads.clear();
+                cc.cached_meta_payload = None;
                 cc.cached_fallthrough = None;
             }
         }

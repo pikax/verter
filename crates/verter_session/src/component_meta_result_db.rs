@@ -8,7 +8,7 @@
 //! ## Contract
 //!
 //! - Key: [`ComponentMetaResultKey`] =
-//!   `(owner_canonical, owner_whole_hash, query_kind, options_fingerprint)`.
+//!   `(owner_canonical, owner_whole_hash, options_fingerprint)`.
 //! - Value: immutable `Arc` payloads — the native component-meta result
 //!   and any strictly projected derivatives.
 //! - **Transitive dependency validation on lookup**: every warm entry
@@ -30,19 +30,6 @@ use verter_semantic::analysis::Hash16;
 use crate::semantic_query::DepSignature;
 use crate::types::ProjectionMode;
 
-/// Output-affecting query shape. Expanded as new public component-meta
-/// query kinds land — every distinct output shape becomes a variant so
-/// the cache does not collapse them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ComponentMetaQueryKind {
-    /// The existing `getComponentMeta` payload (native schema).
-    Native,
-    /// The compat projection layer exposed to `vue-component-meta`
-    /// interoperability callers. Kept as a distinct variant because the
-    /// projection differs in shape, not just metadata.
-    Compat,
-}
-
 /// Stable fingerprint over output-affecting options. Constructed by the
 /// caller from an explicitly versioned serialization; the type alias
 /// points at the workspace-wide [`Hash16`] so downstream tooling does not
@@ -54,7 +41,6 @@ pub type ComponentMetaOptionsFingerprint = Hash16;
 pub struct ComponentMetaResultKey {
     pub owner_canonical: Arc<str>,
     pub owner_whole_hash: Hash16,
-    pub query_kind: ComponentMetaQueryKind,
     pub options_fingerprint: ComponentMetaOptionsFingerprint,
 }
 
@@ -361,7 +347,6 @@ mod tests {
         let key = ComponentMetaResultKey {
             owner_canonical: Arc::from("/w/Accordion.vue"),
             owner_whole_hash: [1u8; 16],
-            query_kind: ComponentMetaQueryKind::Native,
             options_fingerprint: [9u8; 16],
         };
         let entry = ComponentMetaResultEntry {
@@ -381,44 +366,16 @@ mod tests {
     }
 
     #[test]
-    fn distinct_query_kinds_do_not_alias() {
-        let db: ComponentMetaResultDb<u32> = ComponentMetaResultDb::new();
-        let native_key = ComponentMetaResultKey {
-            owner_canonical: Arc::from("/w/o.vue"),
-            owner_whole_hash: [1u8; 16],
-            query_kind: ComponentMetaQueryKind::Native,
-            options_fingerprint: [0u8; 16],
-        };
-        let compat_key = ComponentMetaResultKey {
-            owner_canonical: Arc::from("/w/o.vue"),
-            owner_whole_hash: [1u8; 16],
-            query_kind: ComponentMetaQueryKind::Compat,
-            options_fingerprint: [0u8; 16],
-        };
-        db.insert(
-            native_key.clone(),
-            ComponentMetaResultEntry {
-                payload: Arc::new(1u32),
-                dep_signature: Arc::from(Vec::new().into_boxed_slice()),
-            },
-        );
-        assert!(db.get(&native_key).is_some());
-        assert!(db.get(&compat_key).is_none());
-    }
-
-    #[test]
     fn distinct_options_fingerprints_do_not_alias() {
         let db: ComponentMetaResultDb<u32> = ComponentMetaResultDb::new();
         let k1 = ComponentMetaResultKey {
             owner_canonical: Arc::from("/w/o.vue"),
             owner_whole_hash: [1u8; 16],
-            query_kind: ComponentMetaQueryKind::Native,
             options_fingerprint: [1u8; 16],
         };
         let k2 = ComponentMetaResultKey {
             owner_canonical: Arc::from("/w/o.vue"),
             owner_whole_hash: [1u8; 16],
-            query_kind: ComponentMetaQueryKind::Native,
             options_fingerprint: [2u8; 16],
         };
         db.insert(
@@ -438,13 +395,11 @@ mod tests {
         let k_v1 = ComponentMetaResultKey {
             owner_canonical: Arc::from("/w/o.vue"),
             owner_whole_hash: [1u8; 16],
-            query_kind: ComponentMetaQueryKind::Native,
             options_fingerprint: [9u8; 16],
         };
         let k_v2 = ComponentMetaResultKey {
             owner_canonical: Arc::from("/w/o.vue"),
             owner_whole_hash: [2u8; 16],
-            query_kind: ComponentMetaQueryKind::Native,
             options_fingerprint: [9u8; 16],
         };
         db.insert(
@@ -464,7 +419,6 @@ mod tests {
         let key = ComponentMetaResultKey {
             owner_canonical: Arc::from("/w/o.vue"),
             owner_whole_hash: [1u8; 16],
-            query_kind: ComponentMetaQueryKind::Native,
             options_fingerprint: [0u8; 16],
         };
         db.insert(
@@ -489,58 +443,30 @@ mod tests {
     }
 
     /// `invalidate_owner` drops every entry whose owner canonical matches,
-    /// regardless of owner whole-hash / query kind / options. Unrelated
-    /// owners stay warm.
+    /// regardless of owner whole-hash / options. Unrelated owners stay warm.
     #[test]
     fn invalidate_owner_removes_all_keys_for_one_canonical() {
         let db: ComponentMetaResultDb<u32> = ComponentMetaResultDb::new();
-        let mk_key =
-            |owner: &str, hash: [u8; 16], kind: ComponentMetaQueryKind| ComponentMetaResultKey {
-                owner_canonical: Arc::from(owner),
-                owner_whole_hash: hash,
-                query_kind: kind,
-                options_fingerprint: [0u8; 16],
-            };
+        let mk_key = |owner: &str, hash: [u8; 16]| ComponentMetaResultKey {
+            owner_canonical: Arc::from(owner),
+            owner_whole_hash: hash,
+            options_fingerprint: [0u8; 16],
+        };
         let mk_entry = || ComponentMetaResultEntry {
             payload: Arc::new(1u32),
             dep_signature: Arc::from(Vec::new().into_boxed_slice()),
         };
 
-        // Two entries for /w/a.vue (different hashes + kinds), one for /w/b.vue.
-        db.insert(
-            mk_key("/w/a.vue", [1u8; 16], ComponentMetaQueryKind::Native),
-            mk_entry(),
-        );
-        db.insert(
-            mk_key("/w/a.vue", [1u8; 16], ComponentMetaQueryKind::Compat),
-            mk_entry(),
-        );
-        db.insert(
-            mk_key("/w/a.vue", [2u8; 16], ComponentMetaQueryKind::Native),
-            mk_entry(),
-        );
-        db.insert(
-            mk_key("/w/b.vue", [1u8; 16], ComponentMetaQueryKind::Native),
-            mk_entry(),
-        );
+        // Two entries for /w/a.vue (different hashes), one for /w/b.vue.
+        db.insert(mk_key("/w/a.vue", [1u8; 16]), mk_entry());
+        db.insert(mk_key("/w/a.vue", [2u8; 16]), mk_entry());
+        db.insert(mk_key("/w/b.vue", [1u8; 16]), mk_entry());
 
         let removed = db.invalidate_owner("/w/a.vue");
-        assert_eq!(removed, 3);
+        assert_eq!(removed, 2);
         // /w/b.vue stays.
-        assert!(db
-            .get(&mk_key(
-                "/w/b.vue",
-                [1u8; 16],
-                ComponentMetaQueryKind::Native
-            ))
-            .is_some());
+        assert!(db.get(&mk_key("/w/b.vue", [1u8; 16])).is_some());
         // /w/a.vue is fully gone.
-        assert!(db
-            .get(&mk_key(
-                "/w/a.vue",
-                [1u8; 16],
-                ComponentMetaQueryKind::Native
-            ))
-            .is_none());
+        assert!(db.get(&mk_key("/w/a.vue", [1u8; 16])).is_none());
     }
 }

@@ -114,7 +114,6 @@ impl VerterHost {
         let key = crate::component_meta_result_db::ComponentMetaResultKey {
             owner_canonical: Arc::from(canonical),
             owner_whole_hash: shallow.whole_hash,
-            query_kind: crate::component_meta_result_db::ComponentMetaQueryKind::Native,
             options_fingerprint: component_meta_options_fingerprint(
                 &ComponentMetaOptions::default(),
             ),
@@ -157,7 +156,6 @@ impl VerterHost {
         let key = crate::component_meta_result_db::ComponentMetaResultKey {
             owner_canonical: Arc::from(canonical),
             owner_whole_hash: whole_hash,
-            query_kind: crate::component_meta_result_db::ComponentMetaQueryKind::Native,
             options_fingerprint: component_meta_options_fingerprint(
                 &ComponentMetaOptions::default(),
             ),
@@ -350,7 +348,6 @@ impl VerterHost {
         let key = crate::component_meta_result_db::ComponentMetaResultKey {
             owner_canonical: Arc::from(canonical),
             owner_whole_hash: shallow.whole_hash,
-            query_kind: crate::component_meta_result_db::ComponentMetaQueryKind::Native,
             options_fingerprint: component_meta_options_fingerprint(
                 &ComponentMetaOptions::default(),
             ),

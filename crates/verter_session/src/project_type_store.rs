@@ -808,7 +808,7 @@ pub struct ProjectTypeStore {
     /// reads the same entry.
     owner_import_surfaces: OwnerImportSurfaceDb,
     /// Final component-meta result cache (Phase 3). Keyed by
-    /// `(owner_canonical, owner_whole_hash, query_kind, options_fingerprint)`.
+    /// `(owner_canonical, owner_whole_hash, options_fingerprint)`.
     /// Payload is [`crate::component_meta_result_db::CachedComponentMetaResult`]
     /// — the native `ComponentMetaAnalysis` plus the sanitized
     /// resolution sidecar template. Phase 3 wires `get_component_meta`
@@ -1495,7 +1495,6 @@ mod tests {
             crate::component_meta_result_db::ComponentMetaResultKey {
                 owner_canonical: Arc::from("/w/o.vue"),
                 owner_whole_hash: hash,
-                query_kind: crate::component_meta_result_db::ComponentMetaQueryKind::Native,
                 options_fingerprint: [0u8; 16],
             },
             crate::component_meta_result_db::ComponentMetaResultEntry {

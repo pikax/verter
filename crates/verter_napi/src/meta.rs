@@ -411,20 +411,6 @@ impl NapiMetaSession {
         }))?
     }
 
-    #[napi(js_name = "getDeclaredComponentMeta")]
-    pub fn get_declared_component_meta(
-        &self,
-        canonical_or_alias: String,
-    ) -> Result<Option<Buffer>> {
-        let session = self.session()?;
-        catch_panic(std::panic::AssertUnwindSafe(|| {
-            let payload = session
-                .get_declared_component_meta_payload(&canonical_or_alias, encode_meta_payload)
-                .map_err(meta_err)?;
-            Ok(payload.map(Buffer::from))
-        }))?
-    }
-
     #[napi(js_name = "getProvenance")]
     pub fn get_provenance(&self) -> Result<String> {
         let session = self.session()?;

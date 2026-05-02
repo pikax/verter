@@ -328,7 +328,10 @@ impl ComponentMetaSession {
         Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis>,
         ComponentMetaHostError,
     > {
-        self.get_component_meta_with_fallthrough(canonical_or_alias, true)
+        component_meta_trace_custom!("component_meta_session_query", canonical_or_alias);
+        self.inner
+            .get_component_meta(canonical_or_alias)
+            .map_err(ComponentMetaHostError::from)
     }
 
     /// Get component metadata plus the resolved-state sidecar AND the
@@ -395,82 +398,6 @@ impl ComponentMetaSession {
         );
         self.inner
             .get_component_meta_with_resolution(canonical_or_alias)
-            .map_err(ComponentMetaHostError::from)
-    }
-
-    /// Get declared-only component metadata in this session's overlay context.
-    ///
-    /// This skips accepted-surface and fallthrough resolution so compat callers
-    /// can match Volar-style metadata without paying the inheritance cost.
-    pub fn get_declared_component_meta(
-        &self,
-        canonical_or_alias: &str,
-    ) -> Result<
-        Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis>,
-        ComponentMetaHostError,
-    > {
-        self.get_declared_component_meta_with_resolution(canonical_or_alias)
-            .map(|result| result.map(|(analysis, _resolved)| analysis))
-    }
-
-    /// Declared-only component metadata plus the resolved-state sidecar in
-    /// this session's overlay context.
-    pub fn get_declared_component_meta_with_resolution(
-        &self,
-        canonical_or_alias: &str,
-    ) -> Result<
-        Option<(
-            verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
-            crate::meta_resolve::ResolvedComponentMetaState,
-        )>,
-        ComponentMetaHostError,
-    > {
-        component_meta_trace_custom!(
-            "component_meta_session_declared_query_with_resolution",
-            canonical_or_alias
-        );
-        self.inner
-            .get_declared_component_meta_with_resolution(canonical_or_alias)
-            .map_err(ComponentMetaHostError::from)
-    }
-
-    fn get_component_meta_with_fallthrough(
-        &self,
-        canonical_or_alias: &str,
-        include_fallthrough: bool,
-    ) -> Result<
-        Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis>,
-        ComponentMetaHostError,
-    > {
-        component_meta_trace_custom!(
-            "component_meta_session_query",
-            format!(
-                "owner={} include_fallthrough={include_fallthrough}",
-                canonical_or_alias
-            ),
-        );
-        if !include_fallthrough {
-            self.inner
-                .get_declared_component_meta(canonical_or_alias)
-                .map_err(ComponentMetaHostError::from)
-        } else {
-            self.inner
-                .get_component_meta(canonical_or_alias)
-                .map_err(ComponentMetaHostError::from)
-        }
-    }
-
-    /// Declared-meta as encoded payload. Cache-first on the Verter backend.
-    pub fn get_declared_component_meta_payload(
-        &self,
-        canonical_or_alias: &str,
-        encode_fn: impl FnOnce(
-            verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
-            &crate::meta_resolve::ResolvedComponentMetaState,
-        ) -> Vec<u8>,
-    ) -> Result<Option<Vec<u8>>, ComponentMetaHostError> {
-        self.inner
-            .get_declared_component_meta_payload(canonical_or_alias, encode_fn)
             .map_err(ComponentMetaHostError::from)
     }
 
@@ -818,64 +745,7 @@ mod tests {
     }
 
     #[test]
-    fn declared_component_meta_skips_fallthrough_surface() {
-        let host = make_host();
-        host.upsert_base(
-            "/src/App.vue",
-            "<script setup lang=\"ts\">\ndefineProps<{ msg: string }>()\n</script>\n<template><div>{{ msg }}</div></template>",
-        )
-        .unwrap();
-
-        let session = host.open_session_batch().unwrap();
-        let full = session
-            .get_component_meta("/src/App.vue")
-            .unwrap()
-            .expect("full query should return component meta");
-        let declared = session
-            .get_declared_component_meta("/src/App.vue")
-            .unwrap()
-            .expect("declared query should return component meta");
-
-        assert!(
-            full.accepted_props.iter().any(|prop| prop.name == "id"),
-            "full metadata should include inherited attrs from the root element"
-        );
-        assert!(
-            full.accepted_events
-                .iter()
-                .any(|event| event.name == "click"),
-            "full metadata should include inherited listeners from the root element"
-        );
-        assert!(
-            declared.accepted_props.is_empty(),
-            "declared-only metadata should skip accepted props, got {:?}",
-            declared
-                .accepted_props
-                .iter()
-                .map(|prop| prop.name.as_str())
-                .collect::<Vec<_>>()
-        );
-        assert!(
-            declared.accepted_events.is_empty(),
-            "declared-only metadata should skip accepted events, got {:?}",
-            declared
-                .accepted_events
-                .iter()
-                .map(|event| event.name.as_str())
-                .collect::<Vec<_>>()
-        );
-        assert!(
-            !matches!(
-                declared.fallthrough_surface,
-                verter_semantic::analysis::component_meta::FallthroughSurface::Branches { .. }
-            ),
-            "declared-only metadata should skip fallthrough branches, got {:?}",
-            declared.fallthrough_surface
-        );
-    }
-
-    #[test]
-    fn declared_component_meta_with_resolution_keeps_resolved_type_registry_sidecar() {
+    fn component_meta_with_resolution_keeps_resolved_type_registry_sidecar() {
         let host = make_host();
         host.upsert_base(
             "/src/types.ts",
@@ -929,15 +799,15 @@ defineProps<ButtonProps>()
 
         let session = host.open_session_batch().unwrap();
         let (_analysis, resolved) = session
-            .get_declared_component_meta_with_resolution("/src/Button.vue")
+            .get_component_meta_with_resolution("/src/Button.vue")
             .unwrap()
-            .expect("declared query should return meta plus resolution sidecar");
+            .expect("canonical query should return meta plus resolution sidecar");
 
         let button_entry = resolved
             .resolved_type_registry
             .iter()
             .find(|entry| entry.name == "Button")
-            .expect("declared query should keep the resolved Button registry entry");
+            .expect("canonical query should keep the resolved Button registry entry");
         let TypeExpr::Object(button_shape) = &button_entry.type_expr else {
             panic!(
                 "expected resolved Button helper to materialize as an object, got {:?}",
@@ -1087,9 +957,9 @@ export type ComponentConfig<
             .unwrap();
 
         let (_analysis, resolved) = session
-            .get_declared_component_meta_with_resolution("/src/Button.vue")
+            .get_component_meta_with_resolution("/src/Button.vue")
             .unwrap()
-            .expect("overlay-only helper query should return declared meta plus resolution");
+            .expect("overlay-only helper query should return canonical meta plus resolution");
 
         let button_entry = resolved
             .resolved_type_registry
