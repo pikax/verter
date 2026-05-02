@@ -31,6 +31,71 @@ use super::helpers::{is_package_canonical, strip_parens_expr, type_expr_referenc
 use super::{ComponentMetaQueryEngine, FastShallowFieldExpr, FastShallowFieldExprExactness};
 
 impl<'a> ComponentMetaQueryEngine<'a> {
+    /// Field-level fast path predicate (Issue #3).
+    ///
+    /// Returns `true` when the macro field expression `parsed` MUST
+    /// take the slow parent-projection path; returns `false` when the
+    /// fast path applies and the closure can short-circuit to
+    /// `ExpansionResult::exact_concrete(parsed)` without dispatching
+    /// the macro's parent shell.
+    ///
+    /// The decision is "the field's parsed `TypeExpr` does not
+    /// transitively reference any name in the parent shell's prepared
+    /// `type_parameters`" — modulo shadowing introduced by mapped
+    /// types and function-type parameter lists. The shadow-aware
+    /// walk is delegated to
+    /// [`verter_semantic::analysis::type_expr_refs::field_references_type_params`].
+    ///
+    /// Returns `true` (slow path) on any of:
+    /// - `macro_type_arg` does not resolve to a `Ref` after stripping
+    ///   parens (anonymous parent shell — no type params to compare,
+    ///   but the slow path remains the safe default for compound
+    ///   shapes like `Pick<X, K>` whose type-argument substitution
+    ///   matters);
+    /// - the parent shell's name does not resolve to a known root
+    ///   identity in the owner scope (defensive fallback);
+    /// - the prepared type decl is missing (cache miss → slow path);
+    /// - the prepared decl has a non-empty type-parameter list AND
+    ///   the field expression references at least one of those names.
+    ///
+    /// Returns `false` (fast path) when the prepared decl exists and
+    /// has either:
+    /// - an empty type-parameter list (no params to reference); or
+    /// - a non-empty list whose names are all absent from the field
+    ///   expression (modulo shadowing).
+    pub(crate) fn field_needs_parent_projection(
+        &mut self,
+        scope_canonical_id: &str,
+        parsed: &TypeExpr,
+        macro_type_arg: &TypeExpr,
+    ) -> bool {
+        // Strip outer parens to expose the carrier shape.
+        let carrier = strip_parens_expr(macro_type_arg);
+        let TypeExpr::Ref { name, .. } = carrier else {
+            // Anonymous / compound carrier — keep the slow path.
+            return true;
+        };
+        let Some(root_identity) = self.root_identity_in_scope(scope_canonical_id, name.as_ref())
+        else {
+            return true;
+        };
+        let Some(prepared) =
+            self.prepared_type_decl(&root_identity.canonical_id, &root_identity.symbol_name)
+        else {
+            return true;
+        };
+        // Empty parameter list — no parent-param references possible.
+        // The fast path always applies.
+        if prepared.type_parameters.is_empty() {
+            return false;
+        }
+        // Predicate-correct walk with shadowing semantics.
+        verter_semantic::analysis::type_expr_refs::field_references_type_params(
+            parsed,
+            &prepared.type_parameters,
+        )
+    }
+
     /// Symbolic-preservation predicate for the define-props member rescue
     /// path (D-Cutover §5.8 replacement for
     /// `TypeQueryEngine::should_preserve_shallow_field_expr`).

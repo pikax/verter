@@ -671,7 +671,7 @@ impl VerterHost {
                         };
                         use verter_semantic::analysis::type_eval_build::PathSegment as MacroPathSegment;
 
-                        let symbolic_fallback = || {
+                        let preserve_parsed_symbolically = || {
                             ExpansionResult::exact_symbolic(ExpandedNormalizedExpr {
                                 expr: parsed.clone(),
                             })
@@ -683,128 +683,229 @@ impl VerterHost {
                             .and_then(|m| m.parsed_type_argument.clone());
                         let macro_kind = snapshot.macros.get(ctx.macro_index).map(|m| m.kind);
 
-                        // Phase 5j §5.12 — `defineModel<T>()` prop /
-                        // model lowering. The `expand_macro_types_impl_with_expander`
-                        // emits the model's prop field with
-                        // `output_path = [Member(<model_name>)]`, but the
-                        // macro's `parsed_type_argument` is `T` itself —
-                        // not a parent shell whose member is the type.
-                        // Dispatching `ProjectPath { base, [Member(model)],
-                        // Expanded }` always misses because `T` is
-                        // typically a `Primitive` / `Ref` / `Union` (no
-                        // member to navigate). The closure used to fall
-                        // through to symbolic preservation, but symbolic
-                        // preservation is gated on
-                        // `should_preserve_shallow_field_expr`, which is
-                        // false for primitive-leaf types — leaving the
-                        // dispatch arm to produce `Unknown { raw:
-                        // "semanticMiss" }`.
+                        // Issue #3 — field-level fast path. When the
+                        // macro's parent shell is a named generic /
+                        // non-generic carrier and the field's parsed
+                        // expression does NOT reference any of the
+                        // parent's type parameters (modulo shadowing in
+                        // mapped types and function-type parameter
+                        // lists), the closure short-circuits to
+                        // `ExpansionResult::exact_concrete(parsed)`. The
+                        // parsed field expression is the answer; no
+                        // parent projection runs. Skipping the parent
+                        // lower means we do NOT dispatch
+                        // `Instantiate { base = <heritage>, .. }` for
+                        // any of the shell's `extends`-chain types,
+                        // which is the source of the cold-time blow-up
+                        // when the heritage points into a third-party
+                        // package (the `defineProps<ChatMessageProps>()
+                        // extends UIMessage from 'ai'` regression).
                         //
-                        // Phase 5j routes `DefineModel` prop / model
-                        // fields through a direct lower+raise of
-                        // `macro_type_arg` (the type IS the field's
-                        // type), bypassing the path projection. Mirrors
-                        // the empty-output_path arm semantically. Closes
-                        // `fixture_models` deferred fixture (re-homed
-                        // from 5k per §5.13 r15 table).
-                        if matches!(
-                            macro_kind,
-                            Some(verter_semantic::analysis::AnalyzedMacroKind::DefineModel)
-                        ) {
+                        // The fast path is parse-local and does NOT
+                        // populate any host-cached entry — the parsed
+                        // field expression is canonical to the file's
+                        // most recent parse. The owner SFC's parse is
+                        // already cached by the scheduler; recomputing
+                        // this predicate per `getComponentMeta` call is
+                        // cheaper than an extra DB lookup. The
+                        // `defineModel<T>()` arm BELOW retains its
+                        // existing direct-lower path; the fast path
+                        // applies only when the slow `output_path`
+                        // projection branch would otherwise run.
+                        //
+                        // The early-exit assigns `expansion` rather than
+                        // returning from the closure: the audit-gated
+                        // push at the bottom of the closure must still
+                        // run to keep per-FieldKind cardinality in
+                        // sync with the macro emitter's field count.
+                        let fast_path_applied = if !ctx.output_path.is_empty()
+                            && !matches!(
+                                macro_kind,
+                                Some(verter_semantic::analysis::AnalyzedMacroKind::DefineModel)
+                            ) {
                             if let Some(macro_type_arg) = macro_type_arg.as_ref() {
-                                let dispatch = ProjectSemanticDispatch::new(engine.ctx());
-                                if let Some(base_id) = dispatch.lower_type_expr_in_scope_with_mode(
+                                !engine.field_needs_parent_projection(
                                     canonical,
+                                    parsed,
                                     macro_type_arg.as_ref(),
-                                    ProjectionMode::Expanded,
-                                ) {
-                                    if let Some(raised) = dispatch.raise_node_to_type_expr(base_id)
+                                )
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        };
+
+                        if fast_path_applied {
+                            ExpansionResult::exact_concrete(ExpandedNormalizedExpr {
+                                expr: parsed.clone(),
+                            })
+                        } else {
+                            // Phase 5j §5.12 — `defineModel<T>()` prop /
+                            // model lowering. The `expand_macro_types_impl_with_expander`
+                            // emits the model's prop field with
+                            // `output_path = [Member(<model_name>)]`, but the
+                            // macro's `parsed_type_argument` is `T` itself —
+                            // not a parent shell whose member is the type.
+                            // Dispatching `ProjectPath { base, [Member(model)],
+                            // Expanded }` always misses because `T` is
+                            // typically a `Primitive` / `Ref` / `Union` (no
+                            // member to navigate). The closure used to fall
+                            // through to symbolic preservation, but symbolic
+                            // preservation is gated on
+                            // `should_preserve_shallow_field_expr`, which is
+                            // false for primitive-leaf types — leaving the
+                            // dispatch arm to produce `Unknown { raw:
+                            // "semanticMiss" }`.
+                            //
+                            // Phase 5j routes `DefineModel` prop / model
+                            // fields through a direct lower+raise of
+                            // `macro_type_arg` (the type IS the field's
+                            // type), bypassing the path projection. Mirrors
+                            // the empty-output_path arm semantically. Closes
+                            // `fixture_models` deferred fixture (re-homed
+                            // from 5k per §5.13 r15 table).
+                            if matches!(
+                                macro_kind,
+                                Some(verter_semantic::analysis::AnalyzedMacroKind::DefineModel)
+                            ) {
+                                if let Some(macro_type_arg) = macro_type_arg.as_ref() {
+                                    let dispatch = ProjectSemanticDispatch::new(engine.ctx());
+                                    if let Some(base_id) = dispatch
+                                        .lower_type_expr_in_scope_with_mode(
+                                            canonical,
+                                            macro_type_arg.as_ref(),
+                                            ProjectionMode::Expanded,
+                                        )
                                     {
-                                        ExpansionResult::exact_concrete(ExpandedNormalizedExpr {
-                                            expr: raised,
-                                        })
+                                        if let Some(raised) =
+                                            dispatch.raise_node_to_type_expr(base_id)
+                                        {
+                                            ExpansionResult::exact_concrete(
+                                                ExpandedNormalizedExpr { expr: raised },
+                                            )
+                                        } else {
+                                            // Lowering succeeded but raise
+                                            // failed — fall back to `parsed`
+                                            // (already the model's type).
+                                            ExpansionResult::exact_concrete(
+                                                ExpandedNormalizedExpr {
+                                                    expr: parsed.clone(),
+                                                },
+                                            )
+                                        }
                                     } else {
-                                        // Lowering succeeded but raise
-                                        // failed — fall back to `parsed`
-                                        // (already the model's type).
+                                        // Lowering miss — fall back to `parsed`.
                                         ExpansionResult::exact_concrete(ExpandedNormalizedExpr {
                                             expr: parsed.clone(),
                                         })
                                     }
                                 } else {
-                                    // Lowering miss — fall back to `parsed`.
+                                    // No `parsed_type_argument` — fall back to
+                                    // `parsed` directly (the macro's
+                                    // `prop_fields[0].type_annotation` per
+                                    // `extract_define_model_type` IS the
+                                    // macro's first type argument).
                                     ExpansionResult::exact_concrete(ExpandedNormalizedExpr {
                                         expr: parsed.clone(),
                                     })
                                 }
                             } else {
-                                // No `parsed_type_argument` — fall back to
-                                // `parsed` directly (the macro's
-                                // `prop_fields[0].type_annotation` per
-                                // `extract_define_model_type` IS the
-                                // macro's first type argument).
-                                ExpansionResult::exact_concrete(ExpandedNormalizedExpr {
-                                    expr: parsed.clone(),
-                                })
-                            }
-                        } else {
-                            match (ctx.output_path.is_empty(), macro_type_arg) {
-                                (true, _) | (_, None) => {
-                                    component_meta_trace_custom!(
+                                match (ctx.output_path.is_empty(), macro_type_arg) {
+                                    (true, _) | (_, None) => {
+                                        component_meta_trace_custom!(
                                     "macro_projection_failover",
                                     format!(
                                         "macro_index={} field_kind={:?} reason=no_parsed_type_argument",
                                         ctx.macro_index, ctx.kind,
                                     ),
                                 );
-                                    symbolic_fallback()
-                                }
-                                (false, Some(macro_type_arg)) => {
-                                    let dispatch = ProjectSemanticDispatch::new(engine.ctx());
-                                    let lowered = dispatch.lower_type_expr_in_scope_with_mode(
-                                        canonical,
-                                        macro_type_arg.as_ref(),
-                                        ProjectionMode::Expanded,
-                                    );
-                                    match lowered {
-                                        None => {
-                                            component_meta_trace_custom!(
+                                        preserve_parsed_symbolically()
+                                    }
+                                    (false, Some(macro_type_arg)) => {
+                                        let dispatch = ProjectSemanticDispatch::new(engine.ctx());
+                                        // Issue #3 — selective carrier-mode demotion.
+                                        // Path-precise contract (`/type-resolution`):
+                                        // when the carrier is a named `Ref` (e.g.
+                                        // `defineProps<UIMessage>()` or
+                                        // `defineProps<ChatMessageProps>()`), the
+                                        // shell is an intermediate hop on the way
+                                        // to the field — the field itself is the
+                                        // terminal hop. Lower the carrier in
+                                        // `Navigate` mode so the shell expands
+                                        // only as much as navigation needs; the
+                                        // terminal `ProjectPath` query below runs
+                                        // in `Expanded` and owns the full
+                                        // expansion of the requested member.
+                                        //
+                                        // For compound carriers (anonymous object
+                                        // literals, conditionals, mapped types,
+                                        // intersections, etc.) the field's parsed
+                                        // body may reference parent-generic params
+                                        // and depend on slow-path `Expanded`
+                                        // resolution to instantiate the body
+                                        // correctly — keep `Expanded` for those.
+                                        let carrier_lower_mode = {
+                                            use verter_semantic::analysis::type_expr::TypeExpr;
+                                            // Mirror the shallow_preserve helper's
+                                            // "is this a Ref carrier" check.
+                                            let stripped = {
+                                                let mut e = macro_type_arg.as_ref();
+                                                while let TypeExpr::Parenthesized(inner) = e {
+                                                    e = inner.as_ref();
+                                                }
+                                                e
+                                            };
+                                            if matches!(stripped, TypeExpr::Ref { .. }) {
+                                                ProjectionMode::Navigate
+                                            } else {
+                                                ProjectionMode::Expanded
+                                            }
+                                        };
+                                        let lowered = dispatch.lower_type_expr_in_scope_with_mode(
+                                            canonical,
+                                            macro_type_arg.as_ref(),
+                                            carrier_lower_mode,
+                                        );
+                                        match lowered {
+                                            None => {
+                                                component_meta_trace_custom!(
                                         "macro_projection_failover",
                                         format!(
                                             "macro_index={} field_kind={:?} reason=opaque_scope_or_uninterpretable",
                                             ctx.macro_index, ctx.kind,
                                         ),
                                     );
-                                            symbolic_fallback()
-                                        }
-                                        Some(base_id) => {
-                                            // Phase 5j §5.12 — slot-binding-parameter
-                                            // type lowering migrates from the engine's
-                                            // analysis path to dispatch via the
-                                            // `ResolveMacroPayload` variant +
-                                            // `MaterializeSurface { Slots }` codepath.
-                                            //
-                                            // The pre-Phase-5j closure dispatched
-                                            // `ProjectPath { base, [Member(slot),
-                                            // Member(binding)], Expanded }` directly,
-                                            // but the walker emits `Opaque(Miss)` when
-                                            // it reaches the slot's `Function` value
-                                            // with `Member(binding)` remaining (per
-                                            // `walk.rs` Function arm at the catch-all
-                                            // `opaque_miss` fall-through). The slot
-                                            // value's bindings live inside the
-                                            // function's first-parameter Object, not
-                                            // as a direct member of the Function.
-                                            //
-                                            // Phase 5j routes slot-binding lowering
-                                            // through the new helper
-                                            // `project_slot_binding_member` which
-                                            // composes existing variants to descend
-                                            // through `Function` -> `params[0].ty`
-                                            // -> `Member(binding)`. This closes the
-                                            // `slot_shapes` seed and the
-                                            // `fixture_slots_typed` deferred fixture.
-                                            if matches!(
+                                                preserve_parsed_symbolically()
+                                            }
+                                            Some(base_id) => {
+                                                // Phase 5j §5.12 — slot-binding-parameter
+                                                // type lowering migrates from the engine's
+                                                // analysis path to dispatch via the
+                                                // `ResolveMacroPayload` variant +
+                                                // `MaterializeSurface { Slots }` codepath.
+                                                //
+                                                // The pre-Phase-5j closure dispatched
+                                                // `ProjectPath { base, [Member(slot),
+                                                // Member(binding)], Expanded }` directly,
+                                                // but the walker emits `Opaque(Miss)` when
+                                                // it reaches the slot's `Function` value
+                                                // with `Member(binding)` remaining (per
+                                                // `walk.rs` Function arm at the catch-all
+                                                // `opaque_miss` fall-through). The slot
+                                                // value's bindings live inside the
+                                                // function's first-parameter Object, not
+                                                // as a direct member of the Function.
+                                                //
+                                                // Phase 5j routes slot-binding lowering
+                                                // through the new helper
+                                                // `project_slot_binding_member` which
+                                                // composes existing variants to descend
+                                                // through `Function` -> `params[0].ty`
+                                                // -> `Member(binding)`. This closes the
+                                                // `slot_shapes` seed and the
+                                                // `fixture_slots_typed` deferred fixture.
+                                                if matches!(
                                             ctx.kind,
                                             verter_semantic::analysis::type_eval_build::FieldKind::SlotBinding
                                         ) {
@@ -845,7 +946,7 @@ impl VerterHost {
                                                                     ctx.macro_index, ctx.kind,
                                                                 ),
                                                             );
-                                                            symbolic_fallback()
+                                                            preserve_parsed_symbolically()
                                                         }
                                                     }
                                                 }
@@ -857,7 +958,7 @@ impl VerterHost {
                                                             ctx.macro_index, ctx.kind,
                                                         ),
                                                     );
-                                                    symbolic_fallback()
+                                                    preserve_parsed_symbolically()
                                                 }
                                             }
                                         } else {
@@ -896,7 +997,7 @@ impl VerterHost {
                                                             ctx.macro_index, ctx.kind,
                                                         ),
                                                     );
-                                                        symbolic_fallback()
+                                                        preserve_parsed_symbolically()
                                                     }
                                                 }
                                             }
@@ -908,10 +1009,11 @@ impl VerterHost {
                                                     ctx.macro_index, ctx.kind,
                                                 ),
                                             );
-                                                symbolic_fallback()
+                                                preserve_parsed_symbolically()
                                             }
                                         }
                                         }
+                                            }
                                         }
                                     }
                                 }
