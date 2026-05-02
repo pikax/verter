@@ -1774,10 +1774,53 @@ pub(crate) fn named_ref_can_use_prepared_projection(
     requested_name: &str,
 ) -> bool {
     let declaration = query_engine.resolve_type_declaration(owner_canonical, requested_name);
-    if declaration.canonical_source.is_empty() || declaration.canonical_source == owner_canonical {
+    let target_scope = if declaration.canonical_source.is_empty() {
+        owner_canonical
+    } else {
+        declaration.canonical_source.as_str()
+    };
+    let resolved_name = if declaration.resolved_name.is_empty() {
+        requested_name
+    } else {
+        declaration.resolved_name.as_str()
+    };
+
+    // Issue #11 / Phase 11 — delegate the symbolic-vs-materialize
+    // decision to the shared helper. The previous
+    // `if declaration.canonical_source == owner_canonical { return
+    // true; }` short-circuit was an equivalent one-line guard per
+    // §6.5: same-scope refs are always workspace-owned (they live
+    // inside the owner SFC), so the helper returns `true` and this
+    // predicate returns `true` (allow the prepared-surface
+    // projection). Cross-file workspace-owned direct-member
+    // interface/class refs flow through the same helper path —
+    // canonical-reuse is shared with the field-rescue site.
+    let prepared = query_engine
+        .ctx()
+        .prepared_type_decl(target_scope, resolved_name);
+    let policy_ctx = crate::component_meta_resolution_policy::policy_helpers::PolicyContext {
+        is_workspace_owned: &|canonical| query_engine.ctx.workspace_is_workspace_owned(canonical),
+        is_package_backed: &|canonical| query_engine.ctx.workspace_is_package_backed(canonical),
+        route_preservation_context: false,
+        cycle_active_for_target: false,
+        shallow_preserve_list_entry: false,
+    };
+    if crate::component_meta_resolution_policy::policy_helpers::imported_ref_must_materialize_canonically(
+        target_scope,
+        prepared.as_deref(),
+        &policy_ctx,
+    ) {
         return true;
     }
 
+    // Helper said NOT must-materialize — fall back to the legacy
+    // kind-based decision for cases the helper does not own
+    // (package-backed Interface/Class with explicit object surfaces,
+    // type aliases, the empty-canonical-source case where the
+    // resolver returned no scope hint).
+    if declaration.canonical_source.is_empty() {
+        return true;
+    }
     match declaration.kind {
         crate::resolver_core::ResolvedDeclarationKind::Class => {
             crate::resolver_core::component_meta::imported_declaration_surface_is_authoritative(

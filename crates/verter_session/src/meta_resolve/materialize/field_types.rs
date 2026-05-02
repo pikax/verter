@@ -257,7 +257,15 @@ pub(crate) fn type_expr_has_package_backed_object_like_root(
     } else {
         declaration.canonical_source.clone()
     };
-    if !declaration_scope.contains("/node_modules/") {
+    // Issue #11 / Phase 11 — route the package-backed classification
+    // through `WorkspaceRead::is_package_backed` (NOT a path-substring
+    // check on `node_modules`). The realpath-based classification
+    // correctly handles pnpm-symlinks and workspace-packages-inside-
+    // node_modules.
+    if !query_engine
+        .ctx
+        .workspace_is_package_backed(declaration_scope.as_str())
+    {
         return false;
     }
 
@@ -573,6 +581,47 @@ pub(crate) fn top_level_imported_ref_can_stay_symbolic(
     };
     let (target_scope, target_name) = query_engine
         .resolve_final_prepared_type_target(declaration_scope.as_str(), declaration_name.as_str());
+
+    // Issue #11 / Phase 11 — consult the shared symbolic-preservation
+    // helper before any kind-specific branching. Workspace-owned
+    // direct-member interface/class refs (generic or non-generic) MUST
+    // materialize canonically (cache key includes
+    // `(target_decl_id, normalized_type_args)`), so the helper returns
+    // `true` and this predicate returns `false` (do NOT preserve
+    // symbolic). Symbolic preservation is reserved for: package-backed
+    // refs, explicit shallow-preservation list entries, recursion/cycle
+    // boundaries, and route-preservation expressions.
+    let prepared = query_engine
+        .ctx
+        .prepared_type_decl(target_scope.as_str(), target_name.as_str());
+    let policy_ctx = crate::component_meta_resolution_policy::policy_helpers::PolicyContext {
+        is_workspace_owned: &|canonical| query_engine.ctx.workspace_is_workspace_owned(canonical),
+        is_package_backed: &|canonical| query_engine.ctx.workspace_is_package_backed(canonical),
+        // Top-level ref site: the field-rescue caller handles
+        // route-preservation (lazy route, slot-binding) at its own
+        // site; top-level imported bare refs are NOT route-
+        // preservation contexts here.
+        route_preservation_context: false,
+        // Top-level entry: the helper's own cycle guard relies on
+        // the caller's recursion stack; this site has no active
+        // refs (it is the entry point of the field rescue).
+        cycle_active_for_target: false,
+        // Top-level ref site: the field-rescue caller does not
+        // maintain an explicit shallow-preservation list at this
+        // boundary (the existing `should_preserve_imported_bare_ref`
+        // path handles package-backed shapes via
+        // `is_package_backed`).
+        shallow_preserve_list_entry: false,
+    };
+    let must_materialize = crate::component_meta_resolution_policy::policy_helpers::imported_ref_must_materialize_canonically(
+        target_scope.as_str(),
+        prepared.as_deref(),
+        &policy_ctx,
+    );
+    if must_materialize {
+        return false;
+    }
+
     let target_declaration = query_engine
         .resolve_direct_prepared_type_declaration_metadata(
             target_scope.as_str(),
@@ -587,7 +636,9 @@ pub(crate) fn top_level_imported_ref_can_stay_symbolic(
     ) {
         // Interfaces with members that need materialization (IndexedAccess,
         // Mapped types) should not stay symbolic — the consumer needs the
-        // concrete member shapes.
+        // concrete member shapes. Retained for non-workspace-owned
+        // (e.g. package-backed) Interface/Class refs after the Issue #11
+        // helper has decided this is not a canonical-reuse case.
         let body_needs_materialization = query_engine
             .named_decl_body(target_scope.as_str(), target_name.as_str())
             .is_some_and(|body| interface_body_has_members_needing_materialization(&body));

@@ -319,13 +319,42 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         else {
             return false;
         };
-        if is_package_canonical(&root_identity.canonical_id) {
+        let prepared = self
+            .ctx
+            .prepared_type_decl(&root_identity.canonical_id, &root_identity.symbol_name);
+        // Issue #11 / Phase 11 — delegate the symbolic-vs-materialize
+        // decision to the shared helper. The helper consumes
+        // `WorkspaceRead::is_workspace_owned` / `is_package_backed`
+        // (NOT path-substring `node_modules` checks), so package-backed
+        // refs (including pnpm-symlink + workspace-package-inside-
+        // node_modules edge cases) classify correctly.
+        let policy_ctx = crate::component_meta_resolution_policy::policy_helpers::PolicyContext {
+            is_workspace_owned: &|canonical| self.ctx.workspace_is_workspace_owned(canonical),
+            is_package_backed: &|canonical| self.ctx.workspace_is_package_backed(canonical),
+            route_preservation_context: false,
+            cycle_active_for_target: false,
+            shallow_preserve_list_entry: false,
+        };
+        if crate::component_meta_resolution_policy::policy_helpers::imported_ref_must_materialize_canonically(
+            &root_identity.canonical_id,
+            prepared.as_deref(),
+            &policy_ctx,
+        ) {
+            return false;
+        }
+        // Helper said "may preserve symbolic". Apply the legacy
+        // post-helper checks: package-backed refs (helper short-
+        // circuits, but the legacy site's `is_package_canonical`
+        // covered cases the helper rejects when it has no prepared
+        // body) and direct-member shapes for non-workspace-owned
+        // targets.
+        if self
+            .ctx
+            .workspace_is_package_backed(&root_identity.canonical_id)
+        {
             return true;
         }
-        let Some(prepared) = self
-            .ctx
-            .prepared_type_decl(&root_identity.canonical_id, &root_identity.symbol_name)
-        else {
+        let Some(prepared) = prepared else {
             return false;
         };
         !prepared.member_index.is_empty()

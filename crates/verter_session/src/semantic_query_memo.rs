@@ -1932,12 +1932,20 @@ impl SemanticGraphStore {
         // Recorded with the canonical key the warm cache stores, AND
         // with the caller-side pre-canonical key (via raise/trait
         // entry-point recordings) so tests can probe by either form.
+        let initial_hit = self.get(&key).is_some();
         #[cfg(test)]
-        if self.get(&key).is_some() {
+        if initial_hit {
             crate::project_semantic_dispatch::raise::record_dispatch_warm(&key);
         } else {
             crate::project_semantic_dispatch::raise::record_dispatch_cold(&key);
         }
+        // Issue #11 / Phase 11 — propagate the warm/cold observation to
+        // the per-request `CaptureToken` so `dispatch_count` and
+        // `dispatch_misses` assertions can discriminate by family.
+        // Recorded once per logical call (before the retry loop), like
+        // the cfg(test) split above. The hook is a no-op when no token
+        // is bound on the current thread (zero-overhead production path).
+        crate::capture_token::with_active_capture(|t| t.record_dispatch(&key, initial_hit));
 
         let (inflight, key) = loop {
             // 1. Warm memo hit.

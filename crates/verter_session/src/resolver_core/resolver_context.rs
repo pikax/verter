@@ -241,6 +241,18 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     /// for this method.
     fn workspace_is_workspace_owned(&self, canonical_id: &str) -> bool;
 
+    /// Whether `canonical_id` is package-backed per the workspace's
+    /// resolver-classification (NOT a path-substring check on
+    /// `node_modules`). True only when the realpath sits under
+    /// `node_modules/` AND no registered project root claims the file.
+    ///
+    /// Used by Issue #11 (workspace-local canonical cache reuse) and
+    /// the shared symbolic-preservation helper to decide when an
+    /// imported ref must materialize canonically vs. stay symbolic.
+    /// Callers MUST NOT substitute `path.contains("/node_modules/")`
+    /// for this method.
+    fn workspace_is_package_backed(&self, canonical_id: &str) -> bool;
+
     // -------- Dispatch facade --------------------------------------
 
     fn dispatch(&self) -> ProjectSemanticDispatch<'_>;
@@ -483,6 +495,11 @@ impl ResolverContext for crate::VerterHost {
     #[inline]
     fn workspace_is_workspace_owned(&self, canonical_id: &str) -> bool {
         self.workspace().is_workspace_owned(canonical_id)
+    }
+
+    #[inline]
+    fn workspace_is_package_backed(&self, canonical_id: &str) -> bool {
+        self.workspace().is_package_backed(canonical_id)
     }
 
     // Dispatch facade ------------------------------------------------
