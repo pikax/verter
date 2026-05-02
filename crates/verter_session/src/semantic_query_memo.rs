@@ -750,11 +750,19 @@ struct DerivationStore {
 
 impl DerivationStore {
     fn intern_signature(&mut self, sig: DepSignature) -> Arc<DepSignature> {
+        // Phase 11b diagnosis: record one signature-intern call per
+        // invocation, classified into `returned_existing` vs.
+        // `allocated`. The capture-token hook is a no-op when no
+        // token is bound (zero-overhead production path). The
+        // `with_active_capture` body never panics so it is safe to
+        // run inside the `&mut self` borrow.
         if let Some(existing) = self.signature_pool.get(&sig) {
+            crate::capture_token::with_active_capture(|t| t.record_signature_intern(true));
             return Arc::clone(existing);
         }
         let arc = Arc::new(sig.clone());
         self.signature_pool.insert(sig, Arc::clone(&arc));
+        crate::capture_token::with_active_capture(|t| t.record_signature_intern(false));
         arc
     }
 
@@ -1144,10 +1152,97 @@ thread_local! {
         const { RefCell::new(Vec::new()) };
 }
 
+/// RAII wrapper around a `parking_lot::MutexGuard` for the
+/// `SemanticGraphStore::entries` mutex. Records the wait time
+/// observed at acquisition and the hold time observed at drop on the
+/// active [`crate::capture_token::CaptureToken`]. Phase 11b diagnosis
+/// instrumentation only — the production hot path pays one extra
+/// `Instant::now()` read per acquisition (constant-time) and the
+/// Drop is a single `Instant::elapsed()` plus the no-op
+/// `with_active_capture` hook when no token is bound.
+struct EntriesLockGuard<'a, T> {
+    guard: Option<parking_lot::MutexGuard<'a, T>>,
+    hold_start: Instant,
+    wait_ns: u128,
+}
+
+impl<'a, T> std::ops::Deref for EntriesLockGuard<'a, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        self.guard
+            .as_ref()
+            .expect("guard taken before Drop")
+            .deref()
+    }
+}
+
+impl<'a, T> std::ops::DerefMut for EntriesLockGuard<'a, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        self.guard
+            .as_mut()
+            .expect("guard taken before Drop")
+            .deref_mut()
+    }
+}
+
+impl<'a, T> Drop for EntriesLockGuard<'a, T> {
+    fn drop(&mut self) {
+        // Drop the inner guard FIRST so the mutex is released before
+        // we record the hold time. Releasing the lock before the
+        // capture-token hook keeps the hold-time measurement honest:
+        // the hook itself runs outside the critical section. We use
+        // `Option::take` + explicit `drop` (the `let _ = ...` form
+        // is a clippy `let_underscore_lock` violation because it
+        // could otherwise be read as a no-op binding).
+        if let Some(guard) = self.guard.take() {
+            std::mem::drop(guard);
+        }
+        let hold_ns = self.hold_start.elapsed().as_nanos();
+        let wait_ns = self.wait_ns;
+        crate::capture_token::with_active_capture(|t| {
+            t.record_entries_mutex_timing(wait_ns, hold_ns);
+        });
+    }
+}
+
 impl SemanticGraphStore {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Phase 11b diagnosis accessor: number of distinct interned
+    /// `DepSignature` payloads in the derivation-signature pool. Used
+    /// by the diagnosis benchmark to record the pool's growth across
+    /// scenarios — `record_signature_pool_size` on the active capture
+    /// token reads this value at end-of-capture.
+    #[must_use]
+    pub fn derivation_signature_pool_size(&self) -> usize {
+        self.derivation.lock().signature_pool.len()
+    }
+
+    /// Phase 11b diagnosis-instrumented entries-mutex acquisition.
+    ///
+    /// Returns a [`parking_lot::MutexGuard`] for `self.entries` while
+    /// timing both the wait (lock-acquisition latency) and the hold
+    /// (lifetime of the returned guard) under the active capture
+    /// token, if any. The hooks are no-ops when no token is bound,
+    /// and the timing reads themselves are constant-time.
+    ///
+    /// Production callers acquired this lock via `self.entries.lock()`
+    /// directly; this helper preserves the same contract while
+    /// surfacing per-acquisition cost to the diagnosis benchmark.
+    fn entries_lock_diagnosed<'a>(
+        &'a self,
+    ) -> EntriesLockGuard<'a, FxHashMap<FamilyKey, FamilySlots>> {
+        let wait_start = Instant::now();
+        let guard = self.entries.lock();
+        let wait_ns = wait_start.elapsed().as_nanos();
+        EntriesLockGuard {
+            guard: Some(guard),
+            hold_start: Instant::now(),
+            wait_ns,
+        }
     }
 
     /// Construct a store wired to the host's
@@ -1367,7 +1462,7 @@ impl SemanticGraphStore {
         let mut evicted = 0usize;
         let mut evicted_dep_sigs: Vec<DepSignature> = Vec::new();
         {
-            let mut entries = self.entries.lock();
+            let mut entries = self.entries_lock_diagnosed();
             for ((family, slot), registered_sig) in &drained {
                 let Some(slots) = entries.get_mut(family) else {
                     continue;
@@ -1470,7 +1565,7 @@ impl SemanticGraphStore {
     /// per plan § A0. Returns the number of slots cleared (summed across
     /// every family).
     pub fn invalidate_all(&self) -> usize {
-        let mut entries = self.entries.lock();
+        let mut entries = self.entries_lock_diagnosed();
         let removed: usize = entries.values().map(FamilySlots::populated_count).sum();
         entries.clear();
         removed
@@ -1625,6 +1720,21 @@ impl SemanticGraphStore {
         meta: crate::semantic_query::OriginMeta,
         builder_fence: DepSignature,
     ) {
+        // Phase 11b diagnosis instrumentation: bracket the entire
+        // `record_origin_edge` call with `Instant::now()` deltas so the
+        // capture token can attribute per-call wall-clock cost. The
+        // timing measurement itself is two RDTSC reads (Linux) /
+        // QueryPerformanceCounter (Windows) — no allocation, no lock —
+        // so it does not perturb the production hot path beyond the
+        // `with_active_capture` thread-local lookup that is already
+        // present below. The deltas are only consumed when a token is
+        // bound; the producer always pays the two timestamp reads, but
+        // they are constant-time and on the critical path of every
+        // origin-edge emission anyway (`stats.origin_edges_emitted` is
+        // already atomically bumped). The diagnosis benchmark is the
+        // only consumer; production-path behaviour is unchanged when no
+        // token is bound.
+        let start = Instant::now();
         // Build the edge under the derivation lock, then release the
         // lock before pushing into the accumulator — the accumulator
         // acquires its own mutex and we must not hold the graph lock
@@ -1656,6 +1766,7 @@ impl SemanticGraphStore {
         // The `with_active_capture` call returns immediately when no
         // token is bound (the production hot path) — no lock, no
         // allocation, one thread-local lookup.
+        let elapsed_ns = start.elapsed().as_nanos();
         crate::capture_token::with_active_capture(|t| {
             let dep_signature_hash =
                 crate::capture_token::stable_hash_slice(&edge.edge_dep_signature);
@@ -1667,6 +1778,8 @@ impl SemanticGraphStore {
                 dep_signature_hash,
             );
             t.record_edge(identity);
+            // Phase 11b diagnosis: per-call wall-clock cost.
+            t.record_origin_edge_call(elapsed_ns);
         });
     }
 
@@ -1882,7 +1995,7 @@ impl SemanticGraphStore {
     #[must_use]
     pub fn get(&self, key: &SemanticQueryKey) -> Option<CacheRead<QueryResult<SemanticNodeId>>> {
         let (family, slot) = family_and_slot(key);
-        let entries = self.entries.lock();
+        let entries = self.entries_lock_diagnosed();
         entries.get(&family).and_then(|slots| {
             slots.slot(slot).cloned().map(|entry| CacheRead {
                 value: entry.result,
@@ -2208,7 +2321,7 @@ impl SemanticGraphStore {
             result: result.clone(),
             dep_signature: dep_signature.clone(),
         };
-        let mut entries = self.entries.lock();
+        let mut entries = self.entries_lock_diagnosed();
         // Test-only forcing: simulate a concurrent sweep that aborted
         // this in-flight entry just before the TOCTOU re-check.
         // Deterministically drives the `cold_aborts_swept` counter in
@@ -2297,7 +2410,7 @@ impl SemanticGraphStore {
             result,
             dep_signature: dep_signature.clone(),
         };
-        let mut entries = self.entries.lock();
+        let mut entries = self.entries_lock_diagnosed();
         let populated_slots = entries
             .entry(family.clone())
             .or_default()
