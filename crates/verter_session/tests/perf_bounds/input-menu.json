@@ -1,0 +1,11 @@
+{
+  "component_id": "input-menu",
+  "corpus_path_relative": "src/runtime/components/InputMenu.vue",
+  "corpus_commit": "6e96375851898a9c3c389ad8326a767cffb6d6f8",
+  "bounds": {
+    "max_loaded_files": 152,
+    "max_indexed_files": 16,
+    "max_materialize_memo_db_entries": 73,
+    "parse_count_per_loaded_file_invariant": 1
+  }
+}
