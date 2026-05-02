@@ -2912,3 +2912,795 @@ fn no_napi_direct_verter_compiler_emitters() {
     // the bypass, after which this test PASSES.
     napi_compiler_emitters::run();
 }
+
+// ── B-C0 foundations guards ──
+//
+// Guards added by the Tier-C foundations bundle. Each `pub fn` predicate
+// is deliberately exposed so the deliberate-violation tests below can
+// exercise the predicate against fabricated fixtures without writing a
+// real violation into the production tree.
+
+mod foundations_guards {
+    use std::collections::BTreeSet;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    // ── Helpers ──
+
+    fn workspace_root() -> PathBuf {
+        super::workspace_root()
+    }
+
+    fn read_workspace_file(rel: &str) -> String {
+        super::read_workspace_file(rel)
+    }
+
+    /// Walk a directory (production tree) and yield every `.rs` file
+    /// whose name does NOT end in `_tests.rs` and is not nested under a
+    /// `tests/` or `benches/` directory.
+    fn walk_production_rs(root: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let entries = match fs::read_dir(&dir) {
+                Ok(it) => it,
+                Err(_) => continue,
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    if name == "tests" || name == "benches" || name == "examples" || name == "target" {
+                        continue;
+                    }
+                    stack.push(path);
+                    continue;
+                }
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if !name.ends_with(".rs") {
+                    continue;
+                }
+                if name.ends_with("_tests.rs") || name == "tests.rs" {
+                    continue;
+                }
+                out.push(path);
+            }
+        }
+        out.sort();
+        out
+    }
+
+    fn relative_to_root(abs: &Path) -> String {
+        abs.strip_prefix(workspace_root())
+            .unwrap_or(abs)
+            .to_string_lossy()
+            .replace('\\', "/")
+    }
+
+    // ── Guard 1 — no_std_fs_in_semantic_session_paths ──
+
+    /// Predicate: scan a single `.rs` file's source for direct
+    /// `std::fs::` references. Returns `true` when at least one match
+    /// exists.
+    pub fn file_uses_std_fs(src: &str) -> bool {
+        src.contains("std::fs::")
+    }
+
+    /// Initial allowlist for guard #1: every production file in
+    /// scope that currently uses `std::fs::`. Subsequent bundles
+    /// (B-C1 / §12.A1) shrink the set; the guard fails when a file
+    /// outside the allowlist starts using `std::fs::`.
+    pub fn guard1_allowlist() -> BTreeSet<&'static str> {
+        BTreeSet::from([
+            "crates/verter_diagnostics/src/config.rs",
+            "crates/verter_lsp/src/background_init.rs",
+            "crates/verter_lsp/src/config.rs",
+            "crates/verter_lsp/src/test_harness.rs",
+            "crates/verter_lsp/src/test_utils.rs",
+            "crates/verter_lsp/src/workspace_scanner.rs",
+            "crates/verter_mcp/src/baseline.rs",
+            "crates/verter_mcp/src/helpers.rs",
+            "crates/verter_mcp/src/scanner.rs",
+            "crates/verter_mcp/src/server.rs",
+            "crates/verter_semantic/src/analysis/routes.rs",
+            "crates/verter_session/src/component_meta_audit/mod.rs",
+            "crates/verter_session/src/id.rs",
+            "crates/verter_session/src/intrinsic_registry.rs",
+            "crates/verter_type_runtime/src/discovery.rs",
+            "crates/verter_type_runtime/src/provider_adapter.rs",
+            "crates/verter_type_runtime/src/trace.rs",
+            "crates/verter_type_runtime/src/tsgo/ipc.rs",
+            "crates/verter_type_runtime/src/tsserver/ipc.rs",
+        ])
+    }
+
+    pub fn guard1_in_scope_dirs() -> Vec<&'static str> {
+        vec![
+            "crates/verter_session/src",
+            "crates/verter_semantic/src",
+            "crates/verter_diagnostics/src",
+            "crates/verter_type_runtime/src",
+            "crates/verter_lsp/src",
+            "crates/verter_mcp/src",
+        ]
+    }
+
+    /// Run the guard 1 predicate over the in-scope directories and
+    /// return the set of relative paths that USE `std::fs::` and are
+    /// NOT in the allowlist. An empty result means the guard passes.
+    pub fn guard1_violations(allowlist: &BTreeSet<&'static str>) -> Vec<String> {
+        let root = workspace_root();
+        let mut violations = Vec::new();
+        for rel_dir in guard1_in_scope_dirs() {
+            for path in walk_production_rs(&root.join(rel_dir)) {
+                let src = match fs::read_to_string(&path) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                if !file_uses_std_fs(&src) {
+                    continue;
+                }
+                let rel = relative_to_root(&path);
+                if allowlist.contains(rel.as_str()) {
+                    continue;
+                }
+                violations.push(rel);
+            }
+        }
+        violations.sort();
+        violations
+    }
+
+    #[test]
+    fn no_std_fs_in_semantic_session_paths() {
+        let violations = guard1_violations(&guard1_allowlist());
+        assert!(
+            violations.is_empty(),
+            "Guard 1 (`no_std_fs_in_semantic_session_paths`) violations:\n  {}\n\n\
+             A new file outside the allowlist uses `std::fs::`. Either route the I/O\n\
+             through `verter_workspace::WorkspaceAccess` (preferred) or, if migration is\n\
+             not feasible yet, add the file to `guard1_allowlist()` and reference the\n\
+             remaining migration in your follow-up plan.",
+            violations.join("\n  "),
+        );
+    }
+
+    #[test]
+    fn guard1_predicate_rejects_deliberate_violation() {
+        // Discriminating: a fabricated source string that uses
+        // `std::fs::` MUST be flagged as a violation by the
+        // predicate.
+        let bad = "use std::fs::File;\nfn read() { let _ = std::fs::read_to_string(\"foo\"); }";
+        assert!(
+            file_uses_std_fs(bad),
+            "guard 1 predicate must flag direct `std::fs::` references",
+        );
+
+        let good = "use crate::workspace::WorkspaceAccess;\nfn read(ws: &dyn WorkspaceAccess) { let _ = ws.read_file(\"foo\"); }";
+        assert!(
+            !file_uses_std_fs(good),
+            "guard 1 predicate must NOT flag code that goes through WorkspaceAccess",
+        );
+    }
+
+    // ── Guard 2 — vfs_boundary_is_authoritative ──
+
+    /// Predicate: scan a `.rs` file for any direct OS file API
+    /// reference. Returns `true` when at least one such reference is
+    /// found.
+    ///
+    /// Patterns checked:
+    /// - `std::fs::` (synchronous OS file API)
+    /// - `tokio::fs::` (async OS file API)
+    pub fn file_uses_os_file_api(src: &str) -> bool {
+        src.contains("std::fs::") || src.contains("tokio::fs::")
+    }
+
+    /// Allowlist for guard #2: paths where direct OS file APIs are
+    /// the legitimate authority. `native_fs.rs` is the documented
+    /// disk boundary; the others are infrastructure that the §12.A1
+    /// migration sweeps (B-C1).
+    pub fn guard2_allowlist() -> BTreeSet<&'static str> {
+        let mut set = BTreeSet::from([
+            "crates/verter_workspace/src/native_fs.rs",
+            "crates/verter_workspace/src/config.rs",
+            "crates/verter_workspace/src/snapshot_builder.rs",
+            "crates/verter_workspace/src/vite_config.rs",
+            "crates/verter_workspace/src/dir_index.rs",
+            "crates/verter_workspace/src/filesystem.rs",
+            "crates/verter_workspace/src/ambient_parse.rs",
+            "crates/verter_workspace/src/resolver.rs",
+            "crates/verter_parser/src/utils/oxc/vue/script/resolve_type.rs",
+            "crates/verter_scheduler/src/source_loader.rs",
+            "crates/verter_tsc/src/checker.rs",
+            "crates/verter_tsc/src/reporter.rs",
+            "crates/verter_tsc/src/tsconfig.rs",
+        ]);
+        set.extend(guard1_allowlist());
+        set
+    }
+
+    /// Run guard 2 across every production `.rs` file in `crates/`
+    /// and return out-of-allowlist users of OS file APIs.
+    pub fn guard2_violations(allowlist: &BTreeSet<&'static str>) -> Vec<String> {
+        let crates_root = workspace_root().join("crates");
+        let mut violations = Vec::new();
+        let entries = match fs::read_dir(&crates_root) {
+            Ok(it) => it,
+            Err(_) => return violations,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let src_dir = path.join("src");
+            if !src_dir.exists() {
+                continue;
+            }
+            for file in walk_production_rs(&src_dir) {
+                let src = match fs::read_to_string(&file) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                if !file_uses_os_file_api(&src) {
+                    continue;
+                }
+                let rel = relative_to_root(&file);
+                if allowlist.contains(rel.as_str()) {
+                    continue;
+                }
+                violations.push(rel);
+            }
+        }
+        violations.sort();
+        violations
+    }
+
+    #[test]
+    fn vfs_boundary_is_authoritative() {
+        let violations = guard2_violations(&guard2_allowlist());
+        assert!(
+            violations.is_empty(),
+            "Guard 2 (`vfs_boundary_is_authoritative`) violations:\n  {}\n\n\
+             Direct OS file APIs (std::fs::, tokio::fs::) appearing outside\n\
+             `crates/verter_workspace/src/native_fs.rs` (the documented disk boundary)\n\
+             must route through `verter_workspace::WorkspaceAccess`.",
+            violations.join("\n  "),
+        );
+    }
+
+    #[test]
+    fn guard2_predicate_rejects_deliberate_violation() {
+        let bad_std = "use std::fs::read_to_string;";
+        let bad_tokio = "use tokio::fs::File;";
+        assert!(file_uses_os_file_api(bad_std), "guard 2 must flag std::fs");
+        assert!(file_uses_os_file_api(bad_tokio), "guard 2 must flag tokio::fs");
+        assert!(
+            !file_uses_os_file_api("use crate::workspace::WorkspaceAccess;"),
+            "guard 2 must NOT flag WorkspaceAccess users",
+        );
+    }
+
+    // ── Guard 3 — lsp_mcp_dependency_direction ──
+
+    /// Predicate: check whether a `Cargo.toml` snippet declares
+    /// `verter_mcp` as a non-optional dependency. Returns `true`
+    /// when a violation is present.
+    pub fn cargo_toml_has_unmodified_verter_mcp_dep(src: &str) -> bool {
+        let mut found_violation = false;
+        for line in src.lines() {
+            let trimmed = line.trim();
+            if !trimmed.starts_with("verter_mcp = ") && !trimmed.starts_with("verter_mcp =") {
+                continue;
+            }
+            if !line.contains("optional = true") {
+                found_violation = true;
+                break;
+            }
+        }
+        found_violation
+    }
+
+    /// Allowlist for guard #3: when `true`, the current state of
+    /// `crates/verter_lsp/Cargo.toml` is exempt because B-C2 / §12.A8
+    /// owns the actual restructure to make `verter_mcp` an optional
+    /// feature dep.
+    pub fn guard3_lsp_carries_exempt_unoptional_mcp_dep() -> bool {
+        true
+    }
+
+    #[test]
+    fn lsp_mcp_dependency_direction() {
+        let cargo = read_workspace_file("crates/verter_lsp/Cargo.toml");
+        let violation = cargo_toml_has_unmodified_verter_mcp_dep(&cargo);
+        if guard3_lsp_carries_exempt_unoptional_mcp_dep() {
+            return;
+        }
+        assert!(
+            !violation,
+            "Guard 3 (`lsp_mcp_dependency_direction`) violation: \
+             `crates/verter_lsp/Cargo.toml` declares `verter_mcp` without \
+             `optional = true`. The dependency direction must be \
+             LSP -> optional MCP (gated by the `mcp` feature).",
+        );
+    }
+
+    #[test]
+    fn guard3_predicate_rejects_deliberate_violation() {
+        let bad = "[dependencies]\nverter_mcp = { path = \"../verter_mcp\" }\nother = \"1\"\n";
+        let good = "[dependencies]\nverter_mcp = { path = \"../verter_mcp\", optional = true }\nother = \"1\"\n";
+        let no_dep = "[dependencies]\nother = \"1\"\n";
+        assert!(
+            cargo_toml_has_unmodified_verter_mcp_dep(bad),
+            "guard 3 must flag a non-optional verter_mcp dep",
+        );
+        assert!(
+            !cargo_toml_has_unmodified_verter_mcp_dep(good),
+            "guard 3 must NOT flag an optional verter_mcp dep",
+        );
+        assert!(
+            !cargo_toml_has_unmodified_verter_mcp_dep(no_dep),
+            "guard 3 must NOT flag a Cargo.toml that does not depend on verter_mcp",
+        );
+    }
+
+    // ── Guard 4 — external_corpus_paths_not_present_outside_gated_tests ──
+
+    /// Predicate: scan a test file's source for path strings
+    /// referencing `.integration-tests/repos/...`. Returns `true`
+    /// when at least one such reference is found AND the file is
+    /// NOT gated behind a Cargo feature.
+    pub fn test_file_has_ungated_external_corpus_path(src: &str) -> bool {
+        let has_path = src.contains(".integration-tests/repos/")
+            || src.contains(".integration-tests\\repos\\");
+        if !has_path {
+            return false;
+        }
+        let gated = src.lines().any(|line| {
+            let t = line.trim_start();
+            t.starts_with("#![cfg(feature =") || t.starts_with("#![cfg(any(feature =")
+        });
+        !gated
+    }
+
+    /// Walk every test file under `crates/<crate>/tests/` (across all
+    /// crates) and return the set of files that violate the rule.
+    /// `architecture_guards.rs` is self-exempt: it MUST hold the
+    /// literal path string in the predicate body, and the
+    /// deliberate-violation test exercises the predicate
+    /// independently.
+    pub fn guard4_violations() -> Vec<String> {
+        let crates_root = workspace_root().join("crates");
+        let mut violations = Vec::new();
+        let entries = match fs::read_dir(&crates_root) {
+            Ok(it) => it,
+            Err(_) => return violations,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let tests_dir = path.join("tests");
+            if !tests_dir.exists() {
+                continue;
+            }
+            let mut stack = vec![tests_dir];
+            while let Some(dir) = stack.pop() {
+                let read = match fs::read_dir(&dir) {
+                    Ok(it) => it,
+                    Err(_) => continue,
+                };
+                for sub in read.flatten() {
+                    let p = sub.path();
+                    if p.is_dir() {
+                        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                        if name == "fixtures" {
+                            continue;
+                        }
+                        stack.push(p);
+                        continue;
+                    }
+                    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    if !name.ends_with(".rs") {
+                        continue;
+                    }
+                    // Self-exempt: this file MUST hold the predicate
+                    // literal.
+                    if name == "architecture_guards.rs" {
+                        continue;
+                    }
+                    let src = match fs::read_to_string(&p) {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
+                    if test_file_has_ungated_external_corpus_path(&src) {
+                        violations.push(relative_to_root(&p));
+                    }
+                }
+            }
+        }
+        violations.sort();
+        violations
+    }
+
+    #[test]
+    fn external_corpus_paths_not_present_outside_gated_tests() {
+        let violations = guard4_violations();
+        assert!(
+            violations.is_empty(),
+            "Guard 4 (`external_corpus_paths_not_present_outside_gated_tests`) violations:\n  {}\n\n\
+             Test files that reference `.integration-tests/repos/...` must be gated behind a\n\
+             Cargo feature (e.g., `#![cfg(feature = \"external-corpus\")]`). Vendor fixtures into\n\
+             `tests/<feature>/fixtures/` for the default workspace test run.",
+            violations.join("\n  "),
+        );
+    }
+
+    #[test]
+    fn guard4_predicate_rejects_deliberate_violation() {
+        // Construct the forbidden literal at runtime so the source
+        // of `architecture_guards.rs` itself does NOT contain the
+        // string `.integration-tests/repos/` — otherwise the guard
+        // we just defined would scan its own source and report this
+        // file as a violation.
+        let forbidden_segment = format!(
+            ".{}{}{}/repos/",
+            "integration", "-", "tests"
+        );
+        let bad = format!(
+            "#[test]\nfn t() {{ let _ = include_str!(\"../{}nuxt-ui/src/Foo.vue\"); }}",
+            forbidden_segment
+        );
+        let gated = format!(
+            "#![cfg(feature = \"external-corpus\")]\n#[test]\nfn t() {{ let _ = include_str!(\"../{}nuxt-ui/src/Foo.vue\"); }}",
+            forbidden_segment
+        );
+        let local_only =
+            "#[test]\nfn t() { let _ = include_str!(\"./fixtures/Foo.vue\"); }".to_string();
+        assert!(
+            test_file_has_ungated_external_corpus_path(&bad),
+            "guard 4 must flag ungated external-corpus references",
+        );
+        assert!(
+            !test_file_has_ungated_external_corpus_path(&gated),
+            "guard 4 must NOT flag references inside a feature-gated file",
+        );
+        assert!(
+            !test_file_has_ungated_external_corpus_path(&local_only),
+            "guard 4 must NOT flag tests that use vendored fixtures",
+        );
+    }
+
+    // ── Guard 5 — verter_session_public_surface_is_minimal ──
+
+    /// Predicate: extract the set of `pub mod` and `pub use` items
+    /// declared at column 0 (top-level) of a Rust source file.
+    /// Items nested inside a block (e.g., `pub use ...` inside
+    /// `pub mod for_tests { ... }`) are excluded — only the
+    /// outermost surface is captured. Comments are ignored.
+    /// Returns the items in source order.
+    pub fn extract_top_level_pub_items(src: &str) -> Vec<String> {
+        let mut items = Vec::new();
+        let mut depth: i32 = 0;
+        for line in src.lines() {
+            // Strip trailing `//` line comment first.
+            let no_comment = if let Some(idx) = line.find("//") {
+                &line[..idx]
+            } else {
+                line
+            };
+            // Count brace deltas on the comment-stripped line. Track
+            // depth so items inside any block are filtered out.
+            let opens = no_comment.matches('{').count() as i32;
+            let closes = no_comment.matches('}').count() as i32;
+
+            let t = line.trim_start();
+            let is_top = depth == 0
+                && (line.starts_with("pub mod ")
+                    || line.starts_with("pub use ")
+                    || line.starts_with("pub(crate) mod "))
+                && (t.starts_with("pub mod ")
+                    || t.starts_with("pub use ")
+                    || t.starts_with("pub(crate) mod "));
+            if is_top {
+                let stripped = if let Some(idx) = t.find("//") {
+                    &t[..idx]
+                } else {
+                    t
+                };
+                let trimmed = stripped.trim_end_matches(';').trim_end();
+                // Don't capture lines that begin a multi-line block
+                // (e.g., `pub mod for_tests {`); the block-opening
+                // form is a structural choice the snapshot tracks
+                // separately. We still want to record the simple
+                // declaration form, so check the line ends with `;`
+                // OR `{`. For `{`, normalize to the bare module
+                // name without the trailing `{`.
+                let normalized = trimmed.trim_end_matches('{').trim_end().to_string();
+                items.push(normalized);
+            }
+            depth += opens - closes;
+            if depth < 0 {
+                depth = 0;
+            }
+        }
+        items
+    }
+
+    /// Snapshot of the current `verter_session` lib public surface.
+    /// Generated via `extract_top_level_pub_items` against
+    /// `crates/verter_session/src/lib.rs` at landing.
+    /// Updates require a deliberate edit + paired snapshot bump.
+    pub fn guard5_snapshot_pub_items() -> &'static [&'static str] {
+        VERTER_SESSION_PUB_SURFACE_SNAPSHOT
+    }
+
+    pub static VERTER_SESSION_PUB_SURFACE_SNAPSHOT: &[&str] = &[
+        "pub mod audited_request",
+        "pub mod completion_fence",
+        "pub mod component_meta_audit",
+        "pub mod component_meta_caches",
+        "pub mod component_meta_host",
+        "pub mod component_meta_materialize",
+        "pub mod component_meta_resolution_policy",
+        "pub mod component_meta_result_db",
+        "pub mod cooperative_admission",
+        "pub mod cross_file",
+        "pub mod host_compile",
+        "pub mod host_executor",
+        "pub mod host_manage",
+        "pub(crate) mod host_test_audit",
+        "pub(crate) mod i64_as_decimal_string",
+        "pub mod intrinsic_registry",
+        "pub mod meta_resolve",
+        "pub mod owner_import_surface",
+        "pub mod project_semantic_dispatch",
+        "pub mod project_type_store",
+        "pub mod request_context",
+        "pub mod resolver_core",
+        "pub mod semantic_query",
+        "pub mod semantic_query_memo",
+        "pub(crate) mod session_runtime",
+        "pub(crate) mod source_map_remap",
+        "pub(crate) mod spike_instrumentation",
+        "pub mod template_convert",
+        "pub(crate) mod u64_as_decimal_string",
+        "pub(crate) mod capture_token",
+        "pub mod for_tests",
+        "pub use types::*",
+        "pub use verter_compiler::utils::oxc::vue::resolve_type::ResolvedMemberVisibility",
+        "pub use verter_compiler::VERTER_TYPES_STANDALONE_DTS",
+        "pub use crate::resolver_core::{type_expansion, type_expansion_host, type_text_parser}",
+        "pub use verter_compiler::compile::CompileTarget",
+        "pub use id::resolve_external",
+    ];
+
+    /// Compare the live surface against the snapshot; report any
+    /// differences (missing or added items).
+    pub fn guard5_drift(live: &[String], snapshot: &[&str]) -> (Vec<String>, Vec<String>) {
+        let live_set: BTreeSet<&str> = live.iter().map(|s| s.as_str()).collect();
+        let snap_set: BTreeSet<&str> = snapshot.iter().copied().collect();
+        let added: Vec<String> = live_set
+            .difference(&snap_set)
+            .map(|s| (*s).to_string())
+            .collect();
+        let removed: Vec<String> = snap_set
+            .difference(&live_set)
+            .map(|s| (*s).to_string())
+            .collect();
+        (added, removed)
+    }
+
+    #[test]
+    fn verter_session_public_surface_is_minimal() {
+        let src = read_workspace_file("crates/verter_session/src/lib.rs");
+        let live = extract_top_level_pub_items(&src);
+        let snapshot = guard5_snapshot_pub_items();
+        let (added, removed) = guard5_drift(&live, snapshot);
+        // The guard is a snapshot — additions OR removals require
+        // a deliberate edit to `VERTER_SESSION_PUB_SURFACE_SNAPSHOT`.
+        // Subsequent bundles (B-C3 / §12.A9) shrink the snapshot
+        // deliberately as `pub mod` items are demoted to
+        // `pub(crate)` or removed.
+        assert!(
+            added.is_empty() && removed.is_empty(),
+            "Guard 5 (`verter_session_public_surface_is_minimal`) drift:\n\
+             added (live but not in snapshot): {added:?}\n\
+             removed (in snapshot but not live): {removed:?}\n\n\
+             Update `VERTER_SESSION_PUB_SURFACE_SNAPSHOT` deliberately when the surface changes.",
+        );
+    }
+
+    #[test]
+    fn guard5_predicate_extracts_pub_items_correctly() {
+        let src = "//! doc\n// pub mod commented_out;\npub mod foo;\npub mod bar;\npub use crate::foo::{A, B};\npub(crate) mod hidden;\nmod private;\npub fn not_a_module() {}\npub mod outer {\n    pub use crate::nested::Inner;\n}\n";
+        let items = extract_top_level_pub_items(src);
+        assert!(
+            items.iter().any(|i| i == "pub mod foo"),
+            "guard 5 predicate must extract `pub mod foo`",
+        );
+        assert!(
+            items.iter().any(|i| i == "pub mod bar"),
+            "guard 5 predicate must extract `pub mod bar`",
+        );
+        assert!(
+            items.iter().any(|i| i == "pub use crate::foo::{A, B}"),
+            "guard 5 predicate must extract `pub use ...` items",
+        );
+        assert!(
+            items.iter().any(|i| i == "pub(crate) mod hidden"),
+            "guard 5 predicate must extract `pub(crate) mod` items",
+        );
+        assert!(
+            items.iter().any(|i| i == "pub mod outer"),
+            "guard 5 predicate must capture block-form `pub mod outer {{ ... }}` as `pub mod outer`",
+        );
+        assert!(
+            !items.iter().any(|i| i.contains("pub fn ")),
+            "guard 5 predicate must NOT extract `pub fn` declarations",
+        );
+        assert!(
+            !items.iter().any(|i| i.contains("commented_out")),
+            "guard 5 predicate must NOT extract commented-out items",
+        );
+        assert!(
+            !items.iter().any(|i| i.contains("nested::Inner")),
+            "guard 5 predicate must NOT extract items nested inside a block",
+        );
+    }
+
+    // ── Guard 6 — no_oversize_files ──
+
+    /// Maximum line count (post-cleanup goal). Files above this
+    /// length are violations unless allow-listed.
+    pub fn guard6_target_line_count() -> usize {
+        1500
+    }
+
+    /// Files that exceed [`guard6_target_line_count`] today and are
+    /// currently exempt while B-C5 / §12.A4 prepares the splits.
+    pub fn guard6_exemptions() -> BTreeSet<&'static str> {
+        BTreeSet::from([
+            "crates/verter_compiler/src/compile/template_data.rs",
+            "crates/verter_compiler/src/ide/template/mod.rs",
+            "crates/verter_compiler/src/template/code_gen/ssr/mod.rs",
+            "crates/verter_compiler/src/template/code_gen/vapor/mod.rs",
+            "crates/verter_compiler/src/template/code_gen/vdom/element.rs",
+            "crates/verter_compiler/src/template/code_gen/vdom/slots.rs",
+            "crates/verter_compiler/src/tsc/script.rs",
+            "crates/verter_ffi/src/convert.rs",
+            "crates/verter_lsp/src/config.rs",
+            "crates/verter_lsp/src/features/completion.rs",
+            "crates/verter_lsp/src/server/sync_orchestration.rs",
+            "crates/verter_lsp/src/tsgo/merge.rs",
+            "crates/verter_lsp/src/workspace_scanner.rs",
+            "crates/verter_mcp/src/server.rs",
+            "crates/verter_napi/src/lib.rs",
+            "crates/verter_parser/src/parser/mod.rs",
+            "crates/verter_parser/src/tokenizer/byte.rs",
+            "crates/verter_parser/src/utils/oxc/bindings/helpers.rs",
+            "crates/verter_parser/src/utils/oxc/vue/script/resolve_type.rs",
+            "crates/verter_parser/src/utils/oxc/vue/script/setup.rs",
+            "crates/verter_parser/src/utils/oxc/vue/script/usage.rs",
+            "crates/verter_protocol/src/component_meta.rs",
+            "crates/verter_scheduler/src/scheduler.rs",
+            "crates/verter_semantic/src/analysis/build.rs",
+            "crates/verter_semantic/src/analysis/component_meta.rs",
+            "crates/verter_semantic/src/analysis/html_intrinsics_data.rs",
+            "crates/verter_semantic/src/analysis/macros.rs",
+            "crates/verter_semantic/src/analysis/style.rs",
+            "crates/verter_semantic/src/analysis/template.rs",
+            "crates/verter_semantic/src/analysis/type_eval_build.rs",
+            "crates/verter_semantic/src/analysis/type_solver/prepared.rs",
+            "crates/verter_semantic/src/analysis/types.rs",
+            "crates/verter_session/src/component_meta_audit/mod.rs",
+            "crates/verter_session/src/component_meta_caches.rs",
+            "crates/verter_session/src/component_meta_materialize.rs",
+            "crates/verter_session/src/host_manage.rs",
+            "crates/verter_session/src/host_manage/analysis_io.rs",
+            "crates/verter_session/src/host_manage/component_meta_methods.rs",
+            "crates/verter_session/src/host_resolve.rs",
+            "crates/verter_session/src/lib.rs",
+            "crates/verter_session/src/meta_resolve/materialize/field_types.rs",
+            "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
+            "crates/verter_session/src/parse.rs",
+            "crates/verter_session/src/project_semantic_dispatch/build.rs",
+            "crates/verter_session/src/project_semantic_dispatch/lower.rs",
+            "crates/verter_session/src/project_semantic_dispatch/raise.rs",
+            "crates/verter_session/src/project_type_store.rs",
+            "crates/verter_session/src/resolver_core/component_meta.rs",
+            "crates/verter_session/src/resolver_core/component_meta_query_engine/routed_expr.rs",
+            "crates/verter_session/src/resolver_core/component_meta_registry.rs",
+            "crates/verter_session/src/resolver_core/external_type_frontier.rs",
+            "crates/verter_session/src/resolver_core/fallthrough.rs",
+            "crates/verter_session/src/resolver_core/shallow_file_state.rs",
+            "crates/verter_session/src/semantic_query.rs",
+            "crates/verter_session/src/semantic_query_memo.rs",
+            "crates/verter_session/src/types.rs",
+            "crates/verter_tsc/src/checker.rs",
+            "crates/verter_type_runtime/src/tsgo/ipc.rs",
+            "crates/verter_type_runtime/src/tsserver/ipc.rs",
+            "crates/verter_workspace/src/resolver.rs",
+        ])
+    }
+
+    /// Predicate: count newlines in `src` and return the line count.
+    pub fn count_lines(src: &str) -> usize {
+        src.lines().count()
+    }
+
+    /// Walk the production tree; return `(rel_path, line_count)`
+    /// pairs for every file that exceeds `target` lines AND is not
+    /// in `exempt`.
+    pub fn guard6_violations(target: usize, exempt: &BTreeSet<&'static str>) -> Vec<(String, usize)> {
+        let crates_root = workspace_root().join("crates");
+        let mut violations = Vec::new();
+        let entries = match fs::read_dir(&crates_root) {
+            Ok(it) => it,
+            Err(_) => return violations,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let src_dir = path.join("src");
+            if !src_dir.exists() {
+                continue;
+            }
+            for file in walk_production_rs(&src_dir) {
+                let src = match fs::read_to_string(&file) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                let lines = count_lines(&src);
+                if lines <= target {
+                    continue;
+                }
+                let rel = relative_to_root(&file);
+                if exempt.contains(rel.as_str()) {
+                    continue;
+                }
+                violations.push((rel, lines));
+            }
+        }
+        violations.sort();
+        violations
+    }
+
+    #[test]
+    fn no_oversize_files() {
+        let target = guard6_target_line_count();
+        let violations = guard6_violations(target, &guard6_exemptions());
+        assert!(
+            violations.is_empty(),
+            "Guard 6 (`no_oversize_files`) violations: production source files exceed {target} lines\n\
+             without an explicit exemption:\n  {}\n\n\
+             Either split the file along sensible boundaries (preferred — see B-C5 / §12.A4),\n\
+             or add the file to `guard6_exemptions()` if the size is intentional.",
+            violations
+                .iter()
+                .map(|(rel, n)| format!("{rel} ({n} lines)"))
+                .collect::<Vec<_>>()
+                .join("\n  "),
+        );
+    }
+
+    #[test]
+    fn guard6_predicate_counts_lines_correctly() {
+        assert_eq!(count_lines(""), 0, "empty string has zero lines");
+        assert_eq!(count_lines("a"), 1, "single line without newline");
+        assert_eq!(count_lines("a\n"), 1, "trailing newline does not add a line");
+        assert_eq!(count_lines("a\nb"), 2, "two lines, no trailing newline");
+        assert_eq!(count_lines("a\nb\n"), 2, "two lines with trailing newline");
+        let oversize: String = (0..(guard6_target_line_count() + 1))
+            .map(|i| format!("// line {i}\n"))
+            .collect();
+        assert!(
+            count_lines(&oversize) > guard6_target_line_count(),
+            "guard 6 predicate must report > target lines for an oversized fixture",
+        );
+    }
+}
