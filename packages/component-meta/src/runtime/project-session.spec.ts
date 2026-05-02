@@ -61,9 +61,6 @@ function createMockNativeSession(overrides: Record<string, unknown> = {}) {
     getComponentMeta() {
       return null;
     },
-    getDeclaredComponentMeta() {
-      return null;
-    },
     getProvenance() {
       return "{}";
     },
@@ -81,9 +78,6 @@ describe("ProjectSession", () => {
     const nativeProject = createMockNativeProject();
     const nativeSession = createMockNativeSession({
       getComponentMeta() {
-        return payload;
-      },
-      getDeclaredComponentMeta() {
         return payload;
       },
     });
@@ -138,21 +132,21 @@ describe("ProjectSession", () => {
   });
 
   describe("decoded-result memo", () => {
-    it("repeated getDeclaredComponentMeta decodes only once", () => {
+    it("repeated getComponentMeta decodes only once", () => {
       const payload = encodeTestComponentMetaPayload({
         filePath: "/project/src/Button.vue",
         props: [{ name: "label", type: { kind: "primitive", name: "string" }, required: true }],
       });
-      const getDeclaredComponentMeta = vi.fn(() => payload);
+      const getComponentMeta = vi.fn(() => payload);
       const nativeProject = createMockNativeProject();
-      const nativeSession = createMockNativeSession({ getDeclaredComponentMeta });
+      const nativeSession = createMockNativeSession({ getComponentMeta });
       const engine = new ProjectEngine("engine", "/project", nativeProject as any);
       const session = new ProjectSession(engine, "lease-1", nativeSession as any);
 
-      const result1 = session.getDeclaredComponentMeta("/project/src/Button.vue");
-      const result2 = session.getDeclaredComponentMeta("/project/src/Button.vue");
+      const result1 = session.getComponentMeta("/project/src/Button.vue");
+      const result2 = session.getComponentMeta("/project/src/Button.vue");
 
-      expect(getDeclaredComponentMeta).toHaveBeenCalledTimes(1);
+      expect(getComponentMeta).toHaveBeenCalledTimes(1);
       expect(result1).toBe(result2);
     });
 
@@ -161,27 +155,27 @@ describe("ProjectSession", () => {
         filePath: "/project/src/Button.vue",
         props: [{ name: "label", type: { kind: "primitive", name: "string" }, required: true }],
       });
-      const getDeclaredComponentMeta = vi.fn(() => payload);
+      const getComponentMeta = vi.fn(() => payload);
       const nativeProject = createMockNativeProject({
         refreshBase() {
           return true;
         },
       });
-      const nativeSession = createMockNativeSession({ getDeclaredComponentMeta });
+      const nativeSession = createMockNativeSession({ getComponentMeta });
       const engine = new ProjectEngine("engine", "/project", nativeProject as any);
       const session = new ProjectSession(engine, "lease-1", nativeSession as any);
 
       // First decode
-      session.getDeclaredComponentMeta("/project/src/Button.vue");
-      expect(getDeclaredComponentMeta).toHaveBeenCalledTimes(1);
+      session.getComponentMeta("/project/src/Button.vue");
+      expect(getComponentMeta).toHaveBeenCalledTimes(1);
 
       const genBefore = engine.baseGeneration;
       session.refreshBaseFile("other.vue");
       expect(engine.baseGeneration).toBeGreaterThan(genBefore);
 
       // Second decode after base change — must call native again
-      session.getDeclaredComponentMeta("/project/src/Button.vue");
-      expect(getDeclaredComponentMeta).toHaveBeenCalledTimes(2);
+      session.getComponentMeta("/project/src/Button.vue");
+      expect(getComponentMeta).toHaveBeenCalledTimes(2);
     });
 
     it("ensureBaseFile bumps baseGeneration when loaded, does not when already loaded", () => {
@@ -220,39 +214,39 @@ describe("ProjectSession", () => {
         filePath: "/project/src/Button.vue",
         props: [{ name: "label", type: { kind: "primitive", name: "string" }, required: true }],
       });
-      const getDeclared1 = vi.fn(() => payload);
-      const getDeclared2 = vi.fn(() => payload);
+      const getMeta1 = vi.fn(() => payload);
+      const getMeta2 = vi.fn(() => payload);
       const nativeProject = createMockNativeProject({
         openSession() {
           throw new Error("not used");
         },
       });
       const nativeSession1 = createMockNativeSession({
-        getDeclaredComponentMeta: getDeclared1,
+        getComponentMeta: getMeta1,
       });
       const nativeSession2 = createMockNativeSession({
-        getDeclaredComponentMeta: getDeclared2,
+        getComponentMeta: getMeta2,
       });
       const engine = new ProjectEngine("engine", "/project", nativeProject as any);
       const session1 = new ProjectSession(engine, "lease-1", nativeSession1 as any);
       const session2 = new ProjectSession(engine, "lease-2", nativeSession2 as any);
 
       // Both sessions decode once
-      session1.getDeclaredComponentMeta("/project/src/Button.vue");
-      session2.getDeclaredComponentMeta("/project/src/Button.vue");
-      expect(getDeclared1).toHaveBeenCalledTimes(1);
-      expect(getDeclared2).toHaveBeenCalledTimes(1);
+      session1.getComponentMeta("/project/src/Button.vue");
+      session2.getComponentMeta("/project/src/Button.vue");
+      expect(getMeta1).toHaveBeenCalledTimes(1);
+      expect(getMeta2).toHaveBeenCalledTimes(1);
 
       // session1 overlay upsert invalidates session1's memo
       session1.upsert("test.vue", "new source");
 
       // session1 must re-decode
-      session1.getDeclaredComponentMeta("/project/src/Button.vue");
-      expect(getDeclared1).toHaveBeenCalledTimes(2);
+      session1.getComponentMeta("/project/src/Button.vue");
+      expect(getMeta1).toHaveBeenCalledTimes(2);
 
       // session2 should still use its memo (no overlay change, no base change)
-      session2.getDeclaredComponentMeta("/project/src/Button.vue");
-      expect(getDeclared2).toHaveBeenCalledTimes(1);
+      session2.getComponentMeta("/project/src/Button.vue");
+      expect(getMeta2).toHaveBeenCalledTimes(1);
     });
 
     it("restoreBaseFile bumps baseGeneration when it reloads base content", () => {
@@ -260,35 +254,35 @@ describe("ProjectSession", () => {
         filePath: "/project/src/Button.vue",
         props: [{ name: "label", type: { kind: "primitive", name: "string" }, required: true }],
       });
-      const getDeclared1 = vi.fn(() => payload);
-      const getDeclared2 = vi.fn(() => payload);
+      const getMeta1 = vi.fn(() => payload);
+      const getMeta2 = vi.fn(() => payload);
       const nativeProject = createMockNativeProject({
         ensureLoaded() {
           return true;
         },
       });
       const nativeSession1 = createMockNativeSession({
-        getDeclaredComponentMeta: getDeclared1,
+        getComponentMeta: getMeta1,
         getEffectiveSource(canonicalId: string) {
           return canonicalId === "/project/src/Base.vue" ? null : "<template />";
         },
       });
       const nativeSession2 = createMockNativeSession({
-        getDeclaredComponentMeta: getDeclared2,
+        getComponentMeta: getMeta2,
       });
       const engine = new ProjectEngine("engine", "/project", nativeProject as any);
       const session1 = new ProjectSession(engine, "lease-1", nativeSession1 as any);
       const session2 = new ProjectSession(engine, "lease-2", nativeSession2 as any);
 
-      session2.getDeclaredComponentMeta("/project/src/Button.vue");
-      expect(getDeclared2).toHaveBeenCalledTimes(1);
+      session2.getComponentMeta("/project/src/Button.vue");
+      expect(getMeta2).toHaveBeenCalledTimes(1);
 
       const genBefore = engine.baseGeneration;
       session1.restoreBaseFile("/project/src/Base.vue");
       expect(engine.baseGeneration).toBeGreaterThan(genBefore);
 
-      session2.getDeclaredComponentMeta("/project/src/Button.vue");
-      expect(getDeclared2).toHaveBeenCalledTimes(2);
+      session2.getComponentMeta("/project/src/Button.vue");
+      expect(getMeta2).toHaveBeenCalledTimes(2);
     });
 
     it("frozen memoized result prevents mutation", () => {
@@ -298,14 +292,14 @@ describe("ProjectSession", () => {
       });
       const nativeProject = createMockNativeProject();
       const nativeSession = createMockNativeSession({
-        getDeclaredComponentMeta() {
+        getComponentMeta() {
           return payload;
         },
       });
       const engine = new ProjectEngine("engine", "/project", nativeProject as any);
       const session = new ProjectSession(engine, "lease-1", nativeSession as any);
 
-      const result = session.getDeclaredComponentMeta("/project/src/Button.vue") as any;
+      const result = session.getComponentMeta("/project/src/Button.vue") as any;
 
       expect(Object.isFrozen(result)).toBe(true);
       expect(Object.isFrozen(result.props)).toBe(true);

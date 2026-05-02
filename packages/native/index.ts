@@ -502,13 +502,18 @@ export declare class ComponentMetaSession {
   /** Single native component-meta query. Returns a protobuf payload or null. */
   getComponentMeta(canonicalOrAlias: string): Buffer | null;
 
-  /** Declared-surface native component-meta query. Returns a protobuf payload or null. */
-  getDeclaredComponentMeta(canonicalOrAlias: string): Buffer | null;
+  /**
+   * Resolved-surface native component-meta query. Returns the same
+   * protobuf payload shape as `getComponentMeta`, but exposed under a
+   * dedicated entry-point for callers that want to address the resolved
+   * variant explicitly.
+   */
+  getResolvedComponentMeta(canonicalOrAlias: string): Buffer | null;
 
   /**
    * Synchronous audit bundle — returns JSON bytes of
    * `{ analysis, resolution, record }` or `null` if the canonical does
-   * not resolve. Plan §3 Commit 8.
+   * not resolve.
    *
    * The host must have `audit_enabled` + `footprint_capture` set on
    * construction; otherwise this throws. Promise ergonomics (if

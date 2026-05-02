@@ -22,8 +22,8 @@ describe("ComponentMetaChecker session requirement", () => {
     await expect(checker.getComponentMeta("App.vue")).rejects.toThrow(/runtime session/i);
   });
 
-  it("normalizes session-backed canonical ids before querying declared native metadata", async () => {
-    const getDeclaredComponentMeta = vi.fn(() => ({
+  it("normalizes session-backed canonical ids before querying canonical native metadata", async () => {
+    const getComponentMeta = vi.fn(() => ({
       filePath: "C:/project/src/App.vue",
       optionsApi: false,
       props: [],
@@ -66,10 +66,7 @@ describe("ComponentMetaChecker session requirement", () => {
         engine: { state: "active" as const },
         upsert() {},
         delete() {},
-        getDeclaredComponentMeta,
-        getComponentMeta() {
-          throw new Error("legacy full native query should not be used for default Verter compat");
-        },
+        getComponentMeta,
         getProvenance() {
           return "{}";
         },
@@ -92,7 +89,7 @@ describe("ComponentMetaChecker session requirement", () => {
     );
     await checker.getComponentMeta("src\\App.vue");
 
-    expect(getDeclaredComponentMeta).toHaveBeenCalledWith("c:/project/src/App.vue");
+    expect(getComponentMeta).toHaveBeenCalledWith("c:/project/src/App.vue");
   });
 
   it("propagates native component-meta budget errors to callers", async () => {
@@ -141,8 +138,8 @@ describe("ComponentMetaChecker session requirement", () => {
     await expect(checker.getComponentMeta("App.vue")).rejects.toThrow(/step budget exceeded/i);
   });
 
-  it("uses one declared native query for public Verter compat output and _verter", async () => {
-    const declaredMeta: any = {
+  it("uses one canonical native query for public Verter compat output and _verter", async () => {
+    const fullMeta: any = {
       filePath: "C:/project/src/App.vue",
       optionsApi: false,
       props: [
@@ -175,16 +172,30 @@ describe("ComponentMetaChecker session requirement", () => {
         hasInheritAttrsFalse: false,
         hasStoreUsage: false,
       },
-      acceptedProps: [],
+      acceptedProps: [
+        {
+          name: "label",
+          type: { kind: "primitive", name: "string" },
+          required: true,
+          provenance: { kind: "declared" },
+          availability: { kind: "always" },
+          kind: "declaredProp",
+        },
+        {
+          name: "id",
+          type: { kind: "primitive", name: "string" },
+          required: false,
+          provenance: { kind: "inherited", sources: [{ kind: "nativeTag", tag: "div" }] },
+          availability: { kind: "always" },
+          kind: "attr",
+        },
+      ],
       acceptedEvents: [],
       acceptedSurfaceCompleteness: "exact",
       rootReachability: { kind: "noFallthrough", reason: "noTemplate" },
       fallthroughSurface: { kind: "none", reason: "noTemplate" },
     };
-    const getDeclaredComponentMeta = vi.fn(() => declaredMeta);
-    const getComponentMeta = vi.fn(() => {
-      throw new Error("legacy full native query should not be used for public Verter compat");
-    });
+    const getComponentMeta = vi.fn(() => fullMeta);
 
     const checker = new ComponentMetaChecker(
       {
@@ -198,7 +209,6 @@ describe("ComponentMetaChecker session requirement", () => {
         upsert() {},
         delete() {},
         getComponentMeta,
-        getDeclaredComponentMeta,
         getProvenance() {
           return "{}";
         },
@@ -222,11 +232,11 @@ describe("ComponentMetaChecker session requirement", () => {
 
     const meta = await checker.getComponentMeta("src\\App.vue");
 
-    expect(getDeclaredComponentMeta).toHaveBeenCalledTimes(1);
-    expect(getDeclaredComponentMeta).toHaveBeenCalledWith("c:/project/src/App.vue");
-    expect(getComponentMeta).not.toHaveBeenCalled();
+    expect(getComponentMeta).toHaveBeenCalledTimes(1);
+    expect(getComponentMeta).toHaveBeenCalledWith("c:/project/src/App.vue");
     expect(meta.props.map((prop) => prop.name)).toEqual(["label"]);
-    expect(meta._verter?.acceptedProps).toEqual([]);
+    // Inherited members were dropped by the declared-only projection.
+    expect(meta._verter?.acceptedProps?.map((p: any) => p.name)).toEqual(["label"]);
     expect(meta._verter?.acceptedSurfaceCompleteness).toBe("exact");
   });
 });

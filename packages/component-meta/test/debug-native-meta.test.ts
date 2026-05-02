@@ -81,11 +81,7 @@ describe("debug: native meta output for Alert.vue", () => {
       const session = (checker as any)._session;
       expect(session).toBeDefined();
 
-      const getDeclaredComponentMeta =
-        session.getDeclaredComponentMeta ??
-        session.getResolvedComponentMeta ??
-        session.getComponentMeta;
-      const nativeMeta = getDeclaredComponentMeta.call(session, alertPath);
+      const nativeMeta = session.getComponentMeta(alertPath);
       expect(nativeMeta).toBeDefined();
 
       const targetProps = ["color", "avatar", "variant", "orientation", "actions"];
@@ -171,11 +167,7 @@ describe("debug: native meta output for Alert.vue", () => {
   it("dump Tooltip.vue native meta for description-missing props", async () => {
     const tooltipPath = resolve(uiRoot, "src/runtime/components/Tooltip.vue");
     const session = (checker as any)._session;
-    const getDeclaredComponentMeta =
-      session.getDeclaredComponentMeta ??
-      session.getResolvedComponentMeta ??
-      session.getComponentMeta;
-    const nativeMeta = getDeclaredComponentMeta.call(session, tooltipPath);
+    const nativeMeta = session.getComponentMeta(tooltipPath);
     expect(nativeMeta).toBeDefined();
 
     const targetProps = ["content", "defaultOpen", "delayDuration", "disabled", "portal"];
@@ -236,11 +228,7 @@ describe("debug: native meta output for Alert.vue", () => {
   it("dump App.vue native meta for missing props (dir, nonce, scrollBody)", async () => {
     const appPath = resolve(uiRoot, "src/runtime/components/App.vue");
     const session = (checker as any)._session;
-    const getDeclaredComponentMeta =
-      session.getDeclaredComponentMeta ??
-      session.getResolvedComponentMeta ??
-      session.getComponentMeta;
-    const nativeMeta = getDeclaredComponentMeta.call(session, appPath);
+    const nativeMeta = session.getComponentMeta(appPath);
     expect(nativeMeta).toBeDefined();
 
     const targetProps = ["dir", "nonce", "scrollBody", "locale", "portal"];

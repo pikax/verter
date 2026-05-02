@@ -16,6 +16,7 @@ import {
   nativeComponentMetaToComponentMeta,
   nativeTypeRegistryToMap,
 } from "../native-component-meta.js";
+import { projectDeclaredOnlyNativeResult } from "./native-projection.js";
 import type { TypeDescriptor } from "../type-ir.js";
 import type { VerterHostAdapter } from "../host-adapter.js";
 import type {
@@ -2198,23 +2199,11 @@ export class ComponentMetaChecker {
     const absPath = runtimeResolvePath(this.projectRoot, filePath);
     await this.ensureFile(absPath);
     if (this._session) {
-      const getDeclaredComponentMeta = (
-        this._session as {
-          getDeclaredComponentMeta?: import("../runtime/project-session.js").ProjectSession["getDeclaredComponentMeta"];
-        }
-      ).getDeclaredComponentMeta;
-      const getResolvedComponentMeta = (
-        this._session as {
-          getResolvedComponentMeta?: import("../runtime/project-session.js").ProjectSession["getResolvedComponentMeta"];
-        }
-      ).getResolvedComponentMeta;
-      const nativeMeta =
-        typeof getDeclaredComponentMeta === "function"
-          ? getDeclaredComponentMeta.call(this._session, absPath)
-          : typeof getResolvedComponentMeta === "function"
-            ? getResolvedComponentMeta.call(this._session, absPath)
-            : this._session.getComponentMeta(absPath);
-      if (!nativeMeta) {
+      const fullNativeMeta = this._session.getComponentMeta(absPath) as
+        | import("../native-component-meta.js").NativeComponentMetaResult
+        | null;
+      const declaredNativeMeta = projectDeclaredOnlyNativeResult(fullNativeMeta);
+      if (!declaredNativeMeta) {
         return {
           type: 0,
           props: [],
@@ -2223,10 +2212,8 @@ export class ComponentMetaChecker {
           exposed: [],
         };
       }
-      const resolvedNativeMeta =
-        nativeMeta as import("../native-component-meta.js").NativeComponentMetaResult;
-      const typeRegistry = nativeTypeRegistryToMap(resolvedNativeMeta);
-      const mappedMeta = nativeComponentMetaToComponentMeta(resolvedNativeMeta);
+      const typeRegistry = nativeTypeRegistryToMap(declaredNativeMeta);
+      const mappedMeta = nativeComponentMetaToComponentMeta(declaredNativeMeta);
       const result = mapComponentMeta(mappedMeta, this.options, typeRegistry);
       for (const prop of result.props) {
         if (prop.type === "Booleanish | undefined" || prop.type === "Booleanish") {

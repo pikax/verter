@@ -178,18 +178,6 @@ export class ProjectSession {
   }
 
   /**
-   * Declared-surface native component-meta query for Volar-compatible callers.
-   * Memoized: repeated calls with unchanged overlay + base state skip decode.
-   */
-  getDeclaredComponentMeta(canonicalId: string): unknown | null {
-    return this._memoizedDecode("declared", canonicalId, () => {
-      const payload = this._nativeSession.getDeclaredComponentMeta(canonicalId);
-      if (payload === null || payload === undefined) return null;
-      return decodeComponentMetaPayload(payload);
-    });
-  }
-
-  /**
    * Full native component-meta query with resolution sidecars.
    */
   getResolvedComponentMeta(canonicalId: string): unknown | null {

@@ -17,6 +17,7 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { mapComponentMeta } from "./compat/checker.js";
 import type { CheckerWorkspace } from "./compat/checker.js";
+import { projectDeclaredOnlyNativeResult } from "./compat/native-projection.js";
 import type { MetaCheckerOptions, VolarComponentMeta } from "./compat/types.js";
 import {
   nativeComponentMetaToComponentMeta,
@@ -165,27 +166,8 @@ export class ComponentMetaSession {
       return undefined;
     }
 
-    const getDeclaredComponentMeta = (
-      this._session as {
-        getDeclaredComponentMeta?: ProjectSession["getDeclaredComponentMeta"];
-      }
-    ).getDeclaredComponentMeta;
-    const getResolvedComponentMeta = (
-      this._session as {
-        getResolvedComponentMeta?: ProjectSession["getResolvedComponentMeta"];
-      }
-    ).getResolvedComponentMeta;
-    const nativeMeta =
-      typeof getDeclaredComponentMeta === "function"
-        ? getDeclaredComponentMeta.call(this._session, abs)
-        : typeof getResolvedComponentMeta === "function"
-          ? getResolvedComponentMeta.call(this._session, abs)
-          : this._session.getComponentMeta(abs);
-    if (!nativeMeta) {
-      return undefined;
-    }
-
-    return nativeMeta as NativeComponentMetaResult;
+    const fullNativeMeta = this._session.getComponentMeta(abs) as NativeComponentMetaResult | null;
+    return projectDeclaredOnlyNativeResult(fullNativeMeta) ?? undefined;
   }
 
   private loadResolvedNativeMeta(filePath: string): NativeComponentMetaResult | undefined {

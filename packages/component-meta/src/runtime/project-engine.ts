@@ -44,8 +44,6 @@ export interface NativeMetaSession {
   readonly overlayGeneration: number;
   /** Single native component-meta query. Returns a protobuf payload. */
   getComponentMeta(canonicalOrAlias: string): Buffer | null;
-  /** Declared-surface native query for Volar-compatible callers. Returns a protobuf payload. */
-  getDeclaredComponentMeta(canonicalOrAlias: string): Buffer | null;
   /** Full resolved native query with resolution sidecars. Returns a protobuf payload. */
   getResolvedComponentMeta(canonicalOrAlias: string): Buffer | null;
   /** Provenance counters for observability. Returns JSON. */
