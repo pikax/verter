@@ -1682,6 +1682,40 @@ pub(crate) fn materialize_component_meta_field_types(
             }
         }
 
+        // Issue #6 / Phase 7 — ComponentConfig theme variant fast path.
+        // Fires only when the strict-legality predicate matches (see
+        // `component_config_fast_path.rs::component_config_theme_variant_fast_path`):
+        // alias body is `ComponentConfig<typeof theme, AppConfig, key>`,
+        // the AppConfig argument is `Record<...>` (Path A) or proven
+        // by the `AppConfigNoOverrideProof` cache (Path B — deferred),
+        // and the indexed path is `['variants', literal_name]` or
+        // `['slots']`. On hit we publish the projected value and skip
+        // the rescue + member-route pipeline.
+        if let Some(raw) = parsed_field_raw_type(field).as_ref() {
+            if let super::component_config_fast_path::FastPathOutcome::Hit(candidate) =
+                super::component_config_fast_path::component_config_theme_variant_fast_path(
+                    raw,
+                    scope_canonical_id,
+                    query_engine.ctx,
+                )
+            {
+                field.r#type = candidate;
+                crate::capture_token::with_active_capture(|t| {
+                    t.record_counter(
+                        super::component_config_fast_path::COMPONENT_CONFIG_FAST_PATH_HITS_COUNTER,
+                        1,
+                    )
+                });
+                if crate::host_manage::component_meta_debug_enabled() {
+                    crate::host_manage::component_meta_debug(format!(
+                        "FIELD_MATERIALIZE_COMPONENT_CONFIG_FAST_PATH_HIT owner={} field={} raw={:?} published={:?}",
+                        scope_canonical_id, field.name, raw, field.r#type,
+                    ));
+                }
+                continue;
+            }
+        }
+
         // Plan §4.10 / K1 — wrap `field.r#type` in a `MacroFieldGraphState`
         // for the duration of this iteration. Direct `field.r#type = X`
         // mutations are routed through `field_state.set_current_type(X)`;

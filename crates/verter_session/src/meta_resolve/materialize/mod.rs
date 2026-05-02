@@ -19,10 +19,13 @@
 //! `pub(crate)` surface to the parent so existing `crate::meta_resolve::*`
 //! callsites keep working without churn.
 
+mod component_config_fast_path;
 mod field_types;
 mod macro_shapes;
 pub(crate) mod utility_types;
 
+#[cfg(test)]
+pub(crate) use component_config_fast_path::COMPONENT_CONFIG_FAST_PATH_HITS_COUNTER;
 #[cfg(test)]
 pub(crate) use field_types::MEMBER_ROUTE_CALLS_COUNTER;
 pub(crate) use field_types::{
