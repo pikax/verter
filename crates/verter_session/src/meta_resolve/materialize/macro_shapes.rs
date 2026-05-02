@@ -136,10 +136,6 @@ pub(crate) fn produce_macro_object_shapes_for_purpose(
                             resolved_type_registry_meta,
                         )
                     });
-                let define_props_needs_projection_rescue =
-                    define_props_lowered.is_some_and(|lowered| {
-                        expr_needs_projection_rescue(query_engine, owner_canonical, lowered)
-                    });
                 if define_props_prefers_prepared_projection {
                     if let Some(lowered) = define_props_lowered {
                         let item_started = Instant::now();
@@ -305,32 +301,77 @@ pub(crate) fn produce_macro_object_shapes_for_purpose(
                             );
                         }
                     }
-                } else if !define_props_needs_projection_rescue {
-                    if let Some((shape, source)) = synthesize_define_props_shape_from_registry_root(
-                        owner_canonical,
-                        macro_index,
-                        snapshot,
-                        resolved_type_registry,
-                        resolved_type_registry_meta,
-                    ) {
-                        registry_hits += 1;
-                        let count = shape.value.properties.len();
-                        component_meta_trace_custom!(
-                            "macro_object_shape",
-                            format!(
-                                "owner={} macro_index={} kind=define_props source={} props={}",
+                } else {
+                    // Lazy compute: the rescue probe is consulted only on
+                    // the registry / solver fallback branches. Branches that
+                    // already succeeded above never enter this arm, so the
+                    // probe is skipped on the cheap-success paths.
+                    let define_props_needs_projection_rescue =
+                        define_props_lowered.is_some_and(|lowered| {
+                            crate::capture_token::with_active_capture(|t| {
+                                t.record_counter("expr_needs_projection_rescue_calls", 1)
+                            });
+                            expr_needs_projection_rescue(query_engine, owner_canonical, lowered)
+                        });
+                    if !define_props_needs_projection_rescue {
+                        if let Some((shape, source)) =
+                            synthesize_define_props_shape_from_registry_root(
                                 owner_canonical,
                                 macro_index,
-                                source.label(),
-                                count,
-                            ),
-                        );
-                        evaluated_types.define_props.push(
-                            verter_semantic::analysis::type_expand::ExpandedMacroProps {
-                                macro_index,
-                                result: shape,
-                            },
-                        );
+                                snapshot,
+                                resolved_type_registry,
+                                resolved_type_registry_meta,
+                            )
+                        {
+                            registry_hits += 1;
+                            let count = shape.value.properties.len();
+                            component_meta_trace_custom!(
+                                "macro_object_shape",
+                                format!(
+                                    "owner={} macro_index={} kind=define_props source={} props={}",
+                                    owner_canonical,
+                                    macro_index,
+                                    source.label(),
+                                    count,
+                                ),
+                            );
+                            evaluated_types.define_props.push(
+                                verter_semantic::analysis::type_expand::ExpandedMacroProps {
+                                    macro_index,
+                                    result: shape,
+                                },
+                            );
+                        } else if let Some(lowered) = define_props_lowered {
+                            let item_started = Instant::now();
+                            let (shape, source) = produce_one_macro_object_shape(
+                                query_engine,
+                                owner_canonical,
+                                lowered,
+                                has_prop_shape_surface,
+                            );
+                            if source.is_projection() {
+                                projection_hits += 1;
+                            } else if source.is_solver() {
+                                solver_fallbacks += 1;
+                            }
+                            if let Some(shape) = shape {
+                                let count = shape.value.properties.len();
+                                component_meta_trace_custom!(
+                                    "macro_object_shape",
+                                    format!(
+                                        "owner={} macro_index={} kind=define_props source={} props={} took={:?}",
+                                        owner_canonical, macro_index, source.label(), count,
+                                        item_started.elapsed(),
+                                    ),
+                                );
+                                evaluated_types.define_props.push(
+                                    verter_semantic::analysis::type_expand::ExpandedMacroProps {
+                                        macro_index,
+                                        result: shape,
+                                    },
+                                );
+                            }
+                        }
                     } else if let Some(lowered) = define_props_lowered {
                         let item_started = Instant::now();
                         let (shape, source) = produce_one_macro_object_shape(
@@ -361,36 +402,6 @@ pub(crate) fn produce_macro_object_shapes_for_purpose(
                                 },
                             );
                         }
-                    }
-                } else if let Some(lowered) = define_props_lowered {
-                    let item_started = Instant::now();
-                    let (shape, source) = produce_one_macro_object_shape(
-                        query_engine,
-                        owner_canonical,
-                        lowered,
-                        has_prop_shape_surface,
-                    );
-                    if source.is_projection() {
-                        projection_hits += 1;
-                    } else if source.is_solver() {
-                        solver_fallbacks += 1;
-                    }
-                    if let Some(shape) = shape {
-                        let count = shape.value.properties.len();
-                        component_meta_trace_custom!(
-                            "macro_object_shape",
-                            format!(
-                                "owner={} macro_index={} kind=define_props source={} props={} took={:?}",
-                                owner_canonical, macro_index, source.label(), count,
-                                item_started.elapsed(),
-                            ),
-                        );
-                        evaluated_types.define_props.push(
-                            verter_semantic::analysis::type_expand::ExpandedMacroProps {
-                                macro_index,
-                                result: shape,
-                            },
-                        );
                     }
                 }
                 define_props_index += 1;
@@ -496,6 +507,9 @@ pub(crate) fn produce_macro_object_shapes_for_purpose(
                     || mac.slot_fields.iter().any(|slot| slot.bindings.is_empty());
                 let define_slots_needs_projection_rescue =
                     define_slots_lowered.is_some_and(|lowered| {
+                        crate::capture_token::with_active_capture(|t| {
+                            t.record_counter("expr_needs_projection_rescue_calls", 1)
+                        });
                         expr_needs_projection_rescue(query_engine, owner_canonical, lowered)
                     });
                 if !define_slots_needs_projection_rescue {

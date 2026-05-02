@@ -376,14 +376,29 @@ pub(crate) fn walk_component_meta_macro_shape_member_types(
                         .iter_mut()
                         .find(|entry| entry.macro_index == macro_index)
                     {
-                        let lowered_needs_projection_rescue =
-                            expr_needs_projection_rescue(query_engine, scope_canonical_id, lowered);
-                        let needs_projection_rescue = lowered_needs_projection_rescue
-                            || shape_needs_member_rescue(
-                                scope_canonical_id,
-                                &define_props.result.value,
-                                query_engine,
-                            );
+                        // Gate the lowered-rescue probe behind
+                        // `properties.is_empty()` — when the shape has
+                        // properties, the per-property loop covers
+                        // member-rescue work and the cheap shape-level
+                        // member-rescue scan provides the entry signal.
+                        // The lowered probe is only needed to seed the
+                        // empty-shape path via projection.
+                        let shape_member_rescue_v = shape_needs_member_rescue(
+                            scope_canonical_id,
+                            &define_props.result.value,
+                            query_engine,
+                        );
+                        let properties_empty = define_props.result.value.properties.is_empty();
+                        let lowered_needs_projection_rescue = if properties_empty {
+                            crate::capture_token::with_active_capture(|t| {
+                                t.record_counter("expr_needs_projection_rescue_calls", 1)
+                            });
+                            expr_needs_projection_rescue(query_engine, scope_canonical_id, lowered)
+                        } else {
+                            false
+                        };
+                        let needs_projection_rescue =
+                            lowered_needs_projection_rescue || shape_member_rescue_v;
                         if needs_projection_rescue {
                             if lowered_needs_projection_rescue
                                 && define_props.result.value.properties.is_empty()
@@ -475,14 +490,22 @@ pub(crate) fn walk_component_meta_macro_shape_member_types(
                         .iter_mut()
                         .find(|entry| entry.macro_index == macro_index)
                     {
-                        let lowered_needs_projection_rescue =
-                            expr_needs_projection_rescue(query_engine, scope_canonical_id, lowered);
-                        let needs_projection_rescue = lowered_needs_projection_rescue
-                            || shape_needs_member_rescue(
-                                scope_canonical_id,
-                                &define_emits.result.value,
-                                query_engine,
-                            );
+                        let shape_member_rescue_v = shape_needs_member_rescue(
+                            scope_canonical_id,
+                            &define_emits.result.value,
+                            query_engine,
+                        );
+                        let properties_empty = define_emits.result.value.properties.is_empty();
+                        let lowered_needs_projection_rescue = if properties_empty {
+                            crate::capture_token::with_active_capture(|t| {
+                                t.record_counter("expr_needs_projection_rescue_calls", 1)
+                            });
+                            expr_needs_projection_rescue(query_engine, scope_canonical_id, lowered)
+                        } else {
+                            false
+                        };
+                        let needs_projection_rescue =
+                            lowered_needs_projection_rescue || shape_member_rescue_v;
                         if needs_projection_rescue {
                             if lowered_needs_projection_rescue
                                 && define_emits.result.value.properties.is_empty()
@@ -544,14 +567,22 @@ pub(crate) fn walk_component_meta_macro_shape_member_types(
                         .iter_mut()
                         .find(|entry| entry.macro_index == macro_index)
                     {
-                        let lowered_needs_projection_rescue =
-                            expr_needs_projection_rescue(query_engine, scope_canonical_id, lowered);
-                        let needs_projection_rescue = lowered_needs_projection_rescue
-                            || shape_needs_member_rescue(
-                                scope_canonical_id,
-                                &define_slots.result.value,
-                                query_engine,
-                            );
+                        let shape_member_rescue_v = shape_needs_member_rescue(
+                            scope_canonical_id,
+                            &define_slots.result.value,
+                            query_engine,
+                        );
+                        let properties_empty = define_slots.result.value.properties.is_empty();
+                        let lowered_needs_projection_rescue = if properties_empty {
+                            crate::capture_token::with_active_capture(|t| {
+                                t.record_counter("expr_needs_projection_rescue_calls", 1)
+                            });
+                            expr_needs_projection_rescue(query_engine, scope_canonical_id, lowered)
+                        } else {
+                            false
+                        };
+                        let needs_projection_rescue =
+                            lowered_needs_projection_rescue || shape_member_rescue_v;
                         let needs_slot_binding_rescue = define_slots
                             .result
                             .value
