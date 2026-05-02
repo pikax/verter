@@ -86,6 +86,8 @@ mod component_meta_pathological_recursion_tests;
 mod component_meta_pick_omit_tests;
 #[cfg(test)]
 mod component_meta_read_once_tests;
+#[cfg(test)]
+mod component_meta_repo_first_pass_diagnosis_tests;
 pub mod component_meta_resolution_policy;
 pub mod component_meta_result_db;
 #[cfg(test)]
