@@ -252,6 +252,17 @@ pub enum KeyFamily {
     ShallowForResolvedName(&'static str),
     /// Match `Instantiate { base.decl_name == name, body_mode == Skeleton }`.
     SkeletonForResolvedName(&'static str),
+    /// Match `Instantiate { base.decl_name == name, body_mode == Expanded }`.
+    ///
+    /// Used by the Phase 4 field-level fast path counterfixtures
+    /// to assert that, for a fast-path-eligible field, the macro
+    /// shell is NOT dispatched in `Expanded` mode (the cold-time
+    /// regression that the fast path eliminates is the
+    /// `Instantiate { base = UIMessage, body_mode = Expanded }`
+    /// dispatch driven by `defineProps<ChatMessageProps extends
+    /// UIMessage<...>>()` carriers — counter == 0 after the fast
+    /// path takes the field through `exact_concrete(parsed)`).
+    InstantiateExpandedForResolvedName(&'static str),
     /// Match `ResolveMacroPayload { macro_kind == DefineSlots }`.
     SlotBindingDispatch,
     /// Always match (used for total-dispatch counters).
@@ -287,6 +298,15 @@ impl KeyFamily {
             ) => {
                 base.decl_name.as_ref() == *name
                     && matches!(body_mode, crate::semantic_query::ProjectionMode::Skeleton)
+            }
+            (
+                KeyFamily::InstantiateExpandedForResolvedName(name),
+                SemanticQueryKey::Instantiate {
+                    base, body_mode, ..
+                },
+            ) => {
+                base.decl_name.as_ref() == *name
+                    && matches!(body_mode, crate::semantic_query::ProjectionMode::Expanded)
             }
             (
                 KeyFamily::NavigateForAlias(_root_name, hops),

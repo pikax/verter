@@ -238,3 +238,54 @@ fn dispatch_log_records_under_active_token() {
     assert_eq!(snap.dispatch_count(KeyFamily::AnyDispatch), 2);
     assert_eq!(snap.dispatch_count(KeyFamily::SlotBindingDispatch), 0);
 }
+
+#[test]
+fn key_family_matches_instantiate_expanded_for_resolved_name() {
+    // Mode-aware Instantiate gating used by the Phase 4 field-level
+    // fast-path counterfixtures. The variant must match
+    // `body_mode == Expanded` and reject `Skeleton` / `Shallow` for
+    // the same name, plus reject other names entirely.
+    use verter_session::semantic_query::ProjectionMode;
+
+    // body_mode == Expanded → matches when name matches.
+    let key_expanded = SemanticQueryKey::Instantiate {
+        base: DeclIdentity::synthetic("UIMessage"),
+        args: Arc::new([]),
+        body_mode: ProjectionMode::Expanded,
+    };
+    assert!(KeyFamily::InstantiateExpandedForResolvedName("UIMessage").matches(&key_expanded));
+    assert!(!KeyFamily::InstantiateExpandedForResolvedName("OtherName").matches(&key_expanded));
+    // Distinguishing from mode-agnostic InstantiateForResolvedName: the
+    // unrestricted family also matches the Expanded key (its semantics
+    // do not gate on body_mode).
+    assert!(KeyFamily::InstantiateForResolvedName("UIMessage").matches(&key_expanded));
+
+    // body_mode == Skeleton → must NOT match the Expanded family.
+    let key_skeleton = SemanticQueryKey::Instantiate {
+        base: DeclIdentity::synthetic("UIMessage"),
+        args: Arc::new([]),
+        body_mode: ProjectionMode::Skeleton,
+    };
+    assert!(!KeyFamily::InstantiateExpandedForResolvedName("UIMessage").matches(&key_skeleton));
+    // Correct family for Skeleton still matches.
+    assert!(KeyFamily::SkeletonForResolvedName("UIMessage").matches(&key_skeleton));
+
+    // body_mode == Shallow → must NOT match the Expanded family.
+    let key_shallow = SemanticQueryKey::Instantiate {
+        base: DeclIdentity::synthetic("UIMessage"),
+        args: Arc::new([]),
+        body_mode: ProjectionMode::Shallow,
+    };
+    assert!(!KeyFamily::InstantiateExpandedForResolvedName("UIMessage").matches(&key_shallow));
+    assert!(KeyFamily::ShallowForResolvedName("UIMessage").matches(&key_shallow));
+
+    // Non-Instantiate dispatch never matches.
+    let resolve_key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        scope: ScopeId {
+            canonical_id: Arc::from("/scope.ts"),
+            local_scope: None,
+        },
+        name: Arc::from("UIMessage"),
+    });
+    assert!(!KeyFamily::InstantiateExpandedForResolvedName("UIMessage").matches(&resolve_key));
+}
