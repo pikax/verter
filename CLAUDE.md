@@ -258,6 +258,10 @@ See `/testing` and `/e2e-vscode-testing` skills for commands, fixture design, an
 
 ## Agent Implementation Rules
 
+### Codebase Navigation
+
+Use semantic code-navigation tools before broad source reads when they are available. For Serena or equivalent MCP tools, prefer symbol overviews, symbol lookup, reference lookup, and rename/refactor operations for codebase exploration and targeted edits. Read full source files only when symbolic context is insufficient or the file is small enough that a full read is clearly the most direct path.
+
 ### Planning
 
 Prefer architecturally correct, long-term solutions over easy or quick implementations. Evaluate approaches by correctness and durability, not by implementation speed.
