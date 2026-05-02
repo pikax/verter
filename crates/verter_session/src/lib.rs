@@ -62,6 +62,8 @@ pub mod component_meta_caches;
 #[cfg(test)]
 mod component_meta_caches_tests;
 pub mod component_meta_host;
+#[cfg(test)]
+mod component_meta_lazy_rescue_tests;
 pub mod component_meta_materialize;
 #[cfg(test)]
 mod component_meta_no_cache_promotion_tests;
