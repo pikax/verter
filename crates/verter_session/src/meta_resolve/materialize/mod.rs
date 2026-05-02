@@ -21,6 +21,7 @@
 
 mod field_types;
 mod macro_shapes;
+pub(crate) mod utility_types;
 
 pub(crate) use field_types::{
     define_props_member_can_stay_symbolic_without_rescue,

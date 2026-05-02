@@ -35,7 +35,7 @@ mod dispatch_helpers;
 mod field_state;
 mod graph_predicates;
 mod macro_member_walk;
-mod materialize;
+pub(crate) mod materialize;
 mod origin_graph;
 mod registry_materialize;
 mod resolved_state;
@@ -99,7 +99,8 @@ pub(crate) use crate::host_manage::jsdoc_resolve::{
 };
 pub(crate) use macro_member_walk::{
     collect_define_props_root_names, slot_binding_targets_define_props_root,
-    walk_component_meta_macro_shape_member_types, SLOT_BINDING_REGISTRY_COLLECTION_SKIP_COUNTER,
+    walk_component_meta_macro_shape_member_types, PICK_MEMBER_ROUTE_CALLABLE_DESCENT_COUNTER,
+    SLOT_BINDING_REGISTRY_COLLECTION_SKIP_COUNTER,
 };
 pub(crate) use materialize::{
     collect_type_expr_ref_names, lowered_preserve_package_backed_symbolic_refs,
