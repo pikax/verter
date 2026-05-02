@@ -1,22 +1,25 @@
-//! Phase 11b — `repo_first_pass` semantic-state regression DIAGNOSIS
-//! tests (NOT acceptance tests).
+//! `repo_first_pass` semantic-state regression diagnosis +
+//! Phase 11d acceptance tests.
 //!
-//! These tests exercise the four overlay-isolation scenarios from
-//! §10.4 against a §4.2-shaped fixture (one root that depends on a
-//! shared dep) and assert that the Phase 11b instrumentation hooks
-//! capture **non-empty** counter data for each scenario. The tests
-//! deliberately do NOT assert thresholds; threshold gates live in
-//! Phase 11d. The discriminating value of these tests is that they
-//! FAIL on the pre-instrumentation tree (counters never increment
-//! because the production hooks are not wired) and PASS on the
-//! post-instrumentation tree.
+//! The leading test (`repo_first_pass_diagnosis_emits_capture_curves`)
+//! exercises the four §10.4 overlay-isolation scenarios against a
+//! §4.2-shaped fixture (one root depending on a shared dep) and
+//! asserts that the Phase 11b instrumentation hooks capture
+//! **non-empty** counter data for each scenario. Its discriminating
+//! value is that it FAILS on the pre-instrumentation tree (counters
+//! never increment because production hooks are not wired) and PASSES
+//! on the post-instrumentation tree.
 //!
-//! Acceptance tests for the regression's *fix* (Phase 11d) will
-//! consume the same scenario shape but bind threshold assertions
-//! against the post-B2 baseline; this file's role is only to prove
-//! the harness is wired correctly so the diagnosis benchmark in
-//! `packages/benchmark/src/repo-first-pass.spec.ts` produces
-//! non-trivial data.
+//! The Phase 11d (B-B7f-fix) tests further down assert the
+//! `record_origin_edge` dedup contract: identical edge identity
+//! tuples must NOT produce duplicate ledger entries while preserving
+//! the audit-mining contract (`request_context::current_accumulator`
+//! must observe every derivation hop, including dropped ledger
+//! writes).
+//!
+//! The vitest benchmark in
+//! `packages/benchmark/src/repo-first-pass.spec.ts` exercises the
+//! same instrumentation against the live `nuxt-ui-codex-bench` corpus.
 
 use std::sync::Arc;
 
@@ -287,6 +290,345 @@ fn repo_first_pass_diagnosis_emits_capture_curves() {
         &snap_target_first,
         &snap_after_prior,
         &snap_after_clear,
+    );
+}
+
+/// Mint a fresh distinct interned node for the Phase 11d unit tests.
+/// Uses [`SemanticNodeData::VueMacroElements`] which is sidecar-exempt
+/// and bypasses the sharded dedup (see `NodeArena::push_impl` —
+/// VueMacroElements always allocates a fresh slot), so each call
+/// returns a distinct `SemanticNodeId`.
+fn mint_distinct_node(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+) -> crate::semantic_query::SemanticNodeId {
+    use crate::semantic_query::SemanticNodeData;
+    use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
+    graph.intern_node(SemanticNodeData::VueMacroElements(Arc::new(
+        ResolvedElements::default(),
+    )))
+}
+
+// =====================================================================
+// Phase 11d (B-B7f-fix) — Issue #11 acceptance tests
+// =====================================================================
+//
+// The four tests below assert the structural and behavioural gates for
+// the Phase 11d fix: skip duplicate `record_origin_edge` emissions for
+// already-recorded edge identities, while preserving the audit-mining
+// contract (`request_context::current_accumulator` still observes every
+// derivation hop the production hot path would have emitted).
+//
+// Discriminating predicate per CLAUDE.md characterization-test rule:
+// Tests 1, 3, 4 FAIL on the pre-fix tree (which records duplicates as
+// ledger entries with `duplicate_edges > 0`) and PASS on the post-fix
+// tree (which dedups identity-equal emissions). Test 2 (cold
+// counterfixture) PASSES on both trees and discriminates against an
+// over-aggressive dedup that would skip all emissions.
+//
+// Tests 1, 3, 4 use direct `record_origin_edge` calls on a freshly
+// constructed `SemanticGraphStore` to make the discriminating predicate
+// mechanically observable on a small fixture. The §10.4 corpus-level
+// dup ratio observed by the diagnosis benchmark (12.8%-18.7% on
+// Avatar/Button/Modal × 4 scenarios) is the fix's target on real
+// corpora; these unit tests gate the structural property the corpus
+// observes.
+
+/// Test 1 (positive). Direct unit test of the `record_origin_edge`
+/// dedup. Two emissions of the SAME edge identity must produce only
+/// ONE ledger entry post-fix; pre-fix both emissions land in the
+/// ledger with `duplicate_edges == 1`.
+///
+/// The edge identity tuple is
+/// `(result_node, kind, normalized_sources, dep_signature, meta_hash)`.
+/// This test emits the same tuple twice with a non-empty
+/// `builder_fence` so the interned signature matches across calls.
+#[test]
+fn prefix_backfill_skips_record_origin_edge_when_target_already_warm() {
+    use crate::semantic_query::{OriginEdgeKind, OriginMeta};
+    use crate::semantic_query_memo::SemanticGraphStore;
+
+    let graph = SemanticGraphStore::new();
+    // Build two distinct interned nodes: a source and a target. The
+    // edge will record `target` as derived from `[source]`.
+    let source = mint_distinct_node(&graph);
+    let target = mint_distinct_node(&graph);
+    // Build a non-empty fence so the interner returns a stable Arc.
+    let fence: crate::semantic_query::DepSignature = Arc::from(
+        vec![(
+            Arc::<str>::from("/workspace/src/types.ts"),
+            crate::semantic_query::DepVersion::ProjectGeneration(7),
+        )]
+        .into_boxed_slice(),
+    );
+    let sources: Arc<[crate::semantic_query::SemanticNodeId]> =
+        Arc::from(vec![source].into_boxed_slice());
+    let meta = OriginMeta::MemberName(Arc::<str>::from("initial"));
+
+    // Bind a CaptureToken over the two emissions.
+    let snap = {
+        let _guard = CaptureToken::start_for_query("phase_11d_unit_record_dedup");
+        // First emission: cold ledger insert.
+        graph.record_origin_edge(
+            target,
+            OriginEdgeKind::ProjectMember,
+            Arc::clone(&sources),
+            meta.clone(),
+            Arc::clone(&fence),
+        );
+        // Second emission: identical identity. Pre-fix this records a
+        // duplicate ledger entry; post-fix the dedup skips the ledger
+        // write.
+        graph.record_origin_edge(
+            target,
+            OriginEdgeKind::ProjectMember,
+            Arc::clone(&sources),
+            meta.clone(),
+            Arc::clone(&fence),
+        );
+        _guard.end()
+    };
+
+    assert_eq!(
+        snap.duplicate_edges, 0,
+        "post-fix: identical re-emission must NOT produce a duplicate \
+         ledger entry (got {} dupes / {} total emissions). Pre-fix \
+         this number is 1; post-fix the dedup skips the second write.",
+        snap.duplicate_edges, snap.origin_edge_count
+    );
+    // Sanity: at least the cold (first) emission landed.
+    assert_eq!(
+        snap.origin_edge_count, 1,
+        "post-fix: only the cold emission counts toward \
+         origin_edge_count (got {}). Pre-fix this is 2.",
+        snap.origin_edge_count
+    );
+}
+
+/// Test 2 (counterfixture — cold target). DISTINCT edge identities
+/// must land in the ledger as separate entries. Asserts
+/// `origin_edge_count > 0` and `duplicate_edges == 0` for two cold
+/// emissions. PASSES on both pre-fix and post-fix trees — discriminates
+/// against an over-aggressive dedup that would skip all emissions.
+#[test]
+fn prefix_backfill_emits_record_origin_edge_when_target_cold() {
+    use crate::semantic_query::{OriginEdgeKind, OriginMeta};
+    use crate::semantic_query_memo::SemanticGraphStore;
+
+    let graph = SemanticGraphStore::new();
+    let source = mint_distinct_node(&graph);
+    let target_a = mint_distinct_node(&graph);
+    let target_b = mint_distinct_node(&graph);
+    let fence: crate::semantic_query::DepSignature = Arc::from(
+        vec![(
+            Arc::<str>::from("/workspace/src/types.ts"),
+            crate::semantic_query::DepVersion::ProjectGeneration(7),
+        )]
+        .into_boxed_slice(),
+    );
+    let sources: Arc<[crate::semantic_query::SemanticNodeId]> =
+        Arc::from(vec![source].into_boxed_slice());
+
+    let snap = {
+        let _guard = CaptureToken::start_for_query("phase_11d_unit_cold_emits");
+        // Two DISTINCT edge identities: different result_node values.
+        graph.record_origin_edge(
+            target_a,
+            OriginEdgeKind::ProjectMember,
+            Arc::clone(&sources),
+            OriginMeta::MemberName(Arc::<str>::from("a")),
+            Arc::clone(&fence),
+        );
+        graph.record_origin_edge(
+            target_b,
+            OriginEdgeKind::ProjectMember,
+            Arc::clone(&sources),
+            OriginMeta::MemberName(Arc::<str>::from("b")),
+            Arc::clone(&fence),
+        );
+        _guard.end()
+    };
+
+    // Cold targets MUST still emit edges. An over-aggressive dedup that
+    // skipped all emissions would zero this counter and break the
+    // origin-edge ledger contract.
+    assert_eq!(
+        snap.origin_edge_count, 2,
+        "cold counterfixture: distinct identities must each count \
+         (got {})",
+        snap.origin_edge_count
+    );
+    assert_eq!(
+        snap.duplicate_edges, 0,
+        "cold counterfixture: distinct identities are NOT duplicates \
+         (got {} dupes)",
+        snap.duplicate_edges
+    );
+    // And those emissions must have produced wall-clock cost.
+    assert!(
+        snap.record_origin_edge_total_ns > 0,
+        "cold counterfixture: record_origin_edge_total_ns must be > 0 \
+         (got {})",
+        snap.record_origin_edge_total_ns
+    );
+}
+
+/// Test 3 (audit-mining contract). With an installed
+/// `RequestFootprintAccumulator`, run a query that triggers the
+/// warm-prefix dedup path. Assert the audit accumulator still
+/// captures every derivation edge — the dedup drops the LEDGER write
+/// but NOT the audit-mining trace.
+///
+/// Discriminating: a fix that gated `acc.push_derivation_edge` by the
+/// dedup check (incorrect implementation strategy) would drop audit
+/// trace entries for the warm-prefix steps and this test fails.
+#[test]
+fn audit_mining_traces_dropped_prefix_edges() {
+    use crate::component_meta_audit::accumulator::RequestFootprintAccumulator;
+    use crate::request_context::{RequestContext, RequestContextGuard};
+    use crate::semantic_query::{OriginEdgeKind, OriginMeta};
+    use crate::semantic_query_memo::SemanticGraphStore;
+
+    // Direct unit test. The dedup at `record_origin_edge` skips the
+    // ledger write for the second emission of an identical edge, but
+    // it MUST still push to the audit accumulator (the audit-mining
+    // trace observes both emissions).
+    //
+    // Discriminating: a fix that gated `acc.push_derivation_edge` by
+    // the dedup check would drop the second push and the test fails.
+    let graph = SemanticGraphStore::new();
+    let source = mint_distinct_node(&graph);
+    let target = mint_distinct_node(&graph);
+    let fence: crate::semantic_query::DepSignature = Arc::from(
+        vec![(
+            Arc::<str>::from("/workspace/src/types.ts"),
+            crate::semantic_query::DepVersion::ProjectGeneration(7),
+        )]
+        .into_boxed_slice(),
+    );
+    let sources: Arc<[crate::semantic_query::SemanticNodeId]> =
+        Arc::from(vec![source].into_boxed_slice());
+
+    let acc = Arc::new(RequestFootprintAccumulator::new());
+
+    {
+        let ctx = RequestContext::new(
+            42,
+            Arc::<str>::from("/workspace/test"),
+            true, // footprint_capture
+            Some(Arc::clone(&acc)),
+        );
+        let _guard = RequestContextGuard::install(ctx);
+
+        // Two emissions of the SAME edge identity. Pre-fix both
+        // populate the ledger AND both push to the accumulator.
+        // Post-fix the ledger dedups (one entry) but the accumulator
+        // sees BOTH (audit-mining contract preservation).
+        graph.record_origin_edge(
+            target,
+            OriginEdgeKind::ProjectMember,
+            Arc::clone(&sources),
+            OriginMeta::MemberName(Arc::<str>::from("initial")),
+            Arc::clone(&fence),
+        );
+        graph.record_origin_edge(
+            target,
+            OriginEdgeKind::ProjectMember,
+            Arc::clone(&sources),
+            OriginMeta::MemberName(Arc::<str>::from("initial")),
+            Arc::clone(&fence),
+        );
+    }
+
+    let drained = acc.drain();
+    // Audit-mining contract: BOTH emissions must reach the
+    // accumulator. The dedup is observable in the LEDGER, not the
+    // audit trace.
+    assert_eq!(
+        drained.derivation_edges_raw.len(),
+        2,
+        "audit-mining contract: accumulator must observe BOTH \
+         emissions on the warm-prefix dedup path (got {}). The dedup \
+         must skip only the ledger write, NOT the accumulator trace.",
+        drained.derivation_edges_raw.len()
+    );
+}
+
+/// Test 4 (§4.3A structural gate). Direct unit test simulating a
+/// repeated-emission burst. Emit N copies of the same edge identity;
+/// post-fix the ledger has 1 entry and `duplicate_edges == 0`,
+/// pre-fix the ledger has N entries and `duplicate_edges == N - 1`.
+/// Asserts `duplicate_edges / origin_edge_count < 0.05` post-fix.
+///
+/// On real corpora (B-B7d's diagnosis: Avatar/Button/Modal × 4
+/// scenarios), the pre-fix ratio is 12.8%-18.7%; post-fix the dedup
+/// drives it to ~0%. This unit test gates the structural property.
+#[test]
+fn repo_first_pass_diagnosis_dup_edge_ratio_under_5_percent() {
+    use crate::semantic_query::{OriginEdgeKind, OriginMeta};
+    use crate::semantic_query_memo::SemanticGraphStore;
+
+    let graph = SemanticGraphStore::new();
+    let source = mint_distinct_node(&graph);
+    let target = mint_distinct_node(&graph);
+    let fence: crate::semantic_query::DepSignature = Arc::from(
+        vec![(
+            Arc::<str>::from("/workspace/src/types.ts"),
+            crate::semantic_query::DepVersion::ProjectGeneration(7),
+        )]
+        .into_boxed_slice(),
+    );
+    let sources: Arc<[crate::semantic_query::SemanticNodeId]> =
+        Arc::from(vec![source].into_boxed_slice());
+
+    // Emit a burst of identical-identity edges plus a few unique
+    // edges so the ratio computation has both numerator and
+    // denominator. Post-fix dups == 0 regardless of burst size; the
+    // gate is still ratio < 0.05.
+    const BURST: usize = 8;
+    const UNIQUE_DECOYS: usize = 2;
+
+    let snap = {
+        let _guard = CaptureToken::start_for_query("phase_11d_dup_ratio_gate");
+        // Burst of identical edges.
+        for _ in 0..BURST {
+            graph.record_origin_edge(
+                target,
+                OriginEdgeKind::ProjectMember,
+                Arc::clone(&sources),
+                OriginMeta::MemberName(Arc::<str>::from("initial")),
+                Arc::clone(&fence),
+            );
+        }
+        // A few unique decoys so origin_edge_count > 0 even if
+        // dedup is fully effective on the burst.
+        for i in 0..UNIQUE_DECOYS {
+            let decoy_target = mint_distinct_node(&graph);
+            graph.record_origin_edge(
+                decoy_target,
+                OriginEdgeKind::ProjectMember,
+                Arc::clone(&sources),
+                OriginMeta::MemberName(Arc::<str>::from(format!("decoy_{i}"))),
+                Arc::clone(&fence),
+            );
+        }
+        _guard.end()
+    };
+
+    let total = snap.origin_edge_count;
+    assert!(
+        total > 0,
+        "burst scenario must emit at least one edge to compute a ratio"
+    );
+    let ratio = (snap.duplicate_edges as f64) / (total as f64);
+    assert!(
+        ratio < 0.05,
+        "Phase 11d §4.3A gate: dup_edge_ratio must be < 0.05 (got \
+         {ratio} = {dups}/{total} dupes/total). Pre-fix this ratio is \
+         (BURST - 1) / (BURST + UNIQUE_DECOYS) ~= {pre_fix_ratio}; \
+         post-fix the dedup drives it to ~0%.",
+        dups = snap.duplicate_edges,
+        total = total,
+        pre_fix_ratio = ((BURST - 1) as f64) / ((BURST + UNIQUE_DECOYS) as f64),
     );
 }
 
