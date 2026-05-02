@@ -38,22 +38,19 @@
 //! architecture guard scans this file and rejects any forbidden
 //! external corpus path literal.
 
-const EXPECTED_COUNT: &str =
-    include_str!("perf_bounds/expected-corpus-test-count.txt");
+const EXPECTED_COUNT: &str = include_str!("perf_bounds/expected-corpus-test-count.txt");
 const STITCHER: &str = include_str!("corpus_audit_tests.rs");
 
 /// Parse the threshold from the committed file. The file format is a
 /// single integer on its own line, with optional trailing newline.
 fn parse_threshold(raw: &str) -> u32 {
     let trimmed = raw.trim();
-    trimmed
-        .parse()
-        .unwrap_or_else(|e| {
-            panic!(
-                "perf_bounds/expected-corpus-test-count.txt must contain a single u32; \
+    trimmed.parse().unwrap_or_else(|e| {
+        panic!(
+            "perf_bounds/expected-corpus-test-count.txt must contain a single u32; \
                  got `{trimmed}`: {e}"
-            )
-        })
+        )
+    })
 }
 
 /// Count `mod <ident>;` lines in the stitcher. Each `#[path = ...]
@@ -117,9 +114,7 @@ fn corpus_stitcher_is_non_empty() {
 fn threshold_file_parses_as_positive_integer() {
     let raw = EXPECTED_COUNT;
     let trimmed = raw.trim();
-    let parsed: u32 = trimmed
-        .parse()
-        .expect("threshold file must contain a u32");
+    let parsed: u32 = trimmed.parse().expect("threshold file must contain a u32");
     assert!(
         parsed > 0,
         "threshold file parsed to zero — vacuous floor: `{trimmed}`",

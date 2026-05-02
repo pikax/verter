@@ -527,8 +527,14 @@ fn invalidation_theme_config_source_edit() {
         verter_workspace::ProjectGraph::from_configs(vec![make_project_config("/workspace")]);
     let workspace = Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
     workspace.set_project_graph(project_graph);
-    workspace.inject_file("/workspace/src/theme.ts".into(), Arc::from(POSITIVE_THEME_TS));
-    workspace.inject_file("/workspace/src/types.ts".into(), Arc::from(POSITIVE_TYPES_TS));
+    workspace.inject_file(
+        "/workspace/src/theme.ts".into(),
+        Arc::from(POSITIVE_THEME_TS),
+    );
+    workspace.inject_file(
+        "/workspace/src/types.ts".into(),
+        Arc::from(POSITIVE_TYPES_TS),
+    );
     workspace.inject_file(
         "/workspace/src/Button.vue".into(),
         Arc::from(POSITIVE_BUTTON_VUE),
