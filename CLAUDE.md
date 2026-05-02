@@ -226,6 +226,20 @@ Coverage: new features need tests, bug fixes need regression tests, refactors mu
 
 **Rust test file organization**: When inline `#[cfg(test)]` exceeds ~400 lines, extract to a sibling `*_tests.rs` file.
 
+### Testing-Hermeticity (MANDATORY)
+
+Unit tests must only depend on locally-vendored fixtures. They must compile and run without any third-party repository (e.g., `nuxt-ui`, `element-plus`) checked out alongside this repository. Tests that need external corpora must be feature-gated (e.g., `#[cfg(feature = "external-corpus")]`) and excluded from the default `cargo test --workspace --tests --verbose` run.
+
+A test that references `.integration-tests/repos/<third-party>/...` from a non-gated test file is a violation. The architecture guard `external_corpus_paths_not_present_outside_gated_tests` enforces this.
+
+### No phase archaeology in production code (MANDATORY)
+
+Source comments must not reference plan phases (`phase 5d`, `phase 11`, `post-cutover`, `pre-Phase`), cutover stages (`d-cutover`, `cutover`), deletion history (`deleted in 5g`, `retired in`), or any project-management vocabulary. Once a plan is over, the code should read as final-state.
+
+Durable architecture insights belong in `.claude/skills/*` or `docs/arch/`, not in source comments. Test files named after retired phases must be renamed to describe the invariant they characterize, not the phase that produced them.
+
+The architecture guard `no_phase_archaeology_in_production_code` enforces this on `crates/*/src/**`.
+
 See `/testing` skill for full TS/Rust test patterns, sourcemap testing, and server cleanup.
 
 **Component-meta audit** (plan §3 / F1–F10): Rust-first semantic

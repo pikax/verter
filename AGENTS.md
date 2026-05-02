@@ -52,6 +52,8 @@ Use this file as the neutral entry point. Reuse the shared sources below instead
 - Follow the build philosophy and shallow file processing invariant defined in `CLAUDE.md`.
 - For component-meta work, follow the rules in `/component-meta` skill.
 - For type resolution work, follow the rules in `/type-resolution` skill.
+- **Testing hermeticity**: see `CLAUDE.md` "Testing-Hermeticity (MANDATORY)" and `.claude/skills/testing/SKILL.md`.
+- **No phase archaeology in code**: see `CLAUDE.md` "No phase archaeology in production code (MANDATORY)".
 
 ## Task Routing
 

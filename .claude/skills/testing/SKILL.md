@@ -141,3 +141,26 @@ assert!(parsed.errors.is_empty(), "JS parse error: {:?}\n{}", parsed.errors, tpl
 - **Integration tests**: Test full transformation pipeline
 - **Type tests**: Verify TypeScript inference (using `vitest --typecheck`)
 - **Sourcemap tests**: Verify position mappings
+
+
+### Test Hermeticity (MANDATORY)
+
+Default-run tests must depend only on locally-vendored fixtures. The `cargo test --workspace --tests --verbose` invocation must compile and pass on a fresh checkout without any `.integration-tests/repos/<third-party>/...` clones, sibling repositories, or other external corpora present alongside the workspace.
+
+When you need fixtures sourced from a third-party project (e.g., the nuxt-ui Vue corpus), vendor a snapshot of the upstream files into the consuming crate's `tests/<feature>/fixtures/` directory and refer to them with `include_str!("./fixtures/...")` or path-based loaders. Preserve upstream license attribution in a sibling `LICENSE.md` and `README.md` for provenance.
+
+Tests that genuinely require live external corpora (e.g., periodic drift detectors comparing the vendored snapshot against the upstream submodule) must be gated behind a Cargo feature whose name names the corpus dependency:
+
+```toml
+# crates/<crate>/Cargo.toml
+[features]
+external-corpus = []
+```
+
+```rust
+#![cfg(feature = "external-corpus")]
+//! Optional drift detector — gated so default `cargo test --workspace`
+//! stays hermetic.
+```
+
+The architecture guard `external_corpus_paths_not_present_outside_gated_tests` (in `crates/verter_session/tests/architecture_guards.rs`) rejects `include_str!` / `include!` / path-string references to `.integration-tests/repos/...` from any test file that is not gated behind such a feature. A regression that re-introduces a non-hermetic dependency surfaces here at test time.
