@@ -1,0 +1,72 @@
+<script lang="ts">
+import type { VNode } from 'vue'
+import type { AppConfig } from '@nuxt/schema'
+import type { ComponentConfig } from '../types/tv'
+import theme from '#build/ui/footer'
+
+type Footer = ComponentConfig<typeof theme, AppConfig, 'footer'>
+
+export interface FooterProps {
+  /**
+   * The element or component this component should render as.
+   * @defaultValue 'footer'
+   */
+  as?: any
+  class?: any
+  ui?: Footer['slots']
+}
+
+export interface FooterSlots {
+  left?(props?: {}): VNode[]
+  default?(props?: {}): VNode[]
+  right?(props?: {}): VNode[]
+  top?(props?: {}): VNode[]
+  bottom?(props?: {}): VNode[]
+}
+</script>
+
+<script setup lang="ts">
+import { computed } from 'vue'
+import { Primitive } from 'reka-ui'
+import { useAppConfig } from '#imports'
+import { useComponentUI } from '../composables/useComponentUI'
+import { tv } from '../utils/tv'
+import UContainer from './Container.vue'
+
+const props = withDefaults(defineProps<FooterProps>(), {
+  as: 'footer'
+})
+const slots = defineSlots<FooterSlots>()
+
+const appConfig = useAppConfig() as Footer['AppConfig']
+const uiProp = useComponentUI('footer', props)
+
+// eslint-disable-next-line vue/no-dupe-keys
+const ui = computed(() => tv({ extend: tv(theme), ...(appConfig.ui?.footer || {}) })())
+</script>
+
+<template>
+  <Primitive :as="as" data-slot="root" :class="ui.root({ class: [uiProp?.root, props.class] })">
+    <div v-if="!!slots.top" data-slot="top" :class="ui.top({ class: uiProp?.top })">
+      <slot name="top" />
+    </div>
+
+    <UContainer data-slot="container" :class="ui.container({ class: uiProp?.container })">
+      <div data-slot="right" :class="ui.right({ class: uiProp?.right })">
+        <slot name="right" />
+      </div>
+
+      <div data-slot="center" :class="ui.center({ class: uiProp?.center })">
+        <slot />
+      </div>
+
+      <div data-slot="left" :class="ui.left({ class: uiProp?.left })">
+        <slot name="left" />
+      </div>
+    </UContainer>
+
+    <div v-if="!!slots.bottom" data-slot="bottom" :class="ui.bottom({ class: uiProp?.bottom })">
+      <slot name="bottom" />
+    </div>
+  </Primitive>
+</template>

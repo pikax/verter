@@ -1,0 +1,154 @@
+<script lang="ts">
+import type { Ref, VNode } from 'vue'
+import type { AppConfig } from '@nuxt/schema'
+import theme from '#build/ui/button'
+import type { UseComponentIconsProps } from '../composables/useComponentIcons'
+import type { LinkProps, AvatarProps } from '../types'
+import type { ComponentConfig } from '../types/tv'
+
+type Button = ComponentConfig<typeof theme, AppConfig, 'button'>
+
+export interface ButtonProps extends UseComponentIconsProps, Omit<LinkProps, 'raw' | 'custom'> {
+  label?: string
+  /**
+   * @defaultValue 'primary'
+   */
+  color?: Button['variants']['color']
+  activeColor?: Button['variants']['color']
+  /**
+   * @defaultValue 'solid'
+   */
+  variant?: Button['variants']['variant']
+  activeVariant?: Button['variants']['variant']
+  /**
+   * @defaultValue 'md'
+   */
+  size?: Button['variants']['size']
+  /** Render the button with equal padding on all sides. */
+  square?: boolean
+  /** Render the button full width. */
+  block?: boolean
+  /** Set loading state automatically based on the `@click` promise state */
+  loadingAuto?: boolean
+  onClick?: ((event: MouseEvent) => void | Promise<void>) | Array<((event: MouseEvent) => void | Promise<void>)>
+  class?: any
+  ui?: Button['slots']
+}
+
+export interface ButtonSlots {
+  leading?(props: { ui: Button['ui'] }): VNode[]
+  default?(props: { ui: Button['ui'] }): VNode[]
+  trailing?(props: { ui: Button['ui'] }): VNode[]
+}
+</script>
+
+<script setup lang="ts">
+import { computed, ref, inject } from 'vue'
+import { defu } from 'defu'
+import { useForwardProps } from 'reka-ui'
+import { useAppConfig } from '#imports'
+import { useComponentUI } from '../composables/useComponentUI'
+import { useComponentIcons } from '../composables/useComponentIcons'
+import { useFieldGroup } from '../composables/useFieldGroup'
+import { formLoadingInjectionKey } from '../composables/useFormField'
+import { omit, mergeClasses } from '../utils'
+import { tv } from '../utils/tv'
+import { pickLinkProps } from '../utils/link'
+import UIcon from './Icon.vue'
+import UAvatar from './Avatar.vue'
+import ULink from './Link.vue'
+import ULinkBase from './LinkBase.vue'
+
+const props = defineProps<ButtonProps>()
+const slots = defineSlots<ButtonSlots>()
+
+const appConfig = useAppConfig() as Button['AppConfig']
+const uiProp = useComponentUI('button', props)
+const { orientation, size: buttonSize } = useFieldGroup<ButtonProps>(props)
+
+const linkProps = useForwardProps(pickLinkProps(props))
+
+const loadingAutoState = ref(false)
+const formLoading = inject<Ref<boolean> | undefined>(formLoadingInjectionKey, undefined)
+
+async function onClickWrapper(event: MouseEvent) {
+  loadingAutoState.value = true
+  const callbacks = Array.isArray(props.onClick) ? props.onClick : [props.onClick]
+  try {
+    await Promise.all(callbacks.map(fn => fn?.(event)))
+  } finally {
+    loadingAutoState.value = false
+  }
+}
+
+const isLoading = computed(() => {
+  return props.loading || (props.loadingAuto && (loadingAutoState.value || (formLoading?.value && props.type === 'submit')))
+})
+
+const { isLeading, isTrailing, leadingIconName, trailingIconName } = useComponentIcons(
+  computed(() => ({ ...props, loading: isLoading.value }))
+)
+
+const ui = computed(() => tv({
+  extend: tv(theme),
+  ...defu({
+    variants: {
+      active: {
+        true: {
+          base: mergeClasses(appConfig.ui?.button?.variants?.active?.true?.base, props.activeClass)
+        },
+        false: {
+          base: mergeClasses(appConfig.ui?.button?.variants?.active?.false?.base, props.inactiveClass)
+        }
+      }
+    }
+  }, appConfig.ui?.button || {})
+})({
+  color: props.color,
+  variant: props.variant,
+  size: buttonSize.value,
+  loading: isLoading.value,
+  block: props.block,
+  square: props.square || (!slots.default && !props.label),
+  leading: isLeading.value,
+  trailing: isTrailing.value,
+  fieldGroup: orientation.value
+}))
+</script>
+
+<template>
+  <ULink
+    v-slot="{ active, ...slotProps }"
+    :type="type"
+    :disabled="disabled || isLoading"
+    v-bind="omit(linkProps, ['type', 'disabled', 'onClick'])"
+    custom
+  >
+    <ULinkBase
+      v-bind="slotProps"
+      data-slot="base"
+      :class="ui.base({
+        class: [uiProp?.base, props.class],
+        active,
+        ...(active && activeVariant ? { variant: activeVariant } : {}),
+        ...(active && activeColor ? { color: activeColor } : {})
+      })"
+      @click="onClickWrapper"
+    >
+      <slot name="leading" :ui="ui">
+        <UIcon v-if="isLeading && leadingIconName" :name="leadingIconName" data-slot="leadingIcon" :class="ui.leadingIcon({ class: uiProp?.leadingIcon, active })" />
+        <UAvatar v-else-if="!!avatar" :size="((uiProp?.leadingAvatarSize || ui.leadingAvatarSize()) as AvatarProps['size'])" v-bind="avatar" data-slot="leadingAvatar" :class="ui.leadingAvatar({ class: uiProp?.leadingAvatar, active })" />
+      </slot>
+
+      <slot :ui="ui">
+        <span v-if="label !== undefined && label !== null" data-slot="label" :class="ui.label({ class: uiProp?.label, active })">
+          {{ label }}
+        </span>
+      </slot>
+
+      <slot name="trailing" :ui="ui">
+        <UIcon v-if="isTrailing && trailingIconName" :name="trailingIconName" data-slot="trailingIcon" :class="ui.trailingIcon({ class: uiProp?.trailingIcon, active })" />
+      </slot>
+    </ULinkBase>
+  </ULink>
+</template>
