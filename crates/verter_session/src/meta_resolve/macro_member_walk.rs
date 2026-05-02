@@ -62,6 +62,19 @@ pub(crate) static MEMBER_ROUTE_FAST_PATH_HITS: std::sync::atomic::AtomicUsize =
 pub(crate) const SLOT_BINDING_REGISTRY_COLLECTION_SKIP_COUNTER: &str =
     "slot_binding_registry_collection_skips";
 
+/// Issue #10 / Phase 10 — capture-token counter incremented every
+/// time the Pick member-route materialiser actually descends into a
+/// callable parameter type. The package-backed suppression predicate
+/// (`pick_member_route_should_skip_callable_descent`) bypasses the
+/// indexed-access route entirely; when bypassed, the counter does NOT
+/// increment for that member. Used by
+/// `component_meta_pick_omit_tests::declared_session_meta_preserves_imported_pick_callback_package_param`
+/// (asserts `== 0` for package-backed param) and
+/// `pick_callback_workspace_local_param_still_descends` (asserts
+/// `>= 1` for workspace-local param).
+pub(crate) const PICK_MEMBER_ROUTE_CALLABLE_DESCENT_COUNTER: &str =
+    "pick_member_route_callable_descent_count";
+
 /// Collect the source-level root type names referenced by every
 /// type-based `defineProps<T>()` macro in `snapshot.macros`. The
 /// result is the set of names that — when found at the root of a

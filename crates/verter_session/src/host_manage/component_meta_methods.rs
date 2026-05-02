@@ -1002,6 +1002,189 @@ impl VerterHost {
                 ))
             })
         }
+        /// Issue #10 / Phase 10 — predicate: does `expr` contain any
+        /// callable surface (`TypeExpr::Function` or an Object with a
+        /// call/method signature) anywhere reachable from its top-
+        /// level structure (Array element, Intersection arm, Union
+        /// arm, Object property, Tuple element)?
+        ///
+        /// Used by the Pick member-route materialiser to detect when
+        /// descending into a member's leaf would walk through a
+        /// callable parameter type — which, when the param root is
+        /// package-backed, must be preserved symbolically rather than
+        /// expanded as if it were prop metadata.
+        fn type_expr_contains_callable_surface(
+            expr: &verter_semantic::analysis::type_expr::TypeExpr,
+        ) -> bool {
+            use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+            match expr {
+                TypeExpr::Function(_) => true,
+                TypeExpr::Object(object) => object.properties.iter().any(|m| match m {
+                    ObjectMember::Property(p) => type_expr_contains_callable_surface(&p.ty),
+                    ObjectMember::CallSignature(_)
+                    | ObjectMember::ConstructSignature(_)
+                    | ObjectMember::Method(_) => true,
+                    ObjectMember::IndexSignature(_) => false,
+                }),
+                TypeExpr::Array { element, .. } => type_expr_contains_callable_surface(element),
+                TypeExpr::Tuple { elements, .. } => elements
+                    .iter()
+                    .any(|el| type_expr_contains_callable_surface(&el.ty)),
+                TypeExpr::Union(arms) | TypeExpr::Intersection(arms) => {
+                    arms.iter().any(type_expr_contains_callable_surface)
+                }
+                TypeExpr::Parenthesized(inner) | TypeExpr::Rest(inner) => {
+                    type_expr_contains_callable_surface(inner)
+                }
+                _ => false,
+            }
+        }
+
+        /// Issue #10 / Phase 10 — extract the raw type of `member`
+        /// from `raw_body` when `raw_body` is an Object surface (the
+        /// resolved body of the picked alias). Returns `None` when
+        /// `raw_body` is not an Object or no property matches.
+        fn raw_pick_member_leaf(
+            raw_body: &verter_semantic::analysis::type_expr::TypeExpr,
+            member: &str,
+        ) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+            use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+            match raw_body {
+                TypeExpr::Parenthesized(inner) => raw_pick_member_leaf(inner, member),
+                TypeExpr::Object(object) => object.properties.iter().find_map(|m| match m {
+                    ObjectMember::Property(p) if p.name == member => Some(p.ty.clone()),
+                    _ => None,
+                }),
+                _ => None,
+            }
+        }
+
+        /// Issue #10 / Phase 10 — predicate: does `param.ty` resolve
+        /// to a package-backed declaration?
+        ///
+        /// Walks every `TypeExpr::Ref { name }` rooted in the
+        /// parameter type, lowers each to a `SemanticNodeId` via the
+        /// project's dispatch, and returns `true` iff any of those
+        /// roots resolves to a package-backed declaration (per the
+        /// graph-native `is_package_backed_ref` predicate, which
+        /// delegates to `canonical_resolves_to_package`).
+        fn callable_param_root_is_package_backed(
+            param_ty: &verter_semantic::analysis::type_expr::TypeExpr,
+            ctx: &dyn crate::resolver_core::ResolverContext,
+            scope_canonical_id: &str,
+        ) -> bool {
+            use crate::component_meta_materialize::is_package_backed_ref;
+            use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+            use crate::semantic_query::ProjectionMode;
+            use verter_semantic::analysis::type_expr::TypeExpr;
+            fn collect_root_refs<'a>(expr: &'a TypeExpr, out: &mut Vec<&'a TypeExpr>) {
+                match expr {
+                    TypeExpr::Ref { .. } => out.push(expr),
+                    TypeExpr::Parenthesized(inner) => collect_root_refs(inner, out),
+                    TypeExpr::Array { element, .. } => collect_root_refs(element, out),
+                    TypeExpr::Tuple { elements, .. } => {
+                        for el in elements.iter() {
+                            collect_root_refs(&el.ty, out);
+                        }
+                    }
+                    TypeExpr::Union(arms) | TypeExpr::Intersection(arms) => {
+                        for a in arms.iter() {
+                            collect_root_refs(a, out);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let mut roots: Vec<&TypeExpr> = Vec::new();
+            collect_root_refs(param_ty, &mut roots);
+            if roots.is_empty() {
+                return false;
+            }
+            let dispatch = ProjectSemanticDispatch::new(ctx);
+            roots.iter().any(|r| {
+                dispatch
+                    .lower_type_expr_in_scope_with_mode(
+                        scope_canonical_id,
+                        r,
+                        ProjectionMode::Navigate,
+                    )
+                    .is_some_and(|node| is_package_backed_ref(ctx, node))
+            })
+        }
+
+        /// Issue #10 / Phase 10 — predicate: does the picked member's
+        /// raw leaf contain a callable surface whose param root is
+        /// package-backed? When this fires, the Pick member-route
+        /// materialiser MUST bypass the registry indexed-access route
+        /// and project the raw leaf directly so the package-backed
+        /// callable parameter type stays symbolic.
+        fn pick_member_route_should_skip_callable_descent(
+            raw_leaf: &verter_semantic::analysis::type_expr::TypeExpr,
+            ctx: &dyn crate::resolver_core::ResolverContext,
+            scope_canonical_id: &str,
+        ) -> bool {
+            use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+            // Visit every Function surface reachable from `raw_leaf`
+            // and check ANY parameter root for package-backed-ness.
+            fn any_callable_param_is_package_backed(
+                expr: &TypeExpr,
+                ctx: &dyn crate::resolver_core::ResolverContext,
+                scope_canonical_id: &str,
+            ) -> bool {
+                match expr {
+                    TypeExpr::Function(func) => {
+                        for p in func.parameters.iter() {
+                            if callable_param_root_is_package_backed(&p.ty, ctx, scope_canonical_id)
+                            {
+                                return true;
+                            }
+                        }
+                        false
+                    }
+                    TypeExpr::Object(object) => object.properties.iter().any(|m| match m {
+                        ObjectMember::Property(p) => {
+                            any_callable_param_is_package_backed(&p.ty, ctx, scope_canonical_id)
+                        }
+                        ObjectMember::CallSignature(func)
+                        | ObjectMember::ConstructSignature(func) => {
+                            func.parameters.iter().any(|p| {
+                                callable_param_root_is_package_backed(
+                                    &p.ty,
+                                    ctx,
+                                    scope_canonical_id,
+                                )
+                            })
+                        }
+                        ObjectMember::Method(method) => {
+                            method.function.parameters.iter().any(|p| {
+                                callable_param_root_is_package_backed(
+                                    &p.ty,
+                                    ctx,
+                                    scope_canonical_id,
+                                )
+                            })
+                        }
+                        ObjectMember::IndexSignature(_) => false,
+                    }),
+                    TypeExpr::Array { element, .. } => {
+                        any_callable_param_is_package_backed(element, ctx, scope_canonical_id)
+                    }
+                    TypeExpr::Tuple { elements, .. } => elements.iter().any(|el| {
+                        any_callable_param_is_package_backed(&el.ty, ctx, scope_canonical_id)
+                    }),
+                    TypeExpr::Union(arms) | TypeExpr::Intersection(arms) => arms
+                        .iter()
+                        .any(|a| any_callable_param_is_package_backed(a, ctx, scope_canonical_id)),
+                    TypeExpr::Parenthesized(inner) | TypeExpr::Rest(inner) => {
+                        any_callable_param_is_package_backed(inner, ctx, scope_canonical_id)
+                    }
+                    _ => false,
+                }
+            }
+            type_expr_contains_callable_surface(raw_leaf)
+                && any_callable_param_is_package_backed(raw_leaf, ctx, scope_canonical_id)
+        }
+
         fn materialize_component_meta_registry_candidate_for_route(
             query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
             scope_canonical_id: &str,
@@ -1072,6 +1255,44 @@ impl VerterHost {
                 crate::resolver_core::RouteDemand::Pick(members) => {
                     let mut properties = Vec::new();
                     for member in members {
+                        // Issue #10 / Phase 10 — when the picked
+                        // member's raw leaf contains a callable
+                        // surface AND any callable parameter root
+                        // resolves to a package-backed declaration,
+                        // bypass the registry indexed-access route.
+                        // Descending into a package-backed callable
+                        // parameter (e.g. `(e, message: UIMessage) =>
+                        // void` where `UIMessage` lives in `ai`)
+                        // expands package internals into the
+                        // consumer's prop surface and triggers
+                        // unbounded recursion on cyclic external
+                        // declarations. The raw leaf carries the
+                        // symbolic Ref already; project it directly
+                        // through `materialize_member_surface_expr`
+                        // so package-backed param roots stay
+                        // symbolic.
+                        if let Some(raw_leaf) =
+                            raw_body.and_then(|body| raw_pick_member_leaf(body, member.as_str()))
+                        {
+                            if pick_member_route_should_skip_callable_descent(
+                                &raw_leaf,
+                                query_engine.ctx,
+                                scope_canonical_id,
+                            ) {
+                                let projected_leaf = query_engine.materialize_member_surface_expr(
+                                    scope_canonical_id,
+                                    &raw_leaf,
+                                    true,
+                                );
+                                properties.push(ObjectMember::Property(ObjectProperty {
+                                    name: member.clone(),
+                                    ty: projected_leaf,
+                                    optional: true,
+                                    readonly: false,
+                                }));
+                                continue;
+                            }
+                        }
                         let member_route =
                             crate::resolver_core::RouteDemand::MemberPath(vec![member.clone()]);
                         let route_expr = build_registry_indexed_access_expr(
@@ -1100,6 +1321,26 @@ impl VerterHost {
                             &route_expr,
                         )
                         .unwrap_or(route_expr);
+                        // Issue #10 / Phase 10 — record actual descent
+                        // into the indexed-access route. The
+                        // package-backed suppression branch above bails
+                        // before this point; reaching here means we
+                        // walked the route-expr through dispatch and
+                        // are about to materialise the projected
+                        // surface (which, for callable members, walks
+                        // through callable parameters).
+                        if raw_body
+                            .and_then(|body| raw_pick_member_leaf(body, member.as_str()))
+                            .as_ref()
+                            .is_some_and(type_expr_contains_callable_surface)
+                        {
+                            crate::capture_token::with_active_capture(|t| {
+                                t.record_counter(
+                                    crate::meta_resolve::PICK_MEMBER_ROUTE_CALLABLE_DESCENT_COUNTER,
+                                    1,
+                                );
+                            });
+                        }
                         let member_surface = query_engine.materialize_member_surface_expr(
                             scope_canonical_id,
                             &projected,
