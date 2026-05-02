@@ -1712,6 +1712,24 @@ impl SemanticGraphStore {
     /// Multiple derivations of the same structural `result` produce
     /// multiple edges with the same `(result, kind)` — the layer supports
     /// this; the walker walks all edges (plan §2 + §7.16).
+    ///
+    /// **Issue #11 / Phase 11d** (B-B7d's diagnosis report identified
+    /// duplicate edges as 12.8%–18.7% of every origin-edge emission on
+    /// the `repo_first_pass` corpus). The cooperative-admission cold-
+    /// winner path in `build_project_path`'s prefix-backfill loop emits
+    /// origin edges even when the prefix-backfill target is already
+    /// warm in `SemanticGraphStore::entries`. Different `build_project_path`
+    /// invocations that walk through the same intermediate hop emit the
+    /// same `(result, kind, sources, meta, fence)` identity tuple
+    /// repeatedly, inflating the ledger and the per-request audit cost.
+    ///
+    /// The fix dedups by edge identity at the call site: before
+    /// recording into [`DerivationStore::edges`], we check whether an
+    /// edge with the exact same identity tuple is already present and
+    /// skip the ledger write if so. The audit-mining contract is
+    /// preserved: the [`request_context::current_accumulator`] push
+    /// remains unconditional so the footprint miner observes every
+    /// derivation hop the production hot path would have emitted.
     pub fn record_origin_edge(
         &self,
         result: SemanticNodeId,
@@ -1739,7 +1757,17 @@ impl SemanticGraphStore {
         // lock before pushing into the accumulator — the accumulator
         // acquires its own mutex and we must not hold the graph lock
         // across that boundary (plan §4 Commit 4).
-        let edge = {
+        //
+        // Phase 11d (Issue #11): the edge identity tuple is checked
+        // under the derivation lock for an existing match. When found,
+        // the ledger write is skipped (no `store.record` call) and the
+        // `already_recorded` flag flows through the rest of the
+        // function so the capture-token edge ledger and the
+        // `origin_edges_emitted` stats counter mirror the dedup. The
+        // audit-accumulator push and the `record_origin_edge_total_ns`
+        // wall-clock attribution are intentionally NOT gated by this
+        // flag — see the audit-mining contract preservation note above.
+        let (edge, already_recorded) = {
             let mut store = self.derivation.lock();
             let edge_dep_signature = store.intern_signature(builder_fence);
             let edge = OriginEdge {
@@ -1747,15 +1775,41 @@ impl SemanticGraphStore {
                 meta,
                 edge_dep_signature,
             };
-            store.record(result, kind, edge.clone());
-            edge
+            // Identity check: scan the existing `(result, kind)` bucket
+            // for an entry that matches this edge's full identity tuple
+            // (sources content, meta value, and interned dep_signature
+            // pointer). The interner guarantees identical signatures
+            // share a single Arc, so `Arc::ptr_eq` is a sound identity
+            // probe; `OriginMeta` derives `PartialEq` and `sources` is
+            // a content-comparable slice.
+            let already_recorded = store
+                .edges
+                .get(&(result, kind))
+                .map(|existing| {
+                    existing.iter().any(|e| {
+                        Arc::ptr_eq(&e.edge_dep_signature, &edge.edge_dep_signature)
+                            && e.sources.as_ref() == edge.sources.as_ref()
+                            && e.meta == edge.meta
+                    })
+                })
+                .unwrap_or(false);
+            if !already_recorded {
+                store.record(result, kind, edge.clone());
+            }
+            (edge, already_recorded)
         };
-        self.stats
-            .origin_edges_emitted
-            .fetch_add(1, Ordering::Relaxed);
+        if !already_recorded {
+            self.stats
+                .origin_edges_emitted
+                .fetch_add(1, Ordering::Relaxed);
+        }
         // Plan §4 Commit 4: feed the accumulator of the active audited
         // request so the footprint miner sees every derivation hop.
         // No-op when no request context is installed.
+        //
+        // Phase 11d audit-mining contract preservation: this push is
+        // intentionally unconditional — it runs even on the dedup path
+        // so dropped ledger writes still surface in the audit trace.
         if let Some(acc) = crate::request_context::current_accumulator() {
             acc.push_derivation_edge(result, kind, edge.clone());
         }
@@ -1766,20 +1820,33 @@ impl SemanticGraphStore {
         // The `with_active_capture` call returns immediately when no
         // token is bound (the production hot path) — no lock, no
         // allocation, one thread-local lookup.
+        //
+        // Phase 11d: skip the capture-token edge ledger insert + the
+        // `origin_edge_count` bump on the dedup path. The ledger / count
+        // mirror the production-side ledger writes so test snapshots
+        // observe the same dedup property.
         let elapsed_ns = start.elapsed().as_nanos();
         crate::capture_token::with_active_capture(|t| {
-            let dep_signature_hash =
-                crate::capture_token::stable_hash_slice(&edge.edge_dep_signature);
-            let identity = crate::capture_token::EdgeIdentity::from_record(
-                result,
-                kind,
-                edge.sources.as_ref(),
-                &edge.meta,
-                dep_signature_hash,
-            );
-            t.record_edge(identity);
-            // Phase 11b diagnosis: per-call wall-clock cost.
-            t.record_origin_edge_call(elapsed_ns);
+            if !already_recorded {
+                let dep_signature_hash =
+                    crate::capture_token::stable_hash_slice(&edge.edge_dep_signature);
+                let identity = crate::capture_token::EdgeIdentity::from_record(
+                    result,
+                    kind,
+                    edge.sources.as_ref(),
+                    &edge.meta,
+                    dep_signature_hash,
+                );
+                t.record_edge(identity);
+                // Phase 11d (Issue #11): bump the per-call counter +
+                // wall-clock cost only on actual ledger emissions. The
+                // dedup-skipped path bypasses both so `origin_edge_count`
+                // mirrors the ledger-write count and
+                // `record_origin_edge_total_ns` reflects the cold-path
+                // wall-clock the §4.3B benchmark gate evaluates against
+                // the post-B2 baseline.
+                t.record_origin_edge_call(elapsed_ns);
+            }
         });
     }
 
@@ -4989,13 +5056,21 @@ mod tests {
                  rewrite invalid",
             );
             seen_ids.push(result);
-            for _ in 0..=(i as u32) {
+            for j in 0..=(i as u32) {
+                // Phase 11d (Issue #11): each emission must carry a
+                // distinct edge identity so the per-node ledger
+                // observes (i+1) edges. Vary the dep_signature hash
+                // per emission so the dedup at `record_origin_edge`
+                // does NOT collapse them — the assertion-intent is
+                // per-node edge counts across genuinely-distinct
+                // derivations, which the dedup must NOT touch.
+                let hash_byte = (j as u8).saturating_add(1);
                 store.record_origin_edge(
                     result,
                     OriginEdgeKind::Instantiate,
                     Arc::from(vec![src].into_boxed_slice()),
                     crate::semantic_query::OriginMeta::None,
-                    dep_sig_for("/w/x.ts", 1),
+                    dep_sig_for("/w/x.ts", hash_byte),
                 );
             }
         }
