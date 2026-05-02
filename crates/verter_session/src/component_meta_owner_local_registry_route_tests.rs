@@ -287,3 +287,141 @@ fn public_field_refs_keep_external_indexed_access_routes() {
     // specific route variant (the existing pipeline owns that).
     let _ = counters;
 }
+
+// ── §9.8 owner-local row: alias-of-alias ──
+
+const ALIAS_OF_ALIAS_TS: &str = r#"export const theme = {
+  variants: { variant: { solid: 'solid' } },
+  slots: { root: 'root' },
+} as const
+
+export type AppConfig = Record<string, unknown>
+
+export type ComponentConfig<T, A, K extends keyof T> = {
+  variants: T[K] extends { variants: infer V } ? V : never
+  slots: T[K] extends { slots: infer S } ? S : never
+}
+
+// Alias-of-alias: Bar is itself an alias for ComponentConfig<...>.
+// Foo aliases Bar (one extra hop). Pinned counterfixture: external
+// (imported) alias-of-alias chains do NOT trigger the owner-local
+// Whole rewrite.
+export type Bar = ComponentConfig<typeof theme, AppConfig, 'variants'>
+export type Foo = Bar
+"#;
+
+const ALIAS_OF_ALIAS_VUE: &str = r#"<script setup lang="ts">
+import type { Foo } from '/workspace/src/types'
+defineProps<{
+  variants: Foo['variants']['variant']
+}>()
+</script>
+<template><div /></template>
+"#;
+
+/// §9.8 owner-local matrix row: alias-of-alias chain. The owner-local
+/// rewrite predicate must follow `Foo -> Bar -> ComponentConfig<...>`
+/// to determine if the imported root resolves to a `ComponentConfig`
+/// invocation. On integration HEAD `c4c26c1f` the predicate declines
+/// for external (imported) roots regardless of the alias chain depth
+/// — the predicate is gated on workspace ownership of the consumer
+/// SFC, and the imported `Foo` is reached through `import type`. The
+/// counterfixture pins this behaviour.
+#[test]
+fn owner_local_alias_of_alias_external_import_declines() {
+    let host = build_workspace_host(&[
+        ("/workspace/src/types.ts", ALIAS_OF_ALIAS_TS),
+        ("/workspace/src/Comp.vue", ALIAS_OF_ALIAS_VUE),
+    ]);
+
+    let _ = host.get_component_meta("/workspace/src/Comp.vue");
+
+    // Drive the public predicate directly with an indexed-access
+    // `Foo['variants']['variant']` carrier and assert the rewrite
+    // declines. For an alias-of-alias chain reached via `import
+    // type`, the predicate must NOT rewrite to Whole — the imported
+    // root preserves its existing routing.
+    use crate::resolver_core::component_meta_registry::component_meta_registry_public_route_owner_local_root;
+    use crate::resolver_core::ResolverContext;
+    use std::sync::Arc;
+    use verter_semantic::analysis::type_expr::{LiteralValue, TypeExpr};
+    let foo_indexed = TypeExpr::IndexedAccess {
+        object: Arc::new(TypeExpr::IndexedAccess {
+            object: Arc::new(TypeExpr::Ref {
+                name: Arc::from("Foo"),
+                type_arguments: Arc::from([] as [TypeExpr; 0]),
+            }),
+            index: Arc::new(TypeExpr::Literal(LiteralValue::String(
+                "variants".to_string(),
+            ))),
+        }),
+        index: Arc::new(TypeExpr::Literal(LiteralValue::String(
+            "variant".to_string(),
+        ))),
+    };
+    let analysis: crate::types::FileAnalysisSnapshot = host
+        .get_raw_analysis_snapshot("/workspace/src/Comp.vue")
+        .expect("Comp.vue analysis snapshot");
+    let owner_local = component_meta_registry_public_route_owner_local_root(
+        host.as_ref() as &dyn ResolverContext,
+        "/workspace/src/Comp.vue",
+        &analysis,
+        &foo_indexed,
+        None,
+    );
+    assert!(
+        owner_local.is_none(),
+        "§9.8 owner-local counterfixture: alias-of-alias chain reached \
+         via external import MUST NOT trigger the owner-local Whole rewrite; \
+         got owner_local_root = {owner_local:?}",
+    );
+}
+
+// ── §9.8 owner-local row: generic TypeParameter body ──
+
+const GENERIC_TYPEPARAM_VUE: &str = r#"<script setup lang="ts" generic="T">
+defineProps<{
+  payload: T
+}>()
+</script>
+<template><div /></template>
+"#;
+
+/// §9.8 owner-local matrix row: generic TypeParameter body. The
+/// owner-local rewrite predicate must NOT fire for a `TypeParam`
+/// expression — the parameter has no concrete declaration to route
+/// to. On integration HEAD this counterfixture is asserted to
+/// preserve the standard pipeline (predicate declines).
+#[test]
+fn owner_local_generic_typeparameter_body_declines() {
+    let host = build_workspace_host(&[("/workspace/src/Comp.vue", GENERIC_TYPEPARAM_VUE)]);
+
+    let _ = host.get_component_meta("/workspace/src/Comp.vue");
+
+    use crate::resolver_core::component_meta_registry::component_meta_registry_public_route_owner_local_root;
+    use crate::resolver_core::ResolverContext;
+    use verter_semantic::analysis::type_expr::{TypeExpr, TypeParam};
+    // A bare type parameter — the predicate must decline since
+    // there is no declaration to enqueue.
+    let bare_param = TypeExpr::TypeParameter(TypeParam {
+        name: "T".to_string(),
+        constraint: None,
+        default: None,
+    });
+    let analysis: crate::types::FileAnalysisSnapshot = host
+        .get_raw_analysis_snapshot("/workspace/src/Comp.vue")
+        .expect("Comp.vue analysis snapshot");
+    let owner_local = component_meta_registry_public_route_owner_local_root(
+        host.as_ref() as &dyn ResolverContext,
+        "/workspace/src/Comp.vue",
+        &analysis,
+        &bare_param,
+        None,
+    );
+    assert!(
+        owner_local.is_none(),
+        "§9.8 owner-local counterfixture: bare TypeParameter (`T`) MUST \
+         NOT trigger the owner-local Whole rewrite — type parameters have \
+         no declaration to route to; got owner_local_root = {owner_local:?}",
+    );
+}
