@@ -2,7 +2,7 @@
 //!
 //! The default `cargo test --workspace --tests --verbose` run MUST be
 //! hermetic — every test must compile and execute without an external
-//! third-party clone (e.g., `nuxt-ui-codex-bench`) on disk. The
+//! third-party clone (e.g., a vendored corpus repo) on disk. The
 //! committed `expected-corpus-test-count.txt` records the minimum
 //! number of corpus tests stitched into `corpus_audit_tests.rs`; this
 //! test asserts the stitched module count is at least that threshold.
@@ -23,8 +23,8 @@
 //!
 //! ## Hermeticity contract
 //!
-//! This test does NOT touch `.integration-tests/repos/...`. It only
-//! reads two files inside the workspace tree:
+//! This test does NOT touch the external integration-tests
+//! repos clone. It only reads two files inside the workspace tree:
 //!
 //! - `crates/verter_session/tests/perf_bounds/expected-corpus-test-count.txt`
 //!   — the committed minimum.
@@ -35,8 +35,8 @@
 //! `include_str!` so the assertion runs against the exact bytes
 //! committed alongside the test, not whatever happens to be on disk.
 //! The `external_corpus_paths_not_present_outside_gated_tests`
-//! architecture guard verifies this file does NOT reference any
-//! `.integration-tests/repos/...` path.
+//! architecture guard scans this file and rejects any forbidden
+//! external corpus path literal.
 
 const EXPECTED_COUNT: &str =
     include_str!("perf_bounds/expected-corpus-test-count.txt");
