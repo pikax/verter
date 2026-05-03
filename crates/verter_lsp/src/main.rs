@@ -49,43 +49,20 @@ async fn main() {
     // Parse CLI arguments
     let args = CliArgs::parse();
 
-    // Optionally start the MCP HTTP server alongside LSP (shares the same VerterHost).
-    // Port 0 lets the OS pick a free port, avoiding conflicts when multiple VS Code
-    // windows each running their own Verter instance. We bind the listener here so the
-    // actual port is known immediately — no async coordination needed.
-    //
-    // Only available when verter_lsp is built with `--features mcp`. Without the
-    // feature, IDEs must spawn the standalone `verter_mcp_server` binary.
-    #[cfg(feature = "mcp")]
-    let mcp_actual_port: Option<u16> = if let Some(mcp_port) = args.mcp_port {
-        match tokio::net::TcpListener::bind(format!("127.0.0.1:{mcp_port}")).await {
-            Ok(listener) => {
-                let actual_port = listener.local_addr().unwrap().port();
-                let mcp_host = Arc::clone(&host);
-                let mcp_lint_preset = args.mcp_lint_preset.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = serve_mcp_http(mcp_host, listener, &mcp_lint_preset).await {
-                        tracing::warn!("MCP HTTP server failed: {e}");
-                    }
-                });
-                Some(actual_port)
-            }
-            Err(e) => {
-                tracing::warn!("MCP HTTP server failed to bind port {mcp_port}: {e}");
-                None
-            }
-        }
-    } else {
-        None
-    };
-
-    #[cfg(not(feature = "mcp"))]
+    // The LSP binary no longer hosts the MCP HTTP server in-process.
+    // `verter_lsp` and `verter_mcp` ship as independent products; IDEs
+    // that previously consumed MCP via `--mcp-port` must spawn the
+    // standalone `verter_mcp_server` binary in its own process.
+    // The `--mcp-port` CLI flag is still parsed so existing IDE
+    // configurations remain syntactically valid, but supplying it
+    // now triggers a guidance log only.
     let mcp_actual_port: Option<u16> = {
         if args.mcp_port.is_some() {
             tracing::warn!(
-                "--mcp-port supplied but verter_lsp was built without `mcp` feature. \
-                 Spawn the standalone `verter_mcp_server` binary or rebuild with \
-                 `--features mcp`."
+                "--mcp-port is no longer honoured by verter-lsp. \
+                 The LSP binary no longer embeds the MCP server. \
+                 Spawn `verter-mcp-server --transport http --port <port>` \
+                 in its own process to expose the HTTP MCP transport."
             );
         }
         None
@@ -173,12 +150,11 @@ struct CliArgs {
     plugin_path: Option<String>,
     /// Workspace root (positional argument).
     workspace_root: Option<String>,
-    /// MCP HTTP port. When set, starts an HTTP MCP endpoint alongside LSP stdio.
+    /// MCP HTTP port. Parsed for syntactic compatibility with existing
+    /// IDE configurations only — the LSP binary no longer embeds the
+    /// MCP server. Supplying this flag now logs a notice that points
+    /// consumers at `verter-mcp-server`.
     mcp_port: Option<u16>,
-    /// Lint preset for the MCP server's diagnostic tools.
-    /// Only consumed when the `mcp` feature is enabled.
-    #[cfg_attr(not(feature = "mcp"), allow(dead_code))]
-    mcp_lint_preset: String,
 }
 
 impl CliArgs {
@@ -188,7 +164,6 @@ impl CliArgs {
         let mut plugin_path = None;
         let mut workspace_root = None;
         let mut mcp_port = None;
-        let mut mcp_lint_preset = "recommended".to_string();
 
         for arg in std::env::args().skip(1) {
             if let Some(val) = arg.strip_prefix("--type-provider=") {
@@ -199,8 +174,13 @@ impl CliArgs {
                 plugin_path = Some(val.to_string());
             } else if let Some(val) = arg.strip_prefix("--mcp-port=") {
                 mcp_port = val.parse().ok();
-            } else if let Some(val) = arg.strip_prefix("--mcp-lint-preset=") {
-                mcp_lint_preset = val.to_string();
+            } else if arg.starts_with("--mcp-lint-preset=") {
+                // Accepted for syntactic compatibility with IDE
+                // configurations that previously bundled MCP into the
+                // LSP binary. Now that MCP ships separately via
+                // `verter-mcp-server`, the lint preset is configured
+                // on that binary's CLI; the LSP simply ignores the flag.
+                continue;
             } else if !arg.starts_with("--") {
                 workspace_root = Some(arg);
             }
@@ -212,7 +192,6 @@ impl CliArgs {
             plugin_path,
             workspace_root,
             mcp_port,
-            mcp_lint_preset,
         }
     }
 }
@@ -469,41 +448,4 @@ fn path_to_file_uri(path: &str) -> String {
         // Windows: C:/Users/... → file:///C:/Users/...
         format!("file:///{normalized}")
     }
-}
-
-/// Serve the MCP HTTP endpoint on an already-bound listener.
-/// The listener is bound in `main()` so the actual port is known immediately.
-#[cfg(feature = "mcp")]
-async fn serve_mcp_http(
-    host: Arc<VerterHost>,
-    listener: tokio::net::TcpListener,
-    lint_preset: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use rmcp::transport::streamable_http_server::{
-        session::local::LocalSessionManager, StreamableHttpService,
-    };
-    use verter_mcp::{McpServerConfig, VerterMcpServer};
-
-    let lint_config = verter_mcp::tools::diagnostics::make_lint_config(lint_preset);
-    let linter = Arc::new(verter_diagnostics::Linter::new(lint_config));
-    let config = McpServerConfig::default();
-    let server = VerterMcpServer::new(host, linter, config);
-
-    let http_service = StreamableHttpService::new(
-        move || Ok(server.clone()),
-        LocalSessionManager::default().into(),
-        Default::default(),
-    );
-
-    let router = axum::Router::new().nest_service("/mcp", http_service);
-    let actual_port = listener.local_addr()?.port();
-
-    tracing::info!("MCP HTTP server running at http://127.0.0.1:{actual_port}/mcp");
-
-    axum::serve(listener, router)
-        .with_graceful_shutdown(async {
-            tokio::signal::ctrl_c().await.ok();
-        })
-        .await?;
-    Ok(())
 }

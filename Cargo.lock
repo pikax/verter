@@ -3772,7 +3772,6 @@ dependencies = [
 name = "verter_lsp"
 version = "0.0.1-beta.1"
 dependencies = [
- "axum",
  "dashmap 6.1.0",
  "futures-util",
  "glob",
@@ -3785,7 +3784,6 @@ dependencies = [
  "oxc_span",
  "parking_lot",
  "paste",
- "rmcp",
  "schemars",
  "serde",
  "serde_json",
@@ -3796,7 +3794,6 @@ dependencies = [
  "tracing-subscriber",
  "verter_actions",
  "verter_diagnostics",
- "verter_mcp",
  "verter_scheduler",
  "verter_semantic",
  "verter_session",
