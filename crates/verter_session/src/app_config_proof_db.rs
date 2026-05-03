@@ -184,3 +184,30 @@ impl Default for AppConfigNoOverrideProofDb {
         Self::new()
     }
 }
+
+impl crate::invalidation_domain::ParticipatesInInvalidation for AppConfigNoOverrideProofDb {
+    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        // Plan §12.A3 — `AppConfigNoOverrideProofDb` participates in
+        // [FileContent, AppConfigInterfaceMerge]. The proof's dep
+        // signature includes the merge-generation; either a content
+        // edit on a flagged file or a workspace-level
+        // `interface AppConfig` shape change must invalidate it.
+        &[FileContent, AppConfigInterfaceMerge]
+    }
+    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        if matches!(domain, AppConfigInterfaceMerge | ProjectGeneration) {
+            self.invalidate_all();
+        }
+    }
+}
+
+impl crate::invalidation_domain::InvalidationByCanonical for AppConfigNoOverrideProofDb {
+    fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
+        let before = self.live_count();
+        self.invalidate_canonical(canonical_id);
+        let after = self.live_count();
+        before.saturating_sub(after)
+    }
+}

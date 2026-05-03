@@ -215,6 +215,26 @@ impl Default for ImportedRootDb {
     }
 }
 
+impl crate::invalidation_domain::ParticipatesInInvalidation for ImportedRootDb {
+    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        &[FileContent, ResolverState, ProjectGeneration]
+    }
+    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        if matches!(domain, ProjectGeneration) {
+            self.clear();
+        }
+    }
+}
+
+impl crate::invalidation_domain::InvalidationByCanonical for ImportedRootDb {
+    fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
+        self.evict_provider(canonical_id);
+        0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

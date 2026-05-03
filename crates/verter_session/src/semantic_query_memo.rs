@@ -2608,6 +2608,28 @@ impl SemanticGraphRead for SemanticGraphStore {
     }
 }
 
+impl crate::invalidation_domain::ParticipatesInInvalidation for SemanticGraphStore {
+    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        &[FileContent, TypeGraph, ResolverState, ProjectGeneration]
+    }
+    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        if matches!(domain, ProjectGeneration) {
+            let _ = self.invalidate_all();
+            self.clear_resolved_named_types();
+        }
+    }
+}
+
+impl crate::invalidation_domain::InvalidationByCanonical for SemanticGraphStore {
+    fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
+        let n_memo = self.invalidate_canonical(canonical_id);
+        let n_named = self.invalidate_resolved_named_types_for_canonical(canonical_id);
+        n_memo + n_named
+    }
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // Internal helpers
 // ──────────────────────────────────────────────────────────────────────────

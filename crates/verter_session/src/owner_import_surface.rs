@@ -146,6 +146,28 @@ impl Default for OwnerImportSurfaceDb {
     }
 }
 
+impl crate::invalidation_domain::ParticipatesInInvalidation for OwnerImportSurfaceDb {
+    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        &[FileContent, ResolverState, ProjectGeneration]
+    }
+    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        if matches!(domain, ProjectGeneration) {
+            self.entries_drain_for_generation_bump();
+        }
+    }
+}
+
+impl crate::invalidation_domain::InvalidationByCanonical for OwnerImportSurfaceDb {
+    fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
+        let before = self.len();
+        self.remove(canonical_id);
+        let after = self.len();
+        before.saturating_sub(after)
+    }
+}
+
 /// Build a fresh `OwnerImportSurface` from the owner's resolved-import
 /// iterator. Callers provide the owner identity, content hash, and the
 /// pre-resolved `(local_name, canonical_id, exported_name,

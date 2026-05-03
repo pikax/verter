@@ -160,6 +160,29 @@ impl IntrinsicRegistry {
     }
 }
 
+impl crate::invalidation_domain::ParticipatesInInvalidation for IntrinsicRegistry {
+    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        &[ProjectGeneration]
+    }
+    fn invalidate(&self, _domain: crate::invalidation_domain::InvalidationDomain) {
+        // The intrinsic registry holds the resolver's static lookup
+        // table for `lib*.d.ts` `= intrinsic` declarations. It is
+        // re-seeded on TS-SDK swap by the host's project-generation
+        // bump path; the registry itself does not own a wholesale
+        // invalidation method.
+    }
+}
+
+impl crate::invalidation_domain::InvalidationByCanonical for IntrinsicRegistry {
+    fn invalidate_canonical_for(&self, _canonical_id: &str) -> usize {
+        // The intrinsic registry is not file-content keyed — entries
+        // are intrinsic names registered at boot from the active TS
+        // SDK's `lib*.d.ts`. Per-canonical eviction is a no-op.
+        0
+    }
+}
+
 /// Extract every `type X<...> = intrinsic;` declaration name from a
 /// `lib*.d.ts` source. Used by the repo audit (active-SDK + `typescript@latest`)
 /// to enumerate intrinsics the resolver must implement.

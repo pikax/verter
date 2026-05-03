@@ -370,6 +370,27 @@ impl Default for IndexedReadyDb {
     }
 }
 
+impl crate::invalidation_domain::ParticipatesInInvalidation for IndexedReadyDb {
+    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        &[FileContent]
+    }
+    fn invalidate(&self, _domain: crate::invalidation_domain::InvalidationDomain) {
+        // IndexedReady survives project-generation bumps (whole_hash is
+        // sufficient identity); per-canonical eviction is the only
+        // invalidation mode.
+    }
+}
+
+impl crate::invalidation_domain::InvalidationByCanonical for IndexedReadyDb {
+    fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
+        let before = self.len();
+        self.remove(canonical_id);
+        let after = self.len();
+        before.saturating_sub(after)
+    }
+}
+
 /// Host-owned cache of per-file [`AnalysisReady`] artifacts.
 pub struct AnalysisReadyDb {
     entries: DashMap<AnalysisArtifactKey, Arc<AnalysisReady>>,
@@ -465,6 +486,24 @@ impl AnalysisReadyDb {
 impl Default for AnalysisReadyDb {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl crate::invalidation_domain::ParticipatesInInvalidation for AnalysisReadyDb {
+    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        &[FileContent]
+    }
+    fn invalidate(&self, _domain: crate::invalidation_domain::InvalidationDomain) {
+        // AnalysisReady survives project-generation bumps (the
+        // (canonical, whole_hash, scope) identity is sufficient);
+        // per-canonical eviction is the only invalidation mode.
+    }
+}
+
+impl crate::invalidation_domain::InvalidationByCanonical for AnalysisReadyDb {
+    fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
+        self.invalidate_canonical(canonical_id)
     }
 }
 
@@ -700,6 +739,28 @@ impl RouteOwnedShallowDb {
 impl Default for RouteOwnedShallowDb {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl crate::invalidation_domain::ParticipatesInInvalidation for RouteOwnedShallowDb {
+    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        &[FileContent, ResolverState, ProjectGeneration]
+    }
+    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        if matches!(domain, ProjectGeneration) {
+            self.clear_all();
+        }
+    }
+}
+
+impl crate::invalidation_domain::InvalidationByCanonical for RouteOwnedShallowDb {
+    fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
+        let before = self.len();
+        self.remove(canonical_id);
+        let after = self.len();
+        before.saturating_sub(after)
     }
 }
 
@@ -1278,6 +1339,194 @@ impl ProjectTypeStore {
 impl Default for ProjectTypeStore {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Plan §12.A3 / §12.A12 — typed cache invalidation domain registration.
+//
+// `PROJECT_TYPE_STORE_DB_INVENTORY` and `ProjectTypeStore::all_dbs_for_invalidation`
+// are the single source of truth for which DBs participate in the
+// invalidation cascade. Adding a new DB-typed field on
+// `ProjectTypeStore` requires three coordinated edits:
+//
+//   1. The struct field declaration above.
+//   2. The constructor in `Self::build`.
+//   3. ONE line in `PROJECT_TYPE_STORE_DB_INVENTORY` AND ONE line in
+//      `all_dbs_for_invalidation`'s vector.
+//
+// The architecture guard
+// `every_db_field_in_project_type_store_appears_in_inventory`
+// (in `crates/verter_session/tests/architecture_guards.rs`) walks the
+// struct via `syn::parse_file` and asserts every DB-typed field name
+// appears in the inventory. Adding a field outside the inventory fails
+// the guard.
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Inventory of every DB-typed field on [`ProjectTypeStore`] that
+/// participates in the typed cache invalidation domain cascade.
+///
+/// Plan §12.A3 declares this inventory as the single source of truth
+/// for cascade coverage. The architecture guard walks the struct and
+/// asserts every DB-typed field name appears here.
+pub const PROJECT_TYPE_STORE_DB_INVENTORY: &[&str] = &[
+    "indexed",
+    "analysis",
+    "routes",
+    "imported_roots",
+    "semantic_graph",
+    "owner_import_surfaces",
+    "component_meta_results",
+    "intrinsic_registry",
+    "imported_registry_db",
+    "declaration_lookup_db",
+    "resolvability_db",
+    "owner_collection_db",
+    "prepared_target_db",
+    "materialize_memo_db",
+    "materialize_structure_db",
+    "ref_cycle_db",
+    "prepared_surface_db",
+    "prepared_member_db",
+    "routed_expr_surface_db",
+    "route_owned_shallow",
+    "app_config_no_override_proof",
+];
+
+impl ProjectTypeStore {
+    /// Plan §12.A3 — return one
+    /// [`ParticipatesInInvalidation`](crate::invalidation_domain::ParticipatesInInvalidation)
+    /// reference per registered DB.
+    ///
+    /// Used by [`Self::invalidate_canonical_across_all_dbs`] (the
+    /// macro-equivalent monomorphic cascade) and by the coverage guard
+    /// `every_db_in_project_type_store_participates_in_invalidation`
+    /// in `tests/invalidation_coverage.rs`.
+    ///
+    /// Order matches [`PROJECT_TYPE_STORE_DB_INVENTORY`] exactly. Any
+    /// new DB MUST add an entry here AND in the inventory; the
+    /// coverage guard length-asserts both lists.
+    pub fn all_dbs_for_invalidation(
+        &self,
+    ) -> Vec<&dyn crate::invalidation_domain::ParticipatesInInvalidation> {
+        vec![
+            &self.indexed,
+            &self.analysis,
+            &*self.routes,
+            &*self.imported_roots,
+            &*self.semantic_graph,
+            &self.owner_import_surfaces,
+            &self.component_meta_results,
+            &self.intrinsic_registry,
+            &self.imported_registry_db,
+            &self.declaration_lookup_db,
+            &self.resolvability_db,
+            &self.owner_collection_db,
+            &self.prepared_target_db,
+            &self.materialize_memo_db,
+            &self.materialize_structure_db,
+            &self.ref_cycle_db,
+            &self.prepared_surface_db,
+            &self.prepared_member_db,
+            &self.routed_expr_surface_db,
+            &self.route_owned_shallow,
+            &self.app_config_no_override_proof,
+        ]
+    }
+
+    /// Plan §12.A12 step 3 — monomorphic statically-dispatched
+    /// per-canonical eviction cascade across every DB on the store.
+    ///
+    /// Each call site below invokes the per-DB
+    /// [`InvalidationByCanonical::invalidate_canonical_for`] impl
+    /// directly (no `dyn` dispatch, no virtual call). The cascade
+    /// returns the total number of entries dropped across all DBs.
+    ///
+    /// Called by the host's per-file-content-change invalidation path
+    /// (one call per canonical id whose `whole_hash` shifts). The
+    /// per-DB implementations route through their own secondary
+    /// indices (see [`crate::invalidation_domain::CanonicalReverseIndex`])
+    /// for O(K) drain, where K = entries owned by the canonical.
+    ///
+    /// `IndexedReadyDb` and `ComponentMetaResultDb` are not on the
+    /// canonical-by-canonical path: `IndexedReadyDb` keys directly on
+    /// `Arc<str>` and exposes `remove(canonical_id)`,
+    /// `ComponentMetaResultDb` keys on owner-canonical and exposes
+    /// `invalidate_owner(owner_canonical)`. Both are invoked here so
+    /// the cascade covers the inventory uniformly.
+    pub fn invalidate_canonical_across_all_dbs(&self, canonical_id: &str) -> usize {
+        use crate::invalidation_domain::InvalidationByCanonical;
+
+        // Statically-dispatched InvalidationByCanonical calls — one
+        // per registered DB-typed field on `ProjectTypeStore`. No
+        // `dyn` dispatch; the compiler monomorphises each call. The
+        // call order matches `PROJECT_TYPE_STORE_DB_INVENTORY` and
+        // `all_dbs_for_invalidation()`.
+        let mut total: usize = 0;
+        total = total.saturating_add(self.indexed.invalidate_canonical_for(canonical_id));
+        total = total.saturating_add(self.analysis.invalidate_canonical_for(canonical_id));
+        total = total.saturating_add(self.routes.invalidate_canonical_for(canonical_id));
+        total = total.saturating_add(self.imported_roots.invalidate_canonical_for(canonical_id));
+        total = total.saturating_add(self.semantic_graph.invalidate_canonical_for(canonical_id));
+        total = total.saturating_add(
+            self.owner_import_surfaces
+                .invalidate_canonical_for(canonical_id),
+        );
+        total = total.saturating_add(
+            self.component_meta_results
+                .invalidate_canonical_for(canonical_id),
+        );
+        total = total.saturating_add(
+            self.intrinsic_registry
+                .invalidate_canonical_for(canonical_id),
+        );
+        total = total.saturating_add(
+            self.imported_registry_db
+                .invalidate_canonical_for(canonical_id),
+        );
+        total = total.saturating_add(
+            self.declaration_lookup_db
+                .invalidate_canonical_for(canonical_id),
+        );
+        total = total.saturating_add(self.resolvability_db.invalidate_canonical_for(canonical_id));
+        total = total.saturating_add(
+            self.owner_collection_db
+                .invalidate_canonical_for(canonical_id),
+        );
+        total = total.saturating_add(
+            self.prepared_target_db
+                .invalidate_canonical_for(canonical_id),
+        );
+        total = total.saturating_add(
+            self.materialize_memo_db
+                .invalidate_canonical_for(canonical_id),
+        );
+        total = total.saturating_add(
+            self.materialize_structure_db
+                .invalidate_canonical_for(canonical_id),
+        );
+        total = total.saturating_add(self.ref_cycle_db.invalidate_canonical_for(canonical_id));
+        total = total.saturating_add(
+            self.prepared_surface_db
+                .invalidate_canonical_for(canonical_id),
+        );
+        total = total.saturating_add(
+            self.prepared_member_db
+                .invalidate_canonical_for(canonical_id),
+        );
+        total = total.saturating_add(
+            self.routed_expr_surface_db
+                .invalidate_canonical_for(canonical_id),
+        );
+        total = total.saturating_add(
+            self.route_owned_shallow
+                .invalidate_canonical_for(canonical_id),
+        );
+        total = total.saturating_add(
+            self.app_config_no_override_proof
+                .invalidate_canonical_for(canonical_id),
+        );
+        total
     }
 }
 

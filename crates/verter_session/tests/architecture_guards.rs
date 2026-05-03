@@ -20,6 +20,10 @@ fn read_workspace_file(rel: &str) -> String {
     fs::read_to_string(workspace_root().join(rel)).unwrap_or_else(|e| panic!("read {rel}: {e}"))
 }
 
+fn workspace_path(rel: &str) -> std::path::PathBuf {
+    workspace_root().join(rel)
+}
+
 #[test]
 fn no_read_source_in_component_meta() {
     let src = read_workspace_file("crates/verter_session/src/resolver_core/component_meta.rs");
@@ -3498,6 +3502,8 @@ mod foundations_guards {
         "pub mod resolver_core",
         // tests/host_tests.rs (semantic_query::* in integration tests)
         "pub mod semantic_query",
+        // tests/invalidation_coverage.rs, tests/invalidation_perf.rs
+        "pub mod invalidation_domain",
         // ─── B-C5 territory (separate ownership), kept `pub` ────────
         "pub mod component_meta_resolution_policy",
         // ─── crate-private modules (already non-public) ─────────────
@@ -3772,4 +3778,341 @@ mod foundations_guards {
             "guard 6 predicate must report > target lines for an oversized fixture",
         );
     }
+}
+
+// ===========================================================================
+// guard 8 — every DB-typed field on `ProjectTypeStore` appears in the
+// inventory `PROJECT_TYPE_STORE_DB_INVENTORY` and the runtime
+// `all_dbs_for_invalidation()` list. Plan §12.A3 / §12.A10 step 7.
+//
+// The inventory is the single source of truth for which DBs participate
+// in the typed cache invalidation cascade. Adding a DB-typed field
+// outside the inventory fails this guard.
+//
+// Companion runtime guard:
+// `crates/verter_session/tests/invalidation_coverage.rs`'s
+// `every_db_in_project_type_store_participates_in_invalidation` walks
+// the macro-generated runtime surface; this source-structure guard
+// walks the actual struct definition and asserts every DB-typed field
+// appears in the inventory.
+// ===========================================================================
+
+/// Predicate: does `rendered_ty` syntactically look like one of the
+/// host-owned DB / Store / Registry types tracked by
+/// [`crate::project_type_store::ProjectTypeStore`]?
+///
+/// Recognizes the suffix-pattern `*Db`, `*Store`, `*Registry`, plus
+/// generic forms wrapping the same suffixes, plus `Arc<...>` wrappers.
+/// Tolerant of syn's whitespace canonicalization (single-space-
+/// separated tokens).
+fn is_db_shape(rendered_ty: &str) -> bool {
+    // Strip `Arc <` / `Arc<` wrapper before pattern-matching the
+    // inner type's suffix.
+    let inner = rendered_ty
+        .trim()
+        .strip_prefix("Arc <")
+        .or_else(|| rendered_ty.trim().strip_prefix("Arc<"))
+        .unwrap_or(rendered_ty)
+        .trim_end_matches('>')
+        .trim();
+    // Recognize the head identifier: take chars up to `<` or
+    // whitespace.
+    let head_end = inner
+        .find(|c: char| c == '<' || c.is_whitespace())
+        .unwrap_or(inner.len());
+    let head = inner[..head_end].trim();
+    // The DB suffix family. `Counters` / `Snapshot` / `Hash` etc.
+    // are NOT DB-shape and are excluded by the strict suffix check.
+    let suffixes = ["Db", "Store", "Registry"];
+    suffixes
+        .iter()
+        .any(|suf| head.ends_with(suf) && head.len() > suf.len())
+}
+
+/// Walk `source` (a `syn::parse_file`-able Rust file) for the struct
+/// named `struct_ident` and return the names of every field whose type
+/// matches a DB-shape pattern (`*Db`, `*Store`, `*Registry`,
+/// `Arc<*Db>`, `Arc<*Store>`, `Arc<*Registry>`,
+/// `ComponentMetaResultDb<...>`).
+///
+/// Returns the names that are NOT in `registered`. Pure function for
+/// the deliberate-violation test below.
+fn unregistered_db_fields_in_struct(
+    source: &str,
+    struct_ident: &str,
+    registered: &[&str],
+) -> Vec<String> {
+    use syn::{parse_file, Item};
+
+    let parsed = parse_file(source).expect("parse source via syn");
+    let mut unregistered: Vec<String> = Vec::new();
+
+    for item in &parsed.items {
+        let Item::Struct(item_struct) = item else {
+            continue;
+        };
+        if item_struct.ident != struct_ident {
+            continue;
+        }
+        let syn::Fields::Named(named) = &item_struct.fields else {
+            continue;
+        };
+        for field in &named.named {
+            let Some(field_name) = field.ident.as_ref() else {
+                continue;
+            };
+            let field_name_str = field_name.to_string();
+            let rendered_ty = render_type(&field.ty);
+            if !is_db_shape(&rendered_ty) {
+                continue;
+            }
+            if !registered.iter().any(|r| *r == field_name_str) {
+                unregistered.push(field_name_str);
+            }
+        }
+    }
+
+    unregistered
+}
+
+#[test]
+fn every_db_field_in_project_type_store_appears_in_inventory() {
+    let src = read_workspace_file("crates/verter_session/src/project_type_store.rs");
+    let inventory = verter_session::project_type_store::PROJECT_TYPE_STORE_DB_INVENTORY;
+
+    let unregistered = unregistered_db_fields_in_struct(&src, "ProjectTypeStore", inventory);
+
+    assert!(
+        unregistered.is_empty(),
+        "guard 8: DB-typed field(s) on ProjectTypeStore are not in \
+         PROJECT_TYPE_STORE_DB_INVENTORY: {unregistered:?}. \
+         Adding a DB-typed field requires updating the inventory + \
+         all_dbs_for_invalidation() in lockstep. See \
+         crates/verter_session/src/project_type_store.rs."
+    );
+}
+
+#[test]
+fn guard8_predicate_rejects_unregistered_db_field() {
+    // Deliberate-violation fixture: a struct with a DB-shape field
+    // missing from the registered list. The predicate must surface
+    // the offending field.
+    let fixture_src = r#"
+        pub struct FakeProjectTypeStore {
+            pub indexed: IndexedReadyDb,
+            pub analysis: AnalysisReadyDb,
+            pub forgotten_field: ForgottenStore,
+        }
+    "#;
+    let registered = ["indexed", "analysis"];
+    let unregistered =
+        unregistered_db_fields_in_struct(fixture_src, "FakeProjectTypeStore", &registered);
+    assert_eq!(
+        unregistered,
+        vec!["forgotten_field".to_string()],
+        "guard 8 predicate must catch the unregistered DB field. \
+         If this assertion fails, the cache-shape detector is too \
+         narrow OR the registered-set check is broken."
+    );
+}
+
+#[test]
+fn guard8_predicate_passes_when_inventory_is_complete() {
+    // Sanity counter-fixture: every DB-shape field IS registered.
+    // The predicate must return an empty Vec.
+    let fixture_src = r#"
+        pub struct FakeProjectTypeStore {
+            pub indexed: IndexedReadyDb,
+            pub analysis: AnalysisReadyDb,
+        }
+    "#;
+    let registered = ["indexed", "analysis"];
+    let unregistered =
+        unregistered_db_fields_in_struct(fixture_src, "FakeProjectTypeStore", &registered);
+    assert!(
+        unregistered.is_empty(),
+        "guard 8 predicate must accept a fully-registered struct, \
+         got {unregistered:?}",
+    );
+}
+
+// ===========================================================================
+// guard 9 — every DB-typed field on `ProjectTypeStore` has a
+// corresponding `impl InvalidationByCanonical for ...` block somewhere
+// in the verter_session crate sources. Plan §12.A12 acceptance gate.
+//
+// Source-structure guard. Walks the struct via `syn::parse_file` and
+// extracts the head identifier of each DB-shape field's type
+// (`IndexedReadyDb`, `AnalysisReadyDb`, `RouteDb`, ...). For every
+// such head identifier, asserts that at least one source file under
+// `crates/verter_session/src/` contains an
+// `impl ... InvalidationByCanonical for <Head>` block.
+//
+// Companion runtime guard:
+// `crates/verter_session/tests/invalidation_perf.rs`'s
+// `invalidate_canonical_touches_only_indexed_entries` exercises the
+// O(K) drain semantics for one representative DB; this guard asserts
+// the full inventory is uniformly covered.
+// ===========================================================================
+
+/// Extract the head identifier of every DB-shape field's type from
+/// `source` (a `syn::parse_file`-able Rust file) for the struct named
+/// `struct_ident`. Strips `Arc<...>` and generic-parameter forms so
+/// `Arc<RouteDb>` and `ComponentMetaResultDb<T>` both reduce to their
+/// head identifier.
+fn db_field_type_heads_in_struct(source: &str, struct_ident: &str) -> Vec<String> {
+    use syn::{parse_file, Item};
+
+    let parsed = parse_file(source).expect("parse source via syn");
+    let mut heads: Vec<String> = Vec::new();
+
+    for item in &parsed.items {
+        let Item::Struct(item_struct) = item else {
+            continue;
+        };
+        if item_struct.ident != struct_ident {
+            continue;
+        }
+        let syn::Fields::Named(named) = &item_struct.fields else {
+            continue;
+        };
+        for field in &named.named {
+            if field.ident.is_none() {
+                continue;
+            }
+            let rendered_ty = render_type(&field.ty);
+            if !is_db_shape(&rendered_ty) {
+                continue;
+            }
+            // Reduce to head identifier — same logic as `is_db_shape`'s
+            // internal head extraction.
+            let inner = rendered_ty
+                .trim()
+                .strip_prefix("Arc <")
+                .or_else(|| rendered_ty.trim().strip_prefix("Arc<"))
+                .unwrap_or(&rendered_ty)
+                .trim_end_matches('>')
+                .trim();
+            let head_end = inner
+                .find(|c: char| c == '<' || c.is_whitespace())
+                .unwrap_or(inner.len());
+            let head = inner[..head_end].trim().to_string();
+            if !heads.contains(&head) {
+                heads.push(head);
+            }
+        }
+    }
+
+    heads
+}
+
+/// Search every `.rs` file under `crates/verter_session/src/` for a
+/// `impl ... InvalidationByCanonical for <type_head>` block. Tolerant
+/// of `impl crate::invalidation_domain::InvalidationByCanonical`,
+/// `impl<P> crate::...InvalidationByCanonical for ComponentMetaResultDb<P>`,
+/// and the bare `impl InvalidationByCanonical for ...` form.
+fn invalidation_by_canonical_impl_exists(crate_root: &std::path::Path, type_head: &str) -> bool {
+    use std::fs;
+
+    fn walk(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+        let Ok(read_dir) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in read_dir.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, files);
+            } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
+                files.push(path);
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    walk(crate_root, &mut files);
+
+    // Two variants matched: `for <Head>` (concrete) and `for <Head><`
+    // (generic). The pattern allows arbitrary whitespace and the
+    // optional `crate::invalidation_domain::` prefix.
+    let needle_concrete = format!("InvalidationByCanonical for {type_head}");
+    let needle_generic = format!("InvalidationByCanonical for {type_head}<");
+    let needle_concrete_eol = format!("InvalidationByCanonical for {type_head}\n");
+    let needle_concrete_brace = format!("InvalidationByCanonical for {type_head} ");
+
+    for file in files {
+        let Ok(src) = fs::read_to_string(&file) else {
+            continue;
+        };
+        if src.contains(&needle_generic)
+            || src.contains(&needle_concrete_eol)
+            || src.contains(&needle_concrete_brace)
+            || src.contains(&format!("{needle_concrete}\r\n"))
+            || src.contains(&format!("{needle_concrete}{{"))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+#[test]
+fn every_db_field_implements_invalidation_by_canonical() {
+    let src = read_workspace_file("crates/verter_session/src/project_type_store.rs");
+    let heads = db_field_type_heads_in_struct(&src, "ProjectTypeStore");
+
+    let crate_root = workspace_path("crates/verter_session/src");
+    let mut missing: Vec<String> = Vec::new();
+    for head in &heads {
+        if !invalidation_by_canonical_impl_exists(&crate_root, head) {
+            missing.push(head.clone());
+        }
+    }
+
+    assert!(
+        missing.is_empty(),
+        "guard 9: DB-typed field(s) on ProjectTypeStore have no \
+         corresponding `impl InvalidationByCanonical for ...` block \
+         in `crates/verter_session/src/`: {missing:?}. Plan §12.A12 \
+         requires every DB to implement the per-canonical drain \
+         trait so the cascade `invalidate_canonical_across_all_dbs` \
+         can dispatch monomorphically."
+    );
+}
+
+#[test]
+fn guard9_predicate_rejects_missing_invalidation_by_canonical_impl() {
+    // Deliberate-violation fixture: a struct with a DB-shape field
+    // whose head identifier is NOT in the workspace's
+    // verter_session src tree (so `invalidation_by_canonical_impl_exists`
+    // returns false). Predicate must surface the missing impl.
+    let fixture_src = r#"
+        pub struct FakeProjectTypeStore {
+            pub forgotten_field: NonExistentSentinelGuard9Db,
+        }
+    "#;
+    let heads = db_field_type_heads_in_struct(fixture_src, "FakeProjectTypeStore");
+    assert_eq!(
+        heads,
+        vec!["NonExistentSentinelGuard9Db".to_string()],
+        "guard 9 predicate must extract the field's type head id",
+    );
+    let crate_root = workspace_path("crates/verter_session/src");
+    let exists = invalidation_by_canonical_impl_exists(&crate_root, "NonExistentSentinelGuard9Db");
+    assert!(
+        !exists,
+        "guard 9 predicate must report `false` for a head identifier \
+         that has no corresponding impl block in the source tree",
+    );
+}
+
+#[test]
+fn guard9_predicate_passes_for_known_implementor() {
+    // Sanity counter-fixture: `IndexedReadyDb` IS implemented in the
+    // workspace. The detector must report `true`.
+    let crate_root = workspace_path("crates/verter_session/src");
+    assert!(
+        invalidation_by_canonical_impl_exists(&crate_root, "IndexedReadyDb"),
+        "guard 9 predicate must report `true` for a known \
+         InvalidationByCanonical implementor (IndexedReadyDb)",
+    );
 }

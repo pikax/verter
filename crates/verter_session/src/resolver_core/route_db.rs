@@ -305,6 +305,31 @@ impl Default for RouteDb {
     }
 }
 
+impl crate::invalidation_domain::ParticipatesInInvalidation for RouteDb {
+    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        &[FileContent, ResolverState, ProjectGeneration]
+    }
+    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        if matches!(domain, ProjectGeneration) {
+            self.clear();
+        }
+    }
+}
+
+impl crate::invalidation_domain::InvalidationByCanonical for RouteDb {
+    fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
+        // Routes are keyed on (resolver_owner_canonical, specifier);
+        // a content edit on a provider canonical evicts every route
+        // routed through that provider via `evict_provider`. Returns
+        // 0 because the underlying primitive does not surface a count;
+        // the cascade outcome is verified via the per-DB unit tests.
+        self.evict_provider(canonical_id);
+        0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

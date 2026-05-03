@@ -68,6 +68,7 @@ pub struct ImportedRegistryDb {
     entries: DashMap<ImportedRegistryKey, Arc<ImportedRegistryEntry>>,
     inflight: InflightTable<ImportedRegistryKey>,
     live_counter: Arc<AtomicU64>,
+    canonical_index: crate::invalidation_domain::CanonicalReverseIndex<ImportedRegistryKey>,
 }
 
 impl ImportedRegistryDb {
@@ -80,6 +81,7 @@ impl ImportedRegistryDb {
             entries: DashMap::new(),
             inflight: InflightTable::new(),
             live_counter,
+            canonical_index: crate::invalidation_domain::CanonicalReverseIndex::new(),
         }
     }
 
@@ -93,7 +95,9 @@ impl ImportedRegistryDb {
         F: FnOnce() -> Option<(Option<ResolvedImportedRegistrySymbol>, DepSignature)>,
     {
         let live_counter = Arc::clone(&self.live_counter);
-        cooperative_get_or_insert(
+        let key_for_post_publish = key.clone();
+        let canonical_index = &self.canonical_index;
+        crate::cooperative_admission::cooperative_get_or_insert_with_post_publish(
             &self.entries,
             &self.inflight,
             key.clone(),
@@ -116,23 +120,24 @@ impl ImportedRegistryDb {
             },
             |entry: &ImportedRegistryEntry| entry.value.clone(),
             |entry: &ImportedRegistryEntry| ctx.validate_dep_signature(&entry.dep_signature),
+            |_, _| {
+                // Plan §12.A12 — register the published key in the
+                // canonical reverse index so future
+                // invalidate_canonical_for drains in O(K).
+                let canonical = Arc::clone(&key_for_post_publish.0);
+                canonical_index.register(&canonical, key_for_post_publish.clone());
+            },
         )
     }
 
     pub fn invalidate_canonical(&self, canonical_id: &str) {
-        let keys: Vec<ImportedRegistryKey> = self
-            .entries
-            .iter()
-            .filter_map(|entry| {
-                let (canonical, _) = entry.key();
-                if canonical.as_ref() == canonical_id {
-                    Some(entry.key().clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        for key in keys {
+        // Plan §12.A12 — drain via the per-canonical reverse index in
+        // O(K) (entries owned by this canonical) instead of O(N) (total
+        // entries). The index is populated on every cooperative
+        // post-publish, so a content edit on the file invalidates
+        // exactly its own resolved imports.
+        let drained = self.canonical_index.drain_for(canonical_id);
+        for key in drained {
             if self.entries.remove(&key).is_some() {
                 self.live_counter.fetch_sub(1, Ordering::Relaxed);
             }
@@ -142,6 +147,7 @@ impl ImportedRegistryDb {
     pub fn invalidate_all(&self) {
         let n = self.entries.len() as u64;
         self.entries.clear();
+        self.canonical_index.clear();
         self.live_counter.fetch_sub(
             n.min(self.live_counter.load(Ordering::Relaxed)),
             Ordering::Relaxed,
@@ -150,6 +156,58 @@ impl ImportedRegistryDb {
 
     pub fn live_count(&self) -> usize {
         self.entries.len()
+    }
+
+    /// Test-only direct insertion entry point used by the
+    /// invalidation-perf regression test
+    /// (`crates/verter_session/tests/invalidation_perf.rs`). Bypasses
+    /// the cooperative-admission inflight slot and registers the entry
+    /// in the per-canonical reverse index identically to the cold
+    /// post-publish path. NOT for use from production code.
+    #[cfg(any(test, debug_assertions))]
+    pub fn insert_for_test(&self, key: ImportedRegistryKey, entry: Arc<ImportedRegistryEntry>) {
+        let canonical = Arc::clone(&key.0);
+        self.canonical_index.register(&canonical, key.clone());
+        self.entries.insert(key, entry);
+        self.live_counter.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+impl crate::invalidation_domain::ParticipatesInInvalidation for ImportedRegistryDb {
+    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        &[FileContent, ResolverState, ProjectGeneration]
+    }
+
+    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        match domain {
+            ProjectGeneration => self.invalidate_all(),
+            FileContent | ResolverState => {
+                // Per-canonical invalidation goes through
+                // InvalidationByCanonical. Wholesale invalidation by
+                // domain is not used for these domains; they are
+                // declared so the cascade can route them to the
+                // monomorphic per-canonical path.
+            }
+            TypeGraph | ComponentMeta | AppConfigInterfaceMerge => {
+                // Not declared; ignore.
+            }
+        }
+    }
+}
+
+impl crate::invalidation_domain::InvalidationByCanonical for ImportedRegistryDb {
+    fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
+        let drained = self.canonical_index.drain_for(canonical_id);
+        let mut removed = 0usize;
+        for key in drained {
+            if self.entries.remove(&key).is_some() {
+                self.live_counter.fetch_sub(1, Ordering::Relaxed);
+                removed += 1;
+            }
+        }
+        removed
     }
 }
 
@@ -1547,6 +1605,258 @@ pub(crate) fn ref_cycle_db_peek(
     ctx: &dyn ResolverContext,
 ) -> Option<crate::semantic_query::CacheRead<bool>> {
     db.peek(id, ctx)
+}
+
+// ===========================================================================
+// Plan §12.A3 / §12.A12 — typed invalidation domain wiring for every
+// component-meta DB. Each DB declares the
+// `InvalidationDomain::FileContent | ResolverState | ProjectGeneration`
+// triplet (per-canonical eviction reaches all three when a file edit
+// invalidates resolved type declarations / route shape / project
+// generation).
+//
+// `InvalidationByCanonical::invalidate_canonical_for` returns the count
+// of entries dropped. Per the §12.A3 architecture, the DBs route
+// project-shape (ProjectGeneration) bumps through `invalidate(domain)`
+// → `invalidate_all`, and per-canonical edits through
+// `invalidate_canonical_for`. The `ImportedRegistryDb` impls are
+// already wired above (with a per-canonical reverse index for O(K)
+// drains); the impls below preserve existing per-DB linear-scan
+// invalidation semantics and feed the same count back to the cascade
+// so the unit-test harness can verify cascade coverage.
+// ===========================================================================
+
+// The DBs below all share the
+// `[FileContent, ResolverState, ProjectGeneration]` domain triplet
+// and a uniform `invalidate_canonical_for` body that delegates to
+// the existing `invalidate_canonical(...)` linear scan and reports
+// the count of entries dropped via the `live_count()` delta. Each
+// impl is written explicitly (not generated by a `macro_rules!`) so
+// the source-structure architecture guard
+// `every_db_field_implements_invalidation_by_canonical` can locate
+// the impl block by direct text search.
+
+impl crate::invalidation_domain::ParticipatesInInvalidation for DeclarationLookupDb {
+    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        &[FileContent, ResolverState, ProjectGeneration]
+    }
+    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        if matches!(domain, ProjectGeneration) {
+            self.invalidate_all();
+        }
+    }
+}
+
+impl crate::invalidation_domain::InvalidationByCanonical for DeclarationLookupDb {
+    fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
+        let before = self.live_count();
+        self.invalidate_canonical(canonical_id);
+        let after = self.live_count();
+        before.saturating_sub(after)
+    }
+}
+
+impl crate::invalidation_domain::ParticipatesInInvalidation for ResolvabilityDb {
+    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        &[FileContent, ResolverState, ProjectGeneration]
+    }
+    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        if matches!(domain, ProjectGeneration) {
+            self.invalidate_all();
+        }
+    }
+}
+
+impl crate::invalidation_domain::InvalidationByCanonical for ResolvabilityDb {
+    fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
+        let before = self.live_count();
+        self.invalidate_canonical(canonical_id);
+        let after = self.live_count();
+        before.saturating_sub(after)
+    }
+}
+
+impl crate::invalidation_domain::ParticipatesInInvalidation for OwnerCollectionDb {
+    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        &[FileContent, ResolverState, ProjectGeneration]
+    }
+    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        if matches!(domain, ProjectGeneration) {
+            self.invalidate_all();
+        }
+    }
+}
+
+impl crate::invalidation_domain::InvalidationByCanonical for OwnerCollectionDb {
+    fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
+        let before = self.live_count();
+        self.invalidate_canonical(canonical_id);
+        let after = self.live_count();
+        before.saturating_sub(after)
+    }
+}
+
+impl crate::invalidation_domain::ParticipatesInInvalidation for PreparedTargetDb {
+    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        &[FileContent, ResolverState, ProjectGeneration]
+    }
+    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        if matches!(domain, ProjectGeneration) {
+            self.invalidate_all();
+        }
+    }
+}
+
+impl crate::invalidation_domain::InvalidationByCanonical for PreparedTargetDb {
+    fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
+        let before = self.live_count();
+        self.invalidate_canonical(canonical_id);
+        let after = self.live_count();
+        before.saturating_sub(after)
+    }
+}
+
+impl crate::invalidation_domain::ParticipatesInInvalidation for MaterializeMemoDb {
+    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        &[FileContent, ResolverState, ProjectGeneration]
+    }
+    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        if matches!(domain, ProjectGeneration) {
+            self.invalidate_all();
+        }
+    }
+}
+
+impl crate::invalidation_domain::InvalidationByCanonical for MaterializeMemoDb {
+    fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
+        let before = self.live_count();
+        self.invalidate_canonical(canonical_id);
+        let after = self.live_count();
+        before.saturating_sub(after)
+    }
+}
+
+impl crate::invalidation_domain::ParticipatesInInvalidation for PreparedSurfaceDb {
+    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        &[FileContent, ResolverState, ProjectGeneration]
+    }
+    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        if matches!(domain, ProjectGeneration) {
+            self.invalidate_all();
+        }
+    }
+}
+
+impl crate::invalidation_domain::InvalidationByCanonical for PreparedSurfaceDb {
+    fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
+        let before = self.live_count();
+        self.invalidate_canonical(canonical_id);
+        let after = self.live_count();
+        before.saturating_sub(after)
+    }
+}
+
+impl crate::invalidation_domain::ParticipatesInInvalidation for PreparedMemberDb {
+    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        &[FileContent, ResolverState, ProjectGeneration]
+    }
+    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        if matches!(domain, ProjectGeneration) {
+            self.invalidate_all();
+        }
+    }
+}
+
+impl crate::invalidation_domain::InvalidationByCanonical for PreparedMemberDb {
+    fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
+        let before = self.live_count();
+        self.invalidate_canonical(canonical_id);
+        let after = self.live_count();
+        before.saturating_sub(after)
+    }
+}
+
+impl crate::invalidation_domain::ParticipatesInInvalidation for RoutedExprSurfaceDb {
+    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        &[FileContent, ResolverState, ProjectGeneration]
+    }
+    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        if matches!(domain, ProjectGeneration) {
+            self.invalidate_all();
+        }
+    }
+}
+
+impl crate::invalidation_domain::InvalidationByCanonical for RoutedExprSurfaceDb {
+    fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
+        let before = self.live_count();
+        self.invalidate_canonical(canonical_id);
+        let after = self.live_count();
+        before.saturating_sub(after)
+    }
+}
+
+// `MaterializeStructureDb` and `RefCycleResultDb` use
+// `invalidate_for_canonical` instead of `invalidate_canonical`. Keep
+// the trait wiring uniform.
+impl crate::invalidation_domain::ParticipatesInInvalidation for MaterializeStructureDb {
+    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        &[FileContent, ComponentMeta, ProjectGeneration]
+    }
+    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        if matches!(domain, ProjectGeneration) {
+            self.invalidate_all();
+        }
+    }
+}
+
+impl crate::invalidation_domain::InvalidationByCanonical for MaterializeStructureDb {
+    fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
+        let before = self.live_count();
+        self.invalidate_for_canonical(canonical_id);
+        let after = self.live_count();
+        before.saturating_sub(after)
+    }
+}
+
+impl crate::invalidation_domain::ParticipatesInInvalidation for RefCycleResultDb {
+    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        &[FileContent, TypeGraph, ProjectGeneration]
+    }
+    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        if matches!(domain, ProjectGeneration) {
+            self.invalidate_all();
+        }
+    }
+}
+
+impl crate::invalidation_domain::InvalidationByCanonical for RefCycleResultDb {
+    fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
+        let before = self.entries().len();
+        self.invalidate_for_canonical(canonical_id);
+        let after = self.entries().len();
+        before.saturating_sub(after)
+    }
 }
 
 /// Plan §4.8 / §4.20 — the cooperative-admission wrapper invoked by

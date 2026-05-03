@@ -325,6 +325,34 @@ impl<P> Default for ComponentMetaResultDb<P> {
     }
 }
 
+impl<P> crate::invalidation_domain::ParticipatesInInvalidation for ComponentMetaResultDb<P>
+where
+    P: Send + Sync,
+{
+    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        &[FileContent, ComponentMeta, ProjectGeneration]
+    }
+    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        if matches!(domain, ProjectGeneration) {
+            self.invalidate_all();
+        }
+    }
+}
+
+impl<P> crate::invalidation_domain::InvalidationByCanonical for ComponentMetaResultDb<P>
+where
+    P: Send + Sync,
+{
+    fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
+        // The result key is (owner_canonical, owner_whole_hash, ...);
+        // a content edit on the owner canonical drops every cached
+        // result for that owner across all whole-hashes.
+        self.invalidate_owner(canonical_id)
+    }
+}
+
 impl<P> std::fmt::Debug for ComponentMetaResultDb<P> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ComponentMetaResultDb")

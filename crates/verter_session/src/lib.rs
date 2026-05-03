@@ -123,6 +123,7 @@ mod host_views;
 pub(crate) mod i64_as_decimal_string;
 mod id;
 pub(crate) mod intrinsic_registry;
+pub mod invalidation_domain;
 mod meta;
 pub mod meta_resolve;
 pub(crate) mod owner_import_surface;
