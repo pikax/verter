@@ -157,6 +157,22 @@ A  crates/verter_session/.phase-markers/phase-tier-5a-complete
 A  tools/orchestrator/reports/wt-tier-5a-report.md  (post-acceptance copy)
 ```
 
+## Commit chain
+
+```
+71c34ba7 test(meta): add compat-native-call-surface allowlist walker (Tier 5a)
+81f69e74 refactor(meta): bring compat ensureActive() into D35 read allow-list
+b7dd1fdd chore(session): write phase-tier-5a-complete marker
+012a9d8b chore(session): record marker_commit SHA in phase-tier-5a-complete marker
+780f5eee chore(session): record clippy gate status accurately in tier-5a marker
+23e83048 fix(meta): restore D35-compliant ensureActive() in compat checker
+99205f25 chore(session): refresh tier-5a marker head_commit + commit chain after restore
+2200f1f4 chore(session): record marker_commit SHA in phase-tier-5a-complete (refresh)
+```
+
+Final HEAD: `2200f1f4`. Base: `562233b6`. Net diff vs base: 3 files added,
+1 file modified, 8 commits.
+
 The `wt-tier-5a-report.md` copy under `tools/orchestrator/reports/` is
 the orchestrator-managed copy of this same file; D72 says workers
 write the worktree-local report and the orchestrator copies it
