@@ -1,11 +1,31 @@
 //! Virtual filesystem layer for Verter — sole authority for workspace access.
 //!
+//! # Scope
+//!
+//! Workspace source/config reads only. Tool/output I/O remains on `std::fs`.
+//!
+//! [`WorkspaceAccess`] (and the read-only [`WorkspaceRead`]) is the single
+//! workspace trait; it is the authority for reading user `.vue`/`.ts`/`.tsx`/
+//! `.js`/`.jsx`/`.cjs`/`.mjs`/`.d.ts` source, `tsconfig*.json`,
+//! `vite.config.*`, and `package.json` for module resolution.
+//!
+//! Files that are NOT workspace source/config — trace artifacts, MCP
+//! baseline outputs, profiler dumps, temp test setup files, TS-runtime
+//! tool-cache or shim files, etc. — stay on `std::fs`. The architecture
+//! guard `no_std_fs_in_semantic_session_paths` consults
+//! `tool-output-allowlist.toml` to enumerate those exceptions.
+//!
+//! Ambient TypeScript SDK declarations (`lib*.d.ts`) read from the
+//! installed `typescript` package go through the dedicated
+//! [`IntrinsicLibraryAccess`] trait, NOT [`WorkspaceAccess`], so SDK
+//! reads do not flow through the user-content overlay.
+//!
 //! # Architecture
 //!
 //! `verter_workspace` is the **single entry point** for all workspace filesystem
-//! access and import resolution. No code outside `NativeFs` touches `std::fs`.
-//! The host, LSP, bundler plugins, and Node.js consumers all go through the
-//! [`WorkspaceAccess`] trait.
+//! access and import resolution. No code outside `NativeFs` touches `std::fs`
+//! for workspace reads. The host, LSP, bundler plugins, and Node.js consumers
+//! all go through the [`WorkspaceAccess`] trait.
 //!
 //! ## Key invariants
 //!
@@ -53,6 +73,7 @@ pub(crate) mod dir_index;
 pub mod error;
 pub mod exact_resolution;
 pub mod filesystem;
+pub mod intrinsic_library;
 pub mod membership;
 pub mod memory;
 #[cfg(not(target_arch = "wasm32"))]
@@ -107,6 +128,9 @@ pub use config::{
 pub use error::{DirEntry, VfsError};
 pub use exact_resolution::{DependencySnapshotView, EdgeStore};
 pub use filesystem::{FilesystemOptions, FilesystemWorkspace};
+#[cfg(not(target_arch = "wasm32"))]
+pub use intrinsic_library::NativeIntrinsicLibrary;
+pub use intrinsic_library::{InMemoryIntrinsicLibrary, IntrinsicLibraryAccess};
 pub use membership::{
     typescript_default_excludes, ConfiguredMembership, FallbackMembership, StaticMembershipSpec,
 };

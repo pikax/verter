@@ -2990,32 +2990,18 @@ mod foundations_guards {
         src.contains("std::fs::")
     }
 
-    /// Initial allowlist for guard #1: every production file in
-    /// scope that currently uses `std::fs::`. Subsequent bundles
-    /// (B-C1 / §12.A1) shrink the set; the guard fails when a file
-    /// outside the allowlist starts using `std::fs::`.
-    pub fn guard1_allowlist() -> BTreeSet<&'static str> {
-        BTreeSet::from([
-            "crates/verter_diagnostics/src/config.rs",
-            "crates/verter_lsp/src/background_init.rs",
-            "crates/verter_lsp/src/config.rs",
-            "crates/verter_lsp/src/test_harness.rs",
-            "crates/verter_lsp/src/test_utils.rs",
-            "crates/verter_lsp/src/workspace_scanner.rs",
-            "crates/verter_mcp/src/baseline.rs",
-            "crates/verter_mcp/src/helpers.rs",
-            "crates/verter_mcp/src/scanner.rs",
-            "crates/verter_mcp/src/server.rs",
-            "crates/verter_semantic/src/analysis/routes.rs",
-            "crates/verter_session/src/component_meta_audit/mod.rs",
-            "crates/verter_session/src/id.rs",
-            "crates/verter_session/src/intrinsic_registry.rs",
-            "crates/verter_type_runtime/src/discovery.rs",
-            "crates/verter_type_runtime/src/provider_adapter.rs",
-            "crates/verter_type_runtime/src/trace.rs",
-            "crates/verter_type_runtime/src/tsgo/ipc.rs",
-            "crates/verter_type_runtime/src/tsserver/ipc.rs",
-        ])
+    /// Allowlist for guard #1, sourced from
+    /// `crates/verter_workspace/tool-output-allowlist.toml`. Each entry
+    /// is a path to a file whose `std::fs::` calls write/read
+    /// non-semantic output (trace artifacts, MCP baselines, profiler
+    /// dumps, test fixtures, TS-runtime tool-cache files, etc.).
+    ///
+    /// `source-read` callsites are NOT allowlisted — they MUST route
+    /// through `verter_workspace::WorkspaceAccess`. Migrating a
+    /// `source-read` file shrinks the allowlist by deleting its entry
+    /// from the TOML file in the same change.
+    pub fn guard1_allowlist() -> BTreeSet<String> {
+        load_tool_output_allowlist()
     }
 
     pub fn guard1_in_scope_dirs() -> Vec<&'static str> {
@@ -3029,10 +3015,32 @@ mod foundations_guards {
         ]
     }
 
+    /// Parse `crates/verter_workspace/tool-output-allowlist.toml` and
+    /// return the set of allowlisted paths, one per `[[entries]]` entry.
+    pub fn load_tool_output_allowlist() -> BTreeSet<String> {
+        #[derive(serde::Deserialize)]
+        struct Allowlist {
+            entries: Vec<Entry>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Entry {
+            path: String,
+            #[allow(dead_code)]
+            rationale: String,
+        }
+
+        let path = workspace_root().join("crates/verter_workspace/tool-output-allowlist.toml");
+        let raw = fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("guard 1: could not read `{}`: {e}", path.display()));
+        let parsed: Allowlist = toml::from_str(&raw)
+            .unwrap_or_else(|e| panic!("guard 1: could not parse `{}`: {e}", path.display()));
+        parsed.entries.into_iter().map(|e| e.path).collect()
+    }
+
     /// Run the guard 1 predicate over the in-scope directories and
     /// return the set of relative paths that USE `std::fs::` and are
     /// NOT in the allowlist. An empty result means the guard passes.
-    pub fn guard1_violations(allowlist: &BTreeSet<&'static str>) -> Vec<String> {
+    pub fn guard1_violations(allowlist: &BTreeSet<String>) -> Vec<String> {
         let root = workspace_root();
         let mut violations = Vec::new();
         for rel_dir in guard1_in_scope_dirs() {
@@ -3045,7 +3053,7 @@ mod foundations_guards {
                     continue;
                 }
                 let rel = relative_to_root(&path);
-                if allowlist.contains(rel.as_str()) {
+                if allowlist.contains(&rel) {
                     continue;
                 }
                 violations.push(rel);
@@ -3062,10 +3070,33 @@ mod foundations_guards {
             violations.is_empty(),
             "Guard 1 (`no_std_fs_in_semantic_session_paths`) violations:\n  {}\n\n\
              A new file outside the allowlist uses `std::fs::`. Either route the I/O\n\
-             through `verter_workspace::WorkspaceAccess` (preferred) or, if migration is\n\
-             not feasible yet, add the file to `guard1_allowlist()` and reference the\n\
-             remaining migration in your follow-up plan.",
+             through `verter_workspace::WorkspaceAccess` (preferred) or, if the file\n\
+             writes/reads non-semantic tool output (trace artifacts, MCP baselines,\n\
+             test fixtures, TS-runtime tool-cache files, etc.), add the path with a\n\
+             rationale to `crates/verter_workspace/tool-output-allowlist.toml`.",
             violations.join("\n  "),
+        );
+    }
+
+    #[test]
+    fn guard1_allowlist_paths_exist() {
+        // Every allowlist entry must point to a real production source
+        // file in the tree. Stale entries (file deleted, renamed, or
+        // never existed) are violations because they silently disarm
+        // the guard.
+        let root = workspace_root();
+        let mut missing = Vec::new();
+        for path in load_tool_output_allowlist() {
+            let abs = root.join(&path);
+            if !abs.exists() {
+                missing.push(path);
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "tool-output-allowlist.toml entries refer to paths that do not exist:\n  {}\n\n\
+             Update or remove these entries; a stale allowlist silently disarms the guard.",
+            missing.join("\n  "),
         );
     }
 
@@ -3102,10 +3133,11 @@ mod foundations_guards {
 
     /// Allowlist for guard #2: paths where direct OS file APIs are
     /// the legitimate authority. `native_fs.rs` is the documented
-    /// disk boundary; the others are infrastructure that the §12.A1
-    /// migration sweeps (B-C1).
-    pub fn guard2_allowlist() -> BTreeSet<&'static str> {
-        let mut set = BTreeSet::from([
+    /// disk boundary; `intrinsic_library.rs` is the dedicated reader
+    /// for ambient TypeScript SDK declarations. The remaining entries
+    /// are infrastructure tracked by `tool-output-allowlist.toml`.
+    pub fn guard2_allowlist() -> BTreeSet<String> {
+        let mut set: BTreeSet<String> = [
             "crates/verter_workspace/src/native_fs.rs",
             "crates/verter_workspace/src/config.rs",
             "crates/verter_workspace/src/snapshot_builder.rs",
@@ -3113,20 +3145,24 @@ mod foundations_guards {
             "crates/verter_workspace/src/dir_index.rs",
             "crates/verter_workspace/src/filesystem.rs",
             "crates/verter_workspace/src/ambient_parse.rs",
+            "crates/verter_workspace/src/intrinsic_library.rs",
             "crates/verter_workspace/src/resolver.rs",
             "crates/verter_parser/src/utils/oxc/vue/script/resolve_type.rs",
             "crates/verter_scheduler/src/source_loader.rs",
             "crates/verter_tsc/src/checker.rs",
             "crates/verter_tsc/src/reporter.rs",
             "crates/verter_tsc/src/tsconfig.rs",
-        ]);
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
         set.extend(guard1_allowlist());
         set
     }
 
     /// Run guard 2 across every production `.rs` file in `crates/`
     /// and return out-of-allowlist users of OS file APIs.
-    pub fn guard2_violations(allowlist: &BTreeSet<&'static str>) -> Vec<String> {
+    pub fn guard2_violations(allowlist: &BTreeSet<String>) -> Vec<String> {
         let crates_root = workspace_root().join("crates");
         let mut violations = Vec::new();
         let entries = match fs::read_dir(&crates_root) {
@@ -3151,7 +3187,7 @@ mod foundations_guards {
                     continue;
                 }
                 let rel = relative_to_root(&file);
-                if allowlist.contains(rel.as_str()) {
+                if allowlist.contains(&rel) {
                     continue;
                 }
                 violations.push(rel);
