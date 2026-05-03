@@ -5,7 +5,7 @@
   "status": "success",
   "base_commit": "562233b6",
   "head_commit": "23e83048",
-  "marker_commit": "<recorded by follow-up commit>",
+  "marker_commit": "99205f25",
   "_commit_chain": [
     "71c34ba7 test(meta): add compat-native-call-surface allowlist walker",
     "81f69e74 refactor(meta): bring compat ensureActive() into D35 read allow-list",
