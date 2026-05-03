@@ -36,8 +36,9 @@
   "scripts": {
     "clean:dist": "node ./scripts/clean-dist.mjs",
     "build:types": "pnpm exec tsc --declaration --emitDeclarationOnly --outDir dist index.ts",
-    "build": "pnpm run clean:dist && napi build -o dist --platform --release --manifest-path ../../crates/verter_napi/Cargo.toml && pnpm run build:types",
-    "build:debug": "pnpm run clean:dist && napi build -o dist --platform --manifest-path ../../crates/verter_napi/Cargo.toml && pnpm run build:types",
+    "copy-windows-artefact": "node ./scripts/copy-windows-artefact.mjs",
+    "build": "pnpm run clean:dist && napi build -o dist --platform --release --manifest-path ../../crates/verter_napi/Cargo.toml && pnpm run build:types && pnpm run copy-windows-artefact",
+    "build:debug": "pnpm run clean:dist && napi build -o dist --platform --manifest-path ../../crates/verter_napi/Cargo.toml && pnpm run build:types && pnpm run copy-windows-artefact",
     "prepublishOnly": "pnpm run build && napi prepublish -t npm",
     "artifacts": "napi artifacts",
     "test": "vitest run"
