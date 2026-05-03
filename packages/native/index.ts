@@ -511,6 +511,31 @@ export declare class ComponentMetaSession {
   getResolvedComponentMeta(canonicalOrAlias: string): Buffer | null;
 
   /**
+   * Tier 1B selective surface API (D32 + D101). Returns the
+   * `ComponentMetaSurface` envelope: eager scalars + `NamedTypeHandle`
+   * for every type-bearing field. Consumers walk the type graph one
+   * layer at a time via {@link getComponentMetaTypeExpansion}. The
+   * bytes are a `verter.v1.ComponentMetaSurface` protobuf message.
+   *
+   * Returns `null` when the canonical does not resolve to a component.
+   * Returns an error envelope (first byte `0xFF`) when the bridge
+   * encountered a typed `BridgeError` (D114).
+   */
+  getComponentMetaSurface(canonicalOrAlias: string): Buffer | null;
+
+  /**
+   * Tier 1B selective surface API (D32 + D101). Resolves a
+   * `TypeHandle` (encoded as a `verter.v1.TypeHandle` protobuf
+   * message) into a one-layer `verter.v1.TypeExpansion`. The optional
+   * `depth` argument is currently informational; the bridge always
+   * returns one layer per call.
+   *
+   * On error returns an error envelope (first byte `0xFF`) carrying a
+   * `verter.v1.TypeHandleError` (D104 + D114).
+   */
+  getComponentMetaTypeExpansion(handleBuf: Buffer, depth?: number): Buffer;
+
+  /**
    * Synchronous audit bundle — returns JSON bytes of
    * `{ analysis, resolution, record }` or `null` if the canonical does
    * not resolve.

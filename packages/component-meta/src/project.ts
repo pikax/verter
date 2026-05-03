@@ -15,6 +15,7 @@
 
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { resolve } from "node:path";
 import { mapComponentMeta } from "./compat/checker.js";
 import type { CheckerWorkspace } from "./compat/checker.js";
 import { projectDeclaredOnlyNativeResult } from "./compat/native-projection.js";
@@ -205,6 +206,37 @@ export class ComponentMetaSession {
       this._options,
       nativeTypeRegistryToMap(nativeMeta),
     );
+  }
+
+  /**
+   * Tier 1B selective surface (D32 + D101). Returns the
+   * `verter.v1.ComponentMetaSurface` proto bytes — eager scalars
+   * combined with `NamedTypeHandle` for every type-bearing field.
+   * Consumers walk one layer at a time via {@link
+   * getComponentMetaTypeExpansion}.
+   *
+   * Throws when the canonical does not resolve to a component, or
+   * when the bridge surfaced a typed error envelope.
+   */
+  async getComponentMetaSurface(filePath: string): Promise<Buffer> {
+    this.ensureOpen();
+    const abs = resolve(filePath);
+    const surface = this._session.getComponentMetaSurface(abs);
+    if (!surface) throw new Error(`no surface for ${filePath}`);
+    return surface;
+  }
+
+  /**
+   * Tier 1B selective surface (D32 + D101). Resolves a
+   * `verter.v1.TypeHandle` to a one-layer
+   * `verter.v1.TypeExpansion`. Caller pre-encodes the handle via the
+   * proto module. Returned bytes carry an error envelope (first byte
+   * `0xFF` -> `TypeHandleError`) if the handle is stale; otherwise
+   * the bytes decode as `verter.v1.TypeExpansion`.
+   */
+  async getComponentMetaTypeExpansion(handleBuf: Buffer, depth?: number): Promise<Buffer> {
+    this.ensureOpen();
+    return this._session.getComponentMetaTypeExpansion(handleBuf, depth);
   }
 
   async getNativeComponentMeta(filePath: string): Promise<NativeComponentMetaResult | undefined> {

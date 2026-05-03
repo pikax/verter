@@ -198,6 +198,53 @@ export class ProjectSession {
   }
 
   /**
+   * Tier 1B selective surface (D32 + D101). Returns the
+   * `verter.v1.ComponentMetaSurface` proto bytes (eager scalars +
+   * `NamedTypeHandle` for every type-bearing field). Returns `null`
+   * when the canonical does not resolve. Returns `null` AND logs a
+   * diagnostic when the bridge surfaced an error envelope (D114
+   * magic-byte prefix `0xFF`); callers that want the typed envelope
+   * use the lower-level NAPI surface directly.
+   */
+  getComponentMetaSurface(canonicalId: string): Buffer | null {
+    this.ensureOpen();
+    const nativeSession = this._nativeSession as {
+      getComponentMetaSurface?: (canonicalId: string) => Buffer | null;
+    };
+    const fn = nativeSession.getComponentMetaSurface;
+    if (typeof fn !== "function") {
+      throw new Error(
+        "Selective component-meta surface API is unavailable on the active native session",
+      );
+    }
+    const buf = fn.call(this._nativeSession, canonicalId);
+    if (buf === null || buf === undefined) return null;
+    if (buf.length > 0 && buf[0] === 0xff) return null;
+    return buf;
+  }
+
+  /**
+   * Tier 1B selective surface (D32 + D101). Resolves a
+   * `verter.v1.TypeHandle` (caller pre-encodes via the proto module)
+   * to a one-layer `verter.v1.TypeExpansion`. Returns the raw bytes;
+   * D114 magic-byte error envelopes (`buf[0] === 0xFF`) are surfaced
+   * unchanged for the caller to decode as `verter.v1.TypeHandleError`.
+   */
+  getComponentMetaTypeExpansion(handleBuf: Buffer, depth?: number): Buffer {
+    this.ensureOpen();
+    const nativeSession = this._nativeSession as {
+      getComponentMetaTypeExpansion?: (handleBuf: Buffer, depth?: number) => Buffer;
+    };
+    const fn = nativeSession.getComponentMetaTypeExpansion;
+    if (typeof fn !== "function") {
+      throw new Error(
+        "Selective component-meta type expansion is unavailable on the active native session",
+      );
+    }
+    return fn.call(this._nativeSession, handleBuf, depth);
+  }
+
+  /**
    * Internal memo helper. Returns frozen decoded result on hit,
    * or decodes, freezes, and caches on miss.
    */
