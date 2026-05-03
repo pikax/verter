@@ -91,6 +91,16 @@ interface BackendInstance {
   query(component: PreparedComponentSnapshot): Promise<MeasuredQueryResult>;
   dispose(): Promise<void> | void;
   isAvailable(): boolean;
+  /**
+   * Tier 6 §8.2 / T9.4 — return the stderr text the worker emitted
+   * between the query-send and query-end of the most recent
+   * `query()` call (or null when no query has run yet). Used by
+   * the runner to write a per-component sidecar log on failure.
+   *
+   * Returns `null` when the backend does not support per-query
+   * stderr capture.
+   */
+  takeLastQueryStderr?(): string | null;
 }
 
 interface MeasuredQueryResult {
@@ -674,10 +684,19 @@ class WorkerBackendInstance implements BackendInstance {
       resolve: (value: MeasuredQueryResult) => void;
       reject: (reason?: unknown) => void;
       timer: NodeJS.Timeout | null;
+      // Tier 6 §8.2 / T9.4 — snapshot of `this.stderr.length` at
+      // query-send time. The slice from this index to the array's
+      // end at query-completion captures the stderr emitted during
+      // this query.
+      stderrChunkStart: number;
     }
   >();
   private nextRequestId = 1;
   private unavailableError: Error | null = null;
+  // Tier 6 §8.2 / T9.4 — stderr captured during the most recent
+  // query, surfaced via `takeLastQueryStderr()`. Cleared on the
+  // next query-send to keep the sidecar log per-component-precise.
+  private lastQueryStderr: string | null = null;
 
   constructor(child: ChildProcess, stderr: string[], queryTimeoutMs: number) {
     this.child = child;
@@ -692,11 +711,20 @@ class WorkerBackendInstance implements BackendInstance {
     return this.unavailableError === null;
   }
 
+  takeLastQueryStderr(): string | null {
+    const value = this.lastQueryStderr;
+    this.lastQueryStderr = null;
+    return value;
+  }
+
   async query(component: PreparedComponentSnapshot): Promise<MeasuredQueryResult> {
     if (this.unavailableError) {
       throw this.unavailableError;
     }
     const requestId = this.nextRequestId++;
+    // Snapshot the stderr buffer so the post-query slice captures
+    // only what this component triggered.
+    const stderrChunkStart = this.stderr.length;
     return new Promise<MeasuredQueryResult>((resolveResult, rejectResult) => {
       const timer =
         this.queryTimeoutMs > 0
@@ -704,6 +732,7 @@ class WorkerBackendInstance implements BackendInstance {
               const timeoutError = new Error(
                 `meta-ui query timed out after ${this.queryTimeoutMs}ms while resolving ${component.relativePath}`,
               );
+              this.captureQueryStderr(stderrChunkStart);
               this.markUnavailable(timeoutError, true);
             }, this.queryTimeoutMs)
           : null;
@@ -711,9 +740,18 @@ class WorkerBackendInstance implements BackendInstance {
         resolve: resolveResult,
         reject: rejectResult,
         timer,
+        stderrChunkStart,
       });
       this.child.send({ type: "query", requestId, component });
     });
+  }
+
+  private captureQueryStderr(chunkStart: number): void {
+    if (chunkStart < 0 || chunkStart > this.stderr.length) {
+      this.lastQueryStderr = "";
+      return;
+    }
+    this.lastQueryStderr = this.stderr.slice(chunkStart).join("");
   }
 
   async dispose(): Promise<void> {
@@ -736,6 +774,9 @@ class WorkerBackendInstance implements BackendInstance {
         clearTimeout(pending.timer);
       }
       this.pending.delete(message.requestId);
+      // Tier 6 §8.2 / T9.4 — capture per-query stderr (success path)
+      // so callers that always want the sidecar log can read it.
+      this.captureQueryStderr(pending.stderrChunkStart);
       pending.resolve(message.result);
       return;
     }
@@ -749,6 +790,10 @@ class WorkerBackendInstance implements BackendInstance {
         clearTimeout(pending.timer);
       }
       this.pending.delete(message.requestId);
+      // Tier 6 §8.2 / T9.4 — capture per-query stderr on the error
+      // path before the rejection so the sidecar log captures the
+      // exact window of worker output that produced the failure.
+      this.captureQueryStderr(pending.stderrChunkStart);
       const error = new Error(message.message);
       if (message.stack) {
         error.stack = message.stack;
@@ -904,6 +949,41 @@ function classifyFailure(error: unknown): MetaUiOutcomeBucket {
     : "query_error";
 }
 
+/**
+ * Tier 6 §8.2 / T9.4 — write a per-component stderr sidecar log.
+ *
+ * Sidecar path: `<outputDir>/sidecar-logs/<relativePath>.stderr.log`
+ * Directory structure mirrors the component's path so two
+ * components with the same basename do not collide.
+ *
+ * Returns the absolute path of the written sidecar, or `null` when
+ * the captured stderr was empty (no file is written).
+ *
+ * Pure helper — exported for the discriminating
+ * `bench_meta_ui_per_component_isolation` test.
+ */
+export function writeComponentStderrSidecar(
+  outputDir: string,
+  relativePath: string,
+  stderrText: string | null,
+  reason:
+    | { kind: "success"; latencyMs: number; outcome: MetaUiOutcomeBucket }
+    | { kind: "failure"; outcome: MetaUiOutcomeBucket; errorMessage: string },
+): string | null {
+  if (!stderrText || stderrText.length === 0) {
+    return null;
+  }
+  const sidecarDir = resolve(outputDir, "sidecar-logs");
+  const sidecarPath = resolve(sidecarDir, `${relativePath}.stderr.log`);
+  mkdirSync(dirname(sidecarPath), { recursive: true });
+  const header =
+    reason.kind === "success"
+      ? `# Component: ${relativePath}\n# Outcome: ${reason.outcome} (latency=${reason.latencyMs.toFixed(2)}ms)\n# Generated: ${new Date().toISOString()}\n# Tier 6 §8.2 / T9.4 — per-component stderr sidecar\n\n`
+      : `# Component: ${relativePath}\n# Outcome: ${reason.outcome} (FAILED)\n# Error: ${reason.errorMessage}\n# Generated: ${new Date().toISOString()}\n# Tier 6 §8.2 / T9.4 — per-component stderr sidecar\n\n`;
+  writeFileSync(sidecarPath, header + stderrText, "utf8");
+  return sidecarPath;
+}
+
 async function runScenario(
   prepared: PreparedProject,
   args: MetaUiBenchArgs,
@@ -1047,6 +1127,20 @@ async function runSingleScenarioRepeat(
         outcome,
         error: error instanceof Error ? error.message : String(error),
       });
+      // Tier 6 §8.2 / T9.4 — write per-component stderr sidecar on
+      // failure so the failure context (loader output, plugin
+      // resolver noise, native panic line) survives the worker
+      // process crash for offline diagnosis.
+      writeComponentStderrSidecar(
+        args.outputDir,
+        component.relativePath,
+        instance.takeLastQueryStderr?.() ?? null,
+        {
+          kind: "failure",
+          outcome,
+          errorMessage: error instanceof Error ? error.message : String(error),
+        },
+      );
       logProgress(
         `[repeat ${repeatIndex}]`,
         component,
@@ -1178,6 +1272,18 @@ async function runRepoScenarioRepeat(
             outcome,
             error: error instanceof Error ? error.message : String(error),
           });
+          // Tier 6 §8.2 / T9.4 — sidecar write for the
+          // recovery-mode (post-crash) per-component path.
+          writeComponentStderrSidecar(
+            args.outputDir,
+            component.relativePath,
+            singleInstance.takeLastQueryStderr?.() ?? null,
+            {
+              kind: "failure",
+              outcome,
+              errorMessage: error instanceof Error ? error.message : String(error),
+            },
+          );
           logProgress(
             `[repeat ${repeatIndex}]`,
             component,
@@ -1224,6 +1330,21 @@ async function runRepoScenarioRepeat(
           outcome,
           error: error instanceof Error ? error.message : String(error),
         });
+        // Tier 6 §8.2 / T9.4 — sidecar write for the long-lived
+        // shared-instance steady-state path. The instance may
+        // already be unavailable at this point; takeLastQueryStderr
+        // still returns the captured window because stderr was
+        // captured at message-receipt time before dispose runs.
+        writeComponentStderrSidecar(
+          args.outputDir,
+          component.relativePath,
+          instance?.takeLastQueryStderr?.() ?? null,
+          {
+            kind: "failure",
+            outcome,
+            errorMessage: error instanceof Error ? error.message : String(error),
+          },
+        );
         logProgress(
           `[repeat ${repeatIndex}]`,
           component,

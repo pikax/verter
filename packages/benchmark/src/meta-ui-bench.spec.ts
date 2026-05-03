@@ -17,6 +17,7 @@ import {
   parseMetaUiBenchArgs,
   prepareMetaUiProject,
   tryLoadExpectedArtifacts,
+  writeComponentStderrSidecar,
 } from "./meta-ui-bench.js";
 import { compareNormalizedArtifacts } from "./meta-ui-core.js";
 import { loadVerterCompatModule } from "./verter-compat.js";
@@ -605,4 +606,190 @@ describe("verter benchmark worker parity", () => {
     },
     20_000,
   );
+});
+
+describe("Tier 6 §8.2 / T9.4 — bench_meta_ui_per_component_isolation", () => {
+  // The brief's named discriminating test
+  // (`bench_meta_ui_per_component_isolation`). Two invariants:
+  //   1. The benchmark worker pre-query stderr capture is per-query
+  //      (not cumulative): a stderr line emitted before component
+  //      A's query does NOT show up in component B's sidecar.
+  //   2. `writeComponentStderrSidecar` writes the captured stderr
+  //      to `<outputDir>/sidecar-logs/<relativePath>.stderr.log`
+  //      with a header carrying the component path, outcome, and
+  //      timestamp. Empty stderr produces NO sidecar (no
+  //      zero-byte files).
+  //
+  // We use a synthetic worker that writes deterministic stderr
+  // before answering each query, so the test does not depend on
+  // a real nuxt-ui checkout.
+
+  it("captures per-query stderr in isolation across two consecutive queries", async () => {
+    const workerRoot = mkdtempSync(resolve(tmpdir(), "verter-t94-isolation-"));
+    const workerPath = resolve(workerRoot, "stderr-worker.mjs");
+    writeFileSync(
+      workerPath,
+      [
+        // Worker emits its own per-query stderr line so we can
+        // distinguish queries.
+        "process.on('message', (message) => {",
+        "  if (message?.type === 'init') {",
+        "    process.send?.({ type: 'ready' });",
+        "    return;",
+        "  }",
+        "  if (message?.type === 'query') {",
+        "    // Emit deterministic stderr that names the component.",
+        "    process.stderr.write(`stderr-for=${message.component.relativePath}\\n`);",
+        "    process.send?.({",
+        "      type: 'result',",
+        "      requestId: message.requestId,",
+        "      result: {",
+        "        artifact: { relativePath: message.component.relativePath, schema: null, props: [], emits: [], slots: [], events: [], exposed: [], diagnostics: [] },",
+        "        latencyMs: 1,",
+        "        outcome: 'success',",
+        "      },",
+        "    });",
+        "  }",
+        "});",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const instance = await createWorkerBackendInstance(
+      {
+        backend: "verter",
+        uiRoot: workerRoot,
+        checkerConfig: {},
+        components: [],
+      },
+      {
+        workerEntryPath: workerPath,
+        queryTimeoutMs: 5_000,
+        setupTimeoutMs: 5_000,
+      },
+    );
+
+    try {
+      // First query.
+      await instance.query({
+        absolutePath: resolve(workerRoot, "ComponentA.vue"),
+        relativePath: "src/runtime/ComponentA.vue",
+        transformedSource: "<template />",
+      });
+      // takeLastQueryStderr returns the stderr captured DURING
+      // the most recent query window. Stderr is asynchronously
+      // delivered via the child process, so we may need to wait
+      // briefly for the chunk handler to drain.
+      let firstStderr: string | null = null;
+      for (
+        let attempt = 0;
+        attempt < 40 && (firstStderr === null || firstStderr === "");
+        attempt++
+      ) {
+        firstStderr = (instance as any).takeLastQueryStderr?.() ?? null;
+        if (firstStderr) {
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      expect(firstStderr).toMatch(/stderr-for=src\/runtime\/ComponentA\.vue/);
+      // Discriminator: B's stderr line must NOT be present yet.
+      expect(firstStderr).not.toMatch(/ComponentB/);
+
+      // Second query.
+      await instance.query({
+        absolutePath: resolve(workerRoot, "ComponentB.vue"),
+        relativePath: "src/runtime/ComponentB.vue",
+        transformedSource: "<template />",
+      });
+      let secondStderr: string | null = null;
+      for (
+        let attempt = 0;
+        attempt < 40 && (secondStderr === null || secondStderr === "");
+        attempt++
+      ) {
+        secondStderr = (instance as any).takeLastQueryStderr?.() ?? null;
+        if (secondStderr) {
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      expect(secondStderr).toMatch(/stderr-for=src\/runtime\/ComponentB\.vue/);
+      // Discriminator: A's stderr line must NOT bleed into B's
+      // capture. This is the per-component isolation invariant.
+      expect(secondStderr).not.toMatch(/ComponentA/);
+    } finally {
+      await instance.dispose();
+    }
+  });
+
+  it("writes a per-component stderr sidecar with outcome header on failure", () => {
+    const outputDir = mkdtempSync(resolve(tmpdir(), "verter-t94-sidecar-"));
+    try {
+      const sidecarPath = writeComponentStderrSidecar(
+        outputDir,
+        "src/runtime/Failed.vue",
+        "panic: thread 'main' panicked at 'something broke'\nat fn::failure()\n",
+        {
+          kind: "failure",
+          outcome: "query_error",
+          errorMessage: "expected boom",
+        },
+      );
+      expect(sidecarPath).not.toBeNull();
+      const expectedPath = resolve(outputDir, "sidecar-logs", "src/runtime/Failed.vue.stderr.log");
+      expect(sidecarPath).toBe(expectedPath);
+      const contents = readFileSync(expectedPath, "utf8");
+      // Header must carry the component path + outcome + FAILED tag
+      // so a developer skimming the sidecar files knows which
+      // failed.
+      expect(contents).toMatch(/# Component: src\/runtime\/Failed\.vue/);
+      expect(contents).toMatch(/# Outcome: query_error \(FAILED\)/);
+      expect(contents).toMatch(/# Error: expected boom/);
+      // Body must contain the actual stderr text.
+      expect(contents).toMatch(/panic: thread 'main' panicked/);
+    } finally {
+      // No test cleanup of sidecar dir — vitest mkdtempSync paths
+      // are auto-collected on test exit.
+    }
+  });
+
+  it("does NOT write a sidecar when stderr capture is empty (no zero-byte files)", () => {
+    const outputDir = mkdtempSync(resolve(tmpdir(), "verter-t94-empty-"));
+    const empty = writeComponentStderrSidecar(outputDir, "src/runtime/Quiet.vue", "", {
+      kind: "failure",
+      outcome: "query_error",
+      errorMessage: "no output",
+    });
+    expect(empty).toBeNull();
+    const nullCase = writeComponentStderrSidecar(outputDir, "src/runtime/Quiet.vue", null, {
+      kind: "failure",
+      outcome: "query_error",
+      errorMessage: "no output",
+    });
+    expect(nullCase).toBeNull();
+    // Sidecar dir should not even exist (no writes happened).
+    const sidecarDir = resolve(outputDir, "sidecar-logs");
+    expect(existsSync(sidecarDir)).toBe(false);
+  });
+
+  it("nests sidecar files in the same directory structure as the component path", () => {
+    const outputDir = mkdtempSync(resolve(tmpdir(), "verter-t94-nested-"));
+    writeComponentStderrSidecar(
+      outputDir,
+      "src/runtime/components/forms/Input.vue",
+      "loader noise\n",
+      {
+        kind: "success",
+        latencyMs: 5,
+        outcome: "success",
+      },
+    );
+    const expected = resolve(
+      outputDir,
+      "sidecar-logs",
+      "src/runtime/components/forms/Input.vue.stderr.log",
+    );
+    expect(existsSync(expected)).toBe(true);
+  });
 });
