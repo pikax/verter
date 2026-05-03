@@ -721,6 +721,44 @@ impl FamilySlots {
         ];
         slots.iter().filter(|s| s.is_some()).count()
     }
+
+    /// Audit-only iterator that yields one `(slot_label, &MemoEntry)`
+    /// pair per populated slot. Used by
+    /// [`SemanticGraphStore::audit_eager_key_dump`] to flatten family
+    /// state into per-slot rows for the Tier 0 Step 0.2 corpus snapshot.
+    fn iter_populated_slots(&self) -> Vec<(&'static str, &MemoEntry)> {
+        let mut out: Vec<(&'static str, &MemoEntry)> = Vec::new();
+        if let Some(e) = &self.single {
+            out.push(("single", e));
+        }
+        if let Some(e) = &self.identity {
+            out.push(("identity", e));
+        }
+        if let Some(e) = &self.navigate {
+            out.push(("navigate", e));
+        }
+        if let Some(e) = &self.shallow {
+            out.push(("shallow", e));
+        }
+        if let Some(e) = &self.expanded {
+            out.push(("expanded", e));
+        }
+        if let Some(e) = &self.skeleton {
+            out.push(("skeleton", e));
+        }
+        out
+    }
+}
+
+/// One row in [`SemanticGraphStore::audit_eager_key_dump`] — used by the
+/// Tier 0 Step 0.2 corpus snapshot to record interned keys + cached
+/// payload hashes + dep-signatures for offline analysis. Not on any hot
+/// path.
+#[derive(Debug, Clone)]
+pub struct AuditEagerKeyRow {
+    pub key_repr: String,
+    pub result_hash: String,
+    pub dep_signature: String,
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -1380,6 +1418,48 @@ impl SemanticGraphStore {
             .values()
             .map(FamilySlots::populated_count)
             .sum()
+    }
+
+    /// Audit-only dump of the warm memo entries, keyed by the
+    /// debug-formatted [`FamilyKey`]. Returns one row per populated slot
+    /// (a single family with N slot variants populated yields N rows).
+    /// Each row carries the slot label, a stable hash of the cached
+    /// `SemanticNodeId` payload, and a debug-formatted snapshot of the
+    /// `dep_signature` recorded at admission.
+    ///
+    /// Only used by the Tier 0 Step 0.2 corpus-snapshot test; not on
+    /// any hot path. The returned `Vec` is sorted by key-debug-string for
+    /// determinism so two runs over the same corpus produce identical
+    /// JSON.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn audit_eager_key_dump(&self) -> Vec<AuditEagerKeyRow> {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let entries = self.entries.lock();
+        let mut rows: Vec<AuditEagerKeyRow> = Vec::with_capacity(entries.len());
+        for (family, slots) in entries.iter() {
+            let key_repr = format!("{family:?}");
+            for (slot_label, slot) in slots.iter_populated_slots() {
+                // QueryResult does not derive Hash, so hash a stable
+                // debug-formatted projection instead. The hash is opaque
+                // to callers — they only need it to be deterministic
+                // across two runs over the same fixture corpus.
+                let mut hasher = DefaultHasher::new();
+                let result_repr = format!("{:?}", slot.result);
+                result_repr.hash(&mut hasher);
+                let result_hash = format!("{:016x}", hasher.finish());
+                let dep_signature = format!("{:?}", slot.dep_signature);
+                rows.push(AuditEagerKeyRow {
+                    key_repr: format!("{key_repr}/{slot_label}"),
+                    result_hash,
+                    dep_signature,
+                });
+            }
+        }
+        drop(entries);
+        rows.sort_by(|a, b| a.key_repr.cmp(&b.key_repr));
+        rows
     }
 
     /// Number of `(family, slot)` registrations under `canonical_id`
