@@ -1,0 +1,54 @@
+{
+  "schema_version": 3,
+  "tier": "tier-0",
+  "step": "0.4-bis",
+  "status": "success",
+  "base_commit": "4e074790",
+  "head_commit": "273fca45",
+  "marker_commit": "PENDING_FILL_AFTER_MARKER_COMMIT",
+  "test_results": {
+    "workspace": {
+      "test_scope": "cargo test --workspace --tests --verbose",
+      "passed": 10445,
+      "failed": 0
+    },
+    "architecture_guards": {
+      "test_scope": "cargo test -p verter_session --test architecture_guards",
+      "passed": 42,
+      "failed": 0
+    },
+    "pnpm_test": {
+      "test_scope": "pnpm test",
+      "passed": 0,
+      "failed": 0,
+      "_skipped": "JS tests untouched by archaeology sweep"
+    }
+  },
+  "gate_status": {
+    "fmt_check_passed": true,
+    "clippy_passed": true,
+    "pnpm_install_clean": true
+  },
+  "monotonic_test_count_check": {
+    "workspace": {
+      "prior_known_passed_count": 10443,
+      "current_passed_count": 10445,
+      "delta": 2,
+      "_note": "+2 from the two new architecture-guard tests (the broader D111 production-tree guard and its predicate test)"
+    },
+    "pnpm": {
+      "prior_known_passed_count": 0,
+      "current_passed_count": 0,
+      "delta": 0,
+      "_note": "skipped"
+    }
+  },
+  "snapshot_drift": "none",
+  "discriminating_tests_added": [
+    "foundations_guards::no_phase_archaeology_in_production_code_broader_d111",
+    "foundations_guards::guard7_bis_predicate_rejects_deliberate_violations_and_preserves_algorithm_phases"
+  ],
+  "characterization_tests_added": [],
+  "marker_filename": "phase-tier-0-step-0.4-bis-complete",
+  "cherry_pick_target": "refactor/legacy-to-graph-dispatch-migration"
+}
