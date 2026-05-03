@@ -5,7 +5,7 @@
   "status": "success_with_partial_data",
   "base_commit": "60b1295a",
   "head_commit": "99f38869",
-  "marker_commit": "<filled by post-marker-commit fix>",
+  "marker_commit": "04901407",
   "test_results": {
     "workspace": {
       "test_scope": "cargo test --workspace --tests",
