@@ -45,6 +45,7 @@ hotpath = [
 [dependencies]
 verter_compiler = { path = "../verter_compiler" }
 verter_protocol = { path = "../verter_protocol" }
+prost = "0.14.1"
 verter_semantic = { path = "../verter_semantic" }
 verter_span = { path = "../verter_span" }
 verter_workspace = { path = "../verter_workspace" }

@@ -108,6 +108,9 @@ mod project_semantic_dispatch_invariants_tests;
 // single-file `upsert` + `get_virtual_file`.
 #[cfg(test)]
 mod cache_identity_invariants_tests;
+/// Selective component-meta surface API types and BFS bridge support
+/// (Tier 1B / D102 / D125).
+pub mod component_meta_payload;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod host_compile;
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -130,7 +133,7 @@ pub(crate) mod i64_as_decimal_string;
 mod id;
 pub(crate) mod intrinsic_registry;
 pub mod invalidation_domain;
-mod meta;
+pub mod meta;
 pub mod meta_resolve;
 pub mod owned_artifacts;
 pub(crate) mod owner_import_surface;
@@ -194,6 +197,11 @@ pub mod for_tests {
         CacheKeyFilter, CacheProvenance, CanonicalId, CaptureGuard, CaptureSnapshot, CaptureToken,
         DispatchEntry, EdgeIdentity, InternedId, KeyFamily, SignatureHash, StackOverflow,
     };
+    /// Tier 1B: re-export the cooperative-batch primitive so the
+    /// selective component-meta integration tests can probe its
+    /// existence. Internal callers continue to reach
+    /// `crate::semantic_query_memo::SemanticGraphStore` directly.
+    pub use crate::semantic_query_memo::{BatchExpandError, SemanticGraphStore};
 }
 
 pub use types::*;

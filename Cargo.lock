@@ -3958,6 +3958,7 @@ dependencies = [
  "oxc_parser",
  "oxc_span",
  "parking_lot",
+ "prost",
  "quote",
  "rayon",
  "regex",
