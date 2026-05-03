@@ -266,6 +266,83 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
+  # Build verter-mcp-server (matrix — standalone MCP HTTP/stdio binary)
+  #
+  # `verter_mcp` ships independently of `verter_lsp`: the LSP binary no
+  # longer embeds the MCP server (Tier 3 §5.1 Step 3.1 retired the
+  # embedding point + Cargo dep). Consumers that previously routed MCP
+  # via `verter-lsp --mcp-port=...` spawn `verter-mcp-server` in its
+  # own OS process. This job mirrors `build-lsp`'s platform matrix so
+  # the standalone binary ships per-platform alongside the LSP.
+  # ---------------------------------------------------------------------------
+  build-mcp-server:
+    name: Build MCP Server (${{ matrix.target }})
+    needs: validate
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            asset-target: linux-x64
+            binary: verter-mcp-server
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            use-cross: true
+            asset-target: linux-arm64
+            binary: verter-mcp-server
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+            asset-target: darwin-x64
+            binary: verter-mcp-server
+          - target: aarch64-apple-darwin
+            os: macos-15
+            asset-target: darwin-arm64
+            binary: verter-mcp-server
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            asset-target: win32-x64
+            binary: verter-mcp-server.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-mcp-server-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-mcp-server-${{ matrix.target }}-
+      - name: Setup Zig
+        if: matrix.use-cross
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.13.0
+      - name: Install cargo-zigbuild
+        if: matrix.use-cross
+        run: cargo install cargo-zigbuild --locked
+      - name: Build verter-mcp-server binary
+        run: |
+          if [ "${{ matrix.use-cross }}" = "true" ]; then
+            cargo zigbuild --release --package verter_mcp_server --target ${{ matrix.target }}
+          else
+            cargo build --release --package verter_mcp_server --target ${{ matrix.target }}
+          fi
+        shell: bash
+      - uses: actions/upload-artifact@v6
+        with:
+          name: mcp-server-${{ matrix.asset-target }}
+          path: target/${{ matrix.target }}/release/${{ matrix.binary }}
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
   # Build WASM
   # ---------------------------------------------------------------------------
   build-wasm:
@@ -719,7 +796,15 @@ jobs:
   # ---------------------------------------------------------------------------
   github-release:
     name: GitHub Release
-    needs: [validate, build-native, build-wasm, publish-npm, publish-vscode]
+    needs:
+      [
+        validate,
+        build-native,
+        build-wasm,
+        build-mcp-server,
+        publish-npm,
+        publish-vscode,
+      ]
     runs-on: ubuntu-latest
     environment:
       name: github-releases
@@ -764,6 +849,34 @@ jobs:
           name: vsix
           path: /tmp/release-assets/vsix
 
+      # `verter-mcp-server` ships as a separate per-platform binary so
+      # downstream consumers (IDE integrations, container images,
+      # automation) can pick it up without pulling the LSP binary or
+      # vice versa. The decoupling is enforced at the source level by
+      # the `no_cross_product_binary_imports` architecture guard.
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: mcp-server-*
+          path: /tmp/release-assets/mcp-server
+
+      - name: Stage and rename verter-mcp-server binaries
+        run: |
+          mkdir -p /tmp/release-assets/staged
+          for dir in /tmp/release-assets/mcp-server/mcp-server-*; do
+            [ -d "$dir" ] || continue
+            target=$(basename "$dir" | sed 's/^mcp-server-//')
+            if [ "$target" = "win32-x64" ]; then
+              src="$dir/verter-mcp-server.exe"
+              dest="/tmp/release-assets/staged/verter-mcp-server-${target}.exe"
+            else
+              src="$dir/verter-mcp-server"
+              dest="/tmp/release-assets/staged/verter-mcp-server-${target}"
+            fi
+            cp "$src" "$dest"
+            chmod +x "$dest" 2>/dev/null || true
+          done
+          ls -la /tmp/release-assets/staged/
+
       - name: Create GitHub Release
         run: |
           TAG="${GITHUB_REF_NAME}"
@@ -774,9 +887,14 @@ jobs:
             PRERELEASE_FLAG="--prerelease"
           fi
 
-          # Collect all .node, .wasm, .js, and .vsix files
+          # Collect all .node, .wasm, .js, .vsix files PLUS the
+          # platform-renamed verter-mcp-server binaries staged above.
           ASSETS=""
           for f in $(find /tmp/release-assets -name '*.node' -o -name '*.wasm' -o -name '*.js' -o -name '*.vsix' | head -50); do
+            ASSETS="$ASSETS $f"
+          done
+          for f in /tmp/release-assets/staged/verter-mcp-server-*; do
+            [ -f "$f" ] || continue
             ASSETS="$ASSETS $f"
           done
 
