@@ -4545,3 +4545,262 @@ fn guard9_predicate_passes_for_known_implementor() {
          InvalidationByCanonical implementor (IndexedReadyDb)",
     );
 }
+
+// ===========================================================================
+// guard 10 — no_cross_product_binary_imports
+//
+// `verter_lsp` and `verter_mcp` are two independent product surfaces on
+// top of the shared `verter_session` core. Their binaries must ship as
+// separate processes — the LSP binary must not pull `verter_mcp` (the
+// MCP server crate) into its compile graph, and the MCP server binary
+// must not pull `verter_lsp` into its compile graph.
+//
+// Concretely the guard scans each product's `Cargo.toml` and rejects
+// any line that declares the cross-product crate as a dependency
+// (regardless of `optional = true` / feature gating). The previous
+// `lsp_mcp_dependency_direction` guard tolerated `optional = true`
+// because earlier work decoupled MCP behind a Cargo feature; this
+// guard supersedes that allowance — the cross-product dependency is
+// removed in full.
+//
+// The companion D26 acceptance test
+// `lsp_no_longer_embeds_mcp_AND_mcp_http_still_serves` then asserts
+// the binary entrypoints actually reflect that boundary AND that
+// `verter_mcp_server` still ships the standalone HTTP launcher so
+// IDE consumers have a separately-shippable transport.
+// ===========================================================================
+
+/// Predicate: scan a `Cargo.toml` snippet for any dependency declaration
+/// that names `crate_name` as a dep (any form: bare path, table form,
+/// `optional = true`, feature-gated, etc.). Returns `true` when at
+/// least one matching declaration exists in the `[dependencies]`,
+/// `[dev-dependencies]`, `[build-dependencies]`, or
+/// `[target.*.dependencies]` sections — including the
+/// `[dependencies.<crate>]` section-header form.
+fn cargo_toml_declares_dep(src: &str, crate_name: &str) -> bool {
+    fn is_dep_section(section: &str) -> bool {
+        section == "dependencies"
+            || section == "dev-dependencies"
+            || section == "build-dependencies"
+            || (section.starts_with("target.")
+                && (section.ends_with(".dependencies")
+                    || section.ends_with(".dev-dependencies")
+                    || section.ends_with(".build-dependencies")))
+    }
+
+    let mut in_deps_section = false;
+    for line in src.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix('[') {
+            let header = rest.trim_end_matches(']').trim();
+            // `[dependencies.<crate>]` form: split on the FIRST '.'
+            // after a recognized dep section name and check the
+            // crate suffix exactly.
+            if let Some((section, suffix)) = header.split_once('.') {
+                if is_dep_section(section) && suffix == crate_name {
+                    return true;
+                }
+                in_deps_section = is_dep_section(section)
+                    || (section == "target"
+                        && (suffix.ends_with(".dependencies")
+                            || suffix.ends_with(".dev-dependencies")
+                            || suffix.ends_with(".build-dependencies")));
+                continue;
+            }
+            in_deps_section = is_dep_section(header);
+            continue;
+        }
+        if !in_deps_section {
+            continue;
+        }
+        // Match `<crate_name> = ...` with optional whitespace.
+        // Avoid matching prefixes (e.g. `verter_mcp_server` must NOT
+        // match `verter_mcp`).
+        if let Some((k, _)) = trimmed.split_once('=') {
+            if k.trim() == crate_name {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[test]
+fn no_cross_product_binary_imports() {
+    // `verter_lsp` (LSP product) must not depend on `verter_mcp`
+    // (MCP product) in any form. The previous `optional = true`
+    // tolerance is retired by Tier 3.
+    let lsp_cargo = read_workspace_file("crates/verter_lsp/Cargo.toml");
+    assert!(
+        !cargo_toml_declares_dep(&lsp_cargo, "verter_mcp"),
+        "guard 10 (`no_cross_product_binary_imports`) violation: \
+         `crates/verter_lsp/Cargo.toml` declares `verter_mcp` as a \
+         dependency. The LSP and MCP products must ship as separate \
+         binaries with no cross-product compile-graph coupling. \
+         Spawn `verter_mcp_server` in its own process instead.",
+    );
+
+    // `verter_mcp` must not depend on `verter_lsp` either. This
+    // direction is asserted symmetrically so future plan churn does
+    // not silently re-couple the two products.
+    let mcp_cargo = read_workspace_file("crates/verter_mcp/Cargo.toml");
+    assert!(
+        !cargo_toml_declares_dep(&mcp_cargo, "verter_lsp"),
+        "guard 10 (`no_cross_product_binary_imports`) violation: \
+         `crates/verter_mcp/Cargo.toml` declares `verter_lsp` as a \
+         dependency. The LSP and MCP products must ship as separate \
+         binaries with no cross-product compile-graph coupling.",
+    );
+
+    let mcp_server_cargo = read_workspace_file("crates/verter_mcp_server/Cargo.toml");
+    assert!(
+        !cargo_toml_declares_dep(&mcp_server_cargo, "verter_lsp"),
+        "guard 10 (`no_cross_product_binary_imports`) violation: \
+         `crates/verter_mcp_server/Cargo.toml` declares `verter_lsp` \
+         as a dependency. The standalone MCP server binary must \
+         remain independent of the LSP product.",
+    );
+}
+
+#[test]
+fn guard10_predicate_rejects_deliberate_cross_product_dep() {
+    let bad_plain = "[dependencies]\nverter_mcp = { path = \"../verter_mcp\" }\nfoo = \"1\"\n";
+    let bad_optional =
+        "[dependencies]\nverter_mcp = { path = \"../verter_mcp\", optional = true }\nfoo = \"1\"\n";
+    let bad_dotted = "[dependencies.verter_mcp]\npath = \"../verter_mcp\"\n";
+    let bad_feature_gated =
+        "[features]\nmcp = [\"dep:verter_mcp\"]\n\n[dependencies]\nverter_mcp = { path = \"../verter_mcp\", optional = true }\n";
+    let good_no_dep = "[dependencies]\nfoo = \"1\"\nbar = \"2\"\n";
+    let good_unrelated_section = "[features]\nmcp = []\n\n[dependencies]\nfoo = \"1\"\n";
+    let good_prefix_only = "[dependencies]\nverter_mcp_server = { path = \"../verter_mcp_server\" }\nfoo = \"1\"\n";
+
+    assert!(
+        cargo_toml_declares_dep(bad_plain, "verter_mcp"),
+        "guard 10 predicate must flag a plain `verter_mcp = ...` dep",
+    );
+    assert!(
+        cargo_toml_declares_dep(bad_optional, "verter_mcp"),
+        "guard 10 predicate must flag an `optional = true` dep — \
+         Tier 3 retires the optional-dep tolerance",
+    );
+    assert!(
+        cargo_toml_declares_dep(bad_dotted, "verter_mcp"),
+        "guard 10 predicate must flag a `[dependencies.verter_mcp]` \
+         section header",
+    );
+    assert!(
+        cargo_toml_declares_dep(bad_feature_gated, "verter_mcp"),
+        "guard 10 predicate must flag a feature-gated optional dep \
+         even when the dep line is wrapped behind a `[features]` \
+         section earlier in the file",
+    );
+    assert!(
+        !cargo_toml_declares_dep(good_no_dep, "verter_mcp"),
+        "guard 10 predicate must NOT flag a Cargo.toml that does not \
+         depend on the cross-product crate",
+    );
+    assert!(
+        !cargo_toml_declares_dep(good_unrelated_section, "verter_mcp"),
+        "guard 10 predicate must NOT flag a `[features]` table entry \
+         named `mcp` that lives outside any dependency section",
+    );
+    assert!(
+        !cargo_toml_declares_dep(good_prefix_only, "verter_mcp"),
+        "guard 10 predicate must NOT flag a dep with a name that has \
+         `verter_mcp` as a strict prefix (e.g. `verter_mcp_server`)",
+    );
+}
+
+// ===========================================================================
+// D26 — lsp_no_longer_embeds_mcp_AND_mcp_http_still_serves
+//
+// Combined acceptance discriminator for the Tier 3 LSP/MCP product
+// boundary decoupling. The test FAILS for two distinct reasons
+// before Tier 3 lands and PASSES only when both conditions hold:
+//
+//   (a) `verter_lsp` has been fully decoupled from `verter_mcp` —
+//       no Cargo dep, no `serve_mcp_http` function on the binary
+//       entrypoint, no `verter_mcp::` path references, no
+//       `use verter_mcp` import.
+//   (b) `verter_mcp_server` still ships the standalone HTTP launcher
+//       so consumers retain a working out-of-process MCP transport.
+//
+// Per plan §5.2: pre-Tier-3 FAILS for two distinct reasons (Cargo dep
+// present OR HTTP launcher broken); post-Tier-3 PASSES only when
+// both conditions hold.
+// ===========================================================================
+
+#[test]
+#[allow(non_snake_case)]
+fn lsp_no_longer_embeds_mcp_AND_mcp_http_still_serves() {
+    // ── Condition (a) — LSP no longer embeds MCP ──
+    let lsp_cargo = read_workspace_file("crates/verter_lsp/Cargo.toml");
+    assert!(
+        !cargo_toml_declares_dep(&lsp_cargo, "verter_mcp"),
+        "D26 condition (a) violation: `crates/verter_lsp/Cargo.toml` \
+         still declares `verter_mcp` as a dependency. Tier 3 deletes \
+         this dep so the LSP binary cannot embed the MCP server.",
+    );
+
+    // The LSP binary entrypoint must not host the in-process MCP
+    // server. We assert the absence of the `serve_mcp_http` function
+    // (the embedding point) and any direct `verter_mcp` reference.
+    let lsp_main = read_workspace_file("crates/verter_lsp/src/main.rs");
+    assert!(
+        !lsp_main.contains("fn serve_mcp_http"),
+        "D26 condition (a) violation: `crates/verter_lsp/src/main.rs` \
+         still defines `serve_mcp_http`. Tier 3 deletes this in-process \
+         MCP launcher; consumers must spawn `verter_mcp_server` \
+         instead.",
+    );
+    assert!(
+        !lsp_main.contains("use verter_mcp"),
+        "D26 condition (a) violation: `crates/verter_lsp/src/main.rs` \
+         still imports `verter_mcp`. Tier 3 removes all cross-product \
+         imports from the LSP binary.",
+    );
+    assert!(
+        !lsp_main.contains("verter_mcp::"),
+        "D26 condition (a) violation: `crates/verter_lsp/src/main.rs` \
+         still references `verter_mcp::` symbols on a path. Tier 3 \
+         removes all cross-product references from the LSP binary.",
+    );
+
+    // ── Condition (b) — MCP HTTP launcher still serves ──
+    // The standalone `verter_mcp_server` binary must continue to
+    // expose the HTTP transport so consumers that previously routed
+    // through `verter-lsp --mcp-port=...` retain a working
+    // out-of-process replacement. We assert the presence of the
+    // `Transport::Http` arm wired through `axum::serve` on a TCP
+    // listener — the structural shape that proves the launcher
+    // still serves.
+    let mcp_main = read_workspace_file("crates/verter_mcp_server/src/main.rs");
+    assert!(
+        mcp_main.contains("Transport::Http"),
+        "D26 condition (b) violation: \
+         `crates/verter_mcp_server/src/main.rs` no longer matches \
+         `Transport::Http` — the standalone MCP HTTP launcher is \
+         broken. Tier 3 requires this launcher remain operational.",
+    );
+    assert!(
+        mcp_main.contains("axum::serve"),
+        "D26 condition (b) violation: \
+         `crates/verter_mcp_server/src/main.rs` no longer calls \
+         `axum::serve` — the HTTP transport is broken. Tier 3 \
+         requires this launcher remain operational.",
+    );
+    assert!(
+        mcp_main.contains("TcpListener::bind"),
+        "D26 condition (b) violation: \
+         `crates/verter_mcp_server/src/main.rs` no longer binds a \
+         TCP listener — the HTTP transport cannot start. Tier 3 \
+         requires this launcher remain operational.",
+    );
+    assert!(
+        mcp_main.contains("StreamableHttpService"),
+        "D26 condition (b) violation: \
+         `crates/verter_mcp_server/src/main.rs` no longer wires the \
+         `StreamableHttpService` rmcp transport. Tier 3 requires \
+         this launcher remain operational.",
+    );
+}
