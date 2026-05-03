@@ -4672,7 +4672,8 @@ fn guard10_predicate_rejects_deliberate_cross_product_dep() {
         "[features]\nmcp = [\"dep:verter_mcp\"]\n\n[dependencies]\nverter_mcp = { path = \"../verter_mcp\", optional = true }\n";
     let good_no_dep = "[dependencies]\nfoo = \"1\"\nbar = \"2\"\n";
     let good_unrelated_section = "[features]\nmcp = []\n\n[dependencies]\nfoo = \"1\"\n";
-    let good_prefix_only = "[dependencies]\nverter_mcp_server = { path = \"../verter_mcp_server\" }\nfoo = \"1\"\n";
+    let good_prefix_only =
+        "[dependencies]\nverter_mcp_server = { path = \"../verter_mcp_server\" }\nfoo = \"1\"\n";
 
     assert!(
         cargo_toml_declares_dep(bad_plain, "verter_mcp"),
