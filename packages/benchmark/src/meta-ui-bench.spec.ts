@@ -12,6 +12,7 @@ import { describe, expect, it } from "vitest";
 import {
   EXPECTED_ARTIFACTS_MANIFEST,
   createWorkerBackendInstance,
+  detectUnquotedCsvSpillover,
   maybeRunGarbageCollection,
   parseMetaUiBenchArgs,
   prepareMetaUiProject,
@@ -89,6 +90,91 @@ describe("parseMetaUiBenchArgs", () => {
     const args = parseMetaUiBenchArgs(["--js-audit"]);
 
     expect(args.jsAudit).toBe(true);
+  });
+});
+
+describe("Tier 6 §8.2 / T9.2 — detectUnquotedCsvSpillover", () => {
+  // Discriminator: when a user passes `--scenarios=single_cold
+  // repo_first_pass` (unquoted, with whitespace) the shell splits
+  // on whitespace and `repo_first_pass` arrives as a positional
+  // arg. The detector must surface this so the caller can warn.
+  it("detects positional scenario tokens left over by an unquoted CSV", () => {
+    const spill = detectUnquotedCsvSpillover(["--scenarios=single_cold", "repo_first_pass"]);
+    expect(spill.scenarioSpillover).toEqual(["repo_first_pass"]);
+    expect(spill.backendSpillover).toEqual([]);
+    expect(spill.unrecognizedPositional).toEqual([]);
+  });
+
+  it("detects positional backend tokens left over by an unquoted CSV", () => {
+    const spill = detectUnquotedCsvSpillover(["--backends=verter", "vue-component-meta"]);
+    expect(spill.backendSpillover).toEqual(["vue-component-meta"]);
+    expect(spill.scenarioSpillover).toEqual([]);
+  });
+
+  it("ignores positional tokens that are not known scenario or backend names", () => {
+    // Unrecognized positionals are still tracked but NOT flagged
+    // as scenario/backend spillover — the warning text would be
+    // misleading otherwise.
+    const spill = detectUnquotedCsvSpillover(["--scenarios=single_cold", "some-unrelated-thing"]);
+    expect(spill.scenarioSpillover).toEqual([]);
+    expect(spill.unrecognizedPositional).toEqual(["some-unrelated-thing"]);
+  });
+
+  it("treats correctly-quoted CSV as a single arg with no spillover", () => {
+    // The properly-quoted form arrives as a single argv token. The
+    // detector returns empty spillover lists, which is the
+    // post-change passing state.
+    const spill = detectUnquotedCsvSpillover(["--scenarios=single_cold,repo_first_pass"]);
+    expect(spill.scenarioSpillover).toEqual([]);
+    expect(spill.backendSpillover).toEqual([]);
+    expect(spill.unrecognizedPositional).toEqual([]);
+  });
+
+  it("does not flag flag-form args (e.g., --json, --build-expected-only, --js-audit)", () => {
+    // These flags are valid positional-looking tokens (no `=`) and
+    // must not trigger the spillover warning.
+    const spill = detectUnquotedCsvSpillover(["--json", "--build-expected-only", "--js-audit"]);
+    expect(spill.scenarioSpillover).toEqual([]);
+    expect(spill.backendSpillover).toEqual([]);
+    expect(spill.unrecognizedPositional).toEqual([]);
+  });
+
+  it("emits a stderr warning when parseMetaUiBenchArgs sees unquoted scenario CSV", () => {
+    // End-to-end: run the parser against the broken-form args and
+    // capture the stderr warning. This is the user-visible
+    // behavior the README documents.
+    const originalWrite = process.stderr.write.bind(process.stderr);
+    let captured = "";
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      captured += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString();
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      parseMetaUiBenchArgs(["--scenarios=single_cold", "repo_first_pass"]);
+    } finally {
+      process.stderr.write = originalWrite;
+    }
+    expect(captured).toMatch(/look like scenario names/);
+    expect(captured).toMatch(/--scenarios="single_cold,repo_first_pass"/);
+    // Discriminator: warning text must reference the README so a
+    // future refactor that relocates the docs surfaces here.
+    expect(captured).toMatch(/packages\/benchmark\/README\.md/);
+  });
+
+  it("does not emit a warning when scenarios are correctly quoted (single CSV arg)", () => {
+    const originalWrite = process.stderr.write.bind(process.stderr);
+    let captured = "";
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      captured += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString();
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      parseMetaUiBenchArgs(["--scenarios=single_cold,repo_first_pass"]);
+    } finally {
+      process.stderr.write = originalWrite;
+    }
+    // No spillover warning on the quoted form.
+    expect(captured).not.toMatch(/look like scenario names/);
   });
 });
 

@@ -194,6 +194,57 @@ function logProgress(
   logLine(`${prefix} ${index}/${total} ${component.relativePath} ${detail}${auditSuffix}`);
 }
 
+/**
+ * T9.2 — detect unquoted CSV in `--scenarios=` / `--backends=` /
+ * `--components=`. When the user runs (typically in a shell that
+ * splits unquoted commas):
+ *
+ *   pnpm bench:meta:ui -- --scenarios=single_cold repo_first_pass
+ *
+ * the `repo_first_pass` token arrives as a positional arg (no flag
+ * prefix). The argv parser silently ignores it, leaving the user
+ * with a benchmark run that does NOT include the second scenario.
+ * The correct quoted form is documented in `packages/benchmark/
+ * README.md`:
+ *
+ *   pnpm bench:meta:ui -- --scenarios="single_cold,repo_first_pass"
+ *
+ * This helper returns the list of positional tokens that look like
+ * known scenario / backend names so the parser can warn the user.
+ *
+ * Pure helper, exported for the discriminating
+ * `bench_meta_ui_per_component_isolation` test.
+ */
+export function detectUnquotedCsvSpillover(argv: readonly string[]): {
+  scenarioSpillover: string[];
+  backendSpillover: string[];
+  unrecognizedPositional: string[];
+} {
+  const scenarioSpillover: string[] = [];
+  const backendSpillover: string[] = [];
+  const unrecognizedPositional: string[] = [];
+  for (const arg of argv) {
+    if (
+      arg.startsWith("--") ||
+      arg === "--json" ||
+      arg === "--build-expected-only" ||
+      arg === "--js-audit"
+    ) {
+      continue;
+    }
+    if ((SUPPORTED_SCENARIOS as readonly string[]).includes(arg)) {
+      scenarioSpillover.push(arg);
+      continue;
+    }
+    if ((SUPPORTED_BACKENDS as readonly string[]).includes(arg)) {
+      backendSpillover.push(arg);
+      continue;
+    }
+    unrecognizedPositional.push(arg);
+  }
+  return { scenarioSpillover, backendSpillover, unrecognizedPositional };
+}
+
 export function parseMetaUiBenchArgs(argv: string[]): MetaUiBenchArgs {
   const defaultOutputDir = resolve(
     repoRoot,
@@ -219,6 +270,40 @@ export function parseMetaUiBenchArgs(argv: string[]): MetaUiBenchArgs {
     outputDir: defaultOutputDir,
   };
   let expectedDirExplicit = false;
+
+  // T9.2 — detect unquoted CSV before the per-flag walk; the warning
+  // surfaces on stderr so it does not corrupt --json output, and the
+  // walk still proceeds so the parser remains backward-compatible.
+  const spillover = detectUnquotedCsvSpillover(argv);
+  if (spillover.scenarioSpillover.length > 0) {
+    // Reconstruct the most likely intended CSV by combining the
+    // existing `--scenarios=...` value with the spillover tokens.
+    const existingScenariosValue =
+      argv.find((arg) => arg.startsWith("--scenarios="))?.slice("--scenarios=".length) ?? "";
+    const reconstructedCsv = [existingScenariosValue, ...spillover.scenarioSpillover]
+      .filter(Boolean)
+      .join(",");
+    process.stderr.write(
+      `warning: positional argument(s) [${spillover.scenarioSpillover.join(
+        ", ",
+      )}] look like scenario names — did you mean to write\n` +
+        `         --scenarios="${reconstructedCsv}" (quoted CSV)? Unquoted CSV with whitespace splits in most\n` +
+        `         shells; see packages/benchmark/README.md.\n`,
+    );
+  }
+  if (spillover.backendSpillover.length > 0) {
+    const existingBackendsValue =
+      argv.find((arg) => arg.startsWith("--backends="))?.slice("--backends=".length) ?? "";
+    const reconstructedCsv = [existingBackendsValue, ...spillover.backendSpillover]
+      .filter(Boolean)
+      .join(",");
+    process.stderr.write(
+      `warning: positional argument(s) [${spillover.backendSpillover.join(
+        ", ",
+      )}] look like backend names — did you mean to write\n` +
+        `         --backends="${reconstructedCsv}" (quoted CSV)? See packages/benchmark/README.md.\n`,
+    );
+  }
 
   for (const arg of argv) {
     if (arg === "--json") {

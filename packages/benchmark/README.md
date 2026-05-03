@@ -114,10 +114,34 @@ JSON output:
 
 ```bash
 pnpm --filter @verter/benchmark bench:meta:ui:json -- \
-  --backends=verter,vue-component-meta \
-  --scenarios=single_cold,repo_warm_second_pass \
+  --backends="verter,vue-component-meta" \
+  --scenarios="single_cold,repo_warm_second_pass" \
   --repeats=5
 ```
+
+> **Quote multi-value CSV flags.** `--scenarios`, `--backends`, and
+> `--components` accept comma-separated lists. The runner parses the
+> entire `--scenarios=value` token in one piece, so the value MUST be
+> quoted whenever the shell would otherwise split it on a comma or
+> whitespace:
+>
+> ```bash
+> # Correct — quoted CSV reaches the runner as a single argv token:
+> pnpm --filter @verter/benchmark bench:meta:ui -- \
+>   --scenarios="single_cold,repo_first_pass"
+>
+> # Incorrect — `repo_first_pass` becomes a positional arg and is
+> # silently dropped (the run executes only `single_cold`):
+> pnpm --filter @verter/benchmark bench:meta:ui -- \
+>   --scenarios=single_cold repo_first_pass
+> ```
+>
+> The runner detects the unquoted form and emits a stderr warning
+> showing the recommended quoted spelling, but does NOT auto-correct —
+> the run still proceeds with whatever scenarios were actually passed
+> as `--scenarios=...`. The same applies to `--backends` and
+> `--components`. PowerShell users should also quote the value to
+> defeat its argument-splitting heuristics.
 
 Build or refresh the pinned `vue-component-meta` baseline once and reuse it across later runs:
 
