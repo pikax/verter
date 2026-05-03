@@ -93,13 +93,23 @@ CI uses a separate `/lsp-benchmark` workflow that runs the PrimeVue target on Li
 
 The package also includes a real-project component-meta benchmark for `nuxt/ui`.
 
-Setup the local checkout first:
+Setup the local checkout first. **`--ref=<sha-or-ref>` is required** so every CI run and developer laptop benchmarks the same upstream tree (Tier 6 §8.2 / T9.3 strict-ref enforcement):
 
 ```bash
-pnpm --filter @verter/benchmark bench:meta:ui:setup
+pnpm --filter @verter/benchmark bench:meta:ui:setup -- \
+  --ref=90a94fb162d532ada26012bfe1ab82adc9217988
 ```
 
-That setup intentionally uses `pnpm install --frozen-lockfile` so every backend/job benchmarks the same dependency graph. For manual debugging only, you can opt into an unfrozen fallback with `pnpm --filter @verter/benchmark bench:meta:ui:setup -- --allow-unfrozen-install`.
+Symbolic refs (tags, PR refs) work too:
+
+```bash
+pnpm --filter @verter/benchmark bench:meta:ui:setup -- --ref=v0.5.0
+pnpm --filter @verter/benchmark bench:meta:ui:setup -- --ref=refs/pull/1234/head
+```
+
+The setup also refuses to clobber a target worktree that has local modifications, untracked files, or staged deletions. Resolve by stashing/committing the changes, or pass `--allow-dirty-target` to opt into the destructive behavior for one-off manual debugging.
+
+That setup intentionally uses `pnpm install --frozen-lockfile` so every backend/job benchmarks the same dependency graph. For manual debugging only, you can opt into an unfrozen fallback with `--allow-unfrozen-install`.
 
 Run a small smoke benchmark:
 
