@@ -59,7 +59,9 @@ pub(crate) mod completion_fence;
 pub mod component_meta_audit;
 #[cfg(test)]
 mod component_meta_cache_discipline_tests;
-pub(crate) mod component_meta_caches;
+// tests/invalidation_perf.rs — InvalidationByCanonical impl on
+// ImportedRegistryDb is exercised by the §12.A12 perf gate.
+pub mod component_meta_caches;
 #[cfg(test)]
 mod component_meta_caches_tests;
 #[cfg(test)]

@@ -3504,11 +3504,14 @@ mod foundations_guards {
         "pub mod semantic_query",
         // tests/invalidation_coverage.rs, tests/invalidation_perf.rs
         "pub mod invalidation_domain",
+        // tests/invalidation_perf.rs (ImportedRegistryDb /
+        // ImportedRegistryEntry / ImportedRegistryKey for the §12.A12
+        // InvalidationByCanonical perf gate)
+        "pub mod component_meta_caches",
         // ─── B-C5 territory (separate ownership), kept `pub` ────────
         "pub mod component_meta_resolution_policy",
         // ─── crate-private modules (already non-public) ─────────────
         "pub(crate) mod completion_fence",
-        "pub(crate) mod component_meta_caches",
         "pub(crate) mod component_meta_materialize",
         "pub(crate) mod component_meta_result_db",
         "pub(crate) mod cooperative_admission",
