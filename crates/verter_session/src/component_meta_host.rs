@@ -414,6 +414,33 @@ impl ComponentMetaSession {
             .map_err(ComponentMetaHostError::from)
     }
 
+    /// Tier 1B selective surface API (D32 + D102). Returns the
+    /// `ComponentMetaSurface` envelope (eager scalars + `NamedTypeHandle`
+    /// for every type-bearing field), or `None` when the canonical does
+    /// not resolve to a component.
+    pub fn get_component_meta_surface(
+        &self,
+        canonical_or_alias: &str,
+    ) -> Result<Option<crate::component_meta_payload::ComponentMetaSurface>, ComponentMetaHostError>
+    {
+        self.inner
+            .get_component_meta_surface(canonical_or_alias)
+            .map_err(ComponentMetaHostError::from)
+    }
+
+    /// Tier 1B selective surface API (D32 + D102). Resolves a `TypeHandle`
+    /// to a one-layer `TypeExpansion`. Errors are typed (D104 + D114).
+    pub fn get_component_meta_type_expansion(
+        &self,
+        handle: crate::component_meta_payload::TypeHandle,
+        depth: Option<usize>,
+    ) -> Result<
+        crate::component_meta_payload::TypeExpansion,
+        crate::component_meta_payload::TypeHandleError,
+    > {
+        self.inner.get_component_meta_type_expansion(handle, depth)
+    }
+
     /// Get the analysis snapshot in this session's overlay context.
     pub fn get_analysis(
         &self,

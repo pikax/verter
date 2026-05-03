@@ -2150,6 +2150,38 @@ impl SemanticGraphStore {
         })
     }
 
+    /// Per-key result for the BFS bridge's batch dispatch (D103). Each
+    /// frontier handle is resolved into either a node-id (success) or a
+    /// typed reason describing why expansion could not proceed. Per-key
+    /// errors are returned, NOT panic'd (D41 invariant: one batch entry → N
+    /// keys → K admissions).
+    ///
+    /// Lookups happen via warm `get(key)` only — `execute_cooperative_batch`
+    /// is a non-admission probe; cold builds stay the responsibility of the
+    /// per-query cooperative path.
+    pub fn execute_cooperative_batch(
+        &self,
+        keys: &[crate::semantic_query::SemanticQueryKey],
+    ) -> Vec<Result<SemanticNodeId, BatchExpandError>> {
+        keys.iter()
+            .map(|key| {
+                if let Some(hit) = self.get(key) {
+                    match hit.value {
+                        QueryResult::Value(node) => Ok(node),
+                        QueryResult::Recursive(node) => Ok(node),
+                        QueryResult::Error(_) => Err(BatchExpandError::EvictedNode),
+                    }
+                } else {
+                    // Cold: from the BFS bridge's perspective, an unmaterialized
+                    // key is treated as evicted; the bridge will surface a
+                    // typed StaleAtFrontier envelope and the caller can decide
+                    // whether to issue a per-key cooperative cold build.
+                    Err(BatchExpandError::EvictedNode)
+                }
+            })
+            .collect()
+    }
+
     /// Cooperative execution entry point. Semantics:
     ///
     /// 1. If the key is already warm, return the cached result and signature.
@@ -2623,6 +2655,27 @@ impl SemanticGraphStore {
         );
         self.warm_publish_one_if_absent(key, QueryResult::Value(value), dep_signature);
     }
+}
+
+/// Per-key error returned by `SemanticGraphStore::execute_cooperative_batch`
+/// (D103). Mirrors the proto `BatchExpandError` enum so the BFS bridge can
+/// project per-key failures into a typed `BridgeError::StaleAtFrontier`
+/// envelope without losing the reason.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BatchExpandError {
+    /// Canonical's content hash changed between the surface envelope's
+    /// `TypeHandle` stamp and this batch's read.
+    StaleContentChanged,
+    /// Canonical was deleted from the host between stamp and read.
+    FileDeleted,
+    /// The declaration the handle pointed at no longer exists in the
+    /// current `OwnedTypeResolutionContext::declaration_fingerprints`
+    /// table.
+    DeclarationRemoved,
+    /// The semantic node was evicted from the warm memo (e.g. by a
+    /// generation bump under memory pressure) and would require a cold
+    /// rebuild that the batch path is not authorised to perform.
+    EvictedNode,
 }
 
 /// Maximum number of times a joiner re-enters dispatch after its

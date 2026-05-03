@@ -778,6 +778,287 @@ impl MetaSession {
         })?
     }
 
+    // ───────────────────────────────────────────────────────────────────────
+    // Selective component-meta surface API (Tier 1B / D32 / D102 / D122)
+    // ───────────────────────────────────────────────────────────────────────
+
+    /// Build the eager-scalar + lazy-`TypeHandle` surface envelope for a
+    /// canonical (D32 / D99). Returns `Ok(None)` when the canonical does not
+    /// resolve to a component (e.g., not a Vue SFC).
+    ///
+    /// Tier 1B contract: the lazy fields are populated from the existing
+    /// `ComponentMetaAnalysis` snapshot with **empty** `TypeHandle` query
+    /// paths. Tier 1C-α populates `OwnedTypeResolutionContext::declaration_fingerprints`
+    /// at lowering time, after which the surface envelope handles point at
+    /// real declarations. The contract / proto wire shape / NAPI-side
+    /// behavior is identical at both tiers.
+    pub fn get_component_meta_surface(
+        &self,
+        canonical_or_alias: &str,
+    ) -> Result<Option<crate::component_meta_payload::ComponentMetaSurface>, MetaError> {
+        self.check_alive()?;
+        let analysis = self.get_component_meta(canonical_or_alias)?;
+        Ok(analysis.map(|a| self.assemble_surface_from_analysis(&a)))
+    }
+
+    /// Resolve a `TypeHandle` to a one-layer `TypeExpansion` (D32 / D104).
+    ///
+    /// Tier 1B resolution: a handle whose `query_path` is `None` (the
+    /// surface root) returns an empty Object expansion; handles with a
+    /// populated query path round-trip the proto identity. Tier 1C-α wires
+    /// the real walk against `OwnedTypeResolutionContext::declaration_fingerprints`.
+    pub fn get_component_meta_type_expansion(
+        &self,
+        handle: crate::component_meta_payload::TypeHandle,
+        _depth: Option<usize>,
+    ) -> Result<
+        crate::component_meta_payload::TypeExpansion,
+        crate::component_meta_payload::TypeHandleError,
+    > {
+        use crate::component_meta_payload::{
+            ShapeOutline, StaleHandleReason, TypeExpansion, TypeHandleError,
+        };
+
+        // D104 Step 1: project_id mismatch.
+        // Tier 1B: project_id is currently a stable empty string for the
+        // single-project host model; the comparison is a no-op until 1C-α
+        // ties project_id to `WorkspaceSnapshot::ProjectId`.
+        let session_project_id = String::new();
+        if handle.project_id != session_project_id {
+            return Err(TypeHandleError::ProjectMismatch {
+                expected: session_project_id,
+                actual: handle.project_id.clone(),
+            });
+        }
+
+        // D104 Step 2-3: canonical lookup. Tier 1B: we trust the surface
+        // envelope's stamp and only verify the canonical is still readable
+        // through the host (file-existence check, no content_hash compare
+        // until 1C-α).
+        let host = self.project.host();
+        let resolved = host.resolve_alias_or_canonical(handle.canonical_id.as_str());
+        if host.get_source(resolved.as_str()).is_none() {
+            return Err(TypeHandleError::StaleHandle {
+                reason: StaleHandleReason::FileDeleted,
+            });
+        }
+
+        // D104 Step 5-7: walk query_path. Surface-root handles (no path)
+        // return an empty Object outline. Path-bearing handles round-trip
+        // the identity until 1C-α.
+        let shape = match handle.query_path.as_ref() {
+            None => ShapeOutline::Object { property_count: 0 },
+            Some(_) => ShapeOutline::Object { property_count: 0 },
+        };
+        Ok(TypeExpansion {
+            handle,
+            shape,
+            children: Vec::new(),
+        })
+    }
+
+    /// D90/D98 BFS bridge entry. Wraps the existing legacy
+    /// `get_component_meta_payload` analysis pipeline with the BFS frontier
+    /// + depth-bound + magic-byte error envelope.
+    ///
+    /// Returns `Ok(Some(payload_bytes))` for success; `Ok(Some(magic-byte
+    /// error envelope bytes))` for `BridgeError`; `Ok(None)` when the
+    /// canonical does not resolve to a component. Per D114 the magic-byte
+    /// prefix `0xFF` distinguishes error envelopes at the consumer.
+    pub fn get_component_meta_payload_via_bridge(
+        &self,
+        canonical_or_alias: &str,
+        encode_fn: impl FnOnce(
+            verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+            &crate::meta_resolve::ResolvedComponentMetaState,
+        ) -> Vec<u8>,
+    ) -> Result<Option<Vec<u8>>, MetaError> {
+        use crate::component_meta_payload::{
+            BridgeError, TypeExpansion, TypeHandle, MAX_BRIDGE_DEPTH,
+        };
+        use rustc_hash::FxHashMap;
+
+        self.check_alive()?;
+
+        // Step 1 — surface envelope.
+        let surface = match self.get_component_meta_surface(canonical_or_alias)? {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+
+        // Step 2 — BFS.
+        let mut frontier: Vec<TypeHandle> = surface.collect_all_type_handles();
+        let mut expansions: FxHashMap<TypeHandle, TypeExpansion> = FxHashMap::default();
+        let mut depth: u32 = 0;
+
+        while !frontier.is_empty() {
+            if depth as usize >= MAX_BRIDGE_DEPTH {
+                return Ok(Some(
+                    BridgeError::DepthExceeded {
+                        depth,
+                        max: MAX_BRIDGE_DEPTH as u32,
+                    }
+                    .to_error_envelope(),
+                ));
+            }
+            let mut next_frontier: Vec<TypeHandle> = Vec::new();
+            for handle in frontier.drain(..) {
+                if expansions.contains_key(&handle) {
+                    continue;
+                }
+                match self.get_component_meta_type_expansion(handle.clone(), None) {
+                    Ok(expansion) => {
+                        for child in expansion.lazy_children() {
+                            if !expansions.contains_key(&child) {
+                                next_frontier.push(child);
+                            }
+                        }
+                        expansions.insert(handle, expansion);
+                    }
+                    Err(_) => {
+                        // Surface a typed StaleAtFrontier envelope (D114 + D103).
+                        return Ok(Some(
+                            BridgeError::StaleAtFrontier {
+                                handle,
+                                reason:
+                                    crate::component_meta_payload::BatchExpandError::EvictedNode,
+                            }
+                            .to_error_envelope(),
+                        ));
+                    }
+                }
+            }
+            frontier = next_frontier;
+            depth += 1;
+        }
+
+        // Step 3 — fall through to the legacy ComponentMetaPayload encoder
+        // for byte-equiv preservation (D19). The bridge has gathered all
+        // expansions; for Tier 1B the public bytes still come from the
+        // existing analysis pipeline. Tier 1C-α wires `assemble_volar_payload`
+        // as the encode source once `OwnedTypeResolutionContext::declaration_fingerprints`
+        // is populated.
+        self.get_component_meta_payload(canonical_or_alias, encode_fn)
+    }
+
+    /// D122 Tier 1B-introduced helper. Maps a `ComponentMetaAnalysis`
+    /// snapshot into the public `ComponentMetaSurface` envelope with all
+    /// 23 analysis fields projected per D99.
+    ///
+    /// Eager fields are passed through opaquely (they encode through the
+    /// existing `verter_protocol` mappers). Type-bearing fields project to
+    /// `NamedTypeHandle` carrying a `TypeHandle` whose query path is
+    /// stamped from `OwnedTypeResolutionContext::declaration_fingerprints`
+    /// once populated (1C-α). Until then the query path is `None` (surface
+    /// root) and the BFS bridge terminates immediately.
+    fn assemble_surface_from_analysis(
+        &self,
+        analysis: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    ) -> crate::component_meta_payload::ComponentMetaSurface {
+        use crate::component_meta_payload::{
+            ComponentMetaSurface, FallthroughBranchLazy, FallthroughSurfaceLazy, NamedTypeHandle,
+            TypeHandle,
+        };
+
+        let canonical = analysis.file_path.clone();
+        let project_id = String::new(); // Tier 1B: single-project model.
+        let make_handle = || TypeHandle::root(project_id.clone(), canonical.clone());
+        let named = |name: &str, required: bool, doc: Option<&str>| NamedTypeHandle {
+            name: name.to_string(),
+            handle: make_handle(),
+            required,
+            doc: doc.unwrap_or("").to_string(),
+        };
+
+        // Project the 9 lazy fields verbatim per name + required + doc.
+        let props: Vec<NamedTypeHandle> = analysis
+            .props
+            .iter()
+            .map(|p| named(&p.name, p.required, p.description.as_deref()))
+            .collect();
+        let events: Vec<NamedTypeHandle> = analysis
+            .events
+            .iter()
+            .map(|e| named(&e.name, false, e.description.as_deref()))
+            .collect();
+        let slots: Vec<NamedTypeHandle> = analysis
+            .slots
+            .iter()
+            .map(|s| named(&s.name, s.is_required, s.description.as_deref()))
+            .collect();
+        let models: Vec<NamedTypeHandle> = analysis
+            .models
+            .iter()
+            .map(|m| named(&m.name, false, None))
+            .collect();
+        let exposed: Vec<NamedTypeHandle> = analysis
+            .exposed
+            .iter()
+            .map(|e| named(&e.name, false, e.description.as_deref()))
+            .collect();
+        let accepted_props: Vec<NamedTypeHandle> = analysis
+            .accepted_props
+            .iter()
+            .map(|p| named(&p.name, p.required, None))
+            .collect();
+        let accepted_events: Vec<NamedTypeHandle> = analysis
+            .accepted_events
+            .iter()
+            .map(|e| named(&e.name, false, None))
+            .collect();
+        let type_registry: Vec<NamedTypeHandle> = analysis
+            .type_registry
+            .iter()
+            .map(|t| named(&t.name, false, None))
+            .collect();
+
+        // Fallthrough surface — branch-structured per FallthroughSurface.
+        // Tier 1B wires the structural branch shape only; the per-branch
+        // type-bearing fields project via FallthroughBranchLazy below
+        // once the analysis structure is mapped (1C-α).
+        let fallthrough_surface = match &analysis.fallthrough_surface {
+            verter_semantic::analysis::component_meta::FallthroughSurface::Branches {
+                branches,
+            } if !branches.is_empty() => Some(FallthroughSurfaceLazy {
+                branches: branches
+                    .iter()
+                    .map(|_branch| FallthroughBranchLazy::default())
+                    .collect(),
+            }),
+            _ => None,
+        };
+
+        ComponentMetaSurface {
+            file_path: analysis.file_path.clone(),
+            options_api: analysis.options_api,
+            // Eager opaque fields: empty bytes for Tier 1B; 1C-α maps
+            // through the existing `verter_protocol::component_meta`
+            // converters once the surface envelope encoder is wired.
+            flags_bytes: Vec::new(),
+            root_reachability_bytes: Vec::new(),
+            accepted_surface_completeness_bytes: Vec::new(),
+            macro_expansion_diagnostics_bytes: Vec::new(),
+            vue_api_calls_bytes: Vec::new(),
+            sfc_blocks_bytes: None,
+            imports_bytes: Vec::new(),
+            bindings_bytes: Vec::new(),
+            styles_bytes: Vec::new(),
+            components_bytes: Vec::new(),
+            template_refs_bytes: Vec::new(),
+            public_instance_bytes: None,
+            // Lazy fields — every one of the 9 type-bearing destinations.
+            props,
+            events,
+            slots,
+            models,
+            exposed,
+            accepted_props,
+            accepted_events,
+            fallthrough_surface,
+            type_registry,
+        }
+    }
+
     /// Return provenance counters for this session's host.
     pub fn get_provenance(&self) -> Result<crate::types::MetaProvenanceSnapshot, MetaError> {
         self.check_alive()?;
