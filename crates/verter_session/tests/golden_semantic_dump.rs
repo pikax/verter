@@ -1,7 +1,7 @@
 //! Tier 0 Step 0.2 — semantic-graph eager-snapshot dump.
 //!
-//! Dumps the [`SemanticGraphStore`] interned-key set + per-key result hash
-//! + `dep_signature` to
+//! Dumps the [`SemanticGraphStore`] interned-key set, per-key result hash,
+//! and `dep_signature` to
 //! `crates/verter_session/tests/perf_bounds/golden-semantic/keys-eager.json`
 //! after running `getComponentMeta` against 32 representative
 //! `nuxt-ui-codex-bench` fixtures (or as many as fit in the
