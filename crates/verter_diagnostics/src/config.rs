@@ -248,17 +248,32 @@ pub struct ResolvedLintConfig {
     pub config: LintConfig,
 }
 
+/// Join a workspace root with a relative file name, producing a
+/// forward-slash canonical path suitable for
+/// [`WorkspaceRead::read_file`](verter_workspace::WorkspaceRead::read_file).
+fn join_workspace_path(root: &str, name: &str) -> String {
+    let trimmed = root.trim_end_matches('/');
+    format!("{trimmed}/{name}")
+}
+
 /// Discover and load project lint configuration.
 ///
 /// Priority: `.verterrc.json` > eslint config
-pub fn discover_lint_config(workspace_root: &std::path::Path) -> ResolvedLintConfig {
+///
+/// `workspace_root` is the absolute path to the project root; reads route
+/// through `workspace` (the [`WorkspaceRead`](verter_workspace::WorkspaceRead)
+/// authority) so overlays and snapshot caches are honored.
+pub fn discover_lint_config(
+    workspace: &dyn verter_workspace::WorkspaceRead,
+    workspace_root: &str,
+) -> ResolvedLintConfig {
     // 1. Try .verterrc.json
-    if let Some(config) = load_verterrc(workspace_root) {
+    if let Some(config) = load_verterrc(workspace, workspace_root) {
         return config;
     }
 
     // 2. Try eslint config migration
-    if let Some(config) = load_eslint_config(workspace_root) {
+    if let Some(config) = load_eslint_config(workspace, workspace_root) {
         return config;
     }
 
@@ -267,9 +282,12 @@ pub fn discover_lint_config(workspace_root: &std::path::Path) -> ResolvedLintCon
 }
 
 /// Load `.verterrc.json` from workspace root.
-fn load_verterrc(workspace_root: &std::path::Path) -> Option<ResolvedLintConfig> {
-    let config_path = workspace_root.join(".verterrc.json");
-    let content = std::fs::read_to_string(&config_path).ok()?;
+fn load_verterrc(
+    workspace: &dyn verter_workspace::WorkspaceRead,
+    workspace_root: &str,
+) -> Option<ResolvedLintConfig> {
+    let config_path = join_workspace_path(workspace_root, ".verterrc.json");
+    let content = workspace.read_file(&config_path)?;
     let cleaned = strip_json_comments(&content);
     let project_config: VerterProjectConfig = serde_json::from_str(&cleaned).ok()?;
 
@@ -318,17 +336,18 @@ fn load_verterrc(workspace_root: &std::path::Path) -> Option<ResolvedLintConfig>
 }
 
 /// Load and migrate eslint-plugin-vue config.
-fn load_eslint_config(workspace_root: &std::path::Path) -> Option<ResolvedLintConfig> {
+fn load_eslint_config(
+    workspace: &dyn verter_workspace::WorkspaceRead,
+    workspace_root: &str,
+) -> Option<ResolvedLintConfig> {
     // Try .eslintrc.json first, then package.json
-    let eslint_json = workspace_root.join(".eslintrc.json");
-    let package_json = workspace_root.join("package.json");
+    let eslint_json = join_workspace_path(workspace_root, ".eslintrc.json");
+    let package_json = join_workspace_path(workspace_root, "package.json");
 
-    let json: serde_json::Value = if eslint_json.exists() {
-        let content = std::fs::read_to_string(&eslint_json).ok()?;
+    let json: serde_json::Value = if let Some(content) = workspace.read_file(&eslint_json) {
         let cleaned = strip_json_comments(&content);
         serde_json::from_str(&cleaned).ok()?
-    } else if package_json.exists() {
-        let content = std::fs::read_to_string(&package_json).ok()?;
+    } else if let Some(content) = workspace.read_file(&package_json) {
         let pkg: serde_json::Value = serde_json::from_str(&content).ok()?;
         pkg.get("eslintConfig")?.clone()
     } else {
@@ -619,68 +638,64 @@ mod tests {
         assert_eq!(parse_rule_severity(&serde_json::json!(["off"])), None);
     }
 
+    fn build_workspace(files: &[(&str, &str)]) -> verter_workspace::MemoryWorkspace {
+        use std::sync::Arc;
+        use verter_workspace::WorkspaceAccess;
+        let ws = verter_workspace::MemoryWorkspace::new(verter_workspace::MemoryOptions::default());
+        for (path, content) in files {
+            ws.notify_upsert(path, Arc::from(*content));
+        }
+        ws
+    }
+
     #[test]
     fn discover_lint_config_no_config_returns_default() {
-        let tmp = std::env::temp_dir().join("verter_diag_test_no_config");
-        let _ = std::fs::create_dir_all(&tmp);
-        let result = discover_lint_config(&tmp);
+        let ws = build_workspace(&[]);
+        let result = discover_lint_config(&ws, "/project");
         assert!(
             !result.explicitly_configured,
             "should not be explicitly configured"
         );
         assert_eq!(result.config.preset, LintPreset::Recommended);
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn discover_lint_config_verterrc() {
-        let tmp = std::env::temp_dir().join("verter_diag_test_verterrc");
-        let _ = std::fs::create_dir_all(&tmp);
-        std::fs::write(
-            tmp.join(".verterrc.json"),
+        let ws = build_workspace(&[(
+            "/project/.verterrc.json",
             r#"{"lint":{"preset":"essential","rules":{"no-v-html":"off"}}}"#,
-        )
-        .unwrap();
-        let result = discover_lint_config(&tmp);
+        )]);
+        let result = discover_lint_config(&ws, "/project");
         assert!(result.explicitly_configured);
         assert_eq!(result.config.preset, LintPreset::Essential);
         assert_eq!(result.config.rules.get("no-v-html"), Some(&None));
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn discover_lint_config_eslintrc() {
-        let tmp = std::env::temp_dir().join("verter_diag_test_eslintrc");
-        let _ = std::fs::create_dir_all(&tmp);
-        std::fs::write(
-            tmp.join(".eslintrc.json"),
+        let ws = build_workspace(&[(
+            "/project/.eslintrc.json",
             r#"{"extends":["plugin:vue/vue3-essential"],"rules":{"vue/no-v-html":"error"}}"#,
-        )
-        .unwrap();
-        let result = discover_lint_config(&tmp);
+        )]);
+        let result = discover_lint_config(&ws, "/project");
         assert!(result.explicitly_configured);
         assert_eq!(result.config.preset, LintPreset::Essential);
         assert_eq!(
             result.config.rules.get("no-v-html"),
             Some(&Some(Severity::Error))
         );
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn discover_lint_config_ignore_patterns_from_verterrc() {
-        let tmp = std::env::temp_dir().join("verter_diag_test_ignore");
-        let _ = std::fs::create_dir_all(&tmp);
-        std::fs::write(
-            tmp.join(".verterrc.json"),
+        let ws = build_workspace(&[(
+            "/project/.verterrc.json",
             r#"{"lint":{"preset":"recommended"},"ignore":["src/generated/**","*.test.vue"]}"#,
-        )
-        .unwrap();
-        let result = discover_lint_config(&tmp);
+        )]);
+        let result = discover_lint_config(&ws, "/project");
         assert!(result.explicitly_configured);
         assert_eq!(result.config.ignore_patterns.len(), 2);
         assert_eq!(result.config.ignore_patterns[0], "src/generated/**");
         assert_eq!(result.config.ignore_patterns[1], "*.test.vue");
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
