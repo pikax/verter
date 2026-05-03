@@ -93,6 +93,7 @@ rayon = { workspace = true }
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
+toml = "1"
 verter_parser = { path = "../verter_parser" }
 oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }

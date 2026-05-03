@@ -8,7 +8,7 @@ pub(crate) fn canonicalize_id(input: &str) -> Cow<'_, str> {
     let trimmed = input.trim();
 
     // Strip Windows extended-length path prefix (`//?/` or `\\?\`) early.
-    // `std::fs::canonicalize()` produces these on Windows and they break
+    // OS canonicalization produces these on Windows and they break
     // query-parameter stripping (`?` in `//?/` is not a query separator).
     let trimmed = if let Some(rest) = trimmed
         .strip_prefix("//?/")

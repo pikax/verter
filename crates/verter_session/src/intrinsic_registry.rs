@@ -342,22 +342,17 @@ type   NoInfer   <   T  >   = intrinsic   ;
     // should ensure the workspace `pnpm install` runs before tests.
     // ----------------------------------------------------------------------
 
-    /// Scan a TypeScript `lib` directory and collect every intrinsic
+    /// Scan an [`IntrinsicLibraryAccess`] and collect every intrinsic
     /// declaration name across its `lib*.d.ts` files.
-    fn scan_intrinsics_in_lib_dir(lib_dir: &std::path::Path) -> Vec<Arc<str>> {
+    fn scan_intrinsics_via_library(
+        library: &dyn verter_workspace::IntrinsicLibraryAccess,
+    ) -> Vec<Arc<str>> {
         let mut found: Vec<Arc<str>> = Vec::new();
-        let Ok(entries) = std::fs::read_dir(lib_dir) else {
-            return found;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
-                continue;
-            };
+        for name in library.list_intrinsic_libs() {
             if !name.starts_with("lib.") || !name.ends_with(".d.ts") {
                 continue;
             }
-            let Ok(source) = std::fs::read_to_string(&path) else {
+            let Ok(source) = library.read_intrinsic_lib(&name) else {
                 continue;
             };
             found.extend(extract_intrinsics_from_lib_source(&source));
@@ -367,62 +362,37 @@ type   NoInfer   <   T  >   = intrinsic   ;
         found
     }
 
-    /// Locate a `typescript/lib` directory within the workspace (if any).
-    /// Looks for both the top-level `node_modules/typescript/lib` (hoisted)
-    /// and pnpm's virtual-store layout `node_modules/.pnpm/typescript@*/node_modules/typescript/lib`.
-    fn find_active_ts_lib_dir() -> Option<std::path::PathBuf> {
+    /// Build a [`NativeIntrinsicLibrary`] rooted at the workspace
+    /// (`crates/verter_session/../..`).
+    fn build_active_intrinsic_library() -> verter_workspace::NativeIntrinsicLibrary {
         let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        // workspace root = crates/verter_session → ../../
-        let workspace_root = manifest_dir.parent()?.parent()?.to_path_buf();
-
-        // 1. Hoisted install
-        let hoisted = workspace_root.join("node_modules/typescript/lib");
-        if hoisted.is_dir() {
-            return Some(hoisted);
-        }
-
-        // 2. pnpm virtual store — any typescript@* entry is fine.
-        let pnpm_dir = workspace_root.join("node_modules/.pnpm");
-        let Ok(entries) = std::fs::read_dir(&pnpm_dir) else {
-            return None;
-        };
-        let mut candidates: Vec<std::path::PathBuf> = Vec::new();
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let Some(name_str) = name.to_str() else {
-                continue;
-            };
-            if name_str.starts_with("typescript@") && !name_str.contains('+') {
-                // Skip `@typescript/...` entries, keep plain `typescript@X.Y.Z`.
-                let lib = entry.path().join("node_modules/typescript/lib");
-                if lib.is_dir() {
-                    candidates.push(lib);
-                }
-            }
-        }
-        // Prefer the lexically latest version so the test is deterministic.
-        candidates.sort();
-        candidates.pop()
+        let workspace_root = manifest_dir
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf())
+            .unwrap_or(manifest_dir);
+        verter_workspace::NativeIntrinsicLibrary::discover(&workspace_root)
     }
 
     /// Active-SDK audit — hard correctness gate. Fails if any intrinsic
     /// declared in the workspace TypeScript is missing from the registry.
     #[test]
     fn active_ts_sdk_intrinsic_audit_matches_default_registry() {
-        let Some(lib_dir) = find_active_ts_lib_dir() else {
+        let library = build_active_intrinsic_library();
+        if library.lib_dir().is_none() {
             // No TypeScript installed (e.g. shallow CI image before
             // `pnpm install`). Skip rather than fail the workspace build.
             eprintln!(
                 "skipping active-SDK intrinsic audit: no `typescript` package found under the workspace"
             );
             return;
-        };
-        let scanned = scan_intrinsics_in_lib_dir(&lib_dir);
+        }
+        let scanned = scan_intrinsics_via_library(&library);
         assert!(
             !scanned.is_empty(),
             "scanner must find at least one intrinsic declaration in {:?} — \
              an empty scan suggests the walker is broken",
-            lib_dir
+            library.lib_dir()
         );
         let registry = IntrinsicRegistry::with_defaults();
         let missing = audit_unsupported(&registry, &scanned);
@@ -431,7 +401,7 @@ type   NoInfer   <   T  >   = intrinsic   ;
             "active TypeScript SDK declares intrinsics the registry does not implement: {:?} \
              (lib dir: {:?})",
             missing.iter().map(|s| s.as_ref()).collect::<Vec<_>>(),
-            lib_dir
+            library.lib_dir()
         );
     }
 
@@ -447,12 +417,13 @@ type   NoInfer   <   T  >   = intrinsic   ;
     #[test]
     #[ignore = "maintenance: run with `cargo test -- --ignored` after installing typescript@latest"]
     fn typescript_latest_intrinsic_audit() {
-        let Some(lib_dir) = find_active_ts_lib_dir() else {
+        let library = build_active_intrinsic_library();
+        if library.lib_dir().is_none() {
             panic!(
                 "typescript@latest audit requires a `typescript` package in the workspace; install with `pnpm install` first"
             );
-        };
-        let scanned = scan_intrinsics_in_lib_dir(&lib_dir);
+        }
+        let scanned = scan_intrinsics_via_library(&library);
         let registry = IntrinsicRegistry::with_defaults();
         let missing = audit_unsupported(&registry, &scanned);
         assert!(
