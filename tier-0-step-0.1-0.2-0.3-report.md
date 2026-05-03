@@ -2,7 +2,7 @@
 
 **Branch:** `worktree-agent-a4b2c8e9d62d351ff`
 **Base commit:** `6d9b0fc3` (orchestrator-spawned)
-**Final commit:** _pinned in marker JSON_
+**Final commit:** `6fcdc486` (6 commits)
 **Plan authority:** `D:/tmp/verter-debt-and-deferred-fixes-plan.md` §2.1.1, §2.1.2, §2.1.3, §2.2
 
 ## 1. Steps completed
@@ -42,9 +42,10 @@ fresh-cold,Button,,...
 - **Command**: `timeout 600 cargo test -p verter_session --tests --features external-corpus dump_semantic_keys_eager -- --ignored --nocapture`
 - **First attempt**: hit 10-min hard timeout at fixture 18/32 (ChatMessage). Exit code 143 = SIGTERM. No JSON written (test killed mid-fixture).
 - **Re-run with tighter budgets**: per-fixture 45s soft cap + 5-min total run cap + skip-list of `["ChatMessage", "ChatMessages"]` (known-heavy under pre-bridge resolver).
-- **Re-run exit code**: _filled in after rerun completes_
-- **Fixtures processed**: _filled in after rerun_ of 32 attempted (with 2 skipped → 30 effective).
-- **Keys drained**: _filled in after rerun_
+- **Re-run exit code**: 0 (clean test pass).
+- **Fixtures processed**: 30 of 32 attempted (2 skipped — ChatMessage and ChatMessages on the known-heavy list).
+- **Keys drained**: 6625 (memo_entry_count = 6625; well above the plan §2.2 floor of 1024).
+- **Wall-clock**: 121.7 seconds.
 - **Output**: `crates/verter_session/tests/perf_bounds/golden-semantic/keys-eager.json`
 - **JSON shape**:
 
@@ -129,8 +130,10 @@ The Pre-FAIL → POST-PASS evidence demonstrates each test discriminates against
 | 1 | `cargo test -p verter_session --test architecture_guards no_phase_archaeology` | 0 | 2/2 |
 | 2 | `cargo test -p verter_session --test hermetic_checkout` (after Step 0.2 lands) | 0 | 12/12 |
 | 3 | `cargo test -p verter_protocol --test proto_audit` | 0 | 3/3 |
-| 4 | `cargo test --workspace --tests` | _filled in_ | _filled in_ |
-| 5 | `cargo clippy --workspace --tests -- -D warnings` | _filled in_ | green |
+| 4 | `cargo test --workspace --tests` | 0 | 10457/10457 (prior 10445; +12) |
+| 5 | `cargo clippy --workspace --tests -- -D warnings` | 0 | green |
+| 6 | `cargo fmt --all --check` | 0 | green |
+| 7 | `pnpm install --frozen-lockfile` | 0 | clean |
 
 ## 7. Decisions made
 
@@ -144,7 +147,7 @@ The Pre-FAIL → POST-PASS evidence demonstrates each test discriminates against
 ## 8. Partial-data summary
 
 - **Step 0.1**: 17 of 179 expected fixtures processed before 10-min timeout; representative-5 has 3 of 5 (Avatar/Button/Calendar present; ChatMessage/ChatMessages not reached).
-- **Step 0.2**: _filled in after rerun_ of 32 expected fixtures; ChatMessage/ChatMessages skipped pre-emptively as known-heavy.
+- **Step 0.2**: 30 of 32 expected fixtures processed; ChatMessage/ChatMessages skipped pre-emptively as known-heavy. 6625 interned keys drained (>>1024 floor).
 - **Step 0.3**: 5 of 5 audit documents committed.
 
 ## 9. Blockers
