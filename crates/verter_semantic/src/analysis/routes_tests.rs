@@ -1,5 +1,17 @@
 use super::*;
 
+/// Build a real-disk workspace for tests that write fixture files via
+/// `std::fs::write`.
+fn fs_workspace() -> verter_workspace::FilesystemWorkspace {
+    verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default())
+}
+
+/// Convert a [`std::path::Path`] to the canonical forward-slash string the
+/// workspace API expects.
+fn canonical_str(path: &std::path::Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
 // =============================================================================
 // Framework Detection Tests
 // =============================================================================
@@ -298,7 +310,7 @@ fn test_file_based_routes_with_temp_dir() {
     std::fs::write(pages.join("index.vue"), "<template>Home</template>").unwrap();
     std::fs::write(pages.join("about.vue"), "<template>About</template>").unwrap();
 
-    let routes = extract_file_based_routes(&pages);
+    let routes = extract_file_based_routes(&fs_workspace(), &canonical_str(&pages));
 
     assert_eq!(routes.len(), 2);
 
@@ -323,7 +335,7 @@ fn test_file_based_dynamic_params() {
 
     std::fs::write(users.join("[id].vue"), "<template>User</template>").unwrap();
 
-    let routes = extract_file_based_routes(&pages);
+    let routes = extract_file_based_routes(&fs_workspace(), &canonical_str(&pages));
 
     assert_eq!(routes.len(), 1);
     assert_eq!(routes[0].full_path, "/users/:id");
@@ -338,7 +350,7 @@ fn test_file_based_catch_all() {
 
     std::fs::write(pages.join("[...slug].vue"), "<template>404</template>").unwrap();
 
-    let routes = extract_file_based_routes(&pages);
+    let routes = extract_file_based_routes(&fs_workspace(), &canonical_str(&pages));
 
     assert_eq!(routes.len(), 1);
     assert_eq!(routes[0].full_path, "/:slug(.*)*");
@@ -346,7 +358,7 @@ fn test_file_based_catch_all() {
 
 #[test]
 fn test_file_based_nonexistent_dir() {
-    let routes = extract_file_based_routes(std::path::Path::new("/nonexistent/pages"));
+    let routes = extract_file_based_routes(&fs_workspace(), "/nonexistent/pages");
     assert!(routes.is_empty());
 }
 
@@ -361,7 +373,7 @@ fn test_file_based_ignores_non_vue() {
     std::fs::write(pages.join("utils.ts"), "export const x = 1").unwrap();
     std::fs::write(pages.join("README.md"), "# Pages").unwrap();
 
-    let routes = extract_file_based_routes(&pages);
+    let routes = extract_file_based_routes(&fs_workspace(), &canonical_str(&pages));
 
     assert_eq!(routes.len(), 1, "should only include .vue files");
     assert_eq!(routes[0].full_path, "/");
