@@ -98,7 +98,7 @@ fn compute_for_fixture(fixture: &fixtures::CorrectnessFixture) -> ComponentMetaA
 /// `.snap.json` is captured from Verter's output via the standard
 /// `UPDATE_SNAPSHOTS=1` mode on `correctness_snapshot_for_every_fixture`.
 #[test]
-#[ignore = "phase-0a/0b: regenerate Class A snapshots from expected.rs"]
+#[ignore = "manual: regenerate Class A snapshots from expected.rs via UPDATE_SNAPSHOTS=1"]
 fn generate_class_a_snapshots_from_expected() {
     for fixture in fixtures::FIXTURES {
         if !fixture.is_class_a() {
