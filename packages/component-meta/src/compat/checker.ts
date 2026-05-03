@@ -2434,7 +2434,14 @@ export class ComponentMetaChecker {
     if (this.disposed) {
       throw new Error("ComponentMetaChecker has been disposed.");
     }
-    if (this._session && (this._session.closed || this._session.engine.state !== "active")) {
+    // Engine state is the authoritative liveness signal exposed to compat.
+    // Per the migration plan §7.1 / D35, the compat layer does not consult
+    // session-local `closed` directly — `engine.state` is the single allow-
+    // listed property read on `_session.*`. Compat's own `close()` method
+    // nulls `this._session` synchronously before any external observer can
+    // race, so a leftover `_session` whose engine is still `active` must
+    // also still be open from compat's perspective.
+    if (this._session && this._session.engine.state !== "active") {
       throw new Error("ComponentMetaChecker is closed.");
     }
   }
