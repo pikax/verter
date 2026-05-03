@@ -3849,6 +3849,7 @@ dependencies = [
  "napi-build",
  "napi-derive",
  "oxc_allocator",
+ "prost",
  "serde",
  "serde_json",
  "tokio",

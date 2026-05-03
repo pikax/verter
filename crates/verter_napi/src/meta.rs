@@ -452,6 +452,50 @@ impl NapiMetaSession {
             .as_ref()
             .map_or(0, |session| session.overlay_generation() as u32)
     }
+
+    /// Tier 1B selective surface API (D32 + D63). Returns the
+    /// `verter.v1.ComponentMetaSurface` proto bytes, or `None` when the
+    /// canonical does not resolve. Errors are surfaced via NAPI's
+    /// existing exception path; D114 magic-byte error envelopes are
+    /// not produced from this entry-point because the surface envelope
+    /// itself is a top-level shape, not a per-handle BFS frontier.
+    #[napi]
+    pub fn get_component_meta_surface(&self, canonical_or_alias: String) -> Result<Option<Buffer>> {
+        let session = self.session()?;
+        catch_panic(std::panic::AssertUnwindSafe(|| {
+            let surface = session
+                .get_component_meta_surface(&canonical_or_alias)
+                .map_err(meta_err)?;
+            Ok(surface.map(|s| Buffer::from(s.to_proto_bytes())))
+        }))?
+    }
+
+    /// Tier 1B selective surface API (D32 + D63). Resolves a
+    /// `verter.v1.TypeHandle` (decoded from `handle_buf`) to a one-layer
+    /// `verter.v1.TypeExpansion`. Returns the encoded
+    /// `verter.v1.TypeExpansion` proto bytes on success, or a magic-byte
+    /// (`0xFF`) prefixed `verter.v1.TypeHandleError` envelope on error
+    /// (D114).
+    #[napi]
+    pub fn get_component_meta_type_expansion(
+        &self,
+        handle_buf: Buffer,
+        depth: Option<u32>,
+    ) -> Result<Buffer> {
+        let session = self.session()?;
+        catch_panic(std::panic::AssertUnwindSafe(|| {
+            use prost::Message;
+            let proto_handle = verter_protocol::verter::v1::TypeHandle::decode(handle_buf.as_ref())
+                .map_err(|e| Error::from_reason(format!("invalid TypeHandle: {e}")))?;
+            let handle =
+                verter_session::component_meta_payload::TypeHandle::from_proto(proto_handle)
+                    .map_err(|e| Error::from_reason(format!("invalid TypeHandle: {e}")))?;
+            match session.get_component_meta_type_expansion(handle, depth.map(|d| d as usize)) {
+                Ok(expansion) => Ok(Buffer::from(expansion.to_proto().encode_to_vec())),
+                Err(typed) => Ok(Buffer::from(typed.to_error_envelope())),
+            }
+        }))?
+    }
 }
 
 #[cfg(test)]
