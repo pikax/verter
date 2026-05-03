@@ -251,6 +251,13 @@ struct PassRow {
     derivation_edges: usize,
     edges_truncated: u32,
     has_orphan_edges: bool,
+    /// Max BFS frontier depth observed by the component-meta bridge while
+    /// assembling this fixture's full payload (D115). Reserved column —
+    /// the BFS bridge ships in Tier 1B; pre-bridge runs record `0` and
+    /// the column slot stays in `summary-179.csv`. A pre-Tier-0 dry run
+    /// measured a corpus-wide max of 11 (ChatMessages family); the
+    /// `MAX_BRIDGE_DEPTH = 32` constant is justified at ~3x that floor.
+    bridge_max_depth_observed: u32,
     error: Option<String>,
 }
 
@@ -319,6 +326,11 @@ fn summarize(pass: &str, target: &str, elapsed_ms: f64, record: &RustAuditRecord
         has_orphan_edges: fp
             .map(|f| f.graph_completeness.has_orphan_edges)
             .unwrap_or(false),
+        // D115: column slot reserved. The BFS bridge ships in Tier 1B and
+        // will write the actual frontier depth here; today's audit record
+        // exposes no frontier depth so we record 0. Pre-Tier-0 dry-run
+        // (manual instrumentation, not committed) measured corpus max = 11.
+        bridge_max_depth_observed: 0,
         error: None,
     }
 }
@@ -363,6 +375,7 @@ fn error_row(pass: &str, target: &str, elapsed_ms: f64, error: String) -> PassRo
         derivation_edges: 0,
         edges_truncated: 0,
         has_orphan_edges: false,
+        bridge_max_depth_observed: 0,
         error: Some(error),
     }
 }
@@ -478,10 +491,10 @@ fn run_pass_fresh_cold(
 fn write_summary_csv(out_dir: &Path, rows: &[PassRow]) -> io::Result<()> {
     let path = out_dir.join("summary.csv");
     let mut s = String::new();
-    s.push_str("pass,target,error,elapsed_ms,total_ms,capture_inputs_ms,store_read_ms,direct_import_proof_ms,imported_root_proof_ms,solver_ms,materialize_ms,serialize_ms,vfs_reads,vfs_disk,vfs_snapshot,vfs_overlay,vfs_missing,indexed_ready_builds,instantiations,projections,materializations,substitutions,alias_resolutions,conditional_decisions,cold_builds,warm_hits,joined_waits,inflight_aborted_retries,store_view_hits,store_view_misses,imported_dependency_entries,imported_dependency_kb,prepared_type_decls,prepared_value_decls,rss_delta_kb,derivation_nodes,derivation_edges,edges_truncated,has_orphan_edges\n");
+    s.push_str("pass,target,error,elapsed_ms,total_ms,capture_inputs_ms,store_read_ms,direct_import_proof_ms,imported_root_proof_ms,solver_ms,materialize_ms,serialize_ms,vfs_reads,vfs_disk,vfs_snapshot,vfs_overlay,vfs_missing,indexed_ready_builds,instantiations,projections,materializations,substitutions,alias_resolutions,conditional_decisions,cold_builds,warm_hits,joined_waits,inflight_aborted_retries,store_view_hits,store_view_misses,imported_dependency_entries,imported_dependency_kb,prepared_type_decls,prepared_value_decls,rss_delta_kb,derivation_nodes,derivation_edges,edges_truncated,has_orphan_edges,bridge_max_depth_observed\n");
     for r in rows {
         s.push_str(&format!(
-            "{},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+            "{},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
             r.pass,
             r.target,
             r.error.as_deref().unwrap_or(""),
@@ -495,7 +508,7 @@ fn write_summary_csv(out_dir: &Path, rows: &[PassRow]) -> io::Result<()> {
             r.store_view_hits, r.store_view_misses, r.imported_dependency_entries,
             r.imported_dependency_kb, r.prepared_type_decls, r.prepared_value_decls,
             r.rss_delta_kb, r.derivation_nodes, r.derivation_edges, r.edges_truncated,
-            r.has_orphan_edges,
+            r.has_orphan_edges, r.bridge_max_depth_observed,
         ));
     }
     fs::write(&path, s)?;
