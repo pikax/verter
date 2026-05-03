@@ -168,6 +168,7 @@ impl IntrinsicRegistry {
 /// files declare intrinsics on one physical line with no conditional
 /// gating, so lexical matching is sufficient and keeps the audit
 /// dependency-free.
+#[allow(dead_code)]
 pub fn extract_intrinsics_from_lib_source(source: &str) -> Vec<Arc<str>> {
     let mut names = Vec::new();
     for raw in source.lines() {
@@ -209,6 +210,7 @@ pub fn extract_intrinsics_from_lib_source(source: &str) -> Vec<Arc<str>> {
 /// Compare a scanned intrinsic set against the registry; return the names
 /// that the SDK declares but the registry does not implement. Empty result
 /// ⇒ audit passes.
+#[allow(dead_code)]
 pub fn audit_unsupported(registry: &IntrinsicRegistry, scanned: &[Arc<str>]) -> Vec<Arc<str>> {
     scanned
         .iter()

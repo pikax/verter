@@ -381,6 +381,7 @@ impl Default for ResolvabilityDb {
 
 #[derive(Clone)]
 pub struct OwnerCollectionEntry {
+    #[allow(dead_code)]
     pub owner_canonical: Arc<str>,
     pub value: Option<Arc<TypeExpr>>,
     pub dep_signature: DepSignature,

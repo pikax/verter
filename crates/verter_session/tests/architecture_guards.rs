@@ -3431,42 +3431,75 @@ mod foundations_guards {
     }
 
     pub static VERTER_SESSION_PUB_SURFACE_SNAPSHOT: &[&str] = &[
+        // Each retained `pub mod` MUST cite at least one downstream
+        // consumer (verter_lsp, verter_mcp, verter_napi, verter_wasm,
+        // verter_ffi, verter_diagnostics, verter_type_runtime,
+        // verter_tsc) OR a verter_session integration test. Items
+        // demoted to `pub(crate)` by Phase 12.A9 do not appear here.
+        // ─── public modules: cited consumers ────────────────────────
+        // tests/audited_request_e2e.rs
         "pub mod audited_request",
-        "pub mod completion_fence",
+        // verter_lsp::features::hover_provenance,
+        // verter_napi::meta, verter_wasm::tests::audit
         "pub mod component_meta_audit",
-        "pub mod component_meta_caches",
+        // verter_napi::meta
         "pub mod component_meta_host",
-        "pub mod component_meta_materialize",
-        "pub mod component_meta_resolution_policy",
-        "pub mod component_meta_result_db",
-        "pub mod cooperative_admission",
+        // verter_ffi::convert (host::cross_file::CrossFileResult)
         "pub mod cross_file",
+        // tests/host_tests.rs (host_compile module surface)
         "pub mod host_compile",
-        "pub mod host_executor",
+        // tests/host_tests.rs (host_manage::* APIs in integration tests)
         "pub mod host_manage",
+        // verter_type_runtime::backend::tests via meta_resolve types,
+        // tests/host_tests.rs
+        "pub mod meta_resolve",
+        // tests/host_tests.rs (project_type_store::*)
+        "pub mod project_type_store",
+        // tests/audited_request_e2e.rs, tests/host_tests.rs
+        "pub mod request_context",
+        // verter_type_runtime, verter_napi (TypeExpander API);
+        // tests/host_tests.rs
+        "pub mod resolver_core",
+        // tests/host_tests.rs (semantic_query::* in integration tests)
+        "pub mod semantic_query",
+        // ─── B-C5 territory (separate ownership), kept `pub` ────────
+        "pub mod component_meta_resolution_policy",
+        // ─── crate-private modules (already non-public) ─────────────
+        "pub(crate) mod completion_fence",
+        "pub(crate) mod component_meta_caches",
+        "pub(crate) mod component_meta_materialize",
+        "pub(crate) mod component_meta_result_db",
+        "pub(crate) mod cooperative_admission",
+        "pub(crate) mod host_executor",
         "pub(crate) mod host_test_audit",
         "pub(crate) mod i64_as_decimal_string",
-        "pub mod intrinsic_registry",
-        "pub mod meta_resolve",
-        "pub mod owner_import_surface",
-        "pub mod project_semantic_dispatch",
-        "pub mod project_type_store",
-        "pub mod request_context",
-        "pub mod resolver_core",
-        "pub mod semantic_query",
-        "pub mod semantic_query_memo",
+        "pub(crate) mod intrinsic_registry",
+        "pub(crate) mod owner_import_surface",
+        "pub(crate) mod project_semantic_dispatch",
+        "pub(crate) mod semantic_query_memo",
         "pub(crate) mod session_runtime",
         "pub(crate) mod source_map_remap",
         "pub(crate) mod spike_instrumentation",
-        "pub mod template_convert",
+        "pub(crate) mod template_convert",
         "pub(crate) mod u64_as_decimal_string",
         "pub(crate) mod capture_token",
+        // ─── test-only re-export shim ──────────────────────────────
         "pub mod for_tests",
+        // ─── public re-exports ─────────────────────────────────────
+        // re-exports the canonical data types (HostConfig, VerterHost,
+        // UpsertRequest, FileKind, CompileProfile, CompileErrorPolicy,
+        // DependencyResolution, DiagnosticsSnapshot, HostDiagnostic,
+        // HostSeverity, FileAnalysisSnapshot, ...) — universally used.
         "pub use types::*",
+        // verter_lsp::features::hover_provenance
         "pub use verter_compiler::utils::oxc::vue::resolve_type::ResolvedMemberVisibility",
+        // verter_lsp::background_init,
+        // verter_type_runtime::tsserver::ipc, verter_type_runtime::tsgo::ipc
         "pub use verter_compiler::VERTER_TYPES_STANDALONE_DTS",
-        "pub use crate::resolver_core::{type_expansion, type_expansion_host, type_text_parser}",
+        // verter_lsp::workspace_scanner, verter_lsp::server_utils,
+        // verter_lsp::documents, verter_type_runtime::tsgo::ipc
         "pub use verter_compiler::compile::CompileTarget",
+        // tests/relative_path_session_parity.rs
         "pub use id::resolve_external",
     ];
 

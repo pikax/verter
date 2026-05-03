@@ -66,6 +66,7 @@ pub enum MaterializeOutcome {
     Value(SemanticNodeId),
     /// Computation produced an `Opaque(Miss)` or otherwise valid
     /// negative result. Cacheable per content generation.
+    #[allow(dead_code)]
     Miss(SemanticNodeId),
     /// Same-key recursion detected on this thread. Non-cacheable.
     /// Returned by the per-thread `MATERIALIZE_IN_FLIGHT` guard.
@@ -75,7 +76,7 @@ pub enum MaterializeOutcome {
     /// propagates upward through the worklist as `Tainted`.
     Tainted(SemanticNodeId),
     /// Other dispatch error. Non-cacheable.
-    Error(QueryError),
+    Error(#[allow(dead_code)] QueryError),
 }
 
 impl MaterializeOutcome {
@@ -83,6 +84,7 @@ impl MaterializeOutcome {
     /// the caller-supplied opaque-miss id (non-extractable from
     /// QueryError directly — callers pass the ctx's opaque-miss
     /// fallback).
+    #[allow(dead_code)]
     #[must_use]
     pub fn node_id(&self, opaque_miss_fallback: SemanticNodeId) -> SemanticNodeId {
         match self {
@@ -102,6 +104,7 @@ impl MaterializeOutcome {
 
     /// `true` when this outcome must propagate upward as a
     /// `Tainted` parent outcome.
+    #[allow(dead_code)]
     #[must_use]
     pub fn taints_parent(&self) -> bool {
         matches!(self, Self::Tainted(_))
@@ -163,6 +166,7 @@ pub struct MaterializeStructureCacheKey {
 /// Side effect: appends every `dep_signature` entry into
 /// `local_fence` so the materialiser's compose path observes
 /// transitive dep facts.
+#[allow(dead_code)]
 pub fn convert_dispatch_result(
     read: CacheRead<QueryResult<SemanticNodeId>>,
     input_node_for_sentinel: SemanticNodeId,

@@ -638,6 +638,7 @@ pub fn pick_builtin_decl_identity() -> DeclIdentity {
 /// `build_builtin_utility` Omit arm at `build.rs:911` (which preserves
 /// call/construct/index signatures per `:937-939`).
 #[must_use]
+#[allow(dead_code)]
 pub fn omit_builtin_decl_identity() -> DeclIdentity {
     DeclIdentity {
         canonical_id: Arc::from("__builtin__"),
@@ -663,6 +664,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// existing function as a method on the dispatcher so consumers
     /// can route policy-gated materialisations through dispatch
     /// without inflating the variant set.
+    #[allow(dead_code)]
     pub fn materialize_surface(
         &self,
         key: crate::component_meta_materialize::MaterializeStructureCacheKey,
@@ -707,6 +709,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// source signatures" rule (per `build.rs:937-939` doc) — call /
     /// construct / index signatures of the base are kept when the
     /// keys-to-omit don't shadow them.
+    #[allow(dead_code)]
     pub fn execute_omit(
         &self,
         base: SemanticNodeId,
@@ -879,6 +882,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// Each member name becomes a `PathSegment::Member(Arc<str>)`. The
     /// result has the same length and order as the input.
     #[must_use]
+    #[allow(dead_code)]
     pub fn lower_path_segments(p: &[String]) -> Arc<[PathSegment]> {
         let segs: Vec<PathSegment> = p
             .iter()
@@ -961,6 +965,7 @@ pub trait DispatchHost {
     /// Resolve a `(canonical_id, symbol_name)` pair into a stable root
     /// declaration identity, following re-exports and barrel hops through
     /// `base`'s scope.
+    #[allow(dead_code)]
     fn root_identity(
         &self,
         base: SemanticNodeId,
@@ -976,6 +981,7 @@ pub trait DispatchHost {
     /// Classify whether `name` resolves locally or through an import in
     /// `base`'s scope. Used by lazy field expansion to keep imported
     /// object-like refs symbolic until a deeper route is requested.
+    #[allow(dead_code)]
     fn bare_ref_origin(&self, base: SemanticNodeId, name: &str) -> BareRefOrigin;
 }
 

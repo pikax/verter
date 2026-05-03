@@ -2639,6 +2639,7 @@ fn empty_signature() -> DepSignature {
 /// the `intern` path performs a content equality check before
 /// returning the existing Arc.
 #[derive(Debug, Default)]
+#[allow(dead_code)]
 pub struct DepSignatureInterner {
     table: DashMap<u64, Vec<DepSignatureWeak>>,
     /// Plan §7 — counter-based auto-sweep trigger. Incremented on
@@ -2649,10 +2650,13 @@ pub struct DepSignatureInterner {
 
 /// `Weak` view of an interned `DepSignature` payload — see
 /// [`DepSignatureInterner`].
+#[allow(dead_code)]
 type DepSignatureWeak = std::sync::Weak<[(Arc<str>, crate::semantic_query::DepVersion)]>;
 
+#[allow(dead_code)]
 const SWEEP_INTERVAL: u64 = 1024;
 
+#[allow(dead_code)]
 impl DepSignatureInterner {
     /// Construct a fresh interner with no buckets.
     #[must_use]

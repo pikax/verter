@@ -121,6 +121,7 @@ where
 
     /// Read-only count of live in-flight slots. Test-only / observability.
     #[cfg(test)]
+    #[allow(dead_code)]
     pub fn live_count(&self) -> usize {
         self.table.lock().len()
     }
