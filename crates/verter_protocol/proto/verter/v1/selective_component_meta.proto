@@ -1,0 +1,267 @@
+syntax = "proto3";
+
+package verter.v1;
+
+import "verter/v1/component_meta.proto";
+
+// Selective component-meta wire schema. Per migration plan Tier 0 Step 0.7
+// (D100 corrected): the verter_protocol crate uses .proto codegen via
+// prost-build (see crates/verter_protocol/build.rs). New schema lives in this
+// sibling .proto file; types share the verter.v1 package with the existing
+// component_meta.proto and reach into ComponentFlags / RootReachability /
+// AcceptedSurfaceCompleteness / MacroExpansionDiagnosticEntry /
+// VueApiCallMeta / SfcBlocksMeta / ImportMeta / BindingMeta / StyleMeta /
+// ComponentUsage / TemplateRefMeta / PublicInstanceMeta / FallthroughSurface
+// already defined there.
+//
+// Backing types and bridge-error envelope follow plan §2.1.8 + §3.3.2.
+//
+// The actual implementation of the selective surface APIs lives in
+// crates/verter_session/ (Tier 1B); this file is the pinned wire schema.
+
+// --- TypeHandle canonical-query identity (D104) -----------------------------
+
+// D104 — TypeHandle is the canonical-query identity for a type expression
+// reachable from a ComponentMetaSurface. Carries (project_id, canonical_id,
+// content_hash, query_path) so a handle round-trips across LSP request
+// boundaries within one host session and is invalidated by content_hash
+// change, file deletion, declaration removal, project_id mismatch.
+message TypeHandle {
+  string project_id = 1;
+  string canonical_id = 2;
+  bytes content_hash = 3;        // 16 bytes (Hash16)
+  TypeQueryPath query_path = 4;  // absent for the surface root
+}
+
+message TypeQueryPath {
+  oneof kind {
+    // 16 bytes: blake3(canonical_id || content_hash || decl_name_bytes ||
+    //                  scope_path_bytes || decl_kind_byte)
+    bytes declaration_fingerprint = 1;
+    SubExpressionPath sub_expression = 2;
+    InstantiationPath instantiation = 3;
+  }
+}
+
+message SubExpressionPath {
+  TypeQueryPath parent = 1;
+  ChildKind child_kind = 2;
+  uint32 index = 3;
+}
+
+message InstantiationPath {
+  TypeQueryPath base = 1;
+  bytes type_args_fingerprint = 2;
+}
+
+enum ChildKind {
+  CHILD_KIND_OBJECT_PROPERTY = 0;
+  CHILD_KIND_UNION_MEMBER = 1;
+  CHILD_KIND_INTERSECTION_ARM = 2;
+  CHILD_KIND_TUPLE_ELEMENT = 3;
+  CHILD_KIND_CONDITIONAL_TRUE = 4;
+  CHILD_KIND_CONDITIONAL_FALSE = 5;
+  CHILD_KIND_MAPPED_KEY = 6;
+  CHILD_KIND_MAPPED_VALUE = 7;
+  CHILD_KIND_INDEXED_ACCESS_INDEX = 8;
+  CHILD_KIND_INFER_TARGET = 9;
+  CHILD_KIND_FUNCTION_PARAM = 10;
+  CHILD_KIND_FUNCTION_RETURN = 11;
+}
+
+// --- NamedTypeHandle: lazy stand-in for a typed surface entry ---------------
+
+message NamedTypeHandle {
+  string name = 1;
+  TypeHandle handle = 2;
+  bool required = 3;
+  string doc = 4;  // empty string == absent
+}
+
+// --- ComponentMetaSurface: eager scalars + lazy type handles (D99) ----------
+
+// D99 — full mapping of all 23 ComponentMetaAnalysis fields. Eager scalars
+// land verbatim; type-bearing fields project to NamedTypeHandle so consumers
+// can ask for one expansion at a time via getComponentMetaTypeExpansion.
+message ComponentMetaSurface {
+  // Eager scalar fields (14)
+  string file_path = 1;
+  ComponentFlags flags = 2;
+  bool options_api = 3;
+  RootReachability root_reachability = 4;
+  AcceptedSurfaceCompleteness accepted_surface_completeness = 5;
+  repeated MacroExpansionDiagnosticEntry macro_expansion_diagnostics = 6;
+  repeated VueApiCallMeta vue_api_calls = 7;
+  SfcBlocksMeta sfc_blocks = 8;
+  repeated ImportMeta imports = 9;
+  repeated BindingMeta bindings = 10;
+  repeated StyleMeta styles = 11;
+  repeated ComponentUsage components = 12;
+  repeated TemplateRefMeta template_refs = 13;
+  PublicInstanceMeta public_instance = 14;
+
+  // Lazy type-bearing fields (9)
+  repeated NamedTypeHandle props = 20;
+  repeated NamedTypeHandle events = 21;
+  repeated NamedTypeHandle slots = 22;
+  repeated NamedTypeHandle models = 23;
+  repeated NamedTypeHandle exposed = 24;
+  repeated NamedTypeHandle accepted_props = 25;
+  repeated NamedTypeHandle accepted_events = 26;
+  FallthroughSurfaceLazy fallthrough_surface = 27;
+  repeated NamedTypeHandle type_registry = 28;
+}
+
+// FallthroughSurfaceLazy mirrors the structural shape of FallthroughSurface
+// (component_meta.proto:543) but projects every type-bearing branch field to
+// NamedTypeHandle. Field tags here intentionally mirror FallthroughSurface's
+// scalar fields by tag number (1..N) so consumers reading both forms can
+// align them; type-bearing fields move to NamedTypeHandle in tags 100+.
+message FallthroughSurfaceLazy {
+  repeated FallthroughBranchLazy branches = 1;
+}
+
+message FallthroughBranchLazy {
+  repeated NamedTypeHandle props = 1;
+  repeated NamedTypeHandle events = 2;
+  // Additional structural fields are added at Tier 1B implementation time
+  // when the eager FallthroughBranch shape is fully projected. Tags 3..99
+  // are reserved for structural fields that remain eager; tags 100+ are
+  // reserved for additional NamedTypeHandle projections.
+}
+
+// --- TypeExpansion: one-layer expansion of a TypeHandle (D32) ---------------
+
+message TypeExpansion {
+  TypeHandle handle = 1;
+  ShapeOutline shape = 2;
+  repeated NamedTypeHandle children = 3;
+}
+
+message ShapeOutline {
+  oneof kind {
+    ObjectShape object = 1;
+    FunctionShape function = 2;
+    UnionShape union = 3;
+    IntersectionShape intersection = 4;
+    TupleShape tuple = 5;
+    LiteralShape literal = 6;
+    PrimitiveShape primitive = 7;
+  }
+}
+
+message ObjectShape {
+  uint32 property_count = 1;
+}
+
+message FunctionShape {
+  uint32 param_count = 1;
+  bool has_return = 2;
+}
+
+message UnionShape {
+  uint32 arm_count = 1;
+}
+
+message IntersectionShape {
+  uint32 arm_count = 1;
+}
+
+message TupleShape {
+  uint32 element_count = 1;
+}
+
+message LiteralShape {
+  oneof literal_kind {
+    string string_literal = 1;
+    int64 number_literal = 2;
+    bool boolean_literal = 3;
+  }
+}
+
+message PrimitiveShape {
+  PrimitiveKind kind = 1;
+}
+
+enum PrimitiveKind {
+  PRIMITIVE_KIND_UNSPECIFIED = 0;
+  PRIMITIVE_KIND_STRING = 1;
+  PRIMITIVE_KIND_NUMBER = 2;
+  PRIMITIVE_KIND_BOOLEAN = 3;
+  PRIMITIVE_KIND_NULL = 4;
+  PRIMITIVE_KIND_UNDEFINED = 5;
+  PRIMITIVE_KIND_VOID = 6;
+  PRIMITIVE_KIND_NEVER = 7;
+  PRIMITIVE_KIND_ANY = 8;
+  PRIMITIVE_KIND_BIGINT = 9;
+  PRIMITIVE_KIND_SYMBOL = 10;
+}
+
+// --- Batch + bridge errors (D103 + D114) ------------------------------------
+
+enum BatchExpandError {
+  BATCH_EXPAND_ERROR_OK = 0;
+  BATCH_EXPAND_ERROR_STALE_CONTENT_CHANGED = 1;
+  BATCH_EXPAND_ERROR_FILE_DELETED = 2;
+  BATCH_EXPAND_ERROR_DECLARATION_REMOVED = 3;
+  BATCH_EXPAND_ERROR_EVICTED_NODE = 4;
+}
+
+// D114 — bridge typed error envelope. NAPI encodes as
+// magic-byte-prefixed buffer (buf[0] == 0xFF) so consumers distinguish
+// error envelope from normal payload byte stream.
+message BridgeError {
+  oneof kind {
+    DepthExceeded depth_exceeded = 1;
+    StaleAtFrontier stale_at_frontier = 2;
+    FileNotFound file_not_found = 3;
+  }
+}
+
+message DepthExceeded {
+  uint32 depth = 1;
+  uint32 max = 2;
+}
+
+message StaleAtFrontier {
+  TypeHandle handle = 1;
+  // Serialized BatchExpandError reason; uses the enum above.
+  BatchExpandError reason = 2;
+}
+
+message FileNotFound {
+  string canonical_id = 1;
+}
+
+// --- TypeHandle resolution errors (D104) ------------------------------------
+
+// D104 — typed errors from MetaSession::get_component_meta_type_expansion.
+// Distinguishable so consumers can react: stale handles trigger
+// re-fetch of surface; project mismatch triggers session check; evicted
+// node triggers warm-up.
+message TypeHandleError {
+  oneof kind {
+    ProjectMismatch project_mismatch = 1;
+    StaleHandle stale_handle = 2;
+    EvictedNode evicted_node = 3;
+  }
+}
+
+message ProjectMismatch {
+  string expected_project_id = 1;
+  string actual_project_id = 2;
+}
+
+message StaleHandle {
+  enum Reason {
+    STALE_HANDLE_REASON_UNSPECIFIED = 0;
+    STALE_HANDLE_REASON_FILE_DELETED = 1;
+    STALE_HANDLE_REASON_CONTENT_CHANGED = 2;
+    STALE_HANDLE_REASON_DECLARATION_REMOVED = 3;
+  }
+  Reason reason = 1;
+}
+
+message EvictedNode {
+  TypeHandle handle = 1;
+}

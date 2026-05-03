@@ -8,6 +8,12 @@ fn main() {
             .join("component_meta_descriptor.bin"),
     );
     config
-        .compile_protos(&["proto/verter/v1/component_meta.proto"], &["proto"])
+        .compile_protos(
+            &[
+                "proto/verter/v1/component_meta.proto",
+                "proto/verter/v1/selective_component_meta.proto",
+            ],
+            &["proto"],
+        )
         .expect("component-meta proto should compile");
 }
