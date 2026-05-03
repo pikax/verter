@@ -56,8 +56,7 @@ fn lowering_boundary_owned_artifact_has_no_arena_lifetime() {
     // verify that `OwnedEvalProgram` carries NO lifetime parameter
     // (`<'a>`, `<'ctx>`, etc.). A borrowed-lifetime parameter would
     // mean the type still references the arena.
-    let path = workspace_root()
-        .join("crates/verter_session/src/owned_artifacts/eval_program.rs");
+    let path = workspace_root().join("crates/verter_session/src/owned_artifacts/eval_program.rs");
     let body = std::fs::read_to_string(&path).expect("read eval_program.rs");
     let parsed: syn::File = syn::parse_str(&body).expect("parse owned-artifact module");
 
@@ -66,11 +65,7 @@ fn lowering_boundary_owned_artifact_has_no_arena_lifetime() {
         if let syn::Item::Struct(s) = item {
             if s.ident == "OwnedEvalProgram" {
                 found = true;
-                let has_lifetime = s
-                    .generics
-                    .lifetimes()
-                    .next()
-                    .is_some();
+                let has_lifetime = s.generics.lifetimes().next().is_some();
                 assert!(
                     !has_lifetime,
                     "OwnedEvalProgram must have NO lifetime parameter — D44 lowering-boundary invariant"

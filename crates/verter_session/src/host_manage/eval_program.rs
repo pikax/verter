@@ -460,8 +460,7 @@ impl VerterHost {
         };
         // Tier 1A: thread-local cache deleted (§3.2.4); compute fresh
         // until 1C-α wires the typed `EvalEnvCacheDb` consumer.
-        let parsed =
-            crate::ParsedEvalProgram::parse(Arc::clone(&inputs.eval_source), source_type);
+        let parsed = crate::ParsedEvalProgram::parse(Arc::clone(&inputs.eval_source), source_type);
         let parse_failed = parsed.is_none();
         let program =
             Rc::new(parsed.unwrap_or_else(|| crate::ParsedEvalProgram::empty(source_type)));
@@ -482,11 +481,13 @@ impl VerterHost {
             inputs.analysis.as_ref(),
             &rustc_hash::FxHashMap::default(),
         )?;
-        Some(crate::resolver_core::surface_projector::project_macro_surfaces(
-            Some(inputs.eval_source.as_ref()),
-            macro_kind,
-            &resolved,
-        ))
+        Some(
+            crate::resolver_core::surface_projector::project_macro_surfaces(
+                Some(inputs.eval_source.as_ref()),
+                macro_kind,
+                &resolved,
+            ),
+        )
     }
 
     /// Tier 1A — no-op after thread-local retirement (§3.2.4).

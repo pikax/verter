@@ -1,11 +1,8 @@
 //! Owned, `Send + Sync + 'static` post-lowering artifact types (D64).
 //!
 //! Tier 1A introduces:
-//! - [`eval_program::OwnedEvalProgram`] (D17 + D44 + D107 + D116 + D117) —
-//!   owned IR for parsed script bodies.
-//! - [`type_resolution_context::OwnedTypeResolutionContext`] (D18 + D45
-//!   + D65) — owned mirror of the borrowed `TypeResolutionContext` minus
-//!   the dropped `source: &'ctx [u8]` field.
+//! - [`eval_program::OwnedEvalProgram`] (D17 + D44 + D107 + D116 + D117) — owned IR for parsed script bodies.
+//! - [`type_resolution_context::OwnedTypeResolutionContext`] (D18 + D45 + D65) — owned mirror of the borrowed `TypeResolutionContext` minus the dropped `source: &'ctx [u8]` field.
 //!
 //! Both types live here so they can sit in host-owned typed DBs
 //! (`EvalEnvCacheDb`, `TypeResolutionContextDb`) without the previous

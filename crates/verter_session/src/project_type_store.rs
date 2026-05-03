@@ -813,8 +813,7 @@ impl OwnedArtifactKey {
 /// workarounds.
 #[derive(Debug, Default)]
 pub struct TypeResolutionContextDb {
-    entries:
-        DashMap<OwnedArtifactKey, Arc<crate::owned_artifacts::OwnedTypeResolutionContext>>,
+    entries: DashMap<OwnedArtifactKey, Arc<crate::owned_artifacts::OwnedTypeResolutionContext>>,
 }
 
 impl TypeResolutionContextDb {
@@ -1936,7 +1935,10 @@ impl ProjectTypeStore {
             self.type_resolution_context_db
                 .invalidate_canonical_for(canonical_id),
         );
-        total = total.saturating_add(self.eval_env_cache_db.invalidate_canonical_for(canonical_id));
+        total = total.saturating_add(
+            self.eval_env_cache_db
+                .invalidate_canonical_for(canonical_id),
+        );
         total = total.saturating_add(self.compile_cache_db.invalidate_canonical_for(canonical_id));
         total = total.saturating_add(
             self.resolved_type_cache_db

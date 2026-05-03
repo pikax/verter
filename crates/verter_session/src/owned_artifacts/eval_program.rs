@@ -137,11 +137,10 @@ impl InternedLiteralTable {
     }
 
     pub fn intern(&mut self, kind: LiteralKind, raw_text: &str) -> InternedLiteralId {
-        if let Some((idx, _)) = self
-            .entries
-            .iter()
-            .enumerate()
-            .find(|(_, existing)| existing.kind == kind && existing.raw_text.as_ref() == raw_text)
+        if let Some((idx, _)) =
+            self.entries.iter().enumerate().find(|(_, existing)| {
+                existing.kind == kind && existing.raw_text.as_ref() == raw_text
+            })
         {
             return InternedLiteralId(idx as u32);
         }
@@ -305,9 +304,7 @@ pub enum LoweredStmt {
         value: InternedExpressionId,
     },
     /// Bare top-level return.
-    Return {
-        value: Option<InternedExpressionId>,
-    },
+    Return { value: Option<InternedExpressionId> },
     /// Top-level `if` (sub-statements stored as expression-id blocks for
     /// uniform indexing).
     If {
@@ -316,10 +313,7 @@ pub enum LoweredStmt {
         alternate: SmallVec<[u32; 4]>,
     },
     /// Diagnostic-only unsupported construct (no abort).
-    Unsupported {
-        kind: UnsupportedKind,
-        span: SpanId,
-    },
+    Unsupported { kind: UnsupportedKind, span: SpanId },
 }
 
 /// Lowered expression.
@@ -404,17 +398,11 @@ pub enum LoweringError {
     /// `import` shape that the resolver cannot classify (currently
     /// unused — every shape is recognized — but reserved per inventory's
     /// "no FAIL rows" disclosure for stability with D117).
-    UnsupportedTopLevelImport {
-        specifier: Arc<str>,
-        span: SpanId,
-    },
+    UnsupportedTopLevelImport { specifier: Arc<str>, span: SpanId },
     /// Macro-relevant TS construct in a type position the resolver
     /// rejects (e.g., `TSConstructorType` in `defineEmits<T>`,
     /// `TSInferType` outside `TSConditionalType.extendsType`).
-    UnsupportedMacroRelevantConstruct {
-        construct: Arc<str>,
-        span: SpanId,
-    },
+    UnsupportedMacroRelevantConstruct { construct: Arc<str>, span: SpanId },
 }
 
 impl std::fmt::Display for LoweringError {

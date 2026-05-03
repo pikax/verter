@@ -24,8 +24,7 @@ fn component_meta_flags_has_macro_failure_field_present() {
     // `crates/verter_semantic/src/analysis/component_meta.rs`) MUST
     // declare a `has_macro_failure: bool` field. We parse the file
     // with syn and walk the struct's fields.
-    let rust_path = workspace_root()
-        .join("crates/verter_semantic/src/analysis/component_meta.rs");
+    let rust_path = workspace_root().join("crates/verter_semantic/src/analysis/component_meta.rs");
     let rust_body = std::fs::read_to_string(&rust_path).expect("read component_meta.rs");
     let parsed: syn::File = syn::parse_str(&rust_body).expect("parse component_meta.rs");
 
@@ -67,8 +66,8 @@ fn component_meta_flags_has_macro_failure_field_present() {
     // The .proto definition for `ComponentFlags` MUST also declare
     // `has_macro_failure`. We grep the file's text — proto syntax is
     // simple enough that a substring assertion is fine.
-    let proto_path = workspace_root()
-        .join("crates/verter_protocol/proto/verter/v1/component_meta.proto");
+    let proto_path =
+        workspace_root().join("crates/verter_protocol/proto/verter/v1/component_meta.proto");
     let proto_body = std::fs::read_to_string(&proto_path).expect("read component_meta.proto");
 
     // Locate the `message ComponentFlags { ... }` block.
@@ -76,7 +75,9 @@ fn component_meta_flags_has_macro_failure_field_present() {
         .find("message ComponentFlags")
         .expect("message ComponentFlags not found in proto");
     let block = &proto_body[block_start..];
-    let block_end = block.find('}').expect("ComponentFlags block has no closing brace");
+    let block_end = block
+        .find('}')
+        .expect("ComponentFlags block has no closing brace");
     let block = &block[..block_end];
 
     assert!(

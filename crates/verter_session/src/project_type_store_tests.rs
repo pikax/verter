@@ -9,7 +9,8 @@
 use super::owned_artifacts::eval_program::OwnedEvalProgram;
 use super::owned_artifacts::type_resolution_context::OwnedTypeResolutionContext;
 use super::project_type_store::{
-    EvalEnvCacheDb, OwnedArtifactKey, ProjectTypeStore, ResolvedTypeCacheDb, TypeResolutionContextDb,
+    EvalEnvCacheDb, OwnedArtifactKey, ProjectTypeStore, ResolvedTypeCacheDb,
+    TypeResolutionContextDb,
 };
 use std::sync::Arc;
 
@@ -76,9 +77,7 @@ fn typed_dbs_are_send_sync_static() {
     assert_send_sync_static::<TypeResolutionContextDb>();
     assert_send_sync_static::<EvalEnvCacheDb>();
     assert_send_sync_static::<ResolvedTypeCacheDb>();
-    assert_send_sync_static::<
-        super::project_type_store::CompileCacheDb,
-    >();
+    assert_send_sync_static::<super::project_type_store::CompileCacheDb>();
     // The whole `ProjectTypeStore` likewise — already enforced by
     // `Arc<ProjectTypeStore>` storage on `VerterHost`, but explicit
     // here for the discriminating-test record.

@@ -133,7 +133,10 @@ fn macro_impacting_constructs_fail_lowering_not_silent_skip() {
         // failure ambiguity. `Display` is implemented for `LoweringError`
         // so the rendered text is non-empty.
         let rendered: String = format!("{err}");
-        assert!(!rendered.is_empty(), "{label}: error rendering must be non-empty");
+        assert!(
+            !rendered.is_empty(),
+            "{label}: error rendering must be non-empty"
+        );
     }
 }
 

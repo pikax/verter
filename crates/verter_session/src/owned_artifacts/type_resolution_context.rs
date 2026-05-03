@@ -109,9 +109,7 @@ pub enum OwnedTypeExpr {
         type_args: Vec<TypeExprId>,
     },
     /// Inline object type literal.
-    Object {
-        members: Vec<OwnedObjectMember>,
-    },
+    Object { members: Vec<OwnedObjectMember> },
     /// Union or intersection (discriminated by `kind`).
     Composite {
         kind: CompositeKind,
@@ -140,25 +138,17 @@ pub enum OwnedTypeExpr {
         operand: TypeExprId,
     },
     /// Tuple `[T, U]` — preserves element kinds (rest, optional, named).
-    Tuple {
-        elements: Vec<OwnedTupleElement>,
-    },
+    Tuple { elements: Vec<OwnedTupleElement> },
     /// Array `T[]` (sugar over `Array<T>`).
-    Array {
-        element: TypeExprId,
-    },
+    Array { element: TypeExprId },
     /// Literal type (`"foo"`, `42`, `true`).
     Literal(super::eval_program::InternedLiteralId),
     /// `infer X` placeholder — only meaningful within a Conditional.
-    Infer {
-        target: InternedIdentifierId,
-    },
+    Infer { target: InternedIdentifierId },
     /// Unbound shell when lowering hit a known-unsupported shape that
     /// is *non*-macro-impacting (a regression on a macro-impacting
     /// shape would have produced `LoweringError`, not this).
-    Unsupported {
-        span: SpanId,
-    },
+    Unsupported { span: SpanId },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
