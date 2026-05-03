@@ -698,10 +698,10 @@ fn phase_05m_class_b_callers_migrated_through_bridge_helpers() {
     //      there and only there. The §5.14.1 pre-flight gate sees zero
     //      external engine-method callers post-5m.
     //
-    //   2. The bridge section header
-    //      ("Phase 5l §5.14.2 — bridge helpers (post engine-method
-    //      deletion).") MUST be present in `dispatch_helpers.rs` —
-    //      the location anchor that names where bridges live.
+    //   2. The bridge section header (the literal anchor stored in
+    //      `BRIDGE_SECTION_MARKER` below — "Class B bridge helpers —
+    //      …") MUST be present in `dispatch_helpers.rs` — the
+    //      location anchor that names where bridges live.
     //
     //   3. The stale helper names `project_type_class_b_via_dispatch`
     //      and `project_type_class_b_shape_via_dispatch` MUST NOT
@@ -743,7 +743,7 @@ fn phase_05m_class_b_callers_migrated_through_bridge_helpers() {
     // The single allowed location for Class B bridge bodies.
     const BRIDGE_FILE_REL: &str = "crates/verter_session/src/meta_resolve/dispatch_helpers.rs";
     const BRIDGE_SECTION_MARKER: &str =
-        "Phase 5l §5.14.2 — bridge helpers (post engine-method deletion).";
+        "Class B bridge helpers — Class B engine methods are deleted; these bridges thread `query_engine.ctx` through dispatch.";
 
     let module_root = workspace_root().join("crates/verter_session/src/meta_resolve");
     let shell_path = workspace_root().join("crates/verter_session/src/meta_resolve.rs");
@@ -1803,7 +1803,7 @@ fn no_scheduler_backed_workspace_shim_in_session_src() {
     // Test-fixture filename suffix. The convention in this codebase
     // is that test fixtures with `WorkspaceAccess` impls live in
     // `*_tests.rs` files (e.g. `frontier_tests.rs`,
-    // `host_manage_tests.rs`, `phase_6b_characterization_tests.rs`).
+    // `host_manage_tests.rs`, `cache_identity_invariants_tests.rs`).
     const TEST_FIXTURE_SUFFIX: &str = "_tests.rs";
 
     // (a) The deleted shim file MUST NOT exist.
@@ -3780,6 +3780,177 @@ mod foundations_guards {
             count_lines(&oversize) > guard6_target_line_count(),
             "guard 6 predicate must report > target lines for an oversized fixture",
         );
+    }
+
+    // ── Guard 7 — no_phase_archaeology_in_production_code ──
+    //
+    // Production source code must read as final-state. References to plan
+    // phases (`phase 5d`, `phase 11`), cutover stages (`d-cutover`,
+    // `post-cutover`, `pre-Phase`), or deletion history (`deleted in 5g`,
+    // `retired in`) leak project-management vocabulary into the codebase
+    // and accumulate as the project moves on. Durable architecture
+    // insights belong in `.claude/skills/*` or `docs/arch/`, not in
+    // source comments.
+    //
+    // Predicate: scan every production `.rs` file under `crates/*/src/`
+    // (`walk_production_rs` already excludes `_tests.rs`, `tests.rs`,
+    // `tests/`, `benches/`, `examples/`, and `target/`). The guard fails
+    // when ANY line matches the regex below.
+    //
+    // Forbidden patterns:
+    //   - `d-cutover` / `D-Cutover` — cutover stage from the d-phase plan.
+    //   - `post-cutover` / `Post-Cutover` — narrative of a completed cutover.
+    //   - `pre-Phase` / `Pre-Phase` — narrative of pre-phase state.
+    //   - `Phase \d+` / `phase \d+` — explicit phase reference.
+    //   - `Phase-\d+` / `phase-\d+` — explicit hyphenated phase reference.
+    //   - `deleted in 5[a-z]` — deletion history from the 5-series plan.
+    //   - `retired in` — retirement history of any kind.
+
+    /// Predicate: returns `true` when `line` contains a forbidden
+    /// phase-archaeology pattern. Implemented with case-sensitive
+    /// substring scanning where the plan calls for it, plus a numeric
+    /// scan for `phase \d+` / `phase-\d+`.
+    pub fn line_has_phase_archaeology(line: &str) -> bool {
+        // Substring matches for fixed vocabulary. These are unambiguous
+        // in production source and never appear as legitimate prose.
+        const FIXED_NEEDLES: &[&str] = &[
+            "d-cutover",
+            "D-Cutover",
+            "post-cutover",
+            "Post-Cutover",
+            "Post-cutover",
+            "pre-Phase",
+            "Pre-Phase",
+            "retired in",
+        ];
+        for needle in FIXED_NEEDLES {
+            if line.contains(needle) {
+                return true;
+            }
+        }
+        // `deleted in 5[a-z]` (lowercase `5` + single ASCII letter).
+        let lower = line.to_ascii_lowercase();
+        if let Some(idx) = lower.find("deleted in 5") {
+            let bytes = lower.as_bytes();
+            let after = idx + "deleted in 5".len();
+            if after < bytes.len() && bytes[after].is_ascii_lowercase() {
+                return true;
+            }
+        }
+        // `phase \d+` / `phase-\d+` (case-insensitive on the verb,
+        // ASCII digit immediately after the separator).
+        for prefix in ["phase ", "phase-", "Phase ", "Phase-"] {
+            let mut search_from = 0usize;
+            while let Some(rel) = line[search_from..].find(prefix) {
+                let abs = search_from + rel;
+                let after = abs + prefix.len();
+                if after < line.len() {
+                    let next = line.as_bytes()[after];
+                    if next.is_ascii_digit() {
+                        return true;
+                    }
+                }
+                search_from = abs + prefix.len();
+            }
+        }
+        false
+    }
+
+    /// Walk the production tree and return `(rel_path, line_no, line)`
+    /// triples for every match. `rel_path` is `crates/<name>/src/...`
+    /// with forward slashes.
+    pub fn guard7_violations() -> Vec<(String, usize, String)> {
+        let crates_root = workspace_root().join("crates");
+        let mut violations = Vec::new();
+        let entries = match fs::read_dir(&crates_root) {
+            Ok(it) => it,
+            Err(_) => return violations,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let src_dir = path.join("src");
+            if !src_dir.exists() {
+                continue;
+            }
+            for file in walk_production_rs(&src_dir) {
+                let src = match fs::read_to_string(&file) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                let rel = relative_to_root(&file);
+                for (idx, line) in src.lines().enumerate() {
+                    if line_has_phase_archaeology(line) {
+                        violations.push((rel.clone(), idx + 1, line.to_string()));
+                    }
+                }
+            }
+        }
+        violations.sort();
+        violations
+    }
+
+    #[test]
+    fn no_phase_archaeology_in_production_code() {
+        let violations = guard7_violations();
+        assert!(
+            violations.is_empty(),
+            "Guard 7 (`no_phase_archaeology_in_production_code`) violations: production source\n\
+             files reference plan phases, cutover stages, or deletion history. Once a plan is\n\
+             over, the code should read as final-state. Durable architecture insights belong in\n\
+             `.claude/skills/*` or `docs/arch/`, not in source comments.\n\n\
+             Forbidden patterns: `d-cutover`, `post-cutover`, `pre-Phase`, `phase \\d+`,\n\
+             `phase-\\d+`, `deleted in 5[a-z]`, `retired in`.\n\n\
+             Violations:\n  {}",
+            violations
+                .iter()
+                .map(|(rel, lineno, line)| format!("{rel}:{lineno}: {}", line.trim()))
+                .collect::<Vec<_>>()
+                .join("\n  "),
+        );
+    }
+
+    #[test]
+    fn guard7_predicate_rejects_deliberate_violations() {
+        // Each of these fabricated lines models a real archaeology
+        // pattern observed in the codebase before this guard was wired.
+        let cases = [
+            "// Phase 4 — graph-native projection for imported declarations.",
+            "// Phase 11b.2 — surface-projection helpers.",
+            "// Pre-Phase-4 the resolver passed the imported declaration's raw value.",
+            "// Post-Phase-4 + post-Phase-5l: assertion now expects the resolved value.",
+            "// D-Cutover §5.8 WIP-W retired the previously embedded engine.",
+            "// post-cutover clippy cleanup — direct_macro_type_reference_expr removed.",
+            "// `find_matching_angle` was deleted in 5g once the dispatch resolver took over.",
+            "// `legacy_first_pass` was retired in 11d.",
+            "/// phase-1b cutover deleted the declared component-meta query.",
+        ];
+        for line in cases {
+            assert!(
+                line_has_phase_archaeology(line),
+                "guard 7 predicate must reject deliberate-violation line: {line:?}",
+            );
+        }
+        // Lines that look superficially similar but are NOT violations:
+        // they describe the final state without referencing project
+        // phases, deletion history, or cutover stages.
+        let allowed = [
+            "// Walk the prepared declaration graph for imported types.",
+            "// Surface projection helpers live in the `surface` child module.",
+            "// The resolver passes the imported declaration's raw value.",
+            "/// Returns the projected surface for a given semantic node.",
+            "// `find_matching_angle` is no longer required because the dispatch resolver owns it.",
+            "// Phase angle in radians for the easing curve.", // legitimate "phase" usage
+            "// Builder Phase C — see plan §3.",               // 'Phase C' is a letter, not a digit
+        ];
+        for line in allowed {
+            assert!(
+                !line_has_phase_archaeology(line),
+                "guard 7 predicate must NOT flag legitimate line: {line:?}",
+            );
+        }
     }
 }
 
