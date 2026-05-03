@@ -4207,6 +4207,327 @@ mod foundations_guards {
             );
         }
     }
+
+    // ── Guard D14 — no_std_fs_outside_native_fs_or_allow_list ──
+    //
+    // The NativeFs invariant lock. The single legitimate disk-touch
+    // boundary is `crates/verter_workspace/src/native_fs.rs` (the
+    // `NativeFs` wrapper). Every other production-source file that
+    // contains a `std::fs::` reference must appear in `ALLOW_LIST`
+    // below with an explicit justification. New escapes from NativeFs
+    // are visible as one new constant entry per file in the diff;
+    // there is no opaque TOML or external-file route around the
+    // invariant.
+    //
+    // The ALLOW_LIST coexists with guard 1 (TOML-driven, scoped to
+    // `verter_session` / `verter_semantic` / etc.) and guard 2
+    // (in-source allowlist, broader OS-file-API scope including
+    // `tokio::fs::`). This guard is the strictest of the three and
+    // the ONLY one whose justifications live next to the path in
+    // source code, by design — the brief (D14) requires per-callsite
+    // visibility for the lock.
+
+    /// Path (relative to workspace root) that is exempt from the
+    /// guard. Calls to `std::fs::` here ARE the canonical disk
+    /// boundary that `NativeFs` wraps.
+    pub const D14_NATIVE_FS_PATH: &str = "crates/verter_workspace/src/native_fs.rs";
+
+    /// `(file_path, justification)` enumeration of every production
+    /// file outside `native_fs.rs` that legitimately contains a
+    /// `std::fs::` reference. Adding an entry must be paired with a
+    /// rationale that the reviewer can read at the diff.
+    ///
+    /// File-path strings use forward slashes and are relative to the
+    /// workspace root (matches `relative_to_root`).
+    ///
+    /// Adding a new entry is a deliberate, visible widening of the
+    /// NativeFs invariant. Removing an entry must be paired with a
+    /// code change that routes the I/O through `NativeFs` /
+    /// `WorkspaceAccess` (or a deletion of the callsite).
+    pub const D14_ALLOW_LIST: &[(&str, &str)] = &[
+        (
+            "crates/verter_lsp/src/background_init.rs",
+            "writes Verter-generated `@verter/types` stub files into `node_modules` for tool setup; reads them back via marker detection. Test fixtures inside `#[cfg(test)] mod tests` use temp-dir scratch space.",
+        ),
+        (
+            "crates/verter_lsp/src/config.rs",
+            "test fixtures only (`#[cfg(test)] mod tests` blocks set up tmp directories for `discover_lint_config` tests). No production-path call.",
+        ),
+        (
+            "crates/verter_lsp/src/test_harness.rs",
+            "LSP integration test harness — sets up scratch worktrees and reads fixture files for end-to-end tests.",
+        ),
+        (
+            "crates/verter_lsp/src/test_utils.rs",
+            "LSP unit-test utilities — temp workspace creation and `canonicalize` for fixture path resolution.",
+        ),
+        (
+            "crates/verter_mcp/src/baseline.rs",
+            "MCP baseline output — reads/writes JSON snapshots for regression diffing of MCP tool responses; not semantic state.",
+        ),
+        (
+            "crates/verter_parser/src/utils/oxc/vue/script/resolve_type.rs",
+            "diagnostic trace logger gated behind a debug flag (`OpenOptions::new().append(true)` to a per-process trace file); not on the resolution hot path.",
+        ),
+        (
+            "crates/verter_scheduler/src/source_loader.rs",
+            "scheduler source-loader fallback — reads disk only when the workspace overlay/snapshot is absent for a host-loaded path; transitional pending the full WorkspaceAccess integration.",
+        ),
+        (
+            "crates/verter_session/src/component_meta_audit/mod.rs",
+            "audit telemetry — `/proc/self/statm` resource sample for memory-delta accounting + JSON dump file output for footprint capture; off by default and gated behind audit_enabled.",
+        ),
+        (
+            "crates/verter_tsc/src/checker.rs",
+            "verter-tsc binary CLI — writes the consolidated diagnostics report file at the end of a checker run.",
+        ),
+        (
+            "crates/verter_tsc/src/reporter.rs",
+            "verter-tsc binary CLI — reads the local tsgo cache directory to discover the active tsgo binary for parity reporting.",
+        ),
+        (
+            "crates/verter_tsc/src/tsconfig.rs",
+            "verter-tsc binary CLI — reads tsconfig files outside the host's WorkspaceAccess (separate from the LSP/session tsconfig path). Doc comment also references `std::fs::canonicalize` behaviour for documentation.",
+        ),
+        (
+            "crates/verter_type_runtime/src/discovery.rs",
+            "TypeScript SDK install discovery for the type-runtime tool layer (tsserver/tsgo binary lookup, package.json reads inside the SDK directory).",
+        ),
+        (
+            "crates/verter_type_runtime/src/provider_adapter.rs",
+            "type-runtime tool-cache and shim file management — separate from semantic state; reads/writes the per-runtime scratch dir used by tsserver/tsgo.",
+        ),
+        (
+            "crates/verter_type_runtime/src/trace.rs",
+            "trace artifact writer for tsserver/tsgo IPC debugging; gated behind a debug flag and writes only to a process-local trace file.",
+        ),
+        (
+            "crates/verter_type_runtime/src/tsgo/ipc.rs",
+            "tsgo subprocess IPC — pnpm virtual-store walk, scratch-dir setup, and direct disk reads of files the tsgo subprocess will consume next; orchestrates the external runtime.",
+        ),
+        (
+            "crates/verter_type_runtime/src/tsserver/ipc.rs",
+            "tsserver subprocess IPC — pnpm virtual-store walk, scratch-dir setup, and direct disk reads of files the tsserver subprocess will consume next; orchestrates the external runtime.",
+        ),
+        (
+            "crates/verter_workspace/src/intrinsic_library.rs",
+            "ambient TypeScript SDK reader (`lib*.d.ts`) — companion to NativeFs for SDK declaration files. The verter_session intrinsic_registry consumes this single reader.",
+        ),
+        (
+            "crates/verter_workspace/src/resolver.rs",
+            "doc comment only references `std::fs::canonicalize()` behaviour on Windows for documentation; no actual `std::fs::` callsite. Path-string normalization stays local to the resolver.",
+        ),
+    ];
+
+    /// Predicate the test reuses: does this file's source contain
+    /// any `std::fs::` reference? Identical to guard 1's predicate
+    /// for the `std::fs::` half — extracted here so the deliberate
+    /// violation tests can characterize this guard independently.
+    pub fn d14_file_uses_std_fs(src: &str) -> bool {
+        src.contains("std::fs::")
+    }
+
+    /// Materialize the allow list into a set of allowed paths +
+    /// the implicit native_fs path. Returns the canonical set of
+    /// "files where `std::fs::` is permitted by D14".
+    pub fn d14_permitted_paths() -> BTreeSet<String> {
+        let mut set: BTreeSet<String> = BTreeSet::new();
+        set.insert(D14_NATIVE_FS_PATH.to_string());
+        for (path, _justification) in D14_ALLOW_LIST {
+            set.insert((*path).to_string());
+        }
+        set
+    }
+
+    /// Walk the workspace's production `.rs` tree under `crates/*/src/`
+    /// and return paths of files that contain `std::fs::` and are not
+    /// in the permitted set (native_fs.rs ∪ ALLOW_LIST).
+    pub fn d14_violations(permitted: &BTreeSet<String>) -> Vec<String> {
+        let crates_root = workspace_root().join("crates");
+        let mut violations = Vec::new();
+        let entries = match fs::read_dir(&crates_root) {
+            Ok(it) => it,
+            Err(_) => return violations,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let src_dir = path.join("src");
+            if !src_dir.exists() {
+                continue;
+            }
+            for file in walk_production_rs(&src_dir) {
+                let src = match fs::read_to_string(&file) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                if !d14_file_uses_std_fs(&src) {
+                    continue;
+                }
+                let rel = relative_to_root(&file);
+                if permitted.contains(&rel) {
+                    continue;
+                }
+                violations.push(rel);
+            }
+        }
+        violations.sort();
+        violations
+    }
+
+    #[test]
+    fn no_std_fs_outside_native_fs_or_allow_list() {
+        // D14 NativeFs invariant lock. Production-source files that
+        // contain `std::fs::` must either BE the canonical disk
+        // boundary (`native_fs.rs`) or appear in `D14_ALLOW_LIST`
+        // with an explicit justification.
+        let permitted = d14_permitted_paths();
+        let violations = d14_violations(&permitted);
+        assert!(
+            violations.is_empty(),
+            "D14 (`no_std_fs_outside_native_fs_or_allow_list`) violations:\n  {}\n\n\
+             Each survivor is a production file outside\n\
+             `crates/verter_workspace/src/native_fs.rs` that uses `std::fs::`\n\
+             without an explicit `D14_ALLOW_LIST` entry. To resolve, EITHER\n\
+             route the I/O through `verter_workspace::NativeFs` /\n\
+             `WorkspaceAccess`, OR add an `(path, justification)` tuple to\n\
+             `D14_ALLOW_LIST` in `crates/verter_session/tests/architecture_guards.rs`.",
+            violations.join("\n  "),
+        );
+    }
+
+    #[test]
+    fn d14_allow_list_paths_exist_and_actually_use_std_fs() {
+        // Every D14 ALLOW_LIST entry must:
+        //   1. Point at a real production source file.
+        //   2. Actually contain `std::fs::` — a stale entry silently
+        //      disarms the guard for an unrelated path that may later
+        //      be reused.
+        let root = workspace_root();
+        let mut missing: Vec<String> = Vec::new();
+        let mut clean: Vec<String> = Vec::new();
+        for (path, _justification) in D14_ALLOW_LIST {
+            let abs = root.join(path);
+            if !abs.exists() {
+                missing.push((*path).to_string());
+                continue;
+            }
+            let src = match fs::read_to_string(&abs) {
+                Ok(s) => s,
+                Err(_) => {
+                    missing.push((*path).to_string());
+                    continue;
+                }
+            };
+            if !d14_file_uses_std_fs(&src) {
+                clean.push((*path).to_string());
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "D14 ALLOW_LIST entries refer to paths that do not exist:\n  {}\n\n\
+             Update or remove these entries; a stale allow-list silently\n\
+             disarms the NativeFs invariant lock.",
+            missing.join("\n  "),
+        );
+        assert!(
+            clean.is_empty(),
+            "D14 ALLOW_LIST entries refer to files that no longer use `std::fs::`:\n  {}\n\n\
+             Delete these entries; they advertise an exemption that is no\n\
+             longer warranted.",
+            clean.join("\n  "),
+        );
+    }
+
+    #[test]
+    fn d14_predicate_rejects_deliberate_violation_and_passes_clean_source() {
+        // Discriminating-violation: a fabricated production source
+        // string that uses `std::fs::` MUST be flagged by the
+        // predicate. A counter-fixture that does NOT use `std::fs::`
+        // must NOT be flagged.
+        let bad = "use std::fs::File;\nfn read() { let _ = std::fs::read_to_string(\"foo\"); }";
+        assert!(
+            d14_file_uses_std_fs(bad),
+            "D14 predicate must flag direct `std::fs::` references",
+        );
+
+        let clean = "use crate::workspace::NativeFs;\nfn read(fs: &NativeFs) { let _ = fs.read_file(\"foo\"); }";
+        assert!(
+            !d14_file_uses_std_fs(clean),
+            "D14 predicate must NOT flag code that goes through NativeFs",
+        );
+    }
+
+    #[test]
+    fn d14_native_fs_path_actually_contains_std_fs() {
+        // Sanity counter-fixture: the canonical disk boundary file
+        // MUST itself contain `std::fs::` calls (otherwise the
+        // exemption is meaningless and a typo in the path constant
+        // would silently disarm the guard).
+        let abs = workspace_root().join(D14_NATIVE_FS_PATH);
+        let src = fs::read_to_string(&abs)
+            .unwrap_or_else(|e| panic!("D14 native_fs path must be readable: {e}"));
+        assert!(
+            d14_file_uses_std_fs(&src),
+            "D14 NATIVE_FS_PATH (`{D14_NATIVE_FS_PATH}`) must contain `std::fs::` callsites; it is the canonical disk boundary the lock pivots on. If this assertion fires, either the path constant is stale or NativeFs has been refactored — update `D14_NATIVE_FS_PATH` accordingly.",
+        );
+    }
+
+    #[test]
+    fn d14_each_allow_list_entry_is_a_real_walker_hit() {
+        // Discriminator: the D14 invariant lock is meaningful ONLY
+        // when each `D14_ALLOW_LIST` entry actually corresponds to a
+        // production walker hit. If an entry mapped to a path the
+        // walker never reaches (wrong directory, typo'd path, file
+        // moved without updating the entry), the entry has zero
+        // protective effect and the lock can drift silently.
+        //
+        // This test runs the violation walker with an empty
+        // allow-list (only `native_fs.rs` exempt) and asserts:
+        //   1. The walker produces SOMETHING — proving the lock is
+        //      non-trivial and the production tree contains real
+        //      escapes from NativeFs that the allow-list is paying
+        //      for.
+        //   2. EVERY entry in `D14_ALLOW_LIST` shows up in that
+        //      empty-allow-list violation set — proving each entry
+        //      actually maps to a real `std::fs::` callsite the
+        //      walker would otherwise flag.
+        //
+        // Removing the live ALLOW_LIST entries would, by transitive
+        // implication, make the live `no_std_fs_outside_native_fs_or_allow_list`
+        // test fail with violations equal to (this empty-allow-list
+        // set) minus (any newly-migrated callsites). That is the
+        // pre-change failure the brief requires this guard to
+        // exhibit.
+        let mut empty_permitted: BTreeSet<String> = BTreeSet::new();
+        empty_permitted.insert(D14_NATIVE_FS_PATH.to_string());
+        let violations = d14_violations(&empty_permitted);
+        assert!(
+            !violations.is_empty(),
+            "D14 walker must detect at least one production `std::fs::` callsite outside\n\
+             `native_fs.rs` when the allow-list is empty. If this fails, either the walker is\n\
+             scoped to the wrong tree, or every previous escape from NativeFs has been migrated\n\
+             (in which case `D14_ALLOW_LIST` should also be empty and this discriminator test\n\
+             should be deleted along with it).",
+        );
+        let violations_set: BTreeSet<String> = violations.iter().cloned().collect();
+        let mut entries_without_walker_hits: Vec<String> = Vec::new();
+        for (path, _justification) in D14_ALLOW_LIST {
+            if !violations_set.contains(*path) {
+                entries_without_walker_hits.push((*path).to_string());
+            }
+        }
+        assert!(
+            entries_without_walker_hits.is_empty(),
+            "D14 ALLOW_LIST entries must each represent a real walker hit. The following\n\
+             entries are NOT detected as violations even when the allow-list is empty:\n  {}\n\n\
+             A non-violating entry has no protective effect; either delete it or fix the path\n\
+             so the entry actually maps to a production `std::fs::` callsite.",
+            entries_without_walker_hits.join("\n  "),
+        );
+    }
 }
 
 // ===========================================================================
