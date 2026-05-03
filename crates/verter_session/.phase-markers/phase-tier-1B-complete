@@ -5,7 +5,7 @@
   "status": "success",
   "base_commit": "4042b6ad",
   "head_commit": "054ceb33",
-  "marker_commit": null,
+  "marker_commit": "7d61cf07",
   "test_results": {
     "workspace": {
       "test_scope": "cargo test --workspace --tests -j 2",
