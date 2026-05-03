@@ -15,12 +15,10 @@
 //! existing `Arc<WorkspaceSnapshot>` is reused and only `LspViews` is
 //! rebuilt.
 
-use std::path::Path;
-
 use verter_diagnostics::{Linter, ResolvedLintConfig};
 use verter_workspace::workspace_snapshot::ProjectId;
 
-use verter_workspace::ViteConfigTrustInfo;
+use verter_workspace::{ViteConfigTrustInfo, WorkspaceRead};
 
 /// LSP-specific per-project view.
 ///
@@ -137,23 +135,25 @@ impl LspViews {
 /// Build `LspProjectView` entries for all projects in a snapshot.
 ///
 /// For each `OwnershipProject`, discovers lint config from the project root
-/// and detects SSR projects.
+/// and detects SSR projects. All file reads route through the supplied
+/// [`WorkspaceRead`] authority so overlays and snapshot caches are honored.
 pub fn build_lsp_views(
+    workspace: &dyn WorkspaceRead,
     snapshot: &verter_workspace::WorkspaceSnapshot,
     trust_required: Vec<ViteConfigTrustInfo>,
 ) -> LspViews {
     let mut project_views = Vec::with_capacity(snapshot.projects.len());
 
     for project in &snapshot.projects {
-        let root_path = Path::new(project.root.as_str());
+        let root = project.root.as_str();
 
         // Discover lint config
-        let lint_config = verter_diagnostics::discover_lint_config(root_path);
+        let lint_config = verter_diagnostics::discover_lint_config(workspace, root);
         let lint_explicitly_configured = lint_config.explicitly_configured;
         let linter = Linter::new(lint_config.config.clone());
 
         // Detect SSR
-        let ssr_enabled = detect_ssr_project(root_path, &lint_config);
+        let ssr_enabled = detect_ssr_project(workspace, root, &lint_config);
 
         // Vite config metadata (fallback projects only)
         let (vite_config_path, vite_config_deps) = if project.is_fallback() {
@@ -183,18 +183,25 @@ pub fn build_lsp_views(
 /// Detect whether a project root is an SSR project.
 ///
 /// Checks Nuxt config, `.nuxt/` directory, and `.verterrc.json` ssr_mode.
-fn detect_ssr_project(root: &Path, lint_config: &ResolvedLintConfig) -> bool {
+/// File-system probes route through `workspace` so overlays and snapshot
+/// caches are honored.
+fn detect_ssr_project(
+    workspace: &dyn WorkspaceRead,
+    root: &str,
+    lint_config: &ResolvedLintConfig,
+) -> bool {
     if lint_config.config.ssr_mode {
         return true;
     }
 
+    let trimmed = root.trim_end_matches('/');
     for ext in &["ts", "js", "mjs", "mts"] {
-        if root.join(format!("nuxt.config.{ext}")).exists() {
+        if workspace.file_exists(&format!("{trimmed}/nuxt.config.{ext}")) {
             return true;
         }
     }
 
-    if root.join(".nuxt").is_dir() {
+    if workspace.is_dir(&format!("{trimmed}/.nuxt")) {
         return true;
     }
 
@@ -229,7 +236,14 @@ mod tests {
         OwnershipProject, ProjectId, ProjectPayload, SnapshotGeneration, WorkspaceSnapshot,
     };
     use verter_workspace::ViteConfigTrustInfo;
-    use verter_workspace::{CanonicalPath, FallbackMembership, NormalizedGlob, ProjectResolver};
+    use verter_workspace::{
+        CanonicalPath, FallbackMembership, MemoryOptions, MemoryWorkspace, NormalizedGlob,
+        ProjectResolver,
+    };
+
+    fn empty_workspace() -> MemoryWorkspace {
+        MemoryWorkspace::new(MemoryOptions::default())
+    }
 
     fn fallback_project(id: u32, root: &str) -> OwnershipProject {
         let root_cp = CanonicalPath::new(root);
@@ -284,14 +298,16 @@ mod tests {
             fallback_project(1, "d:/other"),
         ]);
 
-        let views = build_lsp_views(&snap, vec![]);
+        let ws = empty_workspace();
+        let views = build_lsp_views(&ws, &snap, vec![]);
         assert_eq!(views.project_views.len(), 2);
     }
 
     #[test]
     fn linter_view_for_file_finds_owner() {
         let snap = empty_snapshot(vec![fallback_project(0, "d:/project")]);
-        let views = build_lsp_views(&snap, vec![]);
+        let ws = empty_workspace();
+        let views = build_lsp_views(&ws, &snap, vec![]);
 
         let view = views.linter_view_for_file(&snap, "d:/project/src/foo.vue");
         assert!(view.is_some());
@@ -300,7 +316,8 @@ mod tests {
     #[test]
     fn linter_view_for_file_returns_none_outside_projects() {
         let snap = empty_snapshot(vec![fallback_project(0, "d:/project")]);
-        let views = build_lsp_views(&snap, vec![]);
+        let ws = empty_workspace();
+        let views = build_lsp_views(&ws, &snap, vec![]);
 
         let view = views.linter_view_for_file(&snap, "d:/other/foo.vue");
         assert!(view.is_none());
@@ -318,7 +335,8 @@ mod tests {
                 &[shared],
             ),
         ]);
-        let views = build_lsp_views(&snap, vec![]);
+        let ws = empty_workspace();
+        let views = build_lsp_views(&ws, &snap, vec![]);
 
         assert!(
             views.linter_view_for_file(&snap, shared).is_none(),
@@ -337,7 +355,8 @@ mod tests {
     #[test]
     fn ssr_context_server_vue_always_true() {
         let snap = empty_snapshot(vec![fallback_project(0, "d:/project")]);
-        let views = build_lsp_views(&snap, vec![]);
+        let ws = empty_workspace();
+        let views = build_lsp_views(&ws, &snap, vec![]);
 
         assert!(views.is_ssr_context(&snap, "d:/project/pages/index.server.vue"));
     }
@@ -345,7 +364,8 @@ mod tests {
     #[test]
     fn ssr_context_client_vue_always_false() {
         let snap = empty_snapshot(vec![fallback_project(0, "d:/project")]);
-        let views = build_lsp_views(&snap, vec![]);
+        let ws = empty_workspace();
+        let views = build_lsp_views(&ws, &snap, vec![]);
 
         assert!(!views.is_ssr_context(&snap, "d:/project/pages/index.client.vue"));
     }
@@ -353,7 +373,8 @@ mod tests {
     #[test]
     fn ssr_context_inherits_from_project() {
         let snap = empty_snapshot(vec![fallback_project(0, "d:/project")]);
-        let views = build_lsp_views(&snap, vec![]);
+        let ws = empty_workspace();
+        let views = build_lsp_views(&ws, &snap, vec![]);
 
         // Default project is not SSR
         assert!(!views.is_ssr_context(&snap, "d:/project/pages/index.vue"));
@@ -368,7 +389,8 @@ mod tests {
             reason: "function export".to_string(),
         }];
 
-        let views = build_lsp_views(&snap, trust);
+        let ws = empty_workspace();
+        let views = build_lsp_views(&ws, &snap, trust);
         assert_eq!(views.trust_required.len(), 1);
         assert_eq!(
             views.trust_required[0].config_path,

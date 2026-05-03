@@ -180,8 +180,14 @@ impl TestSessionBuilder {
         let root_uri = crate::uri::path_to_file_uri_string(&workspace_id);
         let tsconfig_path_str = format!("{workspace_id}/tsconfig.json");
         let vite_opts = verter_workspace::ViteConfigOptions::default();
-        let build_result =
-            crate::config::ProjectRegistry::from_workspace_roots(&[root_uri.clone()], &vite_opts);
+        let registry_ws = verter_workspace::FilesystemWorkspace::new(
+            verter_workspace::FilesystemOptions::default(),
+        );
+        let build_result = crate::config::ProjectRegistry::from_workspace_roots(
+            &registry_ws,
+            &[root_uri.clone()],
+            &vite_opts,
+        );
         // Sync resolver to host's VFS so resolve_import_via_workspace works
         host.configure_projects(
             build_result
@@ -210,7 +216,8 @@ impl TestSessionBuilder {
             vfs_ws.set_project_graph(vfs_build.graph);
             if let Some(published) = vfs_ws.load_published() {
                 let snapshot_arc = Arc::clone(&published.snapshot);
-                let views = crate::workspace_state::build_lsp_views(&snapshot_arc, vec![]);
+                let views =
+                    crate::workspace_state::build_lsp_views(&*vfs_ws, &snapshot_arc, vec![]);
                 vfs_ws.publish_snapshot(verter_workspace::PublishedRoot::with_ext(
                     snapshot_arc,
                     Box::new(views),

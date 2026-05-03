@@ -675,7 +675,7 @@ fn install_test_resolver_for_root(
         generation: verter_workspace::workspace_snapshot::SnapshotGeneration(1),
     });
 
-    let views = crate::workspace_state::build_lsp_views(&snapshot, vec![]);
+    let views = crate::workspace_state::build_lsp_views(&*vfs_ws, &snapshot, vec![]);
     vfs_ws.publish_snapshot(verter_workspace::PublishedRoot::with_ext(
         snapshot,
         Box::new(views),
@@ -7090,8 +7090,13 @@ import Child from '@/components/Child.vue'
     // Phase 2: Build and populate project registry with tsconfig alias
     let workspace_uri = crate::uri::path_to_file_uri_string(&workspace_id);
     let vite_opts = verter_workspace::ViteConfigOptions::default();
-    let build_result =
-        crate::config::ProjectRegistry::from_workspace_roots(&[workspace_uri], &vite_opts);
+    let registry_ws =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
+    let build_result = crate::config::ProjectRegistry::from_workspace_roots(
+        &registry_ws,
+        &[workspace_uri],
+        &vite_opts,
+    );
     let registry = build_result.registry;
 
     host.configure_projects(
@@ -7212,8 +7217,13 @@ import Child from '@/components/Child.vue'
 
     let vite_opts = verter_workspace::ViteConfigOptions::default();
     let workspace_uri = crate::uri::path_to_file_uri_string(&workspace_id);
-    let build_result =
-        crate::config::ProjectRegistry::from_workspace_roots(&[workspace_uri], &vite_opts);
+    let registry_ws =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
+    let build_result = crate::config::ProjectRegistry::from_workspace_roots(
+        &registry_ws,
+        &[workspace_uri],
+        &vite_opts,
+    );
     let registry = build_result.registry;
     let vfs_workspace = make_test_vfs_workspace_from_registry(&registry);
     host.configure_projects(
@@ -7318,8 +7328,13 @@ import { Overlay } from './components'
 
     let vite_opts = verter_workspace::ViteConfigOptions::default();
     let workspace_uri = crate::uri::path_to_file_uri_string(&workspace_id);
-    let build_result =
-        crate::config::ProjectRegistry::from_workspace_roots(&[workspace_uri], &vite_opts);
+    let registry_ws =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
+    let build_result = crate::config::ProjectRegistry::from_workspace_roots(
+        &registry_ws,
+        &[workspace_uri],
+        &vite_opts,
+    );
     let registry = build_result.registry;
     let vfs_workspace = make_test_vfs_workspace_from_registry(&registry);
     host.configure_projects(

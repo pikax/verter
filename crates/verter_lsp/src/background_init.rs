@@ -75,7 +75,7 @@ fn build_published_workspace(
     );
     let trust_required: Vec<verter_workspace::ViteConfigTrustInfo> = build.trust_required.clone();
     let snapshot = Arc::new(build.snapshot);
-    let mut views = crate::workspace_state::build_lsp_views(&snapshot, trust_required.clone());
+    let mut views = crate::workspace_state::build_lsp_views(ws, &snapshot, trust_required.clone());
 
     if let Some(init_opts) = init_lint_opts.as_ref() {
         crate::workspace_state::apply_default_lint_to_views(&mut views, init_opts);

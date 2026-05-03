@@ -304,9 +304,11 @@ async fn create_type_provider(
                 verter_lsp::tsserver::find_tsserver(args.tsdk.as_deref(), Some(&ws_canonical));
             let mut tsserver_reason = None;
 
-            let has_composite = verter_lsp::config::has_solution_style_tsconfig(
-                std::path::Path::new(&ws_canonical),
+            let composite_ws = verter_workspace::FilesystemWorkspace::new(
+                verter_workspace::FilesystemOptions::default(),
             );
+            let has_composite =
+                verter_lsp::config::has_solution_style_tsconfig(&composite_ws, &ws_canonical);
             if has_composite {
                 tracing::info!(
                     "auto mode: solution-style tsconfig detected at {} \

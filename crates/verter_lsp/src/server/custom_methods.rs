@@ -538,9 +538,10 @@ impl VerterLanguageServer {
             }
         }
 
-        let project_root = std::path::Path::new(root);
+        let workspace = self.documents.host.workspace_read();
         let snapshot = verter_semantic::analysis::routes::build_route_analysis(
-            project_root,
+            &*workspace,
+            root,
             &template_components,
         );
 

@@ -55,7 +55,7 @@ pub(crate) fn make_test_vfs_workspace_with_resolver(
         generation: verter_workspace::workspace_snapshot::SnapshotGeneration(1),
     });
 
-    let views = crate::workspace_state::build_lsp_views(&snapshot, vec![]);
+    let views = crate::workspace_state::build_lsp_views(&*vfs_ws, &snapshot, vec![]);
     vfs_ws.publish_snapshot(verter_workspace::PublishedRoot::with_ext(
         snapshot,
         Box::new(views),
@@ -103,7 +103,7 @@ pub(crate) fn make_test_vfs_workspace_from_registry(
         generation: verter_workspace::workspace_snapshot::SnapshotGeneration(1),
     });
 
-    let views = crate::workspace_state::build_lsp_views(&snapshot, vec![]);
+    let views = crate::workspace_state::build_lsp_views(&*vfs_ws, &snapshot, vec![]);
     vfs_ws.publish_snapshot(verter_workspace::PublishedRoot::with_ext(
         snapshot,
         Box::new(views),
@@ -149,7 +149,7 @@ pub(crate) fn make_test_vfs_workspace_with_resolver_and_projects(
         generation: verter_workspace::workspace_snapshot::SnapshotGeneration(1),
     });
 
-    let views = crate::workspace_state::build_lsp_views(&snapshot, vec![]);
+    let views = crate::workspace_state::build_lsp_views(&*vfs_ws, &snapshot, vec![]);
     vfs_ws.publish_snapshot(verter_workspace::PublishedRoot::with_ext(
         snapshot,
         Box::new(views),

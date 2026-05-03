@@ -1,14 +1,16 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Check if a workspace has any solution-style `tsconfig.json` (non-empty `references` array).
 /// TSGO cannot resolve path aliases from referenced tsconfig files, so this is used by
 /// auto-mode provider selection to prefer tsserver when composite tsconfigs are detected.
 ///
-/// Delegates to VFS config.
-pub fn has_solution_style_tsconfig(workspace_root: &Path) -> bool {
-    let ws =
-        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
-    verter_workspace::config::has_solution_style_tsconfig(&ws, &workspace_root.to_string_lossy())
+/// All file reads route through `workspace` so overlays and snapshot caches
+/// are honored.
+pub fn has_solution_style_tsconfig(
+    workspace: &dyn verter_workspace::WorkspaceAccess,
+    workspace_root: &str,
+) -> bool {
+    verter_workspace::config::has_solution_style_tsconfig(workspace, workspace_root)
 }
 
 pub use verter_diagnostics::{
@@ -204,11 +206,20 @@ mod config_migration_tests {
         );
     }
 
+    fn fs_workspace() -> verter_workspace::FilesystemWorkspace {
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default())
+    }
+
+    fn canonical_str(path: &std::path::Path) -> String {
+        path.to_string_lossy().replace('\\', "/")
+    }
+
     #[test]
     fn discover_no_config_returns_default() {
         let tmp = std::env::temp_dir().join("verter_test_no_config");
         let _ = std::fs::create_dir_all(&tmp);
-        let result = discover_lint_config(&tmp);
+        let ws = fs_workspace();
+        let result = discover_lint_config(&ws, &canonical_str(&tmp));
         assert!(!result.explicitly_configured);
         assert_eq!(
             result.config.preset,
@@ -226,7 +237,8 @@ mod config_migration_tests {
             r#"{"lint":{"preset":"essential","rules":{"no-v-html":"off"}}}"#,
         )
         .unwrap();
-        let result = discover_lint_config(&tmp);
+        let ws = fs_workspace();
+        let result = discover_lint_config(&ws, &canonical_str(&tmp));
         assert!(result.explicitly_configured);
         assert_eq!(
             result.config.preset,
@@ -245,7 +257,8 @@ mod config_migration_tests {
             r#"{"extends":["plugin:vue/vue3-recommended"],"rules":{"vue/no-v-html":"error"}}"#,
         )
         .unwrap();
-        let result = discover_lint_config(&tmp);
+        let ws = fs_workspace();
+        let result = discover_lint_config(&ws, &canonical_str(&tmp));
         assert!(result.explicitly_configured);
         assert_eq!(
             result.config.preset,
@@ -357,21 +370,30 @@ pub struct RegistryBuildResult {
 /// - `nuxt.config.{ts,js,mjs,mts}` exists (Nuxt project)
 /// - `.nuxt/` directory exists
 /// - `.verterrc.json` has `"ssr": { "enabled": true }`
-fn detect_ssr_project(root: &std::path::Path, lint_config: &ResolvedLintConfig) -> bool {
+///
+/// File-system probes route through `workspace` so overlays and snapshot
+/// caches are honored.
+fn detect_ssr_project(
+    workspace: &dyn verter_workspace::WorkspaceRead,
+    root: &str,
+    lint_config: &ResolvedLintConfig,
+) -> bool {
     // Check if the lint config already has ssr_mode set (from .verterrc.json parsing)
     if lint_config.config.ssr_mode {
         return true;
     }
 
+    let trimmed = root.trim_end_matches('/');
+
     // Detect Nuxt: nuxt.config.{ts,js,mjs,mts}
     for ext in &["ts", "js", "mjs", "mts"] {
-        if root.join(format!("nuxt.config.{ext}")).exists() {
+        if workspace.file_exists(&format!("{trimmed}/nuxt.config.{ext}")) {
             return true;
         }
     }
 
     // Detect Nuxt: .nuxt/ directory
-    if root.join(".nuxt").is_dir() {
+    if workspace.is_dir(&format!("{trimmed}/.nuxt")) {
         return true;
     }
 
@@ -423,7 +445,11 @@ impl ProjectRegistry {
     /// Build a registry from workspace roots. Tsconfig-backed projects use tsconfig
     /// paths exclusively; fallback (no-tsconfig) projects get vite aliases via static
     /// analysis or trusted execution.
+    ///
+    /// All file reads route through `workspace` so overlays and snapshot
+    /// caches are honored.
     pub fn from_workspace_roots(
+        workspace: &dyn verter_workspace::WorkspaceAccess,
         roots: &[String],
         vite_opts: &verter_workspace::ViteConfigOptions,
     ) -> RegistryBuildResult {
@@ -441,22 +467,18 @@ impl ProjectRegistry {
 
             for entry in &discovered {
                 let project_root = entry.root.clone();
-                let project_root_path = PathBuf::from(&project_root);
-                let ws = verter_workspace::FilesystemWorkspace::new(
-                    verter_workspace::FilesystemOptions::default(),
-                );
                 let membership =
-                    verter_workspace::config::load_project_membership(&ws, &entry.path);
+                    verter_workspace::config::load_project_membership(workspace, &entry.path);
                 let compiler_options =
-                    verter_workspace::config::load_compiler_options(&ws, &entry.path);
+                    verter_workspace::config::load_compiler_options(workspace, &entry.path);
                 let references =
-                    verter_workspace::config::load_project_references(&ws, &entry.path);
+                    verter_workspace::config::load_project_references(workspace, &entry.path);
                 // Tsconfig-backed projects use tsconfig paths as the sole alias source.
                 // Vite aliases are only applied to fallback (no-tsconfig) projects.
                 let workspace_aliases = Vec::new();
 
-                let lint = discover_lint_config(&project_root_path);
-                let ssr_enabled = detect_ssr_project(&project_root_path, &lint);
+                let lint = discover_lint_config(workspace, &project_root);
+                let ssr_enabled = detect_ssr_project(workspace, &project_root, &lint);
                 let linter = verter_diagnostics::Linter::new(lint.config.clone());
 
                 projects.push(ProjectConfig {
@@ -480,7 +502,7 @@ impl ProjectRegistry {
             // Skip vite analysis when tsconfigs were found for this root: those projects
             // already own alias resolution and the fallback is only a catch-all.
             let has_tsconfigs = !discovered.is_empty();
-            let lint = discover_lint_config(&root_path);
+            let lint = discover_lint_config(workspace, &canonical);
             let linter = verter_diagnostics::Linter::new(lint.config.clone());
             let mut fallback_workspace_aliases = Vec::new();
             let mut fallback_vite_config_path = None;
@@ -488,10 +510,7 @@ impl ProjectRegistry {
 
             if vite_opts.enabled && !has_tsconfigs {
                 use verter_workspace::{analyze_vite_config, ViteConfigAnalysis};
-                let ws = verter_workspace::FilesystemWorkspace::new(
-                    verter_workspace::FilesystemOptions::default(),
-                );
-                match analyze_vite_config(&ws, &canonical) {
+                match analyze_vite_config(workspace, &canonical) {
                     ViteConfigAnalysis::Resolved {
                         config_path,
                         aliases,
@@ -583,7 +602,7 @@ impl ProjectRegistry {
                 }
             }
 
-            let ssr_enabled = detect_ssr_project(&root_path, &lint);
+            let ssr_enabled = detect_ssr_project(workspace, &canonical, &lint);
             projects.push(ProjectConfig {
                 root: canonical,
                 workspace_root: crate::documents::uri_to_canonical_id_from_str(root_uri),
@@ -610,7 +629,13 @@ impl ProjectRegistry {
     }
 
     /// Build a registry from canonical paths (not URIs). Used in tests.
-    pub fn from_canonical_roots(roots: &[&str]) -> Self {
+    ///
+    /// All file reads route through `workspace` so overlays and snapshot
+    /// caches are honored.
+    pub fn from_canonical_roots(
+        workspace: &dyn verter_workspace::WorkspaceAccess,
+        roots: &[&str],
+    ) -> Self {
         let mut projects = Vec::new();
 
         for &root in roots {
@@ -621,18 +646,14 @@ impl ProjectRegistry {
 
             for entry in &discovered {
                 let project_root = entry.root.clone();
-                let project_root_path = PathBuf::from(&project_root);
-                let ws = verter_workspace::FilesystemWorkspace::new(
-                    verter_workspace::FilesystemOptions::default(),
-                );
                 let membership =
-                    verter_workspace::config::load_project_membership(&ws, &entry.path);
+                    verter_workspace::config::load_project_membership(workspace, &entry.path);
                 let compiler_options =
-                    verter_workspace::config::load_compiler_options(&ws, &entry.path);
+                    verter_workspace::config::load_compiler_options(workspace, &entry.path);
                 let references =
-                    verter_workspace::config::load_project_references(&ws, &entry.path);
-                let lint = discover_lint_config(&project_root_path);
-                let ssr_enabled = detect_ssr_project(&project_root_path, &lint);
+                    verter_workspace::config::load_project_references(workspace, &entry.path);
+                let lint = discover_lint_config(workspace, &project_root);
+                let ssr_enabled = detect_ssr_project(workspace, &project_root, &lint);
                 let linter = verter_diagnostics::Linter::new(lint.config.clone());
 
                 projects.push(ProjectConfig {
@@ -652,8 +673,8 @@ impl ProjectRegistry {
                 });
             }
 
-            let lint = discover_lint_config(&root_path);
-            let ssr_enabled = detect_ssr_project(&root_path, &lint);
+            let lint = discover_lint_config(workspace, &root);
+            let ssr_enabled = detect_ssr_project(workspace, &root, &lint);
             let linter = verter_diagnostics::Linter::new(lint.config.clone());
             projects.push(ProjectConfig {
                 root: root.to_string(),
@@ -835,6 +856,14 @@ fn matches_any_pattern(path: &str, patterns: &[String]) -> bool {
 mod tests {
     use super::*;
 
+    fn fs_workspace() -> verter_workspace::FilesystemWorkspace {
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default())
+    }
+
+    fn canonical_str(path: &std::path::Path) -> String {
+        path.to_string_lossy().replace('\\', "/")
+    }
+
     /// @ai-generated - Strip JSON comments handles // and /* */ and preserves strings
     #[test]
     fn test_strip_json_comments() {
@@ -966,7 +995,7 @@ mod tests {
         .unwrap();
 
         let root = tmp.to_string_lossy().replace('\\', "/");
-        let registry = ProjectRegistry::from_canonical_roots(&[&root]);
+        let registry = ProjectRegistry::from_canonical_roots(&fs_workspace(), &[&root]);
 
         // File in packages/ui should match packages/ui project
         let ui_file = format!("{root}/packages/ui/src/Button.vue");
@@ -1005,7 +1034,7 @@ mod tests {
         std::fs::create_dir_all(tmp.join("src")).unwrap();
 
         let root = tmp.to_string_lossy().replace('\\', "/");
-        let registry = ProjectRegistry::from_canonical_roots(&[&root]);
+        let registry = ProjectRegistry::from_canonical_roots(&fs_workspace(), &[&root]);
 
         // File in root (no tsconfig) should still find a default project
         let file = format!("{root}/src/App.vue");
@@ -1050,7 +1079,7 @@ mod tests {
         .unwrap();
 
         let root = tmp.to_string_lossy().replace('\\', "/");
-        let registry = ProjectRegistry::from_canonical_roots(&[&root]);
+        let registry = ProjectRegistry::from_canonical_roots(&fs_workspace(), &[&root]);
 
         let strict_file = format!("{root}/packages/strict-pkg/src/Foo.vue");
         let strict_project = registry.linter_for(&strict_file);
@@ -1105,7 +1134,11 @@ mod tests {
         .unwrap();
 
         let root = tmp.to_string_lossy().replace('\\', "/");
+        let fs_ws = verter_workspace::FilesystemWorkspace::new(
+            verter_workspace::FilesystemOptions::default(),
+        );
         let registry = ProjectRegistry::from_workspace_roots(
+            &fs_ws,
             &[root.clone()],
             &verter_workspace::ViteConfigOptions {
                 enabled: true,
@@ -1155,7 +1188,11 @@ mod tests {
         .unwrap();
 
         let root = tmp.to_string_lossy().replace('\\', "/");
+        let fs_ws = verter_workspace::FilesystemWorkspace::new(
+            verter_workspace::FilesystemOptions::default(),
+        );
         let build_result = ProjectRegistry::from_workspace_roots(
+            &fs_ws,
             &[root.clone()],
             &verter_workspace::ViteConfigOptions {
                 enabled: true,
@@ -1218,7 +1255,11 @@ export default defineConfig(({ mode }) => ({
         .unwrap();
 
         let root = tmp.to_string_lossy().replace('\\', "/");
+        let fs_ws = verter_workspace::FilesystemWorkspace::new(
+            verter_workspace::FilesystemOptions::default(),
+        );
         let build_result = ProjectRegistry::from_workspace_roots(
+            &fs_ws,
             &[root.clone()],
             &verter_workspace::ViteConfigOptions {
                 enabled: true,
@@ -1271,7 +1312,11 @@ export default defineConfig(({ mode }) => ({
         .unwrap();
 
         let root = tmp.to_string_lossy().replace('\\', "/");
+        let fs_ws = verter_workspace::FilesystemWorkspace::new(
+            verter_workspace::FilesystemOptions::default(),
+        );
         let build_result = ProjectRegistry::from_workspace_roots(
+            &fs_ws,
             &[root.clone()],
             &verter_workspace::ViteConfigOptions {
                 enabled: true,
@@ -1313,7 +1358,11 @@ export default defineConfig(({ mode }) => ({
         .unwrap();
 
         let root = tmp.to_string_lossy().replace('\\', "/");
+        let fs_ws = verter_workspace::FilesystemWorkspace::new(
+            verter_workspace::FilesystemOptions::default(),
+        );
         let build_result = ProjectRegistry::from_workspace_roots(
+            &fs_ws,
             &[root.clone()],
             &verter_workspace::ViteConfigOptions {
                 enabled: false,
@@ -1499,7 +1548,7 @@ export default defineConfig(({ mode }) => ({
         std::fs::create_dir_all(&tmp).unwrap();
 
         let root = tmp.to_string_lossy().replace('\\', "/");
-        let registry = ProjectRegistry::from_canonical_roots(&[&root]);
+        let registry = ProjectRegistry::from_canonical_roots(&fs_workspace(), &[&root]);
 
         // File completely outside the workspace
         let outside = "/some/other/project/App.vue";
@@ -1549,7 +1598,7 @@ export default defineConfig(({ mode }) => ({
         let root = verter_workspace::resolver::normalize_canonical_id(
             &tmp.to_string_lossy().replace('\\', "/"),
         );
-        let registry = ProjectRegistry::from_canonical_roots(&[&root]);
+        let registry = ProjectRegistry::from_canonical_roots(&fs_workspace(), &[&root]);
         let source_file = format!("{root}/src/App.vue");
         let expected_app = format!("{root}/tsconfig.app.json");
         let solution_root = format!("{root}/tsconfig.json");
@@ -1590,7 +1639,7 @@ export default defineConfig(({ mode }) => ({
         let root = verter_workspace::resolver::normalize_canonical_id(
             &tmp.to_string_lossy().replace('\\', "/"),
         );
-        let registry = ProjectRegistry::from_canonical_roots(&[&root]);
+        let registry = ProjectRegistry::from_canonical_roots(&fs_workspace(), &[&root]);
         let unmatched = format!("{root}/scripts/tool.ts");
 
         let project = registry
@@ -1639,7 +1688,7 @@ export default defineConfig(({ mode }) => ({
         let root = verter_workspace::resolver::normalize_canonical_id(
             &tmp.to_string_lossy().replace('\\', "/"),
         );
-        let registry = ProjectRegistry::from_canonical_roots(&[&root]);
+        let registry = ProjectRegistry::from_canonical_roots(&fs_workspace(), &[&root]);
         let app_file = format!("{root}/src/App.ts");
         let project = registry
             .find_project(&app_file)
@@ -1672,7 +1721,7 @@ export default defineConfig(({ mode }) => ({
         )
         .unwrap();
         assert!(
-            has_solution_style_tsconfig(dir.path()),
+            has_solution_style_tsconfig(&fs_workspace(), &canonical_str(dir.path())),
             "should detect solution-style tsconfig with references"
         );
     }
@@ -1686,7 +1735,7 @@ export default defineConfig(({ mode }) => ({
         )
         .unwrap();
         assert!(
-            !has_solution_style_tsconfig(dir.path()),
+            !has_solution_style_tsconfig(&fs_workspace(), &canonical_str(dir.path())),
             "flat tsconfig without references should return false"
         );
     }
@@ -1696,7 +1745,7 @@ export default defineConfig(({ mode }) => ({
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("tsconfig.json"), r#"{ "references": [] }"#).unwrap();
         assert!(
-            !has_solution_style_tsconfig(dir.path()),
+            !has_solution_style_tsconfig(&fs_workspace(), &canonical_str(dir.path())),
             "empty references array should return false"
         );
     }
@@ -1705,7 +1754,7 @@ export default defineConfig(({ mode }) => ({
     fn has_solution_style_tsconfig_false_when_missing() {
         let dir = tempfile::tempdir().unwrap();
         assert!(
-            !has_solution_style_tsconfig(dir.path()),
+            !has_solution_style_tsconfig(&fs_workspace(), &canonical_str(dir.path())),
             "missing tsconfig.json should return false"
         );
     }
@@ -1719,7 +1768,7 @@ export default defineConfig(({ mode }) => ({
         )
         .unwrap();
         assert!(
-            has_solution_style_tsconfig(dir.path()),
+            has_solution_style_tsconfig(&fs_workspace(), &canonical_str(dir.path())),
             "should handle JSONC with comments and trailing commas"
         );
     }
@@ -1737,7 +1786,7 @@ export default defineConfig(({ mode }) => ({
         )
         .unwrap();
         assert!(
-            has_solution_style_tsconfig(dir.path()),
+            has_solution_style_tsconfig(&fs_workspace(), &canonical_str(dir.path())),
             "should detect solution-style tsconfig in monorepo subdirectory (packages/ui/)"
         );
         // Negative: root itself has no tsconfig.json file
@@ -1759,7 +1808,7 @@ export default defineConfig(({ mode }) => ({
         )
         .unwrap();
         assert!(
-            !has_solution_style_tsconfig(dir.path()),
+            !has_solution_style_tsconfig(&fs_workspace(), &canonical_str(dir.path())),
             "should not scan node_modules"
         );
     }
@@ -1774,7 +1823,7 @@ export default defineConfig(({ mode }) => ({
         std::fs::write(tmp.join("nuxt.config.ts"), "export default {}").unwrap();
         let lint = ResolvedLintConfig::default();
         assert!(
-            detect_ssr_project(&tmp, &lint),
+            detect_ssr_project(&fs_workspace(), &canonical_str(&tmp), &lint),
             "should detect nuxt.config.ts"
         );
         let _ = std::fs::remove_dir_all(&tmp);
@@ -1788,7 +1837,7 @@ export default defineConfig(({ mode }) => ({
         std::fs::write(tmp.join("nuxt.config.js"), "export default {}").unwrap();
         let lint = ResolvedLintConfig::default();
         assert!(
-            detect_ssr_project(&tmp, &lint),
+            detect_ssr_project(&fs_workspace(), &canonical_str(&tmp), &lint),
             "should detect nuxt.config.js"
         );
         let _ = std::fs::remove_dir_all(&tmp);
@@ -1801,7 +1850,10 @@ export default defineConfig(({ mode }) => ({
         std::fs::create_dir_all(&tmp).unwrap();
         std::fs::create_dir_all(tmp.join(".nuxt")).unwrap();
         let lint = ResolvedLintConfig::default();
-        assert!(detect_ssr_project(&tmp, &lint), "should detect .nuxt dir");
+        assert!(
+            detect_ssr_project(&fs_workspace(), &canonical_str(&tmp), &lint),
+            "should detect .nuxt dir"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1818,7 +1870,7 @@ export default defineConfig(({ mode }) => ({
             explicitly_configured: true,
         };
         assert!(
-            detect_ssr_project(&tmp, &lint),
+            detect_ssr_project(&fs_workspace(), &canonical_str(&tmp), &lint),
             "should detect ssr_mode from lint config"
         );
         let _ = std::fs::remove_dir_all(&tmp);
@@ -1832,7 +1884,7 @@ export default defineConfig(({ mode }) => ({
         std::fs::write(tmp.join("vite.config.ts"), "export default {}").unwrap();
         let lint = ResolvedLintConfig::default();
         assert!(
-            !detect_ssr_project(&tmp, &lint),
+            !detect_ssr_project(&fs_workspace(), &canonical_str(&tmp), &lint),
             "plain vite project should not be SSR"
         );
         let _ = std::fs::remove_dir_all(&tmp);
@@ -1896,7 +1948,7 @@ export default defineConfig(({ mode }) => ({
     fn find_project_normalizes_input_path() {
         // Simulate a Windows root stored with lowercase (production canonical form)
         let root = "c:/users/dev/project";
-        let registry = ProjectRegistry::from_canonical_roots(&[root]);
+        let registry = ProjectRegistry::from_canonical_roots(&fs_workspace(), &[root]);
 
         // Normalized query matches
         assert!(
@@ -1932,7 +1984,8 @@ export default defineConfig(({ mode }) => ({
     #[test]
     fn from_canonical_roots_normalizes_stored_roots() {
         // Feed uppercase Windows drive — simulates what std::fs::canonicalize returns on Windows
-        let registry = ProjectRegistry::from_canonical_roots(&["C:/Users/dev/project"]);
+        let registry =
+            ProjectRegistry::from_canonical_roots(&fs_workspace(), &["C:/Users/dev/project"]);
         let workspace_project = registry.projects.last().unwrap();
 
         // Positive: stored root should have lowercase drive letter (canonical form)
@@ -1948,7 +2001,8 @@ export default defineConfig(({ mode }) => ({
         );
 
         // Also test Linux-style path passes through unchanged
-        let registry2 = ProjectRegistry::from_canonical_roots(&["/home/user/project"]);
+        let registry2 =
+            ProjectRegistry::from_canonical_roots(&fs_workspace(), &["/home/user/project"]);
         let ws2 = registry2.projects.last().unwrap();
         assert_eq!(
             ws2.root, "/home/user/project",

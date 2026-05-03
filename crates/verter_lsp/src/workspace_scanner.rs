@@ -109,10 +109,24 @@ fn is_excluded_dir(name: &str) -> bool {
 /// Skips only fallback-excluded directories (`node_modules`).
 ///
 /// Returns paths with forward slashes (canonical form).
-pub fn collect_vue_paths(root: &Path) -> Vec<String> {
-    let mut result = Vec::new();
-    collect_paths_recursive(root, &mut result, |name| name.ends_with(".vue"));
-    result
+pub fn collect_vue_paths(
+    workspace: &dyn verter_workspace::WorkspaceRead,
+    root: &Path,
+) -> Vec<String> {
+    let root_str = root.to_string_lossy().replace('\\', "/");
+    workspace
+        .walk(
+            &root_str,
+            &|dir: &str| {
+                let name = dir.rsplit('/').next().unwrap_or(dir);
+                !is_excluded_dir(name)
+            },
+            &|file: &str| {
+                let name = file.rsplit('/').next().unwrap_or(file);
+                name.ends_with(".vue")
+            },
+        )
+        .unwrap_or_default()
 }
 
 /// Recursively collect all non-Vue source file paths (`.ts`, `.tsx`, `.js`, `.jsx`)
@@ -122,10 +136,24 @@ pub fn collect_vue_paths(root: &Path) -> Vec<String> {
 /// resolution, not FS walk) and fallback-excluded directories (`node_modules`).
 ///
 /// Returns paths with forward slashes (canonical form).
-pub fn collect_source_paths(root: &Path) -> Vec<String> {
-    let mut result = Vec::new();
-    collect_paths_recursive(root, &mut result, is_non_vue_source_file);
-    result
+pub fn collect_source_paths(
+    workspace: &dyn verter_workspace::WorkspaceRead,
+    root: &Path,
+) -> Vec<String> {
+    let root_str = root.to_string_lossy().replace('\\', "/");
+    workspace
+        .walk(
+            &root_str,
+            &|dir: &str| {
+                let name = dir.rsplit('/').next().unwrap_or(dir);
+                !is_excluded_dir(name)
+            },
+            &|file: &str| {
+                let name = file.rsplit('/').next().unwrap_or(file);
+                is_non_vue_source_file(name)
+            },
+        )
+        .unwrap_or_default()
 }
 
 /// Returns true if the file name is a non-Vue source file we want to sync.
@@ -149,28 +177,6 @@ fn is_non_vue_source_file(name: &str) -> bool {
 /// Returns true if the file name is a TypeScript declaration file.
 fn is_declaration_file(name: &str) -> bool {
     name.ends_with(".d.ts") || name.ends_with(".d.mts") || name.ends_with(".d.cts")
-}
-
-fn collect_paths_recursive(dir: &Path, result: &mut Vec<String>, matcher: fn(&str) -> bool) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(_) => return,
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let file_name = entry.file_name();
-        let name = file_name.to_string_lossy();
-
-        if path.is_dir() {
-            if is_excluded_dir(&name) {
-                continue;
-            }
-            collect_paths_recursive(&path, result, matcher);
-        } else if matcher(&name) {
-            result.push(path.to_string_lossy().replace('\\', "/"));
-        }
-    }
 }
 
 /// Classify paths into priority tiers based on tsconfig coverage patterns.
@@ -312,14 +318,21 @@ async fn scanner_loop(
     let roots = config.root_paths.clone();
     let tsconfig_patterns = config.tsconfig_patterns.clone();
     let workspace_snapshot = config.workspace_snapshot.clone();
+    let vfs_workspace = config.vfs_workspace.clone();
 
     // Step 1: FS walk all roots (blocking) — collect both Vue and non-Vue files
     let (vue_paths, source_paths) = tokio::task::spawn_blocking(move || {
         let mut vue = Vec::new();
         let mut src = Vec::new();
+        let ws_handle = vfs_workspace.read().clone();
+        let ws = ws_handle.unwrap_or_else(|| {
+            Arc::new(verter_workspace::FilesystemWorkspace::new(
+                verter_workspace::FilesystemOptions::default(),
+            ))
+        });
         for root in &roots {
-            vue.extend(collect_vue_paths(root));
-            src.extend(collect_source_paths(root));
+            vue.extend(collect_vue_paths(&*ws, root));
+            src.extend(collect_source_paths(&*ws, root));
         }
         (vue, src)
     })
@@ -822,6 +835,10 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    fn fs_workspace() -> verter_workspace::FilesystemWorkspace {
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default())
+    }
+
     fn create_test_dir() -> TempDir {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
@@ -880,7 +897,7 @@ mod tests {
     fn test_collect_vue_paths() {
         let tmp = create_test_dir();
         let root = tmp.path();
-        let paths = collect_vue_paths(root);
+        let paths = collect_vue_paths(&fs_workspace(), root);
 
         // Positive: finds all .vue files in src/ and scripts/
         assert!(
@@ -1096,7 +1113,7 @@ mod tests {
     #[test]
     fn test_collect_vue_paths_empty_dir() {
         let tmp = TempDir::new().unwrap();
-        let paths = collect_vue_paths(tmp.path());
+        let paths = collect_vue_paths(&fs_workspace(), tmp.path());
         assert!(paths.is_empty(), "empty dir should return no paths");
     }
 
@@ -1478,7 +1495,7 @@ import Child from '@/Child.vue'
     #[test]
     fn test_collect_source_paths_finds_ts_js_tsx_jsx() {
         let tmp = create_mixed_test_dir();
-        let paths = collect_source_paths(tmp.path());
+        let paths = collect_source_paths(&fs_workspace(), tmp.path());
 
         // Positive: finds .ts, .js, .tsx, .jsx files
         assert!(
@@ -1541,7 +1558,7 @@ import Child from '@/Child.vue'
     #[test]
     fn test_collect_source_paths_empty_dir() {
         let tmp = TempDir::new().unwrap();
-        let paths = collect_source_paths(tmp.path());
+        let paths = collect_source_paths(&fs_workspace(), tmp.path());
         assert!(paths.is_empty(), "empty dir should return no paths");
     }
 
