@@ -3673,7 +3673,6 @@ mod foundations_guards {
             "crates/verter_session/src/host_manage/analysis_io.rs",
             "crates/verter_session/src/host_manage/component_meta_methods.rs",
             "crates/verter_session/src/host_resolve.rs",
-            "crates/verter_session/src/lib.rs",
             "crates/verter_session/src/meta_resolve/materialize/field_types.rs",
             "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
             "crates/verter_session/src/parse.rs",
