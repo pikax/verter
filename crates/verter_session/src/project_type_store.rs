@@ -767,6 +767,216 @@ impl crate::invalidation_domain::InvalidationByCanonical for RouteOwnedShallowDb
 // ProjectTypeStore
 // ──────────────────────────────────────────────────────────────────────────
 
+// ──────────────────────────────────────────────────────────────────────────
+// Tier 1A typed-DB shapes (D17 + D18 + D44 + D46 + D48 + D65)
+//
+// Tier 1A introduces these DB wrappers as EMPTY shells (`DashMap`-backed
+// keyed by canonical id; no consumer code yet). The 1C-α worker wires
+// the actual consumers; the 1C-β worker splits `CompileCacheDb`'s
+// super-shape into `ProfileState` / `DerivedRawState` / `DependencyState`.
+//
+// `TypeResolutionContextDb` and `EvalEnvCacheDb` consume the
+// post-lowering owned artifacts in
+// `crate::owned_artifacts::OwnedTypeResolutionContext` /
+// `crate::owned_artifacts::OwnedEvalProgram`. The OXC parser arena
+// is dropped at the lowering boundary so these DBs can sit on
+// `Send + Sync` host caches.
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Cache identity for typed-DB entries that key by canonical-id +
+/// content-version. All four 1A typed DBs share this shape so they
+/// validate writes uniformly when the consumer migration lands.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OwnedArtifactKey {
+    pub canonical_id: Arc<str>,
+    pub whole_hash: Hash16,
+}
+
+impl OwnedArtifactKey {
+    #[must_use]
+    pub fn new(canonical_id: impl Into<Arc<str>>, whole_hash: Hash16) -> Self {
+        Self {
+            canonical_id: canonical_id.into(),
+            whole_hash,
+        }
+    }
+}
+
+/// Host-owned cache for [`crate::owned_artifacts::OwnedTypeResolutionContext`].
+/// Tier 1A introduces this empty; Tier 1C-α moves the existing
+/// `host_manage::HOST_PARSED_TYPE_CONTEXT_CACHE` thread-local consumers
+/// onto this DB.
+///
+/// **Invariant**: `Send + Sync + 'static` (per axiom A1 — host-owned
+/// caches only). The owned-artifact payload itself is `Send + Sync +
+/// 'static` so the cache can sit on a `DashMap` without thread-local
+/// workarounds.
+#[derive(Debug, Default)]
+pub struct TypeResolutionContextDb {
+    entries:
+        DashMap<OwnedArtifactKey, Arc<crate::owned_artifacts::OwnedTypeResolutionContext>>,
+}
+
+impl TypeResolutionContextDb {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Look up an owned context by canonical-id + content-version.
+    /// Returns `None` when no entry is present (Tier 1A's empty-DB
+    /// state).
+    #[must_use]
+    pub fn get(
+        &self,
+        key: &OwnedArtifactKey,
+    ) -> Option<Arc<crate::owned_artifacts::OwnedTypeResolutionContext>> {
+        self.entries.get(key).map(|r| Arc::clone(r.value()))
+    }
+
+    /// Insert an entry. The `Arc` payload may be shared — the DB itself
+    /// is the owner of that shared handle; callers should not mutate
+    /// the inner context after insertion.
+    pub fn insert(
+        &self,
+        key: OwnedArtifactKey,
+        value: Arc<crate::owned_artifacts::OwnedTypeResolutionContext>,
+    ) {
+        self.entries.insert(key, value);
+    }
+
+    /// Remove all entries — used by Tier 1C-γ eviction sweep policy
+    /// (introduced 1A as a primitive, exercised in 1C-γ).
+    pub fn clear(&self) {
+        self.entries.clear();
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+/// Host-owned cache for `EvalEnv` derived from a long-lived
+/// [`crate::owned_artifacts::OwnedEvalProgram`]. Per D46, `EvalEnv` is
+/// derived ad-hoc from the owned program rather than stored independently
+/// — the DB therefore caches programs (not pre-built envs); consumers
+/// derive the env on demand from the cached program.
+///
+/// Tier 1A introduces this empty; Tier 1C-α migrates
+/// `HOST_PARSED_EVAL_PROGRAM_CACHE` consumers onto it.
+#[derive(Debug, Default)]
+pub struct EvalEnvCacheDb {
+    entries: DashMap<OwnedArtifactKey, Arc<crate::owned_artifacts::OwnedEvalProgram>>,
+}
+
+impl EvalEnvCacheDb {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn get(
+        &self,
+        key: &OwnedArtifactKey,
+    ) -> Option<Arc<crate::owned_artifacts::OwnedEvalProgram>> {
+        self.entries.get(key).map(|r| Arc::clone(r.value()))
+    }
+
+    pub fn insert(
+        &self,
+        key: OwnedArtifactKey,
+        value: Arc<crate::owned_artifacts::OwnedEvalProgram>,
+    ) {
+        self.entries.insert(key, value);
+    }
+
+    pub fn clear(&self) {
+        self.entries.clear();
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+/// Host-owned super-shape for the existing `compile_cache` (D48).
+///
+/// Tier 1A introduces this as an empty shell. Tier 1C-α populates
+/// consumers; Tier 1C-β splits the super-shape into `ProfileState` /
+/// `DerivedRawState` / `DependencyState` per the §3.4.2 invalidation
+/// matrix. Tier 1A keeps the shape generic so the 1C-β split can rebind
+/// the inner type without callers refactoring around an interim API.
+#[derive(Debug, Default)]
+pub struct CompileCacheDb {
+    entries: DashMap<Arc<str>, ()>,
+}
+
+impl CompileCacheDb {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn clear(&self) {
+        self.entries.clear();
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+/// Host-owned typed cache for resolved-type entries (D16). Tier 1A
+/// introduces this empty; the existing `resolved_type_cache` field on
+/// `VerterHost` migrates onto this DB in 1C-α.
+#[derive(Debug, Default)]
+pub struct ResolvedTypeCacheDb {
+    entries: DashMap<OwnedArtifactKey, ()>,
+}
+
+impl ResolvedTypeCacheDb {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn clear(&self) {
+        self.entries.clear();
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+// Compile-time `Send + Sync + 'static` guards for the typed DBs. A
+// regression that introduces a borrowed lifetime field would fail to
+// compile here.
+const _: fn() = || {
+    fn assert_send_sync_static<T: Send + Sync + 'static>() {}
+    assert_send_sync_static::<TypeResolutionContextDb>();
+    assert_send_sync_static::<EvalEnvCacheDb>();
+    assert_send_sync_static::<CompileCacheDb>();
+    assert_send_sync_static::<ResolvedTypeCacheDb>();
+};
+
 /// Per-layer debug counters / cache stats for observability.
 ///
 /// The plan requires explicit counters for live entries, stale entries,
@@ -927,6 +1137,23 @@ pub struct ProjectTypeStore {
     /// value directly. See
     /// [`crate::app_config_proof_db::AppConfigNoOverrideProofDb`].
     app_config_no_override_proof: crate::app_config_proof_db::AppConfigNoOverrideProofDb,
+    /// Tier 1A — Host-owned typed DB for [`crate::owned_artifacts::OwnedTypeResolutionContext`].
+    /// Empty in 1A; populated in 1C-α (replaces `HOST_PARSED_TYPE_CONTEXT_CACHE`
+    /// thread-local).
+    type_resolution_context_db: TypeResolutionContextDb,
+    /// Tier 1A — Host-owned typed DB for [`crate::owned_artifacts::OwnedEvalProgram`]
+    /// (D46 — `EvalEnv` is derived ad-hoc from cached programs).
+    /// Empty in 1A; populated in 1C-α (replaces `HOST_PARSED_EVAL_PROGRAM_CACHE`
+    /// thread-local).
+    eval_env_cache_db: EvalEnvCacheDb,
+    /// Tier 1A — Host-owned super-shape for the compile cache (D48).
+    /// Empty in 1A; populated in 1C-α; split into `ProfileState` /
+    /// `DerivedRawState` / `DependencyState` in 1C-β.
+    compile_cache_db: CompileCacheDb,
+    /// Tier 1A — Host-owned typed cache for resolved-type entries (D16).
+    /// Empty in 1A; the existing `resolved_type_cache` field on
+    /// `VerterHost` migrates onto this DB in 1C-α.
+    resolved_type_cache_db: ResolvedTypeCacheDb,
     /// Debug / diagnostic counters.
     pub counters: ProjectTypeStoreCounters,
 }
@@ -1043,6 +1270,10 @@ impl ProjectTypeStore {
             routed_expr_surface_db,
             route_owned_shallow,
             app_config_no_override_proof,
+            type_resolution_context_db: TypeResolutionContextDb::new(),
+            eval_env_cache_db: EvalEnvCacheDb::new(),
+            compile_cache_db: CompileCacheDb::new(),
+            resolved_type_cache_db: ResolvedTypeCacheDb::new(),
             counters,
         }
     }
@@ -1106,6 +1337,39 @@ impl ProjectTypeStore {
     #[must_use]
     pub fn imported_roots_handle(&self) -> Arc<ImportedRootDb> {
         Arc::clone(&self.imported_roots)
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Tier 1A typed-DB accessors (introduced empty; populated in 1C-α).
+    //
+    // These accessors are part of the Step 1A discriminating contract:
+    // the field MUST be addressable from the public surface so future
+    // (1C-α) migration work can wire consumer paths without churning
+    // the API surface again.
+    // ──────────────────────────────────────────────────────────────────
+
+    /// Tier 1A — typed DB for [`crate::owned_artifacts::OwnedTypeResolutionContext`].
+    /// Empty in 1A; consumer migration in 1C-α.
+    pub fn type_resolution_context_cache(&self) -> &TypeResolutionContextDb {
+        &self.type_resolution_context_db
+    }
+
+    /// Tier 1A — typed DB for owned eval-program payloads (D46).
+    /// Empty in 1A; consumer migration in 1C-α.
+    pub fn eval_env_cache(&self) -> &EvalEnvCacheDb {
+        &self.eval_env_cache_db
+    }
+
+    /// Tier 1A — typed super-shape DB for the compile cache (D48).
+    /// Empty in 1A; populated in 1C-α; split in 1C-β.
+    pub fn compile_cache(&self) -> &CompileCacheDb {
+        &self.compile_cache_db
+    }
+
+    /// Tier 1A — typed DB for resolved-type entries (D16).
+    /// Empty in 1A; consumer migration in 1C-α.
+    pub fn resolved_type_cache(&self) -> &ResolvedTypeCacheDb {
+        &self.resolved_type_cache_db
     }
 
     /// Route-only shallow cache. F6/F7 destination DB.

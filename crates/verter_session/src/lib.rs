@@ -139,6 +139,8 @@ mod parse;
 mod project_global_cache_tests;
 pub(crate) mod project_semantic_dispatch;
 pub mod project_type_store;
+#[cfg(test)]
+mod project_type_store_tests;
 pub mod request_context;
 pub mod resolver_core;
 mod resolver_store;
