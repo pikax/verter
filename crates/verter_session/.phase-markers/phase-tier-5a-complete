@@ -26,12 +26,12 @@
   },
   "gate_status": {
     "fmt_check_passed": true,
-    "clippy_passed": true,
+    "clippy_passed": false,
     "pnpm_install_clean": true,
     "fmt_check_command": "cargo fmt --all --check",
     "clippy_command": "cargo clippy --workspace --tests -- -D warnings",
     "pnpm_install_command": "pnpm install --frozen-lockfile",
-    "_clippy_note": "Pre-existing clippy doc-list errors in crates/verter_session/tests/golden_semantic_dump.rs at base_commit 562233b6 are NOT introduced by this worker (TypeScript-only changes). Stashing this worker's changes and re-running cargo clippy reproduces the same errors against the baseline tree."
+    "_clippy_note": "Pre-existing clippy doc-list errors in crates/verter_session/tests/golden_semantic_dump.rs at base_commit 562233b6 are NOT introduced by this worker (TypeScript-only changes). Stashing this worker's changes and re-running cargo clippy reproduces the same errors against the baseline tree. The clippy gate is therefore false on the after-tree but the regression delta is zero — fixing the doc-list errors is out-of-scope for Tier 5a."
   },
   "monotonic_test_count_check": {
     "workspace": {
