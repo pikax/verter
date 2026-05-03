@@ -4,8 +4,8 @@
   "step": "1A",
   "status": "success",
   "base_commit": "562233b6",
-  "head_commit": "33ee329d",
-  "marker_commit": "33ee329d",
+  "head_commit": "a69834d3",
+  "marker_commit": "a69834d3",
   "test_results": {
     "workspace": {
       "test_scope": "cargo test --workspace --tests",
