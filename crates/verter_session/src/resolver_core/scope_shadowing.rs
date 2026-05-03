@@ -11,8 +11,8 @@
 //! preserving the plan's "user shadowing wins" rule across BOTH
 //! lowering entry points.
 //!
-//! **Design rationale (sub-plan §5.10 r15/F11):** the original r14
-//! brief threaded a bare `bool` through every route + registry caller.
+//! **Design rationale:** an earlier draft threaded a bare `bool`
+//! through every route + registry caller.
 //! That replicates the parameter-explosion pattern that the
 //! `ResolverContext` sealed-trait migration is designed to fix. By
 //! introducing this struct now, the threading axis stays

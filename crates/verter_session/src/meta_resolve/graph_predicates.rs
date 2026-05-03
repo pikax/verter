@@ -1,6 +1,6 @@
 //! Graph-native registry-route + cycle-BFS predicates.
 //!
-//! domain 12 — owns the §1.12 graph-native variants of the
+//! Domain 12 — owns the §1.12 graph-native variants of the
 //! TypeExpr-based registry-route helpers, the package-ref check, and
 //! the cycle-BFS predicates that gate ref/recursive-ref termination:
 //!
@@ -39,14 +39,14 @@ use super::dep_signature;
 #[cfg(test)]
 use super::dep_signature::record_bfs_child_refs_count_for_test;
 
-// Plan §6.14 / L — historical doc-block for the graph-native variant
+// Historical doc-block for the graph-native variant
 // of `component_meta_registry_prefers_structural_materialization`. The
 // predicate it documented was extracted during the structural
 // materialisation refactor; the prose is kept as a non-doc comment to
 // preserve the design rationale (structural vs. reference-shaped vs.
-// pass-through classification) for future maintainers.
+// Pass-through classification) for future maintainers.
 //
-// Plan §1.12 — graph-native registry-route + cycle-BFS predicates.
+// Graph-native registry-route + cycle-BFS predicates.
 //
 // These `_node` variants operate on `SemanticNodeId` directly instead of
 // round-tripping through `TypeExpr`. They share the round-7 parity
@@ -56,11 +56,11 @@ use super::dep_signature::record_bfs_child_refs_count_for_test;
 //
 // The TypeExpr-based originals (extract_route_root_identity-equivalent,
 // the TypeExpr package-ref check, ...) are retained — they still
-// have non-walker call sites per plan §11.2. The materialiser entry will be
+// have non-walker call sites per The materialiser entry will be
 // repointed at the `_node` predicates after non-walker callers migrate.
 // ===========================================================================
 
-/// Plan §1.12 / §4.4 — return type for [`extract_route_root_identity_node`].
+/// Return type for [`extract_route_root_identity_node`].
 ///
 /// Pairs the bare-root declaration identity with the route shape that
 /// the Pick/Omit/IndexedAccess wrapping carries. Distinct from the
@@ -69,7 +69,7 @@ use super::dep_signature::record_bfs_child_refs_count_for_test;
 /// `DeclIdentity` carries the full canonical-id + whole-hash pair the
 /// graph layer needs for dispatch keys and package-ref checks.
 ///
-/// Plan §4.4 / Codex2 P0 #3 — `root_args` preserves the generic root
+/// P0 #3 — `root_args` preserves the generic root
 /// carrier's type arguments so `Pick<Foo<T>, 'a'>` and `Foo<T>['a']`
 /// shapes can project. Empty for bare-DeclRef roots; non-empty for
 /// `InstantiationRef` roots (i.e., the original generic shell).
@@ -80,7 +80,7 @@ pub(crate) struct RouteExtraction {
     pub route: crate::resolver_core::RouteDemand,
 }
 
-/// Plan §1.12 / §4.4 — graph-native variant of the `TypeExpr`-based
+/// Graph-native variant of the `TypeExpr`-based
 /// registry route extraction (`component_meta_registry_public_utility_route` +
 /// `component_meta_registry_public_indexed_access_route`).
 ///
@@ -112,7 +112,7 @@ pub(crate) struct RouteExtraction {
 /// - Numeric/type indices rejected: `Foo[0]` and `Foo[K]` return `None`.
 ///
 /// `depth` fuses recursion at 256 to bound runtime on adversarial
-/// inputs (Plan §4.11).
+/// inputs.
 pub(crate) fn extract_route_root_identity_node(
     graph: &crate::semantic_query_memo::SemanticGraphStore,
     node: crate::semantic_query::SemanticNodeId,
@@ -147,7 +147,7 @@ pub(crate) fn extract_route_root_identity_node(
 /// previously returned `Pick`'s `__builtin__` identity, breaking the
 /// cycle / package guards).
 ///
-/// Plan §4.4 / Codex2 P0 #3 — preserves generic root carriers: when
+/// P0 #3 — preserves generic root carriers: when
 /// `args[0]` is `InstantiationRef { base: G, args: [..gargs..] }`,
 /// the extracted `root_identity` is `G` and `root_args` is `[..gargs..]`.
 /// Bare `DeclRef` arms produce empty `root_args`.
@@ -178,7 +178,7 @@ pub(crate) fn extract_pick_omit_route(
             base: gen_base,
             args: gen_args,
         } => (gen_base.clone(), Arc::clone(gen_args)),
-        // Plan §4.4 / R8-1 — symbolic-keep behavior for non-ref roots
+        // Symbolic-keep behavior for non-ref roots
         // depends on `evaluate_deferred_semantic_node` not unwrapping
         // carriers (verified at evaluate.rs:39). If a future change
         // there adds carrier unwrapping, this branch must keep
@@ -202,7 +202,7 @@ pub(crate) fn extract_pick_omit_route(
     })
 }
 
-/// Plan §4.4 — build a string-literal-union node from a list of keys
+/// Build a string-literal-union node from a list of keys
 /// for the 2-step Pick/Omit dispatch orchestration. Used by the
 /// materialiser registry-route branch to construct the keys argument
 /// for the second-step `Instantiate { Pick/Omit, [body_id, keys_node] }`
@@ -324,7 +324,7 @@ pub(crate) fn collect_string_literal_union_keys_node(
 // `_node` allow_dead_code annotations and no remaining production
 // callers; deleted to keep the surface minimal.
 
-/// Plan §6.4 / C — primitive package-detection check on a canonical
+/// Primitive package-detection check on a canonical
 /// id. Returns `true` when the canonical resolves under
 /// `/node_modules/`. Shared by the graph-native predicate
 /// (`component_meta_ref_resolves_to_package_node`) and the
@@ -334,7 +334,7 @@ pub(crate) fn canonical_resolves_to_package(canonical_id: &str) -> bool {
     canonical_id.contains("/node_modules/")
 }
 
-/// Plan §1.12 — graph-native variant of the TypeExpr package-ref
+/// Graph-native variant of the TypeExpr package-ref
 /// check. Delegates to the primitive
 /// [`canonical_resolves_to_package`] (commit C).
 pub(crate) fn component_meta_ref_resolves_to_package_node(
@@ -343,8 +343,8 @@ pub(crate) fn component_meta_ref_resolves_to_package_node(
     canonical_resolves_to_package(identity.canonical_id.as_ref())
 }
 
-/// Plan §1.12 / J1 — graph-native predicate (former TypeExpr
-/// counterpart deleted in Plan §6.15 / N). Returns `true` when the
+/// Graph-native predicate (former TypeExpr
+/// counterpart deleted in). Returns `true` when the
 /// input node's shape requires member-route materialisation (i.e., a
 /// non-package-backed reference target that has not been determined
 /// to participate in a transitive cycle).
@@ -373,7 +373,7 @@ pub(crate) fn component_meta_ref_resolves_to_package_node(
 /// BFS so the caller's completion fence remains complete.
 ///
 /// `depth` is fused at 256 to bound runtime on pathological chains
-/// (Plan §4.11). Fuse returns `false` to match the conservative legacy
+/// Fuse returns `false` to match the conservative legacy
 /// behaviour.
 pub(crate) fn type_node_needs_member_route_materialization(
     ctx: &dyn ResolverContext,
@@ -437,7 +437,7 @@ pub(crate) fn type_node_needs_member_route_materialization(
     }
 }
 
-/// Plan §6.11 / J2 — graph-native helper mirroring the TypeExpr
+/// Graph-native helper mirroring the TypeExpr
 /// predicate `type_expr_has_non_object_top_level_surface`. Returns
 /// `true` when `node`'s top-level shape is something OTHER than a
 /// concrete Object/Function/Array/Tuple/Primitive/Literal — i.e., the
@@ -455,7 +455,7 @@ pub(crate) fn type_node_needs_member_route_materialization(
 /// Depth fused at 256.
 #[allow(
     dead_code,
-    reason = "Plan §6.11 / J2 — wired via slot_binding_param_can_stay_symbolic_node in K2/K3"
+    reason = "wired via slot_binding_param_can_stay_symbolic_node"
 )]
 pub(crate) fn node_has_non_object_top_level_surface(
     ctx: &dyn ResolverContext,
@@ -558,10 +558,10 @@ pub(crate) fn node_has_non_object_top_level_surface(
     }
 }
 
-/// Plan §1.12 / J2 — graph-native predicate (former TypeExpr
+/// Graph-native predicate (former TypeExpr
 /// counterpart, defined inline inside
 /// `walk_component_meta_macro_shape_member_types`, deleted in
-/// Plan §6.15 / N). Returns `true` when `node`'s shape allows the
+///). Returns `true` when `node`'s shape allows the
 /// slot binding parameter to remain symbolic without eager
 /// materialisation.
 ///
@@ -640,8 +640,8 @@ pub(crate) fn slot_binding_param_can_stay_symbolic_node(
     }
 }
 
-/// Plan §1.12 / J0 — graph-native predicate (former TypeExpr
-/// counterpart deleted in Plan §6.15 / N). Returns `true` when
+/// Graph-native predicate (former TypeExpr
+/// counterpart deleted in). Returns `true` when
 /// `node`'s route root resolves to a `/node_modules/`-rooted decl
 /// identity.
 ///
@@ -663,7 +663,7 @@ pub(crate) fn slot_binding_param_can_stay_symbolic_node(
 /// - All other shapes — `false` (matches the TypeExpr `_` arm).
 ///
 /// `depth` is fused at 256 to bound runtime on pathological chains
-/// (Plan §4.11 convention; matches
+/// ( convention; matches
 /// [`has_complex_cycle_guard_surface_node`] etc.). On fuse the
 /// predicate returns `false`, matching the conservative legacy
 /// behaviour: a runaway recursion is treated as "not package-backed"
@@ -708,14 +708,14 @@ pub(crate) fn type_node_has_package_backed_root(
     }
 }
 
-/// Plan §1.12 — graph-native variant of the body inline-materialisation
+/// Graph-native variant of the body inline-materialisation
 /// preference predicate. Returns `true` when the body shape is suitable
 /// for inline materialisation through the registry-route entry.
 ///
 /// Reserved for re-wiring once migrates the inline-route
 /// composition site to graph-native (the predicate's only consumer
 /// before commit I sub-task 4 was the registry-route inline
-/// composition predicate, which was deleted in this commit). Tests in
+/// composition predicate, which was deleted). Tests in
 /// `meta_resolve_tests.rs` exercise this predicate directly.
 #[allow(
     dead_code,
@@ -739,7 +739,7 @@ pub(crate) fn declaration_body_prefers_inline_materialization_node(
     }
 }
 
-/// Plan §1.12 / §4.8 / Commit R — graph-native BFS for transitive cycle
+/// R — graph-native BFS for transitive cycle
 /// detection, with ctx-owned cache.
 ///
 /// Architecture:
@@ -762,7 +762,7 @@ pub(crate) fn declaration_body_prefers_inline_materialization_node(
 /// invalidate_for_canonical`) and project-generation-wide (via
 /// `invalidate_all`).
 ///
-/// Plan §4.1 / R7-13 / R7-14 — legacy parity rules carried into the
+/// Legacy parity rules carried into the
 /// inner BFS body unchanged:
 ///
 /// - Queue carries `(DeclIdentity, path_has_complex_signal: bool)`.
@@ -777,7 +777,7 @@ pub(crate) fn declaration_body_prefers_inline_materialization_node(
 ///   path's complex-signal flag (matches legacy fallback).
 ///
 /// Wired in production by B1's materialiser registry-route +
-/// recursive-helper guards (plan §4.13).
+/// recursive-helper guards.
 pub(crate) fn ref_root_reaches_transitive_cycle_node(
     root_identity: &crate::semantic_query::DeclIdentity,
     ctx: &dyn ResolverContext,
@@ -825,7 +825,7 @@ pub(crate) fn ref_root_reaches_transitive_cycle_node(
     }
 }
 
-/// Plan §6.13 / Commit R — extracted BFS body. Identical legacy-parity
+/// R — extracted BFS body. Identical legacy-parity
 /// logic to `ref_root_reaches_transitive_cycle_node`'s pre-cache body
 /// (preserves recursive-ref back-edge detection, intermediate-self
 /// check, and `ProjectionMode::Skeleton` for open-generic preservation
@@ -881,7 +881,7 @@ pub(crate) fn bfs_compute_inner(
         let key = SemanticQueryKey::Instantiate {
             base: current,
             args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-            // Plan §4.21 / R10-2 — Skeleton mode preserves open generics so
+            // Skeleton mode preserves open generics so
             // body lowering produces TypeParam graph nodes for T-refs (not
             // Opaque(Miss)). Without this, nested-Conditional fixtures like
             // canonical nuxt-ui DotPathKeys collapse the conditional and
@@ -921,7 +921,7 @@ pub(crate) fn bfs_compute_inner(
         let mut child_refs: Vec<(crate::semantic_query::DeclIdentity, bool)> = Vec::new();
         collect_ref_identities_node(graph, body_id, &mut child_refs, 0);
 
-        // Plan §6.2 / §6.6.5 — F-prep test instrumentation. Records
+        // F-prep test instrumentation. Records
         // child_refs.len() per visited identity name into the per-thread
         // observer (no-op when no observer installed).
         #[cfg(test)]
@@ -1074,7 +1074,7 @@ pub(crate) fn body_contains_recursive_ref_to_name(
 /// Literal / TypeParameter / Infer counts as "complex".
 ///
 /// `depth` fuses recursion at 256 to bound runtime on pathological
-/// graphs (Plan §4.11). The fuse intentionally returns `false` on
+/// graphs. The fuse intentionally returns `false` on
 /// hit — a runaway recursion is treated as "not complex" so the
 /// caller continues the BFS rather than terminating prematurely.
 pub(crate) fn has_complex_cycle_guard_surface_node(
@@ -1126,7 +1126,7 @@ pub(crate) fn has_complex_cycle_guard_surface_node(
 /// stops at "complex" body shapes (those are the cycle indicator,
 /// not the termination signal).
 ///
-/// `depth` fuses recursion at 256 (Plan §4.11). The fuse returns
+/// `depth` fuses recursion at 256. The fuse returns
 /// without recording new identities to bound runtime on
 /// pathological graphs.
 pub(crate) fn collect_ref_identities_node(

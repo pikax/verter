@@ -1115,7 +1115,7 @@ pub(crate) fn component_meta_registry_raw_member_path_surface(
         ObjectExpr, ObjectMember, ObjectProperty, TypeExpr,
     };
 
-    /// Plan §4.19 / §6.10 sub-task 4 — inlined replacement for the
+    /// Inlined replacement for the
     /// retired free helper. Navigates into a `TypeExpr::Object` by a
     /// single property name, unwrapping `Parenthesized`. Returns
     /// `None` if `expr` is not an Object or no member matches.
@@ -2284,7 +2284,7 @@ pub(crate) fn collect_component_meta_registry_member_surface_refs(
     }
 }
 
-// Plan §4.19 / §6.6 / E + §6.10 sub-task 4 — both legacy
+// + §6.10 sub-task 4 — both legacy
 // member-path helpers retired. The shared object-member navigation
 // logic is inlined into the body of
 // `component_meta_registry_raw_member_path_surface` (its only

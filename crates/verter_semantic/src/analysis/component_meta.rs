@@ -1643,8 +1643,7 @@ fn merged_resolved_macro_input(
     merged
 }
 
-/// Resolve the prop's `TypeExpr` per the plan §3 Step 6.3 D15
-/// priority chain:
+/// Resolve the prop's `TypeExpr` per the priority chain:
 ///
 /// 1. Evaluated `TypeExpr` post-`raise_and_reduce` (when present).
 ///    The graph-native projection guarantees no operator-leaf residue

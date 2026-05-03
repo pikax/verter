@@ -74,11 +74,11 @@ pub(crate) fn project_expr_class_a_via_dispatch(
 /// created (suitable for top-level entry points without a caller
 /// engine).
 ///
-/// commit 6 retained the engine route-fast-path because
+/// The engine route-fast-path is retained because
 /// `engine.project_route_surface_expr` exercises engine-local
 /// resolution paths (re-export chains, prepared-decl fallbacks) that
 /// the dispatch's `lower_type_expr_in_scope` does not subsume —
-/// removing it caused stack overflows in tests with realistic
+/// removing it would cause stack overflows on realistic
 /// indexed-access / utility shapes (e.g., `*_keeps_imported_*`
 /// member-path test family). The engine method itself remains a
 /// trampoline (already routes through dispatch), so the

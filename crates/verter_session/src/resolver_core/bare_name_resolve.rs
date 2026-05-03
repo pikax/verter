@@ -8,7 +8,7 @@
 //! shallow-file-state, prepared-decl bundles, and resolver stack —
 //! the same substrate `SessionSolverHost` wraps.
 //!
-//! Authority chain (plan §2 / §5.7 step 3):
+//! Authority chain:
 //! 1. Declaration-scope payload (prepared-decl bundle's script-setup type
 //!    bindings, scope type/value names, import bindings).
 //! 2. Host's cached `IndexedReady` shallow state for the scope's canonical.
@@ -159,7 +159,7 @@ fn resolve_import_binding_from_facts(
     scope_payload: Option<&DeclarationScopePayload>,
     local_name: &str,
 ) -> Option<ResolvedRootIdentity> {
-    // a) Try the shallow-state import_targets map first (the cached
+    // A) Try the shallow-state import_targets map first (the cached
     //    parse facts are the canonical authority).
     if let Some(entry) = ctx.ensure_indexed_ready(canonical_id) {
         let state = &entry.shallow_state;
@@ -177,7 +177,7 @@ fn resolve_import_binding_from_facts(
         }
     }
 
-    // b) Fallback to the scope payload's import bindings (which the
+    // B) Fallback to the scope payload's import bindings (which the
     //    prepared-decl builder may have discovered through script-setup
     //    manifest paths not visible to the raw shallow state).
     if let Some(payload) = scope_payload {
@@ -190,7 +190,7 @@ fn resolve_import_binding_from_facts(
         }
     }
 
-    // c) Final fallback: fetch the prepared-decl bundle directly.
+    // C) Final fallback: fetch the prepared-decl bundle directly.
     let bundle = ctx.prepared_decl_bundle(canonical_id)?;
     let binding = bundle.import_bindings.get(local_name)?;
     Some(resolve_imported_type_root_identity(
@@ -273,7 +273,7 @@ fn resolve_imported_type_root_identity(
 ///
 /// Used by the dispatch path (walker / build_instantiate) so dispatch
 /// does not need to construct a `SessionSolverHost` just to reach the
-/// prepared-decl cache (plan §5.7 step 3 / §5.8).
+/// prepared-decl cache.
 pub(crate) fn resolve_prepared_type_decl_via_host(
     ctx: &dyn ResolverContext,
     _scope_canonical_id: Option<&str>,

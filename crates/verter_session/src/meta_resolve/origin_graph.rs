@@ -1,6 +1,6 @@
 //! Origin-graph builder for component-meta audit footprint capture.
 //!
-//! domain 13 — owns the standalone `build_origin_graph`
+//! Domain 13 — owns the standalone `build_origin_graph`
 //! function that reduces `SemanticGraphStore` + a set of surface
 //! identities to a `verter_protocol::types::OriginGraphDto` (the
 //! audit-trace shape). Called once per component-meta request when
@@ -8,19 +8,18 @@
 //! enforced by `gate_text_includes_audit_enabled` in
 //! `meta_resolve/host_methods.rs`).
 //!
-//! Lines 162-335 of the post-commit-12 `meta_resolve.rs` shell.
-//! Visibility escalation: the formerly-private `fn build_origin_graph`
-//! is escalated to `pub(crate) fn` so the impl block in
-//! `host_methods.rs` (commit 9) keeps calling it via the shell's
+//! Visibility: the formerly-private `fn build_origin_graph` is exposed
+//! at `pub(crate) fn` so the impl block in `host_methods.rs` keeps
+//! calling it via the shell's
 //! `pub(crate) use origin_graph::build_origin_graph;` re-export.
 
 use std::sync::Arc;
 
 use super::resolved_state::SurfaceNodeIdentities;
 
-// Plan §6.10 sub-task 4 / §4.19 — registry-route inline composition
+// / §4.19 — registry-route inline composition
 // predicate deleted (verified callerless in production; the only
-// consumer was a composition test that has also been deleted in this
+// consumer was a composition test that has also been deleted
 // commit).
 
 #[cfg_attr(feature = "hotpath", hotpath::measure)]

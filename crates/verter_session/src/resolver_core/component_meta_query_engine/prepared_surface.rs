@@ -44,8 +44,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 
     /// Project the full surface of a type expression in a declaration scope.
     ///
-    /// **trampoline (sub-plan §5 commit 3.7).** Body is
-    /// dispatch-centric: tries `dispatch_projected_surface` (which
+    /// **Trampoline.** Body is dispatch-centric: tries
+    /// `dispatch_projected_surface` (which
     /// instantiates the symbol through the `Instantiate { .., body_mode:
     /// Expanded }` memo and raises the resulting node back to a
     /// `ProjectedSurface`), falling back to the prepared-decl

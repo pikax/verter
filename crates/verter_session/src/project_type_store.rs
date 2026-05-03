@@ -125,7 +125,7 @@ pub struct IndexedReady {
     /// declaration-side data `hash_route_surface` digests). Symmetric
     /// to [`import_route_hash`]; populated when
     /// [`ShallowFileState::has_resolvable_surface`] returns `true`.
-    /// Used by `current_derived_fact_hash` (plan §3 Step 8 / F5) to
+    /// Used by `current_derived_fact_hash` to
     /// answer cached-route fact queries without rehashing per call.
     /// Invalidation lifecycle == `IndexedReady`'s content-hash
     /// lifecycle: when the canonical's whole_hash changes, a fresh
@@ -237,7 +237,7 @@ pub struct IndexedReadyDb {
     /// [`crate::VerterHost::new_with_scheduler_config`] post-construction.
     /// On every fresh `insert`, the hook (if present) bumps the host's
     /// `total_shallow_processes` counter and records the canonical.
-    /// supplement §5.D.0 r17.
+    /// Supplement §5.D.0 r17.
     #[cfg(test)]
     test_audit_hook: parking_lot::Mutex<Option<Arc<crate::host_test_audit::HostTestAuditState>>>,
 }
@@ -320,7 +320,7 @@ impl IndexedReadyDb {
             self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
         } else {
             self.live_counter.fetch_add(1, Ordering::Relaxed);
-            // Plan §3 Commit 5 / §3.A Commit 6.E: push an
+            // / §3.A.E: push an
             // `IndexedReadyBuilt` typed structured event into the
             // active request's accumulator on every FRESH insert.
             // Gate on fresh-insert (prev.is_none()) so overwrites
@@ -331,7 +331,7 @@ impl IndexedReadyDb {
                 Arc::clone(&canonical_for_event),
                 whole_hash,
             );
-            // supplement §5.D.0 r17 — host-level test audit
+            // Supplement §5.D.0 r17 — host-level test audit
             // hook. Bumps `total_shallow_processes` and adds the
             // canonical to `loaded_files` so §5.D.2 read-once tests
             // can sample cumulative counters across requests.
@@ -522,7 +522,7 @@ impl crate::invalidation_domain::InvalidationByCanonical for AnalysisReadyDb {
 /// materialisation. This struct carries all four halves in one shot.
 ///
 /// Generation fields drive the materialiser's tiered staleness gate
-/// (sub-plan §6b.D2a step 2):
+/// (sub-):
 /// - `whole_hash` — content authority (tier 1).
 /// - `workspace_generation` — `ws().content_generation()` at publish time
 ///   (tier 2 fallback for files the scheduler hasn't seen).
@@ -537,7 +537,7 @@ impl crate::invalidation_domain::InvalidationByCanonical for AnalysisReadyDb {
 /// mutexes remain the active authority; this DB is published-into only by
 /// tests and the new materialiser. The transitional coexistence is
 /// internal to verter_session (not a long-lived shim — the legacy fields
-/// are deleted in 6b.D2a step 4).
+/// are deleted.D2a step 4).
 #[derive(Debug)]
 pub struct RouteOwnedShallowEntry {
     /// Tier-1 content hash.
@@ -614,7 +614,7 @@ impl RouteOwnedShallowEntry {
 ///
 /// No explicit capacity bound — sizing follows the upsert/eviction
 /// lifecycle (same stance as [`IndexedReadyDb`]). Counters are required
-/// per sub-plan §6b.D1 fifth-pass review; they feed
+/// per sub- fifth-pass review; they feed
 /// [`ProjectTypeStoreCounters`] for observability symmetry with
 /// [`IndexedReadyDb`].
 pub struct RouteOwnedShallowDb {
@@ -693,7 +693,7 @@ impl RouteOwnedShallowDb {
     }
 
     /// Bulk eviction — drains every entry. Called by the route-resolution
-    /// invalidation cascade (sub-plan §6b.D2a step 6: extended into
+    /// invalidation cascade (sub-: extended into
     /// `configure_projects`, `clear_compile_cache`, `close`,
     /// `set_workspace`).
     pub fn clear_all(&self) {
@@ -871,12 +871,11 @@ pub struct ProjectTypeStore {
     /// `(owner_canonical, owner_whole_hash, options_fingerprint)`.
     /// Payload is [`crate::component_meta_result_db::CachedComponentMetaResult`]
     /// — the native `ComponentMetaAnalysis` plus the sanitized
-    /// resolution sidecar template. wires `get_component_meta`
-    /// to consult the cache with completion-fence dep-signature
-    /// validation before falling back to the cold resolver path; Step 4
-    /// (architectural-debt-closure rev 10) extends the same cache to
-    /// short-circuit `get_component_meta_with_resolution` so audit-mode
-    /// warm replays return in near-zero time.
+    /// resolution sidecar template. `get_component_meta` consults
+    /// the cache with completion-fence dep-signature validation
+    /// before falling back to the cold resolver path; the same cache
+    /// short-circuits `get_component_meta_with_resolution` so
+    /// audit-mode warm replays return in near-zero time.
     component_meta_results:
         ComponentMetaResultDb<crate::component_meta_result_db::CachedComponentMetaResult>,
     /// TypeScript `intrinsic` registry. Maps resolved
@@ -885,9 +884,8 @@ pub struct ProjectTypeStore {
     /// reach this registry — it is consulted only after the normal
     /// declaration path resolves to `= intrinsic`.
     intrinsic_registry: IntrinsicRegistry,
-    // Step 3 closure (architectural-debt-closure rev 10) — 10 host-owned
-    // typed DB wrappers for the component-meta engine's previously
-    // engine-local caches. Each DB consumes the
+    // 10 host-owned typed DB wrappers for the component-meta engine's
+    // previously engine-local caches. Each DB consumes the
     // [`crate::cooperative_admission::cooperative_get_or_insert`]
     // primitive (admission-control, panic safety, post-compute
     // revalidation). The engine keeps a per-request
@@ -898,12 +896,12 @@ pub struct ProjectTypeStore {
     owner_collection_db: OwnerCollectionDb,
     prepared_target_db: PreparedTargetDb,
     materialize_memo_db: MaterializeMemoDb,
-    /// Plan §1.5 / final-result cache for the structural
+    /// Cache for the structural
     /// materialiser. Sole authoritative host-owned materialiser cache.
     /// The canonical removed-symbol list lives in
     /// `tests/no_legacy_walker.rs::RETIRED_SYMBOLS`.
     materialize_structure_db: crate::component_meta_caches::MaterializeStructureDb,
-    /// Plan §4.8 / Phase C / Commit R — host-owned cache for
+    /// C — host-owned cache for
     /// `meta_resolve::ref_root_reaches_transitive_cycle_node`. BFS
     /// results stored as `(DeclIdentity → bool)` with reverse-index
     /// invalidation matching `MaterializeStructureDb`.
@@ -1057,7 +1055,7 @@ impl ProjectTypeStore {
 
     /// Alias — equivalent to [`Self::project_generation`] with
     /// a clearer name for the route-only shallow materialiser's tier-3
-    /// staleness gate (sub-plan §6b.D2a step 2). The materialiser captures
+    /// staleness gate (sub-). The materialiser captures
     /// this value before reading + parsing, then re-checks it inside the
     /// pre-publish fence to detect mid-flight `bump_project_generation`
     /// mutations (`configure_projects`, `set_exact_resolutions`,
@@ -1103,7 +1101,7 @@ impl ProjectTypeStore {
         Arc::clone(&self.routes)
     }
 
-    /// return a cloned `Arc<ImportedRootDb>` handle. See
+    /// Return a cloned `Arc<ImportedRootDb>` handle. See
     /// [`Self::routes_handle`] for the full rationale.
     #[must_use]
     pub fn imported_roots_handle(&self) -> Arc<ImportedRootDb> {
@@ -1171,7 +1169,7 @@ impl ProjectTypeStore {
         &self.materialize_memo_db
     }
 
-    /// Plan §1.5 / accessor for the structural-materialiser
+    /// For the structural-materialiser
     /// final-result cache. Sole authoritative materialiser cache; the
     /// canonical removed-symbol list lives in
     /// `tests/no_legacy_walker.rs::RETIRED_SYMBOLS`.
@@ -1181,7 +1179,7 @@ impl ProjectTypeStore {
         &self.materialize_structure_db
     }
 
-    /// Plan §4.8 / Phase C / Commit R — accessor for the host-owned
+    /// C — accessor for the host-owned
     /// transitive-cycle BFS cache consulted by
     /// `meta_resolve::ref_root_reaches_transitive_cycle_node`.
     pub fn ref_cycle_db(&self) -> &crate::component_meta_caches::RefCycleResultDb {
@@ -1258,11 +1256,11 @@ impl ProjectTypeStore {
         self.owner_collection_db.invalidate_canonical(canonical_id);
         self.prepared_target_db.invalidate_canonical(canonical_id);
         self.materialize_memo_db.invalidate_canonical(canonical_id);
-        // Plan §1.5 / Γ.B-style reverse-index drain on the
+        // Reverse-index drain on the
         // structural-materialiser cache (sole materialiser cache).
         self.materialize_structure_db
             .invalidate_for_canonical(canonical_id);
-        // Plan §4.8 / Commit R — same per-canonical reverse-index drain
+        // R — same per-canonical reverse-index drain
         // for the BFS cycle-result cache.
         self.ref_cycle_db.invalidate_for_canonical(canonical_id);
         self.prepared_surface_db.invalidate_canonical(canonical_id);
@@ -1285,8 +1283,7 @@ impl ProjectTypeStore {
     /// active-TypeScript-SDK, workspace-folder, or other project-shape
     /// changes. Bumps the project generation and wipes every cache layer
     /// whose identity depends on project configuration rather than raw
-    /// file text. Per plan § A0, this is invoked atomically before new
-    /// queries are admitted.
+    /// file text. Invoked atomically before new queries are admitted.
     pub fn bump_project_generation_and_evict(&self) -> u64 {
         let generation = self.bump_project_generation();
         // File-content identity stays (IndexedReady / AnalysisReady keyed
@@ -1314,7 +1311,7 @@ impl ProjectTypeStore {
         self.prepared_target_db.invalidate_all();
         self.materialize_memo_db.invalidate_all();
         self.materialize_structure_db.invalidate_all();
-        // Plan §4.8 / Commit R — project-shape change invalidates the
+        // R — project-shape change invalidates the
         // BFS cycle-result cache (entries depend on the same routes /
         // intrinsics that change at the project-generation boundary).
         self.ref_cycle_db.invalidate_all();
@@ -1336,7 +1333,7 @@ impl Default for ProjectTypeStore {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// Plan §12.A3 / §12.A12 — typed cache invalidation domain registration.
+// typed cache invalidation domain registration.
 //
 // `PROJECT_TYPE_STORE_DB_INVENTORY` and `ProjectTypeStore::all_dbs_for_invalidation`
 // are the single source of truth for which DBs participate in the
@@ -1359,7 +1356,7 @@ impl Default for ProjectTypeStore {
 /// Inventory of every DB-typed field on [`ProjectTypeStore`] that
 /// participates in the typed cache invalidation domain cascade.
 ///
-/// Plan §12.A3 declares this inventory as the single source of truth
+/// Declares this inventory as the single source of truth
 /// for cascade coverage. The architecture guard walks the struct and
 /// asserts every DB-typed field name appears here.
 pub const PROJECT_TYPE_STORE_DB_INVENTORY: &[&str] = &[
@@ -1387,7 +1384,7 @@ pub const PROJECT_TYPE_STORE_DB_INVENTORY: &[&str] = &[
 ];
 
 impl ProjectTypeStore {
-    /// Plan §12.A3 — return one
+    /// Return one
     /// [`ParticipatesInInvalidation`](crate::invalidation_domain::ParticipatesInInvalidation)
     /// reference per registered DB.
     ///
@@ -1427,7 +1424,7 @@ impl ProjectTypeStore {
         ]
     }
 
-    /// Plan §12.A12 step 3 — monomorphic statically-dispatched
+    /// Monomorphic statically-dispatched
     /// per-canonical eviction cascade across every DB on the store.
     ///
     /// Each call site below invokes the per-DB
@@ -1750,8 +1747,8 @@ mod tests {
     }
 
     /// `bump_project_generation_and_evict` clears every generation-sensitive
-    /// cache and bumps the project generation counter. Per plan § A0, this
-    /// is invoked atomically on tsconfig / SDK / workspace-folder changes.
+    /// cache and bumps the project generation counter. Invoked atomically
+    /// on tsconfig / SDK / workspace-folder changes.
     #[test]
     fn bump_project_generation_and_evict_clears_route_and_result_layers() {
         let store = ProjectTypeStore::new();
@@ -1864,7 +1861,7 @@ mod tests {
         assert_eq!(snap.analysis_live, 1);
         assert_eq!(snap.analysis_stale_sweeps, 2);
 
-        // b.ts still resolvable.
+        // B.ts still resolvable.
         assert!(store
             .analysis()
             .get(&AnalysisArtifactKey {

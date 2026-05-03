@@ -938,17 +938,17 @@ pub fn structural_substitute_typeof_refs(
 /// Evaluate a value expression by parsing it and resolving identifiers
 /// via env-based substitution followed by component-meta dispatch.
 ///
-/// Mirrors the pre-migration `evaluate_value_expression` contract:
-/// env-level substitutions (including injected prop-type overrides) take
-/// precedence; otherwise the lowered expression is routed through the
-/// Class A dispatch helper in the owning canonical scope.
-/// commit 5 migrated the engine's
-/// `project_expr_surface_expr` / `lower_and_project_to_expanded`
-/// callsites to `project_expr_class_a_via_dispatch_threaded`, which
-/// covers BOTH the registry-route fast-path AND the generic
-/// `ProjectPath { [], Expanded }` dispatch — collapsing the two
-/// previous fallback layers (which both terminated at the same dispatch
-/// query under the trampolines).
+/// Contract: env-level substitutions (including injected prop-type
+/// overrides) take precedence; otherwise the lowered expression is
+/// routed through the Class A dispatch helper in the owning canonical
+/// scope.
+///
+/// The engine's `project_expr_surface_expr` /
+/// `lower_and_project_to_expanded` callsites delegate to
+/// `project_expr_class_a_via_dispatch_threaded`, which covers BOTH the
+/// registry-route fast-path AND the generic
+/// `ProjectPath { [], Expanded }` dispatch — collapsing two earlier
+/// fallback layers that terminated at the same dispatch query.
 pub fn evaluate_value_expression_via_env_or_dispatch(
     expression: &str,
     canonical_id: &str,

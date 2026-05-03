@@ -6,11 +6,10 @@
 use std::fmt;
 use std::sync::Arc;
 
-/// Path C C13 — scheduler job kind for non-file-staged work (plan §2
-/// Stage 7 Pass C13). Lets the session layer route component-meta
-/// requests through the scheduler as independent jobs so N component-
-/// meta queries in Batch mode fan out onto the Rayon pool instead of
-/// executing synchronously in caller order.
+/// Scheduler job kind for non-file-staged work. Lets the session layer
+/// route component-meta requests through the scheduler as independent
+/// jobs so N component-meta queries in Batch mode fan out onto the
+/// Rayon pool instead of executing synchronously in caller order.
 ///
 /// Currently the only non-staged job kind is `ComponentMeta`; the enum
 /// is kept open for future extensions (resolve-named-type adapters,

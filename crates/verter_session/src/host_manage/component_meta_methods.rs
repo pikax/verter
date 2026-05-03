@@ -1,6 +1,6 @@
 //! Host-method surface for component-meta on `VerterHost`.
 //!
-//! domain 8 — the inherent `impl VerterHost { ... }` block that
+//! Domain 8 — the inherent `impl VerterHost { ... }` block that
 //! lives next to the materialization core. Owns ~18 host methods including
 //! `resolve_component_meta`, `compute_component_meta_state`, the
 //! `*_inner` audited variants, the registry-publication helpers
@@ -19,7 +19,6 @@
 //! `MEMBER_ROUTE_FAST_PATH_HITS`, the registry / cycle / origin-graph
 //! predicates, the resolver adapter, etc.) are reached via `super::*`
 //! until those domains land in their final per-domain siblings
-//!.
 
 use crate::host_manage::{
     component_meta_debug, component_meta_debug_enabled, component_meta_trace_custom,
@@ -35,7 +34,7 @@ use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
-// file moved from `meta_resolve/host_methods.rs` to
+// File moved from `meta_resolve/host_methods.rs` to
 // `host_manage/component_meta_methods.rs`. The original `super::X` paths
 // resolved through `meta_resolve`'s private siblings; after the move,
 // they rewrite to `crate::meta_resolve::X` (the parent module's
@@ -71,8 +70,8 @@ use crate::meta_resolve::{
 // walker (`walk_component_meta_macro_shape_member_types`), the
 // registry-structural materialiser, the registry-route preservers, the
 // graph-native registry-route + cycle-BFS predicates, and the
-// origin-graph builder. The `HostComponentMetaResolver` adapter moved
-// to `host_manage/jsdoc_resolve.rs` in commit 4 (host-impl tier).
+// origin-graph builder. The `HostComponentMetaResolver` adapter lives
+// in `host_manage/jsdoc_resolve.rs` (host-impl tier).
 use crate::host_manage::jsdoc_resolve::HostComponentMetaResolver;
 use crate::meta_resolve::build_origin_graph;
 use crate::meta_resolve::walk_component_meta_macro_shape_member_types;
@@ -251,7 +250,7 @@ impl VerterHost {
                 }
             }
             // Mine the semantic footprint when the active request is
-            // capturing. Plan §3 Commit 4: drains the per-request
+            // capturing. drains the per-request
             // accumulator and feeds the result through the deterministic
             // miner before the builder finalises. Without this step,
             // `RustAuditRecord.footprint` would always be `None` even
@@ -274,7 +273,7 @@ impl VerterHost {
             crate::component_meta_audit::emit_audit_trace(&record);
             // Publish into the host's bounded audit-record store so
             // `take_audit_record(resolution.request_id)` can drain it.
-            // Plan §2.5 — without this line the store stays empty and
+            // Without this line the store stays empty and
             // every `AuditedRequest::resolve` surfaces
             // `AuditRecordMissing`.
             self.publish_audit_record(record);
@@ -387,7 +386,7 @@ impl VerterHost {
                 snapshot.script_flags,
             ),
         );
-        // retired `shared_owner_engine` /
+        // Retired `shared_owner_engine` /
         // `SessionSolverHost` pair; the resolver host is now a thin
         // wrapper around `VerterHost`.
         let resolver_host = HostComponentMetaResolver { host: self };
@@ -424,7 +423,7 @@ impl VerterHost {
         let should_materialize_registry = registry_materialization == RegistryMaterialization::Full;
         let should_produce_macro_object_shapes = mode == ProjectionMode::Expanded;
         let solver_audit = if should_materialize_registry || should_produce_macro_object_shapes {
-            // the retired `shared_owner_engine`
+            // The retired `shared_owner_engine`
             // is gone — dispatch owns all solve-like operations now.
             let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(self);
             if should_materialize_registry {
@@ -808,9 +807,9 @@ impl VerterHost {
                                             .unwrap_or_else(|| {
                                                 scope_canonical_id.to_string()
                                             });
-                                        // commit 6 — migrate the
+                                        // Migrate the
                                         // generic-Ref instantiation to dispatch
-                                        // (sub-plan §C.3 D-T recipe). The
+                                        // (sub- D-T recipe). The
                                         // helper resolves
                                         // `instantiate_local_generic_ref` via
                                         // the dispatch's `Instantiate` arm
@@ -822,7 +821,7 @@ impl VerterHost {
                                                 &stabilized,
                                             )
                                             .unwrap_or_else(|| stabilized.clone());
-                                        // commit 5 — migrate the
+                                        // Migrate the
                                         // route-loop call to the Class A
                                         // dispatch helper. The helper covers
                                         // the registry-route fast-path AND
@@ -830,7 +829,7 @@ impl VerterHost {
                                         // dispatch; preserving the engine
                                         // thread keeps fuse / scope-payload
                                         // continuity for the route fast-path
-                                        // (still on the engine until commit 6
+                                        // (still on the engine until
                                         // alongside instantiate_local_generic_ref).
                                         project_expr_class_a_via_dispatch_threaded(
                                             query_engine.ctx,
@@ -896,7 +895,7 @@ impl VerterHost {
             }) {
                 return raw_body.cloned();
             }
-            // Plan §6.14 / L — migrate the structural-materialisation
+            // Migrate the structural-materialisation
             // preference to the graph-native predicate. Lower the raw
             // TypeExpr to a Navigate-mode SemanticNodeId and consult
             // `component_meta_registry_prefers_structural_materialization_node`.
@@ -931,7 +930,7 @@ impl VerterHost {
                     query_engine,
                 ));
             }
-            // bridge via per-engine helper.
+            // Bridge via per-engine helper.
             project_type_surface_expr_via_host_threaded(
                 query_engine,
                 scope_canonical_id,
@@ -1299,15 +1298,15 @@ impl VerterHost {
                             symbol_name,
                             std::slice::from_ref(member),
                         );
-                        // Plan §6.6 / E — the alias-body fallback was
+                        // The alias-body fallback was
                         //; B1's materialiser
                         // branch handles
                         // route shapes natively. The remaining
                         // surface-expr fallback covers non-route
                         // shapes.
                         //
-                        // commit 6 — migrate to dispatch
-                        // (sub-plan §C.3 D-T recipe: RouteDemand::MemberPath
+                        // Migrate to dispatch
+                        // (sub- D-T recipe: RouteDemand::MemberPath
                         // → Class A with path). The Class A helper handles
                         // the IndexedAccess route_expr through its
                         // registry-route fast-path internally; the previous
@@ -1366,7 +1365,7 @@ impl VerterHost {
                                         query_engine,
                                     )
                                     .unwrap_or_else(|| scope_canonical_id.to_string());
-                                // commit 6 — migrate the generic-Ref
+                                // Migrate the generic-Ref
                                 // instantiation to dispatch.
                                 let expanded = instantiate_local_generic_ref_via_dispatch(
                                     query_engine.ctx,
@@ -1374,7 +1373,7 @@ impl VerterHost {
                                     &stabilized_surface,
                                 )
                                 .unwrap_or_else(|| stabilized_surface.clone());
-                                // commit 5 — migrate the route-loop
+                                // Migrate the route-loop
                                 // call to the Class A dispatch helper.
                                 let solved_opt = project_expr_class_a_via_dispatch_threaded(
                                     query_engine.ctx,
@@ -1392,7 +1391,7 @@ impl VerterHost {
                                 })
                             }
                             TypeExpr::Mapped { .. } => {
-                                // commit 5 — migrate the route-loop
+                                // Migrate the route-loop
                                 // call to the Class A dispatch helper.
                                 let solved_opt = project_expr_class_a_via_dispatch_threaded(
                                     query_engine.ctx,
@@ -1433,9 +1432,9 @@ impl VerterHost {
                     (!properties.is_empty())
                         .then(|| TypeExpr::Object(std::sync::Arc::new(ObjectExpr { properties })))
                         .or_else(|| {
-                            // commit 6 — migrate route-target
+                            // Migrate route-target
                             // (RouteDemand::Pick) via D-T recipe: dispatch
-                            // through `execute_pick` (sub-plan §C.3 D-T).
+                            // through `execute_pick` (sub- D-T).
                             // The pick_via_dispatch_pick_helper resolves the
                             // symbol to a base node via Class A lowering, then
                             // dispatches `Pick<base, key_set>` through the

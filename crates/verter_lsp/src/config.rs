@@ -60,7 +60,7 @@ pub fn parse_experimental_init_options(
     }
 }
 
-/// Hover-related init options. Plan §3 Commit 9.
+/// Hover-related init options.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct HoverOptions {
     /// When `true`, hover responses are enriched with a provenance
@@ -153,7 +153,7 @@ mod config_migration_tests {
 
     #[test]
     fn parse_hover_init_options_defaults_to_provenance_false() {
-        // Plan §3 Commit 9 — default is opt-in false.
+        // Provenance is opt-in; default is false.
         let opts = serde_json::json!({});
         assert_eq!(
             parse_hover_init_options(&opts),

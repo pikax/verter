@@ -1,4 +1,4 @@
-//! Relation engine for semantic-node assignability (plan §2 + §3 Change S).
+//! Relation engine for semantic-node assignability.
 //!
 //! This is the authoritative relation engine post-Phase-D. Supersedes the
 //! retired arena `verter_semantic::analysis::type_solver::relate`. Results
@@ -32,8 +32,8 @@ use crate::semantic_query::{
 use crate::semantic_query_memo::SemanticGraphStore;
 
 thread_local! {
-    /// Per-thread relation in-flight set (plan §2 Recursion guard contract).
-    /// Cyclic re-entry returns `RelationResult::Unknown` per plan §2
+    /// Per-thread relation in-flight set.
+    /// Cyclic re-entry returns `RelationResult::Unknown` per
     /// contract row without recursing.
     ///
     /// **Path C C8** — the previous `RELATION_DEPTH` stack-safety rail is
@@ -72,7 +72,7 @@ enum IdentityCarrierUnwrap {
     Unresolvable,
 }
 
-/// Canonical Record shapes the Cluster C arm handles (plan §3).
+/// Canonical Record shapes the Cluster C arm handles.
 ///
 /// `Record<K, V>` lowers to two different object surfaces depending on
 /// whether K is a literal (union of literals) or a generic primitive.
@@ -94,7 +94,7 @@ enum RecordTargetShape {
 
 impl<'a> ProjectSemanticDispatch<'a> {
     /// Relate `source` against `target`. Returns the tri-state
-    /// [`RelationResult`] under plan §2 + §3 Change S rules.
+    /// [`RelationResult`] under + §3 Change S rules.
     ///
     /// All three outcomes memoise with dep-signature fencing via
     /// [`SemanticGraphStore::insert_relation`]. Warm hits short-circuit
@@ -126,7 +126,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 
     /// Dispatch-aware relation entry. Runs the Object-vs-Record arm
-    /// (plan §3 Cluster C) BEFORE the core `decide_relation` authority.
+    /// BEFORE the core `decide_relation` authority.
     /// When the arm does not fire (source is not a workspace-scoped
     /// `DeclAnchor`, target is not a canonical Record shape, or the
     /// source unwrap produces a non-Object body), control falls through
@@ -189,7 +189,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 },
                 Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
             ),
-            // Plan §4.21 / R10-2 — unwrap DeclRef/InstantiationRef carriers
+            // Unwrap DeclRef/InstantiationRef carriers
             // (which is_deferred treats as deferred so build_conditional
             // doesn't prematurely close branches). The relation engine
             // here is allowed to materialise the concrete body to make a
@@ -230,7 +230,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// Cluster C (plan §3): source-side DeclPlaceholder with Object body
+    /// Cluster C: source-side DeclPlaceholder with Object body
     /// against target-side Object that looks like a `Record<K, V>`
     /// shape. Returns `Some(result)` when the arm applies; `None` to
     /// fall through to the core `decide_relation` authority.
@@ -318,7 +318,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// Returns `Some(RecordTargetShape)` when `target` normalises via
     /// `evaluate_deferred_semantic_node` to a Record-shaped
     /// `Object(SurfaceView)`. Two canonical forms are recognised
-    /// (plan §3 Cluster C): literal-key Record (members-only) and
+    ///: literal-key Record (members-only) and
     /// generic-key Record (single index signature, no members).
     fn record_target_shape(&self, target: SemanticNodeId) -> Option<RecordTargetShape> {
         let graph = self.graph();
@@ -344,7 +344,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// Per plan §3 Cluster C: relate an Object surface against a
+    /// Per Cluster C: relate an Object surface against a
     /// Record<K, V> target by checking that every required key (from
     /// the key type's literal enumeration) is present on the source
     /// and each matching member value is assignable to V.
@@ -460,7 +460,7 @@ enum RelateWork {
 /// `Assignable` results surface the bindings to the caller so
 /// `build_conditional`'s true-branch substitution can pick them up.
 ///
-/// **Termination budget (plan §14.3 / plan §2 Stage 5 option (a)).** The
+/// **Termination budget).** The
 /// driver caps total work at `10 × graph.node_count()` with a minimum
 /// floor (4096 entries) so tiny graphs still handle pathological
 /// distributions. Exceeding the budget yields [`RelationResult::Unknown`]
@@ -642,7 +642,7 @@ fn expand_pair(
         return;
     }
 
-    // ── Infer: defensive Unknown (plan §3 Cluster A) ───────────────────
+    // ── Infer: defensive Unknown ───────────────────
     if matches!(&*source_data, SemanticNodeData::Infer { .. })
         || matches!(&*target_data, SemanticNodeData::Infer { .. })
     {
@@ -970,7 +970,7 @@ fn is_deferred(data: &SemanticNodeData) -> bool {
             | SemanticNodeData::Conditional { .. }
             | SemanticNodeData::TypeOf { .. }
             | SemanticNodeData::TemplateLiteral { .. }
-            // Plan §4.21 / R10-2 — DeclRef/InstantiationRef carriers are
+            // DeclRef/InstantiationRef carriers are
             // unresolved references whose concrete content depends on
             // instantiation. Treat as deferred at the recursive-pair
             // level so callers (especially build_conditional) preserve

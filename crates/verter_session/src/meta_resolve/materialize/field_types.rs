@@ -1,6 +1,6 @@
 //! Materialization core: TypeExpr stabilizer + field-type rescue.
 //!
-//! domain 7 (field-types portion). Owns:
+//! Domain 7 (field-types portion). Owns:
 //! - the eager whole-expression materializer
 //!   (`materialize_component_meta_type_expr_until_stable` + `_full`),
 //! - the `materialize_component_meta_field_types` driver,
@@ -164,7 +164,7 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
     };
     let name_resolution = rustc_hash::FxHashMap::default();
     let mut substitutions: Vec<(Arc<str>, crate::semantic_query::SemanticNodeId)> = Vec::new();
-    // r15/F11 — capture the scope-shadowing context
+    // R15/F11 — capture the scope-shadowing context
     // once for the materialize → lower pipeline so the dispatch
     // fast-path observes the same shadow set the route extraction
     // path uses.
@@ -518,7 +518,7 @@ pub(crate) fn raw_indexed_access_root_is_workspace_owned(
         .workspace_is_workspace_owned(declaration_scope)
 }
 
-// Plan §6.6 / E — the materialiser's registry-route branch handles
+// The materialiser's registry-route branch handles
 // route shapes (`Pick<T, K>`, `Omit<T, K>`, `T['k']`) through
 // dispatch's canonical projection, so the alias-body walk-through is
 // not needed. The removed symbols are listed in the `RETIRED_SYMBOLS`
@@ -694,7 +694,7 @@ pub(crate) fn field_should_preserve_shallow_symbolic_raw_type(
     }
 }
 
-/// Plan §6.15 / N — migration helper. Lowers `expr` to a Navigate-mode
+/// Migration helper. Lowers `expr` to a Navigate-mode
 /// `SemanticNodeId` and dispatches to J1's graph-native
 /// [`type_node_needs_member_route_materialization`] predicate. The
 /// cycle-BFS dep-signature facts collected during the predicate's walk
@@ -730,7 +730,7 @@ pub(crate) fn lowered_needs_member_route_materialization(
     result
 }
 
-/// Plan §6.15 / N — migration helper. Lowers `materialized` and `raw`
+/// Migration helper. Lowers `materialized` and `raw`
 /// TypeExpr inputs to Navigate-mode `SemanticNodeId`s, dispatches to
 /// J4's graph-native [`preserve_package_backed_symbolic_refs_node`],
 /// and raises the result back to TypeExpr.
@@ -844,7 +844,7 @@ pub(crate) fn materialize_component_meta_field_types(
     evaluated_types: &mut verter_semantic::analysis::type_expand::ExpandedComponentTypes,
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
 ) {
-    /// Plan §4.10 / K1 — `rescue_field` mutates field type via
+    /// `rescue_field` mutates field type via
     /// `MacroFieldGraphState::set_current_type` rather than direct
     /// `field.r#type = X` assignment. The `field` reference is read-only
     /// here (used only for raw_type access via `parsed_field_raw_type`);
@@ -885,7 +885,7 @@ pub(crate) fn materialize_component_meta_field_types(
         }
     }
 
-    /// Plan §6.14 / K2 — call the J1 `_node` predicate via the
+    /// Call the J1 `_node` predicate via the
     /// field-state's lazy-lowered current_node. Returns `false` when
     /// lowering fails (matches the legacy TypeExpr predicate's
     /// "conservative not-needed" fallback when no canonical node id
@@ -901,7 +901,7 @@ pub(crate) fn materialize_component_meta_field_types(
         type_node_needs_member_route_materialization(ctx, node, &mut local_fence, 0)
     }
 
-    /// Plan §6.14 / K2 — call the J1 `_node` predicate via the
+    /// Call the J1 `_node` predicate via the
     /// field-state's lazy-lowered raw_node. Returns `false` when
     /// lowering fails.
     fn raw_needs_member_route_materialization(
@@ -1715,7 +1715,7 @@ pub(crate) fn materialize_component_meta_field_types(
             }
         }
 
-        // Plan §4.10 / K1 — wrap `field.r#type` in a `MacroFieldGraphState`
+        // Wrap `field.r#type` in a `MacroFieldGraphState`
         // for the duration of this iteration. Direct `field.r#type = X`
         // mutations are routed through `field_state.set_current_type(X)`;
         // graph-native rewrites (K2) will route through
@@ -1739,7 +1739,7 @@ pub(crate) fn materialize_component_meta_field_types(
             }
         }
         rescue_field(scope_canonical_id, field, &mut field_state, query_engine);
-        // Plan §6.14 / K2 — migrate predicate to graph-native J1 _node
+        // Migrate predicate to graph-native J1 _node
         // version via field_state.raw_node().
         let raw_needs_member_route = parsed_field_raw_type(field).as_ref().is_some_and(|raw| {
             raw_needs_member_route_materialization(ctx, &mut field_state, raw)
@@ -1754,7 +1754,7 @@ pub(crate) fn materialize_component_meta_field_types(
                 )
             });
         if crate::host_manage::component_meta_debug_enabled() {
-            // Plan §6.14 / K2 — debug log uses the J1 _node predicate
+            // Debug log uses the J1 _node predicate
             // through field_state.current_node().
             let current_needs = current_needs_member_route_materialization(ctx, &mut field_state);
             crate::host_manage::component_meta_debug(format!(
@@ -1767,7 +1767,7 @@ pub(crate) fn materialize_component_meta_field_types(
                 current_needs,
             ));
         }
-        // Plan §6.14 / K2 — migrate predicate to graph-native J1 _node
+        // Migrate predicate to graph-native J1 _node
         // version via field_state.current_node().
         if !(raw_needs_member_route
             || raw_is_unpreserved_top_level_ref
@@ -1840,7 +1840,7 @@ pub(crate) fn materialize_component_meta_field_types(
                 type_expr_has_package_backed_object_like_root(raw, scope_canonical_id, query_engine)
             });
         if raw_needs_member_route && !raw_route_root_is_package_backed {
-            // Plan §6.6 / E — the alias-body rescue chain was retired
+            // The alias-body rescue chain was retired
             // in commit E. B1's materialiser registry-route branch
             // already handles `Pick<Foo, ...>`, `Omit<Foo, ...>`, and
             // `Foo['a']['b']…` shapes through dispatch's canonical
@@ -1949,7 +1949,7 @@ pub(crate) fn materialize_component_meta_field_types(
                         // is the single production callsite shape.
                         // The semantic target is
                         // `dispatch.execute(Instantiate { args: [],
-                        // body_mode: Expanded })` per sub-plan §4.1.
+                        // body_mode: Expanded })` per sub-
                         project_type_surface_expr_via_host_threaded(
                             query_engine,
                             target_scope.as_str(),
@@ -2126,7 +2126,7 @@ pub(crate) fn materialize_component_meta_field_types(
                 }
             }
         }
-        // Plan §4.10 / K1 — final publish + write-back to the field.
+        // Final publish + write-back to the field.
         field.r#type = field_state.publish();
         if crate::host_manage::component_meta_debug_enabled() {
             crate::host_manage::component_meta_debug(format!(
@@ -2161,7 +2161,7 @@ pub(crate) fn materialize_component_meta_field_types(
         }
     }
     for field in &mut evaluated_types.emits {
-        // Plan §4.10 / K1 — wrap field.r#type in MacroFieldGraphState.
+        // Wrap field.r#type in MacroFieldGraphState.
         let ctx = query_engine.ctx;
         let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         let mut field_state =
@@ -2170,7 +2170,7 @@ pub(crate) fn materialize_component_meta_field_types(
         field.r#type = field_state.publish();
     }
     for field in &mut evaluated_types.slot_bindings {
-        // Plan §4.10 / K1 — wrap field.r#type in MacroFieldGraphState.
+        // Wrap field.r#type in MacroFieldGraphState.
         let ctx = query_engine.ctx;
         let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         let mut field_state =
@@ -2219,7 +2219,7 @@ pub(crate) fn materialize_component_meta_field_types(
         field.r#type = field_state.publish();
     }
     for field in &mut evaluated_types.bindings {
-        // Plan §4.10 / K1 — wrap field.r#type in MacroFieldGraphState.
+        // Wrap field.r#type in MacroFieldGraphState.
         let ctx = query_engine.ctx;
         let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         let mut field_state =
@@ -2229,7 +2229,7 @@ pub(crate) fn materialize_component_meta_field_types(
     }
 }
 /// Test-only call counter for `materialize_component_meta_type_expr_until_stable`
-/// (plan §3 Step 6.2 / D22). Incremented at function entry — memo hits and
+/// Incremented at function entry — memo hits and
 /// cold builds both count, since the counter discriminates the *entry*
 /// invariant: did the caller route through whole-expression materialization
 /// at all? The Step 6.2 FAIL-FIRST test asserts that route/project

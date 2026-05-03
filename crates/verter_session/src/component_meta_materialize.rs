@@ -1,5 +1,5 @@
 #![deny(missing_docs)]
-//! Session-layer structural materialiser. Plan §1 / §10 / §16.
+//! Session-layer structural materialiser.
 //!
 //! Replaces the legacy walker family with a dispatch-driven
 //! materialiser that uses graph-native policy predicates,
@@ -8,16 +8,15 @@
 //! `DepSignature` interner for `Arc::ptr_eq` cleanup of the
 //! reverse-index.
 //!
-//! **Foundational types** (plan §1.2 / §1.5 / §1.7):
+//! **Foundational types**:
 //! - [`MaterializeOutcome`] — materialiser-local result enum
 //!   (Value / Miss / Recursive / Tainted / Error).
 //! - [`MaterializationScope`] — TopLevel vs Nested axis.
 //! - [`MaterializeStructureCacheKey`] — final-result cache key.
 //! - [`convert_dispatch_result`] — boundary that promotes
-//!   `QueryResult::Recursive` to `MaterializeOutcome::Tainted`
-//!   per plan §1.2.
+//!   `QueryResult::Recursive` to `MaterializeOutcome::Tainted`.
 //!
-//! **Materialiser entry** (plan §10):
+//! **Materialiser entry**:
 //! - [`materialize_component_meta_structure`] — five-phase entry
 //!   pipeline (warm peek → same-key cycle → depth fuse → package /
 //!   function policy gates → cooperative-admission cold build with
@@ -32,7 +31,7 @@
 //!   body via dispatch `Instantiate` (NOT `ResolveDecl`) and
 //!   recursively materialises the resolved body.
 //!
-//! **Policy predicates** (plan §1.6 / §1.12):
+//! **Policy predicates**:
 //! - [`is_package_backed_ref`] — graph-native check that the input
 //!   carrier resolves under `/node_modules/`. Walker behavior:
 //!   keep symbolic at every axis.
@@ -40,7 +39,7 @@
 //!   keep-function-bodies-symbolic invariant for Object-property
 //!   positions.
 //!
-//! cut over the legacy walker shim to this entry, deleted
+//! Cut over the legacy walker shim to this entry, deleted
 //! the walker's inner body family (cycle-key, scope-iteration, and
 //! visited-set helpers), and deleted the dispatch-iteration module
 //! that hosted the walker's visited-set helper. The static-grep gate
@@ -54,7 +53,7 @@ use crate::semantic_query::{
     CacheRead, DepSignature, DepVersion, ProjectionMode, QueryError, QueryResult, SemanticNodeId,
 };
 
-/// Materialiser-local outcome enum. Plan §1.2.
+/// Materialiser-local outcome enum.
 ///
 /// Distinct from `QueryResult` because `Tainted` is materialiser-
 /// scoped: it captures depth-fuse trips, scope-unloaded outcomes,
@@ -94,7 +93,7 @@ impl MaterializeOutcome {
     }
 
     /// `true` for outcomes that may be published to the
-    /// `MaterializeStructureDb` warm cache. Plan §1.2 invariant:
+    /// `MaterializeStructureDb` warm cache. invariant:
     /// only `Value` and `Miss` are cacheable. `Recursive` and
     /// `Tainted` are per-call-context; `Error` is non-deterministic.
     #[must_use]
@@ -111,7 +110,7 @@ impl MaterializeOutcome {
     }
 }
 
-/// Plan §1.7 / §1.8 — materialisation scope axis. Determines how
+/// Materialisation scope axis. Determines how
 /// the policy table dispatches each shape: TopLevel arms vs
 /// Nested arms (e.g., function-typed property at Nested skips,
 /// while Function handler at TopLevel always materialises).
@@ -136,7 +135,7 @@ impl From<MaterializationScope> for crate::component_meta_audit::Materialization
     }
 }
 
-/// Plan §1.5 — final-result cache key for the materialiser. Keyed
+/// Final-result cache key for the materialiser. Keyed
 /// on `(scope_canonical_id, base, scope_axis, mode)` so the same
 /// node id materialised at TopLevel vs Nested, or at Expanded vs
 /// Navigate, lands in distinct slots.
@@ -155,7 +154,7 @@ pub struct MaterializeStructureCacheKey {
     pub mode: ProjectionMode,
 }
 
-/// Plan §1.2 — boundary that converts a dispatch
+/// Boundary that converts a dispatch
 /// `CacheRead<QueryResult<SemanticNodeId>>` to a
 /// `MaterializeOutcome`. The conversion is the load-bearing place
 /// where `QueryResult::Recursive` promotes to
@@ -185,7 +184,7 @@ pub fn convert_dispatch_result(
 }
 
 // ──────────────────────────────────────────────────────────────────
-// Materialiser entry — plan §10
+// Materialiser entry
 // ──────────────────────────────────────────────────────────────────
 
 use std::cell::{Cell, RefCell};
@@ -202,19 +201,19 @@ use crate::resolver_core::ResolverContext;
 use crate::semantic_query::{PathSegment, SemanticQueryKey};
 
 thread_local! {
-    /// Plan §1.4 — per-thread stack of in-flight materialiser keys.
+    /// Per-thread stack of in-flight materialiser keys.
     /// Used for same-key recursion detection. Push on entry, pop on
     /// exit (RAII via `MaterializeInFlightGuard`).
     static MATERIALIZE_IN_FLIGHT: RefCell<Vec<MaterializeStructureCacheKey>> =
         const { RefCell::new(Vec::new()) };
 
-    /// Plan §1.4 — per-thread depth counter. The materialiser's
+    /// Per-thread depth counter. The materialiser's
     /// defensive depth fuse trips at `MAX_DEPTH` to bound stack
     /// growth on pathological recursive shapes.
     static MATERIALIZE_DEPTH: Cell<usize> = const { Cell::new(0) };
 }
 
-/// Plan §1.4 — defensive depth fuse cap. A trip is a bug, not a
+/// Defensive depth fuse cap. A trip is a bug, not a
 /// soft-fail; the audit emits `MaterializeStructureDepthFuseTripped`
 /// with the input key + depth.
 pub const MAX_DEPTH: usize = 4096;
@@ -225,7 +224,7 @@ pub const MAX_DEPTH: usize = 4096;
 /// `cooperative_get_or_insert_with_post_publish` returns `None`.
 type NonCacheableSlot = RefCell<Option<(MaterializeOutcome, Vec<(Arc<str>, DepVersion)>)>>;
 
-/// Plan §1.4 — RAII guard for the per-thread `MATERIALIZE_IN_FLIGHT`
+/// RAII guard for the per-thread `MATERIALIZE_IN_FLIGHT`
 /// stack and the `MATERIALIZE_DEPTH` counter. Push on construction,
 /// pop on `Drop`. Panic-safe.
 pub struct MaterializeInFlightGuard {
@@ -267,7 +266,7 @@ impl Drop for MaterializeInFlightGuard {
     }
 }
 
-/// Plan §10 — materialiser entry. Produces a `CacheRead` carrying
+/// Materialiser entry. Produces a `CacheRead` carrying
 /// the materialisation outcome plus the dep_signature observed
 /// during the cold build.
 ///
@@ -293,7 +292,7 @@ impl Drop for MaterializeInFlightGuard {
 /// and `MaterializeStructureExit` events with the resolved
 /// `CacheOutcomeKind` (`Hit` for warm, `ColdBuild` for cold,
 /// `Tainted` for tainted, `Miss` for opaque).
-/// Plan §4.2 / B1 — single-exit helper for the materialiser compute
+/// Single-exit helper for the materialiser compute
 /// closure. Seeds `local_fence` with the root scope's whole_hash if
 /// available, then either:
 /// - For non-cacheable outcomes (Recursive / Tainted / Error), stashes
@@ -331,21 +330,21 @@ fn finish_cacheable(
     })
 }
 
-/// Plan §10 / §1.5 / §1.7 — five-phase materialiser entry. Maintains
+/// Five-phase materialiser entry. Maintains
 /// the `MaterializeStructureDb` warm cache via cooperative-admission
 /// with `post_publish` reverse-index registration.
 ///
 /// **Phases:**
-/// 1. Warm peek with proactive stale-entry removal (Plan §1.5).
-/// 2. Same-key thread-local re-entry detection (Plan §10.2).
-/// 3. Pre-admission depth fuse (Plan §10.3 / §1.7).
-/// 4. Package-ref / function-shape-at-Nested policy gates (Plan §1.6).
+/// 1. Warm peek with proactive stale-entry removal.
+/// 2. Same-key thread-local re-entry detection.
+/// 3. Pre-admission depth fuse.
+/// 4. Package-ref / function-shape-at-Nested policy gates.
 /// 5. Cooperative-admission cold build with `post_publish`. Inside
-///    the compute closure: registry-route branch (Plan §4.4 / B1),
-///    recursive-helper cycle guard (Plan §4.13 / B1), then the
+///    the compute closure: registry-route branch,
+///    recursive-helper cycle guard, then the
 ///    canonical DeclRef / InstantiationRef / Object handlers.
 ///
-/// **Cache contract** (Plan §1.2):
+/// **Cache contract**:
 /// - Only `Value` and `Miss` outcomes publish to the warm cache.
 /// - `Recursive` and `Tainted` are per-call-context and never cache.
 /// - `Error` is non-deterministic and never caches.
@@ -353,7 +352,7 @@ fn finish_cacheable(
 /// **Audit signal:** every entry/exit emits `MaterializeStructureEnter`
 /// and `MaterializeStructureExit` events with the resolved
 /// `CacheOutcomeKind` (`Hit` for warm, `ColdBuild` for cold,
-/// `Tainted` for tainted, `Miss` for opaque). Plan §4.14 / B1 — also
+/// `Tainted` for tainted, `Miss` for opaque). — also
 /// emits `MaterializeStructurePolicySkip` events with one of:
 /// `PackageRefTopLevel`, `FunctionPropertyAtNested`,
 /// `RegistryRouteCycleGuard`, or `RecursiveHelperCycleGuard`.
@@ -365,12 +364,12 @@ pub(crate) fn materialize_component_meta_structure(
 
     let db = ctx.project_type_store().materialize_structure_db();
 
-    // warm-hit peek with proactive stale removal.
+    // Warm-hit peek with proactive stale removal.
     if let Some(cached) = db.peek(&key, ctx) {
         return cached;
     }
 
-    // same-key thread-local re-entry detection.
+    // Same-key thread-local re-entry detection.
     if MaterializeInFlightGuard::contains_key(&key) {
         let opaque = ctx.project_type_store().semantic_graph().intern_node(
             crate::semantic_query::SemanticNodeData::Opaque(QueryError::Miss),
@@ -381,7 +380,7 @@ pub(crate) fn materialize_component_meta_structure(
         };
     }
 
-    // pre-admission depth fuse (one-call-deep check).
+    // Pre-admission depth fuse (one-call-deep check).
     if MaterializeInFlightGuard::current_depth() >= MAX_DEPTH {
         return crate::semantic_query::CacheRead {
             value: MaterializeOutcome::Tainted(key.base),
@@ -391,14 +390,14 @@ pub(crate) fn materialize_component_meta_structure(
 
     let _guard = MaterializeInFlightGuard::push(key.clone());
 
-    // Plan §1.6 — package-ref policy gate. A DeclRef or
+    // Package-ref policy gate. A DeclRef or
     // InstantiationRef whose declaration resolves under
     // `/node_modules/` materialises to itself unchanged (the walker
     // kept these symbolic at every axis; expanding them would
     // publish package internals into the consumer's component-meta
     // surface).
     if is_package_backed_ref(ctx, key.base) {
-        // Plan §4.14 / B1 — observability for kept-symbolic decision.
+        // Observability for kept-symbolic decision.
         crate::host_manage::emit_policy_skip(
             key.base,
             key.scope_axis,
@@ -410,7 +409,7 @@ pub(crate) fn materialize_component_meta_structure(
         };
     }
 
-    // Plan §1.6 — function-shape skip at Nested axis. The walker
+    // Function-shape skip at Nested axis. The walker
     // kept function-typed Object members symbolic (their value
     // node was not expanded). Without this gate, dispatch's
     // ProjectPath { mode: Expanded } would unfold function bodies
@@ -435,7 +434,7 @@ pub(crate) fn materialize_component_meta_structure(
         }
     }
 
-    // cooperative-admission cold build with post_publish.
+    // Cooperative-admission cold build with post_publish.
     // The compute closure shares its computed outcome via a side
     // channel so the post-cooperative fallback (when the entry is
     // non-cacheable and `cooperative_get_or_insert_with_post_publish`
@@ -449,7 +448,7 @@ pub(crate) fn materialize_component_meta_structure(
         let graph = ctx.project_type_store().semantic_graph();
         let mut local_fence: Vec<(Arc<str>, DepVersion)> = Vec::new();
 
-        // Plan §4.4 / B1 Step 1 — registry-route branch.
+        // Registry-route branch.
         //
         // `extract_route_root_identity_node` returns `Some` ONLY for
         // builtin Pick/Omit and IndexedAccess shapes. The wrapping
@@ -500,7 +499,7 @@ pub(crate) fn materialize_component_meta_structure(
             }
 
             // Guards passed — let dispatch project the original
-            // shape in the caller's mode (Plan §4.3: "Dispatch's
+            // shape in the caller's mode (: "Dispatch's
             // build_builtin_utility projects Pick/Omit canonically.
             // ProjectPath projects IndexedAccess. Materialiser branch
             // only adds cycle + package-root guards on the route's
@@ -584,7 +583,7 @@ pub(crate) fn materialize_component_meta_structure(
                     );
                 }
                 RouteDemand::MemberPath(_) => {
-                    // Plan §4.3 — IndexedAccess projection is dispatch's
+                    // IndexedAccess projection is dispatch's
                     // ProjectPath territory; the materialiser's role
                     // is the cycle/package guards (which already
                     // ran above). Fall through to the existing
@@ -599,7 +598,7 @@ pub(crate) fn materialize_component_meta_structure(
             }
         }
 
-        // Plan §4.13 / B1 Step 4 — recursive-helper cycle guard.
+        // Recursive-helper cycle guard.
         //
         // Cleanly separated from the route guard (R8-3): fires for
         // plain DeclRef AND userland (non-builtin) InstantiationRef.
@@ -638,7 +637,7 @@ pub(crate) fn materialize_component_meta_structure(
             }
         }
 
-        // Plan §1.6 / §10.7 — DeclRef / InstantiationRef handler.
+        // DeclRef / InstantiationRef handler.
         // Resolve the carrier's body via `Instantiate` (NOT
         // `ResolveDecl` which returns `Opaque(DeclPlaceholder)`) and
         // recursively materialise the resolved body. The package-ref
@@ -704,7 +703,7 @@ pub(crate) fn materialize_component_meta_structure(
             None
         };
 
-        // Plan §1.8 — Object-shape handler. Walk the surface's
+        // Object-shape handler. Walk the surface's
         // members + call/construct/index signatures and recursively
         // materialise each at Nested axis. The recursive entry
         // applies the package-ref + function-skip policies, so
@@ -754,7 +753,7 @@ pub(crate) fn materialize_component_meta_structure(
         };
 
         // Seed local_fence with the root scope's whole_hash if
-        // available — plan §1.9 dep-signature accumulation contract.
+        // available.9 dep-signature accumulation contract.
         if !key_for_compute.scope_canonical_id.as_ref().is_empty() {
             if let Some(indexed) = ctx
                 .project_type_store()
@@ -800,9 +799,9 @@ pub(crate) fn materialize_component_meta_structure(
             value: entry.outcome.clone(),
             dep_signature: entry.dep_signature.clone(),
         },
-        // Plan §1.5 race-closer — post-compute revalidation.
+        // Race-closer — post-compute revalidation.
         |entry: &MaterializeStructureEntry| ctx.validate_dep_signature(&entry.dep_signature),
-        // Plan §10.1 post_publish — register reverse-index AFTER
+        // post_publish — register reverse-index AFTER
         // entries.insert AND AFTER successful revalidation.
         move |entry_arc: &Arc<MaterializeStructureEntry>, k: &MaterializeStructureCacheKey| {
             db.bump_live_counter();
@@ -844,7 +843,7 @@ fn empty_signature() -> DepSignature {
     Arc::from(Vec::new().into_boxed_slice())
 }
 
-/// Plan §1.6 / §1.12 / §6.4 — graph-native package-ref policy predicate.
+/// Graph-native package-ref policy predicate.
 /// Returns `true` when `node` is a `DeclRef` or `InstantiationRef`
 /// whose declaration's canonical id resolves under `/node_modules/`.
 /// The walker's pre-cutover policy kept these refs symbolic at every
@@ -869,7 +868,7 @@ pub(crate) fn is_package_backed_ref(ctx: &dyn ResolverContext, node: SemanticNod
     crate::meta_resolve::canonical_resolves_to_package(canonical)
 }
 
-/// Plan §1.8 — Object-shape materialisation. Walk the surface's
+/// Object-shape materialisation. Walk the surface's
 /// members + call/construct/index signatures and recursively
 /// materialise each at Nested axis. Re-entry through
 /// `materialize_component_meta_structure` applies the package-ref +
@@ -984,7 +983,7 @@ fn materialize_child_at_nested(
 }
 
 /// Helper: drain a `local_fence` accumulator into a `DepSignature`
-/// `Arc`. Plan §1.5 — used by the materialiser's publish path to
+/// `Arc`. — used by the materialiser's publish path to
 /// produce the final cache entry's dep_signature.
 #[must_use]
 pub fn dep_signature_from_fence(fence: Vec<(Arc<str>, DepVersion)>) -> DepSignature {
@@ -1072,7 +1071,7 @@ mod tests {
 
     #[test]
     fn convert_dispatch_result_query_recursive_promotes_to_materialize_outcome_tainted() {
-        // Plan §1.2 / round-7 P0 #1 — the load-bearing assertion.
+        // P0 #1 — the load-bearing assertion.
         // Without this promotion, the dispatch's per-call-context
         // Recursive sentinel would be cached as a finalised Miss.
         let mut fence = Vec::new();
@@ -1169,7 +1168,7 @@ mod tests {
     }
 
     // =====================================================================
-    // Plan §6.2 / A0 — 7 RED-first tests for the legacy-parity cycle BFS
+    // 7 RED-first tests for the legacy-parity cycle BFS
     // (`ref_root_reaches_transitive_cycle_node`). All tests drive through
     // a real `MetaProject` so the dispatch path matches production usage.
     //
@@ -1369,7 +1368,7 @@ export type X = number
         );
     }
 
-    /// Plan §4.13 / §4.14 / B1 — recursive-helper guard fires for
+    /// Recursive-helper guard fires for
     /// plain DeclRef shapes whose body cycles via a complex helper.
     /// The materialiser must keep the input symbolic and (when an
     /// audit accumulator is installed) emit a
@@ -1409,7 +1408,7 @@ export type GetItemKeys<T> = (keyof T & string) | DotPathKeys<T>
         );
     }
 
-    /// Plan §4.4 / B1 — registry-route extraction recurses into
+    /// Registry-route extraction recurses into
     /// `args[0]` for builtin Pick/Omit so the cycle guard checks the
     /// ACTUAL root identity (not the wrapping `Pick`/`Omit`). This
     /// test asserts: a `Pick<RecursiveHelper, 'a'>` route extracts
@@ -1497,7 +1496,7 @@ export type Recur = { kids: Recur[] | null }
     }
 
     // =================================================================
-    // F-prep tests (rev-10, plan §6.6.5).
+    // F-prep tests (rev-10,).
     //
     // Two tests exercise the new `ProjectionMode::Skeleton` variant that
     // F-prep introduces:
@@ -1518,7 +1517,7 @@ export type Recur = { kids: Recur[] | null }
     // alongside the Skeleton primitive).
     // =================================================================
 
-    /// F-prep RED-first test (plan §6.6.5).
+    /// F-prep RED-first test.
     ///
     /// **Pre-rev-10 behavior** (Navigate + args=[]):
     /// `build_instantiate`'s param-binding loop hits `continue` for unbound
@@ -1587,7 +1586,7 @@ export type DotPathKeys<T> = T extends object ? GetItemKeys<T> : never
         );
     }
 
-    /// F-prep regression test (plan §6.6.5).
+    /// F-prep regression test.
     ///
     /// Exercising `Identity<T> = T`. Navigate + args=[] still leaves T
     /// unbound (existing semantics), Skeleton + args=[] preserves T as
@@ -1622,7 +1621,7 @@ export type DotPathKeys<T> = T extends object ? GetItemKeys<T> : never
         let _ = expanded_read; // confirms execution
     }
 
-    /// F-prep canonical-fixture A0 test #3b (plan §6.2 line ~1304).
+    /// F-prep canonical-fixture A0 test #3b.
     ///
     /// **Provenance:** the plan's docstring says this helper is "added in
     /// commit A0", but A0 already landed at `11512752` without it
@@ -1745,7 +1744,7 @@ export type GetItemKeys<I, T extends NestedItem<I> = NestedItem<I>> =
     }
 
     // =================================================================
-    // Plan §10.8 / §6.10 sub-task 1 — 5 tests covering:
+    // 5 tests covering:
     //   1. DeclRef materialisation dispatches Instantiate (not ResolveDecl)
     //   2. Cycle gate visited-set short-circuits
     //   3. Cycle BFS dispatches through execute_read for each decl
@@ -1759,7 +1758,7 @@ export type GetItemKeys<I, T extends NestedItem<I> = NestedItem<I>> =
     // path).
     // =================================================================
 
-    /// Plan §10.8 #1 — when the materialiser handles a `DeclRef`, the
+    /// #1 — when the materialiser handles a `DeclRef`, the
     /// dispatch traffic must include Instantiate (NOT ResolveDecl).
     /// Materialiser policy: resolve carriers via Instantiate so the
     /// surrounding `body_mode` selection is honored.
@@ -1805,7 +1804,7 @@ export type GetItemKeys<I, T extends NestedItem<I> = NestedItem<I>> =
         );
     }
 
-    /// Plan §10.8 #2 — cycle BFS visited-set short-circuits.
+    /// #2 — cycle BFS visited-set short-circuits.
     /// Visiting the same DeclIdentity twice would inflate visited
     /// count beyond the BFS's 2-decl bound for a 2-cycle.
     #[test]
@@ -1834,7 +1833,7 @@ export type B = A
         );
     }
 
-    /// Plan §10.8 #3 — cycle BFS dispatches Instantiate per visited decl.
+    /// #3 — cycle BFS dispatches Instantiate per visited decl.
     /// For the 3-cycle A -> B -> C -> A, the BFS should issue at least
     /// 3 Instantiate dispatches (one per visited identity).
     #[test]
@@ -1872,7 +1871,7 @@ export type C<T> = A<T>
         );
     }
 
-    /// Plan §10.8 #4 — orphan entry (stale dep_signature) is caught
+    /// #4 — orphan entry (stale dep_signature) is caught
     /// on the next `peek` and removed proactively. This exercises the
     /// `dep_signature_valid_for_host` path in MaterializeStructureDb::peek.
     ///
@@ -1930,7 +1929,7 @@ export type C<T> = A<T>
         }
     }
 
-    /// Plan §10.8 #5 — orphan entry inserted directly into the cache
+    /// #5 — orphan entry inserted directly into the cache
     /// is reaped on next peek (matches the test above's invariant from
     /// the other angle).
     #[test]
@@ -1985,7 +1984,7 @@ export type C<T> = A<T>
     }
 
     // =====================================================================
-    // Plan §6.13 / Commit R — RefCycleResultDb cache integration tests.
+    // R — RefCycleResultDb cache integration tests.
     //
     // 7 tests covering: warm-fast-path skips dispatch; per-canonical
     // invalidation decrements live_counter; dep_signature captures
@@ -1998,7 +1997,7 @@ export type C<T> = A<T>
     use crate::meta_resolve::{bfs_compute_counter_for_test, reset_bfs_compute_counter_for_test};
     use crate::project_semantic_dispatch::raise::{enable_dispatch_trace_for_test, DISPATCH_TRACE};
 
-    /// Plan §6.13 test 1 — generation-local fast-path skips Instantiate
+    /// Test 1 — generation-local fast-path skips Instantiate
     /// dispatch on a warm cache hit.
     ///
     /// Cold call publishes the cache entry with
@@ -2059,7 +2058,7 @@ export type C<T> = A<T>
         );
     }
 
-    /// Plan §6.13 test 2 — `invalidate_for_canonical` drains the
+    /// Test 2 — `invalidate_for_canonical` drains the
     /// reverse-index AND decrements `live_counter`.
     ///
     /// Discriminating: pre-R there is no cache; live_counter contribution
@@ -2094,7 +2093,7 @@ export type C<T> = A<T>
         );
     }
 
-    /// Plan §6.13 test 3 — `dep_signature` captures every canonical the
+    /// Test 3 — `dep_signature` captures every canonical the
     /// BFS visits, so per-canonical invalidation reaches every cached
     /// entry that depends on the changed file.
     ///
@@ -2134,7 +2133,7 @@ export type C<T> = A<T>
         );
     }
 
-    /// Plan §6.13 test 4 — `invalidate_all` saturating-subtracts the
+    /// Test 4 — `invalidate_all` saturating-subtracts the
     /// DB's contribution to the shared `component_meta_cache_live`
     /// counter, preserving sibling DBs' contributions.
     ///
@@ -2197,7 +2196,7 @@ export type C<T> = A<T>
         );
     }
 
-    /// Plan §6.13 test 5 — project-generation bump invalidates the
+    /// Test 5 — project-generation bump invalidates the
     /// cycle-BFS cache.
     ///
     /// `bump_project_generation_and_evict` is invoked atomically when
@@ -2235,7 +2234,7 @@ export type C<T> = A<T>
         );
     }
 
-    /// Plan §6.13 test 6 — when the host's `content_generation` advances
+    /// Test 6 — when the host's `content_generation` advances
     /// (e.g., via a file content edit), the cached entry's
     /// `validated_at_generation` becomes stale and the slow path
     /// revalidates. If the dep_signature still validates, the entry's
@@ -2281,7 +2280,7 @@ export type C<T> = A<T>
         );
     }
 
-    /// Plan §6.13 test 7 — `peek`'s slow-path stale removal decrements
+    /// Test 7 — `peek`'s slow-path stale removal decrements
     /// the live_counter so the shared counter does not inflate
     /// permanently when entries become stale.
     ///

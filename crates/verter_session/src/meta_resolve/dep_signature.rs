@@ -1,6 +1,6 @@
 //! Per-request thread-local accumulators + test-only BFS counters.
 //!
-//! domain 6 — Step 6.6.A dep-signature accumulator + 3 accessors,
+//! Domain 6 — Step 6.6.A dep-signature accumulator + 3 accessors,
 //! plus `#[cfg(test)]` BFS counters for the cycle-walk regression suite.
 //!
 //! The counters are declared `pub(crate)` so test code anywhere in the crate
@@ -83,7 +83,7 @@ pub(crate) fn accumulate_dispatch_dep_signature(sig: &crate::semantic_query::Dep
 }
 
 // =====================================================================
-// Plan §6.2 / A0 — cycle-BFS visit counter for unit tests.
+// cycle-BFS visit counter for unit tests.
 //
 // `ref_root_reaches_transitive_cycle_node` increments this counter
 // once per body the BFS visits. Tests use `with_visited_counter` to
@@ -110,7 +110,7 @@ where
 }
 
 // =====================================================================
-// Plan §6.13 / Commit R — BFS_COMPUTE_COUNTER per-thread counter.
+// R — BFS_COMPUTE_COUNTER per-thread counter.
 //
 // Counts the number of times the cold-path `bfs_compute_inner` body
 // runs on the current thread. Tests use this to verify that
@@ -142,7 +142,7 @@ pub(crate) fn bfs_compute_counter_for_test() -> usize {
 }
 
 // =====================================================================
-// Plan §6.2 / §6.6.5 — F-prep canonical-fixture A0 test #3b helper.
+// F-prep canonical-fixture A0 test #3b helper.
 //
 // `with_bfs_child_refs_observer_for_test(target_name, f)` instruments
 // `ref_root_reaches_transitive_cycle_node`'s child-ref collection step

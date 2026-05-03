@@ -173,9 +173,9 @@ pub fn resolve_external(owner: &str, specifier: &str) -> String {
         return canonicalize_id(specifier).into_owned();
     }
     if specifier.starts_with('.') {
-        // Sub-plan §2.1: relative branch delegates to the workspace's single
-        // source of truth for path-join semantics. Algorithm preserved
-        // byte-for-byte (parent-pop guard, root-segment guard, "//"/"./" elision).
+        // Relative branch delegates to the workspace's single source of
+        // truth for path-join semantics. Algorithm preserved byte-for-byte
+        // (parent-pop guard, root-segment guard, "//"/"./" elision).
         return verter_workspace::relative_path::join_relative(owner, specifier);
     }
     canonicalize_id(specifier).into_owned()

@@ -1,7 +1,7 @@
 //! Tsconfig discovery and parsing for project configuration.
 //!
-//! All filesystem access goes through `&dyn WorkspaceRead` (
-//! sub-plan §6b.D2b — these helpers are read-only consumers).
+//! All filesystem access goes through `&dyn WorkspaceRead` — these
+//! helpers are read-only consumers.
 
 use std::path::{Path, PathBuf};
 

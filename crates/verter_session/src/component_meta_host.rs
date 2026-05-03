@@ -34,10 +34,10 @@ use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
 use crate::host_manage::component_meta_trace_custom;
 use crate::VerterHost;
 
-// Path C C12 (per plan §14.5) retired `HEAVY_COMPONENT_META_TEST_MUTEX`
+// Path C C12 (per) retired `HEAVY_COMPONENT_META_TEST_MUTEX`
 // along with its `lock_heavy_component_meta_test` helper and mirrored
-// `HEAVY_COMPONENT_META_TEST_{ACQUIRES,WAIT_NS}` counters. Plan §13.2
-// diagnosis identified OS-level CPU/thread oversubscription (each
+// `HEAVY_COMPONENT_META_TEST_{ACQUIRES,WAIT_NS}` counters.
+// Diagnosis identified OS-level CPU/thread oversubscription (each
 // per-test `Scheduler` spawned a `cpu_threads = num_cpus()` Rayon pool)
 // as the true serialization target — not any in-process shared resource.
 // Test hosts now construct via `new_standalone_with_scheduler_config`
@@ -56,7 +56,7 @@ pub enum ComponentMetaHostError {
     #[error("host error: {0}")]
     Host(String),
     /// Audit bundle requested but the host config does not enable
-    /// `audit_enabled` + `footprint_capture`. Plan §3 Commit 8.
+    /// `audit_enabled` + `footprint_capture`.
     #[error(
         "audit is not enabled on this host — set HostConfig::audit_enabled and \
          HostConfig::footprint_capture before calling get_component_meta_with_audit"
@@ -67,7 +67,7 @@ pub enum ComponentMetaHostError {
     /// record was displaced from the bounded store by subsequent
     /// requests (store holds up to
     /// [`crate::component_meta_audit::AUDIT_RECORDS_STORE_CAPACITY`]
-    /// entries). Plan §3 Commit 8.
+    /// entries).
     #[error("audit record for request_id={request_id} missing — store may have evicted it")]
     AuditRecordMissing { request_id: u64 },
 }
@@ -110,10 +110,10 @@ impl ComponentMetaHost {
     /// Create a new component-meta host with a standalone memory workspace and
     /// an explicit [`SchedulerConfig`].
     ///
-    /// Path C C12 (per plan §14.5): test harnesses construct hosts with
+    /// Path C C12 (per): test harnesses construct hosts with
     /// `SchedulerConfig { cpu_threads: 1, ..SchedulerConfig::default() }`
     /// to avoid CPU oversubscription when many parallel test threads each
-    /// spin up their own scheduler thread pools (see plan §13 diagnosis).
+    /// spin up their own scheduler thread pools (see diagnosis).
     pub fn new_standalone_with_scheduler_config(
         config: crate::types::HostConfig,
         scheduler_config: verter_scheduler::scheduler::SchedulerConfig,
@@ -337,8 +337,7 @@ impl ComponentMetaSession {
     /// Get component metadata plus the resolved-state sidecar AND the
     /// per-request audit record produced by the same resolution.
     /// Synchronous — the audit record is retrievable immediately
-    /// after `get_component_meta_with_resolution` returns. Plan §3
-    /// Commit 8.
+    /// after `get_component_meta_with_resolution` returns.
     ///
     /// Requires `HostConfig::audit_enabled` + `HostConfig::footprint_capture`
     /// to be true on the underlying host; otherwise returns
@@ -651,9 +650,9 @@ mod tests {
     use super::*;
 
     fn make_host() -> ComponentMetaHost {
-        // Path C C12 (per plan §14.5): tests use `cpu_threads = 1` to avoid
+        // Path C C12 (per): tests use `cpu_threads = 1` to avoid
         // CPU oversubscription when many parallel test threads each spin up
-        // their own Rayon pools. See plan §13.2 (Option R1).
+        // their own Rayon pools. See (Option R1).
         ComponentMetaHost::new_standalone_with_scheduler_config(
             crate::types::HostConfig::default(),
             verter_scheduler::scheduler::SchedulerConfig {

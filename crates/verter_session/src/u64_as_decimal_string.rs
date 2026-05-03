@@ -8,7 +8,7 @@
 //! consumer round-trips through `JSON.parse` / `JSON.stringify` without
 //! loss. Consumers that need arithmetic call `BigInt(s)` themselves.
 //!
-//! Plan §1.4 — "u64 JSON transport = stringified decimal". The
+//! Architecture rule: u64 JSON transport is a stringified decimal. The
 //! corresponding ts-rs annotation `#[ts(type = "string")]` lives on
 //! every field that uses this helper.
 

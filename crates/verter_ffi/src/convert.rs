@@ -902,8 +902,8 @@ fn resolved_component_meta_to_ffi(
 }
 
 /// Public wrapper exposing the resolved-state → FFI projection. Used
-/// by the NAPI/WASM audit bindings (plan §3 Commit 8) to package the
-/// resolution alongside the audit record as JSON.
+/// by the NAPI/WASM audit bindings to package the resolution alongside
+/// the audit record as JSON.
 pub fn component_meta_resolution_to_ffi(
     state: &host::meta_resolve::ResolvedComponentMetaState,
 ) -> FfiComponentMetaResolution {

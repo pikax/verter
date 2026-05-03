@@ -3,12 +3,12 @@
 //! free-form `component_meta_trace_event!` / `component_meta_trace_scope!`
 //! macro format strings.
 //!
-//! Plan §2.3. The enum is authoritative; the `Display` implementation
+//! The enum is authoritative; the `Display` implementation
 //! is hand-authored fresh (legacy stderr format was deleted in
-//! Commit 5). Every call-site in the allow-list (`host_manage`,
+//!). Every call-site in the allow-list (`host_manage`,
 //! `host_resolve`, `meta_resolve`, `component_meta_host`,
 //! `component_meta_audit`) emits one variant via the
-//! `component_meta_trace_structured!` macro (defined in Commit 5).
+//! `component_meta_trace_structured!` macro (defined in).
 //!
 //! `Custom::name: Arc<str>` is intentionally `Arc<str>` rather than
 //! `Cow<'static, str>` — serde and ts-rs integration is markedly
@@ -158,7 +158,7 @@ pub enum StructuredComponentMetaEvent {
         #[ts(type = "string")]
         duration_ns: u64,
     },
-    /// Entering `materialize_component_meta_structure`. Plan §3.3.
+    /// Entering `materialize_component_meta_structure`.
     MaterializeStructureEnter {
         /// Stable display key for the input `SemanticNodeId`.
         base: Arc<str>,
@@ -169,7 +169,7 @@ pub enum StructuredComponentMetaEvent {
         /// Materialiser stack depth at the entry (post-increment).
         depth: u16,
     },
-    /// Leaving `materialize_component_meta_structure`. Plan §3.3.
+    /// Leaving `materialize_component_meta_structure`.
     MaterializeStructureExit {
         /// Stable display key for the input `SemanticNodeId`.
         base: Arc<str>,
@@ -187,7 +187,7 @@ pub enum StructuredComponentMetaEvent {
         duration_ns: u64,
     },
     /// Policy gate fired before dispatch — input was rejected by
-    /// shape policy. Plan §3.3.
+    /// shape policy.
     MaterializeStructurePolicySkip {
         /// Stable display key for the input `SemanticNodeId`.
         base: Arc<str>,
@@ -197,7 +197,7 @@ pub enum StructuredComponentMetaEvent {
         reason: MaterializeSkipReason,
     },
     /// Same-key re-entry detected on the materialiser's thread-local
-    /// in-flight stack. Plan §3.3.
+    /// in-flight stack.
     MaterializeStructureCycleDetected {
         /// Stable display key for the input `SemanticNodeId`.
         base: Arc<str>,
@@ -209,7 +209,7 @@ pub enum StructuredComponentMetaEvent {
         depth: u16,
     },
     /// Defensive depth fuse tripped (input depth exceeded the
-    /// materialiser's hard cap). Plan §3.3.
+    /// materialiser's hard cap).
     MaterializeStructureDepthFuseTripped {
         /// Stable display key for the input `SemanticNodeId`.
         base: Arc<str>,
@@ -222,7 +222,7 @@ pub enum StructuredComponentMetaEvent {
     },
     /// Escape hatch for ad-hoc events. Every construction site MUST
     /// carry a `// Custom justified: <reason>` comment — the grep
-    /// test in Commit 5 enforces this.
+    /// test enforces this.
     Custom {
         /// Short identifier for the event kind.
         name: Arc<str>,
@@ -238,7 +238,7 @@ impl std::fmt::Display for StructuredComponentMetaEvent {
     /// Hand-authored `Display` — NOT a recreation of the legacy
     /// `format!("k=v")` detail strings. Produces a compact
     /// single-line representation suitable for the structured-event
-    /// snapshot tests (plan §3 Commit 5).
+    /// snapshot tests.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::RequestStart {

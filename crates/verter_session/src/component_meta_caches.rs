@@ -1,13 +1,11 @@
 //! Host-owned typed DB wrappers for the 10 component-meta caches that
 //! were previously authoritative inside `ComponentMetaQueryEngine`.
 //!
-//! Plan §3 D3.2 sub-task 3.2.1 (architectural-debt-closure revision 10).
-//!
 //! ## Architecture
 //!
 //! Each cache is a typed `*Db` wrapper around `DashMap<Key, Arc<Entry>>`
 //! plus a per-cache `InflightTable<Key>` (admission control isolation per
-//! plan §3 D3.2). All 10 wrappers share the same shape:
+//! D3.2). All 10 wrappers share the same shape:
 //!
 //! - `Entry` carries `(value, dep_signature)`.
 //! - `get_or_compute<F>(key, host, compute) -> Option<value>` delegates to
@@ -121,7 +119,7 @@ impl ImportedRegistryDb {
             |entry: &ImportedRegistryEntry| entry.value.clone(),
             |entry: &ImportedRegistryEntry| ctx.validate_dep_signature(&entry.dep_signature),
             |_, _| {
-                // Plan §12.A12 — register the published key in the
+                // Register the published key in the
                 // canonical reverse index so future
                 // invalidate_canonical_for drains in O(K).
                 let canonical = Arc::clone(&key_for_post_publish.0);
@@ -131,7 +129,7 @@ impl ImportedRegistryDb {
     }
 
     pub fn invalidate_canonical(&self, canonical_id: &str) {
-        // Plan §12.A12 — drain via the per-canonical reverse index in
+        // Drain via the per-canonical reverse index in
         // O(K) (entries owned by this canonical) instead of O(N) (total
         // entries). The index is populated on every cooperative
         // post-publish, so a content edit on the file invalidates
@@ -1157,12 +1155,12 @@ impl Default for RoutedExprSurfaceDb {
 }
 
 // ===========================================================================
-// Plan §1.5 / MaterializeStructureDb
+//
 // ===========================================================================
 
 use crate::component_meta_materialize::{MaterializeOutcome, MaterializeStructureCacheKey};
 
-/// Plan §1.5 — entry stored in `MaterializeStructureDb`. Carries the
+/// Entry stored in `MaterializeStructureDb`. Carries the
 /// cacheable `MaterializeOutcome` (`Value` or `Miss` only — `Recursive`
 /// and `Tainted` are non-cacheable per-call sentinels) plus the
 /// `dep_signature` that produced it.
@@ -1178,7 +1176,7 @@ pub struct MaterializeStructureEntry {
     pub dep_signature: DepSignature,
 }
 
-/// Plan §1.5 / §10.1 — final-result cache for the structural
+/// Final-result cache for the structural
 /// materialiser. Reverse-index `canonical_to_keys` enables
 /// `Arc::ptr_eq`-based invalidation cleanup; cooperative-admission's
 /// `post_publish` callback wires the registration.
@@ -1213,21 +1211,21 @@ impl MaterializeStructureDb {
         }
     }
 
-    /// Plan §6.10 sub-task 8 — read-only test accessor for the shared
+    /// Read-only test accessor for the shared
     /// live_counter. Used by `materialize_publish_after_invalidation_*`
     /// tests to verify that revalidation failures do NOT increment the
     /// counter (entries are removed without inflating the live count).
     #[cfg(test)]
     #[allow(
         dead_code,
-        reason = "B1's validated_at_generation field + the test that consumes this accessor land in WT5/R; this accessor is reserved for that wiring per plan §6.10 sub-task 8"
+        reason = "B1's validated_at_generation field + the test that consumes this accessor are pending; this accessor is reserved for that wiring"
     )]
     pub(crate) fn live_counter_for_test(&self) -> u64 {
         self.live_counter.load(Ordering::Relaxed)
     }
 
-    /// Read-only peek with proactive stale-entry removal. Plan §1.5:
-    /// when the entry's `dep_signature` is stale, remove it (orphan
+    /// Read-only peek with proactive stale-entry removal.
+    /// When the entry's `dep_signature` is stale, remove it (orphan
     /// reaping) and return `None`.
     ///
     /// Plan R8-5 — successful stale removal must decrement the shared
@@ -1257,7 +1255,7 @@ impl MaterializeStructureDb {
     }
 
     /// Drop every cache entry whose `dep_signature` references
-    /// `canonical_id`. Plan §1.5 — uses the `canonical_to_keys`
+    /// `canonical_id`. — uses the `canonical_to_keys`
     /// reverse index to find affected keys; uses `Arc::ptr_eq` to
     /// discriminate "our entry" from concurrent fresh writes.
     pub fn invalidate_for_canonical(&self, canonical_id: &str) {
@@ -1366,13 +1364,13 @@ impl Default for MaterializeStructureDb {
 }
 
 // ===========================================================================
-// Plan §4.8 / Phase C / Commit R — RefCycleResultDb
+// C — RefCycleResultDb
 // ===========================================================================
 
 use crate::cooperative_admission::cooperative_get_or_insert_with_post_publish;
 use crate::semantic_query::DeclIdentity;
 
-/// Plan §4.8 / Phase C — entry stored in `RefCycleResultDb`. Carries the
+/// C — entry stored in `RefCycleResultDb`. Carries the
 /// boolean BFS result, the dep-signature recorded during the cold BFS
 /// compute, and a `validated_at_generation` field used by `peek`'s
 /// generation-local fast path.
@@ -1388,7 +1386,7 @@ pub struct RefCycleEntry {
     /// `peek`'s slow path to revalidate against `HostFenceValidator`
     /// when `validated_at_generation` is stale.
     pub dep_signature: DepSignature,
-    /// Plan §4.9 — generation-local validity field. Updated to the
+    /// Generation-local validity field. Updated to the
     /// current `workspace().content_generation()` on:
     ///   - cold publish (initial value = current generation);
     ///   - successful slow-path revalidation in `peek`.
@@ -1402,7 +1400,7 @@ pub struct RefCycleEntry {
     pub validated_at_generation: AtomicU64,
 }
 
-/// Plan §4.8 / §4.9 / Commit R — host-owned cache for transitive
+/// R — host-owned cache for transitive
 /// cycle BFS results.
 ///
 /// Mirrors [`MaterializeStructureDb`]'s reverse-index pattern:
@@ -1465,7 +1463,7 @@ impl RefCycleResultDb {
         self.live_counter.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Plan §6.10 sub-task 8 — read-only test accessor for the shared
+    /// Read-only test accessor for the shared
     /// `live_counter`. Used by R's invalidation tests to verify that
     /// `invalidate_for_canonical` and `invalidate_all` correctly
     /// decrement the counter without corrupting sibling DBs'
@@ -1475,7 +1473,7 @@ impl RefCycleResultDb {
         self.live_counter.load(Ordering::Relaxed)
     }
 
-    /// Plan §4.8 / §10.1 — register the reverse-index after a successful
+    /// Register the reverse-index after a successful
     /// publish. Per-canonical mutex acquisition pattern matches
     /// `MaterializeStructureDb`. Bounded by `dep_signature.len() ≤ 64`
     /// (BFS hop cap from A0).
@@ -1491,7 +1489,7 @@ impl RefCycleResultDb {
         }
     }
 
-    /// Plan §4.9 — generation-local validity peek.
+    /// Generation-local validity peek.
     ///
     /// Fast path: if the entry's `validated_at_generation` matches the
     /// host's current `content_generation`, return the cached value
@@ -1535,7 +1533,7 @@ impl RefCycleResultDb {
         })
     }
 
-    /// Plan §4.8 / R8-5 — drop every cache entry whose `dep_signature`
+    /// Drop every cache entry whose `dep_signature`
     /// references `canonical_id`. Uses the `canonical_to_keys` reverse
     /// index to find affected keys; `Arc::ptr_eq` discriminates "our
     /// entry" from concurrent fresh writes.
@@ -1572,7 +1570,7 @@ impl RefCycleResultDb {
         }
     }
 
-    /// Plan §4.8 / R8-5 — saturating-subtract pattern (NOT `store(0)`)
+    /// Saturating-subtract pattern (NOT `store(0)`)
     /// because `live_counter` is shared via `Arc<AtomicU64>` across all
     /// typed DBs in `ProjectTypeStore`. A per-DB `store(0)` would
     /// corrupt sibling DBs' contributions to the shared sum.
@@ -1593,7 +1591,7 @@ impl Default for RefCycleResultDb {
     }
 }
 
-/// Plan §4.8 — public hook to consult the BFS cache from
+/// Public hook to consult the BFS cache from
 /// `meta_resolve::ref_root_reaches_transitive_cycle_node`.
 ///
 /// Returns `Some(read)` on a generation-local fast hit OR a
@@ -1608,7 +1606,7 @@ pub(crate) fn ref_cycle_db_peek(
 }
 
 // ===========================================================================
-// Plan §12.A3 / §12.A12 — typed invalidation domain wiring for every
+// typed invalidation domain wiring for every
 // component-meta DB. Each DB declares the
 // `InvalidationDomain::FileContent | ResolverState | ProjectGeneration`
 // triplet (per-canonical eviction reaches all three when a file edit
@@ -1859,7 +1857,7 @@ impl crate::invalidation_domain::InvalidationByCanonical for RefCycleResultDb {
     }
 }
 
-/// Plan §4.8 / §4.20 — the cooperative-admission wrapper invoked by
+/// The cooperative-admission wrapper invoked by
 /// `meta_resolve::ref_root_reaches_transitive_cycle_node` on the cold
 /// path. The `compute` closure runs synchronously on the caller's
 /// thread (per cooperative_admission's synchronous-compute contract),
@@ -1884,7 +1882,7 @@ where
         db.entries(),
         db.inflight(),
         id.clone(),
-        // validate(&Entry) -> Option<V>
+        // Validate(&Entry) -> Option<V>
         |entry: &RefCycleEntry| {
             if ctx.validate_dep_signature(&entry.dep_signature) {
                 Some(crate::semantic_query::CacheRead {
@@ -1895,7 +1893,7 @@ where
                 None
             }
         },
-        // compute() -> Option<Entry>
+        // Compute() -> Option<Entry>
         || -> Option<RefCycleEntry> {
             let mut compute_fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
             let result = compute_bfs(&mut compute_fence);
@@ -1905,7 +1903,7 @@ where
                 validated_at_generation: AtomicU64::new(current_gen),
             })
         },
-        // project(&Entry) -> V
+        // Project(&Entry) -> V
         |entry: &RefCycleEntry| crate::semantic_query::CacheRead {
             value: entry.result,
             dep_signature: Arc::clone(&entry.dep_signature),

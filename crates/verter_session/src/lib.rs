@@ -429,7 +429,7 @@ pub struct VerterHost {
     /// `RouteDb` / `ImportedRootDb`. See `project_type_store` module docs.
     pub(crate) project_type_store: Arc<crate::project_type_store::ProjectTypeStore>,
     /// Monotonic request-id generator for component-meta requests.
-    /// Zero is reserved for "not populated" (plan §1.4); the counter
+    /// Zero is reserved for "not populated"; the counter
     /// starts at 0 and `next_request_id()` returns pre-increment + 1.
     pub(crate) request_id_counter: std::sync::atomic::AtomicU64,
     /// Bounded insert-ordered store of finished audit records.
@@ -441,7 +441,7 @@ pub struct VerterHost {
     /// than anything in `ProjectTypeStore`; the audit subsystem has its own
     /// per-request lifecycle. Per-request inserts happen in
     /// `emit_audit_trace`; consumers retrieve via
-    /// `take_audit_record(request_id)`. Plan §2.5.
+    /// `take_audit_record(request_id)`.
     pub(crate) audit_records: Arc<crate::component_meta_audit::AuditRecordsStore>,
     /// Cumulative host-level test audit state — accessible via
     /// [`Self::audit`] (test-only). Counters increment from

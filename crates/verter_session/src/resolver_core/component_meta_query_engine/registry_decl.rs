@@ -134,7 +134,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         })
     }
 
-    /// Plan §4.5 / §6.8 — graph-native replacement for the deleted
+    /// Graph-native replacement for the deleted
     /// legacy walker shim. Lowers `expr` to a `SemanticNodeId` via
     /// Navigate, runs the materialiser, accumulates the dep_signature
     /// into the per-request thread-local accumulator, and raises the
@@ -414,12 +414,11 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         self.imported_registry_symbols.borrow().len()
     }
 
-    /// cutover (plan §11.2 / §1.5): the legacy walker's
-    /// per-request `materialized_member_surfaces` mirror is dead
-    /// . Tests asking for the materialiser's cache size
-    /// now read the ctx-owned `MaterializeStructureDb::live_count()`
-    /// — the final-result cache that the new structural materialiser
-    /// publishes into.
+    /// The legacy walker's per-request
+    /// `materialized_member_surfaces` mirror is dead. Tests asking
+    /// for the materialiser's cache size now read the ctx-owned
+    /// `MaterializeStructureDb::live_count()` — the final-result
+    /// cache that the new structural materialiser publishes into.
     #[cfg(test)]
     pub(crate) fn materialized_member_surface_cache_len(&self) -> usize {
         self.ctx
@@ -487,7 +486,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         resolved
     }
 
-    /// single accessor returning the engine's resolver
+    /// Single accessor returning the engine's resolver
     /// context. Replaces the legacy `ctx()` accessor (which returned
     /// `&VerterHost`) now that the engine field is `&dyn ResolverContext`.
     /// Out-of-seal-scope callers (`host_manage/*`) accept the trait
@@ -506,7 +505,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         scope_canonical_id: &str,
         symbol_name: &str,
     ) -> Option<SemanticNodeId> {
-        // resolve the root identity via
+        // Resolve the root identity via
         // `bare_name_resolve::resolve_bare_name_in_scope` directly —
         // no `SessionSolverHost` construction. Matches the dispatch
         // lowering path in `shallow_lower_type_expr`.
@@ -575,7 +574,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .find(|member| member.name == member_name)
     }
 
-    /// clippy cleanup — paired with `dispatch_projected_member`
+    /// Clippy cleanup — paired with `dispatch_projected_member`
     /// and `dispatch_projected_surface` as part of the ComponentMetaQueryEngine
     /// surface contract. No call site in the landed tree, but the helper is
     /// retained for symmetry with the projection/keyspace surface API; the

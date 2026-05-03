@@ -3,7 +3,7 @@
 //! ([`verter_workspace::audit_sink::VfsAuditSink`]) into the active
 //! request's [`RequestFootprintAccumulator`].
 //!
-//! Plan §3.A Commit 6.D. Each audited request:
+//! Each audited request:
 //!
 //! 1. Builds a [`SessionVfsSink`] holding its `request_id` and a
 //!    [`Weak`] reference to its accumulator.

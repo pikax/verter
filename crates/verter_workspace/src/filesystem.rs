@@ -8,11 +8,10 @@ use crate::engine::Engine;
 use crate::project_graph::{ProjectGraph, VfsProjectConfig};
 use crate::types::{ExactResolution, ExactResolutionResult};
 
-// Kept from the legacy trace system — callers (filesystem_tests,
-// frontier_tests) still consume the per-read detail
-// string directly. The broader `component_meta_trace_*` span tree was
-// deleted in Commit 4 (plan §0.1 clean-cut rule); the replacement is
-// the `VfsAuditSink` registry below.
+// Kept for the per-read detail string surface — callers
+// (filesystem_tests, frontier_tests) consume it directly. The broader
+// `component_meta_trace_*` span tree is replaced by the `VfsAuditSink`
+// registry below.
 thread_local! {
     static LAST_READ_FILE_TRACE_DETAIL: RefCell<Option<(String, String)>> = const { RefCell::new(None) };
 }

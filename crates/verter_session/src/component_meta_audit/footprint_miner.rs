@@ -3,7 +3,7 @@
 //! reference to the live [`SemanticGraphStore`] into a deterministic
 //! [`RustSemanticFootprintAudit`].
 //!
-//! Plan §3 Commit 4. Determinism rules:
+//! Determinism rules:
 //!
 //! 1. Walk `state.derivation_edges_raw` and collect the unique
 //!    [`SemanticNodeId`]s touched (as result or source).
@@ -25,8 +25,8 @@
 //!    `indexed_ready_builds` vector.
 //! 7. Read the per-context cache-event counters from `ctx` —
 //!    `CacheOutcomeTally` is exact even under concurrent audits because
-//!    each request's context isolates its own events (plan §1.4 — kills
-//!    the `is_approximate` field).
+//!    each request's context isolates its own events (this kills the
+//!    `is_approximate` field).
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -53,7 +53,7 @@ use crate::types::Hash16;
 /// Mine a deterministic [`RustSemanticFootprintAudit`] from the drained
 /// accumulator state, using `graph` for node-data lookups and `ctx` for
 /// per-context cache counters. `max_edges` caps the derivation subgraph
-/// (plan §1.4) — when truncation happens, the report's
+/// — when truncation happens, the report's
 /// `has_orphan_edges` flag is set.
 pub fn mine_footprint(
     graph: &SemanticGraphStore,
@@ -341,12 +341,12 @@ fn display_label_for(data: &SemanticNodeData) -> Arc<str> {
 }
 
 fn structural_hash_of(data: &SemanticNodeData) -> Hash16 {
-    // xxh3-128 of the Debug rendering. Debug is content-deterministic
+    // Xxh3-128 of the Debug rendering. Debug is content-deterministic
     // for these payloads — same content prints the same bytes — so two
     // arenas that intern equivalent content produce equal hashes.
     // Intern-order ids appear inside the Debug rendering only as
     // arena-stable references; for the determinism contract we care
-    // about (same-host repeat requests, plan §3 Commit 4 test
+    // about (same-host repeat requests, test
     // `mine_footprint_identical_requests_produce_byte_identical_footprints`)
     // these are themselves stable.
     let dbg = format!("{data:?}");

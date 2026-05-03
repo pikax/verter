@@ -1,4 +1,4 @@
-//! `impl VerterHost` â€” file management, analysis, and diagnostics methods.
+//! `impl VerterHost` — file management, analysis, and diagnostics methods.
 //!
 //! Contains [`VerterHost::remove`], [`VerterHost::get_analysis`],
 //! [`VerterHost::get_diagnostics`], and [`VerterHost::set_import_dependencies`].
@@ -31,18 +31,18 @@ use crate::VerterHost;
 pub(crate) mod analysis_io;
 pub(crate) mod component_meta_entry;
 pub(crate) mod component_meta_extract;
-// moved from `meta_resolve/host_methods.rs`. The file is a
+// Moved from `meta_resolve/host_methods.rs`. The file is a
 // large `impl VerterHost { ... }` block (~18 host methods including
 // `current_dependency_fact_versions`, `get_raw_analysis_snapshot`, and
 // the `*_inner` audited variants). Belongs in host-impl tier per
-// sub-plan §10a.0.A.
+// sub-
 pub(crate) mod component_meta_methods;
-// moved from `meta_resolve/request_host.rs`. The file holds
+// Moved from `meta_resolve/request_host.rs`. The file holds
 // `impl ComponentMetaRequestHost for VerterHost` and the session-scoped
 // variant `impl ComponentMetaRequestHost for SessionRequestHost<'_>`.
-// Belongs in host-impl tier per sub-plan §10a.0.A.
+// Belongs in host-impl tier per sub-
 pub(crate) mod component_meta_request_impl;
-// moved from `meta_resolve/jsdoc_resolve.rs`. The file
+// Moved from `meta_resolve/jsdoc_resolve.rs`. The file
 // defines `HostComponentMetaResolver<'a> { host: &'a VerterHost }` plus
 // `impl crate::resolver_core::{DeclarationMetadataResolver,ComponentMetaResolverHost}
 // for HostComponentMetaResolver<'_>`. The `read_full_source` helper
@@ -300,7 +300,7 @@ pub(crate) fn component_meta_debug(message: impl AsRef<str>) {
     }
 }
 
-// Plan §3 Commit 5: the legacy file/stderr trace is deleted. The
+// The legacy file/stderr trace is deleted. The
 // remaining infrastructure below is the thin shim that keeps
 // component_meta_trace_scope! / component_meta_trace_event! macro
 // call sites compiling — each now pushes `StructuredComponentMetaEvent::Custom`
@@ -314,7 +314,6 @@ pub(crate) fn component_meta_debug(message: impl AsRef<str>) {
 // `component_meta_trace_write_line` / `component_meta_trace_output_lock` /
 // `component_meta_trace_output_path` / `component_meta_trace_next_span_id` /
 // `component_meta_trace_enabled` helpers have all been removed
-// (plan §0.1 clean-cut rule).
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(in crate::host_manage) struct ParsedEvalProgramCacheKey {
@@ -486,7 +485,7 @@ pub(crate) fn component_meta_options_fingerprint(options: &ComponentMetaOptions)
 /// signature still matches what the host reports — a single mismatch
 /// invalidates the entry.
 ///
-/// moved from `component_meta_caches.rs` to host-impl tier.
+/// Moved from `component_meta_caches.rs` to host-impl tier.
 /// Resolver-tier callers reach the validation through the
 /// [`ResolverContext::validate_dep_signature`](crate::resolver_core::ResolverContext::validate_dep_signature)
 /// trait method, whose body delegates here with a concrete `&VerterHost`.
@@ -577,7 +576,7 @@ pub fn push_structured_event(event: crate::component_meta_audit::StructuredCompo
 }
 
 // ---------------------------------------------------------------------------
-// Per-request counter helpers (plan §3.6)
+// Per-request counter helpers
 // ---------------------------------------------------------------------------
 //
 // Cost contract: zero ops when `current_request_context().is_none()`;
@@ -585,7 +584,7 @@ pub fn push_structured_event(event: crate::component_meta_audit::StructuredCompo
 // take a lock and never allocate.
 
 /// Bump `materialize_structure_calls` on the current request's
-/// context. No-op without a context. Plan §3.6.
+/// context. No-op without a context.
 pub fn record_materialize_structure_call() {
     if let Some(ctx) = crate::request_context::current_request_context() {
         ctx.materialize_structure_calls
@@ -594,7 +593,7 @@ pub fn record_materialize_structure_call() {
 }
 
 /// Bump `materialize_structure_cache_hits` on the current request's
-/// context. No-op without a context. Plan §3.6.
+/// context. No-op without a context.
 pub fn record_materialize_structure_cache_hit() {
     if let Some(ctx) = crate::request_context::current_request_context() {
         ctx.materialize_structure_cache_hits
@@ -602,7 +601,7 @@ pub fn record_materialize_structure_cache_hit() {
     }
 }
 
-/// Plan §4.14 / B1 — emit a `MaterializeStructurePolicySkip` event
+/// Emit a `MaterializeStructurePolicySkip` event
 /// into the active audit accumulator. No-op when no request context
 /// or accumulator is installed.
 ///
@@ -629,7 +628,7 @@ pub(crate) fn emit_policy_skip(
 }
 
 /// Bump `node_arena_lock_acquisitions` on the current request's
-/// context. No-op without a context. Plan §3.6.
+/// context. No-op without a context.
 pub fn record_node_arena_lock_acquisition() {
     if let Some(ctx) = crate::request_context::current_request_context() {
         ctx.node_arena_lock_acquisitions
@@ -638,7 +637,7 @@ pub fn record_node_arena_lock_acquisition() {
 }
 
 /// Bump `family_map_lock_acquisitions` on the current request's
-/// context. No-op without a context. Plan §3.6.
+/// context. No-op without a context.
 pub fn record_family_map_lock_acquisition() {
     if let Some(ctx) = crate::request_context::current_request_context() {
         ctx.family_map_lock_acquisitions
@@ -647,7 +646,7 @@ pub fn record_family_map_lock_acquisition() {
 }
 
 /// Bump `dep_signature_merges` on the current request's context.
-/// No-op without a context. Plan §3.6.
+/// No-op without a context.
 pub fn record_dep_signature_merge() {
     if let Some(ctx) = crate::request_context::current_request_context() {
         ctx.dep_signature_merges
@@ -656,7 +655,7 @@ pub fn record_dep_signature_merge() {
 }
 
 /// Bump `dep_signature_intern_hits` on the current request's context.
-/// No-op without a context. Plan §3.6.
+/// No-op without a context.
 pub fn record_dep_signature_intern_hit() {
     if let Some(ctx) = crate::request_context::current_request_context() {
         ctx.dep_signature_intern_hits
@@ -668,7 +667,7 @@ pub fn record_dep_signature_intern_hit() {
 /// the active request's accumulator. Single in-tree construction
 /// site for the `Custom` variant — the
 /// `every_custom_variant_construction_site_has_justification_comment`
-/// grep test (plan §3.A Commit 6.E) checks each `Custom {` literal
+/// grep test checks each `Custom {` literal
 /// has a preceding `// Custom justified:` comment; the rationale
 /// below covers every call routed through this helper.
 pub(crate) fn push_structured_custom(name: &'static str, detail: impl Into<String>) {
@@ -681,8 +680,8 @@ pub(crate) fn push_structured_custom(name: &'static str, detail: impl Into<Strin
     // MaterializeMemberRoute{Start,End} / etc.). The `Custom`
     // variant exists precisely for ad-hoc structured logging; every
     // call site funnels through this single helper so the
-    // justification is centralised and the grep gate in §3.A
-    // Commit 6.E has one place to inspect.
+    // justification is centralised and the grep gate has one place
+    // to inspect.
     // Custom justified: single construction site for `Custom`
     // across the session crate — see the rationale in the
     // `push_structured_custom` doc comment above.
@@ -692,7 +691,7 @@ pub(crate) fn push_structured_custom(name: &'static str, detail: impl Into<Strin
 }
 
 /// Push a typed `StructuredComponentMetaEvent` variant into the
-/// current accumulator. Plan §2.3 — preferred for any call site
+/// current accumulator. — preferred for any call site
 /// that maps to a named variant (`IndexedReadyBuilt`, `VfsRead`,
 /// `MaterializeMemberRouteStart`, …).
 #[macro_export]
@@ -706,7 +705,7 @@ macro_rules! component_meta_trace_structured {
 /// typed `StructuredComponentMetaEvent` variant — the successor to
 /// the deleted `component_meta_trace_scope!` /
 /// `component_meta_trace_event!` macros. Expands to a single call
-/// into [`push_structured_custom`]. Plan §3.A Commit 6.E.
+/// into [`push_structured_custom`].
 macro_rules! component_meta_trace_custom {
     ($name:expr, $detail:expr $(,)?) => {{
         // The accumulator check gates the $detail expression so its

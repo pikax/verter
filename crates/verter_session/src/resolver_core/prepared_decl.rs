@@ -36,11 +36,10 @@ pub struct ImportBinding {
 /// `name_resolution`, or the rest of the prepared-decl surface — so the
 /// pre-C3 wrapping mis-classified script-setup generics as type aliases.
 ///
-/// Plan §2 Pass C3 references this struct. Path C C6a item 1 added
-/// `ordinal` so script-setup binders carry their 0-based clause
-/// position into the lowered `SemanticNodeData::TypeParam.param_index`,
-/// disambiguating same-name parameters across multiple script-setup
-/// declarations within one file.
+/// `ordinal` carries the 0-based clause position into the lowered
+/// `SemanticNodeData::TypeParam.param_index`, disambiguating same-name
+/// parameters across multiple script-setup declarations within one
+/// file.
 #[derive(Debug, Clone)]
 pub struct TypeParamBinding {
     pub name: Arc<str>,

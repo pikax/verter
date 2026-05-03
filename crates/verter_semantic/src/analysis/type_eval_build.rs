@@ -1319,10 +1319,10 @@ pub enum MacroExpansionScope {
 }
 
 /// Field kind discriminator threaded into the closure passed to
-/// [`expand_macro_types_impl_with_expander`] (plan §3 Step 9.1 / D32).
+/// [`expand_macro_types_impl_with_expander`].
 ///
-/// The closure used to receive only the [`TypeExpr`]; session-side
-/// surface-id capture (Step 9 sidecar propagation) needs to know
+/// The closure receives the [`TypeExpr`] alongside this discriminator;
+/// session-side surface-id capture (sidecar propagation) needs to know
 /// which output vector the result is destined for so the captured
 /// `SemanticNodeId` lands in the correct `SurfaceNodeIdentities`
 /// slot. Threading the discriminator at the closure-call boundary

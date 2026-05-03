@@ -652,17 +652,18 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         self.solve_or_project_leaf_expr_with_context(&context, expr)
     }
 
-    /// Path C C11b — per-TypeExpr-shape scope dispatch for the prepared-
-    /// member-path projection (plan §2 Stage 6 Pass C11b).
+    /// Per-TypeExpr-shape scope dispatch for the prepared-member-path
+    /// projection.
     ///
-    /// The pre-C11b logic tried `active_scope` first and then fell back to
+    /// Earlier logic tried `active_scope` first and then fell back to
     /// `resolution_scope` only when the expression referenced a prepared
     /// symbol in that scope. That gate missed transitive helper refs
     /// (e.g., `ComponentUI<typeof theme>` where `ComponentUI` lives in a
     /// type-file reached via the prepared decl's import chain, not the
     /// decl's immediate symbol map).
     ///
-    /// C11b uses a `PreparedProjectionContext { decl_scope, arg_scope }`:
+    /// The current implementation uses a
+    /// `PreparedProjectionContext { decl_scope, arg_scope }`:
     /// - bare `Ref { name, type_arguments: [] }`: try `decl_scope` first
     ///   (helper-body-internal reference), fall back to `arg_scope`.
     /// - `TypeOf(value_ref)`: always resolve in `arg_scope` (caller-

@@ -188,7 +188,7 @@ impl Default for AppConfigNoOverrideProofDb {
 impl crate::invalidation_domain::ParticipatesInInvalidation for AppConfigNoOverrideProofDb {
     fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
         use crate::invalidation_domain::InvalidationDomain::*;
-        // Plan §12.A3 — `AppConfigNoOverrideProofDb` participates in
+        // `AppConfigNoOverrideProofDb` participates in
         // [FileContent, AppConfigInterfaceMerge]. The proof's dep
         // signature includes the merge-generation; either a content
         // edit on a flagged file or a workspace-level

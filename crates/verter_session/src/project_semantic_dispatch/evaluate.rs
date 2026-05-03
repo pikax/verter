@@ -1,11 +1,11 @@
 //! `evaluate_deferred_semantic_node` — deferred-shell evaluation
-//! fix-point loop (plan §3 Change Split + §2 guard contract row for
+//! fix-point loop ( Change Split + §2 guard contract row for
 //! `evaluate_deferred_semantic_node`).
 //!
 //! Walks `SemanticNodeData` unwrapping `Alias(target)` hops,
 //! substituting `Instantiate` shells, and projecting single-segment
 //! `IndexedAccess` shells through dispatch re-entry. Returns the
-//! caller's current node on cyclic re-entry (fix-point) per plan §2.
+//! caller's current node on cyclic re-entry (fix-point) per
 //! Also hosts `normalized_index_key_node` which belongs to the
 //! evaluation surface.
 
@@ -41,7 +41,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         mut node: SemanticNodeId,
     ) -> SemanticNodeId {
         // Phase D §5.3 WIP-R: the former `for _ in 0..32` hard cap is retired.
-        // Cycle detection uses a stack-local visited set (per plan §2 guard
+        // Cycle detection uses a stack-local visited set (per guard
         // contract); the loop converges on graph fix-points in at most
         // graph-size steps.
         let mut visited = rustc_hash::FxHashSet::default();
@@ -130,7 +130,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     quasis,
                     expressions,
                 } => {
-                    // when every expression resolves to a
+                    // When every expression resolves to a
                     // single string literal, fold the template into a
                     // `Literal::String` by concatenating
                     // `quasis[0] expr[0] quasis[1] expr[1] … quasis[n]`.
@@ -205,7 +205,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 return node;
             }
             // Cyclic re-entry detected (self-referential evaluation) — return
-            // current node as fix-point per plan §2 guard contract row.
+            // current node as fix-point per guard contract row.
             if !visited.insert(next) {
                 return node;
             }

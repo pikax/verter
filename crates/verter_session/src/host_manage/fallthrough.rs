@@ -974,11 +974,11 @@ impl VerterHost {
             .collect()
     }
 
-    /// Sync transitive macro/type dependencies for a file. Sub-plan §2.14:
-    /// the workspace's `replace_semantic_transitive` is called UNCONDITIONALLY
-    /// (closes F15 — even when `cc.dependencies` union is unchanged, the
-    /// semantic-class slice may have changed; e.g., a dep moves from
-    /// semantic-only to direct-import).
+    /// Sync transitive macro/type dependencies for a file. The
+    /// workspace's `replace_semantic_transitive` is called
+    /// UNCONDITIONALLY: even when `cc.dependencies` union is
+    /// unchanged, the semantic-class slice may have changed (e.g., a
+    /// dep moves from semantic-only to direct-import).
     pub(crate) fn sync_transitive_macro_type_dependencies(
         &self,
         canonical_id: &str,

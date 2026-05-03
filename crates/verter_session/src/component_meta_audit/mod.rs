@@ -58,7 +58,7 @@ use crate::types::Hash16;
 pub struct RustAuditRecord {
     /// Monotonic request id set at
     /// `get_component_meta_with_resolution` entry. Decimal-string
-    /// transport (plan §1.4) — non-zero, unique per audited request.
+    /// transport — non-zero, unique per audited request.
     #[serde(with = "crate::u64_as_decimal_string")]
     #[ts(type = "string")]
     pub request_id: u64,
@@ -76,10 +76,10 @@ pub struct RustAuditRecord {
     /// `HostConfig::footprint_capture` is true and the accumulator
     /// collected work for this request.
     pub footprint: Option<RustSemanticFootprintAudit>,
-    /// Plan §3 Step 4 (architectural-debt-closure rev 10): true when
-    /// the audited request was satisfied from the warm component-meta
-    /// result cache (HostFenceValidator validated the cached
-    /// `dep_signature`). Cold cold-resolver runs leave this `false`.
+    /// True when the audited request was satisfied from the warm
+    /// component-meta result cache (HostFenceValidator validated the
+    /// cached `dep_signature`). Cold cold-resolver runs leave this
+    /// `false`.
     /// Audit consumers may aggregate against this flag to separate
     /// warm-cache replay from genuine resolver work.
     ///
@@ -146,33 +146,33 @@ pub struct RustStoreAudit {
     /// Prepared value declarations.
     pub prepared_value_decls: u32,
     /// Total `materialize_component_meta_structure` invocations
-    /// observed during the request. Plan §3.2.
+    /// observed during the request.
     #[serde(default, with = "crate::u64_as_decimal_string")]
     #[ts(type = "string")]
     pub materialize_structure_calls: u64,
     /// Subset of `materialize_structure_calls` that were satisfied by
     /// the materialiser's `MaterializeStructureDb` peek (warm cache
-    /// hit). Plan §3.2.
+    /// hit).
     #[serde(default, with = "crate::u64_as_decimal_string")]
     #[ts(type = "string")]
     pub materialize_structure_cache_hits: u64,
     /// Lock acquisitions on the per-scope `NodeArena` dedup index.
-    /// Plan §3.2.
+    ///
     #[serde(default, with = "crate::u64_as_decimal_string")]
     #[ts(type = "string")]
     pub node_arena_lock_acquisitions: u64,
     /// Lock acquisitions on the family-map dep-signature reverse
-    /// index. Plan §3.2.
+    /// index.
     #[serde(default, with = "crate::u64_as_decimal_string")]
     #[ts(type = "string")]
     pub family_map_lock_acquisitions: u64,
     /// Times a `dep_signature` was merged into the materialiser's
-    /// `local_fence`. Plan §3.2.
+    /// `local_fence`.
     #[serde(default, with = "crate::u64_as_decimal_string")]
     #[ts(type = "string")]
     pub dep_signature_merges: u64,
     /// Subset of `dep_signature_merges` that hit an existing intern
-    /// bucket (avoided allocation). Plan §3.2 / §7.
+    /// bucket (avoided allocation).
     #[serde(default, with = "crate::u64_as_decimal_string")]
     #[ts(type = "string")]
     pub dep_signature_intern_hits: u64,
@@ -226,11 +226,11 @@ pub struct RequestPhaseAudit {
 }
 
 // ---------------------------------------------------------------------------
-// Semantic footprint — plan §2.1
+// Semantic footprint
 // ---------------------------------------------------------------------------
 
 /// Semantic footprint attached to an audited request. Populated by the
-/// footprint miner (Commit 4) from the accumulator's raw events.
+/// footprint miner from the accumulator's raw events.
 /// Field docs are carried by the individual record-vector type
 /// declarations below.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
@@ -270,7 +270,7 @@ impl RustSemanticFootprintAudit {
     /// Files the scheduler actually read on behalf of this request:
     /// the union of canonical ids from `vfs_reads` and
     /// `shared_load_reuses`, deduplicated and sorted. Exact per
-    /// plan §1.4 — this is the read-contract answer, not the
+    /// this is the read-contract answer, not the
     /// dependency-graph answer.
     ///
     /// Use [`Self::declared_dependency_files`] for the broader set
@@ -327,13 +327,14 @@ impl RustSemanticFootprintAudit {
     }
 
     /// Produce a new footprint with "incidental" events stripped — the
-    /// Commit 6 assertion harness uses this to turn flaky snapshots into
-    /// stable ones. The fields that get cleared are enumerated in
-    /// [`INCIDENTAL_FIELD_NAMES`]; [`commit_7_snapshots_stable_against_current_incidental_event_names_list`](
-    /// ../../../tests/corpus_generator_parity.rs) pins the current set
-    /// so a silent expansion surfaces as a named failure.
+    /// assertion harness uses this to turn flaky snapshots into stable
+    /// ones. The fields that get cleared are enumerated in
+    /// [`INCIDENTAL_FIELD_NAMES`]; the
+    /// `corpus_generator_parity::commit_7_snapshots_stable_against_current_incidental_event_names_list`
+    /// test pins the current set so a silent expansion surfaces as a
+    /// named failure.
     ///
-    /// Plan §3 Commit 13 references `INCIDENTAL_EVENT_NAMES` as the
+    /// References `INCIDENTAL_EVENT_NAMES` as the
     /// driver for this mask. The set starts with `vfs_reads` (purely
     /// incidental — cache warmth doesn't change the semantic
     /// footprint); future additions should append to
@@ -361,8 +362,8 @@ impl RustSemanticFootprintAudit {
 /// Names of `RustSemanticFootprintAudit` fields that
 /// [`RustSemanticFootprintAudit::mask_incidental_spans`] clears when
 /// producing a snapshot-stable footprint. The set is load-bearing
-/// for Commit 7 fixture snapshots: a new entry implies pinned
-/// snapshots need regeneration.
+/// for fixture snapshots: a new entry implies pinned snapshots need
+/// regeneration.
 ///
 /// The `commit_7_snapshots_stable_against_current_incidental_event_names_list`
 /// test (in `crates/verter_session/tests/corpus_generator_parity.rs`)
@@ -401,7 +402,7 @@ pub struct VfsReadRecord {
     #[serde(with = "crate::u64_as_decimal_string")]
     #[ts(type = "string")]
     pub bytes_read: u64,
-    /// Request-id the sink routed this event to — plan §3.A Commit 6.D.
+    /// Request-id the sink routed this event to.
     /// Session-side [`SessionVfsSink`] only pushes events whose
     /// [`verter_workspace::audit_sink::VfsReadEvent::request_id`]
     /// matches the request this sink was registered for, so this
@@ -413,7 +414,7 @@ pub struct VfsReadRecord {
 }
 
 /// Joiner record — this request attached to a winner's in-flight
-/// cache slot instead of starting fresh. Plan §2.7.
+/// cache slot instead of starting fresh.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub struct SharedLoadReuseRecord {
@@ -504,7 +505,7 @@ pub struct MaterializationRecord {
 
 /// Per-context cache-event tally. No `is_approximate` field — values
 /// are EXACT per-request because they come from the request's own
-/// atomic counters (plan §1.4).
+/// atomic counters.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub struct CacheOutcomeTally {
@@ -572,7 +573,7 @@ pub struct DerivationSubgraph {
 
 /// One node entry in the derivation subgraph. Identity fields
 /// (`kind`, `named_identity`, `structural_hash`) participate in the
-/// deterministic NodeId assignment (plan §1.4).
+/// deterministic NodeId assignment.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub struct NodeRecord {
@@ -583,7 +584,7 @@ pub struct NodeRecord {
     /// an exported type symbol. `None` for anonymous nodes.
     pub named_identity: Option<NamedIdentity>,
     /// Content-deterministic hash distinguishing anonymous nodes.
-    /// Commit 4 computes this from the semantic graph's node data.
+    /// Computed from the semantic graph's node data.
     pub structural_hash: Hash16,
     /// Short human-readable label for the node — used by walker /
     /// chain renderers.
@@ -604,8 +605,7 @@ pub struct NamedIdentity {
 }
 
 /// `#[non_exhaustive]` + `Other` catchall future-proofs against new
-/// `SemanticNodeData` variants landing after Commit 3 without breaking
-/// the audit.
+/// `SemanticNodeData` variants without breaking the audit.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "audit.generated.ts")]
 #[non_exhaustive]
@@ -650,7 +650,7 @@ pub enum SemanticNodeKind {
     /// Normalized intersection (post-flatten).
     NormalizeIntersection,
     /// Catch-all for variants added to the semantic graph after
-    /// Commit 3. The plan uses `#[non_exhaustive]` so future
+    /// The plan uses `#[non_exhaustive]` so future
     /// variants can land without breaking the audit consumer
     /// contract.
     Other {
@@ -679,7 +679,7 @@ pub struct DerivationEdgeRecord {
 /// Audit-side origin edge kind. Mirrors the semantic graph's
 /// `verter_session::semantic_query::OriginEdgeKind` (nine kinds) and
 /// adds `SharedLoadReuse` — an audit-only edge emitted when a joiner
-/// attaches to a winner's in-flight artifact (plan §1.4).
+/// attaches to a winner's in-flight artifact.
 #[derive(
     Debug, Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, ts_rs::TS,
 )]
@@ -854,7 +854,7 @@ pub enum MaterializationSubject {
         owner: Arc<str>,
     },
     /// Generic structural materialisation envelope. Subject of every
-    /// `materialize_component_meta_structure` invocation. Plan §3.4.
+    /// `materialize_component_meta_structure` invocation.
     Structure {
         /// Owner scope's canonical id (the scope the materialiser was
         /// dispatched in — `MaterializeStructureCacheKey.scope_canonical_id`).
@@ -872,8 +872,8 @@ pub enum MaterializationSubject {
 /// PUB mirror of the materialiser's `MaterializationScope` axis. Kept
 /// out of `verter_session::component_meta_materialize` so audit
 /// consumers (TS bindings, harness) do not depend on the materialiser
-/// type. Plan §3.4 — must be `pub` (not `pub(crate)`) for the
-/// e2e test integration.
+/// type. Must be `pub` (not `pub(crate)`) for the e2e test
+/// integration.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ts_rs::TS, PartialEq, Eq, Hash)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub enum MaterializationScopeAudit {
@@ -887,7 +887,7 @@ pub enum MaterializationScopeAudit {
 
 /// PUB mirror of `verter_session::semantic_query::ProjectionMode`. Same
 /// rationale as [`MaterializationScopeAudit`] — keeps audit consumers
-/// independent of the dispatch types. Plan §3.4.
+/// independent of the dispatch types.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ts_rs::TS, PartialEq, Eq, Hash)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub enum ProjectionModeAudit {
@@ -899,7 +899,7 @@ pub enum ProjectionModeAudit {
     Shallow,
     /// Expanded — recursively materialize.
     Expanded,
-    /// Skeleton — open-generic body access for cycle detection. Plan §4.21
+    /// Skeleton — open-generic body access for cycle detection.
     /// / R10-2.
     Skeleton,
 }
@@ -917,7 +917,7 @@ impl From<crate::semantic_query::ProjectionMode> for ProjectionModeAudit {
 }
 
 /// Reason a `MaterializeStructurePolicySkip` event fired — captures
-/// the policy-table arm that bailed before dispatch. Plan §3.3.
+/// the policy-table arm that bailed before dispatch.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ts_rs::TS, PartialEq, Eq, Hash)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub enum MaterializeSkipReason {
@@ -937,14 +937,14 @@ pub enum MaterializeSkipReason {
     /// Top-level input shape is non-structural (primitive, literal,
     /// type-param, etc.) — nothing to materialise.
     NonStructuralTopLevel,
-    /// Plan §4.4 / §4.14 / B1 — the registry-route guard's cycle
+    /// The registry-route guard's cycle
     /// check (`ref_root_reaches_transitive_cycle_node` over the
     /// route's actual root identity) fired. The wrapping `Pick`/
     /// `Omit`/`IndexedAccess` is kept symbolic because expanding a
     /// recursive helper would publish a circular shape into the
     /// component-meta surface.
     RegistryRouteCycleGuard,
-    /// Plan §4.13 / §4.14 / B1 — the recursive-helper cycle guard
+    /// The recursive-helper cycle guard
     /// fired on a plain `DeclRef` or userland `InstantiationRef`. The
     /// declaration body reaches itself via a complex helper (e.g.,
     /// `GetItemKeys<T> = DotPathKeys<T>` -> `GetItemKeys<T>`); kept
@@ -993,7 +993,7 @@ pub enum CacheOutcomeKind {
     /// Path-dependent outcome — the materialiser's depth fuse
     /// tripped, the owner scope was unloaded mid-compute, or a
     /// dispatch sub-call returned `Recursive`. Non-cacheable;
-    /// propagates upward as `MaterializeOutcome::Tainted`. Plan §3.3.
+    /// propagates upward as `MaterializeOutcome::Tainted`.
     Tainted,
 }
 
@@ -1354,7 +1354,7 @@ pub fn emit_audit_trace(record: &RustAuditRecord) {
     }
 }
 
-/// Serialise an audit record to JSON (plan §1.4 debug flow).
+/// Serialise an audit record to JSON.
 pub fn emit_json(record: &RustAuditRecord) -> String {
     serde_json::to_string(record).unwrap_or_default()
 }
@@ -1363,9 +1363,8 @@ pub fn emit_json(record: &RustAuditRecord) -> String {
 /// insertion in the active request's accumulator. Pushes both a
 /// typed `IndexedReadyBuildRecord` (direct lane used by the miner
 /// on the happy path) and the equivalent `StructuredComponentMetaEvent`
-/// (fallback lane when the direct records vec is empty — plan
-/// §3 Commit 5 fallback semantics). No-op when no request context is
-/// installed. Plan §3 Commit 5 / §3.A Commit 6.E.
+/// (fallback lane when the direct records vec is empty). No-op when
+/// no request context is installed.
 pub fn record_indexed_ready_built(canonical_id: Arc<str>, whole_hash: Hash16) {
     if let Some(acc) = crate::request_context::current_accumulator() {
         acc.push_indexed_ready_build(IndexedReadyBuildRecord {
@@ -1380,12 +1379,12 @@ pub fn record_indexed_ready_built(canonical_id: Arc<str>, whole_hash: Hash16) {
 }
 
 // ---------------------------------------------------------------------------
-// Stable display key for SemanticNodeId — plan §3.5
+// Stable display key for SemanticNodeId
 // ---------------------------------------------------------------------------
 
 /// Produce a deterministic, human-readable key for a
 /// [`SemanticNodeId`] suitable for audit trace output and
-/// `MaterializationSubject::Structure.node_key` field. Plan §3.5.
+/// `MaterializationSubject::Structure.node_key` field.
 ///
 /// The key is deterministic under one project generation: identical
 /// `(graph, id)` pairs produce identical strings. The format favours
@@ -1623,7 +1622,7 @@ mod tests {
                     winner_request_id: 1,
                     winner_audited: true,
                 },
-                // dup to prove dedup
+                // Dup to prove dedup
                 SharedLoadReuseRecord {
                     canonical_id: Arc::from("/a.ts"),
                     winner_request_id: 2,

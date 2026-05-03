@@ -77,15 +77,16 @@ impl IoPool {
         f: impl FnOnce() -> T + Send + 'static,
     ) -> IoHandle<T> {
         self.submit(move || {
-            // Plan §4.7 — install BOTH scheduler-side (via
+            // Install BOTH scheduler-side (via
             // `OpaqueContextGuard::install` internally) AND session-side (via
             // `RequestContextGuard::install` internally) TLS slots by routing
-            // through `RequestContextLike::install_tls`. Pre-Q, calling
-            // `OpaqueContextGuard::install` directly populated only the
+            // through `RequestContextLike::install_tls`. Calling
+            // `OpaqueContextGuard::install` directly would populate only the
             // scheduler-side slot, leaving session-side TLS unset on worker
             // threads — host-side audit helpers like
-            // `record_dep_signature_merge()` then no-op'd silently because
-            // they read `current_request_context()` on the worker thread.
+            // `record_dep_signature_merge()` would then no-op silently
+            // because they read `current_request_context()` on the worker
+            // thread.
             let _guard: Option<Box<dyn crate::request_context::TlsUninstall + Send>> =
                 context.map(|opaque| Arc::clone(&opaque.0).install_tls());
             f()

@@ -194,7 +194,7 @@ pub struct NapiHostConfig {
     /// When true, timing/memory/store data is captured per request.
     pub auditEnabled: Option<bool>,
     /// Enable per-request semantic footprint capture. Requires
-    /// `auditEnabled = true`. Plan §3 Commit 8 — necessary for
+    /// `auditEnabled = true` — necessary for
     /// `getComponentMetaWithAudit` to return a populated bundle.
     pub footprintCapture: Option<bool>,
 }

@@ -42,7 +42,7 @@ impl VerterHost {
     /// Uses `resolve_component_meta(Expanded)` as the single enrichment owner,
     /// then projects the result through the analysis-owned `extract_component_meta`.
     ///
-    /// wires this through
+    /// Wires this through
     /// [`ComponentMetaResultDb`](crate::component_meta_result_db::ComponentMetaResultDb):
     /// the method consults the project-global result cache first, revalidates
     /// the cached entry's dep-signature against the live host, and only falls
@@ -62,7 +62,7 @@ impl VerterHost {
         let started = component_meta_debug_enabled().then(Instant::now);
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
 
-        // try the final-result cache before installing a request
+        // Try the final-result cache before installing a request
         // view. A warm hit with a valid dep-signature returns with zero
         // resolver work.
         if let Some(warm) = self.try_component_meta_cache_hit(canonical.as_str()) {
@@ -102,7 +102,7 @@ impl VerterHost {
         Some(meta)
     }
 
-    /// look up the project-global final-result cache for the
+    /// Look up the project-global final-result cache for the
     /// owner and return the warm payload only when its recorded
     /// dep-signature revalidates against the live host. Returns `None` on
     /// any miss, stale entry, or missing shallow state.
@@ -128,7 +128,7 @@ impl VerterHost {
         if !dep_sig_valid {
             return None;
         }
-        // Step 4 (architectural-debt-closure rev 10): the DB now stores
+        // The DB stores
         // `CachedComponentMetaResult { analysis, resolution_template, ... }`
         // so the with_resolution path can rehydrate without re-running the
         // cold resolver. The plain `get_component_meta` warm path returns
@@ -136,7 +136,7 @@ impl VerterHost {
         Some(entry.payload.analysis.clone())
     }
 
-    /// publish the cold-build result into the project-global
+    /// Publish the cold-build result into the project-global
     /// final-result cache. The dep-signature carries the owner's whole-hash,
     /// the current project generation, and every transitive file fact the
     /// resolver observed while producing the result. A later lookup
@@ -227,9 +227,9 @@ impl VerterHost {
     /// double `resolve_component_meta(Expanded)` that happens if callers
     /// invoke `get_component_meta()` + `resolve_component_meta()` separately.
     ///
-    /// **Plan §3 Step 4 (architectural-debt-closure rev 10).** Consults
-    /// the `ComponentMetaResultDb` warm cache before falling through to
-    /// the cold resolver. On a cache hit with a valid `dep_signature`,
+    /// **Warm-cache fast path.** Consults the `ComponentMetaResultDb`
+    /// warm cache before falling through to the cold resolver. On a
+    /// cache hit with a valid `dep_signature`,
     /// the cached `ResolutionTemplate` rehydrates a per-request
     /// `ResolvedComponentMetaState` (snapshot reloaded from `IndexedReadyDb`)
     /// and a synthesized `RustAuditRecord` with `from_cache = true`,
@@ -247,7 +247,7 @@ impl VerterHost {
             .get_component_meta_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // Stamp a request id for this call. The `AuditedRequest`
-        // harness (Commit 6) tracks this via `REQUESTS_CREATED_IN_CURRENT_AUDITED_RUN`
+        // harness tracks this via `REQUESTS_CREATED_IN_CURRENT_AUDITED_RUN`
         // so multi-request closures inside `run_custom` can be rejected.
         let request_id = self.next_request_id();
         crate::request_context::increment_requests_created();
@@ -287,7 +287,6 @@ impl VerterHost {
         // the sink — no more fan-out events arrive), then the
         // context guard drops, then the accumulator Arc drops.
         //
-        // Plan §3.A Commit 6.D.
         let _ctx_guard = crate::request_context::RequestContextGuard::install(ctx);
         let _sink_registration = accumulator.as_ref().and_then(|acc| {
             let sink = crate::component_meta_audit::session_vfs_sink::SessionVfsSink::new(
@@ -297,7 +296,7 @@ impl VerterHost {
             self.workspace().register_audit_sink(sink).ok()
         });
 
-        // Plan §3 Step 4: warm-cache short-circuit AFTER request-context
+        // Warm-cache short-circuit AFTER request-context
         // install (so `current_request_id()` returns the fresh id even
         // on the warm path). Validates `dep_signature` against current
         // host state; on success, rehydrates the resolution template
@@ -320,17 +319,17 @@ impl VerterHost {
             true, // include_fallthrough
         );
 
-        // Plan §3 Step 4: cache-write so subsequent identical calls
+        // Cache-write so subsequent identical calls
         // short-circuit through `try_with_resolution_cache_hit`.
         self.publish_component_meta_cache_entry(canonical.as_str(), &resolved, analysis.clone());
 
         Some((analysis, resolved))
     }
 
-    /// Plan §3 Step 4 cache-hit path (architectural-debt-closure rev 10).
-    /// Returns `Some((analysis, resolution))` on a valid warm hit; `None`
-    /// otherwise (miss, stale `dep_signature`, or eviction-race rehydrate
-    /// failure). Caller falls through to the cold resolver on `None`.
+    /// Cache-hit path. Returns `Some((analysis, resolution))` on a
+    /// valid warm hit; `None` otherwise (miss, stale `dep_signature`,
+    /// or eviction-race rehydrate failure). Caller falls through to
+    /// the cold resolver on `None`.
     ///
     /// Synthesizes a `RustAuditRecord` with `from_cache = true` and
     /// `total_ms = 0.0` and publishes it into `host.audit_records` (when
@@ -405,7 +404,7 @@ impl VerterHost {
     /// Drain the `RustAuditRecord` matching `request_id` from the host's
     /// bounded audit-record store. Returns `None` when the record was
     /// never inserted (capture disabled) or already drained by a prior
-    /// `take_audit_record` call. Plan §1.4 / §2.5.
+    /// `take_audit_record` call.
     pub fn take_audit_record(
         &self,
         request_id: u64,

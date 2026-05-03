@@ -244,11 +244,10 @@ pub(super) async fn handle_hover(
         tracing::info!("hover: no type_provider");
     }
 
-    // Plan §3 Commit 9 — provenance enrichment on the primary
-    // verter-only return path. Early returns (virtual file,
-    // child-hover, type-provider merge) intentionally skip
-    // enrichment for now; the opt-in feature targets the
-    // common "verter-only hover on a Vue binding" case.
+    // Provenance enrichment on the primary verter-only return path.
+    // Early returns (virtual file, child-hover, type-provider merge)
+    // intentionally skip enrichment for now; the opt-in feature
+    // targets the common "verter-only hover on a Vue binding" case.
     Ok(enrich_hover_with_provenance(
         server,
         uri,
@@ -1344,8 +1343,7 @@ pub(super) async fn handle_rename(
     Ok(verter_result)
 }
 
-/// Post-process a hover response with provenance enrichment
-/// (plan §3 Commit 9):
+/// Post-process a hover response with provenance enrichment:
 /// - If `hover.provenance` is disabled → return hover unchanged.
 /// - If the enrichment cache has a payload for `(canonical_id,
 ///   position)` → append it to the hover body.
@@ -1385,15 +1383,15 @@ pub(super) fn enrich_hover_with_provenance(
     // every subsequent hover would spawn another futile task.
     // Short-circuit here so the user sees the legacy hover and
     // no blocking-pool slots are burned on a capture-disabled
-    // host. Plan §3 Commit 9.
+    // host.
     let host = server.documents.host_arc();
     if !host.config().audit_enabled || !host.config().footprint_capture {
         return hover;
     }
 
-    // Cache miss + capture enabled — spawn a background task.
-    // Plan §3 Commit 9 "legacy payload immediately; background
-    // AuditedRequest".
+    // Cache miss + capture enabled — return the legacy payload
+    // immediately and spawn a background AuditedRequest to populate
+    // the cache for the next hover.
     let cache = Arc::clone(&server.hover_provenance_cache);
     let canonical_for_task = canonical_id;
     tokio::task::spawn_blocking(move || {
@@ -1415,11 +1413,10 @@ pub(super) fn enrich_hover_with_provenance(
     hover
 }
 
-/// Append a markdown suffix to a hover body. Plan §3 Commit 9 —
-/// used by the hover provenance enrichment to tack on the
-/// "Provenance" section below the legacy hover content. Returns a
-/// constructed hover even if the input was `None` (the enrichment
-/// alone counts as useful output).
+/// Append a markdown suffix to a hover body. Used by the hover
+/// provenance enrichment to tack on the "Provenance" section below
+/// the legacy hover content. Returns a constructed hover even if the
+/// input was `None` (the enrichment alone counts as useful output).
 fn append_markdown(hover: Option<Hover>, suffix: &str) -> Hover {
     match hover {
         Some(mut h) => {

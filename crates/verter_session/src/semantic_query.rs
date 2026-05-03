@@ -68,7 +68,7 @@ pub struct ScopeId {
     pub local_scope: Option<u32>,
 }
 
-/// Source-scope sidecar tag for a [`SemanticNodeId`] (plan §7.10 + C1).
+/// Source-scope sidecar tag for a [`SemanticNodeId`].
 ///
 /// Every non-exempt interned node records the scope it was first interned in
 /// so dispatch builders that need per-base-scope resolution (e.g. selecting
@@ -252,7 +252,7 @@ impl MapperKind {
     /// - Anything else → [`MapperKind::Computed`].
     ///
     /// Ported verbatim from the retired `mapper_value_is_identity_t_of_k`
-    /// helper (plan §2 Pass C5) so existing fast-path coverage is
+    /// helper so existing fast-path coverage is
     /// preserved.
     ///
     /// **Path C C6a item 7.** `mapper_param_node` is the mapper's
@@ -336,7 +336,7 @@ pub enum IndexKey {
 /// - `Shallow`: expose one level of surface members but do not recurse into
 ///   them.
 /// - `Expanded`: recursively materialize the requested projection.
-/// - `Skeleton`: open-generic body access for cycle detection. Plan §4.21
+/// - `Skeleton`: open-generic body access for cycle detection.
 ///   / R10-2. `build_instantiate` synthesizes `TypeParam` shells for
 ///   unbound type parameters when invoked in this mode, preserving
 ///   project-rule "Navigate/Shallow over open generics preserves type
@@ -377,7 +377,7 @@ pub enum HopDecision {
 /// LSP hover, etc.) so no parallel "projected member" type has to exist.
 ///
 /// `value` is a reference-style [`SemanticNodeId`] under the lazy-materialisation
-/// rule (plan §2): the member's body is **not** eagerly expanded when the
+/// rule: the member's body is **not** eagerly expanded when the
 /// owning surface is interned. A walker that needs the body issues
 /// [`SemanticQueryApi::execute`] with a [`SemanticQueryKey::ProjectPath`]
 /// rooted at `value`; the family memo dedups across distinct entry paths.
@@ -404,7 +404,7 @@ pub struct IndexSignature {
 /// One-level surface view of a semantic node. Members are ordered to keep
 /// hashing stable.
 ///
-/// Extended in B1a (plan §2 lazy-materialisation block) to carry the full
+/// Extended in B1a to carry the full
 /// member + signature metadata previously held by the soon-to-be-retired
 /// `ProjectedMember` / `ProjectedSurface` / `ProjectedKeyspace` types in
 /// `verter_semantic::analysis::type_solver::query_engine`. Consumers should
@@ -439,7 +439,7 @@ impl std::hash::Hash for SurfaceView {
 /// [`CompletionFence`](crate::completion_fence::CompletionFence), so
 /// final-result validation is transitive, not root-key-only.
 ///
-/// `Ord` is derived for plan §7 / the `DepSignatureInterner`
+/// `Ord` is derived for `DepSignatureInterner`
 /// canonicalises bucket contents by sorting `(canonical, version)` pairs
 /// before equality comparison so dep_signatures with the same logical
 /// content but different declaration order share a single Arc.
@@ -465,7 +465,7 @@ pub struct CacheRead<T> {
 // Derivation / origin layer (plan B2 + Derivation/Origin Layer Contract)
 // ──────────────────────────────────────────────────────────────────────────
 
-/// Required edge kinds for the derivation/origin layer (plan §2 Derivation
+/// Required edge kinds for the derivation/origin layer ( Derivation
 /// + Origin Layer Contract). Names are normative — semantics MUST NOT drift.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OriginEdgeKind {
@@ -536,7 +536,7 @@ pub enum OriginMeta {
 
 /// One origin edge: a derivation hop from a source-set to a result. Carries
 /// the per-edge dep-signature snapshot that walkers merge into their fence
-/// at hop-time (plan §7.16 — edges are the only dep-sig propagation route
+/// at hop-time ( — edges are the only dep-sig propagation route
 /// for builders).
 #[derive(Debug, Clone)]
 pub struct OriginEdge {
@@ -562,7 +562,7 @@ pub struct OriginEdge {
 /// path / projection / origin-edge metrics are reduced to p50 / p95 from
 /// host-side reservoir-sampled histograms (cap 8192 samples per metric).
 ///
-/// Field set is normative against plan §6.3 — every field listed there
+/// Field set is normative against — every field listed there
 /// (expected-to-fire + exceptional-path) must appear here, and every
 /// field here must appear in one of those lists. F2's
 /// `counter_taxonomy_matches_plan` test enforces the bidirectional
@@ -629,15 +629,15 @@ pub enum QueryError {
     /// The completion fence exhausted its retry budget (default: 3).
     UnstableState { attempts: u8 },
     /// The path walker re-entered an alias it had already visited on the
-    /// same `build_project_path` invocation (plan §3 C3). Carries the
+    /// same `build_project_path` invocation. Carries the
     /// cycle participants so diagnostics can render the chain end-to-end.
     AliasCycle { chain: Arc<[Arc<str>]> },
     /// Recursive back-edge sentinel emitted when dispatch detects a
     /// declaration expanding into itself (e.g., `type TreeNode = {
     /// children: TreeNode[] }`). `raise_node_to_type_expr` converts
     /// this to [`TypeExpr::RecursiveRef`] so the materialiser stops at
-    /// the back-edge instead of recursing indefinitely. Plan §5.8 /
-    /// plan §1.4 recursion handling.
+    /// the back-edge instead of recursing indefinitely. /
+    /// recursion handling.
     RecursiveRef { name: Arc<str> },
     /// Catch-all for text-bearing failures surfaced to the caller.
     Other(Arc<str>),
@@ -831,7 +831,7 @@ pub enum SemanticQueryKey {
         key: Arc<HostResolvedNamedTypeKey>,
     },
     /// Assignability / relation query between `source` and `target` semantic
-    /// nodes (plan §2 Relation engine + §3 Change S). Dispatches through
+    /// nodes. Dispatches through
     /// `ProjectSemanticDispatch::relate_nodes` and memoises the result in
     /// [`SemanticGraphStore::relation_memo`](crate::semantic_query_memo::SemanticGraphStore)
     /// with dep-signature fencing. Added in Phase D §5.4 WIP-S.
@@ -844,7 +844,7 @@ pub enum SemanticQueryKey {
     /// payload to a single `SemanticNodeId` representing the macro's
     /// effective TypeExpr.
     ///
-    /// binding amendment. This is the SOLE new variant
+    /// Binding amendment. This is the SOLE new variant
     /// introduced in the other 3 originally proposed
     /// (`MaterializeSurface`, `ResolvePublicInstance`,
     /// `ResolveFallthroughSurface`) are non-variant dispatch helpers
@@ -894,7 +894,7 @@ pub struct InferBinding {
     pub bound: SemanticNodeId,
 }
 
-/// Tri-state result of a `Relate` judgement (plan §2 Relation engine).
+/// Tri-state result of a `Relate` judgement.
 ///
 /// All three variants memoise with dep-signature fencing — `Unknown` is
 /// included so repeated cyclic re-entry short-circuits without recomputing
@@ -906,7 +906,7 @@ pub enum RelationResult {
     Unknown,
 }
 
-/// One element of a [`SemanticNodeData::Tuple`] shell (plan §3 B4 + §7.14).
+/// One element of a [`SemanticNodeData::Tuple`] shell.
 ///
 /// Preserves the declaration-site metadata the dispatcher needs to render
 /// tuples correctly: the optional label, whether the slot is optional (`?`),
@@ -925,7 +925,7 @@ pub struct TupleElement {
 /// Immutable semantic-node payload. Storage for this enum is owned by the
 /// shared semantic graph; node ids hand out views without copying.
 ///
-/// **Publication boundary (plan §7.14).** Solver `Infer`, `Rest`, and
+/// **Publication boundary.** Solver `Infer`, `Rest`, and
 /// `RecursiveRef` nodes are scratch-only and never enter this enum. Solver
 /// `Error` values publish at the boundary as [`SemanticNodeData::Opaque`]
 /// carrying the concrete [`QueryError`]. Functions publish through
@@ -953,7 +953,7 @@ pub enum SemanticNodeData {
     /// strings), `Literal(String("idle"))` is the specific literal.
     Literal(LiteralValue),
     Opaque(QueryError),
-    /// Array shell (plan §3 B4 + §7.14). Publishes `T[]` / `Array<T>` /
+    /// Array shell. Publishes `T[]` / `Array<T>` /
     /// `ReadonlyArray<T>` directly rather than routing through generic
     /// `Array<T>` declaration instantiation — array indexed-access is
     /// hot and must not pay generic-instantiation + prototype-surface
@@ -964,7 +964,7 @@ pub enum SemanticNodeData {
         element: SemanticNodeId,
         readonly: bool,
     },
-    /// Tuple shell (plan §3 B4 + §7.14). Preserves per-element label /
+    /// Tuple shell. Preserves per-element label /
     /// optionality / rest metadata so consumers can render tuples without
     /// going through a side channel. Each element's `value` is a regular
     /// [`SemanticNodeId`] under the lazy-materialisation rule.
@@ -972,11 +972,11 @@ pub enum SemanticNodeData {
         elements: Arc<[TupleElement]>,
         readonly: bool,
     },
-    /// Template-literal shell (plan §3 B4 + §7.14). Carries the
+    /// Template-literal shell. Carries the
     /// alternating quasi text spans and expression references verbatim
     /// from the parser's [`TypeExpr::TemplateLiteral`] shape. Relation-
     /// engine support for infer-heavy template matching remains a
-    /// separate follow-up (plan §1.4) — the shell carrier itself is not
+    /// separate follow-up — the shell carrier itself is not
     /// deferred.
     TemplateLiteral {
         quasis: Arc<[Arc<str>]>,
@@ -1032,7 +1032,7 @@ pub enum SemanticNodeData {
         /// Declaration-site constraint (`T extends Constraint`). Lowered
         /// once at declaration time; callers substituting the TypeParam
         /// do NOT re-substitute constraint or default (those carry
-        /// declaration-local meaning, not call-site meaning — plan §3
+        /// declaration-local meaning, not call-site meaning
         /// Cluster A + anti-pattern #4 structural basis).
         constraint: Option<SemanticNodeId>,
         /// Declaration-site default (`T = Default`). Same contract as
@@ -1048,7 +1048,7 @@ pub enum SemanticNodeData {
         display_name: Arc<str>,
     },
     /// `infer X` placeholder inside a conditional's `extends` clause
-    /// (plan §3 Cluster A). Modelled as an explicit variant rather than
+    /// Modelled as an explicit variant rather than
     /// encoded via scope overloading (rejects anti-pattern #3 — scope-
     /// as-discriminator). The `name` is the infer binding name the
     /// `true` branch will substitute the bound type into.
@@ -1058,7 +1058,7 @@ pub enum SemanticNodeData {
     // Declaration identity is carried as `DeclIdentity` in
     // `SemanticQueryKey::Instantiate.base` instead of being interned as
     // a node in the arena.
-    /// Conditional shell node (plan §3 C2 + §2 lazy block).
+    /// Conditional shell node.
     ///
     /// Carries the `check extends extends ? true_branch_ref : false_branch_ref`
     /// structure without recursively materialising either branch. Produced
@@ -1103,7 +1103,7 @@ pub enum SemanticNodeData {
     /// [`HostResolvedNamedTypeKey`]), so reads are self-validating within
     /// one project generation.
     VueMacroElements(Arc<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>),
-    /// Phase D §5.6 WIP-L — function shape (plan §2 architectural decision).
+    // §5.6 WIP-L — function shape.
     ///
     /// Classes / interfaces lower to `SemanticNodeData::Object` with heritage
     /// merged; only function signatures have distinct semantics (call
@@ -1114,7 +1114,7 @@ pub enum SemanticNodeData {
         return_type: SemanticNodeId,
         type_parameters: Arc<[TypeParamDecl]>,
     },
-    /// Lazy declaration-reference carrier (plan §3 Step 6.1.A, D26).
+    /// Lazy declaration-reference carrier.
     ///
     /// Produced by [`shallow_lower_type_expr`] in `Navigate` mode when it
     /// encounters a `TypeExpr::Ref { name, type_arguments: [] }`. Identity
@@ -1130,7 +1130,7 @@ pub enum SemanticNodeData {
     DeclRef {
         identity: DeclIdentity,
     },
-    /// Lazy generic-application carrier (plan §3 Step 6.1.A, D26).
+    /// Lazy generic-application carrier.
     ///
     /// Produced by [`shallow_lower_type_expr`] in `Navigate` mode when it
     /// encounters a `TypeExpr::Ref { name, type_arguments: [...non-empty] }`.
@@ -1189,7 +1189,7 @@ impl SemanticNodeData {
 // `(SemanticNodeData, NodeScopeId)`. Manual `Hash`/`Eq`/`PartialEq`
 // rather than a derive because:
 //
-// - **TypeParam** identity excludes `display_name` per plan §14.2 F11.
+// - **TypeParam** identity excludes `display_name` per F11.
 //   `decl + param_index` (with `constraint` / `default`) is the
 //   semantic identity; `display_name` is a presentational field used
 //   for Debug output and error messages. Two `TypeParam` nodes with
@@ -1289,7 +1289,7 @@ impl PartialEq for SemanticNodeData {
                     param_index: ai,
                     constraint: ac,
                     default: adf,
-                    // `display_name` intentionally excluded per plan §14.2 F11.
+                    // `display_name` intentionally excluded per F11.
                     display_name: _,
                 },
                 Self::TypeParam {
@@ -1404,7 +1404,7 @@ impl std::hash::Hash for SemanticNodeData {
                 param_index,
                 constraint,
                 default,
-                // `display_name` intentionally excluded per plan §14.2 F11.
+                // `display_name` intentionally excluded per F11.
                 display_name: _,
             } => {
                 decl.hash(state);
@@ -1454,7 +1454,7 @@ impl std::hash::Hash for SemanticNodeData {
     }
 }
 
-/// Parameter of a [`SemanticNodeData::Function`] (plan §2 + §3 Change L).
+/// Parameter of a [`SemanticNodeData::Function`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FunctionParam {
     pub name: Option<Arc<str>>,
@@ -1463,7 +1463,7 @@ pub struct FunctionParam {
     pub rest: bool,
 }
 
-/// Type-parameter declaration on a [`SemanticNodeData::Function`] (plan §2).
+/// Type-parameter declaration on a [`SemanticNodeData::Function`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TypeParamDecl {
     pub name: Arc<str>,
@@ -1660,7 +1660,7 @@ mod tests {
         assert_ne!(a, b);
     }
 
-    /// F2 — counter taxonomy matches plan §6.3 (plan §3 F2).
+    /// F2 — counter taxonomy matches
     ///
     /// Asserts bidirectional set-equality between `SemanticGraphStats`
     /// fields and §6.3's expected-to-fire + exceptional-path counter
@@ -1674,7 +1674,7 @@ mod tests {
     /// catches additions, renames, and removals without requiring
     /// reflection.
     ///
-    /// §6.3 source-of-truth field list (see plan §3 F2 + §6.3):
+    /// §6.3 source-of-truth field list (see F2 + §6.3):
     /// - Expected-to-fire: hits, misses, waits_ms, in_flight_peak,
     ///   memo_entry_count, origin_edge_count, instantiate_count,
     ///   conditional_decided_count, conditional_deferred_count,
@@ -1690,7 +1690,7 @@ mod tests {
         let stats = SemanticGraphStats::default();
         let debug = format!("{stats:?}");
 
-        // Expected-to-fire counters (plan §6.3).
+        // Expected-to-fire counters.
         let expected_to_fire = [
             "hits",
             "misses",
@@ -1716,13 +1716,12 @@ mod tests {
         for field in expected_to_fire {
             assert!(
                 debug.contains(&format!("{field}: ")),
-                "SemanticGraphStats is missing expected-to-fire counter `{field}` \
-                 (plan §6.3)"
+                "SemanticGraphStats is missing expected-to-fire counter `{field}`"
             );
         }
 
         // Exceptional-path counters (legitimately zero on the corpus;
-        // §6.2 forcing tests prove they exist and increment under
+        // forcing tests prove they exist and increment under
         // dedicated fixtures).
         let exceptional_path = [
             "budget_fallback_count",
@@ -1734,40 +1733,39 @@ mod tests {
         for field in exceptional_path {
             assert!(
                 debug.contains(&format!("{field}: ")),
-                "SemanticGraphStats is missing exceptional-path counter `{field}` \
-                 (plan §6.3)"
+                "SemanticGraphStats is missing exceptional-path counter `{field}`"
             );
         }
 
         // Cardinality check: total field count on `SemanticGraphStats`
         // equals expected-to-fire + exceptional-path. Catches a field
-        // added to the struct without a corresponding §6.3 entry —
-        // which would otherwise slip past the one-way `contains`
-        // checks above. Uses `": "` as the field delimiter in Debug
-        // output (every primitive field emits exactly one `: `
-        // separator between name and value).
+        // added to the struct without a corresponding entry — which
+        // would otherwise slip past the one-way `contains` checks
+        // above. Uses `": "` as the field delimiter in Debug output
+        // (every primitive field emits exactly one `: ` separator
+        // between name and value).
         let expected_total = expected_to_fire.len() + exceptional_path.len();
         let field_count = debug.matches(": ").count();
         assert_eq!(
             field_count,
             expected_total,
             "SemanticGraphStats has {field_count} fields in Debug output but \
-             plan §6.3 specifies {expected_total} counters (expected_to_fire = {}, \
+             {expected_total} counters were expected (expected_to_fire = {}, \
              exceptional_path = {}). A field was added/removed without updating \
-             this test and plan §6.3; see debug output:\n{debug}",
+             this test; see debug output:\n{debug}",
             expected_to_fire.len(),
             exceptional_path.len(),
         );
     }
 
-    /// F2 — navigation-once invariant contract (plan §3 F2).
+    /// F2 — navigation-once invariant contract.
     ///
     /// The contract says: for N distinct concrete instantiations of the
     /// same parameterised declaration, subexpression lowering count
     /// equals the number of structurally distinct visited subexpressions
     /// — not N × body_size. This test locks the contract; the counter
     /// `decl_subexpression_lowering_count` that drives the strict form
-    /// is a post-track refinement per plan §1.4 follow-up item 4.
+    /// is a post-track refinement per follow-up item 4.
     ///
     /// Today the invariant is enforced by the family memo (B1b) which
     /// dedups every `ProjectPath(member, path, mode)` sub-query across

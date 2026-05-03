@@ -1,15 +1,12 @@
-//! Relocated component-meta cache key types.
+//! Component-meta cache key types.
 //!
-//! Plan §3 D3.2 sub-task 3.2.1 (architectural-debt-closure revision 10).
+//! These keys were previously private to `component_meta_query_engine.rs`.
+//! The engine's authoritative `FxHashMap` caches now live in
+//! [`crate::component_meta_caches`] as host-owned typed DBs. Both the
+//! engine's per-request read-through views and the host DBs share
+//! these key types, so they live in a public-to-the-crate module.
 //!
-//! These keys were previously private to `component_meta_query_engine.rs`
-//! (lines 85-143 area). Step 3 closure migrates the engine's authoritative
-//! `FxHashMap` caches to host-owned typed DBs in
-//! [`crate::component_meta_caches`]. Both the engine's per-request
-//! read-through views and the host DBs share these key types, so they
-//! move into a public-to-the-crate module.
-//!
-//! ## D3.5 — `Arc<str>` / `Arc<TypeExpr>` field migration
+//! ## `Arc<str>` / `Arc<TypeExpr>` fields
 //!
 //! Each previously-`String` field becomes `Arc<str>` and each previously-
 //! owned `TypeExpr` (in `PreparedSubstitutionKey::Entries`) becomes

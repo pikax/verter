@@ -14,10 +14,9 @@
 //!   (`read_full_source`, `resolve_jsdoc_block`, `map_jsdoc_tag`,
 //!   `parse_jsdoc_tag_payload`, `resolve_jsdoc_tag_type`).
 //!
-//! Lines 166-768 of the post-commit-13 `meta_resolve.rs` shell.
-//! Visibility escalation: the formerly-private `struct HostComponentMetaResolver`
-//! and the JSDoc free fns are escalated to `pub(crate)` so the
-//! `host_methods.rs` impl block (commit 9) keeps calling them via the
+//! Visibility: the previously-private `struct HostComponentMetaResolver`
+//! and the JSDoc free fns are exposed at `pub(crate)` so the
+//! `host_methods.rs` impl block keeps calling them via the
 //! shell's `pub(crate) use jsdoc_resolve::*;` re-export.
 
 use crate::host_manage::{component_meta_debug, component_meta_debug_enabled};

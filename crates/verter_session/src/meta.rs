@@ -420,7 +420,7 @@ impl MetaProject {
 // MetaSession
 // ---------------------------------------------------------------------------
 
-/// Path C C12 — session execution mode (plan §2 Stage 7 Pass C12).
+/// Path C C12 — session execution mode.
 ///
 /// Separates interactive-latency callers (LSP) from batch-throughput
 /// callers (test harness, MCP server). Interactive mode matches the
@@ -474,7 +474,7 @@ impl MetaSession {
     }
 
     /// Access the project-level host. Needed by the audit-bundle path
-    /// (plan §3 Commit 8) to call `take_audit_record` after a
+    /// to call `take_audit_record` after a
     /// resolution completes.
     pub fn host(&self) -> &VerterHost {
         self.project.host()

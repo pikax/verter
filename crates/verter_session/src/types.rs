@@ -166,7 +166,7 @@ pub struct HostConfig {
     /// a per-engine-construction-scoped fuse rail (§1.4) that
     /// terminates utility-shape recursion (`Partial<T>` / `Pick<T,K>` /
     /// etc.) before recursion exhausts the call stack.
-    /// promotes the BUDGET (not the per-request COUNTER — that lives
+    /// Promotes the BUDGET (not the per-request COUNTER — that lives
     /// in the request-scoped `RequestBudget` accessed via TLS) to a
     /// constructor-time `HostConfig` field so dispatch consumers
     /// observe the same cap.
@@ -186,7 +186,7 @@ pub struct HostConfig {
 /// [`HostConfig::validate`].
 #[derive(Debug, Clone, Eq, PartialEq, thiserror::Error)]
 pub enum HostConfigError {
-    #[error("footprint_capture requires audit_enabled; enable both or neither (plan §1.4)")]
+    #[error("footprint_capture requires audit_enabled; enable both or neither")]
     FootprintCaptureWithoutAudit,
 }
 
@@ -1231,8 +1231,8 @@ pub(crate) struct CompileCacheEntry {
     /// a profile change evicts both. Consolidating them under one cache
     /// would require conflating COMPILE-event and FILE-CONTENT-event
     /// invalidation, which the existing system deliberately keeps separate.
-    /// classification: `legitimate-authority` (sub-mirror). See
-    /// sub-plan §6b.2.F1.
+    /// Classification: `legitimate-authority` (sub-mirror). See
+    /// sub-
     pub(crate) import_routes: FxHashMap<String, DependencyResolution>,
     pub(crate) dependencies: std::collections::BTreeSet<String>,
     pub(crate) resolved_type_hashes: FxHashMap<(String, String), Hash16>,
@@ -1465,7 +1465,7 @@ pub struct MetaProvenance {
     /// structural interning lands).
     pub node_arena_intern_miss: std::sync::atomic::AtomicU64,
     /// Time spent waiting on `ArenaInner` mutex acquisition during pushes
-    /// (C17 observability per plan §2 Pass C17).
+    /// (C17 observability per Pass C17).
     pub node_arena_inner_write_wait_ns: std::sync::atomic::AtomicU64,
     /// Scheduler submission count (mirrored from
     /// `verter_scheduler::scheduler::SchedulerCounters::submit_count` via

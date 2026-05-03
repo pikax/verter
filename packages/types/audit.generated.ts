@@ -21,7 +21,7 @@ export type CacheOutcomeKind = "Hit" | "Miss" | "JoinedWait" | "Sentinel" | "Col
 /**
  * Per-context cache-event tally. No `is_approximate` field — values
  * are EXACT per-request because they come from the request's own
- * atomic counters (plan §1.4).
+ * atomic counters.
  */
 export type CacheOutcomeTally = { 
 /**
@@ -211,8 +211,8 @@ duration_ms: number, };
  * PUB mirror of the materialiser's `MaterializationScope` axis. Kept
  * out of `verter_session::component_meta_materialize` so audit
  * consumers (TS bindings, harness) do not depend on the materialiser
- * type. Plan §3.4 — must be `pub` (not `pub(crate)`) for the
- * e2e test integration.
+ * type. Must be `pub` (not `pub(crate)`) for the e2e test
+ * integration.
  */
 export type MaterializationScopeAudit = "TopLevel" | "Nested";
 
@@ -270,7 +270,7 @@ mode: ProjectionModeAudit, } };
 
 /**
  * Reason a `MaterializeStructurePolicySkip` event fired — captures
- * the policy-table arm that bailed before dispatch. Plan §3.3.
+ * the policy-table arm that bailed before dispatch.
  */
 export type MaterializeSkipReason = "FunctionPropertyAtNested" | "GenericRefWithArgsTopLevel" | "PackageRefTopLevel" | "RegistryRouteNotInlineMaterialisable" | "NonStructuralTopLevel" | "RegistryRouteCycleGuard" | "RecursiveHelperCycleGuard";
 
@@ -303,7 +303,7 @@ export type NodeId = number;
 /**
  * One node entry in the derivation subgraph. Identity fields
  * (`kind`, `named_identity`, `structural_hash`) participate in the
- * deterministic NodeId assignment (plan §1.4).
+ * deterministic NodeId assignment.
  */
 export type NodeRecord = { 
 /**
@@ -318,7 +318,7 @@ kind: SemanticNodeKind,
 named_identity: NamedIdentity | null, 
 /**
  * Content-deterministic hash distinguishing anonymous nodes.
- * Commit 4 computes this from the semantic graph's node data.
+ * Computed from the semantic graph's node data.
  */
 structural_hash: [number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number], 
 /**
@@ -337,7 +337,7 @@ export type NormalizeKind = "Union" | "Intersection" | "Simplify";
  * Audit-side origin edge kind. Mirrors the semantic graph's
  * `verter_session::semantic_query::OriginEdgeKind` (nine kinds) and
  * adds `SharedLoadReuse` — an audit-only edge emitted when a joiner
- * attaches to a winner's in-flight artifact (plan §1.4).
+ * attaches to a winner's in-flight artifact.
  */
 export type OriginEdgeKind = "Instantiate" | "SubstituteTypeParam" | "ConditionalSelect" | "InferBind" | "ProjectMember" | "ProjectIndex" | "ProjectPath" | "Normalize" | "AliasResolve" | "SharedLoadReuse";
 
@@ -415,7 +415,7 @@ key: string, } } | "KeyOf";
 /**
  * PUB mirror of `verter_session::semantic_query::ProjectionMode`. Same
  * rationale as [`MaterializationScopeAudit`] — keeps audit consumers
- * independent of the dispatch types. Plan §3.4.
+ * independent of the dispatch types.
  */
 export type ProjectionModeAudit = "Identity" | "Navigate" | "Shallow" | "Expanded" | "Skeleton";
 
@@ -463,7 +463,7 @@ terminated: ChainTermination,
 /**
  * Shared-load reuses observed for the queried canonical (only
  * populated by `why_loaded`). Renderers display these as terminal
- * branches per plan §2.7.
+ * branches per
  */
 shared_load_terminals: Array<SharedLoadReuseRecord>, };
 
@@ -511,7 +511,7 @@ export type RustAuditRecord = {
 /**
  * Monotonic request id set at
  * `get_component_meta_with_resolution` entry. Decimal-string
- * transport (plan §1.4) — non-zero, unique per audited request.
+ * transport — non-zero, unique per audited request.
  */
 request_id: string, 
 /**
@@ -541,10 +541,10 @@ memory: RustMemoryAudit,
  */
 footprint: RustSemanticFootprintAudit | null, 
 /**
- * Plan §3 Step 4 (architectural-debt-closure rev 10): true when
- * the audited request was satisfied from the warm component-meta
- * result cache (HostFenceValidator validated the cached
- * `dep_signature`). Cold cold-resolver runs leave this `false`.
+ * True when the audited request was satisfied from the warm
+ * component-meta result cache (HostFenceValidator validated the
+ * cached `dep_signature`). Cold cold-resolver runs leave this
+ * `false`.
  * Audit consumers may aggregate against this flag to separate
  * warm-cache replay from genuine resolver work.
  *
@@ -588,7 +588,7 @@ workspace_after_bytes: string, };
 
 /**
  * Semantic footprint attached to an audited request. Populated by the
- * footprint miner (Commit 4) from the accumulator's raw events.
+ * footprint miner from the accumulator's raw events.
  * Field docs are carried by the individual record-vector type
  * declarations below.
  */
@@ -693,33 +693,33 @@ prepared_type_decls: number,
 prepared_value_decls: number, 
 /**
  * Total `materialize_component_meta_structure` invocations
- * observed during the request. Plan §3.2.
+ * observed during the request.
  */
 materialize_structure_calls: string, 
 /**
  * Subset of `materialize_structure_calls` that were satisfied by
  * the materialiser's `MaterializeStructureDb` peek (warm cache
- * hit). Plan §3.2.
+ * hit).
  */
 materialize_structure_cache_hits: string, 
 /**
  * Lock acquisitions on the per-scope `NodeArena` dedup index.
- * Plan §3.2.
+ *
  */
 node_arena_lock_acquisitions: string, 
 /**
  * Lock acquisitions on the family-map dep-signature reverse
- * index. Plan §3.2.
+ * index.
  */
 family_map_lock_acquisitions: string, 
 /**
  * Times a `dep_signature` was merged into the materialiser's
- * `local_fence`. Plan §3.2.
+ * `local_fence`.
  */
 dep_signature_merges: string, 
 /**
  * Subset of `dep_signature_merges` that hit an existing intern
- * bucket (avoided allocation). Plan §3.2 / §7.
+ * bucket (avoided allocation).
  */
 dep_signature_intern_hits: string, };
 
@@ -766,8 +766,7 @@ serialize_ms: number, };
 
 /**
  * `#[non_exhaustive]` + `Other` catchall future-proofs against new
- * `SemanticNodeData` variants landing after Commit 3 without breaking
- * the audit.
+ * `SemanticNodeData` variants without breaking the audit.
  */
 export type SemanticNodeKind = "DeclAnchor" | "Instantiated" | "Alias" | "Conditional" | "Union" | "Intersection" | "Tuple" | "Object" | "Array" | "Primitive" | "TypeParam" | "Opaque" | "IndexedAccess" | "KeyOf" | "TypeOf" | "Mapped" | "TemplateLiteral" | "NormalizeUnion" | "NormalizeIntersection" | { "Other": { 
 /**
@@ -778,7 +777,7 @@ name: string, } };
 
 /**
  * Joiner record — this request attached to a winner's in-flight
- * cache slot instead of starting fresh. Plan §2.7.
+ * cache slot instead of starting fresh.
  */
 export type SharedLoadReuseRecord = { 
 /**
@@ -1067,7 +1066,7 @@ cache_hit: boolean,
  */
 bytes_read: string, 
 /**
- * Request-id the sink routed this event to — plan §3.A Commit 6.D.
+ * Request-id the sink routed this event to.
  * Session-side [`SessionVfsSink`] only pushes events whose
  * [`verter_workspace::audit_sink::VfsReadEvent::request_id`]
  * matches the request this sink was registered for, so this

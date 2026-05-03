@@ -222,28 +222,19 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
 
-    /// **Step 2 deletion target.** Plan §3 Step 6.4 requires deletion
-    /// of this walker — the architectural target is `PathWalker`
-    /// (in `project_semantic_dispatch/walk.rs`) as the only path-precise
-    /// walker. The Step 11 tombstone command
-    /// `! grep -rn "enumerate_member_surface_keys_via_route" crates/ packages/ scripts/`
-    /// must return 0 hits.
-    ///
-    /// **Status (post Step 1.5).** The Step 1.5 dispatch-substitution
-    /// parity work (Pick<X, K>['member'], mapped+conditional infer P,
-    /// Method-as-Function lowering) closed the substitution-parity gap
-    /// that previously blocked this walker's deletion. The walker
-    /// remains in service of legacy member-route resolution and
-    /// projection-rescue helpers (`expr_needs_projection_rescue`,
+    /// **Deletion target.** This walker is scheduled for removal — the
+    /// architectural target is `PathWalker` (in
+    /// `project_semantic_dispatch/walk.rs`) as the only path-precise
+    /// walker. The walker remains in service of member-route resolution
+    /// and projection-rescue helpers (`expr_needs_projection_rescue`,
     /// `compare_type_expr_improvement`,
     /// `select_imported_materialization_scope`, and the cycle-detection
-    /// migration helper `lowered_root_reaches_transitive_cycle`) that
-    /// Step 2's caller-class parity matrix is responsible for migrating.
-    /// Once those callers retire, this walker and its 13 internal call
-    /// sites can ALL be deleted in the same commit (per CLAUDE.md
-    /// "Legacy Code Deletion" — no shims).
+    /// migration helper `lowered_root_reaches_transitive_cycle`). Once
+    /// those callers migrate to the dispatch path, this walker and its
+    /// 13 internal call sites should be deleted in the same change
+    /// (per CLAUDE.md "Legacy Code Deletion" — no shims).
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    #[allow(dead_code)] // deletion in 5g per call-graph closure
+    #[allow(dead_code)] // deletion target — see doc comment above
     fn enumerate_member_surface_keys_via_route(
         &mut self,
         resolution_scope_canonical_id: &str,

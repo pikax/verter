@@ -55,9 +55,9 @@
 //!   `ambient_resolve.rs` (`lookup_ambient_symbol`,
 //!   `record_ambient_dependency`).
 //!
-//! Forbidden surface — see the sub-plan §10a.1.D. Omitted methods are
-//! not only absent here; the architecture guard ensures resolver-tier
-//! code cannot escape the trait by naming `VerterHost` directly.
+//! Forbidden surface — omitted methods are not only absent here; the
+//! architecture guard ensures resolver-tier code cannot escape the
+//! trait by naming `VerterHost` directly.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;

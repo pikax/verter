@@ -28,7 +28,6 @@ use verter_session::component_meta_audit::RustAuditRecord;
 use wasm_bindgen::prelude::*;
 
 /// WASM audit bundle — mirror of the NAPI binding's bundle shape.
-/// Plan §3 Commit 8.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WasmAuditBundle {
@@ -1140,9 +1139,8 @@ impl WasmMetaSession {
 
     /// Synchronous audit bundle — returns
     /// `{ analysis: FfiComponentMeta, resolution: FfiComponentMetaResolution,
-    ///   record: RustAuditRecord } | null` as a JS object. Plan §3
-    /// Commit 8. Host must have `audit_enabled` + `footprint_capture`
-    /// set; otherwise throws.
+    ///   record: RustAuditRecord } | null` as a JS object. Host must
+    /// have `audit_enabled` + `footprint_capture` set; otherwise throws.
     ///
     /// NOT a Promise. Consumer-side Promise ergonomics (if desired)
     /// live in `packages/wasm/audit.ts`.
@@ -1176,9 +1174,8 @@ impl WasmMetaSession {
     /// Run the Rust walker against a committed audit record (JSON
     /// string from a prior `getComponentMetaWithAudit` round-trip
     /// through `JSON.stringify`) rooted at `canonical_id`. Returns
-    /// the `ProvenanceChain` encoded as JSON string. Plan §2.8 —
-    /// single walker implementation; TS helpers format the JSON via
-    /// pure rendering.
+    /// the `ProvenanceChain` encoded as JSON string. Single walker
+    /// implementation; TS helpers format the JSON via pure rendering.
     #[wasm_bindgen(js_name = "whyLoadedFromAuditJson")]
     pub fn why_loaded_from_audit_json(
         &self,

@@ -1,14 +1,14 @@
 //! Path-walking helper for [`ProjectSemanticDispatch::build_project_path`]
-//! (plan §3 C3). Extracted from the monolithic `project_semantic_dispatch`
+//! Extracted from the monolithic `project_semantic_dispatch`
 //! module in Phase D §5.2 WIP-Split. No semantic changes.
 
 use super::*;
 use crate::semantic_query::{DeclIdentity, QueryError, SemanticQueryApi};
 
-/// Alias-cycle tracking identity (plan §3 C3). `(canonical_id, name)`.
+/// Alias-cycle tracking identity. `(canonical_id, name)`.
 type AliasCycleIdentity = (Arc<str>, Arc<str>);
 
-/// Worklist frame for the iterative `walk_path` driver (plan §2
+/// Worklist frame for the iterative `walk_path` driver (
 /// "Iterative worklist").
 ///
 /// `Step` advances a path segment linearly until an arm-splitting
@@ -31,7 +31,7 @@ enum WalkFrame {
 }
 
 /// Path-walking helper for [`ProjectSemanticDispatch::build_project_path`]
-/// (plan §3 C3). One walker per `build_project_path` invocation — carries
+/// One walker per `build_project_path` invocation — carries
 /// the caller's requested `mode`, per-hop fence, and the alias-cycle
 /// `visited` set that prevents infinite recursion.
 ///
@@ -42,18 +42,18 @@ pub(super) struct PathWalker<'a, 'b> {
     dispatch: &'a ProjectSemanticDispatch<'b>,
     mode: ProjectionMode,
     fence: &'a DepSignature,
-    /// Alias-cycle detection set (plan §3 C3). Records every
+    /// Alias-cycle detection set. Records every
     /// declaration identity the walker has unwrapped on this single
     /// invocation. `SmallVec` because alias chains are overwhelmingly
     /// short; spills to heap only for pathological fixtures.
     visited_aliases: smallvec::SmallVec<[AliasCycleIdentity; 8]>,
     /// Phase D §5.3 WIP-R: per-call cycle-guard over visited
-    /// [`SemanticNodeId`]s (plan §2 WalkGuard contract). Replaces the
+    /// [`SemanticNodeId`]s. Replaces the
     /// retired `max_depth = 64` rail — the set grows only on genuine
     /// re-entry, so linear-chain walks cost O(n) set inserts, not O(n^2)
     /// depth checks.
     visited_nodes: rustc_hash::FxHashSet<SemanticNodeId>,
-    /// per-step intermediate nodes for backfill.
+    /// Per-step intermediate nodes for backfill.
     /// `intermediate_nodes[i]` = node reached after consuming path[..i+1].
     /// `Some(node)` only on linear `Object` member-step transitions.
     /// `None` marks Union/Intersection/Conditional arm-splits — backfill
@@ -104,12 +104,12 @@ impl<'a, 'b> PathWalker<'a, 'b> {
     }
 
     /// Walk `path` starting from `base`, returning the terminal
-    /// [`SemanticNodeId`]. Empty path returns `base` verbatim (plan §2
+    /// [`SemanticNodeId`]. Empty path returns `base` verbatim (
     /// "empty-path projection is the canonical form of whole-surface
     /// expansion"). Path evaluation walks the whole path; per-hop errors
     /// short-circuit via `Opaque(Miss)`.
     ///
-    /// Plan §2 "Iterative worklist": the walker maintains an explicit
+    /// "Iterative worklist": the walker maintains an explicit
     /// stack of `WalkFrame`s and a `results` stack. Arm-splitting frames
     /// (`Union` / `Intersection`) push a `JoinUnion` / `JoinIntersection`
     /// frame followed by one `Step` frame per arm; the join combines
@@ -170,7 +170,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         let mut current = start_node;
         let mut index = start_index;
 
-        // supplement §5.D.0 r17 — honour
+        // Supplement §5.D.0 r17 — honour
         // `HostConfig::depth_budget` so §5.D.4
         // `no_cache_promotion_for_budget_exceeded_*` tests can
         // construct a constrained host and observe a budget-exceeded
@@ -250,7 +250,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                             );
                             current = m.value;
                             index += 1;
-                            // record the linear member-step
+                            // Record the linear member-step
                             // intermediate. `intermediate_nodes[i]` is the
                             // node reached after consuming path[..i+1].
                             self.intermediate_nodes.push(Some(current));
@@ -262,7 +262,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     }
                 }
                 SemanticNodeData::Union(arms) => {
-                    // Plan §2 iterative worklist: push a `JoinUnion`
+                    // Iterative worklist: push a `JoinUnion`
                     // frame then one `Step` frame per arm. Arms inherit
                     // the remaining path starting at `index`. Frames pop
                     // LIFO so the join executes AFTER all arm steps
@@ -279,13 +279,13 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                             index,
                         });
                     }
-                    // arm-split — backfill cannot publish a
+                    // Arm-split — backfill cannot publish a
                     // single canonical answer for `path[..k]` here.
                     self.intermediate_nodes.push(None);
                     return;
                 }
                 SemanticNodeData::Intersection(arms) => {
-                    // Plan §2 iterative worklist + §3 C3 contributor
+                    // Iterative worklist + §3 C3 contributor
                     // rule: push a `JoinIntersection` frame then one
                     // `Step` frame per arm. Opaque arms are dropped at
                     // join time; only non-opaque contributors survive.
@@ -300,7 +300,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                             index,
                         });
                     }
-                    // arm-split — backfill cannot publish a
+                    // Arm-split — backfill cannot publish a
                     // single canonical answer for `path[..k]` here.
                     self.intermediate_nodes.push(None);
                     return;
@@ -358,7 +358,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     );
                     self.graph().record_conditional_deferred();
                     results.push(wrapper);
-                    // open-conditional arm-split — backfill
+                    // Open-conditional arm-split — backfill
                     // cannot publish a single canonical answer for
                     // `path[..k]` here (the wrapper Conditional is the
                     // terminal result for the rest of the path, not an
@@ -460,7 +460,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 SemanticNodeData::Alias(target) => {
                     // Alias unwrap — emit AliasResolve edge and
                     // continue from the target. Cycle detection via
-                    // visited_aliases set (plan §3 C3).
+                    // visited_aliases set.
                     //
                     // Identity is extracted from the *target* (where the
                     // alias points), not from `current` (the Alias node
@@ -534,7 +534,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     }
                     current = expanded;
                 }
-                // D26 lazy carriers (plan §3 Step 6.1.A + D41).
+                // D26 lazy carriers.
                 // DeclRef in any mode resolves through ResolveDecl
                 // ("aliases follow") — Navigate is lazy at the lowering
                 // site but transparent through alias chains during walk.
@@ -625,7 +625,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 }
             }
         }
-        // for `mode: Expanded` with empty path, expand
+        // For `mode: Expanded` with empty path, expand
         // terminal `DeclAnchor` nodes via `Instantiate(anchor, [])` and
         // recurse through Intersection/Union arms so nested
         // `extends`/union-arm refs also surface their body. The
@@ -641,7 +641,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
     }
 
     /// Combine the top `arm_count` entries from `results` into the
-    /// union of the arm projections. Plan §3 C3 union rule: any arm
+    /// union of the arm projections. C3 union rule: any arm
     /// producing `Opaque(_)` → whole union misses.
     fn join_union(&self, arm_count: usize, results: &mut Vec<SemanticNodeId>) {
         let split = results.len().saturating_sub(arm_count);
@@ -668,7 +668,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
     }
 
     /// Combine the top `arm_count` entries from `results` using the
-    /// intersection contributor rule (plan §3 C3): opaque arms drop,
+    /// intersection contributor rule: opaque arms drop,
     /// surviving contributors intersect. Zero contributors → `Opaque(Miss)`.
     fn join_intersection(&self, arm_count: usize, results: &mut Vec<SemanticNodeId>) {
         let split = results.len().saturating_sub(arm_count);
@@ -702,7 +702,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
     /// `DeclAnchor` expansion tail-iterates through the worklist rather
     /// than via a recursive call.
     ///
-    /// **Mapped arm (plan §2 Stage 5 Pass C9).** When the walker runs in
+    /// **Mapped arm.** When the walker runs in
     /// [`ProjectionMode::Expanded`] and a `SemanticNodeData::Mapped`
     /// shell appears at an empty-path terminal, re-enter dispatch via
     /// [`SemanticQueryKey::MappedType`] so the deferred shell is
@@ -831,7 +831,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 }
                 work.push(ExpandFrame::Expand(materialised));
             }
-            // open Conditional at empty-path terminal in
+            // Open Conditional at empty-path terminal in
             // Expanded mode. Per CLAUDE.md "Macro Type Traversal Rule"
             // — open conditionals distribute the remaining path into
             // both branches; with empty path the "remaining path" is

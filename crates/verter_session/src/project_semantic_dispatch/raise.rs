@@ -1,5 +1,4 @@
 //! `raise_node_to_type_expr` — SemanticNodeId → TypeExpr structural raising
-//! (plan §3 Step 6.1, D18).
 //!
 //! Reverse of [`shallow_lower_type_expr`](super::lower::shallow_lower_type_expr).
 //! Walks one structural level of a [`SemanticNodeData`] graph payload back
@@ -7,7 +6,7 @@
 //! no conditional branch selection — those are the [`PathWalker`](super::walk)'s
 //! job. Cycle protection via a per-call `active` visited set.
 //!
-//! **Authority contract (plan §2):** this is the *only* `SemanticNodeId →
+//! **Authority contract:** this is the *only* `SemanticNodeId →
 //! TypeExpr` lowering path in the workspace. Pair with
 //! [`shallow_lower_type_expr`](super::lower::shallow_lower_type_expr)
 //! (forward direction). The Step 6.1 invariant test
@@ -32,7 +31,7 @@ use crate::semantic_query::{
 };
 
 // =====================================================================
-// Plan §6.2 / A0 — dispatch trace plumbing for cycle-BFS unit tests.
+// dispatch trace plumbing for cycle-BFS unit tests.
 //
 // `enable_dispatch_trace_for_test` returns a guard that clears the trace
 // on construction and on drop. `execute_read` pushes a static-string
@@ -68,7 +67,7 @@ pub(crate) fn enable_dispatch_trace_for_test() -> DispatchTraceGuard {
 }
 
 // =====================================================================
-// Plan §1.C — Per-key dispatch traffic counter (diagnostic only).
+// Per-key dispatch traffic counter (diagnostic only).
 //
 // Counts how many times `execute_read` is invoked with each
 // `SemanticQueryKey`, keyed by a (variant_discriminant, content_hash)
@@ -92,7 +91,7 @@ pub(crate) struct SemanticQueryKeyDigest {
 impl SemanticQueryKeyDigest {
     fn from_key(key: &crate::semantic_query::SemanticQueryKey) -> Self {
         use std::hash::{Hash, Hasher};
-        // supplement §5.D.0 r17 — canonicalise the key BEFORE
+        // Supplement §5.D.0 r17 — canonicalise the key BEFORE
         // hashing so probes via the caller's key shape (e.g.
         // `ProjectMember`) hit the same digest the warm cache stores
         // (e.g. `ProjectPath` with a length-1 path). Without this,
@@ -143,13 +142,13 @@ thread_local! {
     pub(crate) static DISPATCH_KEY_COUNTS:
         std::cell::RefCell<rustc_hash::FxHashMap<SemanticQueryKeyDigest, u32>> =
         std::cell::RefCell::new(rustc_hash::FxHashMap::default());
-    /// supplement §5.D.0 r17 — per-key COLD dispatch count.
+    /// Supplement §5.D.0 r17 — per-key COLD dispatch count.
     /// Incremented when `execute_read` enters with no warm cache entry
     /// for the key (cache miss; `build` is invoked).
     pub(crate) static DISPATCH_KEY_COLD_COUNTS:
         std::cell::RefCell<rustc_hash::FxHashMap<SemanticQueryKeyDigest, u32>> =
         std::cell::RefCell::new(rustc_hash::FxHashMap::default());
-    /// supplement §5.D.0 r17 — per-key WARM dispatch count.
+    /// Supplement §5.D.0 r17 — per-key WARM dispatch count.
     /// Incremented when `execute_read` enters with the key already in
     /// the warm cache (cache hit; `build` is NOT invoked).
     pub(crate) static DISPATCH_KEY_WARM_COUNTS:
@@ -165,7 +164,7 @@ pub(crate) fn record_dispatch_key(key: &crate::semantic_query::SemanticQueryKey)
     });
 }
 
-/// supplement §5.D.0 r17 — record a COLD dispatch entry for
+/// Supplement §5.D.0 r17 — record a COLD dispatch entry for
 /// this key (cache miss, `build` will be invoked).
 #[cfg(test)]
 pub(crate) fn record_dispatch_cold(key: &crate::semantic_query::SemanticQueryKey) {
@@ -175,7 +174,7 @@ pub(crate) fn record_dispatch_cold(key: &crate::semantic_query::SemanticQueryKey
     });
 }
 
-/// supplement §5.D.0 r17 — record a WARM dispatch entry for
+/// Supplement §5.D.0 r17 — record a WARM dispatch entry for
 /// this key (cache hit, returning the memoized value).
 #[cfg(test)]
 pub(crate) fn record_dispatch_warm(key: &crate::semantic_query::SemanticQueryKey) {
@@ -185,7 +184,7 @@ pub(crate) fn record_dispatch_warm(key: &crate::semantic_query::SemanticQueryKey
     });
 }
 
-/// supplement §5.D.0 r17 — read the COLD count for `key`.
+/// Supplement §5.D.0 r17 — read the COLD count for `key`.
 /// Returns 0 if the key has not been dispatched on this thread since
 /// thread start. The counter is monotonic; tests sample baselines and
 /// deltas across paired queries.
@@ -195,7 +194,7 @@ pub(crate) fn dispatch_cold_for(key: &crate::semantic_query::SemanticQueryKey) -
     DISPATCH_KEY_COLD_COUNTS.with(|c| c.borrow().get(&digest).copied().unwrap_or(0) as usize)
 }
 
-/// supplement §5.D.0 r17 — read the WARM count for `key`.
+/// Supplement §5.D.0 r17 — read the WARM count for `key`.
 #[cfg(test)]
 pub(crate) fn dispatch_warm_for(key: &crate::semantic_query::SemanticQueryKey) -> usize {
     let digest = SemanticQueryKeyDigest::from_key(key);
@@ -434,7 +433,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 default,
                 ..
             } => {
-                // Plan §3 Cluster A: project `constraint` / `default` back
+                // Cluster A: project `constraint` / `default` back
                 // to `TypeExpr` so the round-trip preserves the declaration
                 // shape. The `active` visited set guards against cyclic
                 // constraint graphs (plan F7): when a TypeParam's
@@ -530,7 +529,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     type_parameters: type_params,
                 }))
             }
-            // D26 lazy carriers (plan §3 Step 6.1.A). DeclRef raises to a
+            // D26 lazy carriers. DeclRef raises to a
             // bare `Ref { name }` with empty type arguments. Identity
             // (`canonical_id + whole_hash`) is encoded in the interning
             // scope, not in the projected TypeExpr — that's the lossy
@@ -586,21 +585,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         key: SemanticQueryKey,
     ) -> crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>> {
-        // Plan §6.2 / A0 — trace the variant for cycle-BFS unit tests.
+        // Trace the variant for cycle-BFS unit tests.
         // Records the variant before key canonicalisation so the
         // observed call shape matches the caller's intent (sugar
         // variants are recorded as the caller wrote them).
         #[cfg(test)]
         DISPATCH_TRACE.with(|t| t.borrow_mut().push(query_key_discriminant(&key)));
 
-        // Plan §1.C — per-key dispatch traffic counter. Records a
+        // Per-key dispatch traffic counter. Records a
         // (variant_discriminant, content_hash) digest so diagnostic
         // tests can dump the top-N most-dispatched keys (deferred per
         // §1.C.3 pending an InputMenu corpus fixture).
         #[cfg(test)]
         record_dispatch_key(&key);
 
-        // supplement §5.D.0 r17 — cold/warm split is recorded
+        // Supplement §5.D.0 r17 — cold/warm split is recorded
         // inside `SemanticGraphStore::execute_cooperative` after
         // canonicalisation. The digest function in
         // `SemanticQueryKeyDigest::from_key` canonicalises the key
@@ -694,7 +693,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let fence = self.project_generation_signature();
                 (QueryResult::Error(QueryError::Miss), fence)
             }
-            // binding amendment — `ResolveMacroPayload`.
+            // Binding amendment — `ResolveMacroPayload`.
             SemanticQueryKey::ResolveMacroPayload {
                 owner,
                 macro_index,
@@ -711,7 +710,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// Reduce a [`SemanticNodeId`] by dispatching the appropriate
     /// [`SemanticQueryKey`] for each operator-shape encountered in the
     /// graph subtree, then raise the fully-reduced graph node to a
-    /// [`TypeExpr`] (plan §3 Step 6.1.A, D26+D31+D33).
+    /// [`TypeExpr`].
     ///
     /// Operates GRAPH-NATIVE: walks [`SemanticNodeData`] via the
     /// graph's `node_data`, dispatches per shape, interns reduced
@@ -754,9 +753,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///    `(SemanticNodeId, ProjectionMode)`.
     /// 2. **Bottom-up reduction**: process `topo` in reverse so children
     ///    are fully reduced before parents. For each node, look up the
-    ///    `SemanticNodeData`, apply the per-shape rule (the table from
-    ///    plan §3 Step 6.1.A), record the reduction in `mapping`. Parent
-    ///    rebuilds substitute child reductions via `mapping`.
+    ///    `SemanticNodeData`, apply the per-shape rule, and record the
+    ///    reduction in `mapping`. Parent rebuilds substitute child
+    ///    reductions via `mapping`.
     ///
     /// Stack-safe for arbitrarily deep acyclic structures (≥5000 levels;
     /// verified by stack-safety regression fixtures in §4.1).
@@ -767,7 +766,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         mode: ProjectionMode,
         state: &mut ReduceState,
     ) -> SemanticNodeId {
-        // collect every reachable `(node, mode)` pair in topo
+        // Collect every reachable `(node, mode)` pair in topo
         // order with a worklist. `visited` short-circuits cycles —
         // they reach a fixpoint at the first visit and are not re-pushed.
         let mut topo: Vec<SemanticNodeId> = Vec::new();
@@ -787,7 +786,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             push_children(&data, &mut to_visit);
         }
 
-        // process topo in reverse — children first. Each
+        // Process topo in reverse — children first. Each
         // (node, mode) reduces by looking at SemanticNodeData and
         // dispatching the per-shape key. The result is recorded in
         // `mapping`; subsequent parents look up child reductions there.
@@ -802,7 +801,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// reduced (their reductions live in `state.mapping`). Returns the
     /// reduced `SemanticNodeId`.
     ///
-    /// Per-shape table (plan §3 Step 6.1.A lines 648-665):
+    /// Per-shape table:
     /// - Operator shapes (`IndexedAccess`, `KeyOf`, `Conditional`,
     ///   `Mapped`, `TypeOf`) dispatch the matching `SemanticQueryKey`.
     ///   `Value(reduced)` with `reduced != node` recurses; `Value(node)`

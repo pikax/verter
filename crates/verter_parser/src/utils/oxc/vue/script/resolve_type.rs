@@ -34,10 +34,10 @@ fn component_meta_core_trace_lock() -> &'static Mutex<()> {
 
 fn component_meta_core_trace_path() -> Option<&'static PathBuf> {
     static PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
-    // Plan §3.A Commit 6.E: the legacy `VERTER_COMPONENT_META_TRACE*`
-    // env var names are retired. The parser's core-trace keeps its
-    // debug aid but reads the narrower `VERTER_PARSER_CORE_TRACE_PATH`
-    // so the session-crate env var surface stays clean.
+    // The legacy `VERTER_COMPONENT_META_TRACE*` env var names are
+    // retired. The parser's core-trace keeps its debug aid but reads
+    // the narrower `VERTER_PARSER_CORE_TRACE_PATH` so the session-crate
+    // env var surface stays clean.
     PATH.get_or_init(|| std::env::var_os("VERTER_PARSER_CORE_TRACE_PATH").map(PathBuf::from))
         .as_ref()
 }
@@ -505,17 +505,16 @@ pub struct TypeResolutionContext<'ctx, 'a: 'ctx> {
 /// nodes (not the same type repeatedly), and the cap bounds on the input's
 /// syntactic depth rather than on reusable semantic work.
 ///
-/// Phase D §5.10 WIP-P — renamed from the legacy `MAX_TYPE_RESOLUTION_DEPTH = 64`
-/// to `PARSER_SYNTACTIC_DEPTH_LIMIT = 256` per plan §3 Change H, documented
-/// as stack-safety rather than a semantic bound. The larger 256 limit matches
-/// TypeScript's own syntactic depth tolerance and avoids false triggers on
-/// deeply nested but legitimate generic chains (e.g. library-grade heavy
+/// `PARSER_SYNTACTIC_DEPTH_LIMIT = 256` is documented as stack-safety
+/// rather than a semantic bound. The 256 limit matches TypeScript's
+/// own syntactic depth tolerance and avoids false triggers on deeply
+/// nested but legitimate generic chains (e.g. library-grade heavy
 /// conditional / indexed-access stacks).
 pub const PARSER_SYNTACTIC_DEPTH_LIMIT: u16 = 256;
 
 /// Structured failure shape emitted by the parser's syntactic depth
-/// guard (plan §3 Change H). Justified as syntactic stack-safety — not
-/// a semantic budget — so the record captures the exact depth at which
+/// guard. Justified as syntactic stack-safety — not a semantic
+/// budget — so the record captures the exact depth at which
 /// the guard refused entry (`actual`), the configured cap (`limit`),
 /// and a short call-site description (`context`) for diagnostics.
 ///
@@ -575,10 +574,10 @@ impl ResolutionDepthGuard {
         RESOLUTION_DEPTH.with(|depth| {
             let current = depth.get();
             if current >= PARSER_SYNTACTIC_DEPTH_LIMIT {
-                // Structured failure shape per plan §3 Change H: record
-                // the exact cap trip (limit + actual + call-site
-                // context) so consumers can observe the cap-trip event
-                // without parsing string diagnostics.
+                // Structured failure shape: record the exact cap trip
+                // (limit + actual + call-site context) so consumers can
+                // observe the cap-trip event without parsing string
+                // diagnostics.
                 LAST_BUDGET_EXCEEDED.with(|cell| {
                     *cell.borrow_mut() = Some(ResolutionBudgetExceeded {
                         limit: PARSER_SYNTACTIC_DEPTH_LIMIT,
@@ -2733,8 +2732,7 @@ fn get_expression_reference_name(expr: &Expression<'_>) -> Option<String> {
 /// host-owned cache migration (the resolver context no longer carries `!Send`
 /// interior-mutability state). Depth guarding still bails at
 /// [`PARSER_SYNTACTIC_DEPTH_LIMIT`] to prevent stack overflow on deeply nested
-/// generic types (plan §3 Change H — syntactic stack-safety, not a semantic
-/// budget).
+/// generic types (syntactic stack-safety, not a semantic budget).
 fn resolve_type_elements_inner_with_ctx<'ctx, 'a: 'ctx>(
     node: &'ctx TSType<'a>,
     base_offset: u32,

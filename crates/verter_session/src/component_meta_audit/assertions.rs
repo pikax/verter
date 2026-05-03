@@ -1,7 +1,7 @@
 #![deny(missing_docs)]
 //! Inherent assertions + iterative walker for [`RustAuditRecord`].
 //!
-//! Plan §2.8 + §3 Commit 6. Public surface:
+//! + §3. Public surface:
 //!
 //! - [`RustAuditRecord::assert_loaded_files_exactly`] — set-equality
 //!   assertion against the union of `vfs_reads` and `shared_load_reuses`
@@ -11,13 +11,13 @@
 //! - [`RustAuditRecord::why_instantiated`] — same shape, rooted at the
 //!   matching [`InstantiationRecord`].
 //! - [`render_chain_text`] — pure formatter; NAPI / WASM / LSP all
-//!   delegate to it via Rust-walker bindings (plan §2.8 — single
-//!   walker implementation).
+//!   delegate to it via Rust-walker bindings (single walker
+//!   implementation).
 //!
 //! The walker is iterative: a `Vec<(NodeId, u16)>` work-stack, an
 //! `FxHashSet<EdgeId>` visited set, a depth-256 cap, and termination
 //! markers carried on the returned chain. Branch termination on
-//! `SharedLoadReuse` terminates only the affected branch (plan §2.8).
+//! `SharedLoadReuse` terminates only the affected branch.
 
 use std::sync::Arc;
 
@@ -32,7 +32,6 @@ use crate::types::Hash16;
 
 /// Maximum depth for the iterative walker. Exceeding this cap
 /// terminates the affected branch with a `DepthExceeded` marker
-/// (plan §2.8).
 pub const WALKER_DEPTH_CAP: u16 = 256;
 
 /// Provenance chain returned by [`RustAuditRecord::why_loaded`] /
@@ -55,7 +54,7 @@ pub struct ProvenanceChain {
     pub terminated: ChainTermination,
     /// Shared-load reuses observed for the queried canonical (only
     /// populated by `why_loaded`). Renderers display these as terminal
-    /// branches per plan §2.7.
+    /// branches per
     pub shared_load_terminals: Vec<SharedLoadReuseRecord>,
 }
 
@@ -139,8 +138,8 @@ impl RustAuditRecord {
 
     /// Assert that the broader dependency set
     /// (`vfs_reads ∪ shared_load_reuses ∪ indexed_ready_builds`)
-    /// equals `expected` exactly (set equality). Plan §3.B Commit 7.B —
-    /// use this when the fixture's intent is "the request's dependency
+    /// equals `expected` exactly (set equality).
+    /// Use this when the fixture's intent is "the request's dependency
     /// closure included these files", which is a distinct semantic
     /// claim from [`Self::assert_loaded_files_exactly`]'s "the
     /// scheduler actually read these files on behalf of this request".
@@ -264,7 +263,7 @@ impl RustAuditRecord {
 /// Walk every derivation edge whose `result` is reachable from `root`
 /// in the backward (sources-of-result) direction. BFS via a
 /// `Vec<(NodeId, u16)>` work-stack so heap-deep chains do not overflow
-/// the OS stack (plan §3 Commit 6 test
+/// the OS stack ( test
 /// `why_loaded_iterative_walker_handles_heap_depth_1000_without_stack_overflow`).
 fn walk_back(footprint: &super::RustSemanticFootprintAudit, root: NodeId) -> ProvenanceChain {
     let edges = &footprint.derivation_subgraph.edges;
@@ -561,7 +560,7 @@ mod tests {
             ["/a.ts", "/b.ts"]
                 .into_iter()
                 .collect::<std::collections::HashSet<_>>(),
-            "loaded_files must exclude indexed_ready_builds per plan §1.4 exactness",
+            "loaded_files must exclude indexed_ready_builds per the exactness rule",
         );
     }
 
@@ -744,7 +743,7 @@ mod tests {
     #[test]
     fn why_loaded_iterative_walker_handles_heap_depth_1000_without_stack_overflow() {
         // 1000-deep chain — recursive walk would overflow; iterative
-        // BFS handles it. Plan §2.8 / §3 Commit 6.
+        // BFS handles it.
         use crate::component_meta_audit::NamedIdentity;
         let mut nodes: Vec<NodeRecord> = (0..1001)
             .map(|i| primitive_node(&format!("n{i}")))
@@ -902,14 +901,14 @@ mod tests {
 
     #[test]
     fn shared_load_reuse_with_winner_audited_false_renders_fallback_text_via_rust_walker() {
-        // Plan §3 Commit 8 test list entry. End-to-end: construct a
+        // Test list entry. End-to-end: construct a
         // footprint with an empty derivation graph but a
         // `SharedLoadReuseRecord` where `winner_audited == false` (the
         // SharedLoadReuse case where the winning request was NOT
         // audited), call `why_loaded` — the walker must return
         // `ChainTermination::Complete` with the shared-load terminal
         // carried through to the chain, and `render_chain_text` must
-        // emit the fallback wording documented in plan §2.7.
+        // emit the fallback wording documented in
         //
         // Discriminating: if `why_loaded` regressed to returning
         // `NotFound` when only a shared-load terminal exists, or if
@@ -960,7 +959,7 @@ mod tests {
         let text = render_chain_text(&chain);
         assert!(
             text.contains("unaudited"),
-            "render_chain_text must emit the `unaudited` fallback wording from plan §2.7: {text}",
+            "render_chain_text must emit the `unaudited` fallback wording: {text}",
         );
         assert!(
             text.contains("/shared.ts"),

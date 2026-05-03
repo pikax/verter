@@ -119,9 +119,9 @@ impl OwnerImportSurfaceDb {
     }
 
     /// Drop every cached surface. Called on project-generation bumps
-    /// (tsconfig / SDK / workspace-folder changes) per plan § A0 — owner
-    /// surfaces depend on resolved routes, which project-shape changes
-    /// may shift, so nothing is safe to keep warm.
+    /// (tsconfig / SDK / workspace-folder changes) — owner surfaces
+    /// depend on resolved routes, which project-shape changes may
+    /// shift, so nothing is safe to keep warm.
     pub fn entries_drain_for_generation_bump(&self) {
         let count = self.entries.len();
         self.entries.clear();

@@ -55,10 +55,10 @@ fn type_runtime_next_span_id() -> u64 {
 }
 
 pub fn type_runtime_trace_enabled() -> bool {
-    // Plan §3.A Commit 6.E: legacy `VERTER_COMPONENT_META_TRACE*`
-    // env vars are deleted workspace-wide. The type-runtime trace
-    // keeps only its own `VERTER_TYPE_RUNTIME_TRACE` + the intermediate
-    // `VERTER_META_TRACE` name.
+    // The type-runtime trace responds to its own
+    // `VERTER_TYPE_RUNTIME_TRACE` env var plus the shared
+    // `VERTER_META_TRACE` name. The legacy `VERTER_COMPONENT_META_TRACE*`
+    // surface has been retired workspace-wide.
     std::env::var_os("VERTER_META_TRACE").is_some()
         || std::env::var_os("VERTER_TYPE_RUNTIME_TRACE").is_some()
 }

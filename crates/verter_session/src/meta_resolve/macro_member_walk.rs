@@ -1,6 +1,6 @@
 //! Walker + macro-shape member traversal.
 //!
-//! domain 9 — owns:
+//! Domain 9 — owns:
 //! - `walk_component_meta_macro_shape_member_types` (the per-field driver
 //!   the ctx method calls into),
 //! - `materialize_component_meta_macro_shape_member_type_expr` (the
@@ -188,7 +188,7 @@ pub(crate) fn slot_binding_targets_define_props_root(
     false
 }
 
-// Plan §6.8 — legacy walker shim deleted; all production call sites
+// Legacy walker shim deleted; all production call sites
 // now use `ComponentMetaQueryEngine::materialize_member_surface_expr`
 // directly.
 
@@ -273,7 +273,7 @@ pub(crate) fn walk_component_meta_macro_shape_member_types(
         })
     }
 
-    /// Plan §6.15 / N — migration helper. Lowers the TypeExpr input to
+    /// Migration helper. Lowers the TypeExpr input to
     /// a `Navigate`-mode `SemanticNodeId` and dispatches to J2's
     /// [`slot_binding_param_can_stay_symbolic_node`].
     ///
@@ -771,7 +771,7 @@ pub(crate) fn materialize_component_meta_macro_shape_member_type_expr(
                     lowered,
                 ) =>
         {
-            // commit 6 — migrate to dispatch (sub-plan §C.3 D-T recipe).
+            // Migrate to dispatch (sub- D-T recipe).
             instantiate_local_generic_ref_via_dispatch(
                 query_engine.ctx,
                 materialize_scope_canonical_id.as_str(),
@@ -787,8 +787,8 @@ pub(crate) fn materialize_component_meta_macro_shape_member_type_expr(
             verter_semantic::analysis::type_expr::TypeExpr::string_literal(member_name.to_string()),
         ),
     };
-    // Plan §6.6 / E — the inline-registry-route candidate chain was
-    //. B1's materialiser registry-route branch
+    // The inline-registry-route candidate chain was
+    // B1's materialiser registry-route branch
     // dispatches Pick/Omit + IndexedAccess shapes canonically
     // through dispatch; the empty `inline_route_candidate` lets the
     // surrounding materialize-and-improve loop drive the member
@@ -805,7 +805,7 @@ pub(crate) fn materialize_component_meta_macro_shape_member_type_expr(
         );
     }
 
-    // Step 6.2 reorder (plan §3): try route/project candidates BEFORE
+    // Step 6.2 reorder: try route/project candidates BEFORE
     // the eager whole-expression `materialize_component_meta_type_expr_until_stable(current, …)`
     // call. The pre-Step-6.2 ordering ran `current` materialization
     // first and only consulted route candidates as fallbacks; this
@@ -856,7 +856,7 @@ pub(crate) fn materialize_component_meta_macro_shape_member_type_expr(
                         scope_canonical_id, member_name, candidate_scope, route_expr,
                     ),
                 );
-                // commit 5 — migrate the route-loop call to the
+                // Migrate the route-loop call to the
                 // Class A dispatch helper. Preserve the engine's
                 // `lower_and_project_to_expanded` `reduced != *expr` filter
                 // (the helper omits that constraint by design — see
@@ -937,7 +937,7 @@ pub(crate) fn materialize_component_meta_macro_shape_member_type_expr(
     if candidate_is_good_enough(&best) {
         return best;
     }
-    // Plan §6.6 / E — the materialiser's registry-route branch
+    // The materialiser's registry-route branch
     // handles the alias-body projection through dispatch. The
     // slow-path materialize-and-improve loop below remains as the
     // catch-all for shapes that don't match a registry-route shape.

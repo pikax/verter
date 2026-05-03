@@ -1,8 +1,6 @@
 //! Admission-only primitive for cooperative get-or-compute over a
 //! [`DashMap`]-backed cache.
 //!
-//! Plan §3 D3.2 sub-task 3.2.0 (architectural-debt-closure revision 10).
-//!
 //! ## Contract
 //!
 //! `cooperative_get_or_insert` provides:
@@ -255,7 +253,7 @@ where
     )
 }
 
-/// Plan §1.5 / §10.1 — extension of [`cooperative_get_or_insert`]
+/// Extension of [`cooperative_get_or_insert`]
 /// with a `post_publish` callback that fires AFTER `entries.insert`
 /// AND AFTER successful `revalidate_after_compute`. The callback
 /// receives the published `Arc<Entry>` and the key.
@@ -276,7 +274,7 @@ where
 /// state) and proactively removed. The orphan window is bounded
 /// per edit-cycle.
 ///
-/// **Compute closure synchronicity contract (plan §4.20).** The
+/// **Compute closure synchronicity contract.** The
 /// `compute` closure runs SYNCHRONOUSLY on the caller's thread.
 /// Future maintainers MUST preserve this invariant; it underpins
 /// borrow-capture safety in callers (e.g.,
@@ -325,7 +323,7 @@ where
     Revalidate: FnOnce(&Entry) -> bool,
     PostPublish: FnOnce(&Arc<Entry>, &K),
 {
-    // warm-hit + validation.
+    // Warm-hit + validation.
     if let Some(entry_arc) = map.get(&key).map(|e| e.clone()) {
         if let Some(value) = validate(&entry_arc) {
             return Some(value);
@@ -334,7 +332,7 @@ where
         map.remove(&key);
     }
 
-    // claim the inflight slot or join an in-progress build.
+    // Claim the inflight slot or join an in-progress build.
     let slot = {
         let mut table = inflight.table.lock();
         table
@@ -358,7 +356,7 @@ where
     state.claimed = true;
     drop(state);
 
-    // cold winner runs compute under a panic guard.
+    // Cold winner runs compute under a panic guard.
     let mut panic_guard = InflightPanicGuard::new(Arc::clone(&slot), &inflight.table, key.clone());
 
     let computed = compute();
@@ -385,7 +383,7 @@ where
             let value = project(&entry_arc);
             map.insert(key.clone(), Arc::clone(&entry_arc));
 
-            // Plan §1.5 / §10.1 post_publish: fires AFTER
+            // post_publish: fires AFTER
             // entries.insert AND AFTER successful revalidate.
             // Reverse-index registration lives here. NOT inside
             // the inflight slot's state lock — the race-closure
@@ -426,7 +424,7 @@ where
 }
 
 // ============================================================================
-// Sub-task 3.2.0 gating tests (5 required by plan §3 D3.2)
+// Sub-task 3.2.0 gating tests (5 required by D3.2)
 // ============================================================================
 
 #[cfg(test)]

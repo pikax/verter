@@ -1,7 +1,7 @@
 #![deny(missing_docs)]
 //! Bounded insert-ordered store for finished audit records.
 //!
-//! Plan §2.5. `VerterHost` owns a single `AuditRecordsStore` instance;
+//! `VerterHost` owns a single `AuditRecordsStore` instance;
 //! every audited request inserts its `RustAuditRecord` at completion;
 //! consumers (harness, NAPI, WASM, LSP) retrieve via
 //! `take_audit_record(request_id)` — a strict insert-then-take flow.
@@ -15,7 +15,7 @@ use parking_lot::Mutex;
 
 use super::RustAuditRecord;
 
-/// Default capacity per plan §1.4 / §2.5.
+/// Default capacity per.
 pub const AUDIT_RECORDS_STORE_CAPACITY: usize = 256;
 
 /// Thread-safe insert-ordered store of `(request_id, RustAuditRecord)`.

@@ -230,9 +230,8 @@ where
         // clear the route-only shallow singleflight too.
         // The `RouteOwnedShallowDb` itself is project-store-owned and
         // cleared via `ProjectTypeStore::route_owned_shallow().clear_all()`
-        // from the host's cascade (sub-plan §6b.D2a step 6). We only
-        // clear the singleflight here so any in-flight closures see a
-        // fresh start.
+        // from the host's cascade. We only clear the singleflight here
+        // so any in-flight closures see a fresh start.
         self.route_owned_shallow_singleflight.clear();
     }
 

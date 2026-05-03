@@ -96,7 +96,7 @@ pub struct Request {
     pub request_context: Option<crate::request_context::OpaqueRequestContext>,
 }
 
-/// Path C C12 — batch submission handle (plan §2 Stage 7 Pass C12).
+/// Path C C12 — batch submission handle.
 ///
 /// Produced by [`Scheduler::submit_batch`]; drained via
 /// [`Scheduler::wait_batch`]. Callers submit N independent requests
@@ -777,7 +777,7 @@ impl Scheduler {
                     if let Some(scheduler) = weak.upgrade() {
                         scheduler.process_submission(submission);
                     }
-                    // else: scheduler dropped during recv — loop will exit on next upgrade
+                    // Else: scheduler dropped during recv — loop will exit on next upgrade
                 }
                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                     continue;
@@ -872,7 +872,7 @@ impl Scheduler {
                 // Genuine re-add: clear tombstone and proceed.
                 self.tombstones.remove(&file_id);
             } else {
-                // source: None after removal — stale (e.g. close_file reload
+                // Source: None after removal — stale (e.g. close_file reload
                 // for a file that was subsequently deleted).
                 sender.send(CompletionState::Failed(
                     crate::job::SchedulerError::FileNotFound {
@@ -1068,7 +1068,7 @@ impl Scheduler {
                                 // (winner_context is still present at this
                                 // generation while the parent's target stage,
                                 // e.g. Analysis, is outstanding).
-                                // Plan §3.B Commit 7.B capture-site audit.
+                                // Capture-site audit.
                                 let parent_ctx = node
                                     .pending_requests
                                     .winner_context_at_generation(generation);
@@ -1242,9 +1242,9 @@ impl Scheduler {
             // Look up the session-side context for this job. Preference:
             //   1. Context propagated by an auto-ingest dep enqueue (the
             //      parent request that caused the dep to be loaded; plan
-            //      §3.B Commit 7.B).
+            // §3.B).
             //   2. Winner context from a direct `submit_request` caller
-            //      at this generation (the original path — plan §3.A).
+            // at this generation (the original path).
             // The closure below installs the chosen context into TLS for
             // the duration of the stage so `current_request_id()`
             // returns the right id while the worker runs.
@@ -1258,7 +1258,7 @@ impl Scheduler {
                 // for parse. This keeps disk reads off the CPU threads.
                 let node_for_panic = Arc::clone(&node);
                 self.io_pool.execute(move || {
-                    // Plan §4.7 — install_tls populates BOTH the scheduler-side
+                    // install_tls populates BOTH the scheduler-side
                     // and session-side TLS slots in one go. Pre-Q this call
                     // routed through `OpaqueContextGuard::install` directly,
                     // populating only scheduler-side TLS — host-side audit
@@ -1296,7 +1296,7 @@ impl Scheduler {
                 // Analysis/Artifact jobs: pure CPU work.
                 let node_for_panic = Arc::clone(&node);
                 self.cpu_pool.spawn(move || {
-                    // Plan §4.7 — see pool.rs:79 + io_pool branch above for
+                    // See pool.rs:79 + io_pool branch above for
                     // the same install_tls bridging pattern; both TLS slots
                     // populated in one go so host-side audit helpers fire
                     // correctly on the CPU pool worker thread.
@@ -3046,7 +3046,7 @@ mod tests {
     }
 
     // ──────────────────────────────────────────────────────────────────
-    // Commit 2 (F2) — Scheduler request context + worker TLS install
+    // Scheduler request context + worker TLS install
     // ──────────────────────────────────────────────────────────────────
 
     use crate::node::PendingRequests;
@@ -3479,7 +3479,7 @@ mod tests {
         assert!(!calls[0].2);
     }
 
-    /// Plan §3.B Commit 7.B capture-site fix. When analysis of a
+    /// Capture-site fix. When analysis of a
     /// parent file extracts dep imports, the scheduler auto-ingests a
     /// Source job for each dep. That job runs on a worker thread whose
     /// TLS is empty by default; without the 7.B propagation fix, the
@@ -3580,9 +3580,8 @@ mod tests {
             dep_observed.load(AtomicOrdering::SeqCst),
             PARENT_REQ_ID,
             "auto-ingested dep Source job must observe the parent's \
-             request_id via TLS — plan §3.B Commit 7.B. Without the \
-             capture-site fix, this observes 0 because the dep worker \
-             thread has an empty TLS.",
+             request_id via TLS. Without the capture-site fix, this \
+             observes 0 because the dep worker thread has an empty TLS.",
         );
     }
 

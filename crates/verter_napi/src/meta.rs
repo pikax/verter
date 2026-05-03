@@ -34,14 +34,13 @@ fn encode_meta_payload(
     verter_protocol::component_meta::encode_component_meta_payload(&ffi)
 }
 
-/// JSON bundle emitted by `getComponentMetaWithAudit`. Plan §3
-/// Commit 8. Three lanes:
+/// JSON bundle emitted by `getComponentMetaWithAudit`. Three lanes:
 /// - `analysis`: FFI projection of `ComponentMetaAnalysis` — `FfiComponentMeta`
 ///   already derives `Serialize` (camelCase).
 /// - `resolution`: FFI projection of `ResolvedComponentMetaState` —
 ///   `FfiComponentMetaResolution` (camelCase).
 /// - `record`: `RustAuditRecord` (ts-rs–generated type surface; u64/i64
-///   fields transport as decimal strings per §3.A + §3.B).
+///   fields transport as decimal strings).
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AuditBundle {
@@ -293,8 +292,8 @@ impl NapiMetaSession {
 
     /// Synchronous audit bundle — returns JSON bytes of
     /// `{ analysis: FfiComponentMeta, resolution: FfiComponentMetaResolution,
-    ///   record: RustAuditRecord }`. Plan §3 Commit 8. Requires the host
-    /// to have `audit_enabled` + `footprint_capture` set on construction.
+    ///   record: RustAuditRecord }`. Requires the host to have
+    /// `audit_enabled` + `footprint_capture` set on construction.
     ///
     /// NOT async. Audit capture completes on the same call that produces
     /// the analysis; there is no background work to await. Consumer-side
@@ -336,9 +335,8 @@ impl NapiMetaSession {
     /// Run the Rust walker against a committed audit record (supplied
     /// as JSON from a prior `getComponentMetaWithAudit`) rooted at the
     /// given `canonical_id`. Returns the `ProvenanceChain` encoded as
-    /// JSON. Plan §2.8 "Single walker implementation" — TS helpers
-    /// format the JSON via pure rendering; they do not re-walk the
-    /// graph.
+    /// JSON. Single-walker rule — TS helpers format the JSON via pure
+    /// rendering; they do not re-walk the graph.
     #[napi(js_name = "whyLoadedFromAuditJson")]
     pub fn why_loaded_from_audit_json(
         &self,

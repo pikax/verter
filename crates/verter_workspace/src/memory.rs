@@ -132,7 +132,7 @@ pub struct MemoryOptions {
 /// Used by playground, WASM, and tests.
 pub struct MemoryWorkspace {
     pub(crate) engine: Engine,
-    /// Registered VFS audit sinks. Plan §2.4.
+    /// Registered VFS audit sinks.
     pub(crate) sinks: parking_lot::RwLock<Vec<(SinkHandle, Arc<dyn VfsAuditSink>)>>,
     pub(crate) next_sink_id: AtomicU64,
 }

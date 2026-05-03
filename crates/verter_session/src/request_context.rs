@@ -1,7 +1,7 @@
 #![deny(missing_docs)]
 //! Session-side request context + per-context counters + TLS guards.
 //!
-//! Plan §2.2. `RequestContext` is the per-request state that rides along
+//! `RequestContext` is the per-request state that rides along
 //! one `get_component_meta_with_resolution` call: request id, canonical,
 //! footprint capture flag, the audit accumulator (if capturing), and the
 //! per-context atomic cache-event counters. Per-context counters kill
@@ -29,7 +29,7 @@ use verter_scheduler::request_context::{
 
 use crate::component_meta_audit::accumulator::RequestFootprintAccumulator;
 
-/// request-scoped fuse state promoted to
+/// Request-scoped fuse state promoted to
 /// host-owned + thread-local accessor.
 ///
 /// Tracks the per-request projection-op count that the legacy engine's
@@ -116,7 +116,7 @@ impl RequestBudget {
 }
 
 thread_local! {
-    /// request-scoped fuse state TLS slot.
+    /// Request-scoped fuse state TLS slot.
     /// Installed by `RequestBudgetGuard::install` and read by the
     /// dispatch-side helpers (`current_request_budget`).
     static CURRENT_REQUEST_BUDGET: RefCell<Option<Arc<RequestBudget>>> =
@@ -176,7 +176,6 @@ pub struct RequestContext {
     /// `execute_cooperative` calling `ctx.record_cache_event(Miss |
     /// ColdBuild)`. Exact per-request even under concurrent audits
     /// because each request's context isolates its own events
-    /// (plan §1.4 — kills the `is_approximate` field).
     pub cold_builds: AtomicU64,
     /// Per-context warm-hit counter. Fired on `Hit`.
     pub warm_hits: AtomicU64,
@@ -197,23 +196,23 @@ pub struct RequestContext {
     pub cold_aborts_swept: AtomicU64,
     /// Per-context counter — total
     /// `materialize_component_meta_structure` invocations observed
-    /// during the request. Plan §3.2.
+    /// during the request.
     pub materialize_structure_calls: AtomicU64,
     /// Per-context counter — subset of `materialize_structure_calls`
     /// satisfied by the materialiser's `MaterializeStructureDb` peek.
-    /// Plan §3.2.
+    ///
     pub materialize_structure_cache_hits: AtomicU64,
     /// Per-context counter — lock acquisitions on the per-scope
-    /// `NodeArena` dedup index. Plan §3.2.
+    /// `NodeArena` dedup index.
     pub node_arena_lock_acquisitions: AtomicU64,
     /// Per-context counter — lock acquisitions on the family-map
-    /// dep-signature reverse index. Plan §3.2.
+    /// dep-signature reverse index.
     pub family_map_lock_acquisitions: AtomicU64,
     /// Per-context counter — times a `dep_signature` was merged into
-    /// the materialiser's `local_fence`. Plan §3.2.
+    /// the materialiser's `local_fence`.
     pub dep_signature_merges: AtomicU64,
     /// Per-context counter — subset of `dep_signature_merges` that
-    /// hit an existing intern bucket. Plan §3.2 / §7.
+    /// hit an existing intern bucket.
     pub dep_signature_intern_hits: AtomicU64,
 }
 
@@ -259,10 +258,9 @@ impl RequestContextLike for RequestContext {
         _winner_request_id: u64,
         _winner_audited: bool,
     ) {
-        // Commit 4 wires this into the accumulator's
-        // `push_shared_load_reuse`. Before the footprint miner is
-        // hooked, the callback is a no-op — the observability surface
-        // is not yet consuming these events. Plan §2.7.
+        // Wires this into the accumulator's `push_shared_load_reuse`.
+        // Before the footprint miner is hooked, the callback is a no-op —
+        // the observability surface is not yet consuming these events.
         if let Some(acc) = self.audit_accumulator.as_ref() {
             acc.push_shared_load_reuse(_canonical_id, _winner_request_id, _winner_audited);
         }

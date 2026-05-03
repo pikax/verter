@@ -1,16 +1,15 @@
 #![deny(missing_docs)]
 //! VFS audit sink registry.
 //!
-//! Plan §2.4 / Commit 4. The workspace side publishes `VfsReadEvent`s
+//! The workspace side publishes `VfsReadEvent`s
 //! to every registered [`VfsAuditSink`]. Session-side audit
 //! (`verter_session::component_meta_audit::session_vfs_sink::SessionVfsSink`)
 //! registers one sink per audited request and filters events by
 //! `request_id`.
 //!
 //! This replaces the legacy file-based component-meta trace that lived
-//! in `filesystem.rs`. The clean-cut rule (plan §0.1) requires the
-//! legacy trace to be deleted in the same work-unit that lands the
-//! sink registry — see Commit 4's `Legacy deletions` summary.
+//! in `filesystem.rs`. The clean-cut rule requires the legacy trace
+//! to be deleted in the same work-unit that lands the sink registry.
 
 use std::sync::Arc;
 

@@ -154,7 +154,7 @@ pub(super) async fn handle_initialize(
                 if enabled { "enabled" } else { "disabled" }
             );
         }
-        // Plan §3 Commit 9 — hover.provenance opt-in.
+        // hover.provenance is opt-in.
         let hover_opts = crate::config::parse_hover_init_options(opts);
         server
             .hover_provenance_enabled
@@ -600,9 +600,9 @@ pub(super) async fn handle_did_change(
     // after 300ms of silence. No concurrent spawned tasks.
     if !style_only {
         if let Some(canonical_id) = server.documents.get_canonical_id(&uri) {
-            // Plan §3 Commit 9 — invalidate the hover provenance
-            // cache for this file. Transitive deps are NOT
-            // invalidated (codified limitation; see
+            // Invalidate the hover provenance cache for this file.
+            // Transitive deps are NOT invalidated (codified limitation;
+            // see
             // `hover_provenance_cache_does_NOT_invalidate_on_transitive_dependency_change`).
             server
                 .hover_provenance_cache

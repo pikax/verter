@@ -1,4 +1,4 @@
-//! Dispatch-layer builders (plan §3 Change Split). Every semantic query
+//! Dispatch-layer builders. Every semantic query
 //! variant that produces a new [`SemanticNodeId`] does so through one of
 //! the `build_*` methods collected here. Kept on `ProjectSemanticDispatch`
 //! via an `impl` block so the inner helpers share private accessors
@@ -26,7 +26,7 @@ use crate::semantic_query::{
     SemanticQueryApi, SemanticQueryKey, SurfaceMember, SurfaceView, ValueRootKey,
 };
 
-// per-call counter (test-only). Incremented every time
+// Per-call counter (test-only). Incremented every time
 // `find_longest_warm_prefix` returns `Some(_)` during a
 // `ProjectSemanticDispatch::build_project_path` invocation. Used by
 // `project_path_prefix_peek_short_circuits_sibling_walk` to discriminate
@@ -68,7 +68,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return (QueryResult::Error(QueryError::Miss), empty_signature());
         }
 
-        // Record the declaration's origin scope in the sidecar (plan §7.10
+        // Record the declaration's origin scope in the sidecar (
         // + C1) so dispatch builders reached from this anchor can route
         // per-base-scope lookups through the scope's declaration-scope
         // payload.
@@ -142,7 +142,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     &bundle,
                 )
             });
-        // r15/F11 — capture the scope-shadowing context
+        // R15/F11 — capture the scope-shadowing context
         // once for the whole `build_typeof` body so every recursive
         // lowering observes the same shadow set.
         let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
@@ -263,7 +263,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         (QueryResult::Value(node_id), signature)
     }
 
-    /// Generic instantiation (plan §3 C1 + §2 lazy materialisation + §7.14).
+    /// Generic instantiation.
     ///
     /// Path C C16: receives `DeclIdentity` directly from the
     /// `Instantiate` key instead of unwrapping a `DeclAnchor` node.
@@ -310,7 +310,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
         let adapter = SessionDispatchHost::new(self.ctx);
 
-        // 2. Built-in utility dispatch (plan §3 C7 + §2 built-in utilities).
+        // 2. Built-in utility dispatch.
         // A utility name (Partial, Pick, ReturnType, etc.) that the user
         // has NOT shadowed routes through the utility-specific dispatch
         // path — producing the same shell structure + origin edges a
@@ -341,7 +341,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // parameter has no explicit arg but carries a default
         // expression, lower the default in the decl's scope and bind
         // it — mirrors the solver's `resolve_type_parameters_in_body`
-        // behaviour at solve.rs:2580 (plan §5.7 step 3).
+        // behaviour at solve.rs:2580.
         let scope_payload = self
             .ctx
             .prepared_decl_bundle(decl_canonical.as_ref())
@@ -350,7 +350,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     &bundle,
                 )
             });
-        // r15/F11 — capture the scope-shadowing context
+        // R15/F11 — capture the scope-shadowing context
         // once for the whole `build_instantiate` body so every
         // recursive lowering observes the same shadow set.
         let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
@@ -373,7 +373,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     body_mode,
                 )
             } else if body_mode == crate::semantic_query::ProjectionMode::Skeleton {
-                // Plan §4.21 / R10-2 — Skeleton mode preserves open generics.
+                // Skeleton mode preserves open generics.
                 // Bind unbound param to a TypeParam shell so body lowering
                 // produces TypeParam graph nodes (instead of resolving
                 // T-refs to Opaque(Miss)). The relation engine treats
@@ -473,9 +473,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         );
 
         // SubstituteTypeParam edges on the shell result: one per visited
-        // substituted occurrence (plan §3 C1 — edges emitted at
+        // substituted occurrence ( C1 — edges emitted at
         // substitution position; at shell level this aggregates on the
-        // result node per plan §2 lazy block).
+        // result node per lazy block).
         for (param_name, arg_id) in substitutions {
             self.graph().record_origin_edge(
                 result,
@@ -561,7 +561,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         )
     }
 
-    /// Built-in utility dispatch (plan §3 C7 + §2 built-in utilities).
+    /// Built-in utility dispatch.
     ///
     /// Routes recognised utility names (`Partial`, `Required`, `Readonly`,
     /// `Record`, `NoInfer`, string intrinsics, etc.) through the same
@@ -1181,7 +1181,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     // `SemanticQueryKey::Instantiate.base` (`DeclIdentity`), so there is
     // no arena node to unwrap.
 
-    /// Path-precise projection (plan §3 C3). Walks each [`PathSegment`]
+    /// Path-precise projection. Walks each [`PathSegment`]
     /// from `base` via a fresh [`PathWalker`] that dispatches per-hop on
     /// every shell variant (`Object`, `Union`, `Intersection`,
     /// `Conditional`, `Alias`) and emits per-segment origin edges
@@ -1208,7 +1208,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> (QueryResult<SemanticNodeId>, DepSignature) {
         let fence = self.project_generation_signature();
         self.graph().record_path_length(path.len() as u32);
-        // longest-prefix-first peek. Skip when path.len() < 2.
+        // Longest-prefix-first peek. Skip when path.len() < 2.
         // Codex-2 r3 fix: prefix entries are cached as Navigate regardless
         // of the caller's mode (path-precise rule — intermediate hops are
         // Navigate, terminal hop is the caller's mode).
@@ -1224,7 +1224,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         let mut walker = PathWalker::new(self, mode, &fence);
         let result = walker.walk(start_base, walker_path.as_ref());
-        // supplement §5.D.0 r17 — surface a budget-exceeded
+        // Supplement §5.D.0 r17 — surface a budget-exceeded
         // sentinel as `QueryResult::Recursive` so §5.D.4
         // `no_cache_promotion_for_budget_exceeded_*` callers can
         // discriminate via a type-level `matches!(_, Recursive(_))`
@@ -1241,7 +1241,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         // Emit a whole-path `ProjectPath` edge on the result so consumers
         // can recover the entry path without rebuilding it from per-hop
-        // edges (plan §3 C3).
+        // edges.
         if result != base {
             self.graph().record_origin_edge(
                 result,
@@ -1251,7 +1251,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 Arc::clone(&fence),
             );
         }
-        // backfill intermediate path prefixes so a sibling
+        // Backfill intermediate path prefixes so a sibling
         // dispatch sharing the same prefix can short-circuit through
         // `find_longest_warm_prefix`. Backfill always targets Navigate
         // (path-precise rule — intermediate hops are Navigate-mode
@@ -1275,7 +1275,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///
     /// Emits one `ProjectMember` edge per keyspace literal back to the
     /// source object base, carrying the member name in
-    /// `OriginMeta::MemberName` (plan §3 C5). The edge lets walkers
+    /// `OriginMeta::MemberName`. The edge lets walkers
     /// reconstruct which source member each keyspace literal derives from.
     pub(super) fn build_key_of(
         &self,
@@ -1362,7 +1362,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             })
     }
 
-    /// Mapped-type rewrite (plan §3 C6 + §2 lazy block).
+    /// Mapped-type rewrite.
     ///
     /// For a mapped type `{ [K in key_space]: value_expr }` with
     /// optional / readonly modifiers (stored on the `MapperKey` and
@@ -1432,7 +1432,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         } else if let Some(names) = self.key_names_from_keyspace_node(mapper.key_space) {
             names
         } else {
-            // Plan §3 Change M: `KeyEnumeration::Unresolvable`. Neither the
+            // Change M: `KeyEnumeration::Unresolvable`. Neither the
             // source surface nor the key space enumerate to concrete names.
             // The canonical form is a deferred
             // `SemanticNodeData::Mapped { source, mapper }` shell — callers
@@ -1501,7 +1501,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     source_member.map(|m| m.readonly).unwrap_or(false)
                 }
             };
-            // Value selection per plan §3 Cluster B:
+            // Value selection per Cluster B:
             //
             // - `source_members` matches this key AND `value_expr` IS
             //   structurally `T[K]` → use the member value directly
@@ -1535,7 +1535,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     evaluated
                 }
             };
-            // apply `name_remap` (the `as <expr>` clause) to
+            // Apply `name_remap` (the `as <expr>` clause) to
             // produce the member's surface name. When unset, the
             // produced name is the iteration key directly. When set,
             // substitute the mapper binder → `Literal(name)` into the
@@ -1612,7 +1612,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         (QueryResult::Value(node), fence)
     }
 
-    /// Conditional type (plan §3 C2 + §2 lazy block + §3
+    /// Conditional type ( C2 + §2 lazy block + §3
     /// distributive-conditional authority).
     ///
     /// Evaluates `check extends extends ? true_branch : false_branch`
@@ -1629,8 +1629,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///   members: per_member_results })`. Termination is guaranteed by
     ///   the `distributive: false` flag on each sub-query (no re-
     ///   distribution), the family memo's per-member dedup, and the
-    ///   dispatch layer's same-path recursion sentinel. Plan §3:
-    ///   dispatch owns distributive distribution.
+    ///   dispatch layer's same-path recursion sentinel. Dispatch owns
+    ///   distributive distribution.
     /// - **Closed/decidable check** — one of the branch shell references
     ///   directly (no `Conditional` node interned). Emits a
     ///   [`OriginEdgeKind::ConditionalSelect`] edge with
@@ -1665,7 +1665,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let graph = self.graph();
         let fence = self.project_generation_signature();
 
-        // Plan §3 C2 + §3 : distributive distribution is the
+        // C2 + §3: distributive distribution is the
         // dispatch layer's responsibility. When `distributive == true`
         // and `check` is a union, re-enter `execute` per-member with
         // `distributive: false`, then normalise the per-member results
@@ -1714,7 +1714,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         }
 
-        // Plan §3 Cluster A: single-infer conditional `T extends infer
+        // Cluster A: single-infer conditional `T extends infer
         // X ? X : ...`. When `extends` is a bare
         // [`SemanticNodeData::Infer`], bind the infer name to `check`
         // on the true branch and emit an `InferBind` origin edge
@@ -1725,12 +1725,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // Multi-infer (`T extends [infer A, infer B] ? ...`), nested-
         // infer, and template-literal-infer patterns stay deferred;
         // they require the full relation-engine bindings integration
-        // still pending per TODO(plan §3 Change S) below.
+        // still pending per TODO below.
         if let Some(SemanticNodeData::Infer { name }) = graph.node_data(extends).as_deref() {
             let infer_name: Arc<str> = Arc::clone(name);
             // Path C C6a item 9a: intern the Infer node, then
             // substitute by node id. substitute's Infer arm still
-            // matches by display_name for now (plan §14.2 item 8
+            // matches by display_name for now ( item 8
             // footnote — TypeScript `infer X` is a separate
             // name-slot mechanism, C11a re-evaluates).
             let infer_node = graph.intern_node(SemanticNodeData::Infer {
@@ -1860,7 +1860,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // with dep-signature fencing.
                 match self.relate_nodes(check, extends).0 {
                     crate::semantic_query::RelationResult::Assignable { bindings: _ } => {
-                        // TODO(plan §3 Change S): substitute infer
+                        // TODO: substitute infer
                         // bindings into `true_branch` via
                         // `substitute_semantic_type_param` and emit
                         // `InferBind` origin edges for non-empty
@@ -1950,7 +1950,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// their only member; empty unions fold to `Primitive(Never)`.
     ///
     /// Emits one `Normalize` origin edge from the result to each
-    /// contributing source member (plan §3 C5). The edge lets walkers
+    /// contributing source member. The edge lets walkers
     /// recover the pre-canonical input set even after dedup / sorting.
     /// Single-member / empty folds emit no edge — the result IS one of
     /// the inputs (or a fresh Never node) and there's no canonicalisation
@@ -1977,7 +1977,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// folds to the only member; empty folds to `Primitive(Never)`.
     ///
     /// Emits one `Normalize` origin edge from the result to each
-    /// contributing source member (plan §3 C5).
+    /// contributing source member.
     pub(super) fn build_normalize_intersection(
         &self,
         members: &Arc<[SemanticNodeId]>,
@@ -2191,7 +2191,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 }
 
-/// path-prefix peek (plan §1.B). Walks `path` from longest to
+/// Path-prefix peek. Walks `path` from longest to
 /// shortest non-empty prefix, returning the warm `(base, path[..k],
 /// Navigate)` entry's resolved node and `k` if any such prefix is
 /// memoized. Returns `None` when no prefix is warm — caller falls back
@@ -2231,7 +2231,7 @@ fn find_longest_warm_prefix(
     None
 }
 
-/// backfill helper (plan §1.B). For each linear-member-step
+/// Backfill helper. For each linear-member-step
 /// intermediate captured by the [`PathWalker`] in `intermediates`,
 /// publish the corresponding `(base, path[..i+1], Navigate)` key into
 /// the warm map via the shared
@@ -2285,7 +2285,7 @@ fn backfill_prefixes(
     }
 }
 
-/// helper — convert a per-call local fence (one
+/// Helper — convert a per-call local fence (one
 /// `(canonical, version)` entry per dep fact accumulated during the
 /// build path) into the canonical `Arc<[(Arc<str>, DepVersion)]>`
 /// shape returned alongside `QueryResult`.

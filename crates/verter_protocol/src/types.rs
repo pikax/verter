@@ -43,7 +43,7 @@ pub struct FfiHostConfig {
     /// Enable Rust-first native audit for component-meta requests.
     pub audit_enabled: Option<bool>,
     /// Enable per-request semantic footprint capture. Requires
-    /// `audit_enabled = true`. Plan §3 Commit 8.
+    /// `audit_enabled = true`.
     pub footprint_capture: Option<bool>,
 }
 

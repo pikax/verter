@@ -34,7 +34,7 @@ impl VerterHost {
     /// back the result and populates the compile cache. The `files` map is also
     /// populated for the WASM path (non-scheduler).
     ///
-    /// sub-plan §0/§3: `upsert` is now a one-line forwarder onto
+    /// Sub-: `upsert` is now a one-line forwarder onto
     /// `upsert_with_priority` at `Priority::Interactive` (the priority the
     /// existing implementation hard-coded at the scheduler submission
     /// site). Batch callers (`compile_many`) instead call
@@ -119,7 +119,7 @@ impl VerterHost {
         // Thread the current thread's `OpaqueRequestContext` (if any)
         // so worker threads install it before running stages — keeps
         // fan-out events from the scheduler's SourceStage attributable
-        // to an outer audited request. Plan §3.A Commit 6.D.
+        // to an outer audited request.
         let handle = self
             .scheduler
             .submit_request(verter_scheduler::scheduler::Request {
@@ -221,7 +221,7 @@ impl VerterHost {
             };
             self.update_alias_map(&canonical_id, &old_aliases, &alias_set);
 
-            // Sub-plan §2.13: byte-identical fast-path workspace-edge write
+            // Sub-: byte-identical fast-path workspace-edge write
             // (closes F7 — fast path used to be a separate writer that
             // skipped record_parsed_edges, leaving the workspace stale on
             // re-upsert with a fresh workspace). Per R4 lifecycle this
@@ -389,7 +389,7 @@ impl VerterHost {
 
     /// Build the set of `ParsedEdge` records from a file's parse analysis.
     ///
-    /// Sub-plan §2.11 (R5 dedupe contract): dedupe by
+    /// Sub- (R5 dedupe contract): dedupe by
     /// `(specifier, ResolveRequestKind)`, NOT by specifier alone. This
     /// closes Codex P2 / F14: a file with `import { foo } from './x'` AND
     /// `import type { Bar } from './x'` must produce TWO `ParsedEdge::Relative`

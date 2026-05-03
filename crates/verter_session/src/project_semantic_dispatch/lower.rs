@@ -1,5 +1,4 @@
 //! `shallow_lower_type_expr` — TypeExpr → SemanticNodeId shallow lowering
-//! (plan §3 Change Split + Change L).
 //!
 //! Produces the first structural layer of the semantic graph from a
 //! parsed [`TypeExpr`] tree. Deeper expansion is the caller's
@@ -7,7 +6,7 @@
 //! this pass stays one member / arm / sub-expression deep so the
 //! published shell identity is stable across entry paths.
 //!
-//! **Authority contract (plan §2):** this is the *only* TypeExpr
+//! **Authority contract:** this is the *only* TypeExpr
 //! lowering path in the workspace. The §6.5 invariant test
 //! `type_expr_lowering_has_exactly_one_path` asserts exactly one
 //! `fn shallow_lower_type_expr` exists in `crates/`.
@@ -49,7 +48,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// name is NOT in `name_resolution` — the walker falls through to
     /// [`resolve_bare_name_in_scope`] which looks at host-owned
     /// `shallow_file_state` + prepared-decl bundle + export-target
-    /// resolvers (plan §5.7 step 3 — dispatch carries full
+    /// resolvers ( — dispatch carries full
     /// name-resolution context without routing through
     /// `SessionSolverHost`).
     ///
@@ -101,7 +100,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // Unbound parameter — intern with lowered
                     // constraint / default so the projection back to
                     // `TypeExpr::TypeParameter(TypeParam { name,
-                    // constraint, default })` is complete. Plan §3
+                    // constraint, default })` is complete.
                     // Cluster A.
                     let constraint = param.constraint.as_ref().map(|c| {
                         self.shallow_lower_type_expr(
@@ -138,7 +137,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // SemanticNodeId; cross-file unresolved `K`
                     // references stay distinct via canonical_id.
                     // `param_index = 0` is the documented zero per
-                    // plan §14.2 item 2 ("file-scoped name-keyed
+                    // item 2 ("file-scoped name-keyed
                     // identity"). Escalation path if too coarse:
                     // owner-scope-local `(name → ordinal)` map.
                     let decl = crate::semantic_query::DeclIdentity::from_scope(
@@ -171,7 +170,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 substitutions.push((Arc::clone(name), arg_id));
                 arg_id
             }
-            // Plan §3 Cluster A + Path C C3: script-setup generic parameter.
+            // Cluster A + Path C C3: script-setup generic parameter.
             // When the bare name maps to a `script_setup_type_bindings`
             // entry, lower directly to a rich
             // `SemanticNodeData::TypeParam { name, constraint, default }`
@@ -226,7 +225,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 });
                 let display_name = Arc::clone(&binding.name);
                 // Path C C6: script-setup type parameters get
-                // `decl_name = "<script-setup>"` sentinel per plan §2
+                // `decl_name = "<script-setup>"` sentinel per
                 // Pass C6, with the file's canonical_id + whole_hash
                 // taken from the current lowering scope. Path C C6a
                 // item 1: `param_index` is the binder's 0-based
@@ -263,7 +262,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             // Named type reference (`type Foo<T> = { y: Other<T> }` →
             // `Other<T>` at `y`'s position). Resolve through
-            // dispatch per plan §3 C1:
+            // dispatch per C1:
             //   - 0-arg refs → execute(ResolveDecl(...)).
             //   - n-arg refs → execute(ResolveDecl(...)) then
             //     execute(Instantiate(decl_identity, lowered_args)) →
@@ -329,7 +328,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         })
                         .collect();
 
-                    // Plan §4.12 / B0: in `Navigate` mode, Pick/Omit
+                    // In `Navigate` mode, Pick/Omit
                     // preserve the carrier `InstantiationRef` shell so the
                     // materialiser's registry-route guard can apply
                     // cycle / package gates on the wrapped root identity
@@ -377,7 +376,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // consults the declaration-scope payload + the host's
                 // `shallow_file_state` import_targets / exports maps +
                 // `resolve_named_type_export_target`, the same substrate
-                // `SessionSolverHost::root_identity` wraps (plan §5.7
+                // `SessionSolverHost::root_identity` wraps (
                 // step 3 — dispatch no longer routes through
                 // `SessionSolverHost`).
                 let resolved_root = if let Some(direct) = name_resolution.get(name.as_ref()) {
@@ -443,7 +442,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     decl_name: Arc::clone(&resolved_name_clone),
                 };
                 if matches!(mode, ProjectionMode::Navigate | ProjectionMode::Skeleton) {
-                    // Plan §4.21 / R10-2 — Skeleton mode preserves carriers
+                    // Skeleton mode preserves carriers
                     // (like Navigate) so the cycle-BFS can see recursive refs
                     // as DeclRef/InstantiationRef in the lowered graph rather
                     // than collapsed Opaque(RecursiveRef) sentinels. Without
@@ -728,7 +727,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             // Arrays publish through the dedicated
             // `SemanticNodeData::Array { element, readonly }` variant per
-            // plan §3 B4 + §7.14: array indexed-access is hot and must not
+            // B4 + §7.14: array indexed-access is hot and must not
             // pay generic `Array<T>` declaration-instantiation cost on
             // every access.
             TypeExpr::Array { element, readonly } => {
@@ -786,8 +785,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             // Template-literal shells publish verbatim — the relation
             // engine's infer-pattern support for template matching is a
-            // follow-up per plan §1.4, but the shell carrier itself is
-            // not deferred (plan §3 B4 + §7.14).
+            // follow-up per, but the shell carrier itself is
+            // not deferred.
             TypeExpr::TemplateLiteral {
                 quasis,
                 expressions,
@@ -834,7 +833,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ),
             // Mapped types (`{ [K in keyof T]: T[K] }` and friends)
             // route through `SemanticQueryKey::MappedType` so `build_mapped_type`
-            // (plan §3 C6) produces the correct shell + per-member
+            // produces the correct shell + per-member
             // modifiers. The key insight for the common `keyof T`
             // pattern: `TypeExpr::Mapped.source` is the key space
             // expression (`keyof T`), not T itself. `build_mapped_type`'s
@@ -870,7 +869,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // as `param_index` so two distinct `[K in ...]`
                 // binders in the same file (or same scope) hash to
                 // distinct identity tuples. Documented fallback from
-                // per-owning-scope per plan §14.2 — see
+                // per-owning-scope per — see
                 // `ProjectSemanticDispatch::mapped_binder_ordinal`
                 // for the trade-off discussion.
                 let mapper_decl = match scope {
@@ -1141,7 +1140,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     substitutions,
                     mode,
                 );
-                // Plan §3 Cluster A + Step 1.5 mapped+conditional infer
+                // Cluster A + Step 1.5 mapped+conditional infer
                 // closure: collect EVERY `SemanticNodeData::Infer { name }`
                 // reachable from `extends` (bare position OR nested inside
                 // Function / Tuple / Array / Union / Intersection / Object
@@ -1297,7 +1296,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 result
             }
-            // Function-type lowering (plan §3 Change L). Produces a
+            // Function-type lowering. Produces a
             // canonical `SemanticNodeData::Function` carrier with
             // lowered parameters and return type. Type parameters
             // lower to `TypeParamDecl` — constraints/defaults lower
@@ -1378,7 +1377,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 )
             }
             // `infer X` placeholder in a conditional's `extends` arm
-            // (plan §3 Cluster A). Explicit semantic variant rather
+            // Explicit semantic variant rather
             // than encoded via scope overloading. Substitution picks
             // the Infer arm up symmetrically with TypeParam in
             // `substitute_semantic_type_param`; `build_conditional`
@@ -1393,7 +1392,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // Conditionals, rest, recursive-ref, and unknown
             // constructs remain out of this pass's scope — they route
             // through their own dispatch builders (C2/C7/...) or stay
-            // solver-scratch-only per plan §7.14 / §7.18.
+            // solver-scratch-only per.
             _ => self.opaque(QueryError::Miss),
         }
     }

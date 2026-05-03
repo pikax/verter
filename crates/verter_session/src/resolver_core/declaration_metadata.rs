@@ -794,15 +794,13 @@ type Props = {
 
     #[test]
     fn declaration_metadata_resolves_local_symbol_via_graph_only() {
-        // discrimination test for the local-symbol
-        // resolution path (former source-reading callsite at
-        // declaration_metadata.rs:184). The graph metadata
-        // (`local_type_symbol_metadata`) is seeded; the resolver
-        // returns kind/span/declaration_id from the graph and leaves
-        // `text` None. (The source-reading trait method was deleted
-        // in commit 5; pre-deletion, this test failed at the
-        // `text == None` assertion because the source-reparse path
-        // populated `text` to `Some(...)`.)
+        // Discrimination test for the local-symbol resolution path.
+        // The graph metadata (`local_type_symbol_metadata`) is seeded;
+        // the resolver returns kind/span/declaration_id from the graph
+        // and leaves `text` None — there is no source-reading
+        // fallback. A regression that re-introduces a source-reparse
+        // path would populate `text` to `Some(...)` and fail this
+        // assertion.
         let mut resolver = FakeResolver::default();
         let source_len = "type Props = { label: string };\n".len() as u32;
         resolver.local_type_symbol_metadata.insert(

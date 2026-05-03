@@ -1,6 +1,6 @@
 //! `MacroFieldGraphState` lazy-lowering scaffold + dispatch lower counter.
 //!
-//! domain 3 — Plan §4.10 / K1 lazy-lowering scaffold +
+//! Domain 3.10 / K1 lazy-lowering scaffold +
 //! test-only `DISPATCH_LOWER_COUNTER` instrumentation.
 //!
 //! Per §4.10, the macro field-type rewrite path inside
@@ -19,7 +19,7 @@
 
 #[cfg(test)]
 thread_local! {
-    /// Plan §4.10 / K3 — instrumentation counter for "this field-state
+    /// Instrumentation counter for "this field-state
     /// triggered a TypeExpr -> SemanticNodeId lowering". Incremented on every
     /// `raw_node()` / `current_node()` call that actually performs a lower.
     ///
@@ -44,7 +44,7 @@ fn dispatch_lower_counter_increment() {
     DISPATCH_LOWER_COUNTER.with(|c| c.set(c.get() + 1));
 }
 
-/// Plan §4.10 — lazy-lowering field state for the macro field-type rewrite
+/// Lazy-lowering field state for the macro field-type rewrite
 /// path. Carries the canonical `published_type` (TypeExpr), a memoised
 /// `raw_node` for the field's original raw type, a memoised `current_node`
 /// for the post-mutation state, and a `node_rewrite_dirty` flag
@@ -72,7 +72,7 @@ pub(crate) struct MacroFieldGraphState<'a> {
     raw_node: Option<crate::semantic_query::SemanticNodeId>,
     /// Memoised lowering of `published_type`. Lazy.
     current_node: Option<crate::semantic_query::SemanticNodeId>,
-    /// Plan §4.10 / Codex2 P1 #6 — distinct from "current_node was lowered".
+    /// P1 #6 — distinct from "current_node was lowered".
     /// Set TRUE only when a graph-native rewrite (via
     /// `set_current_node_rewrite`) produced a NEW `current_node`.
     /// `publish()` raises ONLY when this flag is set; lazy lowering for

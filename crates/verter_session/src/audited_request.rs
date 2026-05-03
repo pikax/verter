@@ -1,5 +1,5 @@
 #![deny(missing_docs)]
-//! `AuditedRequest` harness — plan §2.6.
+//! `AuditedRequest` harness.
 //!
 //! The harness wraps one `get_component_meta_with_resolution` call in
 //! a request-scoped audit: it enables `footprint_capture`, installs a

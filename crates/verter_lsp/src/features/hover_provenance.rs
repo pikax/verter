@@ -1,6 +1,6 @@
 //! Hover provenance opt-in + LRU cache.
 //!
-//! Plan §3 Commit 9. When `HoverOptions.provenance` is enabled, the
+//! When `HoverOptions.provenance` is enabled, the
 //! LSP attaches a provenance markdown section to hover responses,
 //! showing which files the component-meta request loaded and the
 //! derivation chain for the hovered binding.
@@ -19,7 +19,7 @@
 //! drops every entry whose key matches `id` — called on
 //! `textDocument/didChange` for the changed file.
 //!
-//! ## Codified limitation (plan §3 Commit 9)
+//! ## Codified limitation
 //!
 //! Transitive dependencies are NOT tracked. If the hovered file's
 //! *dependency* changes (e.g. `/c.vue` hovers a type imported from
@@ -41,7 +41,7 @@ use tower_lsp_server::ls_types::Position;
 use verter_session::component_meta_audit::RustAuditRecord;
 
 /// Maximum number of hover-provenance entries retained in the cache.
-/// Plan §3 Commit 9: LRU bounded at 100.
+/// LRU bounded at 100.
 pub const CACHE_CAPACITY: usize = 100;
 
 /// Cache key — `(canonical_id, position)` tuple. Position is UTF-16
@@ -72,7 +72,7 @@ pub struct HoverProvenancePayload {
 }
 
 /// Thread-safe LRU-100 cache of hover-provenance payloads, invalidated
-/// on `didChange` for the affected canonical. Plan §3 Commit 9.
+/// on `didChange` for the affected canonical.
 pub struct HoverProvenanceCache {
     inner: Mutex<LruCache<HoverProvenanceKey, HoverProvenancePayload>>,
 }
@@ -105,7 +105,7 @@ impl HoverProvenanceCache {
     /// Remove every entry whose canonical matches `canonical_id`.
     /// Called on `textDocument/didChange` for the changed file.
     /// Transitive dependencies are NOT invalidated — that's the
-    /// codified limitation (plan §3 Commit 9).
+    /// codified limitation.
     pub fn invalidate_canonical(&self, canonical_id: &str) {
         let mut cache = self.inner.lock();
         // LruCache doesn't expose a drain-filter; rebuild a minimal
@@ -151,7 +151,7 @@ impl Default for HoverProvenanceCache {
 
 /// Render an audit record as a markdown "Provenance" section for
 /// appending to a hover body. Pure formatting — does NOT walk the
-/// graph (plan §2.8 single-walker rule); it summarizes the footprint
+/// graph (single-walker rule); it summarizes the footprint
 /// counters and lists the union of `loaded_files()`.
 #[must_use]
 pub fn render_provenance_markdown(record: &RustAuditRecord) -> String {
@@ -214,7 +214,7 @@ mod tests {
     #[test]
     fn hover_provenance_disabled_by_default_returns_legacy_payload() {
         // The option surface defaults to `false` — the enrichment is
-        // opt-in (plan §3 Commit 9). Exercises the real
+        // opt-in. Exercises the real
         // `HoverOptions::default()` AND the parse path on an empty
         // init payload. A regression that flips the default inverts
         // the opt-in contract — both assertions below fail in that
@@ -224,7 +224,7 @@ mod tests {
 
         assert!(
             !HoverOptions::default().provenance,
-            "HoverOptions::default().provenance must be false — plan §3 Commit 9 opt-in",
+            "HoverOptions::default().provenance must be false — provenance is opt-in",
         );
         let parsed_empty = parse_hover_init_options(&serde_json::json!({}));
         assert!(
@@ -278,7 +278,7 @@ mod tests {
 
     #[test]
     fn hover_provenance_cache_does_not_invalidate_on_transitive_dependency_change() {
-        // Codified limitation (plan §3 Commit 9). If this test starts
+        // Codified limitation. If this test starts
         // failing because a refactor expanded the invalidation set to
         // also drop transitive-dep entries, EITHER update the plan /
         // docs to reflect the broader contract, OR revert the
@@ -291,7 +291,7 @@ mod tests {
         assert!(
             cache.contains(&k_owner),
             "transitive-dep change on /types.ts MUST NOT drop /c.vue's cached \
-             provenance — this is the codified limitation (plan §3 Commit 9). \
+             provenance — this is the codified limitation. \
              If you intentionally widened invalidation, update the plan/docs \
              and rename this test rather than deleting it."
         );

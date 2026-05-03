@@ -28,7 +28,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use rustc_hash::FxHashSet;
 
-/// Host-level cumulative test audit state. Plan §5.D.0 r17.
+/// Host-level cumulative test audit state.
 ///
 /// Atomic counters; the `loaded` set lives behind a `Mutex<FxHashSet>`
 /// so concurrent reads can observe set-membership without coarse-grained

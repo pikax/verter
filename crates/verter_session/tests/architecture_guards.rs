@@ -3951,6 +3951,262 @@ mod foundations_guards {
             );
         }
     }
+
+    // ── Guard 7-bis — no_phase_archaeology_in_production_code_broader_d111 ──
+    //
+    // Strict superset of guard 7. Implements the D111 classifier rule
+    // (committed at `tools/god-module-audit/README.md`) for production
+    // source files. Final-state code must not reference plan sections,
+    // commit numbers, decimal phase tags, deletion history with explicit
+    // commit/section references, or revision numbers.
+    //
+    // Predicate: scan every production `.rs` file under `crates/*/src/`
+    // (`walk_production_rs` already excludes `_tests.rs`, `tests.rs`,
+    // `tests/`, `benches/`, `examples/`, and `target/`). The guard fails
+    // when ANY line matches the regex below.
+    //
+    // Forbidden patterns (broader regex from D111):
+    //   - `Plan §` / `plan §` — explicit reference to a plan section.
+    //   - `Phase \d+` followed by anything other than a letter or `:` —
+    //     covers `Phase 5d`, `Phase 11b.2`, `Phase 5)`. The `:` carve-out
+    //     preserves algorithm-phase comments like `Phase 1: collect ...`
+    //     where the verb pinpoints an algorithm step.
+    //   - `Commit \d+` — explicit commit number reference.
+    //   - `deleted in \d` / `retired in` — deletion / retirement history.
+    //   - `revision \d+` / `rev \d+` — revision number reference (only
+    //     when the rev/revision is followed by a decimal digit, to avoid
+    //     legitimate prose like "the rev returns").
+    //
+    // Algorithm-phase carve-out: `Phase 1: collect ...` is preserved
+    // (colon-prefixed verb describes an algorithm step). Letter-suffixed
+    // phases (`Phase 5d`, `Phase 11b`) are NOT preserved — those are
+    // project-management vocabulary.
+
+    /// Predicate: returns `true` when `line` contains a forbidden
+    /// broader-D111 phase-archaeology pattern. Strict superset of the
+    /// narrower guard 7 predicate, except for the algorithm-phase
+    /// carve-out (`Phase 1: collect ...`) which the narrower predicate
+    /// does NOT distinguish from project-management `Phase 1`.
+    ///
+    /// The carve-out is deliberate: post-sweep, `Phase 1: collect ...`
+    /// comments describing algorithm steps are preserved per the D111
+    /// classifier rule. The narrower guard 7 has no such carve-out
+    /// because production code currently contains no algorithm-phase
+    /// comments to protect — the broader rule documents the
+    /// distinction so future authors know it.
+    pub fn line_has_phase_archaeology_d111(line: &str) -> bool {
+        let bytes = line.as_bytes();
+        // ── Fixed substrings — always archaeology. ──
+        const FIXED_NEEDLES: &[&str] = &[
+            "d-cutover",
+            "D-Cutover",
+            "post-cutover",
+            "Post-cutover",
+            "Post-Cutover",
+            "pre-Phase",
+            "Pre-Phase",
+            "retired in",
+            "Plan §",
+            "plan §",
+            "phase-archaeology",
+        ];
+        for needle in FIXED_NEEDLES {
+            if line.contains(needle) {
+                return true;
+            }
+        }
+        // ── `Phase \d+` with the `:` carve-out. ──
+        // `Phase 1: collect ...` is algorithm-phase (preserve). Any
+        // other byte after the digit run (letter, `-`, `.`, space, EOL,
+        // `,`, `)`, `—`, etc.) is archaeology.
+        for prefix in ["Phase ", "phase ", "Phase-", "phase-"] {
+            let mut search_from = 0usize;
+            while let Some(rel) = line[search_from..].find(prefix) {
+                let abs = search_from + rel;
+                let mut after = abs + prefix.len();
+                let digit_start = after;
+                while after < bytes.len() && bytes[after].is_ascii_digit() {
+                    after += 1;
+                }
+                if after > digit_start {
+                    // Found at least one digit. Check the next byte.
+                    // EOL after digit is archaeology.
+                    if after >= bytes.len() {
+                        return true;
+                    }
+                    let next = bytes[after];
+                    // Carve-out: colon-prefixed verb is algorithm-phase.
+                    if next != b':' {
+                        return true;
+                    }
+                }
+                search_from = abs + prefix.len();
+            }
+        }
+        // ── `Commit \d+` — explicit commit-number reference. ──
+        for prefix in ["Commit ", "commit "] {
+            let mut search_from = 0usize;
+            while let Some(rel) = line[search_from..].find(prefix) {
+                let abs = search_from + rel;
+                let after = abs + prefix.len();
+                if after < bytes.len() && bytes[after].is_ascii_digit() {
+                    return true;
+                }
+                search_from = abs + prefix.len();
+            }
+        }
+        // ── `deleted in \d` — deletion history with digit reference. ──
+        let lower = line.to_ascii_lowercase();
+        if let Some(idx) = lower.find("deleted in ") {
+            let after = idx + "deleted in ".len();
+            let bytes_l = lower.as_bytes();
+            if after < bytes_l.len() && bytes_l[after].is_ascii_digit() {
+                return true;
+            }
+            // `deleted in Commit N` / `deleted in Plan §...` are also
+            // covered by the `Commit \d+` and `Plan §` checks above.
+        }
+        // ── `revision N` / `Revision N`. ──
+        for prefix in ["revision ", "Revision "] {
+            let mut search_from = 0usize;
+            while let Some(rel) = line[search_from..].find(prefix) {
+                let abs = search_from + rel;
+                let after = abs + prefix.len();
+                if after < bytes.len() && bytes[after].is_ascii_digit() {
+                    return true;
+                }
+                search_from = abs + prefix.len();
+            }
+        }
+        // ── `rev N` standalone word. ──
+        // Only flag when `rev ` is preceded by whitespace / line start /
+        // `(` (so legitimate prose like `revs 1..3` is not flagged) and
+        // followed by a digit.
+        for (i, _) in line.match_indices("rev ") {
+            if i > 0 {
+                let prev = bytes[i - 1];
+                if !(prev == b' ' || prev == b'\t' || prev == b'(') {
+                    continue;
+                }
+            }
+            let after = i + "rev ".len();
+            if after < bytes.len() && bytes[after].is_ascii_digit() {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Walk the production tree and return `(rel_path, line_no, line)`
+    /// triples for every D111-classified archaeology match.
+    pub fn guard7_bis_violations() -> Vec<(String, usize, String)> {
+        let crates_root = workspace_root().join("crates");
+        let mut violations = Vec::new();
+        let entries = match fs::read_dir(&crates_root) {
+            Ok(it) => it,
+            Err(_) => return violations,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let src_dir = path.join("src");
+            if !src_dir.exists() {
+                continue;
+            }
+            for file in walk_production_rs(&src_dir) {
+                let src = match fs::read_to_string(&file) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                let rel = relative_to_root(&file);
+                for (idx, line) in src.lines().enumerate() {
+                    if line_has_phase_archaeology_d111(line) {
+                        violations.push((rel.clone(), idx + 1, line.to_string()));
+                    }
+                }
+            }
+        }
+        violations.sort();
+        violations
+    }
+
+    #[test]
+    fn no_phase_archaeology_in_production_code_broader_d111() {
+        let violations = guard7_bis_violations();
+        assert!(
+            violations.is_empty(),
+            "Guard 7-bis (`no_phase_archaeology_in_production_code_broader_d111`) violations:\n\
+             production source files reference plan sections, commit numbers, decimal phase\n\
+             tags, deletion history with explicit references, or revision numbers. Once a\n\
+             plan is over, the code should read as final-state. Durable architecture\n\
+             insights belong in `.claude/skills/*` or `docs/arch/`, not in source comments.\n\n\
+             Forbidden patterns (broader D111 regex):\n\
+               - `Plan §` / `plan §`\n\
+               - `Phase \\d+` (NOT followed by letter or `:` — `Phase 1: collect` preserved)\n\
+               - `Commit \\d+`\n\
+               - `deleted in \\d` / `retired in`\n\
+               - `revision \\d+` / `rev \\d+`\n\n\
+             Found {} violation(s):\n  {}",
+            violations.len(),
+            violations
+                .iter()
+                .map(|(rel, lineno, line)| format!("{rel}:{lineno}: {}", line.trim()))
+                .collect::<Vec<_>>()
+                .join("\n  "),
+        );
+    }
+
+    #[test]
+    fn guard7_bis_predicate_rejects_deliberate_violations_and_preserves_algorithm_phases() {
+        // Deliberate-violation lines that the broader D111 guard MUST
+        // reject. Mirror real archaeology shapes seen in the codebase
+        // before this guard was tightened.
+        let cases = [
+            "// Plan §3 Commit 9 — hover.provenance opt-in.",
+            "/// plan §3 Commit 8 — necessary for the audit bundle.",
+            "// Plan §3 Step 4 — audit warm-cache",
+            "/// Plan §4.8 / Phase C / Commit R — RefCycleResultDb",
+            "// Phase D §5.6 WIP-L — function shape (plan §2 decision).",
+            "// architectural-debt-closure rev 10",
+            "// were deleted in Commit 3 of the cutover sub-plan).",
+            "// Counterpart deleted in Plan §6.15 / N — entry stored.",
+            "// Five-phase materialiser entry per plan §10.",
+        ];
+        for line in cases {
+            assert!(
+                line_has_phase_archaeology_d111(line),
+                "guard 7-bis predicate must reject deliberate-violation line: {line:?}",
+            );
+        }
+        // Allowed lines: legitimate prose, algorithm-phase comments,
+        // and final-state architecture documentation. The guard MUST
+        // NOT flag these.
+        let allowed = [
+            // Algorithm-phase carve-out (colon-prefixed verb).
+            "// Phase 1: collect import statements.",
+            "// Phase 2: emit lowered IR.",
+            "// phase 3: walk dependency graph.",
+            // Final-state prose with no project-management vocabulary.
+            "// Walk the prepared declaration graph for imported types.",
+            "/// Returns the projected surface for a given semantic node.",
+            "// LRU bounded at 100 entries.",
+            "// hover.provenance is opt-in (default false).",
+            // Legitimate `rev` / `revision` usage that's not a number.
+            "// Reverses (rev) the iteration order.",
+            "/// The phase angle in radians for the easing curve.",
+            // `Phase` followed by a letter without digits — not archaeology
+            // by the broader rule (the rule specifies `Phase \d+`).
+            "// Builder Phase C owns the second pass.",
+        ];
+        for line in allowed {
+            assert!(
+                !line_has_phase_archaeology_d111(line),
+                "guard 7-bis predicate must NOT flag legitimate line: {line:?}",
+            );
+        }
+    }
 }
 
 // ===========================================================================

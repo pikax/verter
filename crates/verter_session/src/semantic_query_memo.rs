@@ -53,7 +53,7 @@ use crate::semantic_query::{
 // ──────────────────────────────────────────────────────────────────────────
 //
 // The arena pairs each interned [`SemanticNodeData`] with an **origin-scope
-// sidecar** (plan §7.10 + C1). Both the node vec and the parallel scope
+// sidecar**. Both the node vec and the parallel scope
 // vec live inside one `RwLock<ArenaInner>` so reads (`node_data`,
 // `node_scope`) are concurrent while writes (intern-miss) serialize.
 //
@@ -63,7 +63,7 @@ use crate::semantic_query::{
 // under repeated structural construction. Cross-scope same-payload
 // interns stay distinct.
 //
-// **Path C C17 — sharded dedup index (plan §2 Stage 9).** The dedup index
+// **Path C C17 — sharded dedup index.** The dedup index
 // moved off `ArenaInner` onto `[Mutex<ShardIndex>; NUM_SHARDS]`. Payload
 // hash + scope hash route to a specific shard; intern-hits (the steady-
 // state hot path) take only that shard's Mutex — so `K` threads interning
@@ -105,7 +105,7 @@ struct ShardIndex {
 #[derive(Default)]
 struct ArenaInner {
     nodes: Vec<Arc<SemanticNodeData>>,
-    /// Origin-scope sidecar (plan §7.10 + C1). Index-aligned with `nodes`.
+    /// Origin-scope sidecar. Index-aligned with `nodes`.
     /// `None` marks an exempt slot (`VueMacroElements`); `Some(scope)`
     /// records the scope the node was first interned in (`Global` for
     /// scope-less structural nodes, `File { .. }` for declaration-origin
@@ -166,7 +166,7 @@ impl NodeArena {
     }
 
     fn push_impl(&self, data: SemanticNodeData, scope: NodeScopeId) -> SemanticNodeId {
-        // `VueMacroElements` is exempt per plan §7.10 — record `None` so
+        // `VueMacroElements` is exempt per — record `None` so
         // `node_scope` returns `None` rather than `Some(Global)` for those
         // nodes. The exemption is structural so even
         // `intern_node_with_scope(VueMacroElements, Some(scope))` yields
@@ -254,7 +254,7 @@ impl NodeArena {
 
     /// Return the recorded origin scope for `id` — `None` for exempt nodes
     /// (or invalid ids), `Some(scope)` for everything else. Exempt slots
-    /// are `VueMacroElements` nodes (plan §7.10).
+    /// are `VueMacroElements` nodes.
     fn scope(&self, id: SemanticNodeId) -> Option<NodeScopeId> {
         let inner = self.inner.read();
         inner.scopes.get(id.0 as usize).cloned().flatten()
@@ -264,7 +264,7 @@ impl NodeArena {
         self.inner.read().nodes.len()
     }
 
-    /// Drop shard-dedup entries for the given canonical id. Plan §1.10
+    /// Drop shard-dedup entries for the given canonical id.
     /// Γ.A invariant: invalidation does NOT drop `NodeScopeId::Global`
     /// — only `File { canonical_id: c, .. }` matches. Entries keyed at
     /// any other `File` canonical also survive.
@@ -456,7 +456,7 @@ impl<'a> Drop for InflightPanicGuard<'a> {
 #[derive(Default)]
 pub struct SemanticGraphStore {
     arena: NodeArena,
-    /// Family-keyed warm memo (plan §2 cache topology + B1b).
+    /// Family-keyed warm memo.
     ///
     /// Each entry's [`FamilyKey`] is mode-erased; the per-mode result lives
     /// in one of the [`FamilySlots`] slots. For non-mode-bearing variants
@@ -477,18 +477,18 @@ pub struct SemanticGraphStore {
     entries: Mutex<FxHashMap<FamilyKey, FamilySlots>>,
     /// In-flight admission keyed by the full [`SemanticQueryKey`]. Because
     /// mode is part of the key for mode-bearing variants, this keying
-    /// gives per-`(family, mode_slot)` in-flight authority (plan §7.15) —
+    /// gives per-`(family, mode_slot)` in-flight authority
     /// concurrent `Navigate` and `Expanded` builds on the same family run
     /// as two independent in-flight entries.
     inflight: Mutex<FxHashMap<SemanticQueryKey, Arc<InflightEntry>>>,
     /// Identity map for Vue macro resolution artifacts keyed by
     /// [`HostResolvedNamedTypeKey`]. See the struct-level docs for the
-    /// read-path shape. Per plan §7.16, `SemanticQueryKey::ResolvedNamedType`
+    /// read-path shape. Per, `SemanticQueryKey::ResolvedNamedType`
     /// bypasses the family memo entirely — this `DashMap` is the cache,
     /// and `execute_cooperative` short-circuits straight to the build
     /// closure for that variant.
     named_type_index: DashMap<HostResolvedNamedTypeKey, SemanticNodeId>,
-    /// Relation-engine memo (plan §2 + §3 Change S). Added in Phase D §5.4
+    /// Relation-engine memo. Added in Phase D §5.4
     /// WIP-S. Maps `(source, target)` semantic-node pairs to the tri-state
     /// [`RelationResult`](crate::semantic_query::RelationResult) plus the
     /// dep-signature used for warm-hit revalidation. Separate from the
@@ -513,7 +513,7 @@ pub struct SemanticGraphStore {
     /// `execute_cooperative` to bucket owner vs joiner paths and held
     /// time on `MetaProvenance`.
     provenance: Option<Arc<crate::types::MetaProvenance>>,
-    /// Plan §6 / §13.2 Γ.B reverse index. For each canonical id,
+    /// Γ.B reverse index. For each canonical id,
     /// holds the set of `(family, slot)` pairs whose published
     /// dep_signature references it, paired with the dep_signature
     /// `Arc` that was registered. `invalidate_canonical` consults
@@ -536,7 +536,7 @@ pub struct SemanticGraphStore {
     canonical_to_entries: CanonicalToEntries,
 }
 
-/// Plan §6 / §13.2 Γ.B reverse-index type alias. See
+/// Γ.B reverse-index type alias. See
 /// [`SemanticGraphStore::canonical_to_entries`] for the contract.
 type CanonicalToEntries = DashMap<Arc<str>, Mutex<FxHashMap<(FamilyKey, ModeSlot), DepSignature>>>;
 
@@ -557,7 +557,7 @@ struct MemoEntry {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// Family memo — mode-erased keys + per-mode slots (plan §2 + B1b + §7.15)
+// Family memo — mode-erased keys + per-mode slots
 // ──────────────────────────────────────────────────────────────────────────
 
 /// Mode-erased identity for one [`SemanticQueryKey`] family.
@@ -612,11 +612,11 @@ enum FamilyKey {
     },
     /// Included for completeness so `family_and_slot` is total, but
     /// [`SemanticQueryKey::ResolvedNamedType`] bypasses the family memo at
-    /// admission and never lands in the warm map (plan §7.16).
+    /// admission and never lands in the warm map.
     ResolvedNamedType {
         key: Arc<HostResolvedNamedTypeKey>,
     },
-    /// binding amendment — `ResolveMacroPayload`. Mode-erased
+    /// Binding amendment — `ResolveMacroPayload`. Mode-erased
     /// for the family memo; the per-mode result lives in the matching
     /// `FamilySlots` slot.
     ResolveMacroPayload {
@@ -637,7 +637,7 @@ enum ModeSlot {
     Navigate,
     Shallow,
     Expanded,
-    /// Plan §4.21 / R10-2 — Skeleton mode. Distinct semantics from
+    /// Skeleton mode. Distinct semantics from
     /// Identity/Navigate/Shallow/Expanded (preserves open generics as
     /// TypeParam shells); does NOT backfill or get backfilled by other
     /// modes.
@@ -654,7 +654,7 @@ struct FamilySlots {
     navigate: Option<MemoEntry>,
     shallow: Option<MemoEntry>,
     expanded: Option<MemoEntry>,
-    /// Plan §4.21 / R10-2 — Skeleton mode slot. Independent from
+    /// Skeleton mode slot. Independent from
     /// Navigate/Expanded; does NOT participate in backfill.
     skeleton: Option<MemoEntry>,
 }
@@ -685,13 +685,13 @@ impl FamilySlots {
     /// Publish `entry` to `slot` and backfill every narrower slot whose
     /// cell is empty. The narrower slots store the same `Arc`-shared
     /// [`MemoEntry`] (same result + same dep-signature) — this is the
-    /// conservative "broader satisfies narrower" rule from plan §7.11; a
+    /// conservative "broader satisfies narrower" rule from; a
     /// dep-signature tightening pass against the actual narrower read-set
     /// is permitted follow-up work tracked in §1.4.
     ///
     /// Returns the list of slots that this publish actually populated
     /// (the primary slot + any previously-empty narrower slots that were
-    /// backfilled). Plan §6 / §13.2 — the caller registers a
+    /// backfilled). — the caller registers a
     /// reverse-index entry per populated slot in the per-canonical
     /// `canonical_to_entries` index. Capped at 6 (single + identity +
     /// navigate + shallow + expanded + skeleton), so a stack `SmallVec`
@@ -750,7 +750,7 @@ struct DerivationStore {
 
 impl DerivationStore {
     fn intern_signature(&mut self, sig: DepSignature) -> Arc<DepSignature> {
-        // diagnosis: record one signature-intern call per
+        // Diagnosis: record one signature-intern call per
         // invocation, classified into `returned_existing` vs.
         // `allocated`. The capture-token hook is a no-op when no
         // token is bound (zero-overhead production path). The
@@ -896,7 +896,7 @@ struct AtomicSemanticGraphStats {
     projection_depth_samples: Mutex<SampleCollector>,
     decl_subexpression_lowering_count: AtomicU64,
     relation_check_count: AtomicU64,
-    /// Plan §8 / count of `intern_preserving_scope` calls
+    /// Of `intern_preserving_scope` calls
     /// observed by the store. Pre-Fix-D substitute helpers rebuilt
     /// every match arm unconditionally; post-Fix-D the no-op
     /// branches short-circuit and skip the call entirely.
@@ -976,7 +976,7 @@ impl Drop for InFlightStatsGuard<'_> {
 /// satisfies `Identity`. `Identity` and `Single` backfill nothing.
 /// `Skeleton` is independent of the Identity/Navigate/Shallow/Expanded
 /// hierarchy (different semantics: preserves open generics) — it backfills
-/// nothing AND nothing backfills it (plan §4.21 / R10-2).
+/// nothing AND nothing backfills it.
 fn backfill_targets(slot: ModeSlot) -> &'static [ModeSlot] {
     match slot {
         ModeSlot::Single => &[],
@@ -1098,7 +1098,7 @@ fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
             },
             ModeSlot::Single,
         ),
-        // binding amendment — `ResolveMacroPayload`. The
+        // Binding amendment — `ResolveMacroPayload`. The
         // mode is stripped into the slot per the standard mode-bearing
         // pattern; the family identity is the (owner, macro_index,
         // macro_kind, type_args) tuple.
@@ -1211,7 +1211,7 @@ impl SemanticGraphStore {
         Self::default()
     }
 
-    /// diagnosis accessor: number of distinct interned
+    /// Diagnosis accessor: number of distinct interned
     /// `DepSignature` payloads in the derivation-signature pool. Used
     /// by the diagnosis benchmark to record the pool's growth across
     /// scenarios — `record_signature_pool_size` on the active capture
@@ -1221,7 +1221,7 @@ impl SemanticGraphStore {
         self.derivation.lock().signature_pool.len()
     }
 
-    /// diagnosis-instrumented entries-mutex acquisition.
+    /// Diagnosis-instrumented entries-mutex acquisition.
     ///
     /// Returns a [`parking_lot::MutexGuard`] for `self.entries` while
     /// timing both the wait (lock-acquisition latency) and the hold
@@ -1272,7 +1272,7 @@ impl SemanticGraphStore {
     /// whose value carries a declaration identity, etc.).
     ///
     /// [`SemanticNodeData::VueMacroElements`] nodes are sidecar-exempt per
-    /// plan §7.10 — their sidecar slot is forced to `None` structurally,
+    /// their sidecar slot is forced to `None` structurally,
     /// regardless of which intern entry point is used.
     #[must_use = "the returned SemanticNodeId is the only way to reach the interned node"]
     pub fn intern_node(&self, data: SemanticNodeData) -> SemanticNodeId {
@@ -1286,7 +1286,7 @@ impl SemanticGraphStore {
     /// returns the originating scope later.
     ///
     /// [`SemanticNodeData::VueMacroElements`] nodes are sidecar-exempt per
-    /// plan §7.10; passing a non-`Global` scope has no effect for that
+    ///; passing a non-`Global` scope has no effect for that
     /// variant — the sidecar slot is forced to `None` structurally.
     #[must_use = "the returned SemanticNodeId is the only way to reach the interned node"]
     pub fn intern_node_with_scope(
@@ -1327,7 +1327,7 @@ impl SemanticGraphStore {
     }
 
     /// Test/diagnostic — read the cumulative count of
-    /// `intern_preserving_scope` calls. Plan §8 /
+    /// `intern_preserving_scope` calls. /
     /// discriminating signal for the substitute change-tracking
     /// optimization: a no-op substitution must increment this
     /// counter by zero post-Fix-D.
@@ -1351,7 +1351,7 @@ impl SemanticGraphStore {
     ///
     /// The sidecar records the scope at the moment of **first intern**; a
     /// reader that calls `node_scope(id)` from a different scope observes
-    /// the origin scope, not their own (plan §7.10).
+    /// the origin scope, not their own.
     #[must_use]
     pub fn node_scope(&self, id: SemanticNodeId) -> Option<NodeScopeId> {
         self.arena.scope(id)
@@ -1412,7 +1412,7 @@ impl SemanticGraphStore {
     /// flag on wake and re-enter dispatch from step 1 of
     /// [`Self::execute_cooperative`] (up to `MAX_INFLIGHT_RETRIES`).
     ///
-    /// Over-invalidation trade-off (plan §7.11): backfilled narrower
+    /// Over-invalidation trade-off: backfilled narrower
     /// slots inherit the broader compute's full dep-signature, so this
     /// sweep may evict a narrower slot whose independent recomputation
     /// would not have read the changed canonical. Correct — never misses
@@ -1426,7 +1426,7 @@ impl SemanticGraphStore {
     pub fn invalidate_canonical(&self, canonical_id: &str) -> usize {
         use rustc_hash::FxHashSet;
 
-        // drain the per-canonical
+        // Drain the per-canonical
         // (family, slot) → registered_dep_signature map for
         // `canonical_id`. The drain releases the per-canonical mutex
         // before acquires `entries`, preserving the
@@ -1451,7 +1451,7 @@ impl SemanticGraphStore {
             affected_pairs.insert((family.clone(), *slot));
         }
 
-        // walk the
+        // Walk the
         // drained set under the entries lock. Drop each slot whose
         // current dep_signature `Arc::ptr_eq`-matches the registered
         // dep_signature. ptr_eq distinguishes "our entry" from "a
@@ -1485,7 +1485,7 @@ impl SemanticGraphStore {
             entries.retain(|_, slots| slots.populated_count() > 0);
         }
 
-        // for each evicted entry's
+        // For each evicted entry's
         // dep_signature, walk every other canonical it referenced and
         // drop the matching `(family, slot)` registration if it still
         // ptr_eq-matches our dep_signature. Lock order respected:
@@ -1510,7 +1510,7 @@ impl SemanticGraphStore {
             }
         }
 
-        // drop
+        // Drop
         // in-flight entries for any (family, slot) whose warm slot
         // was just evicted. Joiners waiting on the condvar observe
         // `aborted = true` on wake and re-enter dispatch from step 1
@@ -1547,10 +1547,10 @@ impl SemanticGraphStore {
             });
         }
 
-        // drop
+        // Drop
         // NodeArena shard-dedup entries keyed at
         // `File { canonical_id: c, .. }`. Preserves Global entries
-        // and entries for any other canonical (plan §1.10 Γ.A). The
+        // and entries for any other canonical. The
         // arena Vec is append-only — this only clears the "next
         // intern returns existing id" path; valid SemanticNodeIds for
         // nodes already published into the arena are unaffected.
@@ -1560,8 +1560,8 @@ impl SemanticGraphStore {
     }
 
     /// Clear every warm memo entry. Used on project-generation bumps
-    /// (`tsconfig` changes, active-TS-SDK swaps, workspace-folder changes)
-    /// per plan § A0. Returns the number of slots cleared (summed across
+    /// (`tsconfig` changes, active-TS-SDK swaps, workspace-folder
+    /// changes). Returns the number of slots cleared (summed across
     /// every family).
     pub fn invalidate_all(&self) -> usize {
         let mut entries = self.entries_lock_diagnosed();
@@ -1652,7 +1652,7 @@ impl SemanticGraphStore {
     }
 
     // ──────────────────────────────────────────────────────────────────
-    // Relation memo (plan §2 + §3 Change S)
+    // Relation memo
     // ──────────────────────────────────────────────────────────────────
 
     /// Warm-hit read of a cached relation judgement for `(source, target)`.
@@ -1710,7 +1710,7 @@ impl SemanticGraphStore {
     ///
     /// Multiple derivations of the same structural `result` produce
     /// multiple edges with the same `(result, kind)` — the layer supports
-    /// this; the walker walks all edges (plan §2 + §7.16).
+    /// this; the walker walks all edges.
     ///
     /// **Issue #11** (B-B7d's diagnosis report identified
     /// duplicate edges as 12.8%–18.7% of every origin-edge emission on
@@ -1737,7 +1737,7 @@ impl SemanticGraphStore {
         meta: crate::semantic_query::OriginMeta,
         builder_fence: DepSignature,
     ) {
-        // diagnosis instrumentation: bracket the entire
+        // Diagnosis instrumentation: bracket the entire
         // `record_origin_edge` call with `Instant::now()` deltas so the
         // capture token can attribute per-call wall-clock cost. The
         // timing measurement itself is two RDTSC reads (Linux) /
@@ -1755,9 +1755,9 @@ impl SemanticGraphStore {
         // Build the edge under the derivation lock, then release the
         // lock before pushing into the accumulator — the accumulator
         // acquires its own mutex and we must not hold the graph lock
-        // across that boundary (plan §4 Commit 4).
+        // across that boundary.
         //
-        // the edge identity tuple is checked
+        // The edge identity tuple is checked
         // under the derivation lock for an existing match. When found,
         // the ledger write is skipped (no `store.record` call) and the
         // `already_recorded` flag flows through the rest of the
@@ -1802,11 +1802,11 @@ impl SemanticGraphStore {
                 .origin_edges_emitted
                 .fetch_add(1, Ordering::Relaxed);
         }
-        // Plan §4 Commit 4: feed the accumulator of the active audited
+        // Feed the accumulator of the active audited
         // request so the footprint miner sees every derivation hop.
         // No-op when no request context is installed.
         //
-        // audit-mining contract preservation: this push is
+        // Audit-mining contract preservation: this push is
         // intentionally unconditional — it runs even on the dedup path
         // so dropped ledger writes still surface in the audit trace.
         if let Some(acc) = crate::request_context::current_accumulator() {
@@ -1820,7 +1820,7 @@ impl SemanticGraphStore {
         // token is bound (the production hot path) — no lock, no
         // allocation, one thread-local lookup.
         //
-        // skip the capture-token edge ledger insert + the
+        // Skip the capture-token edge ledger insert + the
         // `origin_edge_count` bump on the dedup path. The ledger / count
         // mirror the production-side ledger writes so test snapshots
         // observe the same dedup property.
@@ -1837,7 +1837,7 @@ impl SemanticGraphStore {
                     dep_signature_hash,
                 );
                 t.record_edge(identity);
-                // bump the per-call counter +
+                // Bump the per-call counter +
                 // wall-clock cost only on actual ledger emissions. The
                 // dedup-skipped path bypasses both so `origin_edge_count`
                 // mirrors the ledger-write count and
@@ -1904,9 +1904,9 @@ impl SemanticGraphStore {
     /// [`CompletionFence`](crate::completion_fence::CompletionFence) at
     /// hop-time. Returns the visited edges so the caller can recurse over
     /// `edge.sources` itself (the transitive walk is the caller's
-    /// responsibility, per plan §7.16).
+    /// responsibility, per).
     ///
-    /// Per plan §7.16, **edges are the only dep-sig propagation route for
+    /// Per, **edges are the only dep-sig propagation route for
     /// builders** — there is intentionally no `publisher_of(node)` /
     /// `dep_signature_of(node)` API. Structurally interned nodes can be
     /// reached by multiple derivations with different dep-signatures;
@@ -2105,7 +2105,7 @@ impl SemanticGraphStore {
         let mut miss_recorded = false;
         let mut retries = 0usize;
 
-        // supplement §5.D.0 r17 — record cold/warm split for
+        // Supplement §5.D.0 r17 — record cold/warm split for
         // the §5.D.1 cache-discipline tests. Done ONCE per logical
         // call (before the retry loop) so retries don't double-count.
         // Recorded with the canonical key the warm cache stores, AND
@@ -2131,7 +2131,7 @@ impl SemanticGraphStore {
             if let Some(hit) = self.get(&key) {
                 self.stats.hits.fetch_add(1, Ordering::Relaxed);
                 // Per-context counter — the active request (if any)
-                // observes this hit as its own. Plan §1.4.
+                // observes this hit as its own.
                 if let Some(ctx) = verter_scheduler::request_context::current_context() {
                     ctx.0
                         .record_cache_event(verter_scheduler::request_context::CacheEventKind::Hit);
@@ -2184,7 +2184,7 @@ impl SemanticGraphStore {
                 // `completed` is set OR the entry is aborted by a
                 // canonical-invalidation sweep. Joiners never busy-spin.
                 // Account wait time on the stats surface so the F3 corpus
-                // benchmark surfaces non-zero `waits_ms` (plan §6.3).
+                // benchmark surfaces non-zero `waits_ms`.
                 let wait_start = Instant::now();
                 inflight
                     .ready
@@ -2192,9 +2192,9 @@ impl SemanticGraphStore {
                 self.stats
                     .waits_ms
                     .fetch_add(wait_start.elapsed().as_millis() as u64, Ordering::Relaxed);
-                // Count every cooperative wait return (plan §6.3 /
-                // Commit 1 `joined_waits`). Retries after abort re-enter
-                // dispatch and may bump this again on the next join.
+                // Count every cooperative wait return (`joined_waits`).
+                // Retries after abort re-enter dispatch and may bump
+                // this again on the next join.
                 self.stats.joined_waits.fetch_add(1, Ordering::Relaxed);
                 if let Some(ctx) = verter_scheduler::request_context::current_context() {
                     ctx.0.record_cache_event(
@@ -2269,7 +2269,7 @@ impl SemanticGraphStore {
         }
 
         // 5. Warm-publish only successful values; errors and recursion
-        //    sentinels never become shared-cache entries (plan §2 cache
+        // sentinels never become shared-cache entries ( cache
         //    population). Successful results land in the requested
         //    `(family, slot)` and backfill every empty narrower slot in
         //    the same family — the backfill is a no-op against any slot a
@@ -2301,7 +2301,7 @@ impl SemanticGraphStore {
         //  completed but BEFORE set `aborted=true` — a stale
         //    slot whose dep-sig does NOT reference the invalidated
         //    canonical (so even HostFenceValidator does not catch it).
-        // refactor: cold-winner publish path is encapsulated in
+        // Refactor: cold-winner publish path is encapsulated in
         // `warm_publish_one` so that `publish_warm_if_absent` (used by
         // the §1.B prefix-backfill in `build_project_path`) can reuse the
         // same family/slot mapping + reverse-index registration without
@@ -2351,7 +2351,7 @@ impl SemanticGraphStore {
     /// [`Self::execute_cooperative`] step 5 (refactor — pure
     /// extraction, no behaviour change). Skips publish when the result is
     /// not a [`QueryResult::Value`] (errors / recursion sentinels never
-    /// promote to warm cache entries — plan §2 cache population). Skips
+    /// promote to warm cache entries — cache population). Skips
     /// the family memo for [`FamilyKey::ResolvedNamedType`] (§7.16 —
     /// ResolvedNamedType bypasses the family memo entirely; its
     /// DashMap-backed identity map is the cache).
@@ -2431,7 +2431,7 @@ impl SemanticGraphStore {
         );
     }
 
-    /// variant of [`Self::warm_publish_one`]: publish
+    /// Variant of [`Self::warm_publish_one`]: publish
     /// `(key, result, dep_signature)` into the warm map only when no
     /// entry already exists AND no concurrent in-flight build owns the
     /// key. No TOCTOU re-check (the caller does not own an in-flight
@@ -2513,7 +2513,7 @@ impl SemanticGraphStore {
         }
     }
 
-    /// path-prefix backfill API (plan §1.B). Publishes a
+    /// Path-prefix backfill API. Publishes a
     /// `(key, value, dep_signature)` triple via the same warm-publish
     /// helper that [`Self::execute_cooperative`] uses (extracted as
     /// [`Self::warm_publish_one_if_absent`]), gated by the "absent
@@ -2638,7 +2638,7 @@ fn empty_signature() -> DepSignature {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// Plan §7 / DepSignatureInterner
+//
 // ──────────────────────────────────────────────────────────────────────────
 
 /// Content-hash bucketed `Weak<...>` interner for `DepSignature`. Plan
@@ -2663,7 +2663,7 @@ fn empty_signature() -> DepSignature {
 #[allow(dead_code)]
 pub struct DepSignatureInterner {
     table: DashMap<u64, Vec<DepSignatureWeak>>,
-    /// Plan §7 — counter-based auto-sweep trigger. Incremented on
+    /// Counter-based auto-sweep trigger. Incremented on
     /// every successful intern; sweep runs when the counter hits
     /// `SWEEP_INTERVAL`. Cheap O(buckets) walk; off the hot path.
     inserts_since_sweep: std::sync::atomic::AtomicU64,
@@ -2728,7 +2728,7 @@ impl DepSignatureInterner {
         bucket.push(Arc::downgrade(&fresh));
         drop(bucket);
 
-        // Auto-sweep trigger. Plan §7: cheap O(buckets) walk every
+        // Auto-sweep trigger. cheap O(buckets) walk every
         // SWEEP_INTERVAL inserts.
         let n = self
             .inserts_since_sweep
@@ -2742,7 +2742,7 @@ impl DepSignatureInterner {
     }
 
     /// Intern a single `(canonical, version)` pair. Convenience for
-    /// call sites that build dep_signatures incrementally. Plan §7.
+    /// call sites that build dep_signatures incrementally.
     pub fn intern_canonical(
         &self,
         canonical: Arc<str>,
@@ -2819,7 +2819,7 @@ mod tests {
     /// Path C C7 positive invariant — two `intern_node_with_scope` calls
     /// for the same `(payload, scope)` pair share one
     /// [`SemanticNodeId`]. Under the pre-C7 append-only allocator the two
-    /// calls returned distinct ids (plan §14.3 positive discriminator).
+    /// calls returned distinct ids.
     #[test]
     fn intern_dedups_structural_values_across_contexts() {
         let store = SemanticGraphStore::new();
@@ -2875,7 +2875,7 @@ mod tests {
              identity-carrier contract requires latest-insert-wins semantics",
         );
         // Sidecar stays `None` for both slots — exempt from origin-scope
-        // tracking per plan §7.10.
+        // tracking per
         assert_eq!(store.node_scope(a), None);
         assert_eq!(store.node_scope(b), None);
     }
@@ -3188,9 +3188,9 @@ mod tests {
         assert_eq!(removed, 1);
         assert_eq!(store.memo_entry_count(), 1);
 
-        // b.ts still warm (its dep-sig never mentioned /w/a.ts).
+        // B.ts still warm (its dep-sig never mentioned /w/a.ts).
         assert!(store.get(&b_key).is_some());
-        // a.ts gone — next call re-runs build.
+        // A.ts gone — next call re-runs build.
         assert!(store.get(&a_key).is_none());
     }
 
@@ -3198,7 +3198,7 @@ mod tests {
     // DepSignatureInterner (Γ.C)
     // ──────────────────────────────────────────────────────────────────
 
-    /// interner returns the SAME
+    /// Interner returns the SAME
     /// `Arc` for two distinct calls with equivalent payload.
     /// Discriminating: pre-fix tree has no interner, every publish
     /// builds a fresh Arc. Post-fix tree: dedup via content hash.
@@ -3249,8 +3249,8 @@ mod tests {
         );
     }
 
-    /// sweep removes empty buckets and dead-Weak buckets.
-    /// Plan §7 round-7 Codex#2 P1 #2 — mandatory test:
+    /// Sweep removes empty buckets and dead-Weak buckets.
+    /// Round-7 Codex#2 P1 #2 — mandatory test:
     /// `dep_signature_intern_sweep_removes_empty_buckets`.
     #[test]
     fn dep_signature_intern_sweep_removes_empty_buckets() {
@@ -3275,7 +3275,7 @@ mod tests {
         } // _arc dropped here.
 
         // Strong ref gone; bucket entry now contains a dead Weak.
-        // sweep() must reclaim the empty bucket.
+        // Sweep() must reclaim the empty bucket.
         assert_eq!(
             interner.live_signature_count(),
             0,
@@ -3289,7 +3289,7 @@ mod tests {
         );
     }
 
-    /// auto-sweep trigger fires every `SWEEP_INTERVAL`
+    /// Auto-sweep trigger fires every `SWEEP_INTERVAL`
     /// inserts. Discriminating: drop strong refs, then intern enough
     /// distinct signatures to trip the auto-sweep. The bucket count
     /// stays bounded.
@@ -3353,7 +3353,7 @@ mod tests {
         );
     }
 
-    /// refactor invariant — the helper extracted from
+    /// Refactor invariant — the helper extracted from
     /// `execute_cooperative` step 5 (`warm_publish_one`) must:
     ///   1. Insert into the warm map (slot becomes `get`-readable).
     ///   2. Register the `(family, slot) → dep_signature` reverse-index
@@ -3428,7 +3428,6 @@ mod tests {
     /// `invalidate_canonical` drains the reverse-index
     /// entry for the canonical AND propagates the cleanup to other
     /// canonicals the evicted entry's dep_signature referenced
-    ///.
     ///
     /// Discriminating: warm an entry whose dep_signature references
     /// BOTH "/w/a.ts" AND "/w/b.ts". Verify both reverse-index
@@ -3553,7 +3552,7 @@ mod tests {
         );
     }
 
-    /// Γ.A (component-meta cold-path long-tail plan §5 / §1.10)
+    /// Γ.A (component-meta cold-path long-tail)
     /// — Mandatory test gate. `invalidate_canonical(c)` must drop
     /// `NodeArena` shard-dedup entries whose origin scope is
     /// `NodeScopeId::File { canonical_id: c, .. }` while preserving:
@@ -4141,8 +4140,9 @@ mod tests {
         );
     }
 
-    /// `invalidate_all` clears every memo entry — used on project-generation
-    /// bumps per plan § A0 (tsconfig / SDK / workspace-folder changes).
+    /// `invalidate_all` clears every memo entry — used on
+    /// project-generation bumps (tsconfig / SDK / workspace-folder
+    /// changes).
     #[test]
     fn invalidate_all_clears_every_memo_entry() {
         let store = SemanticGraphStore::new();
@@ -4361,7 +4361,7 @@ mod tests {
     }
 
     // ──────────────────────────────────────────────────────────────────
-    // B1b family-memo backfill matrix (plan §3 B1b + §7.15)
+    // B1b family-memo backfill matrix
     // ──────────────────────────────────────────────────────────────────
 
     fn family_test_path() -> Arc<[PathSegment]> {
@@ -4646,7 +4646,7 @@ mod tests {
         assert_eq!(store.memo_entry_count(), 0);
     }
 
-    // 9. ResolvedNamedType bypasses the family memo entirely (plan §7.16).
+    // 9. ResolvedNamedType bypasses the family memo entirely.
     //    The DashMap-backed identity map remains the only cache. After a
     //    successful execute_cooperative path returning Value via the build
     //    closure, the family memo's entries map stays empty for this key.
@@ -4667,7 +4667,7 @@ mod tests {
 
     /// Multiple edges of the same kind on the same result are stored as a
     /// list — walkers see all of them. This is the multi-derivation
-    /// support the contract requires (plan §2 + §7.16).
+    /// support the contract requires.
     #[test]
     fn origin_multiple_edges_same_kind() {
         let store = SemanticGraphStore::new();
@@ -4889,7 +4889,7 @@ mod tests {
 
     /// Multiple derivations of the SAME structural result store as
     /// distinct edges with distinct dep-signatures. Walkers see all of
-    /// them — there is no "canonical publisher" shortcut (plan §7.16).
+    /// them — there is no "canonical publisher" shortcut.
     #[test]
     fn multiple_derivations_of_same_node_all_contribute_their_edges() {
         let store = SemanticGraphStore::new();
@@ -5034,7 +5034,7 @@ mod tests {
     /// reservoir is needed because the store already records the full
     /// per-node edge layout.
     ///
-    /// **Fixture rewrite (Path C C7 / plan §14.3, §14.4).** Pre-C7 this
+    /// **Fixture rewrite (Path C C7 /, §14.4).** Pre-C7 this
     /// test minted 10 "distinct" nodes by calling `intern_node(Primitive(Number))`
     /// ten times and relied on the append-only allocator to return fresh
     /// ids for each call. Under C7's structural dedup that mechanism is
@@ -5082,7 +5082,7 @@ mod tests {
             );
             seen_ids.push(result);
             for j in 0..=(i as u32) {
-                // each emission must carry a
+                // Each emission must carry a
                 // distinct edge identity so the per-node ledger
                 // observes (i+1) edges. Vary the dep_signature hash
                 // per emission so the dedup at `record_origin_edge`
@@ -5241,7 +5241,7 @@ mod tests {
     }
 
     // ──────────────────────────────────────────────────────────────────
-    // NodeScopeId origin-scope sidecar (plan §7.10 + C1)
+    // NodeScopeId origin-scope sidecar
     //
     // The sidecar records where each non-exempt node was first interned.
     // Dispatch builders query `node_scope(id)` to reconstruct the
@@ -5320,14 +5320,14 @@ mod tests {
         );
 
         // Reader from scope B queries the sidecar — the sidecar returns
-        // scope A, not scope B (plan §7.10: origin, not reader).
+        // scope A, not scope B.
         let observed = store.node_scope(id);
         assert_eq!(observed, Some(scope_a));
         assert_ne!(observed, Some(scope_b));
     }
 
     /// `SemanticNodeData::VueMacroElements` nodes are sidecar-exempt
-    /// (plan §7.10): they live on the parser's refcount-only hot path
+    ///: they live on the parser's refcount-only hot path
     /// and are never consumed by dispatch builders that walk
     /// `node_scope`. The sidecar slot is forced to `None` structurally
     /// so `node_scope(vue_id)` returns `None` rather than
@@ -5376,7 +5376,7 @@ mod tests {
     }
 
     // ──────────────────────────────────────────────────────────────────
-    // Commit 1 (F1) — SemanticGraphStats counter extension
+    // SemanticGraphStats counter extension
     // ──────────────────────────────────────────────────────────────────
 
     /// RAII guard that restores `FORCE_COLD_ABORT_SWEEP` to `false` on
@@ -5625,7 +5625,7 @@ mod tests {
             assert!(
                 debug.contains(&format!("{field}: 0")),
                 "SemanticGraphStats default must publish `{field}: 0` — missing \
-                 field indicates Commit 1 (F1) counter extension did not ship",
+                 field indicates the counter extension did not ship",
             );
         }
 

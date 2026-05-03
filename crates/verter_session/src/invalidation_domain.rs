@@ -157,8 +157,8 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use rustc_hash::{FxHashSet, FxHasher};
 
-/// Plan §12.A12 step 1 — per-DB secondary index that maps a canonical
-/// id to the set of DB-internal keys belonging to that canonical.
+/// Per-DB secondary index that maps a canonical id to the set of
+/// DB-internal keys belonging to that canonical.
 ///
 /// Populated on every cooperative-admission `post_publish` (or on the
 /// test-only direct-insert path) so that

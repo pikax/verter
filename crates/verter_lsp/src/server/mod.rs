@@ -245,14 +245,14 @@ pub struct VerterLanguageServer {
     /// completes. Provides disk-backed file reads, project ownership, and import
     /// resolution through the [`WorkspaceAccess`] trait.
     vfs_workspace: Arc<parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>>,
-    /// Opt-in flag for the plan §3 Commit 9 provenance-enriched
-    /// hover. Default `false`. Read-only after `initialize()` sets
-    /// it from `initializationOptions.hover.provenance`.
+    /// Opt-in flag for the provenance-enriched hover surface. Default
+    /// `false`. Read-only after `initialize()` sets it from
+    /// `initializationOptions.hover.provenance`.
     hover_provenance_enabled: std::sync::atomic::AtomicBool,
     /// LRU-100 cache of provenance-enriched hover payloads. Entries
     /// are invalidated on `textDocument/didChange` for the matching
     /// canonical (transitive deps NOT invalidated — codified
-    /// limitation). Plan §3 Commit 9.
+    /// limitation).
     hover_provenance_cache: Arc<crate::features::hover_provenance::HoverProvenanceCache>,
 }
 

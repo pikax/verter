@@ -2,11 +2,11 @@
 //! `Display`), deserializes by parsing a string (via `FromStr`).
 //!
 //! Mirrors [`crate::u64_as_decimal_string`] but for the signed-64
-//! axis. Plan §3.B Commit 7.A — "every `u64` and every `i64` audit
-//! field serializes as a decimal string (`#[serde(with = "...")]`)
-//! and is typed in TS as `string` (`#[ts(type = "string")]`). No
+//! axis. Architecture rule: every `u64` and every `i64` audit field
+//! serializes as a decimal string (`#[serde(with = "...")]`) and is
+//! typed in TS as `string` (`#[ts(type = "string")]`). No
 //! magnitude-based exceptions; a 'small enough' `i64` is still `i64`,
-//! and uniformity > locally-clever encoding."
+//! and uniformity > locally-clever encoding.
 //!
 //! Rationale identical to the `u64` module: JavaScript `Number` loses
 //! precision above 2^53 (in either direction for signed values); and

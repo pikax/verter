@@ -1,5 +1,5 @@
 //! `substitute_semantic_type_param` — generic type-parameter
-//! substitution into the semantic graph (plan §3 Change Split + §2
+//! substitution into the semantic graph ( Change Split + §2
 //! guard contract row for `substitute_semantic_type_param`).
 //!
 //! / Fix D wraps the public substitute in
@@ -41,7 +41,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         parameter_node: SemanticNodeId,
         arg: SemanticNodeId,
     ) -> SemanticNodeId {
-        // change-tracking through
+        // Change-tracking through
         // recursion. The internal helper returns (result, changed)
         // so each branch can short-circuit the rebuild path when no
         // descendant produced a different node id. The public
@@ -94,7 +94,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // as a regular TypeParam (lowered from a name-only
         // reference), not as a literal Infer node.
         //
-        // Plan §14.2 item 8's "leave Infer string-match alone" is
+        // Item 8's "leave Infer string-match alone" is
         // preserved; the addition is purely cross-variant
         // bridging — it does NOT fall back for ordinary TypeParam
         // substitutions (those go through the node-id branch above).
@@ -465,7 +465,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // inside `(x: T, y: infer X) => R` leaked through
             // substitution unchanged. This is the primary materialisation
             // path for nested-infer in TS conditional `extends` clauses
-            // (plan §2 Pass C11a).
             SemanticNodeData::Function {
                 params,
                 return_type,

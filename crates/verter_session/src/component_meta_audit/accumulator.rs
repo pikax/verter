@@ -1,12 +1,12 @@
 #![deny(missing_docs)]
 //! Request-scoped footprint accumulator.
 //!
-//! Plan §2.5. One `RequestFootprintAccumulator` is built per audited
+//! One `RequestFootprintAccumulator` is built per audited
 //! `get_component_meta_with_resolution` call, attached to the
 //! `RequestContext`, and installed into TLS via
-//! `CURRENT_ACCUMULATOR`. The `record_origin_edge` hook (Commit 4) and
-//! the structured-event macro (Commit 5) both push into this
-//! accumulator under the per-request lock.
+//! `CURRENT_ACCUMULATOR`. The `record_origin_edge` hook and the
+//! structured-event macro both push into this accumulator under the
+//! per-request lock.
 //!
 //! The accumulator is a `parking_lot::Mutex<AccumulatorState>`. Every
 //! push is an append — short critical sections. Draining into the
@@ -25,9 +25,8 @@ use super::{
 use crate::semantic_query::{OriginEdge, OriginEdgeKind, SemanticNodeId};
 
 /// Raw derivation-edge entry captured during a request. The miner
-/// (Commit 4) canonicalises these into the final
-/// `DerivationSubgraph.edges` with deterministic `NodeId` / `EdgeId`
-/// assignment.
+/// canonicalises these into the final `DerivationSubgraph.edges` with
+/// deterministic `NodeId` / `EdgeId` assignment.
 #[derive(Debug, Clone)]
 pub struct DerivationEdgeRaw {
     /// Live semantic-node id of the node the edge produces.
@@ -49,7 +48,7 @@ pub struct AccumulatorState {
     /// the workspace's `VfsAuditSink`).
     pub vfs_reads: Vec<VfsReadRecord>,
     /// Records where this request joined a winner's in-flight slot
-    /// instead of starting cold (plan §2.7).
+    /// instead of starting cold.
     pub shared_load_reuses: Vec<SharedLoadReuseRecord>,
     /// Type-instantiation steps observed during solver / materialization.
     pub instantiations: Vec<InstantiationRecord>,
@@ -157,7 +156,7 @@ impl RequestFootprintAccumulator {
     }
 
     /// Append a raw derivation edge captured by the
-    /// `record_origin_edge` hook (plan §3 Commit 4).
+    /// `record_origin_edge` hook.
     pub fn push_derivation_edge(
         &self,
         result: SemanticNodeId,

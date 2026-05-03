@@ -100,7 +100,7 @@ use crate::resolver_core::ResolverContext;
 use crate::resolver_core::{FuseBudgets, FuseState};
 use crate::semantic_query::SemanticNodeId;
 
-// surface-projection helpers, prepared-substitution
+// Surface-projection helpers, prepared-substitution
 // machinery, and arc cache-key constructors live in the private
 // `surface` child module. The `pub(crate) use` block re-exports the
 // existing public-API symbols so external `crate::resolver_core::component_meta_query_engine::<name>`
@@ -128,7 +128,7 @@ use surface::{
     PreparedSurfaceProjection,
 };
 
-// predicate/utility helpers (route-expr surface keys,
+// Predicate/utility helpers (route-expr surface keys,
 // package-canonical predicates, prepared-decl shape predicates,
 // registry-symbol resolution with budget) live in the private
 // `helpers` child module. All entries are `pub(super)` and used only
@@ -208,7 +208,7 @@ use std::cell::Cell;
 /// See [`ComponentMetaQueryEngine::solve_or_project_leaf_expr_with_context`]
 /// for the per-TypeExpr dispatch rules.
 //
-// no longer constructed after
+// No longer constructed after
 // trampoline conversion of the retired surface methods. Deleted in
 // 5g per §F call-graph closure.
 #[allow(dead_code)]
@@ -307,7 +307,7 @@ pub(crate) struct FastShallowFieldExpr {
 /// memoize by declaration scope so the same textual reference does not
 /// alias across files.
 ///
-/// **Engine-local cache audit (plan §3 Step 6.4 / D37).**
+/// **Engine-local cache audit.**
 ///
 /// The plan's binary partition (a = request-local non-semantic scratch,
 /// b = reusable semantic producer cache subsumed by dispatch) classifies
@@ -330,7 +330,7 @@ pub(crate) struct FastShallowFieldExpr {
 /// | `scope_payloads` | (a) | Per-request `Arc<DeclarationScopePayload>` clones; the bundle is ctx-owned, this just reuses the Arc within one request. |
 /// | `prepared_surface_cache` / `prepared_member_cache` / `prepared_target_cache` / `routed_expr_surface_cache` | (b) | All four are pre-lowering route projections — same justification as above. |
 /// | `prepared_type_decls` | (a) | Arc-cache for `Arc<PreparedTypeDecl>` from ctx; no semantic computation — only refcount avoidance. |
-/// | `materialize_memo` | (b) | Plan §3 Step 6.3 — `(scope, expr, navigate_flag) → MaterializedTypeExpr` memo. Dispatch's post-lowering memo cannot replace this because the key is the un-lowered `TypeExpr`. |
+/// | `materialize_memo` | (b) | — `(scope, expr, navigate_flag) → MaterializedTypeExpr` memo. Dispatch's post-lowering memo cannot replace this because the key is the un-lowered `TypeExpr`. |
 /// | `prepared_*_query_count`, `prepared_*_hit_count` | (a) | `#[cfg(test)]` instrumentation counters. |
 /// | `fuse_budgets` / `fuse_state` | (a) | Engine-construction-scoped fuse rails (§1.4). |
 /// | `projection_chain_scopes` | (a) | Call-scoped scope chain (Path C C11-residual-B). |
@@ -347,15 +347,13 @@ pub(crate) struct FastShallowFieldExpr {
 pub struct ComponentMetaQueryEngine<'a> {
     pub(crate) ctx: &'a dyn ResolverContext,
     current_prepared_request_root: Option<String>,
-    // Step 3 closure (architectural-debt-closure rev 10) — the 10 caches
-    // below were authoritative `FxHashMap` storage prior to this commit.
-    // Authority moves to ctx-owned typed DBs on
-    // `ProjectTypeStore` (see `crate::component_meta_caches`); each
-    // engine field below is a per-request **non-authoritative
-    // read-through view** that mirrors the ctx DB result for repeated
-    // lookups within one request. `RefCell` provides interior
-    // mutability so `&self` lookups can populate the view after a ctx
-    // DB hit. Per the D3.2 contract: NO independent invalidation, NO
+    // The 10 caches below are read-through views over the host-owned
+    // typed DBs on `ProjectTypeStore` (see `crate::component_meta_caches`).
+    // Each engine field is a per-request **non-authoritative read-through
+    // view** that mirrors the ctx DB result for repeated lookups within
+    // one request. `RefCell` provides interior mutability so `&self`
+    // lookups can populate the view after a ctx DB hit. NO independent
+    // invalidation, NO
     // independent dep_signature, NO entries the ctx DB doesn't have.
     imported_registry_symbols:
         RefCell<FxHashMap<(String, String), Option<ResolvedImportedRegistrySymbol>>>,
@@ -377,7 +375,7 @@ pub struct ComponentMetaQueryEngine<'a> {
     /// Read-through view; authority is
     /// `ProjectTypeStore::prepared_surface_db()`.
     ///
-    /// unread after trampoline
+    /// Unread after trampoline
     /// conversion of retired surface methods. Field
     /// §F call-graph closure.
     #[allow(dead_code)]
@@ -391,7 +389,7 @@ pub struct ComponentMetaQueryEngine<'a> {
     /// Read-through view; authority is
     /// `ProjectTypeStore::routed_expr_surface_db()`.
     ///
-    /// unread after trampoline
+    /// Unread after trampoline
     /// conversion of retired surface methods. Field
     /// §F call-graph closure.
     #[allow(dead_code)]
@@ -429,7 +427,7 @@ pub struct ComponentMetaQueryEngine<'a> {
     /// `decl_scope` (the current declaration owner) nor `arg_scope` (the
     /// caller's SFC) contains the value symbol.
     ///
-    /// unread after trampoline
+    /// Unread after trampoline
     /// conversion. Field.
     #[allow(dead_code)]
     projection_chain_scopes: Vec<String>,
@@ -504,7 +502,7 @@ pub(crate) fn forbid_prepared_structural_substitution_slow_lane_for_tests(
     PreparedStructuralSubstitutionSlowLaneGuard
 }
 
-// unused after trampoline
+// Unused after trampoline
 // conversion of `project_route_surface_expr`. Helper.
 #[cfg(test)]
 #[allow(dead_code)]
@@ -590,7 +588,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 
     /// Returns the cached [`DeclarationScopePayload`] for
     /// `scope_canonical_id`, lazily loading the underlying
-    /// `prepared_decl_bundle` on first access (plan §3 Step 6.3 D35:
+    /// `prepared_decl_bundle` on first access ( D35:
     /// promoted to `pub(crate)` so the session-layer materialize wrapper
     /// in `meta_resolve.rs` can reuse the cache without re-walking the
     /// bundle).
@@ -695,7 +693,7 @@ fn empty_semantic_args() -> std::sync::Arc<[SemanticNodeId]> {
     std::sync::Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice())
 }
 
-/// engine-internal helper that mirrors the deprecated
+/// Engine-internal helper that mirrors the deprecated
 /// `project_type_member` entry: dispatch the single-member projection,
 /// falling back to the prepared-decl walker when dispatch misses.
 /// Used by `project_routed_expr_surface_expr` and friends after the
@@ -723,7 +721,7 @@ fn dispatch_member_for_root_symbol(
         })
 }
 
-/// engine-internal substitution helper that mirrors the
+/// Engine-internal substitution helper that mirrors the
 /// deleted `instantiate_local_generic_ref` engine method body. Unlike
 /// the dispatch-only `instantiate_local_generic_ref_via_dispatch`, this
 /// helper walks the re-export chain via

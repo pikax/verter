@@ -16,8 +16,8 @@
 //!   scope/name identity).
 //! - `Instantiate` — identity-preserving alias anchored to the base node.
 //!   Memoizing the key is the dedup guarantee; the richer instantiation
-//!   shape is produced on demand by the solver once the caller walks into
-//!   it. Mode-free per the lazy-materialisation rule (plan §7.14).
+//!   shape is produced on demand by the solver once the caller walks
+//!   into it. Mode-free per the lazy-materialisation rule.
 //! - `ProjectPath` — path-precise projection rooted at `base` walking each
 //!   [`PathSegment`]. The empty-path form is the canonical shape of
 //!   "expand the whole surface" and supersedes the retired `Expand`
@@ -87,7 +87,7 @@ pub(crate) mod substitute;
 pub(crate) mod walk;
 
 /// Declaration identity used for in-flight instantiation tracking
-/// (plan §3 recursive-ref back-edge detection during body
+/// ( recursive-ref back-edge detection during body
 /// lowering). `(canonical_id, name)` tuple keyed on refcount-shared
 /// `Arc<str>` so membership checks are refcount compares, not string
 /// compares. Lives on [`ProjectSemanticDispatch`] so nested
@@ -128,7 +128,7 @@ pub struct ProjectSemanticDispatch<'a> {
     /// ordinals). Trade-off: identity is stable within one
     /// dispatcher lifetime but not across dispatcher instances,
     /// so re-lowering the same file in a fresh dispatcher may
-    /// assign different ordinals. Per plan §14.2, this is
+    /// assign different ordinals. Per, this is
     /// acceptable for C6a-through-C7 correctness; C17's sharded
     /// interner can revisit if hot-path cache stability becomes
     /// a measurable concern.
@@ -138,7 +138,7 @@ pub struct ProjectSemanticDispatch<'a> {
 impl<'a> ProjectSemanticDispatch<'a> {
     /// Create a dispatcher bound to `ctx`.
     ///
-    /// locked-in signature: takes `&dyn ResolverContext`,
+    /// Locked-in signature: takes `&dyn ResolverContext`,
     /// not concrete `&VerterHost`. External callers (test fixtures and
     /// `component_meta_materialize.rs`) pass `&host` directly; the
     /// implicit `&host as &dyn ResolverContext` upcast handles
@@ -243,14 +243,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         )
     }
 
-    /// Convenience wrapper for consumer migrations (plan §5.7 WIP-C).
+    /// Convenience wrapper for consumer migrations.
     /// Lowers a [`TypeExpr`] rooted at the supplied canonical file scope
     /// via [`Self::shallow_lower_type_expr`] with empty env, empty
     /// name-resolution, and the scope's prepared-decl payload for
     /// bare-name fallback. The dispatch walker consults the scope's
     /// `DeclarationScopePayload` + host-owned `shallow_file_state` to
     /// resolve bare `TypeExpr::Ref` hops directly — no
-    /// `SessionSolverHost` is constructed on this path (plan §5.7
+    /// `SessionSolverHost` is constructed on this path (
     /// step 3).
     ///
     /// Lowers under [`ProjectionMode::Expanded`]. Callers that need
@@ -306,7 +306,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     &bundle,
                 )
             });
-        // r15/F11 — construct the resolver-context
+        // R15/F11 — construct the resolver-context
         // `ScopeShadowing` once at the dispatch entry point. The
         // shadow set is derived from the same `scope_payload` the
         // foundation (`524f469d`) consumed inline; any future
@@ -373,7 +373,7 @@ pub(super) fn map_primitive_name(name: PrimitiveName) -> PrimitiveKind {
 /// `["T"]` — not a synthesised `["T0"]` — so origin walks on
 /// `Partial<T>` match `type MyPartial<T> = ...` byte-for-byte.
 ///
-/// See plan §7.2 utility-equivalence rule and §3 C7.
+/// See utility-equivalence rule and §3 C7.
 pub(super) fn utility_param_names(name: &str) -> &'static [&'static str] {
     match name {
         "Partial"
@@ -400,7 +400,7 @@ pub(super) fn utility_param_names(name: &str) -> &'static [&'static str] {
 // `primitive_for_literal` was the pre-C6 approximation that collapsed
 // literal types to their underlying primitive — retired when
 // `SemanticNodeData::Literal(LiteralValue)` landed in WIP 3-quater
-// (plan §3 staging branch). Literal identity is now
+// Literal identity is now
 // preserved through the semantic graph; callers that need the
 // primitive kind of a literal should match on `SemanticNodeData::Literal`
 // and derive the kind inline.
@@ -487,7 +487,7 @@ impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {
                 args,
                 body_mode,
             } => self.build_instantiate(base, args, *body_mode),
-            // Plan §3 C4: `ProjectMember` / `IndexedAccess` are API sugar
+            // C4: `ProjectMember` / `IndexedAccess` are API sugar
             // that admission-time canonicalisation rewrites to
             // `ProjectPath` above. The build closure never observes
             // these variants on the rewritten key; the arms below are
@@ -536,7 +536,7 @@ impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {
                 let fence = self.project_generation_signature();
                 (QueryResult::Error(QueryError::Miss), fence)
             }
-            // binding amendment — `ResolveMacroPayload`.
+            // Binding amendment — `ResolveMacroPayload`.
             SemanticQueryKey::ResolveMacroPayload {
                 owner,
                 macro_index,
@@ -573,7 +573,7 @@ pub fn resolve_decl_key(canonical_id: &str, name: &str) -> ResolveDeclKey {
 /// Convenience: fetch the resolved semantic-node payload for a previously
 /// executed key. Returns `None` if the memo has not warmed the key yet.
 ///
-/// accepts `&dyn ResolverContext`; the trait method
+/// Accepts `&dyn ResolverContext`; the trait method
 /// `dispatch_node_data` provides the same access from any context.
 /// Existing callers passing `&VerterHost` upcast implicitly.
 #[must_use]
@@ -729,9 +729,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// preserved for the caller's fence merge (Codex round 7 P1
     /// rejected lossy `Option<TypeExpr>` returns).
     ///
-    /// Used by trampoline conversions (commit 3.7) and consumer
-    /// migrations that need a `TypeExpr` for downstream
-    /// `ComponentMetaAnalysis` field shape consumption.
+    /// Used by trampoline conversions and consumer migrations that
+    /// need a `TypeExpr` for downstream `ComponentMetaAnalysis` field
+    /// shape consumption.
     pub fn execute_to_type_expr(&self, key: &SemanticQueryKey) -> CacheRead<QueryResult<TypeExpr>> {
         let read = self.execute_read(key.clone());
         let typed_value = match read.value {
@@ -748,7 +748,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// slot-binding-parameter type lowering.
+    /// Slot-binding-parameter type lowering.
     ///
     /// Given the `defineSlots<T>()` macro payload's lowered base node
     /// and the target `slot_name` + `binding_name` pair, projects the
@@ -769,7 +769,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///    (typically `Expanded` for component-meta).
     ///
     /// **Why a helper, not a new variant?** Per parent §0 binding
-    /// amendment + §5.12 r15/F11 (sub-plan §0 worker constraint), the
+    /// amendment + §5.12 r15/F11 (sub- worker constraint), the
     /// slot-binding lowering must compose existing variants and live
     /// as a non-variant dispatch helper. This mirrors `execute_pick` /
     /// `execute_omit` / `materialize_surface` / `execute_to_type_expr`
@@ -921,7 +921,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// DispatchHost trait + session-owned adapter (plan §7.9 + §7.10 + C1)
+// DispatchHost trait + session-owned adapter
 // ──────────────────────────────────────────────────────────────────────────
 //
 // `DispatchHost` is the scope-free minimum-surface host seam dispatch
@@ -933,9 +933,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
 // reconstruct the originating scope and fetch the scope's declaration-
 // scope payload via [`crate::resolver_core::bare_name_resolve`]. Dispatch
 // builders take `&dyn DispatchHost` rather than `&VerterHost`, so they
-// stay scope-free (plan §7.9).
+// stay scope-free.
 
-/// Scope-free, minimum-surface host seam for dispatch builders (plan §7.9 +
+/// Scope-free, minimum-surface host seam for dispatch builders ( +
 /// §7.10 + C1).
 ///
 /// Builders that need to reach host-owned prepared declarations, classify
@@ -985,7 +985,7 @@ pub trait DispatchHost {
     fn bare_ref_origin(&self, base: SemanticNodeId, name: &str) -> BareRefOrigin;
 }
 
-/// Session-owned [`DispatchHost`] implementation (plan §7.10).
+/// Session-owned [`DispatchHost`] implementation.
 ///
 /// Given a base [`SemanticNodeId`], consults
 /// [`SemanticGraphStore::node_scope`] to reconstruct the originating
@@ -1007,7 +1007,7 @@ impl<'a> SessionDispatchHost<'a> {
     /// base node or a scope payload — it re-resolves per-base scope on
     /// every call via [`Self::base_scope`].
     ///
-    /// locked-in signature: takes `&dyn ResolverContext`.
+    /// Locked-in signature: takes `&dyn ResolverContext`.
     /// Existing call sites pass `&host` (concrete `&VerterHost`) and
     /// upcast implicitly because `impl ResolverContext for VerterHost`.
     #[must_use]

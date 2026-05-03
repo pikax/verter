@@ -33,7 +33,7 @@ pub struct QueueEntry {
     /// dependency jobs so the worker installs the parent's context as
     /// TLS — that way VFS-sink fan-out events for the dep read carry
     /// the parent's `request_id` and land in the audit record's
-    /// `vfs_reads`. Plan §3.B Commit 7.B capture-site audit.
+    /// `vfs_reads`. capture-site audit.
     ///
     /// The dispatch loop prefers this context over
     /// [`crate::node::PendingRequests::winner_context_at_generation`];
@@ -65,7 +65,7 @@ impl QueueEntry {
     }
 
     /// Attach a request context to this entry so the dispatching worker
-    /// installs it as TLS while running the job. Plan §3.B Commit 7.B.
+    /// installs it as TLS while running the job.
     #[must_use]
     pub fn with_request_context(
         mut self,
@@ -759,7 +759,7 @@ mod tests {
         let mut entry = make_entry("a.vue", 1, TaskKind::Source, Priority::Background);
         entry.unblock_inherited_priority = Some(Priority::Critical);
 
-        // min(Background, Critical) = Critical
+        // Min(Background, Critical) = Critical
         assert_eq!(entry.effective_priority(), Priority::Critical);
     }
 

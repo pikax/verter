@@ -1,6 +1,6 @@
 //! Registry structural materialization + member-route preservers.
 //!
-//! domain 11 — owns the graph-native structural materialiser
+//! Domain 11 — owns the graph-native structural materialiser
 //! (`component_meta_registry_prefers_structural_materialization_node` +
 //! `materialize_component_meta_registry_structural_expr`) plus the seven
 //! registry-route preserver predicates that gate it
@@ -83,7 +83,7 @@ pub(crate) fn materialize_component_meta_registry_structural_expr(
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::semantic_query::{ProjectionMode, SemanticNodeData, SemanticNodeId};
 
-    /// Plan §6.11 / J3 — graph-native package check on a lowered
+    /// Graph-native package check on a lowered
     /// `Ref { name, [] }`. Lowers via Navigate to a DeclRef /
     /// InstantiationRef, extracts the canonical identity, and
     /// delegates to the J0 / commit-C primitive
@@ -132,7 +132,7 @@ pub(crate) fn materialize_component_meta_registry_structural_expr(
     ) -> verter_semantic::analysis::type_expr::TypeExpr {
         use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
 
-        // Plan §6.11 / J3 — graph-native cycle guard. Lower the
+        // Graph-native cycle guard. Lower the
         // current expr to a Navigate-mode SemanticNodeId and use
         // structural identity (interned node id) for cycle tracking
         // instead of TypeExpr-equality hashing. When lowering fails
@@ -156,8 +156,8 @@ pub(crate) fn materialize_component_meta_registry_structural_expr(
             component_meta_registry_public_utility_route(expr)
                 .or_else(|| component_meta_registry_public_indexed_access_route(expr))
         {
-            // commit 6 — migrate route-target callers to dispatch
-            // (sub-plan §C.3 D-T recipe). Route the utility/indexed
+            // Migrate route-target callers to dispatch
+            // (sub- D-T recipe). Route the utility/indexed
             // expression through the Class A dispatch helper, which handles
             // Whole/MemberPath via its registry-route fast-path AND falls
             // back to the generic ProjectPath{[],Expanded} dispatch. Pick/Omit
@@ -194,11 +194,11 @@ pub(crate) fn materialize_component_meta_registry_structural_expr(
                     name,
                     type_arguments,
                 } if type_arguments.is_empty() => {
-                    // Plan §6.11 / J3 — graph-native package check.
+                    // Graph-native package check.
                     if ref_is_package_backed_node(engine.ctx, scope_canonical_id, name) {
                         expr.clone()
                     } else {
-                        // bridge via per-engine
+                        // Bridge via per-engine
                         // helper.
                         project_type_surface_expr_via_host_threaded(
                             engine,
@@ -419,8 +419,8 @@ pub(crate) fn materialize_component_meta_registry_structural_expr(
     inner(expr, scope_canonical_id, engine, &mut active)
 }
 
-/// Plan §1.12 / J4 — graph-native predicate (former TypeExpr
-/// counterpart deleted in Plan §6.15 / N). Walks two parallel
+/// Graph-native predicate (former TypeExpr
+/// counterpart deleted in). Walks two parallel
 /// `SemanticNodeId` trees (materialised + raw) and, when the raw
 /// surface exposes a package-backed `DeclRef` / `InstantiationRef` at
 /// a given member, overrides the materialised member's value with
@@ -1143,16 +1143,16 @@ pub(crate) fn component_meta_registry_should_keep_raw_symbolic_non_object_alias(
     }
 }
 
-// Plan §6.5 / D — the TypeExpr-keyed free package-ref check was
-//. The 5 callers migrated to a temporary engine
+// The TypeExpr-keyed free package-ref check was
+// The 5 callers migrated to a temporary engine
 // method adapter (commit D), which was itself
 // after migrated production callers to graph-native
 // predicates. The graph-native primitive
 // `component_meta_ref_resolves_to_package_node` is the canonical
 // authority for package-backed decl identity.
 
-// Plan §6.6 / E — the inline-registry-route candidate family was
-//. The inline-registry-route candidate path is
+// The inline-registry-route candidate family was
+// The inline-registry-route candidate path is
 // handled by B1's materialiser registry-route branch, which
 // dispatches Pick/Omit + IndexedAccess shapes through dispatch's
 // canonical projection. Retired symbols are listed in the

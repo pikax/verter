@@ -1,7 +1,7 @@
 //! Byte-exact `Display` snapshots for every variant of
 //! [`StructuredComponentMetaEvent`](super::StructuredComponentMetaEvent).
 //!
-//! Plan §3 Commit 5 / §3.A Commit 6.E. The
+//! / §3.A. The
 //! `structured_event_display_snapshot_byte_exact_for_every_variant`
 //! test in this module constructs a canonical instance of each
 //! variant, invokes `format!("{}", ev)`, and asserts the output
@@ -9,7 +9,7 @@
 //!
 //! A drift in the `Display` impl OR a new enum variant without a
 //! snapshot fails the test. The format is intentionally not a
-//! legacy carry-over; it is authored fresh (plan §2.3 — legacy
+//! legacy carry-over; it is authored fresh ( — legacy
 //! `format!("k=v")` stderr format is gone).
 
 use std::sync::Arc;
@@ -91,7 +91,7 @@ pub fn fixture_request_end_failure() -> Event {
 }
 
 pub fn fixture_indexed_ready_built() -> Event {
-    // first four bytes `01 02 03 04` → short_hash yields "01020304".
+    // First four bytes `01 02 03 04` → short_hash yields "01020304".
     let mut h: Hash16 = [0u8; 16];
     h[0] = 1;
     h[1] = 2;

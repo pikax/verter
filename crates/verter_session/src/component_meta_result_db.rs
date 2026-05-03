@@ -51,8 +51,8 @@ pub struct ComponentMetaResultEntry<P> {
     pub dep_signature: DepSignature,
 }
 
-/// Plan §3 Step 4 (architectural-debt-closure rev 10): sanitized snapshot
-/// of a [`crate::meta_resolve::ResolvedComponentMetaState`] suitable for
+/// Sanitized snapshot of a
+/// [`crate::meta_resolve::ResolvedComponentMetaState`] suitable for
 /// cross-request reuse. Excludes per-request fields (`request_id`,
 /// `compute_audit`) and the [`FileAnalysisSnapshot`] (reloaded from
 /// `ProjectTypeStore::indexed()` at rehydrate time).
@@ -90,7 +90,7 @@ pub struct ResolutionTemplate {
     pub origin_graph: Option<verter_protocol::types::OriginGraphDto>,
 }
 
-/// Plan §3 Step 4: cached component-meta payload AND its sanitized
+/// Cached component-meta payload AND its sanitized
 /// resolution sidecar. The DB generic migrates from
 /// `ComponentMetaResultDb<ComponentMetaAnalysis>` to
 /// `ComponentMetaResultDb<CachedComponentMetaResult>` so warm-cache
@@ -185,7 +185,7 @@ impl<P> Clone for ComponentMetaResultEntry<P> {
 pub struct ComponentMetaResultDb<P> {
     entries: DashMap<ComponentMetaResultKey, ComponentMetaResultEntry<P>>,
     /// Soft size cap — when exceeded, bounded cleanup slices run on the
-    /// top-level query exit path (plan § A1.8). Cleanup in is
+    /// top-level query exit path. Cleanup in is
     /// `stale-first, LRU next`; precise policy lives with the dispatcher.
     capacity: usize,
     live_counter: Arc<AtomicU64>,
@@ -263,9 +263,9 @@ impl<P> ComponentMetaResultDb<P> {
     }
 
     /// Drop every cached entry. Called on project-generation bumps
-    /// (tsconfig / SDK / workspace-folder changes) per plan § A0 — final
-    /// results depend on routes and intrinsic resolution, which
-    /// project-shape changes may shift.
+    /// (tsconfig / SDK / workspace-folder changes) — final results
+    /// depend on routes and intrinsic resolution, which project-shape
+    /// changes may shift.
     pub fn invalidate_all(&self) {
         let count = self.entries.len();
         self.entries.clear();

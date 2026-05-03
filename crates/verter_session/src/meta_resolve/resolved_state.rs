@@ -1,6 +1,6 @@
 //! Resolved-state types + small TypeExpr substitution helpers.
 //!
-//! domain 5 — `ResolvedComponentMetaState`,
+//! Domain 5 — `ResolvedComponentMetaState`,
 //! `SurfaceNodeIdentities`, type aliases, and 9 standalone TypeExpr
 //! substitution / scope-selection helpers.
 
@@ -18,7 +18,7 @@ use super::{ResolvedComponentMetaComputeAudit, ResolvedMacroMeta, ResolvedTypeRe
 
 /// Vector-aligned sidecar carrying the producing `SemanticNodeId`
 /// for each output entry in `ExpandedComponentTypes` /
-/// `ResolvedTypeRegistry` (plan §3 §1.7 + Step 9.1, D19).
+/// `ResolvedTypeRegistry`.
 ///
 /// Populated when audit is on so `build_origin_graph` can scope the
 /// reachable-subgraph walk to the actual surface nodes the request
@@ -69,7 +69,7 @@ pub struct ResolvedComponentMetaState {
     pub fact_versions: Vec<crate::resolver_core::FactVersionRef>,
     /// Non-semantic compute audit captured only when native audit is enabled.
     pub compute_audit: Option<ResolvedComponentMetaComputeAudit>,
-    /// Surface-id sidecar (plan §3 Step 9.1 / §1.7 / D19). Populated only
+    /// Surface-id sidecar. Populated only
     /// when audit is on; the scoped origin export reads `prop_node_ids`
     /// etc. as starting points for the reachable-subgraph walk.
     pub surface_identities: Option<SurfaceNodeIdentities>,
@@ -83,7 +83,7 @@ pub struct ResolvedComponentMetaState {
     /// `VerterHost::take_audit_record(resolution.request_id)`.
     ///
     /// Zero is reserved for "not populated" — emitted by internal
-    /// tests / FFI fixtures that predate the Commit 3 wiring.
+    /// tests / FFI fixtures that do not stamp a real request id.
     pub request_id: u64,
 }
 
@@ -589,7 +589,7 @@ pub(crate) fn select_imported_materialization_scope(
     (!final_scope.is_empty() && final_scope != owner_canonical).then_some(final_scope)
 }
 
-/// Plan §6.15 / P migration helper. Lowers `expr` via Navigate to a
+/// Migration helper. Lowers `expr` via Navigate to a
 /// `SemanticNodeId`, extracts the root identity (DeclRef or
 /// InstantiationRef base), and delegates to the canonical graph-native
 /// [`crate::meta_resolve::ref_root_reaches_transitive_cycle_node`]

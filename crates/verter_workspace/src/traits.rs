@@ -23,7 +23,7 @@ pub struct WorkspaceResourceSnapshot {
     pub published_project_count: usize,
 }
 
-/// read-only view of the workspace authority.
+/// Read-only view of the workspace authority.
 ///
 /// `WorkspaceRead` carries every method that does NOT mutate workspace state
 /// (file reads, resolution, ownership, generation, queries, ambient-lib
@@ -302,7 +302,7 @@ pub trait WorkspaceRead: Send + Sync {
 /// - [`MemoryWorkspace`] — fully in-memory (tests, WASM, playground)
 /// - Lightweight adapters (LSP readers) that delegate to a host's workspace
 ///
-/// # sub-plan §6b.D2b
+/// # sub-
 ///
 /// `WorkspaceAccess` is no longer the public read API for external crates;
 /// it is gated behind `pub(crate) VerterHost::workspace()`. Read consumers
@@ -407,7 +407,7 @@ pub trait WorkspaceAccess: WorkspaceRead {
         Err(crate::error::VfsError::UnsupportedOperation("copy_file"))
     }
 
-    // ── Audit sink registry (plan §2.4 / Commit 4) ──
+    // ── Audit sink registry ──
 
     /// Register a VFS audit sink. The returned handle is deregister-able
     /// via [`deregister_audit_sink`]. Default: `NotSupported`.

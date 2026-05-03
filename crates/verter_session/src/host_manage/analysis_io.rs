@@ -942,7 +942,7 @@ impl VerterHost {
     /// Remove a file from the host, cleaning up aliases, dependencies,
     /// and invalidating compile slots of any dependents.
     ///
-    /// Sub-plan §2.16: workspace-authoritative — read dependents via
+    /// Sub-: workspace-authoritative — read dependents via
     /// `ws().reverse_deps_for(canonical)` BEFORE `notify_delete` fires
     /// (which clears the workspace's per-owner state and reverse-axis
     /// entries via `EdgeStore::remove_file`).
@@ -1021,7 +1021,7 @@ impl VerterHost {
     /// across the (phase, kind) matrix per existing `set_import_dependencies`
     /// semantics.
     ///
-    /// Sub-plan §2.12 (R7): used by both [`Self::set_import_dependencies`]
+    /// Sub- (R7): used by both [`Self::set_import_dependencies`]
     /// (existing flow) AND [`Self::integrate_scheduler_snapshot`]'s post-
     /// `record_parsed_edges` re-apply path (preserves bundler pre-load route
     /// state across ensure_loaded reloads).

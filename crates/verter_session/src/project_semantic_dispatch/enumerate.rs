@@ -1,5 +1,5 @@
 //! `key_names_from_base_node` / `key_names_from_keyspace_node` — TS keyof
-//! enumeration helpers (plan §3 Change Split).
+//! enumeration helpers.
 //!
 //! Shared builders walk the base node's [`SemanticNodeData`] shape and
 //! return the concrete member names when enumeration succeeds, or `None`
@@ -32,7 +32,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// Intersection / Union arm chains no longer grow the Rust call
     /// stack.
     ///
-    /// **Intersection accumulation change (plan §2 Stage 5 Pass C10).**
+    /// **Intersection accumulation change.**
     /// The Intersection arm's pre-C10 all-or-nothing `?` operator
     /// propagated `None` up whenever any arm was unresolvable, even when
     /// other arms had enumerable keys. Post-C10 the Intersection arm
@@ -69,7 +69,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     results.push(if any_enumerable { Some(names) } else { None });
                 }
                 KeyNamesFrame::CombineUnion { arm_count } => {
-                    // keyof (A | B) = common keys across ALL arms (intersection
+                    // Keyof (A | B) = common keys across ALL arms (intersection
                     // of enumerated sets). Unresolvable arm → whole union None.
                     let start = results.len().saturating_sub(arm_count);
                     let arm_results: Vec<_> = results.drain(start..).collect();
