@@ -285,6 +285,7 @@ pub fn component_meta_analysis_to_ffi_with_resolution(
             has_inject: analysis.flags.has_inject,
             has_inherit_attrs_false: analysis.flags.has_inherit_attrs_false,
             has_store_usage: analysis.flags.has_store_usage,
+            has_macro_failure: analysis.flags.has_macro_failure,
         },
         accepted_props: analysis
             .accepted_props

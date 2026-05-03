@@ -461,6 +461,10 @@ message ComponentFlags {
   bool has_inject = 7;
   bool has_inherit_attrs_false = 8;
   bool has_store_usage = 9;
+  // D123 (Tier 1A) — set when lowering produced a `LoweringError`
+  // (macro-impacting unsupported AST kind). Paired with a
+  // `macro_expansion_diagnostics` entry under D117.
+  bool has_macro_failure = 10;
 }
 
 message AcceptedPropMeta {

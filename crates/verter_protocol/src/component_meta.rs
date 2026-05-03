@@ -162,6 +162,7 @@ fn component_meta_body_to_proto(
             has_inject: meta.flags.has_inject,
             has_inherit_attrs_false: meta.flags.has_inherit_attrs_false,
             has_store_usage: meta.flags.has_store_usage,
+            has_macro_failure: meta.flags.has_macro_failure,
         }),
         accepted_props: meta
             .accepted_props
@@ -1502,6 +1503,7 @@ fn build_test_meta() -> FfiComponentMeta {
             has_inject: false,
             has_inherit_attrs_false: false,
             has_store_usage: false,
+            has_macro_failure: false,
         },
         accepted_props: Vec::new(),
         accepted_events: Vec::new(),
@@ -1596,6 +1598,7 @@ mod tests {
             has_inject: false,
             has_inherit_attrs_false: false,
             has_store_usage: false,
+            has_macro_failure: false,
         };
 
         assert_eq!(

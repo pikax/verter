@@ -994,6 +994,13 @@ pub struct FfiComponentMetaFlags {
     pub has_inject: bool,
     pub has_inherit_attrs_false: bool,
     pub has_store_usage: bool,
+    /// D123 (Tier 1A) — set when lowering produced a `LoweringError`
+    /// (macro-impacting unsupported AST kind). Paired with a
+    /// `macro_expansion_diagnostics` entry under D117. NAPI does NOT
+    /// throw exceptions for macro failures; this flag plus the
+    /// diagnostic is the consumer-visible surface.
+    #[serde(default)]
+    pub has_macro_failure: bool,
 }
 
 #[derive(Serialize, Clone)]

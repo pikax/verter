@@ -3898,8 +3898,10 @@ dependencies = [
  "prost",
  "prost-build",
  "protoc-bin-vendored",
+ "quote",
  "serde",
  "serde_json",
+ "syn 2.0.117",
  "verter_semantic",
  "verter_span",
 ]
