@@ -76,7 +76,7 @@ pub(crate) fn enable_dispatch_trace_for_test() -> DispatchTraceGuard {
 // test builds.
 //
 // F18 (r2 review): variant identity uses std::mem::discriminant so the
-// digest does NOT need to be updated when Phase 5 adds new
+// digest does NOT need to be updated when adds new
 // SemanticQueryKey variants. The discriminant is opaque but stable
 // per-variant; pairs with the hash for full key identity.
 // =====================================================================
@@ -92,7 +92,7 @@ pub(crate) struct SemanticQueryKeyDigest {
 impl SemanticQueryKeyDigest {
     fn from_key(key: &crate::semantic_query::SemanticQueryKey) -> Self {
         use std::hash::{Hash, Hasher};
-        // Phase 5g-supplement §5.D.0 r17 — canonicalise the key BEFORE
+        // supplement §5.D.0 r17 — canonicalise the key BEFORE
         // hashing so probes via the caller's key shape (e.g.
         // `ProjectMember`) hit the same digest the warm cache stores
         // (e.g. `ProjectPath` with a length-1 path). Without this,
@@ -143,13 +143,13 @@ thread_local! {
     pub(crate) static DISPATCH_KEY_COUNTS:
         std::cell::RefCell<rustc_hash::FxHashMap<SemanticQueryKeyDigest, u32>> =
         std::cell::RefCell::new(rustc_hash::FxHashMap::default());
-    /// Phase 5g-supplement §5.D.0 r17 — per-key COLD dispatch count.
+    /// supplement §5.D.0 r17 — per-key COLD dispatch count.
     /// Incremented when `execute_read` enters with no warm cache entry
     /// for the key (cache miss; `build` is invoked).
     pub(crate) static DISPATCH_KEY_COLD_COUNTS:
         std::cell::RefCell<rustc_hash::FxHashMap<SemanticQueryKeyDigest, u32>> =
         std::cell::RefCell::new(rustc_hash::FxHashMap::default());
-    /// Phase 5g-supplement §5.D.0 r17 — per-key WARM dispatch count.
+    /// supplement §5.D.0 r17 — per-key WARM dispatch count.
     /// Incremented when `execute_read` enters with the key already in
     /// the warm cache (cache hit; `build` is NOT invoked).
     pub(crate) static DISPATCH_KEY_WARM_COUNTS:
@@ -165,7 +165,7 @@ pub(crate) fn record_dispatch_key(key: &crate::semantic_query::SemanticQueryKey)
     });
 }
 
-/// Phase 5g-supplement §5.D.0 r17 — record a COLD dispatch entry for
+/// supplement §5.D.0 r17 — record a COLD dispatch entry for
 /// this key (cache miss, `build` will be invoked).
 #[cfg(test)]
 pub(crate) fn record_dispatch_cold(key: &crate::semantic_query::SemanticQueryKey) {
@@ -175,7 +175,7 @@ pub(crate) fn record_dispatch_cold(key: &crate::semantic_query::SemanticQueryKey
     });
 }
 
-/// Phase 5g-supplement §5.D.0 r17 — record a WARM dispatch entry for
+/// supplement §5.D.0 r17 — record a WARM dispatch entry for
 /// this key (cache hit, returning the memoized value).
 #[cfg(test)]
 pub(crate) fn record_dispatch_warm(key: &crate::semantic_query::SemanticQueryKey) {
@@ -185,7 +185,7 @@ pub(crate) fn record_dispatch_warm(key: &crate::semantic_query::SemanticQueryKey
     });
 }
 
-/// Phase 5g-supplement §5.D.0 r17 — read the COLD count for `key`.
+/// supplement §5.D.0 r17 — read the COLD count for `key`.
 /// Returns 0 if the key has not been dispatched on this thread since
 /// thread start. The counter is monotonic; tests sample baselines and
 /// deltas across paired queries.
@@ -195,7 +195,7 @@ pub(crate) fn dispatch_cold_for(key: &crate::semantic_query::SemanticQueryKey) -
     DISPATCH_KEY_COLD_COUNTS.with(|c| c.borrow().get(&digest).copied().unwrap_or(0) as usize)
 }
 
-/// Phase 5g-supplement §5.D.0 r17 — read the WARM count for `key`.
+/// supplement §5.D.0 r17 — read the WARM count for `key`.
 #[cfg(test)]
 pub(crate) fn dispatch_warm_for(key: &crate::semantic_query::SemanticQueryKey) -> usize {
     let digest = SemanticQueryKeyDigest::from_key(key);
@@ -600,7 +600,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         #[cfg(test)]
         record_dispatch_key(&key);
 
-        // Phase 5g-supplement §5.D.0 r17 — cold/warm split is recorded
+        // supplement §5.D.0 r17 — cold/warm split is recorded
         // inside `SemanticGraphStore::execute_cooperative` after
         // canonicalisation. The digest function in
         // `SemanticQueryKeyDigest::from_key` canonicalises the key
@@ -694,7 +694,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let fence = self.project_generation_signature();
                 (QueryResult::Error(QueryError::Miss), fence)
             }
-            // Phase 5 §5.0 binding amendment — `ResolveMacroPayload`.
+            // binding amendment — `ResolveMacroPayload`.
             SemanticQueryKey::ResolveMacroPayload {
                 owner,
                 macro_index,
@@ -767,7 +767,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         mode: ProjectionMode,
         state: &mut ReduceState,
     ) -> SemanticNodeId {
-        // Phase 1: collect every reachable `(node, mode)` pair in topo
+        // collect every reachable `(node, mode)` pair in topo
         // order with a worklist. `visited` short-circuits cycles —
         // they reach a fixpoint at the first visit and are not re-pushed.
         let mut topo: Vec<SemanticNodeId> = Vec::new();
@@ -783,11 +783,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // Push children for traversal. Operator-shape children
             // (IndexedAccess.object, Conditional.check/extends/branches,
             // KeyOf.base, etc.) are reachable via their concrete
-            // operands; the dispatch happens during phase 2 reduction.
+            // operands; the dispatch happens during reduction.
             push_children(&data, &mut to_visit);
         }
 
-        // Phase 2: process topo in reverse — children first. Each
+        // process topo in reverse — children first. Each
         // (node, mode) reduces by looking at SemanticNodeData and
         // dispatching the per-shape key. The result is recorded in
         // `mapping`; subsequent parents look up child reductions there.
@@ -1082,9 +1082,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
 }
 
 /// Push all child `SemanticNodeId` references from `data` onto
-/// `worklist` (reducer phase 1 traversal). Operator children, surface
+/// `worklist` (reducer traversal). Operator children, surface
 /// members, signatures, conditional branches, etc. are all collected so
-/// the topo order in phase 2 reduces them before their parents.
+/// the topo order in reduces them before their parents.
 #[allow(dead_code)] // wired by reduce_graph_node_iterative above.
 fn push_children(data: &SemanticNodeData, worklist: &mut Vec<SemanticNodeId>) {
     match data {

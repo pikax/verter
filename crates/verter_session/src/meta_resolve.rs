@@ -27,7 +27,7 @@ use crate::types::{FileAnalysisSnapshot, ProjectionMode};
 
 pub(crate) const STORE_VIEW_STABILITY_MAX_ATTEMPTS: usize = 3;
 
-// Phase 11a sub-module split — siblings live in `crates/verter_session/src/meta_resolve/`.
+// sub-module split — siblings live in `crates/verter_session/src/meta_resolve/`.
 // The shell re-exports the moved `pub(crate)` surface so existing
 // `crate::meta_resolve::*` paths keep working without callsite churn.
 mod dep_signature;
@@ -73,7 +73,7 @@ pub(crate) use graph_predicates::{
     component_meta_ref_resolves_to_package_node, extract_route_root_identity_node,
     ref_root_reaches_transitive_cycle_node,
 };
-// Phase 11a / post-cutover clippy cleanup — these graph-native predicates
+// / clippy cleanup — these graph-native predicates
 // have no non-test consumers in the landed tree but are exercised by
 // `meta_resolve_tests.rs` and other integration-test targets via
 // `crate::meta_resolve::*` paths. Gating with `#[cfg(test)]` keeps the
@@ -85,7 +85,7 @@ pub(crate) use graph_predicates::{
     slot_binding_param_can_stay_symbolic_node, type_node_has_package_backed_root,
     type_node_needs_member_route_materialization,
 };
-// Phase 10a: `jsdoc_resolve` source moved to
+// `jsdoc_resolve` source moved to
 // `host_manage/jsdoc_resolve.rs` (host-impl tier; the
 // `HostComponentMetaResolver` adapter and `read_full_source` helper
 // belong with the host).
@@ -139,7 +139,7 @@ pub(crate) use registry_materialize::{
 // for symbolic-route preservation contract.
 #[cfg(test)]
 pub(crate) use registry_materialize::preserve_package_backed_symbolic_refs_node;
-// Phase 10a: `request_host` source moved to
+// `request_host` source moved to
 // `host_manage/component_meta_request_impl.rs` (host-impl tier per
 // §10a.0.A). The re-export re-points at the new home so the
 // `crate::meta_resolve::*` public surface stays intact for callers.
@@ -158,7 +158,7 @@ pub(crate) use resolved_state::{
 };
 pub use resolved_state::{ResolvedComponentMetaState, SurfaceNodeIdentities};
 pub(crate) use scoring::compare_type_expr_improvement;
-// Phase 10a: promoted to `pub(crate)` so the moved
+// promoted to `pub(crate)` so the moved
 // `host_manage::component_meta_methods.rs` (formerly the in-tree
 // `host_methods.rs`) reaches the function via the `crate::meta_resolve`
 // re-export instead of the now-out-of-scope `super::scoring::...`.

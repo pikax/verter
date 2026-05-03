@@ -12,13 +12,12 @@
 //! **Discrimination.** The `value` prop is the load-bearing assertion:
 //! every fixture must produce a `value` prop in the resolved macro,
 //! AND the prop's `analyzed_type` text must be non-empty. The
-//! companion file `legacy_walker_parity_discrimination.rs` asserts
-//! that the 16 baselines collectively cover the distinct
+//! companion file `walker_parity_baselines_have_full_coverage.rs`
+//! asserts that the 16 baselines collectively cover the distinct
 //! policy-table arms by name.
 //!
-//! **Phase-9 cutover.** When the new materialiser replaces the
-//! walker, these tests run unchanged and must continue to pass.
-//! Plan §11.5 — "16 parity baselines run against new materialiser".
+//! These tests run unchanged against the materialiser and must
+//! continue to pass.
 
 use verter_session::audited_request::{AuditedRequest, AuditedRequestError};
 use verter_session::meta_resolve::ResolvedComponentMetaState;

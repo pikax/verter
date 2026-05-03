@@ -1,4 +1,4 @@
-//! LSP navigation feature method bodies (phase 11e.9).
+//! LSP navigation feature method bodies.
 //!
 //! Free functions hosting the bodies of `impl LanguageServer for
 //! VerterLanguageServer` navigation feature methods (hover,

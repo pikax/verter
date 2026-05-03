@@ -18,7 +18,7 @@
 //!   indexed-access predicate without forcing concrete enumeration.
 //!
 //! For workspace-owned targets, both helpers decline so the canonical
-//! reuse path (Phase 11 / §6.5) keeps ownership of the materialisation
+//! reuse path keeps ownership of the materialisation
 //! result.
 //!
 //! ## Counter contract
@@ -91,7 +91,7 @@ pub(crate) const EXPENSIVE_OMIT_MEMBER_RESOLUTION_TRACE_COUNTER: &str =
 /// surface (the caller falls back to the standard Pick path).
 ///
 /// Workspace-owned targets MUST defer to the canonical reuse path
-/// (Phase 11 / §6.5); this helper is only invoked when the caller
+///; this helper is only invoked when the caller
 /// has already established `target` is package-backed.
 pub(crate) fn selective_pick_expansion_for_package_backed(
     target_body: &TypeExpr,
@@ -136,7 +136,7 @@ pub(crate) fn selective_pick_expansion_for_package_backed(
 /// member-materialize counter MUST stay at 0 for this path.
 ///
 /// Consumers that subsequently index into the symbolic Omit reduce
-/// through the existing indexed-access predicate (Phase 6 / §6.3,
+/// through the existing indexed-access predicate (/ §6.3,
 /// owned by B-Bm).
 ///
 /// `target` is the resolved declaration body; `target_ref` is the

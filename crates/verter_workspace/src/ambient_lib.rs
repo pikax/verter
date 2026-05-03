@@ -1,6 +1,6 @@
 //! Ambient lib registration types and engine storage.
 //!
-//! Phase 5 §6 sub-plan: per-project ambient TypeScript libs (e.g. lib.es5.d.ts)
+//! sub-plan: per-project ambient TypeScript libs (e.g. lib.es5.d.ts)
 //! are registered against a [`crate::project_key::ProjectStableKey`] and stored
 //! lock-free on the [`crate::engine::Engine`] via `ArcSwap`. They are visible
 //! only via [`WorkspaceAccess::read_ambient_lib`] / `lookup_ambient_symbol`,

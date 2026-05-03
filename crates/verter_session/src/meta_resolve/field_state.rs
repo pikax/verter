@@ -1,6 +1,6 @@
 //! `MacroFieldGraphState` lazy-lowering scaffold + dispatch lower counter.
 //!
-//! Phase 11a domain 3 — Plan §4.10 / K1 lazy-lowering scaffold +
+//! domain 3 — Plan §4.10 / K1 lazy-lowering scaffold +
 //! test-only `DISPATCH_LOWER_COUNTER` instrumentation.
 //!
 //! Per §4.10, the macro field-type rewrite path inside

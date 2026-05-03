@@ -1,4 +1,4 @@
-//! Project-global [`SemanticQueryApi`] dispatcher (Phase 2.2).
+//! Project-global [`SemanticQueryApi`] dispatcher.
 //!
 //! Binds [`SemanticQueryKey`] variants onto the shared
 //! [`SemanticGraphStore`](crate::semantic_query_memo::SemanticGraphStore) memo
@@ -87,7 +87,7 @@ pub(crate) mod substitute;
 pub(crate) mod walk;
 
 /// Declaration identity used for in-flight instantiation tracking
-/// (plan §3 D-Cutover — recursive-ref back-edge detection during body
+/// (plan §3 recursive-ref back-edge detection during body
 /// lowering). `(canonical_id, name)` tuple keyed on refcount-shared
 /// `Arc<str>` so membership checks are refcount compares, not string
 /// compares. Lives on [`ProjectSemanticDispatch`] so nested
@@ -138,7 +138,7 @@ pub struct ProjectSemanticDispatch<'a> {
 impl<'a> ProjectSemanticDispatch<'a> {
     /// Create a dispatcher bound to `ctx`.
     ///
-    /// Phase 10a — locked-in signature: takes `&dyn ResolverContext`,
+    /// locked-in signature: takes `&dyn ResolverContext`,
     /// not concrete `&VerterHost`. External callers (test fixtures and
     /// `component_meta_materialize.rs`) pass `&host` directly; the
     /// implicit `&host as &dyn ResolverContext` upcast handles
@@ -306,7 +306,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     &bundle,
                 )
             });
-        // Phase 5h §5.10 r15/F11 — construct the resolver-context
+        // r15/F11 — construct the resolver-context
         // `ScopeShadowing` once at the dispatch entry point. The
         // shadow set is derived from the same `scope_payload` the
         // foundation (`524f469d`) consumed inline; any future
@@ -400,7 +400,7 @@ pub(super) fn utility_param_names(name: &str) -> &'static [&'static str] {
 // `primitive_for_literal` was the pre-C6 approximation that collapsed
 // literal types to their underlying primitive — retired when
 // `SemanticNodeData::Literal(LiteralValue)` landed in WIP 3-quater
-// (plan §3 D-Cutover staging branch). Literal identity is now
+// (plan §3 staging branch). Literal identity is now
 // preserved through the semantic graph; callers that need the
 // primitive kind of a literal should match on `SemanticNodeData::Literal`
 // and derive the kind inline.
@@ -536,7 +536,7 @@ impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {
                 let fence = self.project_generation_signature();
                 (QueryResult::Error(QueryError::Miss), fence)
             }
-            // Phase 5 §5.0 binding amendment — `ResolveMacroPayload`.
+            // binding amendment — `ResolveMacroPayload`.
             SemanticQueryKey::ResolveMacroPayload {
                 owner,
                 macro_index,
@@ -573,7 +573,7 @@ pub fn resolve_decl_key(canonical_id: &str, name: &str) -> ResolveDeclKey {
 /// Convenience: fetch the resolved semantic-node payload for a previously
 /// executed key. Returns `None` if the memo has not warmed the key yet.
 ///
-/// Phase 10a — accepts `&dyn ResolverContext`; the trait method
+/// accepts `&dyn ResolverContext`; the trait method
 /// `dispatch_node_data` provides the same access from any context.
 /// Existing callers passing `&VerterHost` upcast implicitly.
 #[must_use]
@@ -598,7 +598,7 @@ fn find_member(surface: &SurfaceView, needle: &str) -> Option<SemanticNodeId> {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// Phase 5 §3.3 — Dispatch helpers (NON-variant; compose existing variants
+// Dispatch helpers (NON-variant; compose existing variants
 // + read sidecars). These are the 3 helpers that replace the 3 originally
 // proposed `SemanticQueryKey` variants per the §0 binding amendment
 // (`MaterializeSurface`, `ResolvePublicInstance`, `ResolveFallthroughSurface`)
@@ -614,7 +614,7 @@ fn find_member(surface: &SurfaceView, needle: &str) -> Option<SemanticNodeId> {
 // classes A/B/C, 5/6/7/8/9 classes D + R) land in 5d-5f.
 // ──────────────────────────────────────────────────────────────────────────
 
-/// Phase 5 §3.4 — `__builtin__` decl identity for the `Pick` utility.
+/// `__builtin__` decl identity for the `Pick` utility.
 ///
 /// Used by [`ProjectSemanticDispatch::execute_pick`] to dispatch through
 /// the existing `Instantiate` variant's built-in utility branch
@@ -631,7 +631,7 @@ pub fn pick_builtin_decl_identity() -> DeclIdentity {
     }
 }
 
-/// Phase 5 §3.4 — `__builtin__` decl identity for the `Omit` utility.
+/// `__builtin__` decl identity for the `Omit` utility.
 ///
 /// Used by [`ProjectSemanticDispatch::execute_omit`]. Mirrors the Pick
 /// helper above, dispatching through the existing
@@ -648,7 +648,7 @@ pub fn omit_builtin_decl_identity() -> DeclIdentity {
 }
 
 impl<'a> ProjectSemanticDispatch<'a> {
-    /// Phase 5 §3.3 — Direct mirror of
+    /// Direct mirror of
     /// [`materialize_component_meta_structure`](crate::component_meta_materialize::materialize_component_meta_structure).
     ///
     /// Caller pattern-matches `MaterializeOutcome` directly — no
@@ -672,7 +672,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         crate::component_meta_materialize::materialize_component_meta_structure(self.ctx, key)
     }
 
-    /// Phase 5 §3.3 — `Pick<base, members>` via the existing builtin
+    /// `Pick<base, members>` via the existing builtin
     /// Pick dispatch (`build_builtin_utility` Pick arm at `build.rs:870`).
     ///
     /// Inherits TS Pick semantics including modifier preservation
@@ -702,7 +702,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         })
     }
 
-    /// Phase 5 §3.3 — `Omit<base, members>` via the existing builtin
+    /// `Omit<base, members>` via the existing builtin
     /// Omit dispatch (`build_builtin_utility` Omit arm at `build.rs:911`).
     ///
     /// Inherits TS Omit semantics including the "Omit preserves
@@ -724,7 +724,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         })
     }
 
-    /// Phase 5 §3.3 — `execute(key)` + `raise_node_to_type_expr` in
+    /// `execute(key)` + `raise_node_to_type_expr` in
     /// one call, returning the full `CacheRead` so dep_signature is
     /// preserved for the caller's fence merge (Codex round 7 P1
     /// rejected lossy `Option<TypeExpr>` returns).
@@ -748,7 +748,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// Phase 5j §5.12 — slot-binding-parameter type lowering.
+    /// slot-binding-parameter type lowering.
     ///
     /// Given the `defineSlots<T>()` macro payload's lowered base node
     /// and the target `slot_name` + `binding_name` pair, projects the
@@ -773,7 +773,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// slot-binding lowering must compose existing variants and live
     /// as a non-variant dispatch helper. This mirrors `execute_pick` /
     /// `execute_omit` / `materialize_surface` / `execute_to_type_expr`
-    /// which are non-variant dispatch helpers added in Phase 5b/5d/5e.
+    /// which are non-variant dispatch helpers added in the prior cutover/5d/5e.
     ///
     /// **Migration source:** the engine analysis path's
     /// `expand_field_expr` closure used to dispatch a single
@@ -876,7 +876,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// Phase 5 §3.4 — Trivial helper: lower a `[String]` member-name
+    /// Trivial helper: lower a `[String]` member-name
     /// list to an `Arc<[PathSegment]>` for `ProjectPath` queries.
     ///
     /// Each member name becomes a `PathSegment::Member(Arc<str>)`. The
@@ -891,7 +891,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         Arc::from(segs.into_boxed_slice())
     }
 
-    /// Phase 5 §3.4 — Trivial helper: intern a `[Arc<str>]` member-name
+    /// Trivial helper: intern a `[Arc<str>]` member-name
     /// list as a `Union` of string-literal nodes.
     ///
     /// Empty input produces `Primitive(Never)` — caller-side pickup of
@@ -1007,7 +1007,7 @@ impl<'a> SessionDispatchHost<'a> {
     /// base node or a scope payload — it re-resolves per-base scope on
     /// every call via [`Self::base_scope`].
     ///
-    /// Phase 10a — locked-in signature: takes `&dyn ResolverContext`.
+    /// locked-in signature: takes `&dyn ResolverContext`.
     /// Existing call sites pass `&host` (concrete `&VerterHost`) and
     /// upcast implicitly because `impl ResolverContext for VerterHost`.
     #[must_use]

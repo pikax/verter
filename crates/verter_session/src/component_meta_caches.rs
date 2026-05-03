@@ -1157,7 +1157,7 @@ impl Default for RoutedExprSurfaceDb {
 }
 
 // ===========================================================================
-// Plan §1.5 / Phase 8 — MaterializeStructureDb
+// Plan §1.5 / MaterializeStructureDb
 // ===========================================================================
 
 use crate::component_meta_materialize::{MaterializeOutcome, MaterializeStructureCacheKey};

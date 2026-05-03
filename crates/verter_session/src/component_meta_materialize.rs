@@ -40,7 +40,7 @@
 //!   keep-function-bodies-symbolic invariant for Object-property
 //!   positions.
 //!
-//! Phase 9 cut over the legacy walker shim to this entry, deleted
+//! cut over the legacy walker shim to this entry, deleted
 //! the walker's inner body family (cycle-key, scope-iteration, and
 //! visited-set helpers), and deleted the dispatch-iteration module
 //! that hosted the walker's visited-set helper. The static-grep gate
@@ -365,12 +365,12 @@ pub(crate) fn materialize_component_meta_structure(
 
     let db = ctx.project_type_store().materialize_structure_db();
 
-    // Phase 1 — warm-hit peek with proactive stale removal.
+    // warm-hit peek with proactive stale removal.
     if let Some(cached) = db.peek(&key, ctx) {
         return cached;
     }
 
-    // Phase 2 — same-key thread-local re-entry detection.
+    // same-key thread-local re-entry detection.
     if MaterializeInFlightGuard::contains_key(&key) {
         let opaque = ctx.project_type_store().semantic_graph().intern_node(
             crate::semantic_query::SemanticNodeData::Opaque(QueryError::Miss),
@@ -381,7 +381,7 @@ pub(crate) fn materialize_component_meta_structure(
         };
     }
 
-    // Phase 3 — pre-admission depth fuse (one-call-deep check).
+    // pre-admission depth fuse (one-call-deep check).
     if MaterializeInFlightGuard::current_depth() >= MAX_DEPTH {
         return crate::semantic_query::CacheRead {
             value: MaterializeOutcome::Tainted(key.base),
@@ -435,7 +435,7 @@ pub(crate) fn materialize_component_meta_structure(
         }
     }
 
-    // Phase 4 — cooperative-admission cold build with post_publish.
+    // cooperative-admission cold build with post_publish.
     // The compute closure shares its computed outcome via a side
     // channel so the post-cooperative fallback (when the entry is
     // non-cacheable and `cooperative_get_or_insert_with_post_publish`
@@ -1155,7 +1155,7 @@ mod tests {
     }
 
     // Compile-time: silence dead-code warnings on imports until the
-    // materialiser body lands in Phase 8b/c/d.
+    // materialiser body lands in the prior cutover/c/d.
     #[allow(dead_code)]
     fn _construction_smoke_test() {
         let _ = ResolveDeclKey {

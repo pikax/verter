@@ -1,7 +1,7 @@
 //! `host_manage::fallthrough` — fallthrough resolution pipeline + runtime
 //! node ↔ resolution conversions + cached fallthrough mirror.
 //!
-//! Phase 11c sub-plan §11c.2 Domain I. Owns the
+//! Domain I. Owns the
 //! `resolve_fallthrough_surface` family of methods, the runtime
 //! `FallthroughResolverHost`/`FallthroughComputeHost` adapters' compute
 //! callbacks, and the per-canonical fallthrough cache mirror used by

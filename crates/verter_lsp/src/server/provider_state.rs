@@ -1,4 +1,4 @@
-//! Provider-sync state CRUD + context helpers (phase 11e.3).
+//! Provider-sync state CRUD + context helpers.
 //!
 //! Inherent-impl extension methods on [`super::VerterLanguageServer`]
 //! covering MRU bookkeeping, snapshot-pending queue, transition

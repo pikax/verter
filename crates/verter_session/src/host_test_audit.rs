@@ -1,4 +1,4 @@
-//! Test-only host audit accessors (Phase 5g-supplement §5.D.0 r17 instrumentation surface).
+//! Test-only host audit accessors (supplement §5.D.0 r17 instrumentation surface).
 //!
 //! `cargo test --workspace --tests --verbose` (the §0.6.3 gate command)
 //! sees these accessors via bare `#[cfg(test)]`. Production NAPI/WASM/LSP
@@ -72,7 +72,7 @@ pub struct HostTestAudit<'a> {
     graph: &'a crate::semantic_query_memo::SemanticGraphStore,
 }
 
-/// Phase 5g-supplement §5.D.0 r17 — dispatch-counter view over the
+/// supplement §5.D.0 r17 — dispatch-counter view over the
 /// per-thread `DISPATCH_KEY_COLD_COUNTS` / `DISPATCH_KEY_WARM_COUNTS`
 /// thread-locals. Read-only; counters are written from
 /// `ProjectSemanticDispatch::execute_read` based on cache peek.
@@ -101,7 +101,7 @@ impl DispatchCounter {
     }
 }
 
-/// Phase 5g-supplement §5.D.0 r17 — per-key dispatch trace for §5.D.3
+/// supplement §5.D.0 r17 — per-key dispatch trace for §5.D.3
 /// terminal-mode-only-expansion tests. Returned by
 /// [`crate::VerterHost::dispatch_trace_for`].
 ///
@@ -210,7 +210,7 @@ impl DispatchTrace {
     }
 }
 
-/// One hop in a [`DispatchTrace`]. Phase 5g-supplement §5.D.0 r17.
+/// One hop in a [`DispatchTrace`]. supplement §5.D.0 r17.
 #[derive(Debug, Clone, Copy)]
 pub struct SubKey {
     mode: crate::semantic_query::ProjectionMode,

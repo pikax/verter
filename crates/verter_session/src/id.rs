@@ -358,7 +358,7 @@ mod tests {
     }
 
     // ═══════════════════════════════════════════════════════════
-    // Phase 3: Additional id.rs tests
+    // Additional id.rs tests
     // ═══════════════════════════════════════════════════════════
 
     /// @ai-generated - resolve_external with excessive ../ clamps at root

@@ -1,4 +1,4 @@
-//! Wrapper helpers + glue for IDE TSX script generation (D10 of Phase 11d
+//! Wrapper helpers + glue for IDE TSX script generation (D10 of
 //! ownership-domain analysis).
 //!
 //! Hosts the `PREFIX` const, the `___VERTER___instance` /

@@ -1,6 +1,6 @@
 //! Origin-graph builder for component-meta audit footprint capture.
 //!
-//! Phase 11a domain 13 — owns the standalone `build_origin_graph`
+//! domain 13 — owns the standalone `build_origin_graph`
 //! function that reduces `SemanticGraphStore` + a set of surface
 //! identities to a `verter_protocol::types::OriginGraphDto` (the
 //! audit-trace shape). Called once per component-meta request when

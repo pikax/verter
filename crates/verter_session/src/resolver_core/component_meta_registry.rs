@@ -13,7 +13,7 @@ use crate::resolver_core::RouteDemand;
 use crate::types::FileAnalysisSnapshot;
 use verter_semantic::analysis::type_expr::{FunctionExpr, ObjectMember, PrimitiveName, TypeExpr};
 
-/// Issue #7 / Phase 8 — capture-token counters for route-demand
+/// Issue #7 / capture-token counters for route-demand
 /// emission. Recorded inside [`enqueue_component_meta_registry_ref`]
 /// so every enqueue site reports the route variant it pushed onto
 /// the queue.
@@ -154,7 +154,7 @@ pub(crate) fn owner_component_meta_registry_import_root(
     ctx.resolve_owner_direct_import(owner_canonical, local_name)
 }
 
-/// Issue #7 / Phase 8 — extract the route's root name when `expr` is
+/// Issue #7 / extract the route's root name when `expr` is
 /// either an `IndexedAccess` (`Foo['variants']['variant']`) or a
 /// utility wrapper (`Pick<Foo, ...>` / `Omit<Foo, ...>`).
 fn component_meta_registry_route_root_name(expr: &TypeExpr) -> Option<String> {
@@ -167,7 +167,7 @@ fn component_meta_registry_route_root_name(expr: &TypeExpr) -> Option<String> {
     None
 }
 
-/// Issue #7 / Phase 8 — true when the named alias's prepared body
+/// Issue #7 / true when the named alias's prepared body
 /// resolves (modulo single alias-of-alias indirection) to a `Ref {
 /// name: "ComponentConfig", type_arguments: nonempty }`.
 ///
@@ -225,7 +225,7 @@ pub(crate) fn component_meta_registry_owner_local_component_config_alias_name(
     false
 }
 
-/// Issue #7 / Phase 8 — predicate for the registry public-route
+/// Issue #7 / predicate for the registry public-route
 /// rewrite. Returns `Some(root_name)` when ALL of:
 /// - the route root has no import binding on the owner (so the alias
 ///   resolves to a workspace-local declaration)
@@ -295,7 +295,7 @@ pub(crate) fn enqueue_component_meta_registry_ref(
     if published_names.contains(name) {
         return;
     }
-    // Issue #7 / Phase 8 — record the route-demand variant on every
+    // Issue #7 / record the route-demand variant on every
     // queue admission. Tests assert
     // `route_demand_emitted::Whole >= 1` and
     // `route_demand_emitted::Pick + ::MemberPath == 0` for owner-local
@@ -1705,7 +1705,7 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
         });
     let expr = parsed_raw.as_ref().unwrap_or(&field.r#type);
 
-    // Issue #7 / Phase 8 — owner-local ComponentConfig alias rewrite.
+    // Issue #7 / owner-local ComponentConfig alias rewrite.
     // When the indexed-access or utility route's root resolves to an
     // owner-local alias whose body is `ComponentConfig<...>`, emit a
     // `RouteDemand::Whole(root)` instead of `MemberPath`/`Pick`. The

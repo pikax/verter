@@ -1,6 +1,6 @@
 //! Imported registry symbol resolution, direct prepared declaration
 //! access, fuse/state/debug accessors, and ctx/dispatch entry helpers
-//! extracted from `component_meta_query_engine/mod.rs` in Phase 11b.5.
+//! extracted from `component_meta_query_engine/mod.rs` in the prior cutover.5.
 //!
 //! These methods are inherent methods on `ComponentMetaQueryEngine<'a>`
 //! defined in a sibling `impl<'a>` block; they read the engine's
@@ -357,7 +357,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .check_structural_slow_lane(&self.fuse_budgets)
     }
 
-    /// Phase 5l — `pub(crate)` accessor for the projection-op fuse
+    /// `pub(crate)` accessor for the projection-op fuse
     /// budget check. Used by the bridge helpers in `meta_resolve.rs`
     /// (post engine-method deletion) to gate the same-budget check the
     /// retired engine methods enforced.
@@ -414,9 +414,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         self.imported_registry_symbols.borrow().len()
     }
 
-    /// Phase 9 cutover (plan §11.2 / §1.5): the legacy walker's
+    /// cutover (plan §11.2 / §1.5): the legacy walker's
     /// per-request `materialized_member_surfaces` mirror is dead
-    /// post-cutover. Tests asking for the materialiser's cache size
+    /// . Tests asking for the materialiser's cache size
     /// now read the ctx-owned `MaterializeStructureDb::live_count()`
     /// — the final-result cache that the new structural materialiser
     /// publishes into.
@@ -428,19 +428,18 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .live_count()
     }
 
-    /// Phase 5c (sub-plan §A9 (b/c)): the corresponding test
-    /// assertions migrated to behavior assertions / ctx
-    /// `prepared_surface_db().live_count()` checks. Field + accessor
-    /// retained until the broader counter cleanup in 5g.
+    /// The corresponding test assertions migrated to behavior
+    /// assertions / ctx `prepared_surface_db().live_count()` checks.
+    /// Field + accessor retained until the broader counter cleanup.
     #[cfg(test)]
     #[allow(dead_code)]
     pub(crate) fn debug_prepared_type_decl_query_count(&self) -> usize {
         self.prepared_type_decl_query_count
     }
 
-    /// Phase 5c (sub-plan §A9 (d)): the corresponding test
-    /// assertion migrated to a behavior assertion on the projected
-    /// `define_props` shape. Field + accessor retained until 5g.
+    /// The corresponding test assertion migrated to a behavior
+    /// assertion on the projected `define_props` shape. Field +
+    /// accessor retained.
     #[cfg(test)]
     #[allow(dead_code)]
     pub(crate) fn debug_prepared_root_surface_projection_count(&self) -> usize {
@@ -488,7 +487,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         resolved
     }
 
-    /// Phase 10a — single accessor returning the engine's resolver
+    /// single accessor returning the engine's resolver
     /// context. Replaces the legacy `ctx()` accessor (which returned
     /// `&VerterHost`) now that the engine field is `&dyn ResolverContext`.
     /// Out-of-seal-scope callers (`host_manage/*`) accept the trait
@@ -507,7 +506,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         scope_canonical_id: &str,
         symbol_name: &str,
     ) -> Option<SemanticNodeId> {
-        // D-Cutover §5.8: resolve the root identity via
+        // resolve the root identity via
         // `bare_name_resolve::resolve_bare_name_in_scope` directly —
         // no `SessionSolverHost` construction. Matches the dispatch
         // lowering path in `shallow_lower_type_expr`.
@@ -576,7 +575,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .find(|member| member.name == member_name)
     }
 
-    /// Post-cutover clippy cleanup — paired with `dispatch_projected_member`
+    /// clippy cleanup — paired with `dispatch_projected_member`
     /// and `dispatch_projected_surface` as part of the ComponentMetaQueryEngine
     /// surface contract. No call site in the landed tree, but the helper is
     /// retained for symmetry with the projection/keyspace surface API; the

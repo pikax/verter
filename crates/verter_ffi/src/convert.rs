@@ -1807,7 +1807,7 @@ pub fn host_error_to_string(err: &host::HostError) -> String {
 }
 
 // =============================================================================
-// Code action conversion (Phase 1)
+// Code action conversion
 // =============================================================================
 
 /// Convert a `verter_actions::CodeAction` to an FFI-safe `FfiCodeAction`.
@@ -1836,7 +1836,7 @@ pub fn code_action_to_ffi(action: &verter_actions::CodeAction, source: &str) -> 
 }
 
 // =============================================================================
-// Lint rule metadata conversion (Phase 5)
+// Lint rule metadata conversion
 // =============================================================================
 
 /// Convert a lint rule to its FFI metadata representation.

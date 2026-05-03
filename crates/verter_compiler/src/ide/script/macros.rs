@@ -1,4 +1,4 @@
-//! Vue macro projection (D3 of Phase 11d ownership-domain analysis).
+//! Vue macro projection (ownership-domain analysis).
 //!
 //! Hosts the macro state types (`TsxMacroState`, `MacroBindingEntry`,
 //! `ModelBindingEntry`, `MacroSourceCtx`), the `macro_span` extractor, and

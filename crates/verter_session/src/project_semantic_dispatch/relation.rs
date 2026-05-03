@@ -442,9 +442,9 @@ enum RelateWork {
     ReduceOr(u32),
 }
 
-/// Top-level iterative relation dispatch (Path C C8). Replaces the
-/// recursive `decide_relation` / `decide_relation_inner` pair retired in
-/// C8. Consumes a worklist of pairs and reducers, publishing the final
+/// Top-level iterative relation dispatch. Replaces the recursive
+/// `decide_relation` / `decide_relation_inner` pair. Consumes a
+/// worklist of pairs and reducers, publishing the final
 /// [`RelationResult`] once the worklist drains.
 ///
 /// Structural fan-out (Alias unwrap, Union / Intersection distribution,

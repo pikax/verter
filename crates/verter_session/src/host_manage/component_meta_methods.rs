@@ -1,6 +1,6 @@
 //! Host-method surface for component-meta on `VerterHost`.
 //!
-//! Phase 11a domain 8 — the inherent `impl VerterHost { ... }` block that
+//! domain 8 — the inherent `impl VerterHost { ... }` block that
 //! lives next to the materialization core. Owns ~18 host methods including
 //! `resolve_component_meta`, `compute_component_meta_state`, the
 //! `*_inner` audited variants, the registry-publication helpers
@@ -19,7 +19,7 @@
 //! `MEMBER_ROUTE_FAST_PATH_HITS`, the registry / cycle / origin-graph
 //! predicates, the resolver adapter, etc.) are reached via `super::*`
 //! until those domains land in their final per-domain siblings
-//! (Phase 11a commits 10-14).
+//!.
 
 use crate::host_manage::{
     component_meta_debug, component_meta_debug_enabled, component_meta_trace_custom,
@@ -35,7 +35,7 @@ use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
-// Phase 10a: file moved from `meta_resolve/host_methods.rs` to
+// file moved from `meta_resolve/host_methods.rs` to
 // `host_manage/component_meta_methods.rs`. The original `super::X` paths
 // resolved through `meta_resolve`'s private siblings; after the move,
 // they rewrite to `crate::meta_resolve::X` (the parent module's
@@ -387,7 +387,7 @@ impl VerterHost {
                 snapshot.script_flags,
             ),
         );
-        // D-Cutover §5.8 WIP-W: retired `shared_owner_engine` /
+        // retired `shared_owner_engine` /
         // `SessionSolverHost` pair; the resolver host is now a thin
         // wrapper around `VerterHost`.
         let resolver_host = HostComponentMetaResolver { host: self };
@@ -424,7 +424,7 @@ impl VerterHost {
         let should_materialize_registry = registry_materialization == RegistryMaterialization::Full;
         let should_produce_macro_object_shapes = mode == ProjectionMode::Expanded;
         let solver_audit = if should_materialize_registry || should_produce_macro_object_shapes {
-            // D-Cutover §5.8 WIP-W: the retired `shared_owner_engine`
+            // the retired `shared_owner_engine`
             // is gone — dispatch owns all solve-like operations now.
             let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(self);
             if should_materialize_registry {
@@ -808,7 +808,7 @@ impl VerterHost {
                                             .unwrap_or_else(|| {
                                                 scope_canonical_id.to_string()
                                             });
-                                        // Phase 5e commit 6 — migrate the
+                                        // commit 6 — migrate the
                                         // generic-Ref instantiation to dispatch
                                         // (sub-plan §C.3 D-T recipe). The
                                         // helper resolves
@@ -822,7 +822,7 @@ impl VerterHost {
                                                 &stabilized,
                                             )
                                             .unwrap_or_else(|| stabilized.clone());
-                                        // Phase 5e commit 5 — migrate the
+                                        // commit 5 — migrate the
                                         // route-loop call to the Class A
                                         // dispatch helper. The helper covers
                                         // the registry-route fast-path AND
@@ -931,7 +931,7 @@ impl VerterHost {
                     query_engine,
                 ));
             }
-            // Phase 5m §5.13a.2 — bridge via per-engine helper.
+            // bridge via per-engine helper.
             project_type_surface_expr_via_host_threaded(
                 query_engine,
                 scope_canonical_id,
@@ -1002,7 +1002,7 @@ impl VerterHost {
                 ))
             })
         }
-        /// Issue #10 / Phase 10 — predicate: does `expr` contain any
+        /// Issue #10 / predicate: does `expr` contain any
         /// callable surface (`TypeExpr::Function` or an Object with a
         /// call/method signature) anywhere reachable from its top-
         /// level structure (Array element, Intersection arm, Union
@@ -1040,7 +1040,7 @@ impl VerterHost {
             }
         }
 
-        /// Issue #10 / Phase 10 — extract the raw type of `member`
+        /// Issue #10 / extract the raw type of `member`
         /// from `raw_body` when `raw_body` is an Object surface (the
         /// resolved body of the picked alias). Returns `None` when
         /// `raw_body` is not an Object or no property matches.
@@ -1059,7 +1059,7 @@ impl VerterHost {
             }
         }
 
-        /// Issue #10 / Phase 10 — predicate: does `param.ty` resolve
+        /// Issue #10 / predicate: does `param.ty` resolve
         /// to a package-backed declaration?
         ///
         /// Walks every `TypeExpr::Ref { name }` rooted in the
@@ -1112,7 +1112,7 @@ impl VerterHost {
             })
         }
 
-        /// Issue #10 / Phase 10 — predicate: does the picked member's
+        /// Issue #10 / predicate: does the picked member's
         /// raw leaf contain a callable surface whose param root is
         /// package-backed? When this fires, the Pick member-route
         /// materialiser MUST bypass the registry indexed-access route
@@ -1255,7 +1255,7 @@ impl VerterHost {
                 crate::resolver_core::RouteDemand::Pick(members) => {
                     let mut properties = Vec::new();
                     for member in members {
-                        // Issue #10 / Phase 10 — when the picked
+                        // Issue #10 / when the picked
                         // member's raw leaf contains a callable
                         // surface AND any callable parameter root
                         // resolves to a package-backed declaration,
@@ -1300,13 +1300,13 @@ impl VerterHost {
                             std::slice::from_ref(member),
                         );
                         // Plan §6.6 / E — the alias-body fallback was
-                        // retired in commit E; B1's materialiser
+                        //; B1's materialiser
                         // branch handles
                         // route shapes natively. The remaining
                         // surface-expr fallback covers non-route
                         // shapes.
                         //
-                        // Phase 5e commit 6 — migrate to dispatch
+                        // commit 6 — migrate to dispatch
                         // (sub-plan §C.3 D-T recipe: RouteDemand::MemberPath
                         // → Class A with path). The Class A helper handles
                         // the IndexedAccess route_expr through its
@@ -1321,7 +1321,7 @@ impl VerterHost {
                             &route_expr,
                         )
                         .unwrap_or(route_expr);
-                        // Issue #10 / Phase 10 — record actual descent
+                        // Issue #10 / record actual descent
                         // into the indexed-access route. The
                         // package-backed suppression branch above bails
                         // before this point; reaching here means we
@@ -1366,7 +1366,7 @@ impl VerterHost {
                                         query_engine,
                                     )
                                     .unwrap_or_else(|| scope_canonical_id.to_string());
-                                // Phase 5e commit 6 — migrate the generic-Ref
+                                // commit 6 — migrate the generic-Ref
                                 // instantiation to dispatch.
                                 let expanded = instantiate_local_generic_ref_via_dispatch(
                                     query_engine.ctx,
@@ -1374,7 +1374,7 @@ impl VerterHost {
                                     &stabilized_surface,
                                 )
                                 .unwrap_or_else(|| stabilized_surface.clone());
-                                // Phase 5e commit 5 — migrate the route-loop
+                                // commit 5 — migrate the route-loop
                                 // call to the Class A dispatch helper.
                                 let solved_opt = project_expr_class_a_via_dispatch_threaded(
                                     query_engine.ctx,
@@ -1392,7 +1392,7 @@ impl VerterHost {
                                 })
                             }
                             TypeExpr::Mapped { .. } => {
-                                // Phase 5e commit 5 — migrate the route-loop
+                                // commit 5 — migrate the route-loop
                                 // call to the Class A dispatch helper.
                                 let solved_opt = project_expr_class_a_via_dispatch_threaded(
                                     query_engine.ctx,
@@ -1433,7 +1433,7 @@ impl VerterHost {
                     (!properties.is_empty())
                         .then(|| TypeExpr::Object(std::sync::Arc::new(ObjectExpr { properties })))
                         .or_else(|| {
-                            // Phase 5e commit 6 — migrate route-target
+                            // commit 6 — migrate route-target
                             // (RouteDemand::Pick) via D-T recipe: dispatch
                             // through `execute_pick` (sub-plan §C.3 D-T).
                             // The pick_via_dispatch_pick_helper resolves the

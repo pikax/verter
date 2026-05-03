@@ -210,7 +210,7 @@ impl DocumentRegistry {
             std::thread::current().id()
         );
 
-        // Update VFS overlay with latest buffer content. Phase 6b sub-plan
+        // Update VFS overlay with latest buffer content. sub-plan
         // §6b.D2b — route through `host.notify_upsert` so the route-only
         // shallow cache is evicted alongside the workspace overlay write.
         #[cfg(not(target_arch = "wasm32"))]
@@ -319,7 +319,7 @@ impl DocumentRegistry {
     pub fn did_close(&self, uri: &Uri) {
         // Clear the VFS overlay so resolution falls back to snapshot/disk.
         let canonical_id = uri_to_canonical_id(uri);
-        // Phase 6b sub-plan §6b.D2b — route through `host.notify_close`
+        // route through `host.notify_close`
         // so the route-only shallow cache is evicted alongside the
         // workspace overlay clear.
         self.host.notify_close(&canonical_id);

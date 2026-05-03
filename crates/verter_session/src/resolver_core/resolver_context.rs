@@ -1,4 +1,4 @@
-//! Phase 10a — sealed `ResolverContext` super-trait.
+//! sealed `ResolverContext` super-trait.
 //!
 //! Restricted host facade for resolver-tier code under the
 //! `crates/verter_session/src/{resolver_core, meta_resolve,
@@ -98,7 +98,7 @@ mod sealed {
 ///
 /// Visibility is `pub(crate)` because the trait references
 /// `ValueDeclIdentity` which is itself `pub(crate)`; a `pub` trait would
-/// trip clippy's `private_interfaces` lint. Phase 10a is purely an
+/// trip clippy's `private_interfaces` lint. is purely an
 /// internal seal — no external integrators construct
 /// `&dyn ResolverContext`.
 pub(crate) trait ResolverContext: sealed::Sealed {
@@ -175,7 +175,7 @@ pub(crate) trait ResolverContext: sealed::Sealed {
         import_source: &str,
     ) -> Option<String>;
 
-    /// Phase 10a — resolve a route-type-edge through the workspace's
+    /// resolve a route-type-edge through the workspace's
     /// type-import phase. Used by macro-shape materialisation
     /// (`meta_resolve/materialize/macro_shapes.rs`) when projecting
     /// runtime values into structural surfaces.
@@ -185,7 +185,7 @@ pub(crate) trait ResolverContext: sealed::Sealed {
         source_specifier: &str,
     ) -> Option<String>;
 
-    /// Phase 10a — fetch the routed shallow state for a canonical id.
+    /// fetch the routed shallow state for a canonical id.
     /// Used by macro-shape materialisation when re-resolving paths
     /// through cross-file type-import edges.
     fn route_owned_shallow_state(
@@ -193,7 +193,7 @@ pub(crate) trait ResolverContext: sealed::Sealed {
         canonical_id: &str,
     ) -> Option<std::sync::Arc<crate::resolver_core::ShallowFileState>>;
 
-    /// Phase 10a — resolve a type declaration via the
+    /// resolve a type declaration via the
     /// `meta_resolve::resolve_type_declaration` host-tier helper. Used by
     /// the component-meta query engine and `component_meta_registry` to
     /// resolve named declarations through the host's symbol resolver.
@@ -265,7 +265,7 @@ pub(crate) trait ResolverContext: sealed::Sealed {
 
     // -------- Component-meta-tier bridges --------------------------
     //
-    // Post-cutover clippy cleanup — these two trait methods are part of
+    // clippy cleanup — these two trait methods are part of
     // the resolver-context surface contract for component-meta-tier
     // adapters but have no caller in the landed tree. The trait is
     // sealed (only `VerterHost` implements it) and the methods are

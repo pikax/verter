@@ -1,7 +1,7 @@
 //! Component-meta request-host trait impls + audit-capture types +
 //! cache-key helper.
 //!
-//! Phase 11a domain 4 + cache-key helper (domain 14) of the
+//! domain 4 + cache-key helper (domain 14) of the
 //! meta_resolve.rs split.
 //!
 //! Owns the four pieces of the request-orchestration boundary:
@@ -17,7 +17,7 @@
 //!   compute-audit sidecar
 //! - `resolved_meta_cache_key(canonical, mode)` cache-key builder
 
-// Phase 10a: file moved from `meta_resolve/request_host.rs` to
+// file moved from `meta_resolve/request_host.rs` to
 // `host_manage/component_meta_request_impl.rs`. Original `super::X`
 // imports resolved through `meta_resolve` private siblings; after the
 // move, `super` is `host_manage`, so the rewrite goes via the parent

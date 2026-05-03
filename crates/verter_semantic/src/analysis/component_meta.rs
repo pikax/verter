@@ -1647,9 +1647,9 @@ fn merged_resolved_macro_input(
 /// priority chain:
 ///
 /// 1. Evaluated `TypeExpr` post-`raise_and_reduce` (when present).
-///    Phase 3 §4.1's graphNode-leak elimination guarantees no
-///    operator-leaf residue at this layer; the evaluated type IS the
-///    authoritative resolved shape.
+///    The graph-native projection guarantees no operator-leaf residue
+///    at this layer; the evaluated type IS the authoritative resolved
+///    shape.
 /// 2. Raw annotation (when no evaluated entry exists for this field).
 ///    Parsed from the source annotation as the symbolic fallback.
 /// 3. `Unknown { raw: "unknown" }` (when neither is present).

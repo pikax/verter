@@ -2,7 +2,7 @@
 //! diagnostics / files / set-import-dependencies / css-var-flow /
 //! export-graph methods.
 //!
-//! Phase 11c sub-plan §11c.2 Domain J. Holds the public host
+//! Domain J. Holds the public host
 //! file-management surface (`get_source`, `get_analysis*`,
 //! `get_diagnostics*`, `remove`, `list_files`, `list_virtual_nodes`,
 //! etc.) plus the supporting analysis-snapshot pipeline, template

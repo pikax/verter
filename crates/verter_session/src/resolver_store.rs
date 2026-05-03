@@ -442,7 +442,7 @@ impl VerterHost {
             count.saturating_add(bundle.prepared_value_decls.len() as u32)
         });
 
-        // Phase-1 §3.2 — pull per-request materialiser/storage counters
+        // §3.2 — pull per-request materialiser/storage counters
         // off the active `RequestContext` (zero ops when no context is
         // installed; the audit pipeline always installs one before
         // taking this snapshot).

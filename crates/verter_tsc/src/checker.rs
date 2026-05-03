@@ -1,22 +1,23 @@
 //! Batch Vue SFC codegen and type checking.
 //!
-//! Three-phase pipeline:
+//! Three-stage pipeline:
 //!
-//! **Phase 0 — Public API Stubs:**
+//! **Stub stage — Public API stubs:**
 //!   For each .vue file → `get_public_api()` → `.vue.ts` stub with real component types.
 //!   Enables cross-component prop/emit/slot type checking (imports resolve to actual types
 //!   instead of the generic `DefineComponent<{}, {}, any>` wildcard shim).
 //!
-//! **Phase A — Validation (TSX):**
+//! **Validation stage (TSX):**
 //!   For each .vue file → `compile()` with `CompileTarget::IDE` → full TSX with source map.
-//!   `.vue.ts` imports are rewritten to point to Phase 0 stubs.
+//!   `.vue.ts` imports are rewritten to point to stubs.
 //!   Type-checks script body + template. Reports ALL type errors.
 //!
-//! **Phase B — Declaration Generation (TSC):**
+//! **Declaration-generation stage (TSC):**
 //!   For each .vue file → `generate_tsc_output()` → write `.tsc.tsx` to tempdir.
-//!   Only when `--declaration` is requested. Reuses the shared `VerterHost` from Phase 0.
+//!   Only when `--declaration` is requested. Reuses the shared
+//!   `VerterHost` produced by the stub stage.
 //!
-//! All phases invoke `tsgo` (or `tsc`) as a subprocess and remap diagnostics
+//! All stages invoke `tsgo` (or `tsc`) as a subprocess and remap diagnostics
 //! via source maps back to `.vue` positions.
 
 use std::collections::HashMap;
@@ -64,7 +65,7 @@ struct CheckerInvocation {
     success: bool,
 }
 
-/// Phase 0: Generate `.vue.ts` public API stub files for cross-component type resolution.
+/// Generate `.vue.ts` public API stub files for cross-component type resolution.
 ///
 /// For each `.vue` file, generates a `.vue.ts` stub containing the component's public API
 /// (props, emits, slots, exposed bindings) so that cross-component imports resolve to
@@ -114,7 +115,7 @@ fn generate_public_api_stubs(
     (vue_ts_paths, vue_ts_map)
 }
 
-/// Phase A: Generate full TSX (script body + template) for every `.vue` file in parallel.
+/// Validation stage: generate full TSX (script body + template) for every `.vue` file in parallel.
 ///
 /// Uses `compile()` with `CompileTarget::IDE` for full type checking.
 /// Returns `(vue_path, tsx_code, tsx_path)` tuples written to `temp_dir`.
@@ -178,11 +179,11 @@ fn generate_all_tsx(vue_files: &[PathBuf], temp_dir: &Path) -> Vec<(PathBuf, Str
         .collect()
 }
 
-/// Phase B: Generate minimal TSC declaration output for every `.vue` file in parallel.
+/// Declaration-generation stage: generate minimal TSC declaration output for every `.vue` file in parallel.
 ///
 /// Uses the host-backed public API path so imported macro types resolve the same
 /// way they do in the IDE. Accepts a shared `VerterHost` (files already upserted
-/// in Phase 0) to avoid duplicate work.
+/// in the prior cutover) to avoid duplicate work.
 /// Returns `(vue_path, tsc_code, tsc_tsx_path)` tuples written to `temp_dir`.
 fn generate_all_tsc(
     host: &VerterHost,
@@ -258,7 +259,7 @@ pub fn run(
         }
     };
 
-    // ── Phase 0: Generate public API stubs ─────────────────────────
+    // ── Generate public API stubs ─────────────────────────
     // Create a shared VerterHost, upsert all .vue files, and generate .vue.ts
     // stubs containing real component types for cross-component type resolution.
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -280,7 +281,7 @@ pub fn run(
     let (vue_ts_paths, vue_ts_map) =
         generate_public_api_stubs(&host, &config.vue_files, temp_dir.path());
 
-    // ── Phase A: Validation (TSX) ───────────────────────────────────
+    // ── Validation stage (TSX) ───────────────────────────────────
     // Generate full TSX output (script body + template) for type checking.
     // This catches type errors that the minimal macro-only .tsc.tsx would miss.
     let mut validation_generated = generate_all_tsx(&config.vue_files, temp_dir.path());
@@ -298,11 +299,11 @@ pub fn run(
         }
     }
 
-    // ── Phase B: Declaration Generation (TSC) ────────────────────────
+    // ── Declaration-generation stage (TSC) ────────────────────────
     // Only when --declaration is requested. Uses the minimal macro-only codegen.
-    // Reuses the shared VerterHost from Phase 0 (files already upserted).
+    // Reuses the shared VerterHost produced by the stub stage (files already upserted).
     let declaration_generated = if opts.declaration {
-        // Use a subdirectory to keep Phase A and Phase B files separate.
+        // Use a subdirectory to keep validation and declaration files separate.
         let decl_dir = temp_dir.path().join("_tsc");
         let _ = fs::create_dir_all(&decl_dir);
         Some(generate_all_tsc(&host, &config.vue_files, &decl_dir))
@@ -346,11 +347,11 @@ pub fn run(
     let types_path = temp_dir.path().join("__verter_types.d.ts");
     let _ = fs::write(&types_path, verter_compiler::VERTER_TYPES_AMBIENT_MODULE);
 
-    // Build validation file list (Phase A TSX files + Phase 0 stubs).
+    // Build validation file list (validation-stage TSX files + stubs).
     let mut tsx_to_vue: HashMap<String, (PathBuf, String)> = HashMap::new();
     let mut validation_paths: Vec<PathBuf> = vec![shims_path.clone(), html_attrs_path, types_path];
 
-    // Add Phase 0 public API stubs so tsconfig includes them for type resolution.
+    // Add public API stubs so tsconfig includes them for type resolution.
     validation_paths.extend(vue_ts_paths);
 
     for (vue_path, tsx_code, tsx_path) in &validation_generated {
@@ -362,7 +363,7 @@ pub fn run(
         validation_paths.push(tsx_path.clone());
     }
 
-    // Build declaration file list (Phase B TSC files).
+    // Build declaration file list (declaration-stage TSC files).
     // Also track tsc generated files for declaration post-processing.
     let generated_for_decl = if let Some(ref decl_gen) = declaration_generated {
         let mut tsc_tsx_paths: Vec<PathBuf> = vec![shims_path];
@@ -426,7 +427,7 @@ pub fn run(
         }
     };
 
-    // ── Phase A: Validation ─────────────────────────────────────────
+    // ── Validation stage ─────────────────────────────────────────
     // Use full TSX files (script body + template) with --noEmit for type checking.
     let validation_opts = EmitOptions {
         no_emit: true,
@@ -448,7 +449,7 @@ pub fn run(
                 remap_diagnostics(raw_diags, &tsx_to_vue)
             }
             Err(e) => {
-                eprintln!("verter-tsc: Phase A (validation) failed: {e}");
+                eprintln!("verter-tsc: validation stage failed: {e}");
                 Vec::new()
             }
         },
@@ -458,7 +459,7 @@ pub fn run(
         }
     };
 
-    // ── Phase B: Declaration Generation ──────────────────────────────
+    // ── Declaration-generation stage ──────────────────────────────
     let emitted_files = if let Some(tsc_tsx_paths) = generated_for_decl {
         let decl_opts = EmitOptions {
             no_emit: false,
@@ -482,7 +483,7 @@ pub fn run(
 
                         if !invocation.success {
                             eprintln!(
-                                "verter-tsc: Phase B had errors; post-processing emitted declarations anyway"
+                                "verter-tsc: declaration stage had errors; post-processing emitted declarations anyway"
                             );
                         }
 
@@ -502,7 +503,7 @@ pub fn run(
                             .unwrap_or_default()
                     }
                     Err(e) => {
-                        eprintln!("verter-tsc: Phase B (declarations) failed: {e}");
+                        eprintln!("verter-tsc: declaration stage failed: {e}");
                         Vec::new()
                     }
                 }
@@ -653,7 +654,7 @@ fn write_temp_tsconfig(
         // Requires noEmit or emitDeclarationOnly (both true in our generated configs).
         "allowImportingTsExtensions": true,
     });
-    // Phase A (validation) uses TSX files that contain JSX syntax.
+    // Validation stage uses TSX files that contain JSX syntax.
     // Standard Vue TSX config: `jsx: "preserve"` + `jsxImportSource: "vue"`.
     if !opts.declaration {
         compiler_options["jsx"] = serde_json::json!("react-jsx");
@@ -2460,7 +2461,7 @@ import type { Foo } from './types'"#;
         );
     }
 
-    /// When Phase B (declaration generation) has errors but tsc still emits some .d.ts
+    /// When the declaration stage has errors but tsc still emits some .d.ts
     /// files, post-processing must still run to rename the emitted files to .vue.d.ts.
     /// Previously, post-processing was skipped entirely on error, leaving 0 .vue.d.ts files.
     #[test]

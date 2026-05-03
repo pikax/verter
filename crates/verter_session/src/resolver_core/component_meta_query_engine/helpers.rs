@@ -1,5 +1,5 @@
 //! Predicate and utility helpers extracted from
-//! `component_meta_query_engine/mod.rs` in Phase 11b.3.
+//! `component_meta_query_engine/mod.rs` in the prior cutover.3.
 //!
 //! These helpers are pure free functions used by the engine impl
 //! methods to classify type expressions, route demands, prepared type

@@ -899,7 +899,7 @@ pub fn inject_prop_type_overrides(
 /// Structural substitution of bare `TypeOf(ValueRef)` references with
 /// annotations from a standalone evaluation environment.
 ///
-/// D-Cutover §5.8 WIP-W migration path: the session-side callers of
+/// migration path: the session-side callers of
 /// `evaluate_value_expression` now route value references through this
 /// env-first substitution + `ComponentMetaQueryEngine` dispatch fallback
 /// pair. This helper handles the injected-override hot path
@@ -941,14 +941,14 @@ pub fn structural_substitute_typeof_refs(
 /// Mirrors the pre-migration `evaluate_value_expression` contract:
 /// env-level substitutions (including injected prop-type overrides) take
 /// precedence; otherwise the lowered expression is routed through the
-/// Class A dispatch helper in the owning canonical scope. Phase 5e
+/// Class A dispatch helper in the owning canonical scope.
 /// commit 5 migrated the engine's
 /// `project_expr_surface_expr` / `lower_and_project_to_expanded`
 /// callsites to `project_expr_class_a_via_dispatch_threaded`, which
 /// covers BOTH the registry-route fast-path AND the generic
 /// `ProjectPath { [], Expanded }` dispatch — collapsing the two
 /// previous fallback layers (which both terminated at the same dispatch
-/// query under the Phase 5c trampolines).
+/// query under the trampolines).
 pub fn evaluate_value_expression_via_env_or_dispatch(
     expression: &str,
     canonical_id: &str,

@@ -230,7 +230,7 @@ impl MemoryWorkspace {
 }
 
 // ── WorkspaceRead / WorkspaceAccess implementations ──
-// Phase 6b sub-plan §6b.D2b — read-only methods live on the
+// read-only methods live on the
 // `WorkspaceRead` impl; mutators stay on `WorkspaceAccess`.
 
 impl crate::traits::WorkspaceRead for MemoryWorkspace {
@@ -644,7 +644,7 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
         }
     }
 
-    // ── Ambient lib registry (Phase 5 §6.5) ──
+    // ── Ambient lib registry ──
 
     #[cfg(not(target_arch = "wasm32"))]
     fn register_ambient_lib(

@@ -7,8 +7,9 @@
 //! All fixtures live under `crates/verter_session/test_fixtures/`
 //! and are reached via `include_str!`. This keeps fixtures in the
 //! source tree (instead of being embedded as Rust strings) so the
-//! same content can be re-used by the `d_cutover_characterization_tests`
-//! module in future consolidation and by manual reproduction.
+//! same content can be re-used by the
+//! `project_semantic_dispatch_invariants_tests` module in future
+//! consolidation and by manual reproduction.
 //!
 //! **Naming convention:**
 //! - `pathological_*` — regression-pinned snapshots using

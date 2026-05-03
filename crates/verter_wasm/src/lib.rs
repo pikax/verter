@@ -722,7 +722,7 @@ impl WasmVerterHost {
 /// Build a `ScriptAnalysisSnapshot` from a `FileAnalysisSnapshot`.
 ///
 /// Extracts all script-related fields, preserving `vue_api_calls` and
-/// `dom_query_calls` from the snapshot (fixes Phase 2 zeroed-fields bug).
+/// `dom_query_calls` from the snapshot (fixes zeroed-fields bug).
 fn build_script_snapshot(
     snapshot: &host::FileAnalysisSnapshot,
 ) -> verter_semantic::analysis::types::ScriptAnalysisSnapshot {

@@ -1,7 +1,7 @@
 //! `host_manage::eval_env` — eval-env builders, file-analysis snapshot
 //! constructors, and evaluated-type computation.
 //!
-//! Phase 11c sub-plan §11c.2 Domain G. Owns the host's `eval_env_cache`
+//! Domain G. Owns the host's `eval_env_cache`
 //! discipline (cache-key acquisition + `base_eval_env` materialisation),
 //! the `FileAnalysisSnapshot` builders for parse / source / route-owned
 //! flows, and the per-owner evaluated-type compute path. Public surface
@@ -574,7 +574,7 @@ impl VerterHost {
             );
             self.component_meta_binding_type_entries(canonical, &requested_binding_names)
         };
-        // D-Cutover §5.8 WIP-W: the retired `external_engine` branch is
+        // the retired `external_engine` branch is
         // gone; there is only one `expand_macro_types` entry point left.
         // Step 9.1 / D32: surface-id sidecar capture buffers. Populated
         // when audit is on; the dispatch round-trip inside the closure
@@ -741,7 +741,7 @@ impl VerterHost {
                                 expr: parsed.clone(),
                             })
                         } else {
-                            // Phase 5j §5.12 — `defineModel<T>()` prop /
+                            // `defineModel<T>()` prop /
                             // model lowering. The `expand_macro_types_impl_with_expander`
                             // emits the model's prop field with
                             // `output_path = [Member(<model_name>)]`, but the
@@ -758,7 +758,7 @@ impl VerterHost {
                             // dispatch arm to produce `Unknown { raw:
                             // "semanticMiss" }`.
                             //
-                            // Phase 5j routes `DefineModel` prop / model
+                            // routes `DefineModel` prop / model
                             // fields through a direct lower+raise of
                             // `macro_type_arg` (the type IS the field's
                             // type), bypassing the path projection. Mirrors
@@ -879,13 +879,13 @@ impl VerterHost {
                                                 preserve_parsed_symbolically()
                                             }
                                             Some(base_id) => {
-                                                // Phase 5j §5.12 — slot-binding-parameter
+                                                // slot-binding-parameter
                                                 // type lowering migrates from the engine's
                                                 // analysis path to dispatch via the
                                                 // `ResolveMacroPayload` variant +
                                                 // `MaterializeSurface { Slots }` codepath.
                                                 //
-                                                // The pre-Phase-5j closure dispatched
+                                                // The closure dispatched
                                                 // `ProjectPath { base, [Member(slot),
                                                 // Member(binding)], Expanded }` directly,
                                                 // but the walker emits `Opaque(Miss)` when
@@ -897,7 +897,7 @@ impl VerterHost {
                                                 // function's first-parameter Object, not
                                                 // as a direct member of the Function.
                                                 //
-                                                // Phase 5j routes slot-binding lowering
+                                                // routes slot-binding lowering
                                                 // through the new helper
                                                 // `project_slot_binding_member` which
                                                 // composes existing variants to descend

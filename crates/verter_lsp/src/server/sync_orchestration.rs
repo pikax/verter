@@ -1,4 +1,4 @@
-//! Provider-sync orchestration (phase 11e.5).
+//! Provider-sync orchestration.
 //!
 //! Inherent-impl extension methods on [`super::VerterLanguageServer`]
 //! covering diagnostics publishing, IDE/API/non-Vue provider sync,
@@ -904,12 +904,12 @@ impl VerterLanguageServer {
             barrel_ids.push(resolved);
         }
 
-        // Phase 1: Sync Vue dependencies first (so TSGO has .vue.ts targets)
+        // Sync Vue dependencies first (so TSGO has .vue.ts targets)
         for vue_id in &barrel_vue_deps {
             self.sync_imported_vue_api_lightweight(vue_id).await;
         }
 
-        // Phase 2: Sync barrel files (TSGO's rewrite_vue_imports_for_tsgo handles .vue → .vue.ts)
+        // Sync barrel files (TSGO's rewrite_vue_imports_for_tsgo handles .vue → .vue.ts)
         for barrel_id in &barrel_ids {
             // Skip if already synced
             if let Some(state) = self.provider_sync_state_for_source(barrel_id) {

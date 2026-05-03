@@ -1,22 +1,16 @@
-//! Phase 6b characterization and regression tests.
+//! Cache-identity invariant and regression tests for the host's
+//! cache-mirror surface.
 //!
-//! Each test in this module characterizes a specific aspect of the Phase 6b
-//! cache-mirror cleanup (sub-plan §6b.0.2). The full set of T1–T13 tests
-//! lands incrementally across the migration commits 6b.B2 → 6b.D2b. Each
-//! test references symbols introduced in its lands-in commit; any test that
-//! discriminates pre-vs-post migration captures the red-run output (test
-//! failing against parent commit) and the green-run output (test passing
-//! post-implementation) in the commit message body.
+//! Each test characterises a specific aspect of the cache-identity
+//! contract:
+//!   T1  — Arc identity for RouteDb / ImportedRootDb is shared between
+//!         `ProjectTypeStore` and `UnifiedResolverRuntime`
+//!   T2–T6, T9, T12, T13 — F6/F7 internal cache-cluster invariants
+//!   T7  — `evict_canonical` extension drops `route_owned_shallow`
+//!   T8, T10, T11 — workspace-API bypass closure
 //!
-//! Per the lands-in matrix (sub-plan §6b.0.2):
-//!   T1  → 6b.B2  (Arc identity for RouteDb / ImportedRootDb)
-//!   T7  → 6b.D1  (evict_canonical extension)
-//!   T2-T6, T9, T12, T13 → 6b.D2a (F6/F7 internal migration)
-//!   T8, T10, T11 → 6b.D2b (workspace-API bypass closure)
-//!
-//! Tests classified REGRESSION (T6, T11, T12, T13) verify properties that
-//! hold at the destination commit; the red-then-green-within-commit
-//! invariant is relaxed for those — only post-migration green is required.
+//! Tests classified REGRESSION (T6, T11, T12, T13) verify properties
+//! that hold on the final tree; they assert post-state behaviour.
 //!
 //! Module is `#[cfg(test)]`-gated at the lib.rs declaration site.
 
@@ -51,7 +45,7 @@ fn route_db_and_imported_root_db_share_arc_identity_across_runtime_and_store() {
     assert!(
         Arc::ptr_eq(&store_routes, &runtime_routes),
         "RouteDb authority must be shared via Arc identity between \
-         ProjectTypeStore and UnifiedResolverRuntime (Phase 6b.F3, Option (i))",
+         ProjectTypeStore and UnifiedResolverRuntime",
     );
 
     let store_imported_roots = store.imported_roots_handle();
@@ -59,7 +53,7 @@ fn route_db_and_imported_root_db_share_arc_identity_across_runtime_and_store() {
     assert!(
         Arc::ptr_eq(&store_imported_roots, &runtime_imported_roots),
         "ImportedRootDb authority must be shared via Arc identity between \
-         ProjectTypeStore and UnifiedResolverRuntime (Phase 6b.F3, Option (i))",
+         ProjectTypeStore and UnifiedResolverRuntime",
     );
 
     // Negative assertion (per CLAUDE.md "always include negative assertions"):
@@ -200,7 +194,7 @@ fn evict_canonical_cascade_includes_route_owned_shallow() {
     assert!(
         store.route_owned_shallow().get_any(&canonical).is_none(),
         "POST-EVICT: ProjectTypeStore::evict_canonical must remove the \
-         route_owned_shallow entry for that canonical (Phase 6b.D1)",
+         route_owned_shallow entry for that canonical",
     );
 
     // Negative assertion: an unrelated canonical's entry MUST survive
@@ -257,7 +251,7 @@ fn route_owned_shallow_clears_on_host_configure_projects() {
     assert!(
         store.route_owned_shallow().get_any(&canonical).is_none(),
         "POST-CONFIGURE: configure_projects must clear route_owned_shallow \
-         via the new cascade extension (Phase 6b.D2a step 6)",
+         via the new cascade extension",
     );
 
     // Project generation must have advanced (proves
@@ -298,7 +292,7 @@ fn route_owned_shallow_clears_on_host_clear_compile_cache() {
     assert!(
         store.route_owned_shallow().get_any(&canonical).is_none(),
         "POST-CLEAR: clear_compile_cache must clear route_owned_shallow \
-         (Phase 6b.D2a step 6 cascade extension)",
+         (cascade extension)",
     );
 }
 
@@ -339,7 +333,7 @@ fn route_owned_shallow_clears_on_host_set_workspace() {
     assert!(
         store.route_owned_shallow().get_any(&canonical).is_none(),
         "POST-SWAP: set_workspace must clear route_owned_shallow \
-         (Phase 6b.D2a step 6 cascade extension)",
+         (cascade extension)",
     );
 
     let post_gen = store.current_project_generation();

@@ -34,7 +34,7 @@ impl VerterHost {
     /// back the result and populates the compile cache. The `files` map is also
     /// populated for the WASM path (non-scheduler).
     ///
-    /// Phase 9b sub-plan §0/§3: `upsert` is now a one-line forwarder onto
+    /// sub-plan §0/§3: `upsert` is now a one-line forwarder onto
     /// `upsert_with_priority` at `Priority::Interactive` (the priority the
     /// existing implementation hard-coded at the scheduler submission
     /// site). Batch callers (`compile_many`) instead call
@@ -61,7 +61,7 @@ impl VerterHost {
         priority: Priority,
     ) -> Result<HostUpdateResult, HostError> {
         // Invalidate semantic cache for this file before re-parsing.
-        // Mandatory invariant per Phase 9b §0 row "Pre-invalidation
+        // Mandatory invariant per row "Pre-invalidation
         // invariant" — batch upserts route through here, NOT through
         // `upsert_via_scheduler_with_priority` directly.
         if let Some(ref id) = req.canonical_id {

@@ -1,6 +1,6 @@
-//! Phase 4 field-level fast-path counterfixtures (Issue #3).
+//! Field-level fast-path counterfixtures (Issue #3).
 //!
-//! The Phase 4 fast path eliminates parent-shell dispatch for
+//! The field-level fast path eliminates parent-shell dispatch for
 //! `defineProps<X<...>>()` carriers whose field expressions do
 //! not reference any of the parent's type parameters (modulo
 //! shadowing in mapped types and function-type parameter
@@ -58,10 +58,10 @@ use crate::harness::{build_hermetic_host, resolve_under_audit};
 // and the fast path applies.
 //
 // The fixture does NOT inject the `ai` package's index.d.ts —
-// the discriminating gate is that the Phase 4 fast path
+// the discriminating gate is that the field-level fast path
 // short-circuits before the heritage import would be walked,
 // so the `node_modules/ai/index.d.ts` canonical id never
-// reaches `loaded_files` or `indexed_ready_builds`. Pre-Phase-4,
+// reaches `loaded_files` or `indexed_ready_builds`. Pre-fast-path,
 // the parent-shell `Expanded` lower would attempt to walk the
 // heritage and trigger a workspace-resolver lookup against
 // `node_modules` (which a hermetic MemoryWorkspace does not
@@ -72,7 +72,7 @@ const FAST_PATH_VUE: &str = r#"<script lang="ts">
 // Heritage is imported from a third-party package by name. In a
 // hermetic MemoryWorkspace this import does not resolve — the
 // declarations of UIDataTypes / UIMessage / UITools below stay
-// `Unknown` to the resolver — but the Phase 4 fast path does
+// `Unknown` to the resolver — but the field-level fast path does
 // not need them: the field's parsed `TypeExpr` is checked
 // against the parent shell's locally-declared `type_parameters`
 // only.
@@ -101,11 +101,11 @@ defineProps<ChatMessageProps<TMetadata, TDataParts, TTools>>()
 <template><div /></template>
 "#;
 
-/// Phase 4 gate — sub-assertion 1 + sub-assertion 2.
+/// field-fast-path gate — sub-assertion 1 + sub-assertion 2.
 ///
 /// Sub-assertion 1: the request must NOT dispatch `Instantiate
 /// { base = UIMessage, body_mode = Expanded }` for any of
-/// `ChatMessageProps`'s primitive fields. The Phase 4 fast
+/// `ChatMessageProps`'s primitive fields. The field-level fast
 /// path ELIMINATES the parent-shell `Expanded` lower entirely
 /// for fields whose parsed expression doesn't reference any
 /// parent type parameter — observable as `dispatch_count` == 0
@@ -122,7 +122,7 @@ fn fast_path_skips_expanded_dispatch_and_heritage_load() {
 
     // Hermetic fixture does NOT inject the `ai` package — the
     // import statement in `/c.vue` is unresolvable by design.
-    // The Phase 4 fast path must not depend on the heritage's
+    // The field-level fast path must not depend on the heritage's
     // declarations being available; primitive fields take
     // `exact_concrete(parsed)` regardless. The `loaded_files`
     // accumulator therefore must NOT contain any
@@ -133,11 +133,11 @@ fn fast_path_skips_expanded_dispatch_and_heritage_load() {
 
     let snapshot = guard.end();
 
-    // ── Sub-assertion 1 (Phase 4 §4.3A gate sub-assertion 1) ──
+    // ── Sub-assertion 1 (§4.3A gate sub-assertion 1) ──
     //
     // Counter passes trivially on the B-B1 commit in isolation —
     // the production wiring that records dispatches into the
-    // capture token's `dispatch_log` is owned by B-Bm Phase 11
+    // capture token's `dispatch_log` is owned by B-Bm
     // (commit `fcdb5ed5` on `wt/tier-b-materialize`). Until that
     // wiring lands, `record_dispatch` is not invoked from the
     // semantic graph store's hot path, so the counter reads 0
@@ -149,28 +149,28 @@ fn fast_path_skips_expanded_dispatch_and_heritage_load() {
         snapshot.dispatch_count(KeyFamily::InstantiateExpandedForResolvedName("UIMessage"));
     assert_eq!(
         expanded_ui_message, 0,
-        "Phase 4 gate: Instantiate {{ UIMessage, body_mode = Expanded }} must not be dispatched \
+        "field-fast-path gate: Instantiate {{ UIMessage, body_mode = Expanded }} must not be dispatched \
          when the fast path is taking primitive fields through `exact_concrete(parsed)`. \
          Got {expanded_ui_message} dispatches.",
     );
 
-    // ── Sub-assertion 2 (Phase 4 §4.3A gate sub-assertion 2) ──
+    // ── Sub-assertion 2 (§4.3A gate sub-assertion 2) ──
     //
-    // After the Phase 4 fast path takes the primitive fields
+    // After the field-level fast path takes the primitive fields
     // through `exact_concrete(parsed)`, the request must NOT
     // touch `node_modules/ai/...` at all — the heritage walk is
     // entirely skipped. This is the discriminating sub-assertion
     // for B-B1's Slice B1 commit standalone — readable on the
     // worktree without any semantic_query_memo wiring.
     //
-    // Pre-Phase-4 behaviour: the parent-shell `Expanded` lower
+    // Pre-fast-path behaviour: the parent-shell `Expanded` lower
     // would dispatch `Instantiate { UIMessage, Expanded }` per
     // primitive field, each of which would attempt to walk the
     // heritage. Even with the heritage source missing from the
     // hermetic VFS, the workspace resolver would record the
     // failed lookup attempt as part of the audit (vfs_reads /
-    // indexed_ready_builds). With Phase 4, the lookup is never
-    // attempted because the field-level fast path returns
+    // indexed_ready_builds). With the field-level fast path the
+    // lookup is never attempted because the fast path returns
     // `exact_concrete(parsed)` before the parent-shell lower
     // runs.
     let fp = record
@@ -184,7 +184,7 @@ fn fast_path_skips_expanded_dispatch_and_heritage_load() {
         .any(|c| c.as_ref().contains("node_modules/ai"));
     assert!(
         !heritage_in_loaded,
-        "Phase 4 gate: no `node_modules/ai/...` canonical may appear in loaded_files when \
+        "field-fast-path gate: no `node_modules/ai/...` canonical may appear in loaded_files when \
          the fast path skips heritage walk for primitive fields. Got loaded files: {in_loaded:?}",
     );
 
@@ -194,7 +194,7 @@ fn fast_path_skips_expanded_dispatch_and_heritage_load() {
         .any(|b| b.canonical_id.as_ref().contains("node_modules/ai"));
     assert!(
         !heritage_in_indexed,
-        "Phase 4 gate: no `node_modules/ai/...` canonical may appear in indexed_ready_builds. \
+        "field-fast-path gate: no `node_modules/ai/...` canonical may appear in indexed_ready_builds. \
          Indexed: {:?}",
         fp.indexed_ready_builds
             .iter()
@@ -210,7 +210,7 @@ fn fast_path_skips_expanded_dispatch_and_heritage_load() {
     for required in ["as", "icon", "compact", "content", "className"] {
         assert!(
             prop_names.iter().any(|n| n == required),
-            "Phase 4 fast path must still produce prop records for primitive fields — \
+            "field-level fast path must still produce prop records for primitive fields — \
              missing `{required}`. Got {prop_names:?}",
         );
     }
@@ -219,8 +219,8 @@ fn fast_path_skips_expanded_dispatch_and_heritage_load() {
     // `UIMessage` (id, role, parts, metadata) must NOT appear
     // in the props because the hermetic fixture intentionally
     // does NOT inject the `ai` package — heritage walk is
-    // unresolvable. If the heritage WAS walked (Phase 4 fast
-    // path bypassed), the macro pipeline would either produce
+    // unresolvable. If the heritage WAS walked (field-level
+    // fast path bypassed), the macro pipeline would either produce
     // these inherited fields (if it found them somehow) or
     // record the failed lookup in the audit. The combination
     // of "primitive fields present" + "heritage canonical
@@ -229,7 +229,7 @@ fn fast_path_skips_expanded_dispatch_and_heritage_load() {
     for forbidden in ["id", "role", "parts", "metadata"] {
         assert!(
             !prop_names.iter().any(|n| n == forbidden),
-            "Phase 4 fast path counterfixture: heritage is unresolvable in this hermetic \
+            "field-level fast path counterfixture: heritage is unresolvable in this hermetic \
              fixture — inherited prop `{forbidden}` from `UIMessage` must NOT surface \
              unless the heritage was unexpectedly resolved. Got {prop_names:?}",
         );
@@ -322,7 +322,7 @@ fn parent_generic_field_must_take_slow_path() {
 // ── Owner-edit invalidation (§17.9 B-B2 row) ──
 //
 // When the owner SFC's source content changes, the cached
-// component-meta result must be invalidated. The Phase 4 fast
+// component-meta result must be invalidated. The field-level fast
 // path operates on the file's most recent parse and does NOT
 // populate any host-cached entry — it is parse-local. But the
 // containing component-meta cache entry IS host-owned, so an
@@ -344,7 +344,7 @@ defineProps<Props>();
 "#;
 
 /// Owner-component file edit invalidates the cached
-/// component-meta result. The Phase 4 fast path is parse-local
+/// component-meta result. The field-level fast path is parse-local
 /// (re-evaluated on every request) but the containing
 /// component-meta cache entry is host-owned and must drop on
 /// content change so the edit is observable end-to-end.

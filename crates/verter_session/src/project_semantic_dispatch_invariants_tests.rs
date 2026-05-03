@@ -1,12 +1,10 @@
-//! Phase D cutover characterization test stubs.
-//!
-//! Added in §5.1 WIP-baseline with `#[ignore]`. Each test is un-ignored in
-//! the WIP step that enables it (see attribute note). The §7.5 Check 10
-//! landing-gate script validates that every test below appears as
-//! `test .* ... ok` in the final workspace run.
-//!
-//! Test bodies are intentionally minimal stubs here; real assertions are
-//! written in each subsequent step's WIP commit once the subject code lands.
+//! Invariant tests for `ProjectSemanticDispatch`: per-function
+//! recursion guards, fixpoint termination of `evaluate_deferred`,
+//! cycle-safe `walk_path` / `key_names_from_base_node`,
+//! `relation_guard` short-circuiting, mapped-type substitution, and
+//! the relation-memo round-trip. Each test characterizes a specific
+//! architectural property of the dispatch surface and discriminates
+//! against violations introduced by future regressions.
 
 #![allow(dead_code)]
 
@@ -1579,7 +1577,7 @@ fn count_def_in_crates(needle: &str) -> usize {
         .expect("workspace parent")
         .to_path_buf();
     let crates_dir = workspace_root.join("crates");
-    let self_file = "d_cutover_characterization_tests.rs";
+    let self_file = "project_semantic_dispatch_invariants_tests.rs";
     let mut count = 0usize;
     fn walk(dir: &std::path::Path, needle: &str, self_file: &str, count: &mut usize) {
         let Ok(entries) = std::fs::read_dir(dir) else {
@@ -1907,7 +1905,7 @@ fn retired_symbol_hits_in_production(symbols: &[&str]) -> Vec<String> {
         .expect("workspace parent")
         .to_path_buf();
     let crates_dir = workspace_root.join("crates");
-    let self_file = "d_cutover_characterization_tests.rs";
+    let self_file = "project_semantic_dispatch_invariants_tests.rs";
     let mut hits: Vec<String> = Vec::new();
     fn walk(dir: &std::path::Path, symbols: &[&str], self_file: &str, hits: &mut Vec<String>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
@@ -2147,7 +2145,7 @@ fn no_deprecated_attributes_on_retired_symbols() {
         .expect("workspace parent")
         .to_path_buf();
     let crates_dir = workspace_root.join("crates");
-    let self_file = "d_cutover_characterization_tests.rs";
+    let self_file = "project_semantic_dispatch_invariants_tests.rs";
     let mut violations: Vec<String> = Vec::new();
     fn walk(
         dir: &std::path::Path,

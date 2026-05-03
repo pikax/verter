@@ -196,7 +196,7 @@ pub(crate) fn resolved_macro_to_expansion_via_solver(
     TypeExpansionResult,
     Vec<verter_semantic::analysis::type_solver::host::ResolvedRootIdentity>,
 ) {
-    // D-Cutover §5.8: route through CMQE (dispatch-backed) instead of
+    // route through CMQE (dispatch-backed) instead of
     // SessionSolverHost + TypeQueryEngine. The retired solver returned
     // a ResolvedRootIdentity trace for each solve; dispatch's audit
     // lives on `SemanticGraphStore` and is covered by the broader
@@ -208,7 +208,7 @@ pub(crate) fn resolved_macro_to_expansion_via_solver(
     } else {
         macro_meta.declaration.canonical_source.as_str()
     };
-    // Phase 5d (sub-plan §4.1 type_expansion_verter.rs row): both
+    // both
     // Class A sites here are migrated to the shared dispatch helper.
     let solve_via_dispatch = |text: &str| -> TypeExpr {
         let parsed = crate::resolver_core::type_text_parser::parse_type_text(text);

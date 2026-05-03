@@ -1,6 +1,6 @@
 //! Walker + macro-shape member traversal.
 //!
-//! Phase 11a domain 9 — owns:
+//! domain 9 — owns:
 //! - `walk_component_meta_macro_shape_member_types` (the per-field driver
 //!   the ctx method calls into),
 //! - `materialize_component_meta_macro_shape_member_type_expr` (the
@@ -11,7 +11,7 @@
 //! Lines 136-907 of the post-commit-9 `meta_resolve.rs` shell. Visibility
 //! escalation: the formerly-private `walk_*` and `materialize_*_member_type_expr`
 //! free functions are escalated to `pub(crate)` so the impl block in
-//! `host_methods.rs` (Phase 11a commit 9) can keep calling them without
+//! `host_methods.rs` can keep calling them without
 //! callsite churn.
 
 use crate::host_manage::component_meta_trace_custom;
@@ -62,7 +62,7 @@ pub(crate) static MEMBER_ROUTE_FAST_PATH_HITS: std::sync::atomic::AtomicUsize =
 pub(crate) const SLOT_BINDING_REGISTRY_COLLECTION_SKIP_COUNTER: &str =
     "slot_binding_registry_collection_skips";
 
-/// Issue #10 / Phase 10 — capture-token counter incremented every
+/// Issue #10 / capture-token counter incremented every
 /// time the Pick member-route materialiser actually descends into a
 /// callable parameter type. The package-backed suppression predicate
 /// (`pick_member_route_should_skip_callable_descent`) bypasses the
@@ -771,7 +771,7 @@ pub(crate) fn materialize_component_meta_macro_shape_member_type_expr(
                     lowered,
                 ) =>
         {
-            // Phase 5e commit 6 — migrate to dispatch (sub-plan §C.3 D-T recipe).
+            // commit 6 — migrate to dispatch (sub-plan §C.3 D-T recipe).
             instantiate_local_generic_ref_via_dispatch(
                 query_engine.ctx,
                 materialize_scope_canonical_id.as_str(),
@@ -788,7 +788,7 @@ pub(crate) fn materialize_component_meta_macro_shape_member_type_expr(
         ),
     };
     // Plan §6.6 / E — the inline-registry-route candidate chain was
-    // retired in commit E. B1's materialiser registry-route branch
+    //. B1's materialiser registry-route branch
     // dispatches Pick/Omit + IndexedAccess shapes canonically
     // through dispatch; the empty `inline_route_candidate` lets the
     // surrounding materialize-and-improve loop drive the member
@@ -856,7 +856,7 @@ pub(crate) fn materialize_component_meta_macro_shape_member_type_expr(
                         scope_canonical_id, member_name, candidate_scope, route_expr,
                     ),
                 );
-                // Phase 5e commit 5 — migrate the route-loop call to the
+                // commit 5 — migrate the route-loop call to the
                 // Class A dispatch helper. Preserve the engine's
                 // `lower_and_project_to_expanded` `reduced != *expr` filter
                 // (the helper omits that constraint by design — see
@@ -937,12 +937,10 @@ pub(crate) fn materialize_component_meta_macro_shape_member_type_expr(
     if candidate_is_good_enough(&best) {
         return best;
     }
-    // Plan §6.6 / E — the alias-body candidate path was retired in
-    // commit E. B1's materialiser registry-route branch handles the
-    // equivalent
-    // projection through dispatch. The slow-path materialize-and-
-    // improve loop below remains as the catch-all for shapes that
-    // don't match a registry-route shape.
+    // Plan §6.6 / E — the materialiser's registry-route branch
+    // handles the alias-body projection through dispatch. The
+    // slow-path materialize-and-improve loop below remains as the
+    // catch-all for shapes that don't match a registry-route shape.
 
     // Slow path: previously-cached project/solve candidates that
     // weren't structurally sufficient now feed into the

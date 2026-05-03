@@ -98,14 +98,16 @@ mod component_meta_slot_binding_skip_tests;
 mod component_meta_terminal_mode_tests;
 pub(crate) mod cooperative_admission;
 pub mod cross_file;
-#[cfg(test)]
-mod d_cutover_characterization_tests;
 mod deps;
 mod hash;
-// Phase 9b — `host_compile` is the host-backed parallel SFC batch
-// compile module. It is bundler/runtime-only and uses Rayon, which is
-// not available on WASM, so the module is gated to native targets.
-// WASM continues to use single-file `upsert` + `get_virtual_file`.
+#[cfg(test)]
+mod project_semantic_dispatch_invariants_tests;
+// `host_compile` is the host-backed parallel SFC batch compile module.
+// It is bundler/runtime-only and uses Rayon, which is not available on
+// WASM, so the module is gated to native targets. WASM continues to use
+// single-file `upsert` + `get_virtual_file`.
+#[cfg(test)]
+mod cache_identity_invariants_tests;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod host_compile;
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -132,8 +134,6 @@ pub(crate) mod owner_import_surface;
 #[cfg(test)]
 mod parity_tests;
 mod parse;
-#[cfg(test)]
-mod phase_6b_characterization_tests;
 #[cfg(test)]
 mod project_global_cache_tests;
 pub(crate) mod project_semantic_dispatch;
@@ -295,7 +295,7 @@ pub(crate) struct HostResolverState {
 }
 
 impl HostResolverState {
-    /// Phase 6b.F3 (Option (i)) — construct a `HostResolverState` whose
+    /// Construct a `HostResolverState` whose
     /// inner [`UnifiedResolverRuntime`](crate::resolver_core::resolver_runtime::UnifiedResolverRuntime)
     /// shares its `RouteDb` / `ImportedRootDb` authority with the host's
     /// [`ProjectTypeStore`](crate::project_type_store::ProjectTypeStore)
@@ -340,9 +340,8 @@ pub struct VerterHost {
     /// non-canonical paths (e.g. synthetic IDs from the unplugin or LSP layer)
     /// to canonical IDs for symbol-resolution stability across surfaces.
     /// Disjoint from VFS overlay storage (which keys by canonical) and from
-    /// `verter_vfs::ProjectResolver` (which resolves import strings). Phase 6b
-    /// classification: `legitimate-authority` — host-scoped, no equivalent
-    /// in `ProjectTypeStore`. See sub-plan §6b.2.F12.
+    /// `verter_vfs::ProjectResolver` (which resolves import strings).
+    /// Host-scoped authority with no equivalent in `ProjectTypeStore`.
     pub(crate) alias_to_canonical: Shared<FxHashMap<String, String>>,
     pub(crate) tick: std::sync::atomic::AtomicU64,
     /// Coarse semantic mutation epoch used for snapshot-coherent resolver views.
@@ -350,12 +349,11 @@ pub struct VerterHost {
     /// Unlike `tick`, which tracks compile/access recency, this counter only
     /// advances after host mutations that can change semantic resolution inputs.
     pub(crate) store_view_epoch: std::sync::atomic::AtomicU64,
-    /// Last computed cross-file prop constness overrides — Phase-7
-    /// invalidation tracking. Stores the LAST computed cross-file prop
-    /// constness overrides for diff-detection on re-computation. **NOT a
-    /// cache** of resolution results — a state-diff record. Phase 6b
-    /// classification: `legitimate-authority` — no equivalent in
-    /// `ProjectTypeStore`. See sub-plan §6b.2.F13.
+    /// Last computed cross-file prop constness overrides for
+    /// invalidation tracking. Stores the LAST computed values for
+    /// diff-detection on re-computation. **NOT a cache** of resolution
+    /// results — a state-diff record. Host-scoped authority with no
+    /// equivalent in `ProjectTypeStore`.
     pub(crate) last_const_prop_overrides:
         Shared<rustc_hash::FxHashMap<String, rustc_hash::FxHashSet<String>>>,
     #[cfg(feature = "session_metrics")]
@@ -369,12 +367,11 @@ pub struct VerterHost {
     /// Per-file compile cache: overrides, compile slots, diagnostics, deps.
     /// Scheduler owns raw source + analysis; this cache owns per-profile state.
     ///
-    /// Phase 6b classification: `legitimate-authority`. The
-    /// [`CompileCacheEntry::import_routes`](crate::types::CompileCacheEntry::import_routes)
+    /// The [`CompileCacheEntry::import_routes`](crate::types::CompileCacheEntry::import_routes)
     /// sub-shape and `IndexedReady.import_routes` share the same
     /// `DependencyResolution` shape but follow different invalidation
     /// triggers — see the doc on `CompileCacheEntry.import_routes` for the
-    /// lifecycle disclosure. See sub-plan §6b.2.F1.
+    /// lifecycle disclosure.
     pub(crate) compile_cache: dashmap::DashMap<String, CompileCacheEntry>,
     /// Provenance counters for component-meta observability.
     /// Shared with sessions via `Arc`.
@@ -391,8 +388,6 @@ pub struct VerterHost {
     /// `SemanticGraphStore.HostResolvedNamedTypeKey`, which serves the
     /// component-meta resolved-named-type pipeline with a richer identity
     /// (surface, companion, type-param bindings).
-    ///
-    /// Phase 6b classification: `legitimate-authority`. See sub-plan §6b.2.F2.
     pub(crate) resolved_type_cache:
         parking_lot::Mutex<rustc_hash::FxHashMap<ResolvedTypeCacheKey, ResolvedTypeCacheEntry>>,
     /// Consolidated resolver state: sub-node caches (symbol + fallthrough),
@@ -406,8 +401,6 @@ pub struct VerterHost {
     /// cache surface benefits from project-global sharing of `EvalEnv`
     /// values. Migration to a hypothetical `ProjectTypeStore.EvalEnvDb` is
     /// possible but unmotivated by current consumer patterns.
-    ///
-    /// Phase 6b classification: `legitimate-authority`. See sub-plan §6b.2.F4.
     pub(crate) eval_env_cache: parking_lot::Mutex<
         rustc_hash::FxHashMap<String, (Hash16, Arc<verter_semantic::analysis::type_eval::EvalEnv>)>,
     >,
@@ -420,25 +413,19 @@ pub struct VerterHost {
     /// [`ProjectTypeStore.semantic_graph()`](crate::project_type_store::ProjectTypeStore::semantic_graph)
     /// which is the resolved-named-type graph arena. Two databases, two
     /// crates, two artifact types.
-    ///
-    /// Phase 6b classification: `legitimate-authority`. See sub-plan §6b.2.F5.
     pub(crate) semantic_db: parking_lot::Mutex<verter_semantic::db::SemanticDb>,
     /// Active per-host query profile — execution-policy decisions
     /// (prewarming, budgets, allowed query families). **Not a cache** — does
     /// not memoise query results. Different artifact type than anything in
     /// `ProjectTypeStore`.
-    ///
-    /// Phase 6b classification: `legitimate-authority`. See sub-plan §6b.2.F10.
     pub(crate) query_profile: parking_lot::Mutex<verter_semantic::profile::QueryProfile>,
-    // Phase 6b.D2a step 4 — `external_type_analysis_cache` (F6) and
-    // `route_owned_shallow_cache` (F7) host mutexes are DELETED. Both
-    // halves are now carried in
+    // The `external_type_analysis_cache` (F6) and
+    // `route_owned_shallow_cache` (F7) host mutexes are not present here:
+    // both halves are carried in
     // [`ProjectTypeStore.route_owned_shallow`](crate::project_type_store::ProjectTypeStore::route_owned_shallow)
-    // as a single first-class artifact ([`RouteOwnedShallowEntry`]). See
-    // sub-plan §6b.2.F6/F7 (Option (c)) and §6b.D2a step 2 for the
-    // canonical materialiser.
-    /// Project-global type-resolution cache root (Phase 1+ of the cache
-    /// overhaul). Owns `IndexedReady`, `AnalysisReady`, and the rehomed
+    // as a single first-class artifact ([`RouteOwnedShallowEntry`]).
+    /// Project-global type-resolution cache root. Owns `IndexedReady`,
+    /// `AnalysisReady`, and the rehomed
     /// `RouteDb` / `ImportedRootDb`. See `project_type_store` module docs.
     pub(crate) project_type_store: Arc<crate::project_type_store::ProjectTypeStore>,
     /// Monotonic request-id generator for component-meta requests.
@@ -455,17 +442,15 @@ pub struct VerterHost {
     /// per-request lifecycle. Per-request inserts happen in
     /// `emit_audit_trace`; consumers retrieve via
     /// `take_audit_record(request_id)`. Plan §2.5.
-    ///
-    /// Phase 6b classification: `legitimate-authority`. See sub-plan §6b.2.F11.
     pub(crate) audit_records: Arc<crate::component_meta_audit::AuditRecordsStore>,
-    /// Cumulative host-level test audit state. Phase 5g-supplement
-    /// §5.D.0 r17 — accessible via [`Self::audit`] (test-only).
-    /// Counters increment from `#[cfg(test)]` hooks at the production
-    /// read / shallow-process sites; the lowering count is read from
-    /// the graph store's existing `stats_snapshot`.
+    /// Cumulative host-level test audit state — accessible via
+    /// [`Self::audit`] (test-only). Counters increment from
+    /// `#[cfg(test)]` hooks at the production read / shallow-process
+    /// sites; the lowering count is read from the graph store's
+    /// existing `stats_snapshot`.
     #[cfg(test)]
     pub(crate) test_audit: Arc<crate::host_test_audit::HostTestAuditState>,
-    /// Phase 9b test-only observable: records the most recent priority
+    /// Test-only observable: records the most recent priority
     /// passed to [`VerterHost::upsert_with_priority`]. Read by
     /// `compile_many_propagates_interactive_priority` and
     /// `compile_many_priority_default_is_background` to confirm that
@@ -473,7 +458,7 @@ pub struct VerterHost {
     /// the scheduler submit site. **Compiled out in production builds.**
     #[cfg(test)]
     pub(crate) last_upsert_priority: parking_lot::Mutex<Option<verter_scheduler::stage::Priority>>,
-    /// Phase 9b test-only observable: incremented at the very top of
+    /// Test-only observable: incremented at the very top of
     /// `host_compile::compile_one_in_batch` (BEFORE the precomputed-error
     /// short-circuit so every invocation is counted). Read by
     /// `compile_many_compiles_each_canonical_once` to discriminate the

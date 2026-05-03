@@ -325,7 +325,7 @@ where
     Revalidate: FnOnce(&Entry) -> bool,
     PostPublish: FnOnce(&Arc<Entry>, &K),
 {
-    // Phase 1: warm-hit + validation.
+    // warm-hit + validation.
     if let Some(entry_arc) = map.get(&key).map(|e| e.clone()) {
         if let Some(value) = validate(&entry_arc) {
             return Some(value);
@@ -334,7 +334,7 @@ where
         map.remove(&key);
     }
 
-    // Phase 2: claim the inflight slot or join an in-progress build.
+    // claim the inflight slot or join an in-progress build.
     let slot = {
         let mut table = inflight.table.lock();
         table
@@ -358,7 +358,7 @@ where
     state.claimed = true;
     drop(state);
 
-    // Phase 3: cold winner runs compute under a panic guard.
+    // cold winner runs compute under a panic guard.
     let mut panic_guard = InflightPanicGuard::new(Arc::clone(&slot), &inflight.table, key.clone());
 
     let computed = compute();

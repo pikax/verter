@@ -1,10 +1,9 @@
-//! Phase 7 (component-meta cold-path long-tail plan §11.5) —
-//! discrimination meta-test for the 16 parity baselines in
+//! Discrimination meta-test for the 16 parity baselines in
 //! `legacy_walker_parity_baseline.rs`. The goal is to prove the
 //! baselines collectively cover the legacy walker's policy-table
 //! arms; without this gate the baselines could collapse into a
 //! single "resolution does not panic" smoke test that would let a
-//! Phase 9 regression slip through.
+//! regression slip through silently.
 //!
 //! The discrimination is a SOURCE-LEVEL property: the baseline file
 //! must contain 16 `#[test]` functions whose names follow the

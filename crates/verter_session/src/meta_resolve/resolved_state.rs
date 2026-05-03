@@ -1,6 +1,6 @@
 //! Resolved-state types + small TypeExpr substitution helpers.
 //!
-//! Phase 11a domain 5 — `ResolvedComponentMetaState`,
+//! domain 5 — `ResolvedComponentMetaState`,
 //! `SurfaceNodeIdentities`, type aliases, and 9 standalone TypeExpr
 //! substitution / scope-selection helpers.
 

@@ -76,5 +76,5 @@ mod lib_parity;
 // (Expanded-mode dispatch counter, heritage canonical not in
 // loaded-files) plus a counterfixture for the predicate's
 // negative branch and an owner-edit invalidation regression.
-#[path = "component_meta_audit/phase_4_field_fast_path.rs"]
-mod phase_4_field_fast_path;
+#[path = "component_meta_audit/field_fast_path_counterfixtures.rs"]
+mod field_fast_path_counterfixtures;

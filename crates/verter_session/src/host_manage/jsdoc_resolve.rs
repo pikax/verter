@@ -1,6 +1,6 @@
 //! `HostComponentMetaResolver` adapter + JSDoc resolution helpers.
 //!
-//! Phase 11a domain 14 + 15 — owns:
+//! domain 14 + 15 — owns:
 //! - `HostComponentMetaResolver<'a>` struct + `impl
 //!   DeclarationMetadataResolver` + `impl ComponentMetaResolverHost`
 //!   (the adapter that wraps `&VerterHost` for the
@@ -30,7 +30,7 @@ use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
-// Phase 10a: file moved from `meta_resolve/jsdoc_resolve.rs` to
+// file moved from `meta_resolve/jsdoc_resolve.rs` to
 // `host_manage/jsdoc_resolve.rs`. The original `super::dispatch_helpers`
 // import resolved through `meta_resolve` private siblings; after the
 // move, `super` is `host_manage`, so the rewrite goes via the
@@ -204,7 +204,7 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
                 }),
         );
         let compute_eval_start = component_meta_debug_enabled().then(Instant::now);
-        // D-Cutover §5.8 WIP-W: the retired `shared_owner_engine` path
+        // the retired `shared_owner_engine` path
         // is gone; all callers go through
         // `compute_evaluated_types_with_tracking_from_owner_context`
         // which internally builds any needed host bridge.
@@ -310,7 +310,7 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
             return Vec::new();
         }
 
-        // Phase 5m §5.13a.2 — bridge via per-engine helper.
+        // bridge via per-engine helper.
         let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(self.host);
 
         candidate_roots
@@ -343,7 +343,7 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
         root_name: &str,
         macro_kind: verter_semantic::analysis::types::AnalyzedMacroKind,
     ) -> Option<crate::resolver_core::surface_projector::ProjectedMacroSurfaces> {
-        // Phase 5m §5.13a.2 — bridge via per-engine helper.
+        // bridge via per-engine helper.
         let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(self.host);
         let shape = project_prepared_type_surface_shape_via_host_threaded(
             &mut query_engine,
@@ -639,7 +639,7 @@ pub(crate) fn resolve_jsdoc_tag_type(
             .into_iter()
             .map(|dependency| dependency.canonical_id),
     );
-    // Phase 5d (sub-plan §4.1): route directly through the shared
+    // route directly through the shared
     // dispatch ProjectPath helper. Falls back to the raw parsed
     // annotation when projection misses so the caller still receives
     // the unresolved TypeExpr rather than `None`.

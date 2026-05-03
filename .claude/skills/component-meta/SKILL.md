@@ -197,7 +197,7 @@ The 3 originally-proposed variants — `MaterializeSurface`, `ResolvePublicInsta
 
 **Source-text fallbacks are guard-enforced (Phase 4 / 4b).** The pre-Phase-4 `host.read_source` callsites in `component_meta.rs` and the `DeclarationMetadataResolver::read_source` trait + the three text-projection helpers (`source_for_local_type_projection`, `project_macro_surfaces_from_expanded_text`, `project_macro_surfaces_from_source_type_name`) are deleted. Per-member JSDoc enrichment now flows through `enrich_projected_jsdoc` using `host.resolve_jsdoc_block` (graph-native). The architecture guards `no_read_source_in_component_meta`, `no_read_source_in_declaration_metadata`, `no_text_based_macro_surface_projection_helpers`, and `no_macro_string_heuristics_in_resolver_core` are un-ignored and mechanically enforce the no-fallback invariant on every commit.
 
-**Key resolver files (post-cutover):**
+**Key resolver files:**
 
 | File | Purpose |
 | --- | --- |
@@ -205,7 +205,23 @@ The 3 originally-proposed variants — `MaterializeSurface`, `ResolvePublicInsta
 | `crates/verter_session/src/semantic_query_memo.rs` | `SemanticGraphStore` (node memo + relation memo) |
 | `crates/verter_session/src/host_manage.rs` | `get_component_meta()` entry point, `HostNamedTypeCacheAdapter` (reads/writes `SemanticGraphStore` directly for Vue macro results) |
 | `crates/verter_session/src/host_resolve.rs` | `HostFrontierAdapter`, cross-file type resolution |
-| `crates/verter_session/src/resolver_core/component_meta_query_engine/` | `ComponentMetaQueryEngine` — Phase 5 query-planner. Reduced from a resolver to a builder of `SemanticQueryKey` lists; the engine asks the shared dispatch and assembles `ComponentMetaAnalysis` from the returned `CacheRead<T>` results. No private resolver/expander state (Phase 11b.2 split helpers/prepared_surface/registry_decl/route_keys/routed_expr/shallow_preserve/surface child modules) |
+| `crates/verter_session/src/resolver_core/component_meta_query_engine/` | `ComponentMetaQueryEngine` — request-scoped query-planner. Builder of `SemanticQueryKey` lists; the engine asks the shared dispatch and assembles `ComponentMetaAnalysis` from the returned `CacheRead<T>` results. **Authority model lives in `mod.rs`'s file-level doc-comment** — read it before adding cache state to the engine. No private durable resolver/expander state; child modules `helpers` / `prepared_surface` / `registry_decl` / `route_keys` / `routed_expr` / `shallow_preserve` / `surface` provide focused method clusters. |
+
+### Engine-internal authority model
+
+The authoritative caches that survive across requests are
+`MaterializeMemoDb`, `ComponentMetaResultDb`, `SemanticGraphStore`,
+`RefCycleResultDb`, and `MaterializeStructureDb`. The engine sits
+above these and below the public component-meta API; it does not own
+any durable cache state. Per-request scratch (`prepared_surface_cache`,
+`routed_expr_surface_cache`, `prepared_member_cache`, type-param
+substitution maps, projection-chain scopes) dies when the engine
+drops and is never promoted. Cancelled, superseded, interrupted,
+budget-exceeded, and partial results MUST NOT be admitted to the
+authoritative caches. The full ownership-boundary contract lives in
+the file-level doc-comment of
+`crates/verter_session/src/resolver_core/component_meta_query_engine/mod.rs` —
+read it before introducing new cache state inside the engine.
 
 ## Component-Meta Perf / Debug Workflow
 

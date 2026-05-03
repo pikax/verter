@@ -1475,7 +1475,7 @@ pub struct ImportSourceInfo {
     pub bindings: Vec<String>,
 }
 
-// ── Phase 1c: Non-SFC Deep Analysis ──
+// ── Non-SFC Deep Analysis ──
 
 /// Analyzed exported function from a non-SFC file.
 /// Used for composable return type analysis and function parameter info.
@@ -1587,7 +1587,7 @@ pub enum ReturnReactivity {
     Unknown,
 }
 
-// ── Phase 2b: Type Enhancement Placeholders ──
+// ── Type Enhancement Placeholders ──
 
 /// TODO(type-provider): Script-level type enhancements.
 /// Populated by external type providers (TS language service, TSGO, etc.).

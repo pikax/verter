@@ -2,7 +2,7 @@
 //! free functions: snapshot → ComponentMetaAnalysis projection,
 //! evaluated-type merge, JSDoc enrichment, and SFC sidecar population.
 //!
-//! Phase 11c sub-plan §11c.2 Domain K. Owns the public-facing
+//! Domain K. Owns the public-facing
 //! `extract_component_meta_from_resolved` /
 //! `extract_component_meta_from_resolved_with_facts` entry points
 //! plus their internal helpers (`merge_evaluated_prop_types_into_meta`,
@@ -1028,7 +1028,7 @@ pub(crate) fn extract_component_meta_from_resolved(
             meta.fallthrough_surface = resolution.fallthrough_surface;
         }
     }
-    // Phase 4B: apply the publication policy that commit `624b14d2` deleted.
+    // apply the publication policy that commit `624b14d2` deleted.
     // The pass is PURE over (resolved_type_registry, resolved_type_registry_meta);
     // see docs/arch/debt-closure/06-step4b-consumer-surface.md.
     crate::component_meta_resolution_policy::apply_component_meta_resolution_policy(
@@ -1086,7 +1086,7 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
     } else {
         None
     };
-    // Phase 4B: apply the publication policy AFTER fallthrough merge so the
+    // apply the publication policy AFTER fallthrough merge so the
     // pass operates on the final accepted_props/events. PURE over
     // (resolved_type_registry, resolved_type_registry_meta).
     crate::component_meta_resolution_policy::apply_component_meta_resolution_policy(

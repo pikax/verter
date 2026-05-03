@@ -124,7 +124,7 @@ where
     /// Host-owned cross-file route subsystem: barrel surfaces, route results,
     /// and stable negative answers.
     ///
-    /// Phase 6b.F3 (Option (i)): authority owned by
+    /// Authority owned by
     /// [`ProjectTypeStore`](crate::project_type_store::ProjectTypeStore).
     /// The runtime holds an `Arc` clone of the store's instance so resolver
     /// hot-path mutations land on the project-shared `RouteDb`. See
@@ -132,16 +132,16 @@ where
     pub routes: Arc<RouteDb>,
     /// Host-owned imported-root proof cache (positive and negative).
     ///
-    /// Phase 6b.F3: same `Arc`-shared discipline as `routes`. See
+    /// same `Arc`-shared discipline as `routes`. See
     /// [`Self::imported_roots_handle`].
     pub imported_roots: Arc<ImportedRootDb>,
-    /// Phase 6b.D1 (sub-plan §6b.2.F6/F7) — singleflight for the route-only
-    /// shallow materialiser. Collapses concurrent cold callers for the
-    /// same canonical onto one materialisation path. Mirrors the
+    /// Singleflight for the route-only shallow materialiser. Collapses
+    /// concurrent cold callers for the same canonical onto one
+    /// materialisation path. Mirrors the
     /// [`Self::indexed_singleflight`] pattern: key is `Arc<str>`
     /// (canonical alone), error type is `()` (matches `indexed_singleflight`;
     /// the host materialiser maps internal errors to `()` and returns
-    /// `Option<...>` to callers per sub-plan §6b.D2a step 2 STEP 7).
+    /// `Option<...>` to callers).
     pub route_owned_shallow_singleflight:
         SingleflightGroup<Arc<str>, Arc<crate::project_type_store::RouteOwnedShallowEntry>, ()>,
 }
@@ -154,7 +154,7 @@ where
     /// Create a new runtime with fresh caches and counters, sharing the
     /// project-store-owned `RouteDb` / `ImportedRootDb` instances.
     ///
-    /// Phase 6b.F3 (Option (i)): the host's
+    /// The host's
     /// [`ProjectTypeStore`](crate::project_type_store::ProjectTypeStore)
     /// is the project-global authority for both DBs. The host pulls
     /// [`ProjectTypeStore::routes_handle`](crate::project_type_store::ProjectTypeStore::routes_handle)
@@ -200,7 +200,7 @@ where
         }
     }
 
-    /// Phase 6b.F3 — return a cloned `Arc<RouteDb>` handle for use as a
+    /// return a cloned `Arc<RouteDb>` handle for use as a
     /// stable shared reference. Mirrors
     /// [`ProjectTypeStore::routes_handle`](crate::project_type_store::ProjectTypeStore::routes_handle)
     /// — successive calls return Arcs that `Arc::ptr_eq` the inner
@@ -210,7 +210,7 @@ where
         Arc::clone(&self.routes)
     }
 
-    /// Phase 6b.F3 — return a cloned `Arc<ImportedRootDb>` handle. See
+    /// return a cloned `Arc<ImportedRootDb>` handle. See
     /// [`Self::routes_handle`] for the full rationale.
     #[must_use]
     pub fn imported_roots_handle(&self) -> Arc<ImportedRootDb> {
@@ -227,7 +227,7 @@ where
         self.indexed_singleflight.clear();
         self.routes.clear();
         self.imported_roots.clear();
-        // Phase 6b.D1 — clear the route-only shallow singleflight too.
+        // clear the route-only shallow singleflight too.
         // The `RouteOwnedShallowDb` itself is project-store-owned and
         // cleared via `ProjectTypeStore::route_owned_shallow().clear_all()`
         // from the host's cascade (sub-plan §6b.D2a step 6). We only
@@ -280,7 +280,7 @@ where
     /// Test-only constructor minting a fresh runtime with newly-allocated
     /// `Arc<RouteDb>` / `Arc<ImportedRootDb>` instances.
     ///
-    /// Phase 6b.B2: now that `UnifiedResolverRuntime::new` requires
+    /// now that `UnifiedResolverRuntime::new` requires
     /// `Arc<RouteDb>` / `Arc<ImportedRootDb>` parameters supplied by the
     /// host's [`ProjectTypeStore`](crate::project_type_store::ProjectTypeStore),
     /// tests that mint their own runtime in isolation use this helper to
@@ -296,7 +296,7 @@ where
     }
 
     /// Test-only constructor variant that shares counters with another
-    /// runtime. Same Phase 6b.B1 / B2 lifecycle as `for_tests()`.
+    /// runtime. Same lifecycle as `for_tests()`.
     #[cfg(test)]
     pub fn for_tests_with_counters(counters: Arc<ResolverCounters>) -> Self {
         Self::with_counters(

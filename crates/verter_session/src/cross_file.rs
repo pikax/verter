@@ -618,7 +618,7 @@ import Child from '@/components/Child.vue'
         compile_file(&host, "/project/src/components/Child.vue");
         compile_file(&host, "/project/src/App.vue");
 
-        // Configure workspace resolver via host wrapper — Phase 6b sub-plan
+        // Configure workspace resolver via host wrapper — sub-plan
         // §6b.D2b reroute. LSP/unplugin route through `host.configure_projects`
         // post-bypass-closure; the host wrapper runs the route_owned_shallow
         // clear_all + bump_project_generation_and_evict cascade.

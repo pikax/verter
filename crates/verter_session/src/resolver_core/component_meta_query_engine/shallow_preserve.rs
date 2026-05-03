@@ -1,6 +1,6 @@
 //! Shallow preservation, imported-route fast paths, and deep slot/type
 //! ref resolution methods extracted from
-//! `component_meta_query_engine/mod.rs` in Phase 11b.4.
+//! `component_meta_query_engine/mod.rs` in the prior cutover.4.
 //!
 //! These methods are private inherent methods on
 //! `ComponentMetaQueryEngine<'a>`. They classify how shallowly an
@@ -97,7 +97,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     }
 
     /// Symbolic-preservation predicate for the define-props member rescue
-    /// path (D-Cutover §5.8 replacement for
+    /// path (replacement for
     /// `TypeQueryEngine::should_preserve_shallow_field_expr`).
     ///
     /// Returns `true` when `expr` references a package-backed imported
@@ -322,7 +322,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let prepared = self
             .ctx
             .prepared_type_decl(&root_identity.canonical_id, &root_identity.symbol_name);
-        // Issue #11 / Phase 11 — delegate the symbolic-vs-materialize
+        // Issue #11 / delegate the symbolic-vs-materialize
         // decision to the shared helper. The helper consumes
         // `WorkspaceRead::is_workspace_owned` / `is_package_backed`
         // (NOT path-substring `node_modules` checks), so package-backed
@@ -1195,7 +1195,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// Walk an Object's properties/methods and resolve any
     /// `TypeExpr::Ref` leaves (inside property types, function return
     /// types, array elements, union/intersection arms) to their
-    /// dispatch-projected surface (D-Cutover §5.8 replacement for the
+    /// dispatch-projected surface (replacement for the
     /// retired `type_eval_build::deep_resolve_slot_function_refs`).
     ///
     /// Non-Object inputs are returned verbatim — matches the pre-cutover

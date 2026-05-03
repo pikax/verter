@@ -1,4 +1,4 @@
-//! Owner import surface cache (Phase 2 of the project-global overhaul).
+//! Owner import surface cache.
 //!
 //! [`OwnerImportSurfaceDb`] is the reusable direct-owner-imports artifact:
 //! one [`OwnerImportSurface`] per `(owner_canonical, owner_whole_hash)`
@@ -8,7 +8,7 @@
 //! solver host, fallthrough / meta projection — from the same entry.
 //!
 //! Today the pipeline asks `resolve_imported_type_root` from each
-//! stage independently. Phase 2 wires the stages onto this cache so direct
+//! stage independently. wires the stages onto this cache so direct
 //! imports resolve exactly once per owner version.
 //!
 //! ## Contract

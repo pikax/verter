@@ -1,5 +1,5 @@
-// Phase 2: Document highlights — highlight all occurrences of a binding in the current file.
-// Phase 3: Enhanced with type-aware highlights from TypeProvider.
+// Document highlights — highlight all occurrences of a binding in the current file.
+// Enhanced with type-aware highlights from TypeProvider.
 
 use tower_lsp_server::ls_types::*;
 use verter_session::FileAnalysisSnapshot;

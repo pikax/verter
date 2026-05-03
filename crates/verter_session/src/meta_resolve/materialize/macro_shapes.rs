@@ -1,6 +1,6 @@
 //! Materialization core: macro-shape producers.
 //!
-//! Phase 11a domain 7 (macro-shapes portion). Owns:
+//! domain 7 (macro-shapes portion). Owns:
 //! - `produce_macro_object_shapes` + `produce_macro_object_shapes_for_purpose`
 //!   (the sole authority that emits `define_props` / `define_emits` /
 //!   `define_slots` object shapes for `ExpandedComponentTypes`),
@@ -32,7 +32,7 @@ use super::super::dispatch_helpers::{
     project_prepared_type_surface_shape_via_host_threaded,
     project_type_surface_expr_via_host_threaded, project_type_surface_shape_via_host_threaded,
 };
-// Phase 10a: `request_host` source moved to
+// `request_host` source moved to
 // `host_manage/component_meta_request_impl.rs`. Import rewritten to
 // the new home.
 use super::super::resolved_state::lowered_root_reaches_transitive_cycle;
@@ -1562,7 +1562,7 @@ pub(crate) fn produce_one_macro_object_shape(
             if let Some((def_canonical, def_name)) =
                 classify_named_ref_for_db_projection(query_engine, owner_canonical, name)
             {
-                // Phase 5m §5.13a.2 — bridge the engine method via
+                // bridge the engine method via
                 // the per-engine helper so the §5.14.1 pre-flight
                 // gate sees zero external engine-method callers.
                 if let Some(shape) = project_type_surface_shape_via_host_threaded(
@@ -1600,7 +1600,7 @@ pub(crate) fn produce_one_macro_object_shape(
             } else {
                 declaration.resolved_name.clone()
             };
-            // Phase 5m §5.13a.2 — bridge the engine method via the
+            // bridge the engine method via the
             // per-engine helper so the §5.14.1 pre-flight gate sees
             // zero external engine-method callers.
             project_type_surface_expr_via_host_threaded(
@@ -1618,20 +1618,20 @@ pub(crate) fn produce_one_macro_object_shape(
         }
         _ => None,
     };
-    // D-Cutover §5.8: the retired solver's `owner_engine.solve` is gone.
+    // the retired solver's `owner_engine.solve` is gone.
     // Route through dispatch's surface projection + the dispatch-backed
     // `deep_resolve_slot_function_refs` on CMQE (replacement for the
     // retired solver-backed pass), treating the result as an
     // exact-concrete SolverResult so `solver_result_to_object_expansion`
     // still derives the expansion.
     let solver_result = scoped_solver_result.unwrap_or_else(|| {
-        // D-Cutover §5.8: dispatch's surface projection is the sole
+        // dispatch's surface projection is the sole
         // solve path. Empty-path `ProjectPath` with mode Expanded now
         // expands terminal DeclAnchors via `Instantiate(anchor, [])`
         // so non-generic aliases (including namespace-qualified
         // `Types.Props` → `Props`) emit their body surface here.
         //
-        // Phase 5f §8 — route through `project_expr_class_a_via_dispatch_threaded`
+        // route through `project_expr_class_a_via_dispatch_threaded`
         // so IndexedAccess chains (`WrappedConfig<Theme>['nested']['palette']`)
         // are decomposed into `(base_expr, [PathSegment::Index(...)])`
         // and dispatched as `ProjectPath { base, path, Expanded }`.
@@ -1642,13 +1642,12 @@ pub(crate) fn produce_one_macro_object_shape(
         // each intermediate hop instead of following the requested
         // path.
         //
-        // Phase 5l + 5m migration (post-cutover): this multi-macro-kind
-        // callsite routes through the bridge helper
-        // `project_expr_class_a_via_dispatch_threaded`, which threads
-        // `query_engine.ctx` so the request-local fuse + scope-payload
-        // state stays load-bearing for `Partial<T>` optionality
-        // propagation across props/emits/slots in the same request.
-        // The engine method itself was retired in Phase 5l; the bridge
+        // This multi-macro-kind callsite routes through the bridge
+        // helper `project_expr_class_a_via_dispatch_threaded`, which
+        // threads `query_engine.ctx` so the request-local fuse +
+        // scope-payload state stays load-bearing for `Partial<T>`
+        // optionality propagation across props/emits/slots in the same
+        // request. The bridge
         // helper is the single production callsite shape per §5.13a.2.
         let projected = project_expr_class_a_via_dispatch_threaded(
             query_engine.ctx,
@@ -1669,7 +1668,7 @@ pub(crate) fn produce_one_macro_object_shape(
     let rescue_projection =
         solver_count == 0 || expr_needs_projection_rescue(query_engine, owner_canonical, lowered);
     let projected = if rescue_projection {
-        // Phase 5m §5.13a.2 — bridge the engine method via the
+        // bridge the engine method via the
         // per-engine helper so the §5.14.1 pre-flight gate sees zero
         // external engine-method callers.
         project_expr_surface_shape_via_host_threaded(query_engine, owner_canonical, lowered)
@@ -1754,7 +1753,7 @@ pub(crate) fn project_named_ref_prepared_surface_shape(
     let (scope_canonical, resolved_name) =
         resolve_named_ref_prepared_projection_target(query_engine, owner_canonical, name.as_ref())?;
 
-    // Phase 5m §5.13a.2 — bridge the engine method via the per-engine
+    // bridge the engine method via the per-engine
     // helper so the §5.14.1 pre-flight gate sees zero external
     // engine-method callers.
     project_prepared_type_surface_shape_via_host_threaded(
@@ -1785,7 +1784,7 @@ pub(crate) fn named_ref_can_use_prepared_projection(
         declaration.resolved_name.as_str()
     };
 
-    // Issue #11 / Phase 11 — delegate the symbolic-vs-materialize
+    // Issue #11 / delegate the symbolic-vs-materialize
     // decision to the shared helper. The previous
     // `if declaration.canonical_source == owner_canonical { return
     // true; }` short-circuit was an equivalent one-line guard per
@@ -1924,7 +1923,7 @@ pub(crate) fn project_named_ref_surface_shape(
         declaration.resolved_name.as_str()
     };
 
-    // Phase 5m §5.13a.2 — bridge the engine method via the per-engine
+    // bridge the engine method via the per-engine
     // helper so the §5.14.1 pre-flight gate sees zero external
     // engine-method callers.
     project_type_surface_shape_via_host_threaded(query_engine, defining_canonical, defining_name)
@@ -1955,7 +1954,7 @@ pub(crate) fn project_named_ref_imported_scope_shape(
         return None;
     }
 
-    // Phase 5m §5.13a.2 — bridge the engine method via the per-engine
+    // bridge the engine method via the per-engine
     // helper so the §5.14.1 pre-flight gate sees zero external
     // engine-method callers.
     project_expr_surface_shape_via_host_threaded(query_engine, defining_canonical, lowered)
@@ -1983,7 +1982,7 @@ pub(crate) fn produce_one_macro_object_shape_for_slots(
             if let Some((def_canonical, def_name)) =
                 classify_named_ref_for_db_projection(query_engine, owner_canonical, name)
             {
-                // Phase 5m §5.13a.2 — bridge via per-engine helper.
+                // bridge via per-engine helper.
                 if let Some(shape) = project_type_surface_shape_via_host_threaded(
                     query_engine,
                     &def_canonical,
@@ -2003,7 +2002,7 @@ pub(crate) fn produce_one_macro_object_shape_for_slots(
     }
 
     // ── Non-object body: dispatch projection first, then projection on warm caches ─
-    // D-Cutover §5.8: dispatch's `project_expr_surface_expr` replaces
+    // dispatch's `project_expr_surface_expr` replaces
     // `owner_engine.solve`; `CMQE::deep_resolve_slot_function_refs`
     // replaces the retired `type_eval_build::deep_resolve_slot_function_refs`
     // pass. Both route through the shared dispatch memo so caches stay
@@ -2019,7 +2018,7 @@ pub(crate) fn produce_one_macro_object_shape_for_slots(
     // `solver_result_to_object_expansion`. The expansion's existing
     // Intersection-merging in [`type_expr_to_expanded_shape`] then
     // collects the explicit slot members from the compound shape.
-    // Phase 5d (sub-plan §4.1 slot-cluster row): the strict
+    // the strict
     // `project_expr_surface_expr` migrates to the shared dispatch
     // helper. The lenient
     // `project_expr_surface_expr_with_compound_objects` fallback is
@@ -2028,7 +2027,7 @@ pub(crate) fn produce_one_macro_object_shape_for_slots(
     let projected_body =
         project_expr_class_a_via_dispatch(query_engine.ctx, owner_canonical, lowered)
             .or_else(|| {
-                // Phase 5m §5.13a.2 — bridge via per-engine helper.
+                // bridge via per-engine helper.
                 project_expr_surface_expr_with_compound_objects_via_host_threaded(
                     query_engine,
                     owner_canonical,

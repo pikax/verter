@@ -254,7 +254,7 @@ pub enum KeyFamily {
     SkeletonForResolvedName(&'static str),
     /// Match `Instantiate { base.decl_name == name, body_mode == Expanded }`.
     ///
-    /// Used by the Phase 4 field-level fast path counterfixtures
+    /// Used by the field-level fast path counterfixtures
     /// to assert that, for a fast-path-eligible field, the macro
     /// shell is NOT dispatched in `Expanded` mode (the cold-time
     /// regression that the fast path eliminates is the
@@ -377,7 +377,7 @@ pub struct CaptureToken {
     cache_provenance: Mutex<CacheProvenance>,
     dispatch_log: Mutex<Vec<DispatchEntry>>,
     // -------------------------------------------------------------------
-    // Phase 11b — diagnosis counters
+    // diagnosis counters
     //
     // These counters profile cost contributors to the
     // `repo_first_pass` semantic-state regression. They are read
@@ -513,7 +513,7 @@ impl CaptureToken {
     }
 
     // ---------------------------------------------------------------
-    // Phase 11b — diagnosis recorders
+    // diagnosis recorders
     // ---------------------------------------------------------------
 
     /// Record one `record_origin_edge` invocation with its measured
@@ -648,7 +648,7 @@ pub struct CaptureSnapshot {
     pub cache_provenance: CacheProvenance,
     pub dispatch_log: Vec<DispatchEntry>,
     // -------------------------------------------------------------------
-    // Phase 11b — diagnosis counter snapshots
+    // diagnosis counter snapshots
     // -------------------------------------------------------------------
     /// Total wall-clock cost (ns) of all `record_origin_edge` calls
     /// during this capture window.
@@ -839,7 +839,7 @@ impl std::error::Error for StackOverflow {}
 
 /// Run `f` on a thread with a 256 KB stack. Returns `Err(StackOverflow)`
 /// when the closure panics with a payload that names "stack overflow"
-/// (or its Windows-style `STATUS_STACK_OVERFLOW` form). Used by Phase 9
+/// (or its Windows-style `STATUS_STACK_OVERFLOW` form). Used by
 /// (cycle guard) tests to assert recursive codepaths terminate before
 /// running out of stack — when the guard is wrongly keyed, the closure
 /// will recurse unboundedly and the small stack hits OS-level overflow

@@ -1,7 +1,7 @@
 //! Shared types for the retired native type solver kernel.
 //!
 //! The arena-based solver (`solve_type`, `relate`, `project`, `TypeQueryEngine`,
-//! `TypeSolverHost`) has been retired as part of the D-Cutover. What survives
+//! `TypeSolverHost`) has been retired as part of the cutover. What survives
 //! here are the compact data carriers that remain in use across
 //! `verter_session`, `verter_ffi`, and the shared semantic dispatch layer:
 //!

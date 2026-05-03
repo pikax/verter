@@ -1,8 +1,9 @@
-//! Commit 6.E exit-criteria tests (plan §3.A Commit 6.E / §6 item 11):
-//! grep-based regression guards that the legacy
-//! `component_meta_trace_scope!` / `component_meta_trace_event!` surface
-//! is gone, and that every `StructuredComponentMetaEvent::Custom {`
-//! construction site carries a `// Custom justified:` comment.
+//! Regression guards for the structured component-meta trace surface:
+//! grep-based assertions that the legacy
+//! `component_meta_trace_scope!` / `component_meta_trace_event!` macros
+//! do not exist anywhere in the workspace, and that every
+//! `StructuredComponentMetaEvent::Custom { ... }` construction site
+//! carries a `// Custom justified:` comment.
 //!
 //! These are integration tests because the grep scope crosses the
 //! crate boundary; the runtime tests (snapshot byte-exactness,
@@ -45,7 +46,7 @@ fn walk_rs_files(root: &Path) -> Vec<PathBuf> {
                 // messages and grep predicates, which would
                 // falsely fail our own grep scan.
                 let file_name = path.file_name().map(|s| s.to_string_lossy().into_owned());
-                if file_name.as_deref() == Some("legacy_trace_cutover.rs") {
+                if file_name.as_deref() == Some("no_legacy_trace_surface.rs") {
                     continue;
                 }
                 out.push(path);

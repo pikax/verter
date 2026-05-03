@@ -1,5 +1,5 @@
-// Phase 2: Diagnostics — parse errors, macro validation from verter_session.
-// Phase 3: Enhanced with type errors, unused variables, strict null checks from TypeProvider.
+// Diagnostics — parse errors, macro validation from verter_session.
+// Enhanced with type errors, unused variables, strict null checks from TypeProvider.
 
 use tower_lsp_server::ls_types::*;
 use verter_session::{DiagnosticsSnapshot, HostDiagnostic, HostSeverity};

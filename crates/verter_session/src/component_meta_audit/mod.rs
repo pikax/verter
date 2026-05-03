@@ -873,7 +873,7 @@ pub enum MaterializationSubject {
 /// out of `verter_session::component_meta_materialize` so audit
 /// consumers (TS bindings, harness) do not depend on the materialiser
 /// type. Plan §3.4 — must be `pub` (not `pub(crate)`) for the
-/// Phase-1 e2e test integration.
+/// e2e test integration.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ts_rs::TS, PartialEq, Eq, Hash)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub enum MaterializationScopeAudit {

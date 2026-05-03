@@ -2028,7 +2028,7 @@ impl NapiVerterHost {
         Ok(results)
     }
 
-    /// Phase 9b host-backed batch compile.
+    /// host-backed batch compile.
     ///
     /// Compiles a batch of Vue SFC inputs through the production host
     /// path (scheduler + dispatch + compile_cache). Returns one
@@ -2363,14 +2363,14 @@ fn build_selector_match_results(
 }
 
 // =============================================================================
-// Phase 9b — host-backed batch compile (NAPI surface)
+// host-backed batch compile (NAPI surface)
 //
 // Replaces the previous free-fn `compileBatch` (Rayon-direct,
 // stateless, bypassing VerterHost). The new entry point is the
 // `NapiVerterHost::compile_many` instance method, which routes
 // through the host's scheduler + dispatch + compile_cache and
 // preserves the read/parse/process-once invariant. See sub-plan
-// `D:/tmp/verter-architecture-cutover-phase-09.md` §3.4.
+// `D:/tmp/verter-architecture-cutover-.md` §3.4.
 // =============================================================================
 
 use verter_session::host_compile;
@@ -2520,10 +2520,10 @@ mod tests {
         );
     }
 
-    // Phase 9b — the inline `compile_batch_files` helper smoke tests
+    // the inline `compile_batch_files` helper smoke tests
     // were deleted along with the helper itself (host-bypassing
     // free-fn `compileBatch` is now `host.compileMany`). The
     // host-backed batch path is fully exercised by the host_compile
     // tests in verter_session and the JS-side E2E tests in
-    // packages/native/index.spec.ts (commit 4 of Phase 9b).
+    // packages/native/index.spec.ts.
 }

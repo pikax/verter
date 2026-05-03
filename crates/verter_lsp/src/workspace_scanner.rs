@@ -82,7 +82,7 @@ pub struct WorkspaceScannerConfig {
     /// `classify_tiers()`. Generation-pinned at spawn time.
     pub workspace_snapshot: Option<std::sync::Arc<verter_workspace::WorkspaceSnapshot>>,
     /// Optional oneshot channel fired after the full scanner loop completes
-    /// (both Phase 1 `.vue` files and Phase 2 non-Vue source files).
+    /// (both `.vue` files and non-Vue source files).
     /// Used by the server to send `$/verter/typeProviderSyncComplete`.
     pub done_tx: Option<tokio::sync::oneshot::Sender<()>>,
 }
@@ -384,7 +384,7 @@ async fn scanner_loop(
     let mut priority_dirs: Vec<String> = Vec::new();
     let mut batch_count: usize = 0;
 
-    // ── Phase 1: All .vue files (produces .vue.ts public API files for barrel re-exports) ──
+    // ── All .vue files (produces .vue.ts public API files for barrel re-exports) ──
     let mut idx = 0;
     while idx < vue_classified.len() {
         drain_priority_signals(&mut rx, &mut priority_dirs, &mut vue_classified[idx..]);
@@ -433,11 +433,11 @@ async fn scanner_loop(
     }
 
     tracing::info!(
-        "workspace_scanner: phase 1 complete — {} .vue files processed",
+        "workspace_scanner: stage 1 complete — {} .vue files processed",
         batch_count,
     );
 
-    // ── Phase 2: All non-Vue source files (.ts/.tsx/.js/.jsx) ──
+    // ── All non-Vue source files (.ts/.tsx/.js/.jsx) ──
     // Also follows node_modules dependencies transitively.
     let mut node_modules_synced: HashSet<String> = HashSet::new();
     let mut idx = 0;
@@ -489,7 +489,7 @@ async fn scanner_loop(
         node_modules_synced.len(),
     );
 
-    // Signal that the full scanner loop (Phase 1 + Phase 2) is complete.
+    // Signal that the full scanner loop is complete.
     if let Some(tx) = config.done_tx {
         let _ = tx.send(());
     }
@@ -604,7 +604,7 @@ async fn sync_non_vue_file_to_provider(
             .map(|result| result.module_references)
             .unwrap_or_default();
 
-        // Phase 6b sub-plan §6b.D2b — `prepare_non_vue_provider_sync` is
+        // `prepare_non_vue_provider_sync` is
         // a read-only consumer; route through `host.workspace_read()`.
         let ws = host_clone.workspace_read();
         crate::server::prepare_non_vue_provider_sync(
@@ -698,11 +698,11 @@ async fn follow_node_modules_deps(
     while let Some(dep) = pending.pop() {
         // Handle Vue public API dependencies (sync .vue.ts files)
         if dep.provider_target == crate::project_resolver::ProviderTarget::VuePublicApi {
-            // Vue public API files are handled in phase 1 by sync_file_to_provider
+            // Vue public API files are handled in by sync_file_to_provider
             continue;
         }
 
-        // Handle shadow source files (non-Vue workspace files — already in phase 2 queue)
+        // Handle shadow source files (non-Vue workspace files — already in queue)
         if dep.provider_target == crate::project_resolver::ProviderTarget::ShadowSourceFile {
             // These are workspace files already queued in source_classified
             continue;

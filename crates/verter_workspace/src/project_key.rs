@@ -1,6 +1,6 @@
 //! Stable per-project identity key for ambient-lib registration.
 //!
-//! Phase 5 §6.2 (sub-plan A3): `ProjectStableKey` includes a workspace-root
+//! (sub-plan A3): `ProjectStableKey` includes a workspace-root
 //! discriminator to prevent multi-root collisions. Two workspaces both
 //! containing `tsconfig.json` produce distinct keys (different
 //! workspace_root_canonical paths).

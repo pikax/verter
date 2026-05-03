@@ -1,7 +1,6 @@
 //! Routed expression projection, request-local caches, pick/member
 //! route projection, inherited-member projection, and `type_surface_facts`
-//! methods extracted from `component_meta_query_engine/mod.rs` in
-//! Phase 11b.8.
+//! methods extracted from `component_meta_query_engine/mod.rs`.
 //!
 //! These methods project type expressions through `RouteDemand`
 //! variants (Whole / MemberPath / Pick / Omit) and the cached
@@ -15,7 +14,7 @@
 //! - All other methods stay private and are visible inside the
 //!   `component_meta_query_engine` folder via parent-private locality.
 //!
-//! Phase 11b.8 LOC budget: ~1534 (within 4000-LOC sibling budget).
+//! LOC budget: ~1534 (within the 4000-LOC sibling budget).
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_semantic::analysis::type_expr::TypeExpr;
@@ -53,7 +52,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             member_name: &str,
             projected_expr: &TypeExpr,
         ) -> Option<ProjectedMember> {
-            // Phase 5l: dispatch a single-member ProjectPath query for
+            // dispatch a single-member ProjectPath query for
             // the (root_symbol, member_name) pair, then fall back to the
             // engine's prepared/inherited route helpers (kept on the
             // engine because they consume the per-engine prepared-decl
@@ -164,7 +163,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 return Some(projected_expr);
             }
             if let [member_name] = path.as_slice() {
-                // Phase 5l: dispatch the single-member projection.
+                // dispatch the single-member projection.
                 let projected_member = dispatch_member_for_root_symbol(
                     self,
                     scope_canonical_id,
@@ -235,7 +234,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         None
     }
 
-    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
+    #[allow(dead_code)] // deletion in 5g per call-graph closure
     fn cached_routed_expr_surface_expr(
         &self,
         scope_canonical_id: &str,
@@ -269,7 +268,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         Some(value)
     }
 
-    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
+    #[allow(dead_code)] // deletion in 5g per call-graph closure
     fn cache_routed_expr_surface_expr(
         &mut self,
         scope_canonical_id: &str,
@@ -298,7 +297,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .insert(local_key, projected_expr.clone());
     }
 
-    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
+    #[allow(dead_code)] // deletion in 5g per call-graph closure
     fn cache_pick_members_from_projected_expr(
         &mut self,
         scope_canonical_id: &str,
@@ -341,7 +340,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
 
-    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
+    #[allow(dead_code)] // deletion in 5g per call-graph closure
     fn cache_projected_member(
         &mut self,
         scope_canonical_id: &str,
@@ -362,7 +361,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         None
     }
 
-    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
+    #[allow(dead_code)] // deletion in 5g per call-graph closure
     pub(super) fn cached_prepared_surface(
         &mut self,
         scope_canonical_id: &str,
@@ -373,7 +372,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         None
     }
 
-    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
+    #[allow(dead_code)] // deletion in 5g per call-graph closure
     pub(super) fn cache_prepared_surface_projection(
         &mut self,
         scope_canonical_id: &str,
@@ -424,7 +423,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             && (!substitutions.is_empty() || is_package_source(Some(scope_canonical_id)))
     }
 
-    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
+    #[allow(dead_code)] // deletion in 5g per call-graph closure
     fn project_prepared_member_route_projection(
         &mut self,
         scope_canonical_id: &str,
@@ -436,7 +435,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         self.project_prepared_member_from_decl(scope_canonical_id, &prepared, member_name, member)
     }
 
-    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
+    #[allow(dead_code)] // deletion in 5g per call-graph closure
     fn project_prepared_member_from_decl(
         &mut self,
         scope_canonical_id: &str,
@@ -462,7 +461,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 Some(member.ty.clone())
             }
             _ => {
-                // Phase 5l: dispatch path replaces the deprecated method.
+                // dispatch path replaces the deprecated method.
                 crate::meta_resolve::project_expr_surface_expr_via_host_threaded(
                     self,
                     scope_canonical_id,
@@ -479,7 +478,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         })
     }
 
-    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
+    #[allow(dead_code)] // deletion in 5g per call-graph closure
     fn project_prepared_member_path_route_surface_expr(
         &mut self,
         scope_canonical_id: &str,
@@ -497,7 +496,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         )
     }
 
-    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
+    #[allow(dead_code)] // deletion in 5g per call-graph closure
     fn expr_references_prepared_scope_symbol(
         &mut self,
         scope_canonical_id: &str,
@@ -638,7 +637,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
 
-    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
+    #[allow(dead_code)] // deletion in 5g per call-graph closure
     pub(super) fn solve_or_project_prepared_member_leaf_expr(
         &mut self,
         resolution_scope_canonical_id: &str,
@@ -681,7 +680,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     ///   per-sub-expression scope splitting because their sub-
     ///   expressions are already `TypeExpr` leaves that round-trip
     ///   through this function.
-    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
+    #[allow(dead_code)] // deletion in 5g per call-graph closure
     fn solve_or_project_leaf_expr_with_context(
         &mut self,
         context: &PreparedProjectionContext,
@@ -845,7 +844,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
 
-    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
+    #[allow(dead_code)] // deletion in 5g per call-graph closure
     fn solve_or_project_leaf_expr_until_stable(
         &mut self,
         scope_canonical_id: &str,
@@ -854,7 +853,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let mut current = expr.clone();
         let mut last = None;
         for _ in 0..3 {
-            // Phase 5l: dispatch the lower+project tail and the
+            // dispatch the lower+project tail and the
             // expr-surface bridge from `meta_resolve` instead of the
             // deprecated engine methods. The bridges share the engine's
             // cycle-protection helpers so behavior matches the legacy
@@ -883,7 +882,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         last
     }
 
-    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
+    #[allow(dead_code)] // deletion in 5g per call-graph closure
     pub(super) fn project_prepared_member_path_route_projection_from_symbol(
         &mut self,
         resolution_scope_canonical_id: &str,
@@ -966,7 +965,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         result
     }
 
-    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
+    #[allow(dead_code)] // deletion in 5g per call-graph closure
     fn project_prepared_member_path_route_projection_from_expr(
         &mut self,
         resolution_scope_canonical_id: &str,
@@ -1262,7 +1261,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
 
-    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
+    #[allow(dead_code)] // deletion in 5g per call-graph closure
     fn project_inherited_member_route_projection(
         &mut self,
         scope_canonical_id: &str,
@@ -1278,7 +1277,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         )
     }
 
-    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
+    #[allow(dead_code)] // deletion in 5g per call-graph closure
     fn project_inherited_member_route_projection_from_symbol(
         &mut self,
         scope_canonical_id: &str,
@@ -1358,7 +1357,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         result
     }
 
-    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
+    #[allow(dead_code)] // deletion in 5g per call-graph closure
     fn project_inherited_member_route_projection_from_expr(
         &mut self,
         _scope_canonical_id: &str,
@@ -1409,7 +1408,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .map(|projected_member| projected_member.ty)
     }
 
-    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
+    #[allow(dead_code)] // deletion in 5g per call-graph closure
     fn project_pick_route_surface_expr_via_members(
         &mut self,
         scope_canonical_id: &str,
@@ -1440,7 +1439,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             ) {
                 projected_member
             } else {
-                // Phase 5l: dispatch path replaces the deprecated method.
+                // dispatch path replaces the deprecated method.
                 dispatch_member_for_root_symbol(self, scope_canonical_id, symbol_name, member_name)?
             };
             self.cache_projected_member(scope_canonical_id, symbol_name, &projected_member);
@@ -1466,7 +1465,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         })))
     }
 
-    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
+    #[allow(dead_code)] // deletion in 5g per call-graph closure
     fn project_pick_route_surface_expr_via_routed_expr(
         &mut self,
         scope_canonical_id: &str,
@@ -1478,7 +1477,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         self.project_routed_expr_surface_expr_direct(scope_canonical_id, symbol_name, route)
     }
 
-    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
+    #[allow(dead_code)] // deletion in 5g per call-graph closure
     fn project_routed_expr_surface_expr_direct(
         &mut self,
         scope_canonical_id: &str,
@@ -1488,7 +1487,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         self.dispatch_routed_expr_surface_expr(scope_canonical_id, root_symbol, route)
     }
 
-    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
+    #[allow(dead_code)] // deletion in 5g per call-graph closure
     pub(super) fn project_prepared_pick_route_surface_expr(
         &mut self,
         scope_canonical_id: &str,

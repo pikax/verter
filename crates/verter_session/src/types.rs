@@ -146,7 +146,7 @@ pub struct HostConfig {
     /// `graph_completeness.has_orphan_edges = true`. Default: 10_000.
     pub max_derivation_edges: usize,
     /// Depth budget for path-projection / dispatch traversals
-    /// (Phase 5g-supplement §5.D.0 r17 + §0.6.5 stack-depth
+    /// (supplement §5.D.0 r17 + §0.6.5 stack-depth
     /// discipline). Tests construct constrained hosts to exercise
     /// budget-exceeded sentinel paths (`HostConfig { depth_budget: 2,
     /// ..Default::default() }`). When `0`, the existing `MAX_DEPTH`
@@ -158,14 +158,14 @@ pub struct HostConfig {
     /// `component_meta_materialize` cap).
     pub depth_budget: usize,
     /// Projection-operation budget for path-projection / dispatch
-    /// traversals (Phase 5m §5.13a.1.2 — request-scoped fuse state
+    /// traversals (request-scoped fuse state
     /// promoted to host-owned state per §0.6.5 stack-depth
     /// discipline).
     ///
     /// The legacy engine carried this as `FuseBudgets::projection_op_count`,
     /// a per-engine-construction-scoped fuse rail (§1.4) that
     /// terminates utility-shape recursion (`Partial<T>` / `Pick<T,K>` /
-    /// etc.) before recursion exhausts the call stack. Phase 5m
+    /// etc.) before recursion exhausts the call stack.
     /// promotes the BUDGET (not the per-request COUNTER — that lives
     /// in the request-scoped `RequestBudget` accessed via TLS) to a
     /// constructor-time `HostConfig` field so dispatch consumers
@@ -1183,7 +1183,7 @@ impl DependencyResolution {
 /// **DependencyState**: resolution metadata + invalidation hashes
 /// - `import_routes`, `dependencies`, `resolved_type_hashes`, `aliases`
 #[derive(Debug, Default)]
-#[allow(dead_code)] // Fields used progressively during Phase 2 migration
+#[allow(dead_code)] // Fields used progressively during migration
 pub(crate) struct CompileCacheEntry {
     // ── ProfileState: per-profile override + compile outputs ──
     pub(crate) content_overrides: FxHashMap<u64, ContentOverrideWithParse>,
@@ -1231,7 +1231,7 @@ pub(crate) struct CompileCacheEntry {
     /// a profile change evicts both. Consolidating them under one cache
     /// would require conflating COMPILE-event and FILE-CONTENT-event
     /// invalidation, which the existing system deliberately keeps separate.
-    /// Phase 6b classification: `legitimate-authority` (sub-mirror). See
+    /// classification: `legitimate-authority` (sub-mirror). See
     /// sub-plan §6b.2.F1.
     pub(crate) import_routes: FxHashMap<String, DependencyResolution>,
     pub(crate) dependencies: std::collections::BTreeSet<String>,
@@ -1278,7 +1278,7 @@ pub(crate) struct EffectiveFileState {
 /// synthetic SFC source, re-parses it, and stores the result here. The scheduler's
 /// raw source/analysis are never modified by overrides.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Used in Phase 2a: apply_block_overrides
+#[allow(dead_code)] // Used in apply_block_overrides
 pub(crate) struct ContentOverrideWithParse {
     pub(crate) layer: ContentOverrideLayer,
     pub(crate) parse: ParseSnapshot,
@@ -1291,7 +1291,7 @@ pub(crate) struct ContentOverrideWithParse {
 /// When a style preprocessor (e.g. SCSS → CSS) runs, the compiled CSS and its
 /// remapped CSS analysis (with SFC-absolute spans) are stored here per-profile.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Used in Phase 2a: apply_style_overrides
+#[allow(dead_code)] // Used in apply_style_overrides
 pub(crate) struct StyleOverrideWithAnalysis {
     pub(crate) layer: StyleOverrideLayer,
     /// Per-index: Some(remapped CSS analysis) for overridden blocks, None for raw.
@@ -1396,11 +1396,10 @@ pub(crate) struct CachedMetaPayload {
 /// Number of [`crate::semantic_query::SemanticNodeData`] discriminants used
 /// to size the per-discriminant push-count array in [`MetaProvenance`].
 ///
-/// Sized with headroom over the current 20 variants (Path C C1
-/// instrumentation per `/tmp/d-cutover-path-c-full-architectural-cleanup.md`
-/// §2 Stage 1) so adding a variant doesn't require widening the array. If
-/// `SemanticNodeData::discriminant_index` ever returns `>= 24`, that's a
-/// debug-assert hit at the push site rather than a silent overflow.
+/// Sized with headroom over the current 20 variants so adding a
+/// variant doesn't require widening the array. If
+/// `SemanticNodeData::discriminant_index` ever returns `>= 24`, that's
+/// a debug-assert hit at the push site rather than a silent overflow.
 pub const SEMANTIC_NODE_DATA_DISCRIMINANT_COUNT: usize = 24;
 
 /// Per-host provenance counters for component-meta observability.
@@ -1408,13 +1407,11 @@ pub const SEMANTIC_NODE_DATA_DISCRIMINANT_COUNT: usize = 24;
 /// AtomicU64 for thread-safe increment. Reset on host close. Not persisted.
 /// Host tests read counters directly via `host.provenance()`.
 ///
-/// Path C C1 instrumentation (per `/tmp/d-cutover-path-c-full-architectural-cleanup.md`
-/// §2 Stage 1) adds the `ensure_loaded_*`, `execute_cooperative_*`,
-/// `overlay_gate_*`, and `node_arena_*` families. They count
-/// cooperative-execute path selection, intern hot-path activity,
-/// and lock hold/wait time so subsequent passes (C17 interner sharding)
-/// can be evidence-driven. The `heavy_test_mutex_*` family was retired
-/// alongside `HEAVY_COMPONENT_META_TEST_MUTEX` per Path C C12 (plan §14.5).
+/// The `ensure_loaded_*`, `execute_cooperative_*`, `overlay_gate_*`,
+/// and `node_arena_*` families count cooperative-execute path
+/// selection, intern hot-path activity, and lock hold/wait time so
+/// future tuning passes (e.g., interner sharding) can be
+/// evidence-driven.
 pub struct MetaProvenance {
     pub get_component_meta_calls: std::sync::atomic::AtomicU64,
     pub component_meta_resolved_state_recomputes: std::sync::atomic::AtomicU64,

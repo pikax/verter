@@ -1,5 +1,5 @@
-// Phase 2: References — find all occurrences of a binding across script/template blocks.
-// Phase 3: Enhanced with cross-file references from TypeProvider.
+// References — find all occurrences of a binding across script/template blocks.
+// Enhanced with cross-file references from TypeProvider.
 
 use tower_lsp_server::ls_types::*;
 use verter_session::FileAnalysisSnapshot;

@@ -1,4 +1,4 @@
-//! Project-global host-owned cache root (Phase 1)
+//! Project-global host-owned cache root
 //!
 //! One [`ProjectTypeStore`] per loaded workspace / project-root set. It is
 //! the authoritative cache graph that replaces request-view-scoped memoization
@@ -106,7 +106,7 @@ pub struct AnalysisArtifactKey {
 /// `Send + Sync` data so long-lived host-owned caches do not carry borrowed
 /// AST pointers.
 ///
-/// As of Phase 5 this is the single canonical post-parse artifact. The
+/// As of this is the single canonical post-parse artifact. The
 /// transitional `IndexedReadyDb` cache that previously duplicated this
 /// payload has been retired; every consumer reads from
 /// [`IndexedReadyDb`] through [`ProjectTypeStore::indexed`].
@@ -157,9 +157,8 @@ impl IndexedReady {
     /// Test-only constructor producing a minimal `IndexedReady` with
     /// stub fields. Consumers of this helper only inspect
     /// `whole_hash`, so everything else is empty. Used by the
-    /// `legacy_trace_cutover` integration test (plan §3.A
-    /// Commit 6.E) to drive `IndexedReadyDb::insert` through the
-    /// event-emitting path.
+    /// `no_legacy_trace_surface` integration test to drive
+    /// `IndexedReadyDb::insert` through the event-emitting path.
     pub fn new_for_test(whole_hash: Hash16) -> Self {
         use rustc_hash::{FxHashMap, FxHashSet};
         let analysis = Arc::new(
@@ -238,7 +237,7 @@ pub struct IndexedReadyDb {
     /// [`crate::VerterHost::new_with_scheduler_config`] post-construction.
     /// On every fresh `insert`, the hook (if present) bumps the host's
     /// `total_shallow_processes` counter and records the canonical.
-    /// Phase 5g-supplement §5.D.0 r17.
+    /// supplement §5.D.0 r17.
     #[cfg(test)]
     test_audit_hook: parking_lot::Mutex<Option<Arc<crate::host_test_audit::HostTestAuditState>>>,
 }
@@ -258,7 +257,7 @@ impl IndexedReadyDb {
         }
     }
 
-    /// Install the host-level test audit hook (Phase 5g-supplement
+    /// Install the host-level test audit hook (supplement
     /// §5.D.0 r17). Called by `VerterHost::new_with_scheduler_config`
     /// once the test-audit `Arc` is allocated. The hook fires on every
     /// fresh `insert` and bumps `total_shallow_processes` plus the
@@ -332,7 +331,7 @@ impl IndexedReadyDb {
                 Arc::clone(&canonical_for_event),
                 whole_hash,
             );
-            // Phase 5g-supplement §5.D.0 r17 — host-level test audit
+            // supplement §5.D.0 r17 — host-level test audit
             // hook. Bumps `total_shallow_processes` and adds the
             // canonical to `loaded_files` so §5.D.2 read-once tests
             // can sample cumulative counters across requests.
@@ -508,12 +507,12 @@ impl crate::invalidation_domain::InvalidationByCanonical for AnalysisReadyDb {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// RouteOwnedShallow — F6/F7 unified destination DB (Phase 6b sub-plan §6b.2)
+// RouteOwnedShallow — F6/F7 unified destination DB
 // ──────────────────────────────────────────────────────────────────────────
 
 /// Project-store-owned route-only shallow state artifact.
 ///
-/// Phase 6b sub-plan §6b.2.F6 / F7 — Option (c): a first-class
+/// / F7 — Option (c): a first-class
 /// `RouteOwnedShallowDb` field on [`ProjectTypeStore`], replacing the two
 /// pre-migration host mutex caches (`external_type_analysis_cache` and
 /// `route_owned_shallow_cache`). The pre-migration `route_shallow_state`
@@ -569,7 +568,7 @@ pub struct RouteOwnedShallowEntry {
 
 impl RouteOwnedShallowEntry {
     /// Test-only constructor producing a minimal `RouteOwnedShallowEntry`
-    /// with stub fields. Used by phase-6b characterization tests T7 and
+    /// with stub fields. Used by characterization tests T7 and
     /// the eviction-cascade regression in 6b.D1; downstream consumers
     /// don't read these fields, only assert on the entry's identity.
     #[cfg(test)]
@@ -717,7 +716,7 @@ impl RouteOwnedShallowDb {
     }
 
     /// Project each `(canonical_id, &RouteOwnedShallowEntry)` pair through
-    /// `f` and collect the results. Phase 6b.D2a step 3 — exposes a stable
+    /// `f` and collect the results. exposes a stable
     /// iteration surface for `resolver_store::derived_hashes` fact-capture
     /// without leaking the inner `DashMap` type. The iteration is a DashMap
     /// snapshot — concurrent inserts during iteration are handled by
@@ -791,7 +790,7 @@ pub struct ProjectTypeStoreCounters {
     /// snapshot reflects total host-owned cache occupancy without
     /// per-DB plumbing in the snapshot surface.
     pub component_meta_cache_live: Arc<AtomicU64>,
-    /// Phase 6b.D1 — Route-only shallow cache (`RouteOwnedShallowDb`).
+    /// Route-only shallow cache (`RouteOwnedShallowDb`).
     /// Mirrors `indexed_live` / `indexed_stale_sweeps` for symmetric
     /// observability with [`IndexedReadyDb`].
     pub route_owned_shallow_live: Arc<AtomicU64>,
@@ -856,23 +855,23 @@ pub struct ProjectTypeStore {
     /// Rehomed routing-surface cache. `RouteDb` survives as the shared
     /// route/barrel authority under project-global validation semantics.
     routes: Arc<RouteDb>,
-    /// Temporary transitive-discovery helper. In Phase 2 this collapses to
-    /// transitive-only use; by Phase 5 it folds into the shared route /
+    /// Temporary transitive-discovery helper. In this collapses to
+    /// transitive-only use; by it folds into the shared route /
     /// semantic-query layer.
     imported_roots: Arc<ImportedRootDb>,
     /// Host-owned semantic-query memo table + node arena. Shared across
     /// every consumer that resolves a `SemanticQueryKey` through the
     /// shared query API.
     semantic_graph: Arc<SemanticGraphStore>,
-    /// Owner direct-import surface cache (Phase 2). Direct owner imports
+    /// Owner direct-import surface cache. Direct owner imports
     /// resolve exactly once per owner version and every downstream stage
     /// reads the same entry.
     owner_import_surfaces: OwnerImportSurfaceDb,
-    /// Final component-meta result cache (Phase 3). Keyed by
+    /// Final component-meta result cache. Keyed by
     /// `(owner_canonical, owner_whole_hash, options_fingerprint)`.
     /// Payload is [`crate::component_meta_result_db::CachedComponentMetaResult`]
     /// — the native `ComponentMetaAnalysis` plus the sanitized
-    /// resolution sidecar template. Phase 3 wires `get_component_meta`
+    /// resolution sidecar template. wires `get_component_meta`
     /// to consult the cache with completion-fence dep-signature
     /// validation before falling back to the cold resolver path; Step 4
     /// (architectural-debt-closure rev 10) extends the same cache to
@@ -880,7 +879,7 @@ pub struct ProjectTypeStore {
     /// warm replays return in near-zero time.
     component_meta_results:
         ComponentMetaResultDb<crate::component_meta_result_db::CachedComponentMetaResult>,
-    /// TypeScript `intrinsic` registry (Phase 2.1). Maps resolved
+    /// TypeScript `intrinsic` registry. Maps resolved
     /// declaration names that have `= intrinsic` bodies to their
     /// implementation arms. Userland aliases like `Pick` / `Omit` never
     /// reach this registry — it is consulted only after the normal
@@ -899,11 +898,10 @@ pub struct ProjectTypeStore {
     owner_collection_db: OwnerCollectionDb,
     prepared_target_db: PreparedTargetDb,
     materialize_memo_db: MaterializeMemoDb,
-    /// Plan §1.5 / Phase 8 — final-result cache for the structural
-    /// materialiser. Sole authoritative host-owned materialiser cache
-    /// post-Phase-9 (the legacy walker's per-shape DB was retired in
-    /// plan §11.2; the canonical retired-symbol list lives in
-    /// `tests/no_legacy_walker.rs::RETIRED_SYMBOLS`).
+    /// Plan §1.5 / final-result cache for the structural
+    /// materialiser. Sole authoritative host-owned materialiser cache.
+    /// The canonical removed-symbol list lives in
+    /// `tests/no_legacy_walker.rs::RETIRED_SYMBOLS`.
     materialize_structure_db: crate::component_meta_caches::MaterializeStructureDb,
     /// Plan §4.8 / Phase C / Commit R — host-owned cache for
     /// `meta_resolve::ref_root_reaches_transitive_cycle_node`. BFS
@@ -913,12 +911,10 @@ pub struct ProjectTypeStore {
     prepared_surface_db: PreparedSurfaceDb,
     prepared_member_db: PreparedMemberDb,
     routed_expr_surface_db: RoutedExprSurfaceDb,
-    /// Phase 6b.D1 (sub-plan §6b.2.F6/F7) — Route-only shallow cache.
-    /// Replaces the pre-migration `external_type_analysis_cache` and
-    /// `route_owned_shallow_cache` host mutexes (deleted in 6b.D2a step 4).
-    /// Canonical-keyed (`Arc<str>`) with `whole_hash` validated INSIDE the
-    /// entry; mirrors [`IndexedReadyDb`] exactly. Per-canonical eviction
-    /// goes through [`Self::evict_canonical`] (extended in 6b.D1 to call
+    /// Route-only shallow cache. Canonical-keyed (`Arc<str>`) with
+    /// `whole_hash` validated INSIDE the entry; mirrors
+    /// [`IndexedReadyDb`] exactly. Per-canonical eviction goes through
+    /// [`Self::evict_canonical`] (which calls
     /// `route_owned_shallow.remove(canonical)`); bulk eviction uses
     /// [`RouteOwnedShallowDb::clear_all`].
     route_owned_shallow: RouteOwnedShallowDb,
@@ -1059,7 +1055,7 @@ impl ProjectTypeStore {
         self.project_generation.load(Ordering::Acquire)
     }
 
-    /// Phase 6b.D1 alias — equivalent to [`Self::project_generation`] with
+    /// Alias — equivalent to [`Self::project_generation`] with
     /// a clearer name for the route-only shallow materialiser's tier-3
     /// staleness gate (sub-plan §6b.D2a step 2). The materialiser captures
     /// this value before reading + parsing, then re-checks it inside the
@@ -1095,7 +1091,7 @@ impl ProjectTypeStore {
         &self.imported_roots
     }
 
-    /// Phase 6b.F3 (Option (i)) — return a cloned `Arc<RouteDb>` handle
+    /// Return a cloned `Arc<RouteDb>` handle
     /// that callers can store and use as a stable, shared reference.
     /// Identical authority to `routes()` but returns a clonable owned
     /// `Arc` so the [`UnifiedResolverRuntime`](crate::resolver_core::resolver_runtime::UnifiedResolverRuntime)
@@ -1107,14 +1103,14 @@ impl ProjectTypeStore {
         Arc::clone(&self.routes)
     }
 
-    /// Phase 6b.F3 — return a cloned `Arc<ImportedRootDb>` handle. See
+    /// return a cloned `Arc<ImportedRootDb>` handle. See
     /// [`Self::routes_handle`] for the full rationale.
     #[must_use]
     pub fn imported_roots_handle(&self) -> Arc<ImportedRootDb> {
         Arc::clone(&self.imported_roots)
     }
 
-    /// Phase 6b.D1 — Route-only shallow cache. F6/F7 destination DB.
+    /// Route-only shallow cache. F6/F7 destination DB.
     /// See [`RouteOwnedShallowDb`] for the cache shape and
     /// [`Self::evict_canonical`] for per-canonical eviction semantics
     /// (which this DB participates in via the cascade extension landed
@@ -1129,20 +1125,20 @@ impl ProjectTypeStore {
         &self.semantic_graph
     }
 
-    /// Owner direct-import surface cache (Phase 2). Direct owner imports
+    /// Owner direct-import surface cache. Direct owner imports
     /// resolve exactly once per owner version through this cache.
     pub fn owner_import_surfaces(&self) -> &OwnerImportSurfaceDb {
         &self.owner_import_surfaces
     }
 
-    /// Final component-meta result cache (Phase 3).
+    /// Final component-meta result cache.
     pub fn component_meta_results(
         &self,
     ) -> &ComponentMetaResultDb<crate::component_meta_result_db::CachedComponentMetaResult> {
         &self.component_meta_results
     }
 
-    /// TypeScript `intrinsic` registry (Phase 2.1). Read-only from the
+    /// TypeScript `intrinsic` registry. Read-only from the
     /// resolver hot path; the host may re-register entries at boot when
     /// the active TS SDK is swapped.
     pub fn intrinsic_registry(&self) -> &IntrinsicRegistry {
@@ -1175,11 +1171,10 @@ impl ProjectTypeStore {
         &self.materialize_memo_db
     }
 
-    /// Plan §1.5 / Phase 8 — accessor for the structural-materialiser
-    /// final-result cache. Sole authoritative materialiser cache
-    /// post-Phase-9 cutover (the legacy walker's per-shape materialiser
-    /// DB was retired in plan §11.2 — see `RETIRED_SYMBOLS` in
-    /// `tests/no_legacy_walker.rs`).
+    /// Plan §1.5 / accessor for the structural-materialiser
+    /// final-result cache. Sole authoritative materialiser cache; the
+    /// canonical removed-symbol list lives in
+    /// `tests/no_legacy_walker.rs::RETIRED_SYMBOLS`.
     pub fn materialize_structure_db(
         &self,
     ) -> &crate::component_meta_caches::MaterializeStructureDb {
@@ -1205,7 +1200,7 @@ impl ProjectTypeStore {
         &self.routed_expr_surface_db
     }
 
-    /// Issue #6 / Phase 7 — accessor for the `AppConfigNoOverrideProof`
+    /// Issue #6 / accessor for the `AppConfigNoOverrideProof`
     /// cache consulted by the ComponentConfig theme variant fast path.
     /// On miss, the fast path declines and the slow path runs.
     pub fn app_config_no_override_proof_db(
@@ -1242,7 +1237,7 @@ impl ProjectTypeStore {
     /// - `SemanticGraphStore`: removes every memo entry whose scope
     ///   references the canonical, and every Vue macro resolution entry
     ///   keyed on the canonical.
-    /// - `RouteOwnedShallowDb` (Phase 6b.D1): removes the route-only
+    /// - `RouteOwnedShallowDb`: removes the route-only
     ///   shallow entry for the canonical (extension landed in 6b.D1; the
     ///   inner DB method is `remove`, mirroring `IndexedReadyDb::remove`).
     pub fn evict_canonical(&self, canonical_id: &str) {
@@ -1263,10 +1258,8 @@ impl ProjectTypeStore {
         self.owner_collection_db.invalidate_canonical(canonical_id);
         self.prepared_target_db.invalidate_canonical(canonical_id);
         self.materialize_memo_db.invalidate_canonical(canonical_id);
-        // Plan §1.5 / Phase 8 — Γ.B-style reverse-index drain on the
-        // structural-materialiser cache (sole materialiser cache
-        // post-Phase-9; the legacy walker's per-shape materialiser DB
-        // was retired in plan §11.2).
+        // Plan §1.5 / Γ.B-style reverse-index drain on the
+        // structural-materialiser cache (sole materialiser cache).
         self.materialize_structure_db
             .invalidate_for_canonical(canonical_id);
         // Plan §4.8 / Commit R — same per-canonical reverse-index drain
@@ -1276,10 +1269,10 @@ impl ProjectTypeStore {
         self.prepared_member_db.invalidate_canonical(canonical_id);
         self.routed_expr_surface_db
             .invalidate_canonical(canonical_id);
-        // Phase 6b.D1 — F6/F7 destination DB participates in the
+        // F6/F7 destination DB participates in the
         // per-canonical eviction cascade.
         self.route_owned_shallow.remove(canonical_id);
-        // Issue #6 / Phase 7 — drop any AppConfigNoOverrideProof entry
+        // Issue #6 / drop any AppConfigNoOverrideProof entry
         // whose dep_signature references this canonical or whose
         // app_config_decl_canonical_id IS this canonical.
         self.app_config_no_override_proof
@@ -1328,7 +1321,7 @@ impl ProjectTypeStore {
         self.prepared_surface_db.invalidate_all();
         self.prepared_member_db.invalidate_all();
         self.routed_expr_surface_db.invalidate_all();
-        // Issue #6 / Phase 7 — project-shape change invalidates every
+        // Issue #6 / project-shape change invalidates every
         // proof entry; the proof's dep signature includes routes and
         // workspace-level interface-merging state.
         self.app_config_no_override_proof.invalidate_all();

@@ -1,4 +1,4 @@
-//! Options-API + dual-script processing (D2 of Phase 11d ownership-domain
+//! Options-API + dual-script processing (ownership-domain
 //! analysis).
 //!
 //! Hosts:

@@ -2,7 +2,7 @@
 //! materialisation, shallow-file-state lookup, and import-route resolution
 //! used by the resolver / engine layers.
 //!
-//! Phase 11c sub-plan §11c.2 Domain F. Owns the largest single block of
+//! Domain F. Owns the largest single block of
 //! cache-discipline code in `host_manage`: the bundle materialiser, the
 //! prepared-decl freshness gate, the imported-symbol dependency walker,
 //! the indexed-ready upsert path, and the owner-direct-import surface.
@@ -961,7 +961,7 @@ impl VerterHost {
         }
     }
 
-    /// Phase 5 §A14 — O(1) lookup of an `AnalyzedMacro` from the
+    /// O(1) lookup of an `AnalyzedMacro` from the
     /// sidecar by its stable index in
     /// `ScriptAnalysisSnapshot.macros`. Returns `None` when the file
     /// is not indexed, has no script analysis, or `macro_index` is
@@ -1390,7 +1390,7 @@ impl VerterHost {
     }
 
     /// Get-or-build the [`OwnerImportSurface`](crate::owner_import_surface::OwnerImportSurface)
-    /// for `owner_canonical`. Phase 2 of the project-global cache overhaul:
+    /// for `owner_canonical`. of the project-global cache overhaul:
     /// direct owner imports resolve exactly once per owner version and every
     /// downstream stage reads the same surface entry.
     ///
@@ -1456,7 +1456,7 @@ impl VerterHost {
     }
 
     /// Resolve a direct owner import binding to its final root identity via
-    /// the Phase 2 owner import surface. Returns `(final_canonical,
+    /// the owner import surface. Returns `(final_canonical,
     /// final_exported_name)` matching the legacy
     /// [`Self::resolve_imported_type_root`] contract for direct
     /// owner imports, but sourced from one cached surface per owner version.

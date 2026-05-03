@@ -1,4 +1,4 @@
-//! Host-owned semantic-query memo table (Phase 2.2 core).
+//! Host-owned semantic-query memo table.
 //!
 //! This module provides the concrete backing store for
 //! [`SemanticQueryKey`](crate::semantic_query::SemanticQueryKey) →
@@ -521,7 +521,7 @@ pub struct SemanticGraphStore {
     ///
     /// **`Arc` discrimination.** When evicting an entry the registered
     /// `dep_signature` Arc is `ptr_eq`-compared against the current
-    /// entry's dep_signature. Under Phase 5 Γ.C interning this Arc is
+    /// entry's dep_signature. Under Γ.C interning this Arc is
     /// shared across equivalent dep_signatures so ptr_eq matches a
     /// concurrent fresh write only when its content really is the
     /// same; pre-Γ.C the registered Arc is the exact one the publish
@@ -616,7 +616,7 @@ enum FamilyKey {
     ResolvedNamedType {
         key: Arc<HostResolvedNamedTypeKey>,
     },
-    /// Phase 5 §5.0 binding amendment — `ResolveMacroPayload`. Mode-erased
+    /// binding amendment — `ResolveMacroPayload`. Mode-erased
     /// for the family memo; the per-mode result lives in the matching
     /// `FamilySlots` slot.
     ResolveMacroPayload {
@@ -750,7 +750,7 @@ struct DerivationStore {
 
 impl DerivationStore {
     fn intern_signature(&mut self, sig: DepSignature) -> Arc<DepSignature> {
-        // Phase 11b diagnosis: record one signature-intern call per
+        // diagnosis: record one signature-intern call per
         // invocation, classified into `returned_existing` vs.
         // `allocated`. The capture-token hook is a no-op when no
         // token is bound (zero-overhead production path). The
@@ -896,7 +896,7 @@ struct AtomicSemanticGraphStats {
     projection_depth_samples: Mutex<SampleCollector>,
     decl_subexpression_lowering_count: AtomicU64,
     relation_check_count: AtomicU64,
-    /// Plan §8 / Phase 6 — count of `intern_preserving_scope` calls
+    /// Plan §8 / count of `intern_preserving_scope` calls
     /// observed by the store. Pre-Fix-D substitute helpers rebuilt
     /// every match arm unconditionally; post-Fix-D the no-op
     /// branches short-circuit and skip the call entirely.
@@ -1098,7 +1098,7 @@ fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
             },
             ModeSlot::Single,
         ),
-        // Phase 5 §5.0 binding amendment — `ResolveMacroPayload`. The
+        // binding amendment — `ResolveMacroPayload`. The
         // mode is stripped into the slot per the standard mode-bearing
         // pattern; the family identity is the (owner, macro_index,
         // macro_kind, type_args) tuple.
@@ -1155,7 +1155,7 @@ thread_local! {
 /// RAII wrapper around a `parking_lot::MutexGuard` for the
 /// `SemanticGraphStore::entries` mutex. Records the wait time
 /// observed at acquisition and the hold time observed at drop on the
-/// active [`crate::capture_token::CaptureToken`]. Phase 11b diagnosis
+/// active [`crate::capture_token::CaptureToken`]. diagnosis
 /// instrumentation only — the production hot path pays one extra
 /// `Instant::now()` read per acquisition (constant-time) and the
 /// Drop is a single `Instant::elapsed()` plus the no-op
@@ -1211,7 +1211,7 @@ impl SemanticGraphStore {
         Self::default()
     }
 
-    /// Phase 11b diagnosis accessor: number of distinct interned
+    /// diagnosis accessor: number of distinct interned
     /// `DepSignature` payloads in the derivation-signature pool. Used
     /// by the diagnosis benchmark to record the pool's growth across
     /// scenarios — `record_signature_pool_size` on the active capture
@@ -1221,7 +1221,7 @@ impl SemanticGraphStore {
         self.derivation.lock().signature_pool.len()
     }
 
-    /// Phase 11b diagnosis-instrumented entries-mutex acquisition.
+    /// diagnosis-instrumented entries-mutex acquisition.
     ///
     /// Returns a [`parking_lot::MutexGuard`] for `self.entries` while
     /// timing both the wait (lock-acquisition latency) and the hold
@@ -1252,8 +1252,8 @@ impl SemanticGraphStore {
     /// [`Self::new`] / [`Self::default`] (provenance stays `None`).
     ///
     /// The constructor installs provenance via field mutation on a
-    /// `Default`-built store so it stays compatible with the d-cutover
-    /// characterization tests that require single-owner cardinality for
+    /// `Default`-built store so it stays compatible with the dispatch
+    /// invariant tests that require single-owner cardinality for
     /// `arena: NodeArena` and `relation_memo: DashMap` in production code.
     #[must_use]
     pub fn with_provenance(provenance: Arc<crate::types::MetaProvenance>) -> Self {
@@ -1327,7 +1327,7 @@ impl SemanticGraphStore {
     }
 
     /// Test/diagnostic — read the cumulative count of
-    /// `intern_preserving_scope` calls. Plan §8 / Phase 6
+    /// `intern_preserving_scope` calls. Plan §8 /
     /// discriminating signal for the substitute change-tracking
     /// optimization: a no-op substitution must increment this
     /// counter by zero post-Fix-D.
@@ -1426,12 +1426,12 @@ impl SemanticGraphStore {
     pub fn invalidate_canonical(&self, canonical_id: &str) -> usize {
         use rustc_hash::FxHashSet;
 
-        // Phase 1 (Γ.B reverse-index path): drain the per-canonical
+        // drain the per-canonical
         // (family, slot) → registered_dep_signature map for
         // `canonical_id`. The drain releases the per-canonical mutex
-        // before phase 2 acquires `entries`, preserving the
+        // before acquires `entries`, preserving the
         // documented `entries → canonical_to_entries shards` lock
-        // order. `affected_pairs` is retained so phase 3 (in-flight
+        // order. `affected_pairs` is retained so (in-flight
         // abort) can drop matching in-flight entries even when phase
         // 2's `Arc::ptr_eq` check rejects an entry (e.g., a fresh
         // post-publish write replaced the registered dep_signature).
@@ -1451,7 +1451,7 @@ impl SemanticGraphStore {
             affected_pairs.insert((family.clone(), *slot));
         }
 
-        // Phase 2 (entries eviction with `Arc::ptr_eq`): walk the
+        // walk the
         // drained set under the entries lock. Drop each slot whose
         // current dep_signature `Arc::ptr_eq`-matches the registered
         // dep_signature. ptr_eq distinguishes "our entry" from "a
@@ -1485,11 +1485,11 @@ impl SemanticGraphStore {
             entries.retain(|_, slots| slots.populated_count() > 0);
         }
 
-        // Phase 3 (cross-canonical cleanup): for each evicted entry's
+        // for each evicted entry's
         // dep_signature, walk every other canonical it referenced and
         // drop the matching `(family, slot)` registration if it still
         // ptr_eq-matches our dep_signature. Lock order respected:
-        // `entries` was unlocked at the close of phase 2 before any
+        // `entries` was unlocked at the close of before any
         // shard mutex is acquired here.
         for entry_sig in &evicted_dep_sigs {
             for (other_canonical, _) in entry_sig.iter() {
@@ -1510,18 +1510,17 @@ impl SemanticGraphStore {
             }
         }
 
-        // Phase 4 (in-flight abort, was phase 2 pre-Γ.B): drop
+        // drop
         // in-flight entries for any (family, slot) whose warm slot
         // was just evicted. Joiners waiting on the condvar observe
         // `aborted = true` on wake and re-enter dispatch from step 1
         // of `execute_cooperative`. The completed sentinel wakes any
         // joiner whose wait predicate only checks `completed`.
         //
-        // `affected_pairs` is populated from the Γ.B drained set in
-        // phase 1 — even slots that phase 2's ptr_eq rejected (because
-        // a fresh post-publish write replaced the registered Arc) are
-        // included so any in-flight entry under that pair still aborts
-        // correctly.
+        // `affected_pairs` is populated from the Γ.B drained set —
+        // even slots that the ptr_eq step rejected (because a fresh
+        // post-publish write replaced the registered Arc) are included
+        // so any in-flight entry under that pair still aborts correctly.
         //
         // The `affected_pairs.is_empty()` guard short-circuits the
         // whole phase when no canonical-keyed entries existed,
@@ -1548,7 +1547,7 @@ impl SemanticGraphStore {
             });
         }
 
-        // Phase 5 (Γ.A NodeArena, was phase 3 pre-Γ.B): drop
+        // drop
         // NodeArena shard-dedup entries keyed at
         // `File { canonical_id: c, .. }`. Preserves Global entries
         // and entries for any other canonical (plan §1.10 Γ.A). The
@@ -1713,7 +1712,7 @@ impl SemanticGraphStore {
     /// multiple edges with the same `(result, kind)` — the layer supports
     /// this; the walker walks all edges (plan §2 + §7.16).
     ///
-    /// **Issue #11 / Phase 11d** (B-B7d's diagnosis report identified
+    /// **Issue #11** (B-B7d's diagnosis report identified
     /// duplicate edges as 12.8%–18.7% of every origin-edge emission on
     /// the `repo_first_pass` corpus). The cooperative-admission cold-
     /// winner path in `build_project_path`'s prefix-backfill loop emits
@@ -1738,7 +1737,7 @@ impl SemanticGraphStore {
         meta: crate::semantic_query::OriginMeta,
         builder_fence: DepSignature,
     ) {
-        // Phase 11b diagnosis instrumentation: bracket the entire
+        // diagnosis instrumentation: bracket the entire
         // `record_origin_edge` call with `Instant::now()` deltas so the
         // capture token can attribute per-call wall-clock cost. The
         // timing measurement itself is two RDTSC reads (Linux) /
@@ -1758,7 +1757,7 @@ impl SemanticGraphStore {
         // acquires its own mutex and we must not hold the graph lock
         // across that boundary (plan §4 Commit 4).
         //
-        // Phase 11d (Issue #11): the edge identity tuple is checked
+        // the edge identity tuple is checked
         // under the derivation lock for an existing match. When found,
         // the ledger write is skipped (no `store.record` call) and the
         // `already_recorded` flag flows through the rest of the
@@ -1807,7 +1806,7 @@ impl SemanticGraphStore {
         // request so the footprint miner sees every derivation hop.
         // No-op when no request context is installed.
         //
-        // Phase 11d audit-mining contract preservation: this push is
+        // audit-mining contract preservation: this push is
         // intentionally unconditional — it runs even on the dedup path
         // so dropped ledger writes still surface in the audit trace.
         if let Some(acc) = crate::request_context::current_accumulator() {
@@ -1821,7 +1820,7 @@ impl SemanticGraphStore {
         // token is bound (the production hot path) — no lock, no
         // allocation, one thread-local lookup.
         //
-        // Phase 11d: skip the capture-token edge ledger insert + the
+        // skip the capture-token edge ledger insert + the
         // `origin_edge_count` bump on the dedup path. The ledger / count
         // mirror the production-side ledger writes so test snapshots
         // observe the same dedup property.
@@ -1838,7 +1837,7 @@ impl SemanticGraphStore {
                     dep_signature_hash,
                 );
                 t.record_edge(identity);
-                // Phase 11d (Issue #11): bump the per-call counter +
+                // bump the per-call counter +
                 // wall-clock cost only on actual ledger emissions. The
                 // dedup-skipped path bypasses both so `origin_edge_count`
                 // mirrors the ledger-write count and
@@ -2106,7 +2105,7 @@ impl SemanticGraphStore {
         let mut miss_recorded = false;
         let mut retries = 0usize;
 
-        // Phase 5g-supplement §5.D.0 r17 — record cold/warm split for
+        // supplement §5.D.0 r17 — record cold/warm split for
         // the §5.D.1 cache-discipline tests. Done ONCE per logical
         // call (before the retry loop) so retries don't double-count.
         // Recorded with the canonical key the warm cache stores, AND
@@ -2119,7 +2118,7 @@ impl SemanticGraphStore {
         } else {
             crate::project_semantic_dispatch::raise::record_dispatch_cold(&key);
         }
-        // Issue #11 / Phase 11 — propagate the warm/cold observation to
+        // Issue #11 / propagate the warm/cold observation to
         // the per-request `CaptureToken` so `dispatch_count` and
         // `dispatch_misses` assertions can discriminate by family.
         // Recorded once per logical call (before the retry loop), like
@@ -2288,21 +2287,21 @@ impl SemanticGraphStore {
         //
         //    **TOCTOU guard.** We acquire `self.entries.lock()` FIRST and
         //    then re-check `inflight.state.aborted` under the entries
-        //    lock before calling `publish`. Invalidation's phase 1 also
+        //  lock before calling `publish`. Invalidation's also
         //    acquires `self.entries.lock()`; acquiring it here
         //    serialises us against invalidation. If invalidation got the
-        //    entries lock first and aborted our in-flight via phase 2,
+        //    entries lock first and aborted our in-flight via step 2,
         //    our re-check sees `aborted = true` and we skip publish. If
         //    we got the entries lock first, we publish and release;
-        //    invalidation then evicts our fresh publish in its phase 1.
+        //  invalidation then evicts our fresh publish in its
         //    Either interleaving leaves the slot empty post-invalidation.
         //    A pre-lock check alone would leave a gap where a build
         //    result from a thread that checked `aborted=false` before
-        //    acquiring `entries` could land AFTER invalidation's phase 1
-        //    completed but BEFORE phase 2 set `aborted=true` — a stale
+        //    acquiring `entries` could land AFTER invalidation's step 1
+        //  completed but BEFORE set `aborted=true` — a stale
         //    slot whose dep-sig does NOT reference the invalidated
         //    canonical (so even HostFenceValidator does not catch it).
-        // Phase 1B refactor: cold-winner publish path is encapsulated in
+        // refactor: cold-winner publish path is encapsulated in
         // `warm_publish_one` so that `publish_warm_if_absent` (used by
         // the §1.B prefix-backfill in `build_project_path`) can reuse the
         // same family/slot mapping + reverse-index registration without
@@ -2349,7 +2348,7 @@ impl SemanticGraphStore {
     }
 
     /// Cold-winner publish path. Extracted from
-    /// [`Self::execute_cooperative`] step 5 (Phase 1B refactor — pure
+    /// [`Self::execute_cooperative`] step 5 (refactor — pure
     /// extraction, no behaviour change). Skips publish when the result is
     /// not a [`QueryResult::Value`] (errors / recursion sentinels never
     /// promote to warm cache entries — plan §2 cache population). Skips
@@ -2359,8 +2358,8 @@ impl SemanticGraphStore {
     ///
     /// **TOCTOU contract.** Acquires `entries` lock first, then
     /// re-checks `inflight.state.aborted` under the entries lock. If
-    /// invalidation's phase 1 acquired `entries` first and aborted this
-    /// in-flight via phase 2, the re-check sees `aborted = true` and
+    /// invalidation's acquired `entries` first and aborted this
+    /// in-flight via step 2, the re-check sees `aborted = true` and
     /// skips publish. If this caller got `entries` first, publishes and
     /// releases; invalidation then evicts the fresh publish in its phase
     /// 1. Either interleaving leaves the slot empty post-invalidation.
@@ -2417,7 +2416,7 @@ impl SemanticGraphStore {
             .entry(family.clone())
             .or_default()
             .publish(slot, entry);
-        // Phase 4 — Γ.B reverse-index registration. For each populated
+        // Γ.B reverse-index registration. For each populated
         // slot (the primary plus any backfilled narrower slots),
         // register the (family, slot) → dep_signature mapping under
         // every canonical the dep_signature references. Lock order is
@@ -2432,7 +2431,7 @@ impl SemanticGraphStore {
         );
     }
 
-    /// Phase 1B variant of [`Self::warm_publish_one`]: publish
+    /// variant of [`Self::warm_publish_one`]: publish
     /// `(key, result, dep_signature)` into the warm map only when no
     /// entry already exists AND no concurrent in-flight build owns the
     /// key. No TOCTOU re-check (the caller does not own an in-flight
@@ -2491,7 +2490,7 @@ impl SemanticGraphStore {
         );
     }
 
-    /// Phase 1B Γ.B reverse-index registration helper. Shared by
+    /// Γ.B reverse-index registration helper. Shared by
     /// [`Self::warm_publish_one`] and
     /// [`Self::warm_publish_one_if_absent`]. Caller must have dropped
     /// the `entries` lock before calling per the `entries →
@@ -2514,7 +2513,7 @@ impl SemanticGraphStore {
         }
     }
 
-    /// Phase 1B path-prefix backfill API (plan §1.B). Publishes a
+    /// path-prefix backfill API (plan §1.B). Publishes a
     /// `(key, value, dep_signature)` triple via the same warm-publish
     /// helper that [`Self::execute_cooperative`] uses (extracted as
     /// [`Self::warm_publish_one_if_absent`]), gated by the "absent
@@ -2569,7 +2568,7 @@ impl SemanticGraphStore {
     /// Test-only: set `aborted = true` on the in-flight entry for `key`,
     /// plant an `Error(Other)` sentinel on `completed` if absent, notify
     /// waiters, and remove the entry from the table. Mirrors
-    /// `invalidate_canonical` phase 2 exactly but bypasses the phase 1
+    /// `invalidate_canonical` exactly but bypasses the step 1
     /// warm-slot gate so joiner-retry tests don't have to race a real
     /// invalidation window between publish and inflight retirement.
     ///
@@ -2639,14 +2638,14 @@ fn empty_signature() -> DepSignature {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// Plan §7 / Phase 5 — DepSignatureInterner
+// Plan §7 / DepSignatureInterner
 // ──────────────────────────────────────────────────────────────────────────
 
 /// Content-hash bucketed `Weak<...>` interner for `DepSignature`. Plan
 /// §7 / §1.10 Γ.C. Equivalent dep_signatures (same `(canonical,
 /// version)` set after sort+dedup) share a single `Arc<[(...)]>` so:
 ///
-/// 1. The Phase 4 reverse-index `Arc::ptr_eq` discrimination matches
+/// 1. The reverse-index `Arc::ptr_eq` discrimination matches
 ///    "our entry" vs "fresh post-publish write" correctly.
 /// 2. Memory pressure stays bounded — N publishes of the same dep
 ///    closure store one allocation, not N.
@@ -3196,10 +3195,10 @@ mod tests {
     }
 
     // ──────────────────────────────────────────────────────────────────
-    // Phase 5 — DepSignatureInterner (Γ.C)
+    // DepSignatureInterner (Γ.C)
     // ──────────────────────────────────────────────────────────────────
 
-    /// Phase 5 (plan §7 / §1.10 Γ.C) — interner returns the SAME
+    /// interner returns the SAME
     /// `Arc` for two distinct calls with equivalent payload.
     /// Discriminating: pre-fix tree has no interner, every publish
     /// builds a fresh Arc. Post-fix tree: dedup via content hash.
@@ -3250,7 +3249,7 @@ mod tests {
         );
     }
 
-    /// Phase 5 — sweep removes empty buckets and dead-Weak buckets.
+    /// sweep removes empty buckets and dead-Weak buckets.
     /// Plan §7 round-7 Codex#2 P1 #2 — mandatory test:
     /// `dep_signature_intern_sweep_removes_empty_buckets`.
     #[test]
@@ -3290,7 +3289,7 @@ mod tests {
         );
     }
 
-    /// Phase 5 — auto-sweep trigger fires every `SWEEP_INTERVAL`
+    /// auto-sweep trigger fires every `SWEEP_INTERVAL`
     /// inserts. Discriminating: drop strong refs, then intern enough
     /// distinct signatures to trip the auto-sweep. The bucket count
     /// stays bounded.
@@ -3315,7 +3314,7 @@ mod tests {
         );
     }
 
-    /// Phase 4 (plan §6 / §13.2 Γ.B) — `invalidate_canonical(c)`
+    /// `invalidate_canonical(c)`
     /// uses the `canonical_to_entries` reverse index to find affected
     /// `(family, slot)` pairs in O(referencing entries) instead of
     /// O(all entries). A publish must register its dep_signature in
@@ -3345,7 +3344,7 @@ mod tests {
         assert!(
             store.canonical_to_entries_count("/w/a.ts") >= 1,
             "publish must register the (family, slot) → dep_signature mapping \
-             in canonical_to_entries[\"/w/a.ts\"] (Phase 4 Γ.B reverse index)"
+             in canonical_to_entries[\"/w/a.ts\"] (Γ.B reverse index)"
         );
         assert_eq!(
             store.canonical_to_entries_count("/w/missing.ts"),
@@ -3354,7 +3353,7 @@ mod tests {
         );
     }
 
-    /// Phase 1B refactor invariant — the helper extracted from
+    /// refactor invariant — the helper extracted from
     /// `execute_cooperative` step 5 (`warm_publish_one`) must:
     ///   1. Insert into the warm map (slot becomes `get`-readable).
     ///   2. Register the `(family, slot) → dep_signature` reverse-index
@@ -3426,17 +3425,17 @@ mod tests {
         );
     }
 
-    /// Phase 4 — `invalidate_canonical` drains the reverse-index
+    /// `invalidate_canonical` drains the reverse-index
     /// entry for the canonical AND propagates the cleanup to other
     /// canonicals the evicted entry's dep_signature referenced
-    /// (cross-canonical cleanup, plan §6 phase 3).
+    ///.
     ///
     /// Discriminating: warm an entry whose dep_signature references
     /// BOTH "/w/a.ts" AND "/w/b.ts". Verify both reverse-index
     /// entries are populated (count == 1 each). Invalidate "/w/a.ts".
     /// Verify both reverse-index entries are EMPTY (the "/w/a.ts"
-    /// shard via drain in phase 1, the "/w/b.ts" shard via cross-
-    /// canonical cleanup in phase 3). Pre-fix: cross-canonical
+    /// shard via drain in step 1, the "/w/b.ts" shard via cross-
+    /// canonical cleanup in step 3). Pre-fix: cross-canonical
     /// cleanup did not exist; the "/w/b.ts" entry would dangle.
     #[test]
     fn family_map_invalidate_canonical_propagates_cross_canonical_cleanup() {
@@ -3482,18 +3481,18 @@ mod tests {
             store.canonical_to_entries_count("/w/a.ts"),
             0,
             "/w/a.ts reverse-index shard must be drained by invalidate_canonical \
-             (Phase 4 Γ.B phase 1 drain)"
+             (Γ.B step 1 drain)"
         );
         assert_eq!(
             store.canonical_to_entries_count("/w/b.ts"),
             0,
             "/w/b.ts reverse-index entry for the evicted (family, slot) must be \
-             cleaned up by cross-canonical cleanup (Phase 4 Γ.B phase 3); pre-fix \
+             cleaned up by cross-canonical cleanup (Γ.B step 3); pre-fix \
              this entry would dangle and bloat the reverse index over time"
         );
     }
 
-    /// Phase 4 — `invalidate_canonical` evicts the warm entry whose
+    /// `invalidate_canonical` evicts the warm entry whose
     /// dep_signature references the canonical (no behavioural change
     /// from pre-Γ.B), but now via the reverse-index path. Existing
     /// `invalidate_canonical_removes_only_matching_scope_keys` test
@@ -3554,7 +3553,7 @@ mod tests {
         );
     }
 
-    /// Phase 3 (component-meta cold-path long-tail plan §5 / §1.10 Γ.A)
+    /// Γ.A (component-meta cold-path long-tail plan §5 / §1.10)
     /// — Mandatory test gate. `invalidate_canonical(c)` must drop
     /// `NodeArena` shard-dedup entries whose origin scope is
     /// `NodeScopeId::File { canonical_id: c, .. }` while preserving:
@@ -3661,12 +3660,12 @@ mod tests {
         assert_eq!(
             global_id_post, global_id_first,
             "Global-scope shard entry must SURVIVE invalidate_canonical \
-             (Phase 3 Γ.A invariant — invalidation does NOT drop Global)"
+             (Γ.A invariant — invalidation does NOT drop Global)"
         );
         assert_eq!(
             file_b_id_post, file_b_id_first,
             "File(/w/b.ts) shard entry must SURVIVE invalidation of /w/a.ts \
-             (Phase 3 Γ.A invariant — invalidation drops only the matching canonical's File scope)"
+             (Γ.A invariant — invalidation drops only the matching canonical's File scope)"
         );
         assert_ne!(
             file_a_id_post, file_a_id_first,
@@ -4030,9 +4029,9 @@ mod tests {
     ///      but `FamilySlots::publish` writes the slot field directly,
     ///      not gated on in-flight ownership). Identity is now warm with
     ///      Expanded's result + dep-sig.
-    ///   3. Main calls `invalidate_canonical("/w/target.ts")`. Phase 1
-    ///      evicts Identity + Expanded (both reference the canonical).
-    ///      Phase 2 aborts A's in-flight at `(F, Identity)`: sets
+    ///   3. Main calls `invalidate_canonical("/w/target.ts")`. This
+    ///      evicts Identity + Expanded (both reference the canonical)
+    ///      and aborts A's in-flight at `(F, Identity)`: sets
     ///      `state.aborted = true`, plants a completed sentinel, notifies.
     ///   4. Main releases the barrier. A finishes its build and returns
     ///      a (would-be) `Value` result with a dep-sig that does NOT
@@ -4117,17 +4116,17 @@ mod tests {
             "Expanded's backfill must populate Identity before invalidation runs",
         );
 
-        // Invalidate /w/target.ts. Phase 1 evicts all four slots:
+        // Invalidate /w/target.ts. evicts all four slots:
         // Expanded's publish fills its target slot + backfills Shallow,
         // Navigate, and the empty Identity (writing the slot field
         // directly without gating on A's in-flight claim). All four
-        // carry Expanded's dep-sig. Phase 2 aborts A's in-flight at
+        // carry Expanded's dep-sig. aborts A's in-flight at
         // (F, Identity) because `(F, Identity)` is now in
         // `affected_pairs`.
         let removed = store.invalidate_canonical("/w/target.ts");
         assert_eq!(
             removed, 4,
-            "phase 1 evicts all four slots (Expanded publish + 3 backfilled narrower slots)",
+            "step 1 evicts all four slots (Expanded publish + 3 backfilled narrower slots)",
         );
 
         // Release A. It returns from the build closure and enters step 5.
@@ -5083,7 +5082,7 @@ mod tests {
             );
             seen_ids.push(result);
             for j in 0..=(i as u32) {
-                // Phase 11d (Issue #11): each emission must carry a
+                // each emission must carry a
                 // distinct edge identity so the per-node ledger
                 // observes (i+1) edges. Vary the dep_signature hash
                 // per emission so the dedup at `record_origin_edge`
@@ -5470,7 +5469,7 @@ mod tests {
     /// bumps `inflight_aborted_retries` exactly once per retry. Uses the
     /// `test_trigger_inflight_abort` helper to deterministically plant
     /// the abort on the live in-flight entry — the production path
-    /// (`invalidate_canonical` phase 2) requires a matching warm slot
+    /// requires a matching warm slot
     /// to have been evicted, which is not reachable while the cold
     /// winner is still running the build.
     #[test]
@@ -5525,7 +5524,7 @@ mod tests {
         // Give the joiner time to enter the wait.
         thread::sleep(std::time::Duration::from_millis(50));
 
-        // Abort the joiner's wait — simulate invalidation's phase 2
+        // Abort the joiner's wait — simulate invalidation's step 2
         // without requiring a matching warm slot.
         let aborted = store.test_trigger_inflight_abort(&key);
         assert!(aborted, "inflight entry must have been present to abort");

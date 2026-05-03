@@ -130,7 +130,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     quasis,
                     expressions,
                 } => {
-                    // Phase 5i: when every expression resolves to a
+                    // when every expression resolves to a
                     // single string literal, fold the template into a
                     // `Literal::String` by concatenating
                     // `quasis[0] expr[0] quasis[1] expr[1] … quasis[n]`.

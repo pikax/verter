@@ -1,5 +1,5 @@
-// Phase 2: Hover — binding name, kind, source location from verter_session analysis.
-// Phase 3: Enhanced with full resolved type signature, JSDoc from TypeProvider.
+// Hover — binding name, kind, source location from verter_session analysis.
+// Enhanced with full resolved type signature, JSDoc from TypeProvider.
 
 use std::collections::{HashMap, HashSet};
 

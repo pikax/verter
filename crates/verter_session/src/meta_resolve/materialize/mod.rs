@@ -1,6 +1,6 @@
 //! Materialization core: TypeExpr stabilizer + macro-shape producers.
 //!
-//! Phase 11a domain 7 — split into two children to keep each below the
+//! domain 7 — split into two children to keep each below the
 //! 4,000-line `god_module_size_budget`:
 //!
 //! - [`field_types`] — stabilizer

@@ -1,14 +1,86 @@
 //! Declaration-aware component-meta query engine.
 //!
-//! `ComponentMetaQueryEngine` is a request-scoped cache bag for one
-//! `get_component_meta()` request. It owns per-request projection caches
-//! and resolves type declarations lazily from the ctx's prepared-decl
-//! bundles. All solve-like operations dispatch through
-//! [`ProjectSemanticDispatch`]; D-Cutover §5.8 WIP-W retired the
-//! previously embedded `TypeQueryEngine` + `TypeSolverHost` bridge.
+//! `ComponentMetaQueryEngine` is the per-request execution surface for
+//! one `get_component_meta()` call. It resolves type declarations
+//! lazily from the ctx's prepared-decl bundles. All solve-like
+//! operations dispatch through [`ProjectSemanticDispatch`].
 //!
-//! The per-scope caches provide query-local memoization to avoid
-//! re-projecting the same imported type reference within one request.
+//! ## Authority model — what is durable vs. scratch
+//!
+//! The engine sits **above** the host's authoritative caches and
+//! **below** the public component-meta API. It does NOT own any
+//! durable cache state. The authoritative caches that survive
+//! beyond a single request are listed below; the engine reads from
+//! them via [`ResolverContext`] and (where applicable) writes to
+//! them through cooperative-admission `post_publish` so concurrent
+//! requests collapse onto one cold build.
+//!
+//! ### Authoritative host-owned caches (durable, dep-validated, reused across queries)
+//!
+//! - [`MaterializeMemoDb`](crate::component_meta_caches::MaterializeMemoDb)
+//!   — interned semantic instantiations keyed by
+//!   `(target_decl, mode, args)`. Final-result reuse across requests.
+//! - [`ComponentMetaResultDb`](crate::component_meta_caches::ComponentMetaResultDb)
+//!   — final `ComponentMetaAnalysis` payloads keyed by `(canonical, profile)`.
+//!   `get_component_meta` consults this first; the engine only runs on cold misses.
+//! - [`SemanticGraphStore`](crate::semantic_query_memo::SemanticGraphStore)
+//!   — interned semantic-node arena and resolved-named-type identity map.
+//!   Engine subqueries dispatch via
+//!   [`ProjectSemanticDispatch`](crate::project_semantic_dispatch::ProjectSemanticDispatch)
+//!   which deduplicates against this store.
+//! - [`RefCycleResultDb`](crate::component_meta_caches::RefCycleResultDb)
+//!   — host-cached transitive cycle-detection BFS results keyed by
+//!   parameterized generic helpers. Cooperative-admission cold build.
+//! - [`MaterializeStructureDb`](crate::component_meta_caches::MaterializeStructureDb)
+//!   — interned structural projections produced by the canonical
+//!   materialiser; sole authoritative materialiser cache.
+//!
+//! All five participate in `ProjectTypeStore`'s invalidation cascade
+//! and are dep-signature-validated on warm hit via
+//! [`HostFenceValidator`](crate::host_manage::HostFenceValidator).
+//!
+//! ### Per-request scratch (NOT promoted, dies with the engine)
+//!
+//! The engine retains a small set of `RefCell`-wrapped maps used to
+//! avoid recomputing the same projection within one request. These
+//! are scratch only:
+//!
+//! - `prepared_surface_cache` — read-through view of the ctx's
+//!   `prepared_surface_db`; mirrors the durable result for the current
+//!   request only.
+//! - `routed_expr_surface_cache` — same shape, for routed-expr surfaces.
+//! - `prepared_member_cache` — request-local memo of prepared-member
+//!   projections.
+//! - Type-param substitution maps and projection-chain scopes —
+//!   per-frame state for the current dispatch path.
+//!
+//! **None of these are written back to the host store directly.**
+//! When durable population is required, the engine uses the ctx's
+//! cooperative-admission `post_publish` path so the host store sees
+//! exactly one canonical write per cache key.
+//!
+//! ### Never-promoted results
+//!
+//! The following partial outcomes MUST NOT be admitted to the
+//! authoritative caches above. They produce request-local outputs only
+//! and are discarded when the engine drops:
+//!
+//! - cancelled requests (cooperative cancellation),
+//! - superseded results (a later request's input changed before this
+//!   one published),
+//! - interrupted results (panic / stack overflow / OS error caught by
+//!   the cooperative-admission guard),
+//! - budget-exceeded results (FuseBudgets tripped before the projection
+//!   converged), and
+//! - partial results (any path that returned `Opaque(Miss)` or an
+//!   intentionally incomplete shape because a strict-legality precondition
+//!   was not met).
+//!
+//! The engine's `post_publish` discipline enforces this: it commits
+//! only when the cooperative-admission guard records a complete success.
+//!
+//! See the `/component-meta` skill for the public API surface and the
+//! `/type-resolution` skill for the cross-file resolver query modes.
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -28,7 +100,7 @@ use crate::resolver_core::ResolverContext;
 use crate::resolver_core::{FuseBudgets, FuseState};
 use crate::semantic_query::SemanticNodeId;
 
-// Phase 11b.2 — surface-projection helpers, prepared-substitution
+// surface-projection helpers, prepared-substitution
 // machinery, and arc cache-key constructors live in the private
 // `surface` child module. The `pub(crate) use` block re-exports the
 // existing public-API symbols so external `crate::resolver_core::component_meta_query_engine::<name>`
@@ -56,7 +128,7 @@ use surface::{
     PreparedSurfaceProjection,
 };
 
-// Phase 11b.3 — predicate/utility helpers (route-expr surface keys,
+// predicate/utility helpers (route-expr surface keys,
 // package-canonical predicates, prepared-decl shape predicates,
 // registry-symbol resolution with budget) live in the private
 // `helpers` child module. All entries are `pub(super)` and used only
@@ -136,7 +208,7 @@ use std::cell::Cell;
 /// See [`ComponentMetaQueryEngine::solve_or_project_leaf_expr_with_context`]
 /// for the per-TypeExpr dispatch rules.
 //
-// Phase 5c (sub-plan §5 commit 3.7): no longer constructed after
+// no longer constructed after
 // trampoline conversion of the retired surface methods. Deleted in
 // 5g per §F call-graph closure.
 #[allow(dead_code)]
@@ -189,8 +261,8 @@ struct PreparedMemberCacheKey {
     substitutions: PreparedSubstitutionKey,
 }
 
-// Phase 5c (sub-plan §5 commit 3.7): `InheritedRoute` is no longer
-// constructed after trampoline conversion. Variant deleted in 5g per
+// `InheritedRoute` is no longer
+// constructed after trampoline conversion. Variant
 // §F call-graph closure.
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 enum PreparedMemberCacheKind {
@@ -229,7 +301,7 @@ pub(crate) struct FastShallowFieldExpr {
 /// Query-local component-meta solve engine.
 ///
 /// Declaration-scoped lookups resolve through dispatch via
-/// [`project_type_surface_expr`]. D-Cutover §5.8 WIP-W retired the
+/// [`project_type_surface_expr`]. retired the
 /// request-scoped owner engine bridge; all solve-like operations now
 /// route through `ProjectSemanticDispatch`. Imported registry entries
 /// memoize by declaration scope so the same textual reference does not
@@ -305,8 +377,8 @@ pub struct ComponentMetaQueryEngine<'a> {
     /// Read-through view; authority is
     /// `ProjectTypeStore::prepared_surface_db()`.
     ///
-    /// Phase 5c (sub-plan §5 commit 3.7): unread after trampoline
-    /// conversion of retired surface methods. Field deleted in 5g per
+    /// unread after trampoline
+    /// conversion of retired surface methods. Field
     /// §F call-graph closure.
     #[allow(dead_code)]
     prepared_surface_cache: RefCell<FxHashMap<PreparedSurfaceCacheKey, PreparedSurfaceProjection>>,
@@ -319,8 +391,8 @@ pub struct ComponentMetaQueryEngine<'a> {
     /// Read-through view; authority is
     /// `ProjectTypeStore::routed_expr_surface_db()`.
     ///
-    /// Phase 5c (sub-plan §5 commit 3.7): unread after trampoline
-    /// conversion of retired surface methods. Field deleted in 5g per
+    /// unread after trampoline
+    /// conversion of retired surface methods. Field
     /// §F call-graph closure.
     #[allow(dead_code)]
     routed_expr_surface_cache: RefCell<FxHashMap<RoutedExprSurfaceCacheKey, TypeExpr>>,
@@ -357,8 +429,8 @@ pub struct ComponentMetaQueryEngine<'a> {
     /// `decl_scope` (the current declaration owner) nor `arg_scope` (the
     /// caller's SFC) contains the value symbol.
     ///
-    /// Phase 5c (sub-plan §5 commit 3.7): unread after trampoline
-    /// conversion. Field deleted in 5g per §F call-graph closure.
+    /// unread after trampoline
+    /// conversion. Field.
     #[allow(dead_code)]
     projection_chain_scopes: Vec<String>,
 }
@@ -432,8 +504,8 @@ pub(crate) fn forbid_prepared_structural_substitution_slow_lane_for_tests(
     PreparedStructuralSubstitutionSlowLaneGuard
 }
 
-// Phase 5c (sub-plan §5 commit 3.7): unused after trampoline
-// conversion of `project_route_surface_expr`. Helper deleted in 5g.
+// unused after trampoline
+// conversion of `project_route_surface_expr`. Helper.
 #[cfg(test)]
 #[allow(dead_code)]
 fn assert_direct_pick_routed_expr_slow_lane_allowed() {
@@ -623,7 +695,7 @@ fn empty_semantic_args() -> std::sync::Arc<[SemanticNodeId]> {
     std::sync::Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice())
 }
 
-/// Phase 5l — engine-internal helper that mirrors the deprecated
+/// engine-internal helper that mirrors the deprecated
 /// `project_type_member` entry: dispatch the single-member projection,
 /// falling back to the prepared-decl walker when dispatch misses.
 /// Used by `project_routed_expr_surface_expr` and friends after the
@@ -651,7 +723,7 @@ fn dispatch_member_for_root_symbol(
         })
 }
 
-/// Phase 5l — engine-internal substitution helper that mirrors the
+/// engine-internal substitution helper that mirrors the
 /// deleted `instantiate_local_generic_ref` engine method body. Unlike
 /// the dispatch-only `instantiate_local_generic_ref_via_dispatch`, this
 /// helper walks the re-export chain via

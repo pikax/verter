@@ -166,7 +166,7 @@ impl RuleRegistry {
     /// Create a registry with all built-in rules.
     pub fn builtin() -> Self {
         let mut registry = Self::new();
-        // Rules will be registered here as they're implemented in Phase 10
+        // Rules will be registered here as they're implemented in
         register_builtin_rules(&mut registry);
         registry
     }

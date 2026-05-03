@@ -173,7 +173,7 @@ enum WholeRouteContext {
 }
 
 // ---------------------------------------------------------------------------
-// Budget and failure contract (Phase 1.5)
+// Budget and failure contract
 // ---------------------------------------------------------------------------
 
 /// Deterministic budgets for the three resolution domains.
@@ -458,7 +458,7 @@ impl ShallowFileState {
                 };
                 augment_with_typeof_import_deps(&decl.body, &import_targets, &mut external_deps);
 
-                // Phase 1b: Declaration merging — multiple interfaces with the
+                // Declaration merging — multiple interfaces with the
                 // same name merge their members (TS declaration merging).
                 if let Some(existing) = symbols.get_mut(name) {
                     if existing.kind == TypeDeclKind::Interface

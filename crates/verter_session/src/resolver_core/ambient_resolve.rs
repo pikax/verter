@@ -1,4 +1,4 @@
-//! Phase 5a §6.7: session-side ambient global resolver.
+//! session-side ambient global resolver.
 //!
 //! Bare-name fallback for symbols that aren't found in scope or in the
 //! import graph. Looks the symbol up against the workspace's per-project
@@ -7,11 +7,11 @@
 //! (`ambient:/<tag>/<canonical>`).
 //!
 //! The full session-side scheduler submission (lazy parse → analysis →
-//! type lowering) is intentionally deferred to a follow-up sub-phase per
-//! §0 binding amendment / brief: phase 5a stops at the symbol-resolution
-//! and dep-recording infrastructure, and phase 5b's bare-name resolver is
-//! the first caller. The signature below is fixed; subsequent sub-phases
-//! extend it to issue the scheduler request internally.
+//! type lowering) is intentionally deferred to a follow-up: this stops
+//! at the symbol-resolution and dep-recording infrastructure, and the
+//! bare-name resolver is the first caller. The signature below is
+//! fixed; later work extends it to issue the scheduler request
+//! internally.
 
 use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
 use verter_workspace::ProjectStableKey;
@@ -29,9 +29,9 @@ use crate::resolver_core::ResolverContext;
 /// - returns a `ResolvedRootIdentity` whose `canonical_id` is the ambient
 ///   virtual id, ensuring the resolver fence reaches
 ///   [`HostFenceValidator`](crate::host_manage::HostFenceValidator)'s
-///   ambient `WholeHash` arm (Phase 5a §6.6 / A8).
+///   ambient `WholeHash` arm.
 ///
-/// First production caller lands in 5b's bare-name resolver fallback.
+/// First production caller is the bare-name resolver fallback.
 #[allow(dead_code)]
 pub(crate) fn resolve_ambient_global(
     ctx: &dyn ResolverContext,
@@ -39,7 +39,7 @@ pub(crate) fn resolve_ambient_global(
     consumer_project_stable_key: ProjectStableKey,
     symbol: &str,
 ) -> Option<ResolvedRootIdentity> {
-    // Phase 10a: workspace mutators are NOT exposed on `ResolverContext`.
+    // workspace mutators are NOT exposed on `ResolverContext`.
     // The two narrow ambient capabilities `lookup_ambient_symbol` and
     // `record_ambient_dependency` replace the broad `workspace()` accessor
     // that the previous `&VerterHost` callsite consulted.

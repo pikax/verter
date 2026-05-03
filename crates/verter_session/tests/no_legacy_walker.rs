@@ -1,14 +1,13 @@
-//! LEGACY_GATE_SELF — Phase 9 static-grep gate (plan §11.4).
+//! LEGACY_GATE_SELF — static-grep gate (plan §11.4).
 //!
-//! Guards against re-introduction of the legacy walker family after
-//! the Phase-9 cutover. The walker's outer shim and entire inner
-//! body family (`walker_cycle_key_node`,
-//! `expand_generic_ref_via_scope_iteration`,
-//! and the visited-set helper variant) were deleted, along with the
+//! Guards against re-introduction of the legacy walker family. The
+//! walker's outer shim and entire inner body family
+//! (`walker_cycle_key_node`,
+//! `expand_generic_ref_via_scope_iteration`, and the visited-set
+//! helper variant) no longer exist, along with the
 //! `component_meta_dispatch_iteration` module that hosted the
-//! walker's visited-set helper. Plan §6.8 (commit G) deletes the
-//! outer shim; commit I finalises the RETIRED_SYMBOLS list to
-//! include the outer shim's name.
+//! walker's visited-set helper. The `RETIRED_SYMBOLS` constant below
+//! holds the canonical list this gate enforces.
 //!
 //! Self-exclusion: the first 5 lines of this file contain
 //! `LEGACY_GATE_SELF` so the recursive walk skips this file.

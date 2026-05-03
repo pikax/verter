@@ -1,6 +1,6 @@
 //! Surface-projection helpers, prepared-substitution machinery, and
 //! arc cache-key constructors extracted from
-//! `component_meta_query_engine/mod.rs` in Phase 11b.2.
+//! `component_meta_query_engine/mod.rs` in the prior cutover.2.
 //!
 //! These helpers are intentionally free functions (not engine methods).
 //! They operate on `TypeExpr` / `ProjectedSurface` values produced by

@@ -81,7 +81,7 @@ enum IndexedPath {
     Slots,
 }
 
-/// Phase 7 entry point. Returns `FastPathOutcome::Hit(candidate)` when
+/// entry point. Returns `FastPathOutcome::Hit(candidate)` when
 /// every legality predicate passes; `FastPathOutcome::Miss` otherwise.
 ///
 /// Caller (`materialize_component_meta_field_types`) invokes this

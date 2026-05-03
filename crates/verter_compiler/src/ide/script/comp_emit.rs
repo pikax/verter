@@ -1,4 +1,4 @@
-//! Comp-function emission for IDE TSX template projection (D9 of Phase 11d
+//! Comp-function emission for IDE TSX template projection (D9 of
 //! ownership-domain analysis).
 //!
 //! This is the largest sibling. Hosts:

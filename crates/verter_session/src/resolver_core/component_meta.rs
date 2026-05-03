@@ -337,19 +337,19 @@ fn jsdoc_tags_from_resolved(
         .collect()
 }
 
-/// Phase 4 — graph-native per-member JSDoc enrichment.
+/// graph-native per-member JSDoc enrichment.
 ///
 /// Walks the resolved cross-file `elements` parallel to the way
 /// `project_macro_surfaces` projected them, and asks
 /// `host.resolve_jsdoc_block` (an existing host API) for the JSDoc
 /// block sitting near each source-element span. Found descriptions
 /// and tags overwrite the empty `description = None` / `tags = vec![]`
-/// values that the post-Phase-4 graph-native projection (which
+/// values that the graph-native projection (which
 /// receives `source = None`) wrote.
 ///
-/// Pre-Phase-4 the resolver passed the imported declaration's raw
+/// the resolver passed the imported declaration's raw
 /// source text into `project_macro_surfaces`, which then called
-/// `member_jsdoc(source, prop.span)` per element. Phase 4 deleted
+/// `member_jsdoc(source, prop.span)` per element. deleted
 /// the host source-text reader from this resolver and the fallback
 /// paths it fed; the source-text inputs are gone. This helper reuses the
 /// shared `host.resolve_jsdoc_block` helper (the same path the
@@ -534,7 +534,7 @@ where
                     .get(dep.macro_index)
                     .copied()
                     .unwrap_or(false);
-                // Phase 4b §4b.4 — graph-native authoritative-owner-
+                // graph-native authoritative-owner-
                 // local detection. The legacy
                 // `macro_has_authoritative_resolved_local_surface`
                 // re-parsed `resolved.expanded` text via the
@@ -703,7 +703,7 @@ where
                 )
             });
         if let Some(elements) = imported_elements {
-            // Phase 4 — graph-native projection. The resolver's
+            // graph-native projection. The resolver's
             // `host.resolve_macro_elements` returns the prop/emit/slot
             // surface graph-natively; `project_macro_surfaces(None, ...)`
             // preserves the core data extraction. Per-member JSDoc is
@@ -780,7 +780,7 @@ where
                 });
             }
         } else {
-            // Phase 4 — graph-native fallback. When `imported_elements`
+            // graph-native fallback. When `imported_elements`
             // is `None` the macro has no resolvable surface; emit empty
             // surfaces and proceed. The previous source-text reparse
             // path (read source then call the source-typed projector)
@@ -868,7 +868,7 @@ where
                         | AnalyzedMacroKind::DefineEmits
                 );
 
-            // Phase 4b §4b.4 — the legacy first-pass text-projection
+            // the legacy first-pass text-projection
             // over each `mac.resolved_local_types[i].expanded` string
             // is deleted. The graph-native second pass below
             // (`host.resolve_owner_local_macro_surface`) produces the
@@ -937,7 +937,7 @@ where
             //     chains like `Omit<ExternalType, K>`.
             //   - purely-local macros (no cross-file deps): the
             //     prepared projection is the only surface producer
-            //     after Phase 4b §4b.4 deleted the text-projection
+            //  after deleted the text-projection
             //     first pass.
             //   - DefineEmits with no imported deps under fallthrough
             //     scope: separate carve-out for the emits inheritance
@@ -1103,7 +1103,7 @@ mod tests {
         external_macro_elements: BTreeMap<(String, String), ResolvedElements>,
         eval_outputs: ComponentMetaEvalOutputs,
         projectable_owner_local_roots: BTreeSet<String>,
-        // Phase 4b §4b.4 — precomputed owner-local macro surfaces
+        // precomputed owner-local macro surfaces
         // keyed by root name. The legacy TestHost derived these
         // surfaces by re-parsing `source` text via the (now-deleted)
         // source-typed projector; the graph-only resolver demands
@@ -1757,7 +1757,7 @@ defineEmits<Emits>()
 
     #[test]
     fn local_resolved_macro_types_project_into_resolved_macro_surfaces() {
-        // Phase 4b §4b.4 — the legacy text-projection first pass
+        // the legacy text-projection first pass
         // would derive the projected surface by parsing
         // `mac.resolved_local_types[i].expanded` text. Under the
         // graph-only resolver the surface comes from
@@ -1853,8 +1853,8 @@ defineEmits<Emits>()
             external_macro_elements: BTreeMap::new(),
             eval_outputs: ComponentMetaEvalOutputs::default(),
             projectable_owner_local_roots: BTreeSet::from(["AppEmits".to_string()]),
-            // Phase 4b §4b.4 — graph-only: precomputed surface for
-            // `AppEmits` derived once and seeded directly. Pre-Phase-4b
+            // graph-only: precomputed surface for
+            // `AppEmits` derived once and seeded directly.
             // the TestHost re-derived this from `source` text.
             owner_local_macro_surfaces: BTreeMap::from([(
                 "AppEmits".to_string(),
@@ -1911,10 +1911,10 @@ defineEmits<Emits>()
 
     #[test]
     fn local_resolved_slot_types_project_resolved_pick_bindings() {
-        // Phase 4 — slot binding type-annotations are now the resolved
+        // slot binding type-annotations are now the resolved
         // leaf, not the symbolic indexed-access form.
         //
-        // Pre-Phase-4 + pre-Phase-5l: this test asserted the symbolic
+        // + : this test asserted the symbolic
         // form `Some("CalendarCellTriggerProps['day']")`. The pre-
         // change pipeline read the owner source via the host source-
         // text reader and ran the source-typed projector against it;
@@ -1924,7 +1924,7 @@ defineEmits<Emits>()
         // `Pick<X, K>` down to the symbolic `X[K]` form
         // `CalendarCellTriggerProps['day']`.
         //
-        // Post-Phase-4 + post-Phase-5l + post-Phase-4b: the
+        // + + : the
         // source-text reparse path is gone (both the host source-
         // text reader and the source-typed projector are deleted).
         // Owner-local resolved-type projection runs through the
@@ -1955,7 +1955,7 @@ defineSlots<CalendarSlots>()
             external_macro_elements: BTreeMap::new(),
             eval_outputs: ComponentMetaEvalOutputs::default(),
             projectable_owner_local_roots: BTreeSet::from(["CalendarSlots".to_string()]),
-            // Phase 4b §4b.4 — graph-only: the owner-local slot
+            // graph-only: the owner-local slot
             // surface is precomputed (production derives the same
             // shape via `host.resolve_owner_local_macro_surface` from
             // the prepared graph projection).
@@ -2158,7 +2158,7 @@ type LocalItem = {
     #[test]
     fn resolve_component_meta_parts_skips_transitive_imported_macro_resolution_when_eval_surface_is_authoritative(
     ) {
-        // Phase 4b §4b.4 — `authoritative_resolved_local` is now
+        // `authoritative_resolved_local` is now
         // `projectable_owner_local`; configuring `Props` as a
         // projectable owner-local root makes the transitive
         // imported `ImportedBase` dep suppressible alongside the
@@ -2297,7 +2297,7 @@ type Props = Pick<ImportedBase, 'href'>
     #[test]
     fn resolve_component_meta_parts_skips_transitive_imported_macro_resolution_when_raw_surface_is_authoritative(
     ) {
-        // Phase 4b §4b.4 — `authoritative_resolved_local` is now
+        // `authoritative_resolved_local` is now
         // `projectable_owner_local`; configuring `Props` as a
         // projectable owner-local root makes the owner-local
         // surface authoritative and suppresses the transitive
@@ -2420,7 +2420,7 @@ type Props = Pick<ImportedBase, 'href'>
     #[test]
     fn resolve_component_meta_parts_skips_transitive_imported_macro_resolution_when_resolved_local_surface_is_authoritative(
     ) {
-        // Phase 4b §4b.4 — `authoritative_resolved_local` is now
+        // `authoritative_resolved_local` is now
         // `projectable_owner_local`; configuring `Props` as a
         // projectable owner-local root drives the suppression.
         let source = r#"
@@ -2540,7 +2540,7 @@ type Props = {
     #[test]
     fn resolve_component_meta_parts_skips_direct_imported_macro_resolution_when_resolved_local_surface_is_authoritative(
     ) {
-        // Phase 4b §4b.4 — `authoritative_resolved_local` is now
+        // `authoritative_resolved_local` is now
         // `projectable_owner_local`. The macro's
         // `type_references = ["Props", "ImportedBase"]` lists
         // ImportedBase as an indirect reference (used inside
@@ -2661,7 +2661,7 @@ type Props = {
     #[test]
     fn resolve_component_meta_parts_skips_direct_imported_macro_resolution_when_local_wrapper_type_expr_is_available(
     ) {
-        // Phase 4b §4b.4 — `authoritative_resolved_local` is now
+        // `authoritative_resolved_local` is now
         // `projectable_owner_local`; configuring `Props` as a
         // projectable owner-local root drives the suppression of
         // the indirect ImportedBase dep.
@@ -2795,7 +2795,7 @@ type Props = Omit<ImportedBase, 'hidden'>
             )]),
             eval_outputs: ComponentMetaEvalOutputs::default(),
             projectable_owner_local_roots: BTreeSet::from(["Props".to_string()]),
-            // Phase 4b §4b.4 — graph-only: precomputed owner-local
+            // graph-only: precomputed owner-local
             // surface for `Props` (the prepared shape resolves
             // `Omit<ImportedBase, 'hidden'>` graph-natively in
             // production via `host.resolve_owner_local_macro_surface`;
@@ -2953,15 +2953,15 @@ type Props = Omit<ImportedBase, 'hidden'>
 
     #[test]
     fn resolve_component_meta_parts_seeds_imported_macro_root_when_graph_metadata_unknown() {
-        // Phase 4b §4b.3 — the prior assertion ("direct non-object
+        // the prior assertion ("direct non-object
         // imported aliases stay out of the initial registry seed")
-        // depended on the source-text reparse path: pre-Phase-4b the
+        // depended on the source-text reparse path: the
         // resolver derived `kind=TypeAlias` + body-text from the
         // host source-text reader, parsed the body, and skipped the
         // seed when the alias was non-object
         // (`string | VNode | (() => VNode)`).
         //
-        // Post-Phase-4b that source-text reparse path is gone. The
+        // that source-text reparse path is gone. The
         // host returns whatever graph metadata the
         // `local_type_symbol_metadata` index carries; for an imported
         // alias with no metadata seeded, `kind` is `Unknown`. The
@@ -3061,7 +3061,7 @@ type Props = Omit<ImportedBase, 'hidden'>
 
     #[test]
     fn resolve_component_meta_parts_keeps_non_root_local_helpers_off_resolved_macros() {
-        // Phase 4b §4b.4 — under the graph-only resolver only roots
+        // under the graph-only resolver only roots
         // the host's `projectable_owner_local_macro_roots` returns
         // are eligible for owner-local projection. The TestHost
         // models this by configuring `projectable_owner_local_roots`
@@ -3582,7 +3582,7 @@ fn is_direct_macro_type_reference(
         return false;
     }
 
-    // Phase 4 — graph-native gate. The parsed type argument (cached
+    // graph-native gate. The parsed type argument (cached
     // once during shallow analysis per the Shallow File Processing
     // Core Invariant) is the authoritative shape of the macro's first
     // type arg. When present, the dep is "direct" only if the parsed
@@ -3622,11 +3622,11 @@ fn keep_direct_imported_vue_macro(
         && declaration.canonical_source.ends_with(".vue")
 }
 
-// Phase 11a / post-cutover clippy cleanup — `direct_macro_type_reference_expr`,
-// `find_matching_angle`, and `split_top_level_type_args` were post-cutover
+// / clippy cleanup — `direct_macro_type_reference_expr`,
+// `find_matching_angle`, and `split_top_level_type_args` were
 // orphans (no caller in the landed tree). They originated as the legacy
 // span-extraction path for cross-file `defineProps<T>()` macros before
-// the dispatch-backed resolver took over. Removed in the post-cutover
+// the dispatch-backed resolver took over. Removed in the
 // clippy cleanup; the dispatch path is the sole canonical resolution.
 
 fn type_expr_has_direct_macro_reference(expr: &TypeExpr, needle: &str) -> bool {

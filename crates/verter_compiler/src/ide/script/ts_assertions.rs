@@ -1,4 +1,4 @@
-//! TS angle-bracket type-assertion rewriter (D5 of Phase 11d
+//! TS angle-bracket type-assertion rewriter (D5 of
 //! ownership-domain analysis).
 //!
 //! TypeScript's `TSTypeAssertion` syntax (`<string>foo`) is ambiguous with

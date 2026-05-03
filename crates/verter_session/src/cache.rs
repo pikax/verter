@@ -207,7 +207,7 @@ mod tests {
     }
 
     // ═══════════════════════════════════════════════════════════
-    // Phase 3: Additional cache tests
+    // Additional cache tests
     // ═══════════════════════════════════════════════════════════
 
     use rustc_hash::FxHashMap;

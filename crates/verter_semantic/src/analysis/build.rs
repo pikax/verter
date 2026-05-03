@@ -1525,7 +1525,7 @@ fn find_await_offset(expr: &Expression<'_>) -> Option<u32> {
 }
 
 // =============================================================================
-// Phase 1c: Exported Function Analysis
+// Exported Function Analysis
 // =============================================================================
 
 /// Walk top-level statements to find exported functions and analyze them.

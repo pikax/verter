@@ -1,7 +1,7 @@
 //! `host_manage::intrinsic_projection` — project-scoped HTML intrinsic
 //! attribute / element projection pipeline.
 //!
-//! Phase 11c sub-plan §11c.2 Domain E. Materialises `JSX.IntrinsicElements`
+//! Domain E. Materialises `JSX.IntrinsicElements`
 //! and `HTMLAttributes` shapes against the project-resolved Vue / JSX
 //! companions, projects per-tag member sets, and merges fallback
 //! attributes. Public surface remains rooted at `crate::host_manage::*`;
@@ -86,7 +86,7 @@ impl VerterHost {
         canonical_id: &str,
         type_name: &str,
     ) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
-        // Phase 5m §5.13a.2 — JSX intrinsics resolve through the
+        // JSX intrinsics resolve through the
         // bridge helper so the §5.14.1 pre-flight gate sees zero
         // external engine-method callers. The bridge body retains
         // the engine call through the migration window per §5.13a.2;
@@ -128,7 +128,7 @@ impl VerterHost {
             .filter(|resolved_id| resolved_id != canonical_id);
         let scope = tag_scope_canonical.as_deref().unwrap_or(canonical_id);
         let _ = self.ensure_indexed_ready(scope);
-        // Phase 5d (sub-plan §4.1 host_manage row): Class A path via
+        // Class A path via
         // the shared dispatch helper. The intrinsic-member
         // materialiser still uses the engine for its own bundle-level
         // scope cache.
@@ -147,7 +147,7 @@ impl VerterHost {
         scope_canonical_id: &str,
         expr: &verter_semantic::analysis::type_expr::TypeExpr,
     ) -> verter_semantic::analysis::type_expr::TypeExpr {
-        // Phase 5d (sub-plan §4.1 host_manage row): Class A via shared
+        // Class A via shared
         // dispatch helper. The engine here is still kept on the
         // calling intrinsic member-surface materialiser path.
         crate::meta_resolve::project_expr_class_a_via_dispatch(

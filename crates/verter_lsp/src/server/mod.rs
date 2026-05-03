@@ -32,7 +32,7 @@ use crate::features::cursor_context::{
 use crate::tsgo::merge;
 
 // ── Handler tracking for freeze diagnosis ──────────────────────────────
-// Moved to `handler_guard.rs` (phase 11e.2). Imported here so the
+// Moved to `handler_guard.rs`. Imported here so the
 // `#[path = "../background_init.rs"]` sibling (which references
 // ACTIVE_HANDLERS and block_in_place_if_available via `use super::*`
 // or implicit module-level lookup) compiles.
@@ -40,26 +40,26 @@ mod handler_guard;
 #[allow(unused_imports)]
 use self::handler_guard::{block_in_place_if_available, ACTIVE_HANDLERS};
 
-// Provider-sync state CRUD + context helpers (phase 11e.3). Inherent-impl
+// Provider-sync state CRUD + context helpers. Inherent-impl
 // extension methods on `VerterLanguageServer` covering MRU bookkeeping,
 // snapshot-pending queue, sync-state CRUD, type-provider context, and
 // virtual-file routing context.
 mod provider_state;
 
-// Component contract resolution (phase 11e.4). Inherent-impl extension
+// Component contract resolution. Inherent-impl extension
 // methods on `VerterLanguageServer` covering import-specifier resolution,
 // child-component document/context building, barrel re-export following,
 // and template-contract definition resolution (props, events, v-model,
 // slots).
 mod component_resolve;
 
-// Provider-sync orchestration (phase 11e.5). Inherent-impl extension
+// Provider-sync orchestration. Inherent-impl extension
 // methods on `VerterLanguageServer` covering diagnostics publishing,
 // IDE/API/non-Vue sync, ensure_*_synced family, provisional sync,
 // target_ide_path helpers, and the background-init bootstrap.
 mod sync_orchestration;
 
-// Custom LSP protocol handlers (phase 11e.6). The 13 `pub async fn`
+// Custom LSP protocol handlers. The 13 `pub async fn`
 // methods invoked via `main.rs` `.custom_method("$/...",
 // VerterLanguageServer::<method>)` registrations. Public visibility on
 // each method preserves the inherent-method path
@@ -68,7 +68,7 @@ mod sync_orchestration;
 // defining crate).
 mod custom_methods;
 
-// LSP lifecycle (phase 11e.7). Trait methods on `LanguageServer for
+// LSP lifecycle. Trait methods on `LanguageServer for
 // VerterLanguageServer` covering initialize, initialized, shutdown,
 // did_open, did_change, did_close, did_save,
 // did_change_workspace_folders, did_change_watched_files,
@@ -77,7 +77,7 @@ mod custom_methods;
 // sibling.
 mod lifecycle;
 
-// LSP auxiliary feature handlers (phase 11e.8). Trait methods on
+// LSP auxiliary feature handlers. Trait methods on
 // `LanguageServer for VerterLanguageServer` covering document_symbol,
 // folding_range, selection_range, document_highlight, signature_help,
 // code_action, semantic_tokens_full, code_lens, inlay_hint,
@@ -88,7 +88,7 @@ mod lifecycle;
 // `handle_*` free function in the sibling.
 mod aux_features;
 
-// LSP navigation feature handlers (phase 11e.9). Trait methods on
+// LSP navigation feature handlers. Trait methods on
 // `LanguageServer for VerterLanguageServer` covering hover, completion,
 // completion_resolve, goto_definition, goto_type_definition, references,
 // prepare_rename, rename. Also hosts the relocated

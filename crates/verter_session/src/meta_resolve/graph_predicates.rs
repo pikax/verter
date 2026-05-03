@@ -1,6 +1,6 @@
 //! Graph-native registry-route + cycle-BFS predicates.
 //!
-//! Phase 11a domain 12 — owns the §1.12 graph-native variants of the
+//! domain 12 — owns the §1.12 graph-native variants of the
 //! TypeExpr-based registry-route helpers, the package-ref check, and
 //! the cycle-BFS predicates that gate ref/recursive-ref termination:
 //!
@@ -317,7 +317,7 @@ pub(crate) fn collect_string_literal_union_keys_node(
 }
 
 // `collect_indexed_access_path_node` and `bare_decl_ref_identity_node`
-// were retired in B1: `extract_indexed_access_route` now walks the
+// were
 // chain inline (preserving generic root carriers via `root_args`),
 // and `extract_pick_omit_route` recurses into `args[0]` directly to
 // find the actual root identity (R8-2 fix). Both functions had
@@ -712,14 +712,14 @@ pub(crate) fn type_node_has_package_backed_root(
 /// preference predicate. Returns `true` when the body shape is suitable
 /// for inline materialisation through the registry-route entry.
 ///
-/// Reserved for re-wiring once Phase 11 migrates the inline-route
+/// Reserved for re-wiring once migrates the inline-route
 /// composition site to graph-native (the predicate's only consumer
 /// before commit I sub-task 4 was the registry-route inline
 /// composition predicate, which was deleted in this commit). Tests in
 /// `meta_resolve_tests.rs` exercise this predicate directly.
 #[allow(
     dead_code,
-    reason = "Re-wired in Phase 11; covered by unit tests in meta_resolve_tests.rs"
+    reason = "Re-wired by inline-materialization predicate; covered by unit tests in meta_resolve_tests.rs"
 )]
 pub(crate) fn declaration_body_prefers_inline_materialization_node(
     graph: &crate::semantic_query_memo::SemanticGraphStore,

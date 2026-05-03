@@ -1,4 +1,4 @@
-//! Setup pipeline (D1 of Phase 11d ownership-domain analysis).
+//! Setup pipeline (ownership-domain analysis).
 //!
 //! Hosts the two large entry points that drive `<script setup>` processing:
 //! `process_tsx_script_setup` (clean parse path) and

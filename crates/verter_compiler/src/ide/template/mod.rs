@@ -773,7 +773,7 @@ fn walk_children_with_iife_tracking<'a, 'alloc>(
     ctx: &mut IdeTemplateCtx<'a, 'alloc>,
     parent_condition_scopes: &[ConditionScope],
 ) {
-    // ── Phase 1: Build per-index plan from chain metadata ──
+    // ── Build per-index plan from chain metadata ──
 
     // Classify each chain: Lifted (any member has v-for) vs Iife
     #[derive(Copy, Clone, PartialEq)]
@@ -847,7 +847,7 @@ fn walk_children_with_iife_tracking<'a, 'alloc>(
         }
     }
 
-    // ── Phase 2: Comment repositioning (unchanged logic) ──
+    // ── Comment repositioning (unchanged logic) ──
 
     let analysis = if ctx.options.comments {
         analyze_child_comments(children, ctx.ast, ctx.source)
@@ -868,10 +868,10 @@ fn walk_children_with_iife_tracking<'a, 'alloc>(
     // Also add suppressed chain-interval indices
     all_repositioned.extend(&suppressed_indices);
 
-    // ── Phase 3: IIFE tracking state (for Iife-shape chains) ──
+    // ── IIFE tracking state (for Iife-shape chains) ──
     let mut pending_iife_close_pos: Option<u32> = None;
 
-    // ── Phase 4: Walk ──
+    // ── Walk ──
 
     for (idx, &child_id) in children.iter().enumerate() {
         let child_node = &ctx.ast.nodes[child_id.0];

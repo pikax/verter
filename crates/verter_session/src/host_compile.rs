@@ -1,15 +1,15 @@
-//! Host-backed parallel SFC compilation (Phase 9b).
+//! Host-backed parallel SFC compilation.
 //!
 //! Bundler/runtime output only. Returns the assembled Main virtual
 //! file (script + template render fn). For IDE TSX or TSC type-extract
 //! batch surfaces, see future `ide_many` / `public_api_many` (sub-plan
 //! §8.3 — out of scope, not deferred).
 //!
-//! ## Three-phase batch
+//! ## Four-stage batch
 //!
-//! 1. **Phase 0 — short-circuit empty input.** Empty input returns
+//! 1. **Stage A — short-circuit empty input.** Empty input returns
 //!    immediately; no thread pool is constructed.
-//! 2. **Phase 1 — group + selective upsert.** Group by `canonical_id`.
+//! 2. **Stage B — group + selective upsert.** Group by `canonical_id`.
 //!    Reject groups with conflicting source (every entry for that id
 //!    receives a duplicate-conflict error). For non-conflicting unique
 //!    groups, skip the upsert when the scheduler already holds
@@ -18,13 +18,13 @@
 //!    performs the same `semantic_db` pre-invalidation that the
 //!    existing public `upsert` does) at the caller-configured priority
 //!    and wait for all to commit.
-//! 3. **Phase 2 — compile each unique canonical group exactly once.**
+//! 3. **Stage C — compile each unique canonical group exactly once.**
 //!    Probe [`VerterHost::compile_slot_is_warm`], then call
 //!    [`VerterHost::get_virtual_file`] for `Main` inside
 //!    `std::panic::catch_unwind`. Read/process-once invariant: same
 //!    canonical+profile is never compiled twice within one batch even
 //!    if the input list contains duplicates.
-//! 4. **Phase 3 — fan out.** For each original input position, look up
+//! 4. **Stage D — fan out.** For each original input position, look up
 //!    the result for that canonical and clone its `Arc<str>` payloads
 //!    (refcount-only, no string copy).
 //!
@@ -32,8 +32,8 @@
 //! worker stack. The local pool is always built (never falls through
 //! to Rayon's global pool) to ensure the stack guard applies to the
 //! default path, not just explicit `threads: Some(N)` callers.
-//! `pool.install` is synchronous: Phase 1 fully completes before
-//! Phase 2 begins.
+//! `pool.install` is synchronous: Stage B fully completes before
+//! Stage C begins.
 
 #![cfg(not(target_arch = "wasm32"))]
 
@@ -93,8 +93,7 @@ pub struct CompileBatchOptions {
 }
 
 /// Bundler-default compile profile: production codegen, no SSR, no
-/// HMR. Phase 9b sub-plan §0 ("Profile representation (internal)")
-/// binds `compile_many` to always use this profile internally — no
+/// HMR. `compile_many` always uses this profile internally — no
 /// JS-side profile parameter, no IDE preset helper.
 pub fn compile_profile_for_bundler() -> CompileProfile {
     CompileProfile {
@@ -107,9 +106,9 @@ pub fn compile_profile_for_bundler() -> CompileProfile {
 impl VerterHost {
     /// Host-backed parallel SFC batch compile.
     ///
-    /// See module-level docs for the three-phase algorithm. Returns
+    /// See module-level docs for the four-stage algorithm. Returns
     /// one [`CompileBatchEntry`] per input, in the original input
-    /// order. Output ordering is fixed by Phase 3, not by Phase 1/2's
+    /// order. Output ordering is fixed by Stage D, not by Stage B/C's
     /// (non-deterministic) HashMap iteration.
     ///
     /// Per-input panic isolation: if `get_virtual_file` panics for one
@@ -120,7 +119,7 @@ impl VerterHost {
         inputs: Vec<CompileBatchInput>,
         options: CompileBatchOptions,
     ) -> Vec<CompileBatchEntry> {
-        // ── Phase 0: short-circuit empty input ──
+        // ── short-circuit empty input ──
         // No pool is constructed. Tested by
         // `compile_many_with_zero_inputs`.
         if inputs.is_empty() {
@@ -147,11 +146,11 @@ impl VerterHost {
             .build()
             .expect("build rayon thread pool");
 
-        // ── Phase 1: group + selective upsert ──
+        // ── group + selective upsert ──
         // HashMap iteration is non-deterministic, but we only iterate
         // it for parallel-independent upserts and probe-keys — never
         // for a position-sensitive output. Output order is fixed in
-        // Phase 3 by iterating `inputs` (the caller's order).
+        // Stage D by iterating `inputs` (the caller's order).
         let mut groups: HashMap<String, Vec<&CompileBatchInput>> =
             HashMap::with_capacity(inputs.len());
         for input in &inputs {
@@ -161,9 +160,9 @@ impl VerterHost {
                 .push(input);
         }
 
-        // Per-canonical errors discovered in Phase 1 (duplicate-source
+        // Per-canonical errors discovered in Stage B (duplicate-source
         // conflicts and upsert failures). Surfaced to every original
-        // input position belonging to that canonical in Phase 3.
+        // input position belonging to that canonical in Stage D.
         let mut group_errors: HashMap<String, String> = HashMap::new();
         let mut canonical_to_upsert: Vec<&CompileBatchInput> = Vec::new();
         let mut canonical_to_compile: Vec<&CompileBatchInput> = Vec::new();
@@ -203,9 +202,9 @@ impl VerterHost {
             }
         }
 
-        // ── Phase 2: compile each UNIQUE canonical group exactly once ──
+        // ── compile each UNIQUE canonical group exactly once ──
         // pool.install is synchronous: this block doesn't begin until
-        // Phase 1's pool.install above has returned. The
+        // Stage B's pool.install above has returned. The
         // `compile_one_call_count` test-only counter on `VerterHost` is
         // incremented at the top of `compile_one_in_batch` to make the
         // read-once invariant directly observable.
@@ -220,9 +219,9 @@ impl VerterHost {
                 .collect()
         });
 
-        // ── Phase 3: fan out to original input order ──
-        // For canonicals that errored in Phase 1 (duplicate-source
-        // conflict) or Phase 2 (compile/host error / panic), every
+        // ── fan out to original input order ──
+        // For canonicals that errored in Stage B (duplicate-source
+        // conflict) or Stage C (compile/host error / panic), every
         // original input position receives the same error entry.
         // Cloning a `CompileBatchEntry` is refcount-only on the
         // `Arc<str>` payloads — no string allocation.
@@ -242,7 +241,7 @@ impl VerterHost {
                 compiled
                     .get(&input.canonical_id)
                     .cloned()
-                    .expect("phase 2 compiled every non-error canonical group")
+                    .expect("stage C compiled every non-error canonical group")
             })
             .collect()
     }
@@ -287,7 +286,7 @@ impl VerterHost {
     }
 
     /// Per-input compile worker. The `precomputed_error` slot is
-    /// `Some(...)` when Phase 1 already failed for this canonical
+    /// `Some(...)` when Stage B already failed for this canonical
     /// (duplicate-source conflict or upsert error) — the compile is
     /// short-circuited but the test-only call counter is still
     /// incremented at the top.

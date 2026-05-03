@@ -53,7 +53,7 @@ pub(super) struct PathWalker<'a, 'b> {
     /// re-entry, so linear-chain walks cost O(n) set inserts, not O(n^2)
     /// depth checks.
     visited_nodes: rustc_hash::FxHashSet<SemanticNodeId>,
-    /// Phase 1B2: per-step intermediate nodes for backfill.
+    /// per-step intermediate nodes for backfill.
     /// `intermediate_nodes[i]` = node reached after consuming path[..i+1].
     /// `Some(node)` only on linear `Object` member-step transitions.
     /// `None` marks Union/Intersection/Conditional arm-splits — backfill
@@ -170,7 +170,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         let mut current = start_node;
         let mut index = start_index;
 
-        // Phase 5g-supplement §5.D.0 r17 — honour
+        // supplement §5.D.0 r17 — honour
         // `HostConfig::depth_budget` so §5.D.4
         // `no_cache_promotion_for_budget_exceeded_*` tests can
         // construct a constrained host and observe a budget-exceeded
@@ -250,7 +250,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                             );
                             current = m.value;
                             index += 1;
-                            // Phase 1B2: record the linear member-step
+                            // record the linear member-step
                             // intermediate. `intermediate_nodes[i]` is the
                             // node reached after consuming path[..i+1].
                             self.intermediate_nodes.push(Some(current));
@@ -279,7 +279,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                             index,
                         });
                     }
-                    // Phase 1B2: arm-split — backfill cannot publish a
+                    // arm-split — backfill cannot publish a
                     // single canonical answer for `path[..k]` here.
                     self.intermediate_nodes.push(None);
                     return;
@@ -300,7 +300,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                             index,
                         });
                     }
-                    // Phase 1B2: arm-split — backfill cannot publish a
+                    // arm-split — backfill cannot publish a
                     // single canonical answer for `path[..k]` here.
                     self.intermediate_nodes.push(None);
                     return;
@@ -358,7 +358,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     );
                     self.graph().record_conditional_deferred();
                     results.push(wrapper);
-                    // Phase 1B2: open-conditional arm-split — backfill
+                    // open-conditional arm-split — backfill
                     // cannot publish a single canonical answer for
                     // `path[..k]` here (the wrapper Conditional is the
                     // terminal result for the rest of the path, not an
@@ -616,7 +616,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     // Can't descend further through generic path-walk —
                     // Array indexed-access, Tuple slot projection, and
                     // template-literal relation matching are their own
-                    // semantic work (C3 path-walker + D-Cutover). The
+                    // semantic work (C3 path-walker + ). The
                     // shell carriers (B4) exist so the graph publishes
                     // these shapes first-class; deeper projection lands
                     // in later phases. Return Opaque(Miss) for now.
@@ -625,7 +625,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 }
             }
         }
-        // D-Cutover §5.8: for `mode: Expanded` with empty path, expand
+        // for `mode: Expanded` with empty path, expand
         // terminal `DeclAnchor` nodes via `Instantiate(anchor, [])` and
         // recurse through Intersection/Union arms so nested
         // `extends`/union-arm refs also surface their body. The
@@ -831,7 +831,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 }
                 work.push(ExpandFrame::Expand(materialised));
             }
-            // Phase 5f §7: open Conditional at empty-path terminal in
+            // open Conditional at empty-path terminal in
             // Expanded mode. Per CLAUDE.md "Macro Type Traversal Rule"
             // — open conditionals distribute the remaining path into
             // both branches; with empty path the "remaining path" is

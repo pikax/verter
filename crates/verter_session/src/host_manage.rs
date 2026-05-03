@@ -22,7 +22,7 @@ use crate::types::*;
 use crate::VerterHost;
 
 // ──────────────────────────────────────────────────────────────────────────
-// Phase 11c (parent §11.3): private sub-modules under `host_manage/`. Public
+// private sub-modules under `host_manage/`. Public
 // surface remains rooted at `crate::host_manage::*`; siblings are
 // `pub(crate) mod` so any `pub(crate)` items they re-expose stay scoped to
 // the session crate.
@@ -31,18 +31,18 @@ use crate::VerterHost;
 pub(crate) mod analysis_io;
 pub(crate) mod component_meta_entry;
 pub(crate) mod component_meta_extract;
-// Phase 10a: moved from `meta_resolve/host_methods.rs`. The file is a
+// moved from `meta_resolve/host_methods.rs`. The file is a
 // large `impl VerterHost { ... }` block (~18 host methods including
 // `current_dependency_fact_versions`, `get_raw_analysis_snapshot`, and
 // the `*_inner` audited variants). Belongs in host-impl tier per
 // sub-plan §10a.0.A.
 pub(crate) mod component_meta_methods;
-// Phase 10a: moved from `meta_resolve/request_host.rs`. The file holds
+// moved from `meta_resolve/request_host.rs`. The file holds
 // `impl ComponentMetaRequestHost for VerterHost` and the session-scoped
 // variant `impl ComponentMetaRequestHost for SessionRequestHost<'_>`.
 // Belongs in host-impl tier per sub-plan §10a.0.A.
 pub(crate) mod component_meta_request_impl;
-// Phase 10a: moved from `meta_resolve/jsdoc_resolve.rs`. The file
+// moved from `meta_resolve/jsdoc_resolve.rs`. The file
 // defines `HostComponentMetaResolver<'a> { host: &'a VerterHost }` plus
 // `impl crate::resolver_core::{DeclarationMetadataResolver,ComponentMetaResolverHost}
 // for HostComponentMetaResolver<'_>`. The `read_full_source` helper
@@ -430,7 +430,7 @@ thread_local! {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// Phase 3: Component-meta options + fingerprint + fence validator
+// Component-meta options + fingerprint + fence validator
 // ──────────────────────────────────────────────────────────────────────────
 
 /// Stable-shape options passed to [`VerterHost::get_component_meta`]. Only
@@ -486,7 +486,7 @@ pub(crate) fn component_meta_options_fingerprint(options: &ComponentMetaOptions)
 /// signature still matches what the host reports — a single mismatch
 /// invalidates the entry.
 ///
-/// Phase 10a: moved from `component_meta_caches.rs` to host-impl tier.
+/// moved from `component_meta_caches.rs` to host-impl tier.
 /// Resolver-tier callers reach the validation through the
 /// [`ResolverContext::validate_dep_signature`](crate::resolver_core::ResolverContext::validate_dep_signature)
 /// trait method, whose body delegates here with a concrete `&VerterHost`.
@@ -503,8 +503,8 @@ pub(crate) fn dep_signature_valid_for_host(
 
 /// [`FenceValidator`](crate::completion_fence::FenceValidator) backed by a
 /// live [`VerterHost`]. Reports whether an observed dep-fact still matches
-/// the host's current state — used by Phase 3 cache revalidation and
-/// Phase 4 cold-build retry loops.
+/// the host's current state — used by cache revalidation and
+/// cold-build retry loops.
 pub(crate) struct HostFenceValidator<'a> {
     pub host: &'a VerterHost,
 }
@@ -513,7 +513,7 @@ impl crate::completion_fence::FenceValidator for HostFenceValidator<'_> {
     fn validate(&self, canonical_id: &str, version: &crate::semantic_query::DepVersion) -> bool {
         match version {
             crate::semantic_query::DepVersion::WholeHash(expected) => {
-                // Phase 5a §6.6 / A8: ambient virtual ids
+                // / A8: ambient virtual ids
                 // (`ambient:/<tag>/<canonical>`) bypass the shallow-file
                 // map (they have no `ShallowFileState`) and route to the
                 // workspace's ambient lib registry.
@@ -538,7 +538,7 @@ impl crate::completion_fence::FenceValidator for HostFenceValidator<'_> {
 }
 
 impl HostFenceValidator<'_> {
-    /// Phase 5a §6.6 / A8: validate an ambient virtual id against the
+    /// / A8: validate an ambient virtual id against the
     /// workspace's ambient lib registry. Returns `true` iff the parsed
     /// `ProjectStableKey + canonical` pair points at an entry whose
     /// content_hash matches `expected`.

@@ -1,4 +1,4 @@
-//! Mandatory completion fence for top-level semantic queries (Phase 1)
+//! Mandatory completion fence for top-level semantic queries
 //!
 //! A [`CompletionFence`] is created at each top-level public entry point that
 //! publishes to shared caches — today that is `get_component_meta` and any

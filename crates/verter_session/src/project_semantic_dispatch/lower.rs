@@ -54,14 +54,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// `SessionSolverHost`).
     ///
     /// `shadowing` carries the scope-shadowing decision once per
-    /// resolver context (Phase 5h §5.10 r15/F11). The dispatch
+    /// resolver context. The dispatch
     /// fast-path consults `shadowing.is_shadowing_lib(name)` before
     /// routing a bare `Ref` through the ambient-lib `__builtin__`
     /// path — when `true`, the userland declaration wins via the
     /// standard `ResolveDecl` route. The struct (rather than a bare
-    /// `bool`) keeps the threading axis single-source-of-truth so
-    /// Phase 10a's `ResolverContext` migration absorbs the field
-    /// without inventing a parallel axis to undo. Constructible via
+    /// `bool`) keeps the threading axis single-source-of-truth so the
+    /// `ResolverContext` absorbs the field without inventing a
+    /// parallel axis to undo. Constructible via
     /// [`ScopeShadowing::from_scope_payload`] (dispatch path) or
     /// [`ScopeShadowing::from_host_scope`] (materialise path).
     ///
@@ -289,7 +289,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // `name_resolution` OR in the
                 // [`ScopeShadowing`](ScopeShadowing) context built once
                 // per resolver context from the owner scope's
-                // `scope_type_names` + `scope_type_bindings` (Phase 5h
+                // `scope_type_names` + `scope_type_bindings` (
                 // §5.10 r15/F11 — the second source covers callers
                 // that lower with an empty `name_resolution` map but
                 // still hand a populated `scope_payload`, e.g.
@@ -337,7 +337,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // Other utilities (Extract, Exclude, NonNullable,
                     // Partial, Required, Readonly, Mutable, …) keep the
                     // existing eager-resolve path so they still reduce
-                    // through dispatch as before. Phase 5i closes the
+                    // through dispatch as before. closes the
                     // literal-type reduction for `Extract` / `Exclude`
                     // through `build_builtin_utility`; the eager-resolve
                     // path here remains unchanged because the lowering
@@ -1211,9 +1211,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     NodeScopeId::File { canonical_id, .. } => Arc::clone(canonical_id),
                     NodeScopeId::Global => return self.opaque(QueryError::Miss),
                 };
-                // Phase 5k §5.13 — `typeof X.Y` semantic discrimination.
+                // `typeof X.Y` semantic discrimination.
                 //
-                // The pre-Phase-5k branch unconditionally joined the first
+                // The branch unconditionally joined the first
                 // two path segments into `"X.Y"` whenever the path had
                 // length > 1, turning EVERY dotted typeof into a
                 // namespace-member lookup. That worked for
@@ -1228,7 +1228,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // leaving the type argument as a free `T` placeholder when
                 // the surface body referenced it through substitution
                 // (`Instantiate { TypeOf { ... } }` chained substitution
-                // gap — `phase-00-tier1-mismatches.md` row 4).
+                // gap — `-tier1-mismatches.md` row 4).
                 //
                 // The fix: attempt single-segment root resolution first
                 // (the value-member projection case) and fall back to the

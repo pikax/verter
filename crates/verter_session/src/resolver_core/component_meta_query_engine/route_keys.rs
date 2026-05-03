@@ -1,6 +1,5 @@
 //! Route literal-key enumeration and direct utility shape projection
-//! methods extracted from `component_meta_query_engine/mod.rs` in
-//! Phase 11b.7.
+//! methods extracted from `component_meta_query_engine/mod.rs`.
 //!
 //! These methods enumerate the literal string keys driving Pick / Omit
 //! / MemberPath route demands, and project the shape of a direct
@@ -73,7 +72,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
 
-    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
+    #[allow(dead_code)] // deletion in 5g per call-graph closure
     pub(super) fn enumerate_route_literal_keys(
         &mut self,
         resolution_scope_canonical_id: &str,
@@ -88,7 +87,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         )
     }
 
-    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
+    #[allow(dead_code)] // deletion in 5g per call-graph closure
     fn enumerate_route_literal_keys_inner(
         &mut self,
         resolution_scope_canonical_id: &str,
@@ -244,7 +243,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// sites can ALL be deleted in the same commit (per CLAUDE.md
     /// "Legacy Code Deletion" — no shims).
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
+    #[allow(dead_code)] // deletion in 5g per call-graph closure
     fn enumerate_member_surface_keys_via_route(
         &mut self,
         resolution_scope_canonical_id: &str,
@@ -274,7 +273,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             )
             .unwrap_or_else(|| expr.clone());
         if matches!(projected_expr, TypeExpr::Unknown { .. }) {
-            // Phase 5l: preserve the re-export chain walk that the
+            // preserve the re-export chain walk that the
             // deleted `instantiate_local_generic_ref` engine method
             // performed via `resolve_final_prepared_type_target`.
             if let Some(expanded) =
@@ -380,7 +379,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 }
             }
             TypeExpr::TypeOf(value_ref) => {
-                // D-Cutover §5.8: resolve the value root via the
+                // resolve the value root via the
                 // dispatch-aligned bare-name resolver + ctx
                 // prepared_value_decl directly. Mirrors `build_typeof`.
                 let scope_payload = self.scope_payload_for_scope(active_scope_canonical_id);
@@ -526,7 +525,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         // Try expanding the alias's body (substituting
                         // type arguments), then retry the indexed access
                         // against the substituted body.
-                        // Phase 5l: preserve the engine method's
+                        // preserve the engine method's
                         // re-export chain walk via the engine helper.
                         let expanded = if !type_arguments.is_empty() {
                             instantiate_local_generic_ref_via_engine(
@@ -621,7 +620,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             scope_canonical_id: &str,
             target: &TypeExpr,
         ) -> Option<ExpandedObjectShape> {
-            // Phase 5l: route through the dispatch-based bridges in
+            // route through the dispatch-based bridges in
             // `meta_resolve` instead of the deprecated engine methods.
             // The bridges compose dispatch + the engine's surviving
             // `pub(crate)` cycle-protected helpers, preserving the
@@ -649,7 +648,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     return Some(shape);
                 }
             }
-            // Phase 5l: preserve the engine method's re-export chain
+            // preserve the engine method's re-export chain
             // walk by routing through the engine helper rather than
             // the dispatch-only variant.
             let expanded_ref_opt =

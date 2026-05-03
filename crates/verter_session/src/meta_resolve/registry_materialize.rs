@@ -1,6 +1,6 @@
 //! Registry structural materialization + member-route preservers.
 //!
-//! Phase 11a domain 11 — owns the graph-native structural materialiser
+//! domain 11 — owns the graph-native structural materialiser
 //! (`component_meta_registry_prefers_structural_materialization_node` +
 //! `materialize_component_meta_registry_structural_expr`) plus the seven
 //! registry-route preserver predicates that gate it
@@ -156,7 +156,7 @@ pub(crate) fn materialize_component_meta_registry_structural_expr(
             component_meta_registry_public_utility_route(expr)
                 .or_else(|| component_meta_registry_public_indexed_access_route(expr))
         {
-            // Phase 5e commit 6 — migrate route-target callers to dispatch
+            // commit 6 — migrate route-target callers to dispatch
             // (sub-plan §C.3 D-T recipe). Route the utility/indexed
             // expression through the Class A dispatch helper, which handles
             // Whole/MemberPath via its registry-route fast-path AND falls
@@ -198,7 +198,7 @@ pub(crate) fn materialize_component_meta_registry_structural_expr(
                     if ref_is_package_backed_node(engine.ctx, scope_canonical_id, name) {
                         expr.clone()
                     } else {
-                        // Phase 5m §5.13a.2 — bridge via per-engine
+                        // bridge via per-engine
                         // helper.
                         project_type_surface_expr_via_host_threaded(
                             engine,
@@ -1144,15 +1144,15 @@ pub(crate) fn component_meta_registry_should_keep_raw_symbolic_non_object_alias(
 }
 
 // Plan §6.5 / D — the TypeExpr-keyed free package-ref check was
-// retired in commit D. The 5 callers migrated to a temporary engine
-// method adapter (commit D), which was itself retired in commit O
-// after Phase 11 K3 migrated production callers to graph-native
+//. The 5 callers migrated to a temporary engine
+// method adapter (commit D), which was itself
+// after migrated production callers to graph-native
 // predicates. The graph-native primitive
 // `component_meta_ref_resolves_to_package_node` is the canonical
 // authority for package-backed decl identity.
 
 // Plan §6.6 / E — the inline-registry-route candidate family was
-// retired in commit E. The inline-registry-route candidate path is
+//. The inline-registry-route candidate path is
 // handled by B1's materialiser registry-route branch, which
 // dispatches Pick/Omit + IndexedAccess shapes through dispatch's
 // canonical projection. Retired symbols are listed in the

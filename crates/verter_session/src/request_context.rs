@@ -29,7 +29,7 @@ use verter_scheduler::request_context::{
 
 use crate::component_meta_audit::accumulator::RequestFootprintAccumulator;
 
-/// Phase 5m §5.13a.1.2 — request-scoped fuse state promoted to
+/// request-scoped fuse state promoted to
 /// host-owned + thread-local accessor.
 ///
 /// Tracks the per-request projection-op count that the legacy engine's
@@ -116,7 +116,7 @@ impl RequestBudget {
 }
 
 thread_local! {
-    /// Phase 5m §5.13a.1.2 — request-scoped fuse state TLS slot.
+    /// request-scoped fuse state TLS slot.
     /// Installed by `RequestBudgetGuard::install` and read by the
     /// dispatch-side helpers (`current_request_budget`).
     static CURRENT_REQUEST_BUDGET: RefCell<Option<Arc<RequestBudget>>> =

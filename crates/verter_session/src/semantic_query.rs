@@ -1,4 +1,4 @@
-//! Semantic Query Graph (Phase 2.2)
+//! Semantic Query Graph
 //!
 //! Host-owned memo table keyed by [`SemanticQueryKey`] that deduplicates reusable
 //! type-resolution work across all higher-level requests. This is the shared
@@ -20,9 +20,9 @@
 //!   and perform limited normalization, but any reusable semantic work must
 //!   enter through [`SemanticQueryApi::execute`].
 //!
-//! This module intentionally introduces the type surface without wiring it
-//! through the hot path yet; Phase 2.2 lands the implementation that binds it
-//! to [`ProjectTypeStore`](crate::project_type_store::ProjectTypeStore).
+//! This module introduces the type surface; the implementation that binds
+//! it to [`ProjectTypeStore`](crate::project_type_store::ProjectTypeStore)
+//! lives in the `project_type_store` consumers.
 
 use std::sync::Arc;
 
@@ -439,7 +439,7 @@ impl std::hash::Hash for SurfaceView {
 /// [`CompletionFence`](crate::completion_fence::CompletionFence), so
 /// final-result validation is transitive, not root-key-only.
 ///
-/// `Ord` is derived for plan §7 / Phase 5 — the `DepSignatureInterner`
+/// `Ord` is derived for plan §7 / the `DepSignatureInterner`
 /// canonicalises bucket contents by sorting `(canonical, version)` pairs
 /// before equality comparison so dep_signatures with the same logical
 /// content but different declaration order share a single Arc.
@@ -844,8 +844,8 @@ pub enum SemanticQueryKey {
     /// payload to a single `SemanticNodeId` representing the macro's
     /// effective TypeExpr.
     ///
-    /// Phase 5 §5.0 binding amendment. This is the SOLE new variant
-    /// introduced in Phase 5 — the other 3 originally proposed
+    /// binding amendment. This is the SOLE new variant
+    /// introduced in the other 3 originally proposed
     /// (`MaterializeSurface`, `ResolvePublicInstance`,
     /// `ResolveFallthroughSurface`) are non-variant dispatch helpers
     /// that compose existing variants and read the
@@ -854,7 +854,7 @@ pub enum SemanticQueryKey {
     /// `owner` is the synthetic SFC declaration identity (`canonical_id`
     /// = the SFC file path, `decl_name` per repo convention).
     /// `macro_index` is the stable index into `ScriptAnalysisSnapshot.macros`
-    /// per Phase 5 §A14. `macro_kind` is the semantic-level
+    /// per `macro_kind` is the semantic-level
     /// [`AnalyzedMacroKind`], NOT [`verter_semantic::analysis::template::MacroKind`].
     /// `type_args` carries the macro's type arguments (already lowered to
     /// `SemanticNodeId`s by the caller). `mode` selects the projection
@@ -1055,9 +1055,9 @@ pub enum SemanticNodeData {
     Infer {
         name: Arc<str>,
     },
-    // DeclAnchor variant retired in Path C C16. Declaration identity is now
-    // carried as `DeclIdentity` in `SemanticQueryKey::Instantiate.base`
-    // instead of being interned as a node in the arena.
+    // Declaration identity is carried as `DeclIdentity` in
+    // `SemanticQueryKey::Instantiate.base` instead of being interned as
+    // a node in the arena.
     /// Conditional shell node (plan §3 C2 + §2 lazy block).
     ///
     /// Carries the `check extends extends ? true_branch_ref : false_branch_ref`
@@ -1149,8 +1149,7 @@ pub enum SemanticNodeData {
 }
 
 impl SemanticNodeData {
-    /// Stable discriminant index used by Path C C1 instrumentation
-    /// (per `/tmp/d-cutover-path-c-full-architectural-cleanup.md` §2 Stage 1)
+    /// Stable discriminant index used by Path C instrumentation
     /// to bucket per-variant push counts on
     /// [`crate::types::MetaProvenance::node_arena_pushes_per_discriminant`].
     ///
@@ -1584,7 +1583,7 @@ mod tests {
 
     /// Semantic subqueries with the same resolved meaning produce the same
     /// key even when reached through different higher-level expressions —
-    /// this is the core dedup guarantee Phase 2.2 builds on.
+    /// this is the core dedup guarantee the dispatch layer builds on.
     #[test]
     fn resolve_decl_keys_dedup_by_scope_and_name() {
         let scope = ScopeId {

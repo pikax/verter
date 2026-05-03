@@ -1,7 +1,7 @@
 //! `host_manage::component_meta_entry` — public component-meta query
 //! entry points + audit-record dispatch.
 //!
-//! Phase 11c sub-plan §11c.2 Domain H. Holds the `evaluate_types`,
+//! Domain H. Holds the `evaluate_types`,
 //! `get_component_meta`, and `get_component_meta_with_resolution`
 //! public entry points along with the
 //! [`ComponentMetaResultDb`](crate::component_meta_result_db::ComponentMetaResultDb)
@@ -42,7 +42,7 @@ impl VerterHost {
     /// Uses `resolve_component_meta(Expanded)` as the single enrichment owner,
     /// then projects the result through the analysis-owned `extract_component_meta`.
     ///
-    /// Phase 3 wires this through
+    /// wires this through
     /// [`ComponentMetaResultDb`](crate::component_meta_result_db::ComponentMetaResultDb):
     /// the method consults the project-global result cache first, revalidates
     /// the cached entry's dep-signature against the live host, and only falls
@@ -62,7 +62,7 @@ impl VerterHost {
         let started = component_meta_debug_enabled().then(Instant::now);
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
 
-        // Phase 3: try the final-result cache before installing a request
+        // try the final-result cache before installing a request
         // view. A warm hit with a valid dep-signature returns with zero
         // resolver work.
         if let Some(warm) = self.try_component_meta_cache_hit(canonical.as_str()) {
@@ -77,7 +77,7 @@ impl VerterHost {
         }
 
         // Cold build — install a request view for the duration of the
-        // existing resolver path. Phase 4 replaces the view with fence
+        // existing resolver path. replaces the view with fence
         // observation only.
         let resolved = self
             .resolve_component_meta(canonical.as_str(), crate::types::ProjectionMode::Expanded)?;
@@ -102,7 +102,7 @@ impl VerterHost {
         Some(meta)
     }
 
-    /// Phase 3: look up the project-global final-result cache for the
+    /// look up the project-global final-result cache for the
     /// owner and return the warm payload only when its recorded
     /// dep-signature revalidates against the live host. Returns `None` on
     /// any miss, stale entry, or missing shallow state.
@@ -136,7 +136,7 @@ impl VerterHost {
         Some(entry.payload.analysis.clone())
     }
 
-    /// Phase 3: publish the cold-build result into the project-global
+    /// publish the cold-build result into the project-global
     /// final-result cache. The dep-signature carries the owner's whole-hash,
     /// the current project generation, and every transitive file fact the
     /// resolver observed while producing the result. A later lookup
@@ -191,7 +191,7 @@ impl VerterHost {
     /// for now — they are validated via their underlying file hashes plus
     /// the project-generation bump on shape changes. Including them in the
     /// signature would require extending `HostFenceValidator` with a
-    /// derived-fact-aware path, which lands with the Phase 4 cut.
+    /// derived-fact-aware path, which lands with the cut.
     fn build_component_meta_dep_signature(
         owner_canonical: &str,
         owner_whole_hash: Hash16,

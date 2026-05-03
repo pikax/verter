@@ -1,4 +1,4 @@
-//! LSP auxiliary feature method bodies (phase 11e.8).
+//! LSP auxiliary feature method bodies.
 //!
 //! Free functions hosting the bodies of `impl LanguageServer for
 //! VerterLanguageServer` auxiliary feature methods (document_symbol,

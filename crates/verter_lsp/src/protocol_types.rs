@@ -64,7 +64,7 @@ pub struct VerterReadyParams {
 }
 
 /// Server → client notification: workspace scanner has finished syncing all files
-/// (Phase 1 `.vue` + Phase 2 non-Vue source) to the type provider.
+/// to the type provider.
 /// Cross-file type resolution (barrel re-exports, imported types) is now reliable.
 pub enum TypeProviderSyncComplete {}
 

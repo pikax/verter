@@ -926,7 +926,7 @@ export interface Slots {
         );
     }
 
-    // Phase 4b §4b.4 — the
+    // the
     // `project_expanded_text_define_emits_preserves_conditional_payload_text`
     // and `project_local_source_define_slots_preserves_symbolic_pick_binding`
     // unit tests were attached to the (now-deleted) text-based
@@ -973,7 +973,7 @@ export interface Slots {
         assert_eq!(names, vec!["default"]);
     }
 
-    // Phase 4b §4b.4 — the `project_local_source_define_props_*` tests
+    // the `project_local_source_define_props_*` tests
     // exercised the (now-deleted) source-typed projector. The
     // behaviour contracts they covered (heritage resolution, JSDoc
     // through `@vue-ignore`-annotated `Omit<>`) are covered by

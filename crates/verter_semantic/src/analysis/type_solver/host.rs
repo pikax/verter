@@ -1,7 +1,7 @@
 //! Shared identity/utility classification types used by the host ↔ dispatch
 //! seam.
 //!
-//! These types survive the D-Cutover solver kernel retirement because they
+//! These types survive the cutover solver kernel retirement because they
 //! describe resolved declaration identities and name-classification facts that
 //! `verter_session` publishes to dispatch and `component_meta_query_engine`.
 //! The `TypeSolverHost` trait itself, the `EvalEnvSolverHost`, and the

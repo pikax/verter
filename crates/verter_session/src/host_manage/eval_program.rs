@@ -1,6 +1,6 @@
 //! `host_manage::eval_program` — eval-source / parsed-program / external-type-analysis bridge.
 //!
-//! Phase 11c sub-plan §11c.2 Domain D. Holds the host-instance-scoped
+//! Domain D. Holds the host-instance-scoped
 //! parsed-program / type-context caches and the bridge between raw
 //! source loading and the OXC-based external-type analyzer. Public
 //! surface remains rooted at `crate::host_manage::*`; this file
@@ -196,7 +196,7 @@ impl VerterHost {
                             false,
                         ),
                     );
-                    // Phase 5g-supplement §5.D.0 r17 — fresh load,
+                    // supplement §5.D.0 r17 — fresh load,
                     // count for the host-level test audit. Fresh
                     // means we missed both `get_source` and
                     // `IndexedReadyDb::get_any` before reaching here.
@@ -409,7 +409,7 @@ impl VerterHost {
         let normalized_canonical_id = self.normalized_analysis_canonical(canonical_id);
         let canonical_id = normalized_canonical_id.as_ref();
 
-        // The per-request `external_inputs_memo` was retired in Phase 4.
+        // The per-request `external_inputs_memo` was.
         // The project-global `IndexedReadyDb` already returns cached state,
         // so the old memo was just a redundant lookup memo layered over a
         // host-owned cache.
@@ -426,7 +426,7 @@ impl VerterHost {
             return Some(inputs);
         }
 
-        // Phase 6b.D2a step 3 — F6 reader migration. Drive the route-only
+        // F6 reader migration. Drive the route-only
         // fall-through path through the shared materialiser so external-type
         // analysis is built exactly once per `(canonical, whole_hash)` and
         // shared with F7's `route_shallow_state` reader. The materialiser's
@@ -453,7 +453,7 @@ impl VerterHost {
     /// surfaces, reusing the host-cached parsed program and external type
     /// analysis so this path never parses raw source again.
     ///
-    /// Pre-Phase-4b a raw-source projection helper allocated a fresh
+    /// a raw-source projection helper allocated a fresh
     /// oxc arena and reparsed the source on every call; that path
     /// is deleted under the graph-only resolver. Enrichment/lookup
     /// paths (for example JSDoc collection for imported props) use
@@ -531,7 +531,7 @@ impl VerterHost {
                 .borrow_mut()
                 .retain(|key, _| key.host_instance_id != host_instance_id);
         });
-        // Phase 6b.D2a step 4 — `external_type_analysis_cache` host mutex
+        // `external_type_analysis_cache` host mutex
         // is gone (folded into `RouteOwnedShallowDb` via the unified F6/F7
         // entry). The new discipline is per-canonical tiered staleness gate
         // + atomic `project_type_store.evict_canonical` cascade on file

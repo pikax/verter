@@ -1,4 +1,4 @@
-//! Component contract resolution helpers (phase 11e.4).
+//! Component contract resolution helpers.
 //!
 //! Inherent-impl extension methods on [`super::VerterLanguageServer`]
 //! covering import-specifier resolution, child-component context

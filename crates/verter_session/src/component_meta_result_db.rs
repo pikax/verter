@@ -1,4 +1,4 @@
-//! Final component-meta result cache (Phase 3 of the project-global overhaul).
+//! Final component-meta result cache.
 //!
 //! [`ComponentMetaResultDb`] is the authoritative final-payload cache for
 //! component-meta results. Identical repeated requests on an unchanged
@@ -185,7 +185,7 @@ impl<P> Clone for ComponentMetaResultEntry<P> {
 pub struct ComponentMetaResultDb<P> {
     entries: DashMap<ComponentMetaResultKey, ComponentMetaResultEntry<P>>,
     /// Soft size cap — when exceeded, bounded cleanup slices run on the
-    /// top-level query exit path (plan § A1.8). Cleanup in Phase 3 is
+    /// top-level query exit path (plan § A1.8). Cleanup in is
     /// `stale-first, LRU next`; precise policy lives with the dispatcher.
     capacity: usize,
     live_counter: Arc<AtomicU64>,

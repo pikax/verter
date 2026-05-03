@@ -288,7 +288,7 @@ fn external_type_frontier_layer_result_detail(
 /// for fact-capture. **Not** a cache entry itself; the project-store-owned
 /// [`RouteOwnedShallowDb`](crate::project_type_store::RouteOwnedShallowDb)
 /// retains the full entry, while this projection is the thin shape exposed
-/// across the in-crate consumer boundary (Phase 6b sub-plan §6b.D2a step 5).
+/// across the in-crate consumer boundary.
 pub(crate) struct RouteOwnedShallowStateSnapshot {
     pub canonical_id: String,
     pub whole_hash: Hash16,
@@ -562,7 +562,7 @@ impl crate::resolver_core::ExternalMacroTypeCollectorHost for HostExternalMacroT
 }
 
 impl VerterHost {
-    /// Phase 6b.D2a step 3 — invalidate the route-only shallow entry for a
+    /// invalidate the route-only shallow entry for a
     /// canonical via the project-store-owned
     /// [`RouteOwnedShallowDb`](crate::project_type_store::RouteOwnedShallowDb).
     /// The pre-migration host-mutex (`route_owned_shallow_cache`) is gone;
@@ -576,7 +576,7 @@ impl VerterHost {
             .remove(canonical_id);
     }
 
-    /// Phase 6b.D2a step 3 — snapshot the route-only shallow entries from the
+    /// snapshot the route-only shallow entries from the
     /// project-store DB for fact-capture (`resolver_store::derived_hashes`).
     /// Iteration is across `DashMap<Arc<str>, Arc<RouteOwnedShallowEntry>>`;
     /// the projection ([`RouteOwnedShallowStateSnapshot`]) carries the
@@ -2107,7 +2107,7 @@ impl VerterHost {
         }
     }
 
-    /// Phase 6b.D2a step 3 — query the cached `whole_hash` for a canonical
+    /// query the cached `whole_hash` for a canonical
     /// without forcing a cold materialisation. Used by warm-path callers
     /// that need a content-hash for `store_view_allows_current_whole_hash`
     /// without consuming the full route-only artifact. Reads the
@@ -2127,7 +2127,7 @@ impl VerterHost {
             .map(|entry| entry.whole_hash)
     }
 
-    /// Phase 6b.D2a step 3 — return the cached eval-state tuple for a
+    /// return the cached eval-state tuple for a
     /// canonical via the materialiser. On cache miss, materialises through
     /// [`Self::ensure_route_owned_shallow_entry`].
     pub(crate) fn cached_route_owned_eval_state(
@@ -2146,7 +2146,7 @@ impl VerterHost {
         ))
     }
 
-    /// Phase 6b.D2a step 3 — return the cached `FileAnalysisSnapshot` for a
+    /// return the cached `FileAnalysisSnapshot` for a
     /// canonical via the materialiser. On cache miss, materialises through
     /// [`Self::ensure_route_owned_shallow_entry`].
     pub(crate) fn cached_route_owned_snapshot(
@@ -2157,7 +2157,7 @@ impl VerterHost {
         Some(Arc::clone(&entry.snapshot))
     }
 
-    /// Phase 6b.D2a step 2 — shared materialiser for the route-only
+    /// shared materialiser for the route-only
     /// shallow artifact. Three-layer pattern matching the verified
     /// `ensure_indexed_ready` template at `host_manage.rs:3417`:
     ///
@@ -2335,7 +2335,7 @@ impl VerterHost {
         }
     }
 
-    /// Phase 6b.D2a step 2 — tiered staleness gate for route-only entries.
+    /// tiered staleness gate for route-only entries.
     /// Mirrors pre-migration `cached_route_owned_shallow_state_entry` body
     /// (host_resolve.rs:2128–2147) extended with tier-3 `project_generation`
     /// per tenth-pass Codex P0:
@@ -2368,8 +2368,8 @@ impl VerterHost {
             && self.ws().file_exists(canonical_id)
     }
 
-    /// Phase 6b.D2a — test-only accessor for the route-only freshness gate.
-    /// Used by `phase_6b_characterization_tests` to discriminate tier-2
+    /// test-only accessor for the route-only freshness gate.
+    /// Used by `cache_identity_invariants_tests` to discriminate tier-2
     /// behaviour without depending on the public materialiser path (which
     /// always populates `compile_cache` and would otherwise put tier-1 in
     /// charge).
@@ -2382,7 +2382,7 @@ impl VerterHost {
         self.route_owned_entry_is_fresh(canonical_id, entry)
     }
 
-    /// Phase 6b.D2a step 1 (writers) — `route_shallow_state` is the
+    /// `route_shallow_state` is the
     /// route-only frontier reader. Body now delegates to the shared
     /// materialiser ([`Self::ensure_route_owned_shallow_entry`]) and
     /// returns the entry's `shallow_state`. The request-scoped
@@ -2411,7 +2411,7 @@ impl VerterHost {
 
         // Request-scoped memo (frontier engine de-dupe). NOT a host-side
         // mirror — see `HostFrontierAdapter::route_shallow_cache` doc-comment
-        // (Phase 6b §6b.2.F9 `scratch` classification).
+        //.
         if let Some(cached) = route_shallow_cache.get(normalized_canonical.as_str()) {
             return Some(Arc::clone(cached));
         }
@@ -2578,7 +2578,7 @@ impl VerterHost {
         Some(result)
     }
 
-    /// Phase 5m §5.13a.1.1 — host-level prepared-decl barrel routing
+    /// host-level prepared-decl barrel routing
     /// helper.
     ///
     /// Returns the declaring `(canonical_id, symbol_name)` for the
@@ -2594,9 +2594,8 @@ impl VerterHost {
     ///   reachable.
     ///
     /// This is a host-state-only operation (no engine instance
-    /// required). After Phase 5m, dispatch-side helpers consume this
-    /// directly to subsume the engine route fast-path's barrel
-    /// routing.
+    /// required). Dispatch-side helpers consume this directly to
+    /// subsume the engine route fast-path's barrel routing.
     ///
     /// Test-only — exercised by the in-tree
     /// `host_resolve_tests::resolve_prepared_decl_target_*` cases
@@ -2605,8 +2604,7 @@ impl VerterHost {
     /// longer calls this helper directly (subsumed by the cooperative
     /// `PreparedTargetDb` / barrel-chain pipeline), so the helper is
     /// gated `#[cfg(test)]` to keep the non-test dead-code surface
-    /// minimal while preserving the regression-test contract for
-    /// Phase 5m §5.13a.1.1.
+    /// minimal while preserving the regression-test contract.
     #[cfg(test)]
     pub(crate) fn resolve_prepared_decl_target(
         &self,
@@ -2627,7 +2625,7 @@ impl VerterHost {
             .unwrap_or_else(|| (canonical_source.to_string(), resolved_name.to_string()))
     }
 
-    /// Phase 5m §5.13a.1.3 — host-level re-export chain walking helper.
+    /// host-level re-export chain walking helper.
     ///
     /// Resolves a bare-name reference in a scope, walking the
     /// re-export chain to the declaring file. Returns the canonical
@@ -2647,7 +2645,7 @@ impl VerterHost {
     /// `host_resolve_tests::resolve_decl_in_scope_with_reexport_chain_*`
     /// cases. The dispatch pipeline subsumed the helper into the
     /// cooperative bare-name resolution path; the helper is retained
-    /// only for Phase 5m §5.13a.1.3 regression coverage.
+    /// only for regression coverage.
     #[cfg(test)]
     pub(crate) fn resolve_decl_in_scope_with_reexport_chain(
         &self,
@@ -2982,7 +2980,7 @@ impl VerterHost {
     /// `get_virtual_file` (see this file at the start of the
     /// `cache_miss` block — `slot.semantic_hash == parse.semantic_hash
     /// && slot.style_override_hash == soh && slot.content_override_hash
-    /// == coh`). Phase 9b sub-plan §3.2 binds this predicate to remain
+    /// == coh`). binds this predicate to remain
     /// in lockstep with the writer; if the writer's predicate ever
     /// changes, this accessor changes with it.
     ///
@@ -3667,7 +3665,7 @@ impl VerterHost {
             ssr: profile.ssr,
             external_types,
             extract_template_data: scope.needs_template_analysis(),
-            prop_constness_overrides: None, // TODO(Phase 6): populated by cross-file optimizer,
+            prop_constness_overrides: None, // TODO: populated by cross-file optimizer,
             style_v_bind_vars: snapshot.style_v_bind_vars.clone(),
         };
 
@@ -4106,12 +4104,12 @@ pub(crate) struct HostFrontierAdapter<'a> {
     pub route_exports_only: bool,
     /// Request-scoped memoisation of route-only [`ShallowFileState`] entries
     /// for the duration of a single frontier traversal. **NOT a host-side
-    /// mirror** of the host's `route_owned_shallow` cache (Phase 6b: the
+    /// mirror** of the host's `route_owned_shallow` cache (the
     /// host cache lives on `ProjectTypeStore.route_owned_shallow`); this
     /// `RefCell<...>` exists only to dedupe repeated reads of the same
     /// canonical within one request, so request-level callers do not
     /// repeatedly clone the host-cached `Arc`. Lifetime bounded to the
-    /// adapter (`'a`). Phase 6b classification: `scratch`. See sub-plan
+    /// adapter (`'a`). classification: `scratch`. See sub-plan
     /// §6b.2.F9.
     pub route_shallow_cache: RefCell<RouteShallowStateCache>,
 }

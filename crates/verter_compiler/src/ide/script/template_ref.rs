@@ -1,4 +1,4 @@
-//! Template-ref call inference (D7 of Phase 11d ownership-domain analysis).
+//! Template-ref call inference (ownership-domain analysis).
 //!
 //! Hosts the `collect_binding_names` helper, the `TemplateRefCandidate /
 //! TemplateRefSelector / TemplateRefCallKind / TemplateRefCallSite /

@@ -2,7 +2,7 @@
 //! substitution into the semantic graph (plan §3 Change Split + §2
 //! guard contract row for `substitute_semantic_type_param`).
 //!
-//! Phase 6 / Fix D wraps the public substitute in
+//! / Fix D wraps the public substitute in
 //! `substitute_with_change_tracking`, which returns `(result,
 //! changed)`. Each match arm short-circuits the rebuild when no
 //! descendant produced a different `SemanticNodeId`, skipping
@@ -41,7 +41,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         parameter_node: SemanticNodeId,
         arg: SemanticNodeId,
     ) -> SemanticNodeId {
-        // Phase 6 (plan §8 / Fix D) — change-tracking through
+        // change-tracking through
         // recursion. The internal helper returns (result, changed)
         // so each branch can short-circuit the rebuild path when no
         // descendant produced a different node id. The public
@@ -50,7 +50,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .0
     }
 
-    /// Phase 6 / Fix D internal helper. Returns `(result, changed)`
+    /// / Fix D internal helper. Returns `(result, changed)`
     /// where `changed` is `true` if any descendant produced a
     /// different `SemanticNodeId` from its input. When `changed` is
     /// `false`, every recursive arm returns `(node, false)` directly
@@ -532,7 +532,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// Phase 6 / Fix D companion of `substitute_index_key`. Returns
+    /// / Fix D companion of `substitute_index_key`. Returns
     /// `(result, changed)`.
     fn substitute_index_key_with_change_tracking(
         &self,

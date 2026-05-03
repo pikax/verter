@@ -1,6 +1,6 @@
 //! Symbolic-penalty + materialization-improvement scoring helpers.
 //!
-//! Phase 11a domain 10 — TypeExpr-walking helpers used by the materialization
+//! domain 10 — TypeExpr-walking helpers used by the materialization
 //! pipeline to choose between candidate surfaces. These are pure leaf helpers:
 //! no shared state, no host access, no graph access.
 
@@ -322,7 +322,7 @@ pub(crate) fn compare_type_expr_improvement(
             && count_generic_detail_in_expr(candidate) > count_generic_detail_in_expr(current))
 }
 
-// Phase 10a: promoted from `pub(super)` to `pub(crate)` so the moved
+// promoted from `pub(super)` to `pub(crate)` so the moved
 // `host_manage::component_meta_methods.rs` (formerly the in-tree
 // `host_methods.rs`) reaches the function via the
 // `crate::meta_resolve::component_meta_registry_prefers_structural_materialization`

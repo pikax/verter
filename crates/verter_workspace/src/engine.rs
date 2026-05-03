@@ -93,7 +93,7 @@ pub(crate) struct Engine {
     /// `ownership_ready: true` is published.
     pub(crate) published_state: ArcSwapOption<PublishedRoot>,
 
-    /// Per-project ambient TypeScript lib registry (Phase 5 §6.3 / A1).
+    /// Per-project ambient TypeScript lib registry.
     ///
     /// Lock-free `ArcSwap` so reads (file shadowing checks, symbol lookup,
     /// dep-fact validation) never block on concurrent registrations. Concrete
@@ -751,7 +751,7 @@ impl Engine {
         self.edges.read().forward_deps(canonical_id)
     }
 
-    // ── Ambient lib registration (Phase 5 §6.5) ──
+    // ── Ambient lib registration ──
 
     /// Register an ambient lib via the CAS loop (`ambient_lib::cas_register`).
     ///

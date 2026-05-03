@@ -495,7 +495,7 @@ mod tests {
     }
 
     // ═══════════════════════════════════════════════════════════
-    // Phase 2: assemble_main_module tests
+    // assemble_main_module tests
     // ═══════════════════════════════════════════════════════════
 
     use verter_compiler::compile::{

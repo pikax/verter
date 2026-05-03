@@ -1,5 +1,5 @@
 //! Detectors for `useAttrs()` and `getCurrentInstance()` calls in script
-//! setup bodies (D8 of Phase 11d ownership-domain analysis).
+//! setup bodies (ownership-domain analysis).
 
 use oxc_ast::ast::{Expression, Statement};
 use oxc_span::GetSpan;

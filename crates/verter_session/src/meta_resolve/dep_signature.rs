@@ -1,6 +1,6 @@
 //! Per-request thread-local accumulators + test-only BFS counters.
 //!
-//! Phase 11a domain 6 — Step 6.6.A dep-signature accumulator + 3 accessors,
+//! domain 6 — Step 6.6.A dep-signature accumulator + 3 accessors,
 //! plus `#[cfg(test)]` BFS counters for the cycle-walk regression suite.
 //!
 //! The counters are declared `pub(crate)` so test code anywhere in the crate

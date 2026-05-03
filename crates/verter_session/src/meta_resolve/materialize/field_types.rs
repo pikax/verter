@@ -1,6 +1,6 @@
 //! Materialization core: TypeExpr stabilizer + field-type rescue.
 //!
-//! Phase 11a domain 7 (field-types portion). Owns:
+//! domain 7 (field-types portion). Owns:
 //! - the eager whole-expression materializer
 //!   (`materialize_component_meta_type_expr_until_stable` + `_full`),
 //! - the `materialize_component_meta_field_types` driver,
@@ -13,7 +13,7 @@
 //! MTL counter section moved here from later in the shell so the static
 //! it counts off lives in the same module). The body is verbatim apart
 //! from `pub(crate)` visibility escalation on the formerly-private items
-//! the parent shell still calls (matches the Phase 11a foundation
+//! the parent shell still calls (matches the foundation
 //! extractions: `dispatch_helpers.rs`, `resolved_state.rs`, etc.).
 
 use crate::resolver_core::component_meta_registry::{
@@ -29,7 +29,7 @@ use super::super::dispatch_helpers::{
     project_expr_class_a_via_dispatch, project_type_surface_expr_via_host_threaded,
 };
 use super::super::field_state::MacroFieldGraphState;
-// Phase 10a: `request_host` source moved to
+// `request_host` source moved to
 // `host_manage/component_meta_request_impl.rs`. Import rewritten to
 // the new home.
 use super::super::resolved_state::select_imported_materialization_scope;
@@ -38,12 +38,12 @@ use super::macro_shapes::expr_needs_projection_rescue;
 use crate::host_manage::component_meta_request_impl::ResolvedMacroMeta;
 
 // `materialize_component_meta_macro_shape_member_type_expr` lives in the
-// `macro_member_walk` sibling (Phase 11a commit 10);
+// `macro_member_walk` sibling;
 // `component_meta_registry_should_keep_raw_symbolic_non_object_alias`
 // and `preserve_package_backed_symbolic_refs_node` live in the
-// `registry_materialize` sibling (Phase 11a commit 11);
+// `registry_materialize` sibling;
 // `type_node_needs_member_route_materialization` lives in the
-// `graph_predicates` sibling (Phase 11a commit 12).
+// `graph_predicates` sibling.
 use super::super::graph_predicates::type_node_needs_member_route_materialization;
 use super::super::macro_member_walk::materialize_component_meta_macro_shape_member_type_expr;
 use super::super::registry_materialize::{
@@ -164,7 +164,7 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
     };
     let name_resolution = rustc_hash::FxHashMap::default();
     let mut substitutions: Vec<(Arc<str>, crate::semantic_query::SemanticNodeId)> = Vec::new();
-    // Phase 5h §5.10 r15/F11 — capture the scope-shadowing context
+    // r15/F11 — capture the scope-shadowing context
     // once for the materialize → lower pipeline so the dispatch
     // fast-path observes the same shadow set the route extraction
     // path uses.
@@ -257,7 +257,7 @@ pub(crate) fn type_expr_has_package_backed_object_like_root(
     } else {
         declaration.canonical_source.clone()
     };
-    // Issue #11 / Phase 11 — route the package-backed classification
+    // Issue #11 / route the package-backed classification
     // through `WorkspaceRead::is_package_backed` (NOT a path-substring
     // check on `node_modules`). The realpath-based classification
     // correctly handles pnpm-symlinks and workspace-packages-inside-
@@ -307,7 +307,7 @@ pub(crate) fn type_expr_is_slots_member_route(
 }
 
 /// Capture-token counter recorded every time the per-field member-route
-/// materialization path actually runs (Issue #5). The Phase 6 indexed-
+/// materialization path actually runs (Issue #5). The indexed-
 /// access early-out short-circuits the field loop before the member
 /// route fires when the published surface is already terminal — for
 /// those fields this counter stays at 0. Counterfixtures (conditional
@@ -316,7 +316,7 @@ pub(crate) fn type_expr_is_slots_member_route(
 /// counter increments.
 pub(crate) const MEMBER_ROUTE_CALLS_COUNTER: &str = "member_route_calls";
 
-/// Phase 6 / Issue #5 — true when `expr` is a *terminal scalar surface*:
+/// / Issue #5 — true when `expr` is a *terminal scalar surface*:
 /// a single primitive, a literal, a literal-string union, or `any |
 /// scalars`. This is the condition under which a raw `IndexedAccess`
 /// route does not need to be re-projected through the registry member
@@ -364,7 +364,7 @@ pub(crate) fn type_expr_is_terminal_scalar_surface(
     }
 }
 
-/// Phase 6 / Issue #5 — true when `expr` is an `IndexedAccess` route
+/// / Issue #5 — true when `expr` is an `IndexedAccess` route
 /// (or a `Parenthesized` wrapper around one) whose index expression is
 /// a literal string or a literal-string union (NOT a generic /
 /// type-parameter, NOT a conditional, NOT mapped). This is the syntactic
@@ -414,7 +414,7 @@ pub(crate) fn type_expr_is_indexed_access_route(
     }
 }
 
-/// Phase 6 / Issue #5 — true when `expr` is a `non-empty object surface`
+/// / Issue #5 — true when `expr` is a `non-empty object surface`
 /// per §6.3 strict definition: an `Object` whose `properties.len() >= 1`,
 /// at least one property's type is NOT `never`, and the object is not
 /// solely an index signature whose value type is `never` (e.g.,
@@ -479,7 +479,7 @@ pub(crate) fn type_expr_is_non_empty_object_surface(
     saw_non_never_property && !saw_only_never_index_sig
 }
 
-/// Phase 6 / Issue #5 — true when the root of an `IndexedAccess` route
+/// / Issue #5 — true when the root of an `IndexedAccess` route
 /// resolves to a workspace-owned declaration (per
 /// `WorkspaceRead::is_workspace_owned`, NOT path-substring
 /// `node_modules`). The early-out must not fire for package-backed
@@ -518,12 +518,11 @@ pub(crate) fn raw_indexed_access_root_is_workspace_owned(
         .workspace_is_workspace_owned(declaration_scope)
 }
 
-// Plan §6.6 / E — the alias-body rescue chain was retired in commit
-// E. B1's materialiser registry-route branch handles route shapes
-// (`Pick<T, K>`, `Omit<T, K>`, `T['k']`) through dispatch's canonical
-// projection, so the alias-body walk-through is no longer needed.
-// The retired symbols are listed in the `RETIRED_SYMBOLS` array of
-// the static-grep gate test (commit I).
+// Plan §6.6 / E — the materialiser's registry-route branch handles
+// route shapes (`Pick<T, K>`, `Omit<T, K>`, `T['k']`) through
+// dispatch's canonical projection, so the alias-body walk-through is
+// not needed. The removed symbols are listed in the `RETIRED_SYMBOLS`
+// array of the static-grep gate test.
 
 pub(crate) fn parsed_field_raw_type(
     field: &verter_semantic::analysis::type_expand::ExpandedField,
@@ -582,7 +581,7 @@ pub(crate) fn top_level_imported_ref_can_stay_symbolic(
     let (target_scope, target_name) = query_engine
         .resolve_final_prepared_type_target(declaration_scope.as_str(), declaration_name.as_str());
 
-    // Issue #11 / Phase 11 — consult the shared symbolic-preservation
+    // Issue #11 / consult the shared symbolic-preservation
     // helper before any kind-specific branching. Workspace-owned
     // direct-member interface/class refs (generic or non-generic) MUST
     // materialize canonically (cache key includes
@@ -1657,7 +1656,7 @@ pub(crate) fn materialize_component_meta_field_types(
             continue;
         }
 
-        // Issue #5 / Phase 6 early-out (PRE-rescue): when the parsed raw
+        // Issue #5 / early-out (PRE-rescue): when the parsed raw
         // type is an indexed-access route and the field's published
         // surface is already a terminal scalar (single primitive,
         // literal, literal-string union, or `any | scalars`), the
@@ -1682,7 +1681,7 @@ pub(crate) fn materialize_component_meta_field_types(
             }
         }
 
-        // Issue #6 / Phase 7 — ComponentConfig theme variant fast path.
+        // Issue #6 / ComponentConfig theme variant fast path.
         // Fires only when the strict-legality predicate matches (see
         // `component_config_fast_path.rs::component_config_theme_variant_fast_path`):
         // alias body is `ComponentConfig<typeof theme, AppConfig, key>`,
@@ -1778,7 +1777,7 @@ pub(crate) fn materialize_component_meta_field_types(
             continue;
         }
 
-        // Issue #5 / Phase 6 second early-out (POST-rescue): when the
+        // Issue #5 / second early-out (POST-rescue): when the
         // raw type is a `slots`-route (`X['slots']`) AND the published
         // surface is already a non-empty object surface, the
         // member-route projection cannot improve the result. Publish
@@ -1804,7 +1803,7 @@ pub(crate) fn materialize_component_meta_field_types(
         }
 
         if let Some(routes) = prop_member_routes.get(&field.name).cloned() {
-            // Issue #5 / Phase 6 — the member-route projection is about
+            // Issue #5 / the member-route projection is about
             // to fire. Record the capture-token counter so positive
             // tests can assert `member_route_calls == 0` (early-out
             // succeeded) and counterfixtures (conditional / mapped /
@@ -1850,7 +1849,7 @@ pub(crate) fn materialize_component_meta_field_types(
             // applies the same projection in the materialiser's
             // policy-gated form.
             //
-            // Issue #5 / Phase 6 — register the routed-surface
+            // Issue #5 / register the routed-surface
             // member-route entry under the same counter as the
             // `prop_member_routes` loop so positive tests can assert
             // `member_route_calls == 0` covers BOTH route branches.
@@ -1942,7 +1941,7 @@ pub(crate) fn materialize_component_meta_field_types(
                         rewrite_named_self_refs_to_recursive_ref(&body, target_name.as_str())
                     })
                     .or_else(|| {
-                        // Phase 5m §5.13a.2 (post-cutover): the Class B
+                        // (): the Class B
                         // migration completed by routing through the
                         // bridge helper `project_type_surface_expr_via_host_threaded`.
                         // The §5.14.1 pre-flight gate observes zero

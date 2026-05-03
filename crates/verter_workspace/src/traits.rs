@@ -23,7 +23,7 @@ pub struct WorkspaceResourceSnapshot {
     pub published_project_count: usize,
 }
 
-/// Phase 6b sub-plan §6b.D2b — read-only view of the workspace authority.
+/// read-only view of the workspace authority.
 ///
 /// `WorkspaceRead` carries every method that does NOT mutate workspace state
 /// (file reads, resolution, ownership, generation, queries, ambient-lib
@@ -302,7 +302,7 @@ pub trait WorkspaceRead: Send + Sync {
 /// - [`MemoryWorkspace`] — fully in-memory (tests, WASM, playground)
 /// - Lightweight adapters (LSP readers) that delegate to a host's workspace
 ///
-/// # Phase 6b sub-plan §6b.D2b
+/// # sub-plan §6b.D2b
 ///
 /// `WorkspaceAccess` is no longer the public read API for external crates;
 /// it is gated behind `pub(crate) VerterHost::workspace()`. Read consumers
@@ -541,7 +541,7 @@ impl ResolverSnapshot for EmptyResolverSnapshot {
 
 #[cfg(test)]
 mod ambient_default_tests {
-    //! Phase 5 §6.1 / A1 default-trait surface tests.
+    //! / A1 default-trait surface tests.
     //!
     //! These confirm that `WorkspaceAccess` has the ambient lib registration
     //! API and that backends without ambient support return

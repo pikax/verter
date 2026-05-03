@@ -1,5 +1,5 @@
 //! Type constructs, helper imports, and the `@verter/types` ambient module
-//! constants (D11 of Phase 11d ownership-domain analysis).
+//! constants (ownership-domain analysis).
 
 use oxc_ast::ast::{BindingPattern, Statement};
 use oxc_ast::{Comment, CommentContent};

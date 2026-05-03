@@ -179,7 +179,7 @@ pub fn resolve_type_declaration<R: DeclarationMetadataResolver>(
     let export_span = resolver
         .get_export_span_follow_reexports(dep_canonical, requested_name)
         .unwrap_or_default();
-    // Phase 4b §4b.3 — source-text reparse path retired. The graph
+    // source-text reparse path retired. The graph
     // surface (`resolve_local_type_symbol_metadata`) is the
     // authoritative kind/span carrier; declaration text is no longer
     // populated by the resolver.
@@ -260,7 +260,7 @@ pub fn resolve_type_declaration<R: DeclarationMetadataResolver>(
             follow_direct_type_reexport_chain(resolver, dep_canonical, requested_name)
         {
             if followed_canonical != canonical_source || followed_name != resolved_name {
-                // Phase 4b §4b.3 — source-text reparse path retired.
+                // source-text reparse path retired.
                 // The leaf graph metadata
                 // (`resolve_local_type_symbol_metadata`) is the
                 // authoritative kind/span carrier when the chain
@@ -309,7 +309,7 @@ pub fn resolve_local_type_declaration<R: DeclarationMetadataResolver>(
     resolved_name: &str,
     span: verter_span::Span,
 ) -> ResolvedTypeDeclaration {
-    // Phase 4b §4b.3 — source-text reparse path retired. The graph
+    // source-text reparse path retired. The graph
     // metadata (`resolve_local_type_symbol_metadata`) is the
     // authoritative kind/span carrier. When metadata is available
     // its `kind` and `span` are preferred; otherwise the caller's
@@ -740,14 +740,14 @@ type Props = {
         assert_eq!(resolved.resolved_name, "RouteLocationRaw");
         assert_eq!(resolved.declaration_id, Some(11));
         assert_eq!(resolved.kind, ResolvedDeclarationKind::TypeAlias);
-        // Phase 4b §4b.3 — source-text reparse retired. The
+        // source-text reparse retired. The
         // local_export symbol target rerouting still resolves the
         // declaration via graph metadata; only the `text` field is
         // no longer populated.
         assert_eq!(resolved.text, None);
     }
 
-    // Phase 4b §4b.3 — `resolve_type_declaration_uses_cached_*_without_reparsing_source`
+    // `resolve_type_declaration_uses_cached_*_without_reparsing_source`
     // were negative tests asserting that cached reexport / local-import
     // routes did NOT trigger source reparsing for the original (barrel /
     // owner) canonical id. Under the graph-only resolver, the
@@ -774,27 +774,27 @@ type Props = {
             resolved.span,
             verter_span::Span::new(0, source.len() as u32)
         );
-        // Phase 4b §4b.3 — graph metadata is the kind/span carrier;
+        // graph metadata is the kind/span carrier;
         // declaration text is no longer populated.
         assert_eq!(resolved.text, None);
     }
 
     // ----------------------------------------------------------------------
-    // Phase 4b §4b.2 — graph-only decoupling tests for the three
+    // graph-only decoupling tests for the three
     // production source-reading callsites (former lines 184, 261, 308).
     // Each test seeds graph metadata and asserts the resolver returns
     // graph kind/span/declaration_id while `declaration.text` is `None`
     // — the architectural contract that resolver-core consumes only
     // graph data, not raw source text.
     //
-    // Pre-Phase-4b: the source-reparse path populated `text` from the
+    // : the source-reparse path populated `text` from the
     // sources map → these tests would have FAILED with `Some(_)`.
-    // Post-Phase-4b: the production path no longer threads source
+    // : the production path no longer threads source
     // text through → tests PASS with `text == None`.
 
     #[test]
     fn declaration_metadata_resolves_local_symbol_via_graph_only() {
-        // Phase 4b §4b.2 — discrimination test for the local-symbol
+        // discrimination test for the local-symbol
         // resolution path (former source-reading callsite at
         // declaration_metadata.rs:184). The graph metadata
         // (`local_type_symbol_metadata`) is seeded; the resolver
@@ -829,14 +829,14 @@ type Props = {
         // reparse path is gone.
         assert_eq!(
             resolved.text, None,
-            "Phase 4b: resolve_type_declaration must NOT thread source \
+            "resolve_type_declaration must NOT thread source \
              text into ResolvedTypeDeclaration.text (graph-only resolver)"
         );
     }
 
     #[test]
     fn declaration_metadata_follows_reexport_chain_via_graph_only() {
-        // Phase 4b §4b.2 — discrimination test for the reexport-
+        // discrimination test for the reexport-
         // following path (former callsite at
         // declaration_metadata.rs:261). A barrel (`/types.ts`) re-
         // exports `Props` from `/inner.ts` via `direct_reexports`;
@@ -851,7 +851,7 @@ type Props = {
             ("/inner.ts".to_string(), "Props".to_string()),
         );
         let leaf_source_len = "interface Props { label: string }\n".len() as u32;
-        // Graph metadata at leaf — what the post-Phase-4b path uses.
+        // Graph metadata at leaf — what the path uses.
         resolver.local_type_symbol_metadata.insert(
             ("/inner.ts".to_string(), "Props".to_string()),
             ResolvedLocalTypeSymbolMetadata {
@@ -876,14 +876,14 @@ type Props = {
         // source-reparse arm at line 261 no longer runs.
         assert_eq!(
             resolved.text, None,
-            "Phase 4b: reexport-chain following must NOT re-read leaf \
+            "reexport-chain following must NOT re-read leaf \
              source to populate ResolvedTypeDeclaration.text"
         );
     }
 
     #[test]
     fn declaration_metadata_extracts_details_via_graph_only() {
-        // Phase 4b §4b.2 — discrimination test for
+        // discrimination test for
         // `resolve_local_type_declaration` (former callsite at
         // declaration_metadata.rs:308). The graph metadata
         // (`local_type_symbol_metadata`) provides kind/span; the
@@ -917,7 +917,7 @@ type Props = {
         // resolve_local_type_declaration no longer reads source text.
         assert_eq!(
             resolved.text, None,
-            "Phase 4b: resolve_local_type_declaration must NOT thread \
+            "resolve_local_type_declaration must NOT thread \
              source text into ResolvedTypeDeclaration.text"
         );
     }

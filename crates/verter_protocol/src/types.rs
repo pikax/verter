@@ -347,7 +347,7 @@ pub struct FfiCrossFileDiagnostic {
 }
 
 // =============================================================================
-// Code action types (Phase 1)
+// Code action types
 // =============================================================================
 
 /// A code action (quick fix, refactoring, or source action) for the playground.
@@ -379,7 +379,7 @@ pub struct FfiTextEdit {
 }
 
 // =============================================================================
-// Lint rule metadata (Phase 5)
+// Lint rule metadata
 // =============================================================================
 
 /// Metadata for a single lint rule, used by the rule browser UI.
@@ -395,7 +395,7 @@ pub struct FfiLintRuleMetadata {
 }
 
 // =============================================================================
-// Document symbol types (Phase 2)
+// Document symbol types
 // =============================================================================
 
 /// A document symbol for the outline/go-to-symbol panel.
@@ -421,7 +421,7 @@ pub struct FfiDocumentSymbol {
 }
 
 // =============================================================================
-// CSS selector match types (Phase 7)
+// CSS selector match types
 // =============================================================================
 
 /// Result of matching all CSS selectors against all template elements.

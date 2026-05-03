@@ -1,11 +1,11 @@
-//! Phase 5d dispatch-direct surface helpers + Phase 5l bridge helpers.
+//! dispatch-direct surface helpers + bridge helpers.
 //!
-//! Phase 11a domains 1+2 of the meta_resolve.rs split.
+//! domains 1+2 of the meta_resolve.rs split.
 //!
-//! Phase 5d (sub-plan §4.1 Class A/B) — dispatch-direct surface helpers.
+//! dispatch-direct surface helpers.
 //!
-//! The Phase 5c trampolines on `ComponentMetaQueryEngine` are slated for
-//! retirement in 5g. Phase 5d migrates Class A and Class B callers off
+//! The trampolines on `ComponentMetaQueryEngine` are slated for
+//! retirement in 5g. migrates Class A and Class B callers off
 //! the engine helpers. The two helpers below are the dispatch-direct
 //! equivalents of the trampoline bodies, placed next to the meta_resolve
 //! callers so each migrated callsite stays a one-liner.
@@ -21,7 +21,7 @@
 //! lowered to `Instantiate { args: [], body_mode: Expanded }` per
 //! `build.rs`'s utility router; the Class B helper inlines that path.
 //!
-//! Phase 5l §5.14.2 — bridge helpers (post engine-method deletion).
+//! bridge helpers (post engine-method deletion).
 //!
 //! The 18 external callsites that 5m migrated onto these wrappers continue
 //! to call them, but their bodies no longer dispatch through the deleted
@@ -36,18 +36,16 @@ use crate::resolver_core::ResolverContext;
 use crate::types::ProjectionMode;
 use std::sync::Arc;
 
-/// Class A surface projection (Phase 5d §4.1) — dispatch-equivalent
+/// Class A surface projection — dispatch-equivalent
 /// of `ComponentMetaQueryEngine::project_expr_surface_expr`.
 ///
 /// The trampoline's body has TWO paths:
 ///   1. Registry-route fast path for indexed-access / utility shapes
 ///      (`Button['ui']`, `Pick<Foo, K>`). This routes through the
 ///      Class D route helpers (`project_route_surface_expr` /
-///      `lower_and_project_to_expanded`), which are themselves
-///      trampolines through dispatch in Phase 5c. The Class D
-///      trampoline retirement happens in commit 6 (5e); for now we
-///      keep calling them via a transient engine instance so route
-///      projection stays correct after callsite migration.
+///      `lower_and_project_to_expanded`); we call them via a
+///      transient engine instance so route projection stays correct
+///      after callsite migration.
 ///   2. Generic ProjectPath dispatch for arbitrary expressions —
 ///      direct `Instantiate { args: [], body_mode: Expanded }`-shaped
 ///      `ProjectPath` query, raised to a `TypeExpr` and filtered for
@@ -76,14 +74,14 @@ pub(crate) fn project_expr_class_a_via_dispatch(
 /// created (suitable for top-level entry points without a caller
 /// engine).
 ///
-/// Phase 5e commit 6 retained the engine route-fast-path because
+/// commit 6 retained the engine route-fast-path because
 /// `engine.project_route_surface_expr` exercises engine-local
 /// resolution paths (re-export chains, prepared-decl fallbacks) that
 /// the dispatch's `lower_type_expr_in_scope` does not subsume —
 /// removing it caused stack overflows in tests with realistic
 /// indexed-access / utility shapes (e.g., `*_keeps_imported_*`
 /// member-path test family). The engine method itself remains a
-/// Phase 5c trampoline (already routes through dispatch), so the
+/// trampoline (already routes through dispatch), so the
 /// fast-path remains semantically aligned with dispatch.
 pub(crate) fn project_expr_class_a_via_dispatch_threaded<'ctx>(
     ctx: &'ctx dyn ResolverContext,
@@ -101,7 +99,7 @@ pub(crate) fn project_expr_class_a_via_dispatch_threaded<'ctx>(
     };
     use crate::semantic_query::{PathSegment, QueryResult, SemanticQueryKey};
 
-    // Phase 1+2: registry-route fast path via caller's engine (or a
+    // registry-route fast path via caller's engine (or a
     // transient engine when caller doesn't pass one). The Class D
     // route helpers (`project_route_surface_expr`,
     // `lower_and_project_to_expanded`) exercise engine-local
@@ -109,7 +107,7 @@ pub(crate) fn project_expr_class_a_via_dispatch_threaded<'ctx>(
     // generic `lower_type_expr_in_scope` does not inherit verbatim;
     // they retire alongside the engine deletion in 5g.
     //
-    // Phase 5h §5.10 r15/F11 — scope-shadowing gate. The TypeExpr
+    // r15/F11 — scope-shadowing gate. The TypeExpr
     // route extractors recognise `Pick<…>` / `Omit<…>` syntactically;
     // they do not consult the owner scope. When the SFC's same-file
     // scope already declares a userland `type Pick<T,_K> = T`
@@ -133,7 +131,7 @@ pub(crate) fn project_expr_class_a_via_dispatch_threaded<'ctx>(
             Some(e) => e,
             None => transient_engine.insert(ComponentMetaQueryEngine::new(ctx)),
         };
-        // Phase 5m §5.13a.2 — route engine.project_route_surface_expr
+        // route engine.project_route_surface_expr
         // and engine.lower_and_project_to_expanded through the bridge
         // helpers so the §5.14.1 pre-flight gate sees zero external
         // engine-method callers. The bridges' bodies remain
@@ -155,7 +153,7 @@ pub(crate) fn project_expr_class_a_via_dispatch_threaded<'ctx>(
         }
     }
 
-    // Phase 5f §8: indexed-path dispatch via decomposed `ProjectPath`.
+    // indexed-path dispatch via decomposed `ProjectPath`.
     // For an IndexedAccess chain with literal-string indices over a
     // generic-instantiated Ref base (e.g.,
     // `WrappedConfig<Theme>['nested']['palette']`), the registry-route
@@ -197,7 +195,7 @@ pub(crate) fn project_expr_class_a_via_dispatch_threaded<'ctx>(
         .then_some(projected)
 }
 
-/// Phase 5f §8 — decompose an IndexedAccess chain over literal-string
+/// decompose an IndexedAccess chain over literal-string
 /// indices into `(base_expr, path_segments)` so the dispatch helper can
 /// route through `ProjectPath { base, path, Expanded }` per CLAUDE.md
 /// "Macro Type Traversal Rule".
@@ -238,7 +236,7 @@ fn decompose_indexed_access_chain(
     (base, Arc::from(path.into_boxed_slice()))
 }
 
-/// Class A shape variant (Phase 5d §4.1) — dispatch-direct equivalent
+/// Class A shape variant — dispatch-direct equivalent
 /// of `ComponentMetaQueryEngine::project_expr_surface_shape`.
 ///
 /// Returns the projection's `ExpandedObjectShape` when it has at least
@@ -272,11 +270,11 @@ pub(crate) fn project_expr_class_a_shape_via_dispatch_threaded<'ctx>(
 // prepared-decl fallback (`cached_prepared_root_surface`). The
 // trampoline's `project_type_surface` body is dispatch-first then
 // prepared-decl-second; threading the prepared-decl path through
-// dispatch atomically is a Phase 5g change. Class B callsite
+// dispatch atomically is a change. Class B callsite
 // migration deferred to 5g per CLAUDE.md fix-quality discipline.
 
 /// Class D — Pick route-target via dispatch's `execute_pick`
-/// (Phase 5e §4.1 commit 6 / sub-plan §C.3 D-T recipe).
+///.
 ///
 /// Resolves `symbol_name` to a base `SemanticNodeId` (via Class A
 /// lowering on a bare `Ref` of the symbol), then dispatches
@@ -313,8 +311,7 @@ pub(crate) fn pick_via_dispatch_pick_helper(
     dispatch.raise_node_to_type_expr(node)
 }
 
-/// Class D — generic-Ref instantiation via dispatch (Phase 5e §4.1
-/// commit 6 / sub-plan §C.3 D-T recipe).
+/// Class D — generic-Ref instantiation via dispatch.
 ///
 /// Dispatch-equivalent of
 /// `ComponentMetaQueryEngine::instantiate_local_generic_ref`. The
@@ -369,14 +366,14 @@ pub(crate) fn instantiate_local_generic_ref_via_dispatch(
 }
 
 // =============================================================================
-// Phase 5l §5.14.2 — bridge helpers (post engine-method deletion).
+// Class B bridge helpers — Class B engine methods are deleted; these bridges thread `query_engine.ctx` through dispatch.
 //
 // The threaded `_threaded(engine, …)` variants are the production
 // callsite shape (engine threaded through caller). The non-threaded sync
 // variants (`project_type_surface_expr_via_host`,
 // `project_type_surface_shape_via_host`,
 // `project_prepared_type_surface_shape_via_host`) had no caller — neither
-// in production nor in tests — and were removed in the post-cutover
+// in production nor in tests — and were removed in the
 // clippy cleanup. The threaded `_via_host_threaded` variants below are
 // the canonical entrypoints; one (`_prepared_type_surface_expr_via_host_threaded`)
 // is gated `#[cfg(test)]` because tests are its only consumer.
@@ -524,7 +521,7 @@ pub(crate) fn lower_and_project_to_expanded_via_host_threaded<'ctx>(
         .then_some(reduced)
 }
 
-/// Phase 5l — direct equivalent of the deleted
+/// direct equivalent of the deleted
 /// `ComponentMetaQueryEngine::project_expr_surface_expr` engine method:
 /// the registry-route fast-path falls through to
 /// `lower_and_project_to_expanded_via_host_threaded`, then to a

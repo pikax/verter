@@ -874,7 +874,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
             }
         }
 
-        // Phase 1: Sync Vue dependencies first (so TSGO has .vue.ts targets before barrel)
+        // Sync Vue dependencies first (so TSGO has .vue.ts targets before barrel)
         for vue_id in &barrel_vue_deps {
             // Skip if already synced in the main Vue pass
             if let Some(state) = provider_sync_states.get(vue_id.as_str()) {
@@ -958,7 +958,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
             }
         }
 
-        // Phase 2: Sync barrel files (their rewritten imports now point to .vue.ts)
+        // Sync barrel files (their rewritten imports now point to .vue.ts)
         for barrel_id in &barrel_ids {
             if sync_pending_non_vue_provider_file(
                 sync,

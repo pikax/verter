@@ -2987,11 +2987,10 @@ fn mapped_type_value_materialised_from_source_member_for_known_keys() {
     }
 }
 
-// `mapped_type_value_stays_opaque_when_source_is_not_object` retired in
-// §5.5 WIP-M: plan §3 Change M rewrote `build_mapped_type` so that
-// symbolic-source mapped types substitute into the keyspace rather than
-// short-circuiting to Opaque(Miss). Its replacement lives in
-// `d_cutover_characterization_tests::mapped_type_value_substitutes_into_keyspace_even_when_source_is_not_object`.
+// Symbolic-source mapped types substitute into the keyspace rather
+// than short-circuiting to Opaque(Miss). The discriminating
+// characterization lives in
+// `project_semantic_dispatch_invariants_tests::mapped_type_value_substitutes_into_keyspace_even_when_source_is_not_object`.
 
 /// `build_mapped_type` resolves the key space lazily via the
 /// source object's member names (or a pre-built keyspace union)
@@ -3043,15 +3042,14 @@ fn mapped_type_resolves_key_space_via_key_of_subquery() {
 }
 
 // `mapped_type_inside_non_contributing_intersection_arm_ignored` and
-// `mapped_type_with_as_key_remapping_emits_project_member_with_remap_meta`
-// retired in §5.5 WIP-M: plan §3 Change M moved the intersection
-// contributor rule from `walk_internal` into `KeyEnumeration::Intersection`
-// aggregation, and reworked `as`-clause remapping so symbolic
-// `name_remap` defers the whole shape rather than eagerly emitting
-// `ProjectMember` edges with a remapped name. Replacements live in
-// `d_cutover_characterization_tests::build_mapped_type_produces_canonical_mapped_shell_on_unresolvable_enumeration`
+// The intersection contributor rule lives in
+// `KeyEnumeration::Intersection` aggregation (not `walk_internal`).
+// `as`-clause remapping defers the whole shape via symbolic
+// `name_remap` rather than eagerly emitting `ProjectMember` edges
+// with a remapped name. The discriminating characterizations live in
+// `project_semantic_dispatch_invariants_tests::build_mapped_type_produces_canonical_mapped_shell_on_unresolvable_enumeration`
 // and
-// `d_cutover_characterization_tests::mapped_type_with_as_clause_symbolic_remapping_defers_whole_shape_preserving_name_remap`.
+// `project_semantic_dispatch_invariants_tests::mapped_type_with_as_clause_symbolic_remapping_defers_whole_shape_preserving_name_remap`.
 
 // ──────────────────────────────────────────────────────────────────
 // Self-review regression tests (C1b–C6 follow-up)

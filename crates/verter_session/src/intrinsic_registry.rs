@@ -1,4 +1,4 @@
-//! TypeScript `intrinsic` declaration registry (Phase 2.1).
+//! TypeScript `intrinsic` declaration registry.
 //!
 //! The plan requires that named utility types like `Pick`, `Omit`, `Partial`,
 //! and userland aliases resolve through the normal declaration path —
@@ -351,7 +351,7 @@ type   NoInfer   <   T  >   = intrinsic   ;
     }
 
     // ----------------------------------------------------------------------
-    // Active-SDK intrinsic audit (plan § Phase 2.1)
+    // Active-SDK intrinsic audit
     //
     // Walks the workspace's installed TypeScript SDK, scans `lib*.d.ts` for
     // `type X<...> = intrinsic;` declarations, and asserts the default

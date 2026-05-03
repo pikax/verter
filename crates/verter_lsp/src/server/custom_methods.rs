@@ -1,4 +1,4 @@
-//! Custom LSP protocol handlers (phase 11e.6).
+//! Custom LSP protocol handlers.
 //!
 //! Inherent-impl extension methods on [`super::VerterLanguageServer`]
 //! covering the 13 custom $/* methods consumed by main.rs as

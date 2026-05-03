@@ -1,7 +1,7 @@
 //! Built-in TypeScript utility type registry.
 //!
 //! This module keeps the `BuiltinUtility` enum and its name/arity/intrinsic
-//! metadata alive after the D-Cutover solver kernel retirement. Utility
+//! metadata alive after the cutover solver kernel retirement. Utility
 //! expansion logic itself lives on the shared semantic dispatch layer
 //! (`verter_session::project_semantic_dispatch`); callers such as
 //! `IntrinsicRegistry`, `component_meta_query_engine`, and dispatch lower

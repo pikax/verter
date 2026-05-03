@@ -1108,7 +1108,7 @@ mod tests {
     }
 
     // =====================================================================
-    // Tsconfig-first policy tests (Phase 1)
+    // Tsconfig-first policy tests
     // =====================================================================
 
     #[test]
@@ -1169,7 +1169,7 @@ mod tests {
     }
 
     // =====================================================================
-    // Phase 3: Fallback project vite alias wiring tests
+    // Fallback project vite alias wiring tests
     // =====================================================================
 
     #[test]

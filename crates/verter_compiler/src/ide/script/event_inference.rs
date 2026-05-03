@@ -1,4 +1,4 @@
-//! Event-handler parameter inference (D6 of Phase 11d ownership-domain analysis).
+//! Event-handler parameter inference (ownership-domain analysis).
 //!
 //! For simple native-element handlers like `<button @click="handleClick">`,
 //! rewrite `function handleClick(e) {}` into

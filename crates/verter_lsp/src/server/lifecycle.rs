@@ -1,4 +1,4 @@
-//! LSP lifecycle method bodies (phase 11e.7).
+//! LSP lifecycle method bodies.
 //!
 //! Free functions hosting the bodies of `impl LanguageServer for
 //! VerterLanguageServer` lifecycle methods (initialize, initialized,

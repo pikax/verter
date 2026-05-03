@@ -1,6 +1,6 @@
-// Phase 2: Completion — template bindings, component names, props from verter_session analysis.
-// Phase 3: Enhanced with typed member access, generic inference from TypeProvider.
-// Phase 4: AST-based cursor context detection via cursor_context module.
+// Completion — template bindings, component names, props from verter_session analysis.
+// Enhanced with typed member access, generic inference from TypeProvider.
+// AST-based cursor context detection via cursor_context module.
 
 use tower_lsp_server::ls_types::*;
 use verter_session::FileAnalysisSnapshot;

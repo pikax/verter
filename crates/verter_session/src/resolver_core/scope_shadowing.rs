@@ -1,4 +1,4 @@
-//! Phase 5h §5.10 r15/F11 — `ScopeShadowing` resolver context.
+//! r15/F11 — `ScopeShadowing` resolver context.
 //!
 //! Captures, once per resolver context, the set of bare type names the
 //! owner scope already declares. The dispatch fast-path
@@ -9,14 +9,14 @@
 //! ambient-lib `__builtin__` fast-path. When `true`, the userland
 //! declaration wins and the `__builtin__` route is suppressed —
 //! preserving the plan's "user shadowing wins" rule across BOTH
-//! lowering entry points (the gap closed by Phase 5h).
+//! lowering entry points.
 //!
 //! **Design rationale (sub-plan §5.10 r15/F11):** the original r14
 //! brief threaded a bare `bool` through every route + registry caller.
-//! That replicates the parameter-explosion pattern Phase 10a's
+//! That replicates the parameter-explosion pattern that the
 //! `ResolverContext` sealed-trait migration is designed to fix. By
 //! introducing this struct now, the threading axis stays
-//! single-source-of-truth and Phase 10a can absorb `ScopeShadowing`
+//! single-source-of-truth and can absorb `ScopeShadowing`
 //! as one input field of `ResolverContext` without inventing a
 //! parallel axis to undo.
 //!
@@ -44,7 +44,7 @@ use std::sync::Arc;
 
 use crate::resolver_core::bare_name_resolve::DeclarationScopePayload;
 use crate::resolver_core::prepared_decl::PreparedDeclBundle;
-// Phase 10a: `from_host_scope` migrates to `&dyn ResolverContext`; the
+// `from_host_scope` migrates to `&dyn ResolverContext`; the
 // `crate::VerterHost` type is no longer needed in this file.
 
 /// Captures, once per resolver context, the set of bare type names

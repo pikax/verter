@@ -1,6 +1,5 @@
 //! Prepared root/member surface projection and ctx-cache publication
-//! methods extracted from `component_meta_query_engine/mod.rs` in
-//! Phase 11b.6.
+//! methods extracted from `component_meta_query_engine/mod.rs`.
 //!
 //! These methods operate on prepared type declarations
 //! (`PreparedTypeDecl`) and project their root surface or requested
@@ -45,7 +44,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 
     /// Project the full surface of a type expression in a declaration scope.
     ///
-    /// **Phase 5c trampoline (sub-plan §5 commit 3.7).** Body is
+    /// **trampoline (sub-plan §5 commit 3.7).** Body is
     /// dispatch-centric: tries `dispatch_projected_surface` (which
     /// instantiates the symbol through the `Instantiate { .., body_mode:
     /// Expanded }` memo and raises the resulting node back to a
@@ -76,7 +75,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .map(projected_surface_unwrap_or_clone)
     }
 
-    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
+    #[allow(dead_code)] // deletion in 5g per call-graph closure
     pub(super) fn project_prepared_root_surface(
         &mut self,
         scope_canonical_id: &str,
@@ -90,7 +89,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         result
     }
 
-    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
+    #[allow(dead_code)] // deletion in 5g per call-graph closure
     fn project_prepared_root_surface_inner(
         &mut self,
         scope_canonical_id: &str,
@@ -116,7 +115,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
 
-    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
+    #[allow(dead_code)] // deletion in 5g per call-graph closure
     fn project_prepared_surface_from_symbol(
         &mut self,
         scope_canonical_id: &str,
@@ -249,7 +248,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// Step 3 closure helper: write-through to ctx-owned
     /// PreparedSurfaceDb. Called after compute publishes a result so
     /// the next request (or a concurrent reader) gets the warm hit.
-    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
+    #[allow(dead_code)] // deletion in 5g per call-graph closure
     fn publish_prepared_surface_to_host_db(
         &self,
         scope_canonical_id: &str,
@@ -279,7 +278,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         });
     }
 
-    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
+    #[allow(dead_code)] // deletion in 5g per call-graph closure
     fn project_prepared_surface_from_expr(
         &mut self,
         scope_canonical_id: &str,
@@ -389,7 +388,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
 
-    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
+    #[allow(dead_code)] // deletion in 5g per call-graph closure
     fn project_prepared_surface_from_ref(
         &mut self,
         scope_canonical_id: &str,
@@ -499,7 +498,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
 
-    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
+    #[allow(dead_code)] // deletion in 5g per call-graph closure
     fn project_prepared_requested_member_surface_from_expr(
         &mut self,
         scope_canonical_id: &str,

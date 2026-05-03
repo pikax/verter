@@ -26,7 +26,7 @@ use crate::semantic_query::{
     SemanticQueryApi, SemanticQueryKey, SurfaceMember, SurfaceView, ValueRootKey,
 };
 
-// Phase 1B per-call counter (test-only). Incremented every time
+// per-call counter (test-only). Incremented every time
 // `find_longest_warm_prefix` returns `Some(_)` during a
 // `ProjectSemanticDispatch::build_project_path` invocation. Used by
 // `project_path_prefix_peek_short_circuits_sibling_walk` to discriminate
@@ -142,7 +142,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     &bundle,
                 )
             });
-        // Phase 5h §5.10 r15/F11 — capture the scope-shadowing context
+        // r15/F11 — capture the scope-shadowing context
         // once for the whole `build_typeof` body so every recursive
         // lowering observes the same shadow set.
         let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
@@ -350,7 +350,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     &bundle,
                 )
             });
-        // Phase 5h §5.10 r15/F11 — capture the scope-shadowing context
+        // r15/F11 — capture the scope-shadowing context
         // once for the whole `build_instantiate` body so every
         // recursive lowering observes the same shadow set.
         let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
@@ -590,9 +590,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///   assignability via `relate_nodes`; survivors reconstituted via
     ///   `intern_normalized_union_or_intersection` so empty and
     ///   singleton surviving sets canonicalise to `Never` / the lone
-    ///   member respectively. Phase 5i closes the literal-type
-    ///   reduction; non-literal arms still fall through to the
-    ///   deferred shell.
+    ///   member respectively. This closes the literal-type reduction;
+    ///   non-literal arms still fall through to the deferred shell.
     /// - **Opaque** (`NonNullable`, `Awaited`, function-signature
     ///   utilities when the argument shape does not match, string
     ///   intrinsics with non-literal inputs): return a shell anchored
@@ -980,7 +979,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 (QueryResult::Value(result), fence)
             }
 
-            // ---- Union-filter utilities (Phase 5i) ----
+            // ---- Union-filter utilities ----
             // `Extract<T, U>` keeps each member of `T`'s union that is
             // assignable to `U`; `Exclude<T, U>` keeps each member that
             // is NOT assignable to `U`. Both delegate per-member
@@ -1003,7 +1002,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // shells, opaque carriers) while closing the literal-type
             // case the `mapped_types` seed exercises.
             //
-            // Plan: §5.11 (Phase 5i — `Exclude<>` / `Extract<>`
+            // Plan: §5.11 (`Exclude<>` / `Extract<>`
             // concrete-literal reduction). The relation engine's
             // union-distribution path (§3 Cluster A) already handles
             // each per-member judgement; this arm composes those
@@ -1178,9 +1177,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }))
     }
 
-    // `resolve_decl_anchor` retired in Path C C16. Declaration identity
-    // is now carried directly by `SemanticQueryKey::Instantiate.base`
-    // (`DeclIdentity`), so there is no arena node to unwrap.
+    // Declaration identity is carried directly by
+    // `SemanticQueryKey::Instantiate.base` (`DeclIdentity`), so there is
+    // no arena node to unwrap.
 
     /// Path-precise projection (plan §3 C3). Walks each [`PathSegment`]
     /// from `base` via a fresh [`PathWalker`] that dispatches per-hop on
@@ -1209,7 +1208,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> (QueryResult<SemanticNodeId>, DepSignature) {
         let fence = self.project_generation_signature();
         self.graph().record_path_length(path.len() as u32);
-        // Phase 1B: longest-prefix-first peek. Skip when path.len() < 2.
+        // longest-prefix-first peek. Skip when path.len() < 2.
         // Codex-2 r3 fix: prefix entries are cached as Navigate regardless
         // of the caller's mode (path-precise rule — intermediate hops are
         // Navigate, terminal hop is the caller's mode).
@@ -1225,7 +1224,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         let mut walker = PathWalker::new(self, mode, &fence);
         let result = walker.walk(start_base, walker_path.as_ref());
-        // Phase 5g-supplement §5.D.0 r17 — surface a budget-exceeded
+        // supplement §5.D.0 r17 — surface a budget-exceeded
         // sentinel as `QueryResult::Recursive` so §5.D.4
         // `no_cache_promotion_for_budget_exceeded_*` callers can
         // discriminate via a type-level `matches!(_, Recursive(_))`
@@ -1252,7 +1251,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 Arc::clone(&fence),
             );
         }
-        // Phase 1B2: backfill intermediate path prefixes so a sibling
+        // backfill intermediate path prefixes so a sibling
         // dispatch sharing the same prefix can short-circuit through
         // `find_longest_warm_prefix`. Backfill always targets Navigate
         // (path-precise rule — intermediate hops are Navigate-mode
@@ -1536,7 +1535,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     evaluated
                 }
             };
-            // Phase 5i: apply `name_remap` (the `as <expr>` clause) to
+            // apply `name_remap` (the `as <expr>` clause) to
             // produce the member's surface name. When unset, the
             // produced name is the iteration key directly. When set,
             // substitute the mapper binder → `Literal(name)` into the
@@ -1613,7 +1612,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         (QueryResult::Value(node), fence)
     }
 
-    /// Conditional type (plan §3 C2 + §2 lazy block + §3 D-Cutover
+    /// Conditional type (plan §3 C2 + §2 lazy block + §3
     /// distributive-conditional authority).
     ///
     /// Evaluates `check extends extends ? true_branch : false_branch`
@@ -1630,9 +1629,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///   members: per_member_results })`. Termination is guaranteed by
     ///   the `distributive: false` flag on each sub-query (no re-
     ///   distribution), the family memo's per-member dedup, and the
-    ///   dispatch layer's same-path recursion sentinel. Plan §3
-    ///   D-Cutover: dispatch owns distributive distribution; the
-    ///   solver's retired distributive loop is gone.
+    ///   dispatch layer's same-path recursion sentinel. Plan §3:
+    ///   dispatch owns distributive distribution.
     /// - **Closed/decidable check** — one of the branch shell references
     ///   directly (no `Conditional` node interned). Emits a
     ///   [`OriginEdgeKind::ConditionalSelect`] edge with
@@ -1653,7 +1651,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// `never` bottom, exact node identity, and the obvious
     /// non-assignability cases. Object / union / intersection / generic
     /// relations stay deferred — the full solver routing lands via the
-    /// `resolve_conditional` dispatch handoff in D-Cutover. Bare-infer
+    /// `resolve_conditional` dispatch handoff in . Bare-infer
     /// bindings (`T extends infer X`) are handled by the shortcut below;
     /// nested-infer in complex patterns defers to the relation engine.
     pub(super) fn build_conditional(
@@ -1667,7 +1665,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let graph = self.graph();
         let fence = self.project_generation_signature();
 
-        // Plan §3 C2 + §3 D-Cutover: distributive distribution is the
+        // Plan §3 C2 + §3 : distributive distribution is the
         // dispatch layer's responsibility. When `distributive == true`
         // and `check` is a union, re-enter `execute` per-member with
         // `distributive: false`, then normalise the per-member results
@@ -2031,7 +2029,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// Phase 5 §3.2 — `ResolveMacroPayload` body.
+    /// `ResolveMacroPayload` body.
     ///
     /// Resolve a Vue compiler macro's payload to a single
     /// `SemanticNodeId` representing the macro's effective TypeExpr.
@@ -2193,7 +2191,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 }
 
-/// Phase 1B path-prefix peek (plan §1.B). Walks `path` from longest to
+/// path-prefix peek (plan §1.B). Walks `path` from longest to
 /// shortest non-empty prefix, returning the warm `(base, path[..k],
 /// Navigate)` entry's resolved node and `k` if any such prefix is
 /// memoized. Returns `None` when no prefix is warm — caller falls back
@@ -2233,7 +2231,7 @@ fn find_longest_warm_prefix(
     None
 }
 
-/// Phase 1B2 backfill helper (plan §1.B). For each linear-member-step
+/// backfill helper (plan §1.B). For each linear-member-step
 /// intermediate captured by the [`PathWalker`] in `intermediates`,
 /// publish the corresponding `(base, path[..i+1], Navigate)` key into
 /// the warm map via the shared
@@ -2287,7 +2285,7 @@ fn backfill_prefixes(
     }
 }
 
-/// Phase 5 §3.2 helper — convert a per-call local fence (one
+/// helper — convert a per-call local fence (one
 /// `(canonical, version)` entry per dep fact accumulated during the
 /// build path) into the canonical `Arc<[(Arc<str>, DepVersion)]>`
 /// shape returned alongside `QueryResult`.

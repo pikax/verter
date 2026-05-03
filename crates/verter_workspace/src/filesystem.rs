@@ -252,7 +252,7 @@ impl FilesystemWorkspace {
 
 // â”€â”€ WorkspaceAccess implementation â”€â”€
 
-// Phase 6b sub-plan §6b.D2b — split into `WorkspaceRead` (read-only)
+// split into `WorkspaceRead` (read-only)
 // and `WorkspaceAccess` (mutators) per the trait hierarchy.
 impl crate::traits::WorkspaceRead for FilesystemWorkspace {
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
@@ -658,7 +658,7 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         }
     }
 
-    // ── Ambient lib registry (Phase 5 §6.5) ──
+    // ── Ambient lib registry ──
 
     #[cfg(not(target_arch = "wasm32"))]
     fn register_ambient_lib(
