@@ -1,13 +1,16 @@
 # Off-store host caches — rehoming roadmap
 
-Source plan: `D:/tmp/verter-component-meta-performance-plan.md` Phase 12.followup.
+Source plan: `D:/tmp/verter-debt-and-deferred-fixes-plan.md` Tier 1 Step 1C
+(1C-α / 1C-β / 1C-γ). Originally filed under
+`D:/tmp/verter-component-meta-performance-plan.md` Phase 12.followup; the
+rehoming has since been promoted from deferred follow-up into the active
+legacy → graph + dispatch migration.
 
-This document captures the follow-up architecture work to rehome the
-remaining cache-shape fields on `VerterHost` into `ProjectTypeStore`.
-The work itself is **deferred** out of the current component-meta
-performance landing because it is an independent architecture rewrite
-that deserves its own plan + review cycle. This file is the standalone
-rehoming plan that will be picked up later.
+This document is the binding rehoming spec for Tier 1 Step 1C. It captures
+the cache-shape fields on `VerterHost` that move into `ProjectTypeStore`,
+the `CompileCacheEntry` super-shape split (option (b), D48) that drives
+1C-β, the eviction-policy tightening (D33 + D40 + D119) that drives 1C-γ,
+and the discriminating-test contract per sub-step.
 
 The five fields in scope:
 
@@ -211,48 +214,95 @@ pub struct ProjectTypeStore {
 state, not a result memoiser. The `no_off_store_host_caches`
 allow-list keeps its entry; the rationale stays the same.
 
-### F1 — `compile_cache` rehoming
+### F1 — `compile_cache` rehoming via `CompileCacheEntry` super-shape split (D48)
 
-**Backing**: `pub(crate) struct CompileCacheDb` wrapping
-`DashMap<String, Arc<CompileCacheEntry>>` (note: `Arc<Entry>` to
-match the cooperative-admission contract; today the off-store form
-is `DashMap<String, CompileCacheEntry>`, and the change to `Arc`
-is part of the rehoming).
+**Backing**: three typed DBs, not one. The super-shape `CompileCacheEntry`
+splits into independent invalidation domains so each sub-state evicts on
+its own trigger and survives orthogonal triggers. This is the migration
+plan's option (b) (D48); option (a) — keeping `CompileCacheEntry` as one
+struct — was rejected in revision 8 because the sub-mirror lifecycle
+asymmetry documented at `types.rs:1215..1236` makes the unified-entry form
+permanently lose precision.
 
-**Sub-mirror lifecycle preservation**: the doc-comment block at
-`types.rs:1215..1236` is the binding contract that the rehoming
-must preserve. `CompileCacheEntry::import_routes` is a sub-mirror
-of `IndexedReady.import_routes` with a *different invalidation
-trigger*: compile-event invalidation drops it, file-content-event
-invalidation drops both. The rehomed DB MUST keep this asymmetry
-visible — option (a) keeps `CompileCacheEntry` as one struct and
-documents the sub-shape lifecycle on the DB; option (b) splits
-`CompileCacheEntry` into `ProfileState` + `DerivedRawState` +
-`DependencyState` so each sub-shape is its own typed entry. Option
-(b) is the correct end-state but is a separate scope; option (a)
-is the rehoming. **Selected: option (a).** The split is filed as
-a downstream follow-up to this rehoming, not part of it.
+```rust
+// crates/verter_session/src/project_type_store.rs
+
+pub struct ProfileState {
+    pub compile_slots: FxHashMap<ProfileId, CompileSlot>,
+    pub overrides: ProfileOverrides,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+pub struct DerivedRawState {
+    /// Sub-mirror of IndexedReady.import_routes. Same content, different
+    /// invalidation trigger: source content change for the owner drops
+    /// this; profile-flag change preserves it.
+    pub import_routes: Arc<ImportRoutes>,
+}
+
+pub struct DependencyState {
+    pub deps: Arc<DepGraph>,
+    pub resolved_type_hashes: FxHashMap<TypeKey, Hash16>,
+}
+```
+
+Each sub-shape gets its own DB:
+
+- `CompileCacheDb` — `DashMap<String, Arc<ProfileState>>`. Profile-domain
+  state.
+- `DerivedRawCacheDb` — `DashMap<String, Arc<DerivedRawState>>`. Source-
+  content-domain state. Sub-mirror of IndexedReady.
+- `DependencyCacheDb` — `DashMap<String, Arc<DependencyState>>`. Dependency-
+  closure-domain state.
+
+**Invalidation matrix (D48)**:
+
+| Trigger | `ProfileState` | `DerivedRawState` | `DependencyState` |
+|---|---|---|---|
+| Source content change for owner | preserve | invalidate | invalidate |
+| Profile-flag change | invalidate | preserve | preserve |
+| Dep transitive close changed | preserve | preserve | invalidate |
+| `bump_project_generation_and_evict` | invalidate | invalidate | invalidate |
+
+The invalidation matrix is the contract that distinguishes super-shape from
+split form: in super-shape, profile-flag change drops `import_routes`
+unnecessarily (forcing a redundant rebuild on every profile sweep); in
+split form, the trigger touches only the matching domain.
+
+**Sub-mirror visibility**: `DerivedRawState::import_routes` is documented
+on its own type as "sub-mirror of `IndexedReady.import_routes`; different
+invalidation trigger from the IndexedReady source — see invalidation
+matrix above". The doc-comment block previously at `types.rs:1215..1236`
+is rewritten on `DerivedRawState` itself, not on the DB wrapper.
 
 **API contract**: existing readers / writers of the off-store
-`compile_cache` translate 1:1:
+`compile_cache` translate to the matching domain DB:
 
-- `host.compile_cache.entry(canonical).or_insert_with(...)` →
-  `project_type_store.compile_cache().get_or_insert(...)`
-- `host.compile_cache.get(canonical)` →
-  `project_type_store.compile_cache().get(canonical)`
+- `host.compile_cache.entry(c).or_insert_with(...).profile_state` →
+  `project_type_store.compile_cache().get_or_insert(c, profile_state_compute)`
+- `host.compile_cache.entry(c).or_insert_with(...).import_routes` →
+  `project_type_store.derived_raw_cache().get_or_insert(c, derived_raw_compute)`
+- `host.compile_cache.entry(c).or_insert_with(...).deps` →
+  `project_type_store.dependency_cache().get_or_insert(c, dep_state_compute)`
 - `host.compile_cache.remove(canonical)` →
-  participates in `evict_canonical` cascade
+  participates in the per-domain invalidation triggers above. The
+  unified `evict_canonical` cascade fires when source content changes
+  for the owner (drops Derived + Dependency); profile-flag change is a
+  separate path (drops Profile only).
 
-**Cooperative admission**: cold compile-slot insertions go through
-`cooperative_get_or_insert` (post-compute revalidation: if
-`whole_hash` of the canonical changed during compute, the entry is
-dropped). This closes the race documented in §0.4 above where two
-concurrent cold callers could pin a stale slot.
+**Cooperative admission**: cold inserts on each of the three DBs go
+through `cooperative_get_or_insert` with per-domain post-compute
+revalidation. ProfileState revalidates against the active profile-flag
+hash; DerivedRawState revalidates against `whole_hash` of the canonical;
+DependencyState revalidates against the dep-closure hash. This closes
+the race documented in §0.4 above where two concurrent cold callers
+could pin a stale slot.
 
-**Project-generation invalidation**: `compile_cache` participates in
+**Project-generation invalidation**: all three domain DBs participate in
 `bump_project_generation_and_evict`. Today `clear_compile_cache`
-(`lib.rs:1448..1467`) does this with full `clear()`; the rehoming
-makes it a one-line entry in the project-store cascade.
+(`lib.rs:1448..1467`) does this with full `clear()` of the unified
+super-shape; post-rehoming the cascade fans out to the three DBs and
+drops each.
 
 ### F2 — `resolved_type_cache` rehoming
 
@@ -540,29 +590,6 @@ rewrite says: "post-rehoming, both lifecycles live inside
 different invalidation trigger; see `CompileCacheDb`'s lifecycle
 docs for the full asymmetry."
 
-### Deferred follow-ups (NOT part of this rehoming)
-
-- **`CompileCacheEntry` super-shape split** (option (b) in §1.1).
-  Splitting `CompileCacheEntry` into `ProfileState` +
-  `DerivedRawState` + `DependencyState` is a separate scope; this
-  rehoming keeps the super-shape intact and rehomes it as one DB.
-- **Move `verter_semantic::db::SemanticDb` into `verter_session`**.
-  The crate split is correct (`SemanticDb` serves the surfaces /
-  bindings / reactivity provenance pipeline). This rehoming places
-  the `Mutex<SemanticDb>` *handle* under `ProjectTypeStore`'s
-  ownership; it does not fold the artifact into another crate.
-- **Promote `eval_env_cache` to project-global sharing** (cross-host
-  reuse of `EvalEnv` for the same `(canonical, whole_hash)`).
-  Phase 6b's note at `lib.rs:402..405` says the migration is
-  "unmotivated by current consumer patterns." This rehoming closes
-  the host-local-vs-project-store split but does not enable
-  cross-host sharing — `ProjectTypeStore` is still per-host today.
-  Cross-host sharing is its own scope.
-- **Profile-aware key composition for `eval_env_cache`**. Today the
-  cache key is `(canonical, whole_hash)`. Profile-gated writes (the
-  F2 model) could apply but are not motivated by current consumer
-  patterns. Filed as a downstream follow-up.
-
 ## Verification
 
 ### Workspace-wide test gate
@@ -675,29 +702,61 @@ The repo-first-pass benchmark (`tests/repo_first_pass_diagnosis_corpus.rs`)
 must show no regression and a small improvement on the F2 path. The
 benchmark's own tolerance bands cover the expected range.
 
-### Conventional-commit shape
+### Conventional-commit shape (per Tier 1 sub-step split)
 
-The rehoming lands as one commit:
+The rehoming lands across three sub-step commits, matching the migration
+plan's Tier 1 Step 1C decomposition (1C-α, 1C-β, 1C-γ):
 
 ```
-refactor(meta): rehome off-store host caches into ProjectTypeStore (Phase 12.followup)
+1C-α: refactor(session): rehome typed-DB destinations onto ProjectTypeStore (CompileCacheEntry stays super-shape)
 
-- F1 compile_cache: DashMap<String, CompileCacheEntry>
-  → ProjectTypeStore.compile_cache (CompileCacheDb)
-- F2 resolved_type_cache: bounded clear-all preserved inside DB,
-  per-canonical eviction added
-  → ProjectTypeStore.resolved_type_cache (ResolvedTypeCacheDb)
-- F4 eval_env_cache: cooperative admission closes two-concurrent-
-  cold-callers race
-  → ProjectTypeStore.eval_env_cache (EvalEnvCacheDb)
-- F5 semantic_db: handle moved (different crate, different artifact;
-  not folded into SemanticGraphStore)
-  → ProjectTypeStore.semantic_db (Mutex<SemanticDb>)
-- no_off_store_host_caches allow-list shrunk to F10 + non-cache
-  exceptions only
-
-5 new discriminating tests; 0 expected regressions.
+- Move four off-store fields from VerterHost to ProjectTypeStore.
+  CompileCacheEntry rehomes as one super-shape DB at this step (the
+  split is staged for 1C-β to keep the move atomic).
+- ResolvedTypeCacheDb / EvalEnvCacheDb / SemanticDb handle land at
+  their final addresses.
+- 4 discriminating tests: compile_cache_db_present_with_accessor_post_tier_1c_alpha,
+  resolved_type_cache_db_present_with_accessor_post_tier_1c_alpha,
+  eval_env_cache_db_stores_owned_eval_program_arc,
+  type_resolution_context_db_stores_owned_arc.
 ```
+
+```
+1C-β: refactor(session): split CompileCacheEntry super-shape per invalidation domain (D48)
+
+- ProfileState (profile-domain), DerivedRawState (source-content-domain
+  sub-mirror of IndexedReady.import_routes), DependencyState
+  (dep-closure-domain) each become their own typed DB on
+  ProjectTypeStore.
+- Invalidation matrix per domain: source change drops Derived+Dependency
+  but preserves Profile; profile-flag change drops Profile but preserves
+  Derived+Dependency; dep transitive close drops Dependency only;
+  bump_project_generation_and_evict drops all three.
+- 4 discriminating tests: source_content_change_preserves_profile_state,
+  profile_flag_change_preserves_raw_and_dep_state,
+  dep_transitive_close_change_preserves_profile_and_raw,
+  bump_project_generation_evicts_all_three_sub_shapes.
+```
+
+```
+1C-γ: refactor(session): tighten eviction policy + shrink no_off_store_host_caches allow-list (D33 + D40 + D119)
+
+- evict_unreachable_indexed_ready: live-content reachability first
+  (D33); LRU floor only triggers under explicit memory_pressure flag
+  (D40 + D119: memory_pressure_threshold defaults to usize::MAX).
+- F1, F2, F4, F5 entries deleted from phase_8_allow_list().
+- 6 discriminating tests: unchanged_live_file_never_re_lowered_across_publish_cycles,
+  four_off_store_caches_absent_post_tier_1,
+  host_manage_thread_local_caches_absent_post_tier_1,
+  no_off_store_host_caches_allow_list_shrunk,
+  eviction_policy_tunables_exposed_via_host_config,
+  lru_floor_only_triggers_under_memory_pressure_threshold.
+```
+
+Plus 5 discriminating tests defined in §3.3 of this document carry over
+unchanged from the option-(b) split (now part of 1C-β instead of one
+combined commit). Total per Tier 1 Step 1C: 4 + 4 + 6 + 5 = 19 new
+discriminating tests; 0 expected regressions.
 
 ### Rollback contract
 
@@ -707,29 +766,28 @@ the four allow-list entries simultaneously. There is no partial
 rollback — F1/F2/F4/F5 are interlocked through the unified
 `evict_canonical` cascade.
 
-## Why this is filed under Phase 12.followup
+## Promotion from follow-up to active migration
 
-Phase 12.followup of the component-meta performance plan
-(`D:/tmp/verter-component-meta-performance-plan.md` lines 1201..1207)
-explicitly stages this work as a follow-up because:
+This document was originally filed as Phase 12.followup of the component-
+meta performance plan because:
 
-1. The component-meta performance landing's scope is component-meta
+1. The component-meta performance landing's scope was component-meta
    correctness + performance (selective `Pick` materialisation,
    symbolic `Omit` preservation, repo-first-pass invariants). The
-   rehoming is orthogonal to those phases — it does not change any
+   rehoming was orthogonal to those phases — it did not change any
    component-meta semantics or performance characteristics by itself.
 2. Each rehomed cache surfaces consumer-visible API changes through
    the FFI / LSP / playground boundary. Bundling those changes with
-   the component-meta landing would conflate two reviewable scopes.
+   the component-meta landing would have conflated two reviewable
+   scopes.
 3. The rehoming requires its own discriminating test suite (§3.3
    above) and its own architecture-guard allow-list shrink. Neither
-   is in the component-meta landing's scope.
+   was in the component-meta landing's scope.
 
-This document satisfies the Phase 12.followup acceptance criterion:
-*"Follow-up doc exists with concrete sections (Context, Changes,
-Legacy Deletions, Verification per CLAUDE.md plan structure). Not a
-placeholder."*
-
-The rehoming itself will be a separate plan / PR cycle picked up
-when the component-meta landing has stabilised. This document is
-the entry point for that cycle.
+The legacy → graph + dispatch migration plan promotes the rehoming
+into Tier 1 Step 1C. Sub-step 1C-α moves the destination DBs onto
+`ProjectTypeStore` (super-shape preserved); 1C-β splits
+`CompileCacheEntry` into the three invalidation-domain DBs per D48;
+1C-γ tightens eviction policy and shrinks the architecture guard's
+allow-list. The discriminating-test contract per sub-step is in
+`§Verification` above.
