@@ -130,6 +130,7 @@ pub(crate) mod intrinsic_registry;
 pub mod invalidation_domain;
 mod meta;
 pub mod meta_resolve;
+pub mod owned_artifacts;
 pub(crate) mod owner_import_surface;
 #[cfg(test)]
 mod parity_tests;
