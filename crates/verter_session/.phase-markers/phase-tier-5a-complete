@@ -4,8 +4,16 @@
   "step": null,
   "status": "success",
   "base_commit": "562233b6",
-  "head_commit": "81f69e74",
-  "marker_commit": "b7dd1fdd",
+  "head_commit": "23e83048",
+  "marker_commit": "<recorded by follow-up commit>",
+  "_commit_chain": [
+    "71c34ba7 test(meta): add compat-native-call-surface allowlist walker",
+    "81f69e74 refactor(meta): bring compat ensureActive() into D35 read allow-list",
+    "b7dd1fdd chore(session): write phase-tier-5a-complete marker",
+    "012a9d8b chore(session): record marker_commit SHA in phase-tier-5a-complete marker",
+    "780f5eee chore(session): record clippy gate status accurately in tier-5a marker",
+    "23e83048 fix(meta): restore D35-compliant ensureActive() in compat checker"
+  ],
   "test_results": {
     "workspace": {
       "test_scope": "cargo test --workspace --tests",
