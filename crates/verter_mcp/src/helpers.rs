@@ -18,14 +18,15 @@ pub fn resolve_path(path: &str, project_root: Option<&Path>) -> String {
     }
 }
 
-/// Ensure a file is loaded in the host. Reads from disk if not already present.
+/// Ensure a file is loaded in the host. Reads from the workspace if not already present.
 pub fn ensure_loaded(host: &VerterHost, canonical_id: &str) -> Result<(), McpError> {
     if host.get_source(canonical_id).is_some() {
         return Ok(());
     }
-    let source = std::fs::read_to_string(canonical_id).map_err(|e| McpError {
+    let workspace = host.workspace_read();
+    let source = workspace.read_file(canonical_id).ok_or_else(|| McpError {
         code: rmcp::model::ErrorCode::INTERNAL_ERROR,
-        message: format!("Cannot read file {}: {}", canonical_id, e).into(),
+        message: format!("Cannot read file {} via workspace", canonical_id).into(),
         data: None,
     })?;
     let file_kind = if canonical_id.ends_with(".vue") {
@@ -36,7 +37,7 @@ pub fn ensure_loaded(host: &VerterHost, canonical_id: &str) -> Result<(), McpErr
     let _ = host.upsert(UpsertRequest {
         canonical_id: Some(canonical_id.to_string()),
         input_id: canonical_id.to_string(),
-        source: Arc::from(source.as_str()),
+        source: Arc::from(source.as_ref()),
         file_kind,
         aliases: vec![],
     });

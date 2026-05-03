@@ -57,12 +57,13 @@ pub fn scan_directory(root: &Path, host: &VerterHost, include_script_deps: bool)
 
         let canonical = path.to_string_lossy().replace('\\', "/");
 
-        match std::fs::read_to_string(path) {
-            Ok(source) => {
+        let workspace = host.workspace_read();
+        match workspace.read_file(&canonical) {
+            Some(source) => {
                 let result = host.upsert(UpsertRequest {
                     canonical_id: Some(canonical.clone()),
                     input_id: canonical,
-                    source: Arc::from(source.as_str()),
+                    source: Arc::from(source.as_ref()),
                     file_kind,
                     aliases: vec![],
                 });
@@ -78,8 +79,8 @@ pub fn scan_directory(root: &Path, host: &VerterHost, include_script_deps: bool)
                     }
                 }
             }
-            Err(e) => {
-                errors.push(format!("{}: {}", path.display(), e));
+            None => {
+                errors.push(format!("{}: file not found via workspace", path.display()));
             }
         }
     }

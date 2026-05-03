@@ -289,11 +289,13 @@ impl VerterMcpServer {
         Parameters(params): Parameters<ScanProjectParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let root = std::path::Path::new(&params.root);
+        let root_canonical = root.to_string_lossy().replace('\\', "/");
         let result =
             scanner::scan_directory(root, &self.host, params.include_deps.unwrap_or(false));
 
         // Auto-discover project lint config
-        let resolved = verter_diagnostics::discover_lint_config(root);
+        let workspace = self.host.workspace_read();
+        let resolved = verter_diagnostics::discover_lint_config(&*workspace, &root_canonical);
         let config_info = serde_json::json!({
             "explicitly_configured": resolved.explicitly_configured,
             "preset": format!("{:?}", resolved.config.preset),
@@ -302,7 +304,8 @@ impl VerterMcpServer {
         });
 
         // Detect routing framework after scanning
-        let route_framework = verter_semantic::analysis::detect_routing_framework(root);
+        let route_framework =
+            verter_semantic::analysis::detect_routing_framework(&*workspace, &root_canonical);
         let route_info = serde_json::json!({
             "framework": route_framework,
         });
@@ -325,10 +328,14 @@ impl VerterMcpServer {
         Parameters(params): Parameters<UpsertFileParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let canonical = self.resolve(&params.path);
-        let source = match params.source {
-            Some(s) => s,
-            None => std::fs::read_to_string(&canonical)
-                .map_err(|e| mcp_err(format!("Cannot read {}: {}", canonical, e)))?,
+        let source: Arc<str> = match params.source {
+            Some(s) => Arc::from(s.as_str()),
+            None => {
+                let workspace = self.host.workspace_read();
+                workspace
+                    .read_file(&canonical)
+                    .ok_or_else(|| mcp_err(format!("Cannot read {} via workspace", canonical)))?
+            }
         };
         let file_kind = if canonical.ends_with(".vue") {
             verter_session::FileKind::VueSfc
@@ -340,7 +347,7 @@ impl VerterMcpServer {
             .upsert(verter_session::UpsertRequest {
                 canonical_id: Some(canonical.clone()),
                 input_id: canonical.clone(),
-                source: Arc::from(source.as_str()),
+                source,
                 file_kind,
                 aliases: vec![],
             })
@@ -2736,7 +2743,13 @@ impl VerterMcpServer {
             })
             .collect();
 
-        verter_semantic::analysis::build_route_analysis(project_root, &template_components)
+        let workspace = self.host.workspace_read();
+        let project_root_str = project_root.to_string_lossy().replace('\\', "/");
+        verter_semantic::analysis::build_route_analysis(
+            &*workspace,
+            &project_root_str,
+            &template_components,
+        )
     }
 
     // ── Store Analysis Tools ──────────────────────────────────────────
