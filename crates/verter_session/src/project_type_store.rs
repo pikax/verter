@@ -977,6 +977,148 @@ const _: fn() = || {
     assert_send_sync_static::<ResolvedTypeCacheDb>();
 };
 
+// ──────────────────────────────────────────────────────────────────────
+// Tier 1A typed-DB invalidation impls
+//
+// Every DB-typed field on `ProjectTypeStore` MUST implement
+// `ParticipatesInInvalidation` AND `InvalidationByCanonical` so the
+// cascade in `invalidate_canonical_across_all_dbs` can dispatch to it
+// monomorphically. For Tier 1A's empty DBs the canonical-drain
+// implementations are a `clear`-on-key-prefix walk; they're correct
+// for the empty-DB state and Tier 1C-α's consumer migration extends
+// them to use a per-canonical reverse index.
+// ──────────────────────────────────────────────────────────────────────
+
+impl crate::invalidation_domain::ParticipatesInInvalidation for TypeResolutionContextDb {
+    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        &[FileContent, ProjectGeneration]
+    }
+
+    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        match domain {
+            ProjectGeneration => self.clear(),
+            FileContent => {
+                // Per-canonical drain through InvalidationByCanonical.
+            }
+            ResolverState | TypeGraph | ComponentMeta | AppConfigInterfaceMerge => {
+                // Not declared; ignore.
+            }
+        }
+    }
+}
+
+impl crate::invalidation_domain::InvalidationByCanonical for TypeResolutionContextDb {
+    fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
+        let mut removed = 0usize;
+        // Linear scan — Tier 1A's empty-DB state is fine with O(N); the
+        // 1C-α consumer migration adds a CanonicalReverseIndex.
+        self.entries.retain(|key, _| {
+            if key.canonical_id.as_ref() == canonical_id {
+                removed += 1;
+                false
+            } else {
+                true
+            }
+        });
+        removed
+    }
+}
+
+impl crate::invalidation_domain::ParticipatesInInvalidation for EvalEnvCacheDb {
+    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        &[FileContent, ProjectGeneration]
+    }
+
+    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        match domain {
+            ProjectGeneration => self.clear(),
+            FileContent => {}
+            ResolverState | TypeGraph | ComponentMeta | AppConfigInterfaceMerge => {}
+        }
+    }
+}
+
+impl crate::invalidation_domain::InvalidationByCanonical for EvalEnvCacheDb {
+    fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
+        let mut removed = 0usize;
+        self.entries.retain(|key, _| {
+            if key.canonical_id.as_ref() == canonical_id {
+                removed += 1;
+                false
+            } else {
+                true
+            }
+        });
+        removed
+    }
+}
+
+impl crate::invalidation_domain::ParticipatesInInvalidation for CompileCacheDb {
+    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        &[FileContent, ProjectGeneration]
+    }
+
+    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        match domain {
+            ProjectGeneration => self.clear(),
+            FileContent => {}
+            ResolverState | TypeGraph | ComponentMeta | AppConfigInterfaceMerge => {}
+        }
+    }
+}
+
+impl crate::invalidation_domain::InvalidationByCanonical for CompileCacheDb {
+    fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
+        let mut removed = 0usize;
+        self.entries.retain(|key, _| {
+            if key.as_ref() == canonical_id {
+                removed += 1;
+                false
+            } else {
+                true
+            }
+        });
+        removed
+    }
+}
+
+impl crate::invalidation_domain::ParticipatesInInvalidation for ResolvedTypeCacheDb {
+    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        &[FileContent, TypeGraph, ProjectGeneration]
+    }
+
+    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        match domain {
+            ProjectGeneration => self.clear(),
+            FileContent | TypeGraph => {}
+            ResolverState | ComponentMeta | AppConfigInterfaceMerge => {}
+        }
+    }
+}
+
+impl crate::invalidation_domain::InvalidationByCanonical for ResolvedTypeCacheDb {
+    fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
+        let mut removed = 0usize;
+        self.entries.retain(|key, _| {
+            if key.canonical_id.as_ref() == canonical_id {
+                removed += 1;
+                false
+            } else {
+                true
+            }
+        });
+        removed
+    }
+}
+
 /// Per-layer debug counters / cache stats for observability.
 ///
 /// The plan requires explicit counters for live entries, stale entries,
@@ -1645,6 +1787,11 @@ pub const PROJECT_TYPE_STORE_DB_INVENTORY: &[&str] = &[
     "routed_expr_surface_db",
     "route_owned_shallow",
     "app_config_no_override_proof",
+    // Tier 1A typed-DB shapes (introduced empty; consumer migration in 1C-α).
+    "type_resolution_context_db",
+    "eval_env_cache_db",
+    "compile_cache_db",
+    "resolved_type_cache_db",
 ];
 
 impl ProjectTypeStore {
@@ -1685,6 +1832,11 @@ impl ProjectTypeStore {
             &self.routed_expr_surface_db,
             &self.route_owned_shallow,
             &self.app_config_no_override_proof,
+            // Tier 1A typed-DB shapes (introduced empty; consumer migration in 1C-α).
+            &self.type_resolution_context_db,
+            &self.eval_env_cache_db,
+            &self.compile_cache_db,
+            &self.resolved_type_cache_db,
         ]
     }
 
@@ -1778,6 +1930,16 @@ impl ProjectTypeStore {
         );
         total = total.saturating_add(
             self.app_config_no_override_proof
+                .invalidate_canonical_for(canonical_id),
+        );
+        total = total.saturating_add(
+            self.type_resolution_context_db
+                .invalidate_canonical_for(canonical_id),
+        );
+        total = total.saturating_add(self.eval_env_cache_db.invalidate_canonical_for(canonical_id));
+        total = total.saturating_add(self.compile_cache_db.invalidate_canonical_for(canonical_id));
+        total = total.saturating_add(
+            self.resolved_type_cache_db
                 .invalidate_canonical_for(canonical_id),
         );
         total

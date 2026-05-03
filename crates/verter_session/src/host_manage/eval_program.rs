@@ -16,8 +16,7 @@ use crate::VerterHost;
 use super::{
     component_meta_trace_custom, is_raw_import_specifier_id, read_analysis_source_result_detail,
     ExternalTypeResolutionInputs, HostNamedTypeCacheAdapter, ParsedEvalProgramCacheEntry,
-    ParsedEvalProgramCacheKey, ParsedTypeResolutionContextCacheEntry,
-    HOST_PARSED_EVAL_PROGRAM_CACHE, HOST_PARSED_TYPE_CONTEXT_CACHE,
+    ParsedEvalProgramCacheKey,
 };
 
 impl VerterHost {
@@ -267,6 +266,23 @@ impl VerterHost {
             })
     }
 
+    /// Tier 1A — produces a fresh `ParsedEvalProgram` per call.
+    ///
+    /// The previous warm-cache lived in the
+    /// `HOST_PARSED_EVAL_PROGRAM_CACHE` thread-local, which is now
+    /// retired (§3.2.4). The new typed [`crate::project_type_store::EvalEnvCacheDb`]
+    /// stores `Arc<crate::owned_artifacts::OwnedEvalProgram>` once
+    /// Tier 1C-α migrates the consumer; in 1A this method falls
+    /// through to direct compute.
+    ///
+    /// `_cache_key` is constructed for trace fidelity with the old
+    /// cache-key shape so 1C-α's migration can reuse the
+    /// `(canonical_id, whole_hash, source_type)` identity tuple
+    /// without a wrapper. The single parse authority (host_executor's
+    /// `execute_source`) lowers the OXC arena to
+    /// [`OwnedEvalProgram`](crate::owned_artifacts::OwnedEvalProgram)
+    /// and drops the arena at the boundary; this method is the
+    /// borrowed-form interim path until consumers migrate.
     pub(super) fn cached_parsed_eval_program_entry(
         &self,
         canonical_id: &str,
@@ -274,52 +290,42 @@ impl VerterHost {
         eval_source: &Arc<str>,
         source_type: oxc_span::SourceType,
     ) -> ParsedEvalProgramCacheEntry {
-        let cache_key = ParsedEvalProgramCacheKey {
+        let _cache_key = ParsedEvalProgramCacheKey {
             host_instance_id: self.instance_id,
             canonical_id: canonical_id.to_string(),
             source_type,
             whole_hash,
         };
-        HOST_PARSED_EVAL_PROGRAM_CACHE.with(|cache| {
-            let mut cache = cache.borrow_mut();
-            if let Some(entry) = cache.get(&cache_key) {
-                if entry.whole_hash == whole_hash {
-                    component_meta_trace_custom!(
-                        "cached_parsed_eval_program_hit",
-                        format!(
-                            "owner={} bytes={} whole_hash={whole_hash:?} parse_failed={}",
-                            canonical_id,
-                            eval_source.len(),
-                            entry.parse_failed,
-                        ),
-                    );
-                    return entry.clone();
-                }
-            }
-
-            let parsed = crate::ParsedEvalProgram::parse(Arc::clone(eval_source), source_type);
-            let parse_failed = parsed.is_none();
-            let program =
-                Rc::new(parsed.unwrap_or_else(|| crate::ParsedEvalProgram::empty(source_type)));
-            let entry = ParsedEvalProgramCacheEntry {
-                whole_hash,
-                parse_failed,
-                program,
-            };
-            component_meta_trace_custom!(
-                "cached_parsed_eval_program_store",
-                format!(
-                    "owner={} bytes={} whole_hash={whole_hash:?} parse_failed={}",
-                    canonical_id,
-                    eval_source.len(),
-                    entry.parse_failed,
-                ),
-            );
-            cache.insert(cache_key, entry.clone());
-            entry
-        })
+        let parsed = crate::ParsedEvalProgram::parse(Arc::clone(eval_source), source_type);
+        let parse_failed = parsed.is_none();
+        let program =
+            Rc::new(parsed.unwrap_or_else(|| crate::ParsedEvalProgram::empty(source_type)));
+        let entry = ParsedEvalProgramCacheEntry {
+            whole_hash,
+            parse_failed,
+            program,
+        };
+        component_meta_trace_custom!(
+            "cached_parsed_eval_program_store",
+            format!(
+                "owner={} bytes={} whole_hash={whole_hash:?} parse_failed={}",
+                canonical_id,
+                eval_source.len(),
+                entry.parse_failed,
+            ),
+        );
+        entry
     }
 
+    /// Tier 1A — builds a fresh `ParsedTypeResolutionContext` per call.
+    ///
+    /// The previous warm-cache lived in the
+    /// `HOST_PARSED_TYPE_CONTEXT_CACHE` thread-local, which is now
+    /// retired (§3.2.4). The new typed [`crate::project_type_store::TypeResolutionContextDb`]
+    /// stores `Arc<crate::owned_artifacts::OwnedTypeResolutionContext>`
+    /// once Tier 1C-α migrates the consumer; in 1A this method falls
+    /// through to direct compute against the borrowed-form
+    /// `ParsedTypeResolutionContext`.
     pub(super) fn cached_type_resolution_context_entry(
         &self,
         canonical_id: &str,
@@ -327,79 +333,54 @@ impl VerterHost {
         eval_source: &Arc<str>,
         source_type: oxc_span::SourceType,
     ) -> Option<Rc<crate::ParsedTypeResolutionContext>> {
-        let cache_key = ParsedEvalProgramCacheKey {
+        let _cache_key = ParsedEvalProgramCacheKey {
             host_instance_id: self.instance_id,
             canonical_id: canonical_id.to_string(),
             source_type,
             whole_hash,
         };
-        HOST_PARSED_TYPE_CONTEXT_CACHE.with(|cache| {
-            let mut cache = cache.borrow_mut();
-            if let Some(entry) = cache.get(&cache_key) {
-                if entry.whole_hash == whole_hash {
-                    component_meta_trace_custom!(
-                        "cached_type_resolution_context_hit",
-                        format!(
-                            "owner={} bytes={} whole_hash={whole_hash:?}",
-                            canonical_id,
-                            eval_source.len(),
-                        ),
-                    );
-                    return Some(Rc::clone(&entry.type_context));
-                }
-            }
+        let parsed_eval_program = self.cached_parsed_eval_program_entry(
+            canonical_id,
+            whole_hash,
+            eval_source,
+            source_type,
+        );
+        if parsed_eval_program.parse_failed {
+            return None;
+        }
 
-            let parsed_eval_program = self.cached_parsed_eval_program_entry(
+        let adapter: std::sync::Arc<
+            dyn verter_compiler::utils::oxc::vue::resolve_type::cache_keys::NamedTypeCache
+                + Send
+                + Sync,
+        > = std::sync::Arc::new(HostNamedTypeCacheAdapter {
+            graph: std::sync::Arc::clone(self.project_type_store.semantic_graph()),
+            canonical_id: Arc::<str>::from(canonical_id),
+            whole_hash,
+        });
+        let type_context = Rc::new(crate::ParsedTypeResolutionContext::new(
+            Rc::clone(&parsed_eval_program.program),
+            |parsed_program| {
+                let program = parsed_program.borrow_dependent();
+                let mut ctx = verter_compiler::utils::oxc::vue::resolve_type::build_type_context(
+                    program,
+                    parsed_program.source_bytes(),
+                    0,
+                );
+                ctx.set_trace_label(canonical_id.to_string());
+                ctx.set_named_type_cache(Some(adapter));
+                ctx
+            },
+        ));
+        component_meta_trace_custom!(
+            "cached_type_resolution_context_store",
+            format!(
+                "owner={} bytes={} whole_hash={whole_hash:?}",
                 canonical_id,
-                whole_hash,
-                eval_source,
-                source_type,
-            );
-            if parsed_eval_program.parse_failed {
-                return None;
-            }
-
-            let adapter: std::sync::Arc<
-                dyn verter_compiler::utils::oxc::vue::resolve_type::cache_keys::NamedTypeCache
-                    + Send
-                    + Sync,
-            > = std::sync::Arc::new(HostNamedTypeCacheAdapter {
-                graph: std::sync::Arc::clone(self.project_type_store.semantic_graph()),
-                canonical_id: Arc::<str>::from(canonical_id),
-                whole_hash,
-            });
-            let type_context = Rc::new(crate::ParsedTypeResolutionContext::new(
-                Rc::clone(&parsed_eval_program.program),
-                |parsed_program| {
-                    let program = parsed_program.borrow_dependent();
-                    let mut ctx =
-                        verter_compiler::utils::oxc::vue::resolve_type::build_type_context(
-                            program,
-                            parsed_program.source_bytes(),
-                            0,
-                        );
-                    ctx.set_trace_label(canonical_id.to_string());
-                    ctx.set_named_type_cache(Some(adapter));
-                    ctx
-                },
-            ));
-            component_meta_trace_custom!(
-                "cached_type_resolution_context_store",
-                format!(
-                    "owner={} bytes={} whole_hash={whole_hash:?}",
-                    canonical_id,
-                    eval_source.len(),
-                ),
-            );
-            cache.insert(
-                cache_key,
-                ParsedTypeResolutionContextCacheEntry {
-                    whole_hash,
-                    type_context: Rc::clone(&type_context),
-                },
-            );
-            Some(type_context)
-        })
+                eval_source.len(),
+            ),
+        );
+        Some(type_context)
     }
 
     pub(super) fn external_type_resolution_inputs(
@@ -471,81 +452,75 @@ impl VerterHost {
             inputs.raw_source.as_ref(),
             inputs.cached_parse.as_deref(),
         );
-        let cache_key = ParsedEvalProgramCacheKey {
+        let _cache_key = ParsedEvalProgramCacheKey {
             host_instance_id: self.instance_id,
             canonical_id: dep_canonical.to_string(),
             source_type,
             whole_hash: inputs.whole_hash,
         };
-        HOST_PARSED_EVAL_PROGRAM_CACHE.with(|cache| {
-            let mut cache = cache.borrow_mut();
-            let entry = match cache.get(&cache_key) {
-                Some(entry) if entry.whole_hash == inputs.whole_hash => entry.clone(),
-                _ => {
-                    let parsed = crate::ParsedEvalProgram::parse(
-                        Arc::clone(&inputs.eval_source),
-                        source_type,
-                    );
-                    let parse_failed = parsed.is_none();
-                    let program = Rc::new(
-                        parsed.unwrap_or_else(|| crate::ParsedEvalProgram::empty(source_type)),
-                    );
-                    let entry = ParsedEvalProgramCacheEntry {
-                        whole_hash: inputs.whole_hash,
-                        parse_failed,
-                        program,
-                    };
-                    cache.insert(cache_key.clone(), entry.clone());
-                    entry
-                }
-            };
-            if entry.parse_failed {
-                return None;
-            }
-            let program = entry.program.borrow_dependent();
-            let source_bytes = inputs.eval_source.as_bytes();
-            let resolved = verter_compiler::utils::oxc::vue::resolve_type::resolve_external_type_in_program_with_analyzed_symbol_companion(
-                exported_name,
-                program,
-                source_bytes,
-                inputs.analysis.as_ref(),
-                &rustc_hash::FxHashMap::default(),
-            )?;
-            Some(crate::resolver_core::surface_projector::project_macro_surfaces(
-                Some(inputs.eval_source.as_ref()),
-                macro_kind,
-                &resolved,
-            ))
-        })
+        // Tier 1A: thread-local cache deleted (§3.2.4); compute fresh
+        // until 1C-α wires the typed `EvalEnvCacheDb` consumer.
+        let parsed =
+            crate::ParsedEvalProgram::parse(Arc::clone(&inputs.eval_source), source_type);
+        let parse_failed = parsed.is_none();
+        let program =
+            Rc::new(parsed.unwrap_or_else(|| crate::ParsedEvalProgram::empty(source_type)));
+        let entry = ParsedEvalProgramCacheEntry {
+            whole_hash: inputs.whole_hash,
+            parse_failed,
+            program,
+        };
+        if entry.parse_failed {
+            return None;
+        }
+        let program_ref = entry.program.borrow_dependent();
+        let source_bytes = inputs.eval_source.as_bytes();
+        let resolved = verter_compiler::utils::oxc::vue::resolve_type::resolve_external_type_in_program_with_analyzed_symbol_companion(
+            exported_name,
+            program_ref,
+            source_bytes,
+            inputs.analysis.as_ref(),
+            &rustc_hash::FxHashMap::default(),
+        )?;
+        Some(crate::resolver_core::surface_projector::project_macro_surfaces(
+            Some(inputs.eval_source.as_ref()),
+            macro_kind,
+            &resolved,
+        ))
     }
 
+    /// Tier 1A — no-op after thread-local retirement (§3.2.4).
+    ///
+    /// The previous implementation drained the
+    /// `HOST_PARSED_EVAL_PROGRAM_CACHE` /
+    /// `HOST_PARSED_TYPE_CONTEXT_CACHE` thread-locals for this host
+    /// instance. Both caches are gone in 1A; this method is preserved
+    /// as a stable name for callers (Tier 1C-α reintroduces the
+    /// behaviour through the typed `EvalEnvCacheDb` /
+    /// `TypeResolutionContextDb` typed-DB clear methods).
     pub(crate) fn clear_thread_local_parsed_eval_program_cache(&self) {
-        let host_instance_id = self.instance_id;
-        HOST_PARSED_EVAL_PROGRAM_CACHE.with(|cache| {
-            cache
-                .borrow_mut()
-                .retain(|key, _| key.host_instance_id != host_instance_id);
-        });
-        HOST_PARSED_TYPE_CONTEXT_CACHE.with(|cache| {
-            cache
-                .borrow_mut()
-                .retain(|key, _| key.host_instance_id != host_instance_id);
-        });
-        // `external_type_analysis_cache` host mutex
-        // is gone (folded into `RouteOwnedShallowDb` via the unified F6/F7
-        // entry). The new discipline is per-canonical tiered staleness gate
-        // + atomic `project_type_store.evict_canonical` cascade on file
-        // change + bulk `route_owned_shallow.clear_all` on route-resolution
-        // mutation. NO cache-wide epoch-bump clear — that was over-clearing
-        // and the per-entry `route_owned_entry_is_fresh` gate is precise.
+        // Tier 1A — `HOST_PARSED_EVAL_PROGRAM_CACHE` /
+        // `HOST_PARSED_TYPE_CONTEXT_CACHE` thread-locals are retired
+        // (§3.2.4). Tier 1C-α replaces with:
+        //   self.project_type_store.eval_env_cache().clear();
+        //   self.project_type_store.type_resolution_context_cache().clear();
+        // The `external_type_analysis_cache` host mutex is already
+        // folded into `RouteOwnedShallowDb` (unified F6/F7 entry). The
+        // discipline is per-canonical tiered staleness gate + atomic
+        // `project_type_store.evict_canonical` cascade on file change +
+        // bulk `route_owned_shallow.clear_all` on route-resolution
+        // mutation. NO cache-wide epoch-bump clear — that was
+        // over-clearing and the per-entry `route_owned_entry_is_fresh`
+        // gate is precise.
         //
-        // Clear host-owned named-type cache on epoch bump. Entries live on
-        // the shared `SemanticGraphStore` under `HostResolvedNamedTypeKey`
-        // identities, scoped by `(canonical_id, whole_hash)`. Whole_hash
-        // reflects one workspace content generation, so a bumped epoch
-        // means at least one canonical's facts changed; we prefer to drop
-        // stale entries over validating each one lazily (which would
-        // require a per-canonical invalidation pass).
+        // Clear host-owned named-type cache on epoch bump. Entries live
+        // on the shared `SemanticGraphStore` under
+        // `HostResolvedNamedTypeKey` identities, scoped by
+        // `(canonical_id, whole_hash)`. Whole_hash reflects one
+        // workspace content generation, so a bumped epoch means at
+        // least one canonical's facts changed; we prefer to drop stale
+        // entries over validating each one lazily (which would require
+        // a per-canonical invalidation pass).
         self.project_type_store
             .semantic_graph()
             .clear_resolved_named_types();

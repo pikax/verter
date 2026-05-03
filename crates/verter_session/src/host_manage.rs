@@ -3,7 +3,6 @@
 //! Contains [`VerterHost::remove`], [`VerterHost::get_analysis`],
 //! [`VerterHost::get_diagnostics`], and [`VerterHost::set_import_dependencies`].
 
-use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
@@ -329,17 +328,17 @@ pub(in crate::host_manage) struct ParsedEvalProgramCacheKey {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)] // `whole_hash` retained for trace fidelity; consumer migration in 1C-α.
 pub(in crate::host_manage) struct ParsedEvalProgramCacheEntry {
     pub(in crate::host_manage) whole_hash: Hash16,
     pub(in crate::host_manage) parse_failed: bool,
     pub(in crate::host_manage) program: Rc<crate::ParsedEvalProgram>,
 }
 
-#[derive(Clone)]
-pub(in crate::host_manage) struct ParsedTypeResolutionContextCacheEntry {
-    pub(in crate::host_manage) whole_hash: Hash16,
-    pub(in crate::host_manage) type_context: Rc<crate::ParsedTypeResolutionContext>,
-}
+// `ParsedTypeResolutionContextCacheEntry` retired with the
+// thread-locals (§3.2.4); the borrowed `ParsedTypeResolutionContext`
+// flows directly through `cached_type_resolution_context_entry` until
+// 1C-α migrates to the typed `OwnedTypeResolutionContext` cache.
 
 /// Thin adapter that implements
 /// [`verter_compiler::utils::oxc::vue::resolve_type::cache_keys::NamedTypeCache`]
@@ -414,19 +413,28 @@ pub(crate) struct ExternalTypeResolutionInputs {
     pub(crate) analysis_cache_hit: bool,
 }
 
-thread_local! {
-    pub(in crate::host_manage) static HOST_PARSED_EVAL_PROGRAM_CACHE: RefCell<
-        rustc_hash::FxHashMap<ParsedEvalProgramCacheKey, ParsedEvalProgramCacheEntry>
-    > = RefCell::new(rustc_hash::FxHashMap::default());
-    pub(in crate::host_manage) static HOST_PARSED_TYPE_CONTEXT_CACHE: RefCell<
-        rustc_hash::FxHashMap<ParsedEvalProgramCacheKey, ParsedTypeResolutionContextCacheEntry>
-    > = RefCell::new(rustc_hash::FxHashMap::default());
-    // TODO(follow-up): Move HOST_PARSED_EVAL_PROGRAM_CACHE and HOST_PARSED_TYPE_CONTEXT_CACHE
-    // to host-owned caches. Currently blocked by !Send types:
-    // - ParsedEvalProgram uses self_cell with oxc_allocator::Allocator (!Send arena)
-    // - ParsedTypeResolutionContext's dependent contains Rc<RefCell<>> fields
-    // The proper fix requires converting OXC arena types to Send+Sync (upstream concern).
-}
+// Tier 1A — `HOST_PARSED_EVAL_PROGRAM_CACHE` and
+// `HOST_PARSED_TYPE_CONTEXT_CACHE` thread-locals deleted (D44 + §3.2.4).
+//
+// The OXC parser arena drops at the lowering boundary: lowering produces
+// `crate::owned_artifacts::OwnedEvalProgram` /
+// `crate::owned_artifacts::OwnedTypeResolutionContext`, both `Send +
+// Sync + 'static`. The owned forms sit in
+// `ProjectTypeStore::eval_env_cache()` /
+// `ProjectTypeStore::type_resolution_context_cache()` (D17 + D18 typed
+// DBs). The empty-DB consumer migration is Tier 1C-α.
+//
+// In Tier 1A the borrowed `ParsedEvalProgram` / `ParsedTypeResolutionContext`
+// types are still produced fresh per call by
+// `cached_parsed_eval_program_entry` / `cached_type_resolution_context_entry`
+// — the cache that was here is gone; consumers fall back to direct
+// compute. Performance regression is intentional and bounded to 1A; the
+// 1C-α consumer migration restores warm-cache behaviour through the
+// owned-artifact path.
+//
+// Architecture guard: `no_thread_local_oxc_caches` (Tier 1A) rejects
+// any reintroduction of OXC-arena thread-local caches in
+// `crates/verter_session/src/`.
 
 // ──────────────────────────────────────────────────────────────────────────
 // Component-meta options + fingerprint + fence validator

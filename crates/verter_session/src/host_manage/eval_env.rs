@@ -1117,3 +1117,7 @@ impl VerterHost {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "eval_env_tests.rs"]
+mod eval_env_tests;

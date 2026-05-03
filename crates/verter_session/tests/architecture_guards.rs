@@ -3493,6 +3493,13 @@ mod foundations_guards {
         // verter_type_runtime::backend::tests via meta_resolve types,
         // tests/host_tests.rs
         "pub mod meta_resolve",
+        // Tier 1A — `OwnedEvalProgram` / `OwnedTypeResolutionContext`
+        // owned-artifact module (D17 + D18 + D44 + D45 + D65). Public
+        // because the typed-DB shapes on `ProjectTypeStore` (1C-α
+        // consumers) need to expose `OwnedArtifactKey` -> payload
+        // values to consumers in `verter_type_runtime` /
+        // `verter_napi` once the lowering pipeline lands.
+        "pub mod owned_artifacts",
         // tests/host_tests.rs (project_type_store::*)
         "pub mod project_type_store",
         // tests/audited_request_e2e.rs, tests/host_tests.rs

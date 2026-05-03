@@ -12,7 +12,6 @@ use super::project_type_store::{
     EvalEnvCacheDb, OwnedArtifactKey, ProjectTypeStore, ResolvedTypeCacheDb, TypeResolutionContextDb,
 };
 use std::sync::Arc;
-use verter_semantic::analysis::Hash16;
 
 #[test]
 fn type_resolution_context_db_present_with_accessor() {
@@ -25,7 +24,7 @@ fn type_resolution_context_db_present_with_accessor() {
     assert!(db.is_empty(), "Tier 1A introduces the DB empty");
     // Constructive insert + lookup roundtrip — verifies the DB is
     // really backed by storage and not a no-op stub.
-    let key = OwnedArtifactKey::new("test.vue", Hash16::default());
+    let key = OwnedArtifactKey::new("test.vue", [0u8; 16]);
     db.insert(key.clone(), Arc::new(OwnedTypeResolutionContext::empty()));
     assert_eq!(db.len(), 1, "insert must populate");
     let recovered = db.get(&key);
@@ -39,7 +38,7 @@ fn eval_env_cache_db_present_with_accessor() {
     let store = ProjectTypeStore::new();
     let db: &EvalEnvCacheDb = store.eval_env_cache();
     assert!(db.is_empty(), "Tier 1A introduces the DB empty");
-    let key = OwnedArtifactKey::new("test.vue", Hash16::default());
+    let key = OwnedArtifactKey::new("test.vue", [0u8; 16]);
     db.insert(key.clone(), Arc::new(OwnedEvalProgram::empty()));
     assert_eq!(db.len(), 1);
     let recovered = db.get(&key);
