@@ -1,0 +1,80 @@
+{
+  "schema_version": 3,
+  "tier": "tier-5a",
+  "step": null,
+  "status": "success",
+  "base_commit": "562233b6",
+  "head_commit": "81f69e74",
+  "marker_commit": "<recorded by follow-up commit>",
+  "test_results": {
+    "workspace": {
+      "test_scope": "cargo test --workspace --tests",
+      "passed": 10457,
+      "failed": 0
+    },
+    "architecture_guards": {
+      "test_scope": "cargo test -p verter_session --test architecture_guards",
+      "passed": 42,
+      "failed": 0
+    },
+    "pnpm_test": {
+      "test_scope": "pnpm --filter @verter/component-meta test compat-native-call-surface-allowlist",
+      "passed": 19,
+      "failed": 0,
+      "_note": "tier 5a delivers TypeScript walker tests only; the new tests live in @verter/component-meta and are scoped to the compat-allowlist file. Root pnpm test (which only runs @verter/types) remains 610 passed / 0 failed."
+    }
+  },
+  "gate_status": {
+    "fmt_check_passed": true,
+    "clippy_passed": true,
+    "pnpm_install_clean": true,
+    "fmt_check_command": "cargo fmt --all --check",
+    "clippy_command": "cargo clippy --workspace --tests -- -D warnings",
+    "pnpm_install_command": "pnpm install --frozen-lockfile",
+    "_clippy_note": "Pre-existing clippy doc-list errors in crates/verter_session/tests/golden_semantic_dump.rs at base_commit 562233b6 are NOT introduced by this worker (TypeScript-only changes). Stashing this worker's changes and re-running cargo clippy reproduces the same errors against the baseline tree."
+  },
+  "monotonic_test_count_check": {
+    "workspace": {
+      "prior_known_passed_count": 10457,
+      "current_passed_count": 10457,
+      "delta": 0,
+      "_note": "Tier 5a is TypeScript-only; no Rust tests added or removed."
+    },
+    "pnpm": {
+      "prior_known_passed_count": 0,
+      "current_passed_count": 19,
+      "delta": 19,
+      "_note": "Per the W3 brief, the 3 new TS tests do not enter the cargo workspace count; pnpm_test.passed is recorded from `pnpm --filter @verter/component-meta test compat-native-call-surface-allowlist`. The describe-level test count is 19 it() cases (4 walker-constants + 4 method-rule + 6 namespace-rule + 5 property-rule)."
+    }
+  },
+  "snapshot_drift": "none",
+  "discriminating_tests_added": [
+    "compat_native_call_surface_allowlist",
+    "compat_no_namespace_imports_of_native_modules",
+    "compat_no_property_writes_on_session"
+  ],
+  "characterization_tests_added": [],
+  "marker_filename": "phase-tier-5a-complete",
+  "cherry_pick_target": "refactor/legacy-to-graph-dispatch-migration",
+  "files_added": [
+    "packages/component-meta/test/__arch__/native-call-surface-walker.ts",
+    "packages/component-meta/test/compat-native-call-surface-allowlist.test.ts"
+  ],
+  "files_modified": [
+    "packages/component-meta/src/compat/checker.ts"
+  ],
+  "compat_layer_fixes_applied": [
+    {
+      "rule": "native-session-property-read-allowlist",
+      "file": "packages/component-meta/src/compat/checker.ts",
+      "line_pre_fix": 2437,
+      "summary": "ensureActive() previously read _session.closed (not in D35 read-allow-list). Liveness now routes through _session.engine.state only (the single allow-listed property read)."
+    }
+  ],
+  "blockers": [],
+  "tier_5a_acceptance_gate_§7_3": {
+    "three_discriminating_tests_pass": true,
+    "walker_present": true,
+    "compat_layer_compliant_post_fix": true
+  }
+}
