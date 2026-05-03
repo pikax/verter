@@ -11,6 +11,11 @@ publish = false
 
 [features]
 hotpath = ["dep:hotpath", "hotpath/hotpath", "verter_session/hotpath", "verter_diagnostics/hotpath"]
+# `mcp` enables the embedded MCP HTTP server inside the LSP binary.
+# Default-OFF: IDEs that previously consumed MCP-via-LSP must either build
+# verter_lsp with `--features mcp` or spawn the standalone `verter_mcp_server`
+# binary. See docs/contributing/lsp-mcp-decoupling.md.
+mcp = ["dep:verter_mcp", "dep:rmcp", "dep:axum"]
 
 [dependencies]
 verter_session = { path = "../verter_session", features = ["session_metrics"] }
@@ -22,15 +27,15 @@ verter_diagnostics = { path = "../verter_diagnostics" }
 verter_actions = { path = "../verter_actions" }
 verter_span = { path = "../verter_span" }
 verter_type_runtime = { path = "../verter_type_runtime" }
-verter_mcp = { path = "../verter_mcp" }
+verter_mcp = { path = "../verter_mcp", optional = true }
 oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }
 oxc_parser = { workspace = true }
 oxc_span = { workspace = true }
 oxc_sourcemap = "6.0.2"
 tower-lsp-server = "0.23"
-rmcp = { version = "1", features = ["server", "macros", "transport-streamable-http-server"] }
-axum = "0.8"
+rmcp = { version = "1", features = ["server", "macros", "transport-streamable-http-server"], optional = true }
+axum = { version = "0.8", optional = true }
 schemars = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }

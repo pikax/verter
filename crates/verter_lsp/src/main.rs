@@ -53,6 +53,10 @@ async fn main() {
     // Port 0 lets the OS pick a free port, avoiding conflicts when multiple VS Code
     // windows each running their own Verter instance. We bind the listener here so the
     // actual port is known immediately — no async coordination needed.
+    //
+    // Only available when verter_lsp is built with `--features mcp`. Without the
+    // feature, IDEs must spawn the standalone `verter_mcp_server` binary.
+    #[cfg(feature = "mcp")]
     let mcp_actual_port: Option<u16> = if let Some(mcp_port) = args.mcp_port {
         match tokio::net::TcpListener::bind(format!("127.0.0.1:{mcp_port}")).await {
             Ok(listener) => {
@@ -72,6 +76,18 @@ async fn main() {
             }
         }
     } else {
+        None
+    };
+
+    #[cfg(not(feature = "mcp"))]
+    let mcp_actual_port: Option<u16> = {
+        if args.mcp_port.is_some() {
+            tracing::warn!(
+                "--mcp-port supplied but verter_lsp was built without `mcp` feature. \
+                 Spawn the standalone `verter_mcp_server` binary or rebuild with \
+                 `--features mcp`."
+            );
+        }
         None
     };
 
@@ -160,6 +176,8 @@ struct CliArgs {
     /// MCP HTTP port. When set, starts an HTTP MCP endpoint alongside LSP stdio.
     mcp_port: Option<u16>,
     /// Lint preset for the MCP server's diagnostic tools.
+    /// Only consumed when the `mcp` feature is enabled.
+    #[cfg_attr(not(feature = "mcp"), allow(dead_code))]
     mcp_lint_preset: String,
 }
 
@@ -453,6 +471,7 @@ fn path_to_file_uri(path: &str) -> String {
 
 /// Serve the MCP HTTP endpoint on an already-bound listener.
 /// The listener is bound in `main()` so the actual port is known immediately.
+#[cfg(feature = "mcp")]
 async fn serve_mcp_http(
     host: Arc<VerterHost>,
     listener: tokio::net::TcpListener,

@@ -3828,6 +3828,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "verter_mcp_server"
+version = "0.0.1-beta.1"
+dependencies = [
+ "axum",
+ "clap",
+ "rmcp",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "verter_diagnostics",
+ "verter_mcp",
+ "verter_semantic",
+ "verter_session",
+ "verter_workspace",
+]
+
+[[package]]
 name = "verter_napi"
 version = "0.0.1-beta.1"
 dependencies = [

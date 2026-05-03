@@ -3209,21 +3209,10 @@ mod foundations_guards {
         found_violation
     }
 
-    /// Allowlist for guard #3: when `true`, the current state of
-    /// `crates/verter_lsp/Cargo.toml` is exempt because B-C2 / §12.A8
-    /// owns the actual restructure to make `verter_mcp` an optional
-    /// feature dep.
-    pub fn guard3_lsp_carries_exempt_unoptional_mcp_dep() -> bool {
-        true
-    }
-
     #[test]
     fn lsp_mcp_dependency_direction() {
         let cargo = read_workspace_file("crates/verter_lsp/Cargo.toml");
         let violation = cargo_toml_has_unmodified_verter_mcp_dep(&cargo);
-        if guard3_lsp_carries_exempt_unoptional_mcp_dep() {
-            return;
-        }
         assert!(
             !violation,
             "Guard 3 (`lsp_mcp_dependency_direction`) violation: \
