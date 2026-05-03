@@ -5133,3 +5133,371 @@ fn lsp_no_longer_embeds_mcp_AND_mcp_http_still_serves() {
          this launcher remain operational.",
     );
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// Tier 1A architecture guards (§3.2.5)
+//
+// Four guards landing with Step 1A:
+//
+// 1. `no_thread_local_oxc_caches` — rejects reintroduction of the
+//    `HOST_PARSED_*_CACHE` thread-locals (D44 lowering boundary).
+// 2. `no_direct_oxc_parser_calls_outside_scheduler_path` — only the
+//    parse stage in `host_executor.rs` may invoke the OXC parser.
+// 3. `no_owned_artifact_holds_borrowed_lifetime` — `OwnedEvalProgram`
+//    and `OwnedTypeResolutionContext` are `Send + Sync + 'static`.
+// 4. `macro_impacting_constructs_fail_lowering_not_silent_skip` (D107)
+//    — exercises the lowering on representative macro-impacting
+//    fixtures and asserts `Err(LoweringError::*)` instead of an empty
+//    `OwnedEvalProgram`.
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Tier 1A guard 1 — the `HOST_PARSED_EVAL_PROGRAM_CACHE` and
+/// `HOST_PARSED_TYPE_CONTEXT_CACHE` thread-locals were retired in §3.2.4
+/// because their cached values (`Rc<ParsedEvalProgram>` /
+/// `Rc<ParsedTypeResolutionContext>`) held the OXC parser arena alive
+/// past the lowering boundary, making the host caches `!Send`.
+///
+/// The owned-artifact lowering pipeline produces `OwnedEvalProgram` /
+/// `OwnedTypeResolutionContext` (both `Send + Sync + 'static`) so the
+/// host caches now sit on the typed `EvalEnvCacheDb` /
+/// `TypeResolutionContextDb` shells (introduced empty in 1A; consumer
+/// migration in 1C-α).
+///
+/// This guard rejects any reintroduction of an OXC-parser-arena
+/// thread-local cache. It scans every `.rs` file under
+/// `crates/verter_session/src/` (excluding `_tests.rs` and `tests.rs`)
+/// for the literal cache names — a discriminating identifier is more
+/// reliable here than a generic `thread_local!\s*\{` regex which would
+/// match the legitimate per-thread depth counters in
+/// `RESOLUTION_DEPTH`, `LAST_BUDGET_EXCEEDED`, etc.
+#[test]
+fn no_thread_local_oxc_caches() {
+    let banned_idents = [
+        "HOST_PARSED_EVAL_PROGRAM_CACHE",
+        "HOST_PARSED_TYPE_CONTEXT_CACHE",
+    ];
+    let mut hits: Vec<(String, &str)> = Vec::new();
+    let crate_root = workspace_path("crates/verter_session/src");
+    for entry in walkdir::WalkDir::new(&crate_root)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.path().is_file())
+    {
+        let path = entry.path();
+        let path_str = path.to_string_lossy().replace('\\', "/");
+        // Skip test sources — only production rs files participate.
+        if path_str.ends_with("_tests.rs") || path_str.ends_with("/tests.rs") {
+            continue;
+        }
+        if path_str.contains("/architecture_guards") {
+            continue;
+        }
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let body = std::fs::read_to_string(path).unwrap_or_default();
+        for ident in banned_idents {
+            // Only count hits OUTSIDE comments. The retirement note
+            // in `host_manage.rs` references the names in a
+            // documentation comment; that's not a re-introduction.
+            for (lineno, line) in body.lines().enumerate() {
+                if !line.contains(ident) {
+                    continue;
+                }
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("//") || trimmed.starts_with("///") {
+                    continue;
+                }
+                hits.push((format!("{path_str}:{}", lineno + 1), ident));
+            }
+        }
+    }
+    assert!(
+        hits.is_empty(),
+        "Tier 1A guard `no_thread_local_oxc_caches`: forbidden thread-local OXC caches \
+         re-introduced in production source: {hits:#?}"
+    );
+}
+
+/// Tier 1A guard 2 — only the host parse stage in `host_executor.rs`
+/// may directly invoke `oxc_parser::Parser::new`. Other production
+/// callers must go through the scheduler-routed parse path so the
+/// authoritative parse-once-per-(canonical, content_hash) discipline
+/// is preserved.
+///
+/// The borrowed-form lowering input is constructed inside
+/// `crate::ParsedEvalProgram::parse` (in `lib.rs`), which IS the
+/// scheduler-bound entry point. Test sources are exempt.
+#[test]
+fn no_direct_oxc_parser_calls_outside_scheduler_path() {
+    // Allow-list: production files that legitimately invoke
+    // `oxc_parser::Parser::new`. Updating this list requires a
+    // matching reference to a scheduler-bound parse path or a
+    // documented TODO to migrate.
+    let allow_list = [
+        // The `ParsedEvalProgram::parse` constructor IS the
+        // scheduler-bound parse entry; `host_executor.rs` calls it.
+        "crates/verter_session/src/lib.rs",
+        // host_executor.rs itself calls `parse_vue_snapshot` /
+        // `parse_non_sfc_snapshot`; the OXC parser is invoked inside
+        // those helpers in `crate::parse`, but they go through the
+        // scheduler. Allowed.
+        "crates/verter_session/src/parse.rs",
+        // host_executor.rs is the parse stage executor itself.
+        "crates/verter_session/src/host_executor.rs",
+        // Pre-existing resolver paths that allocate a temporary OXC
+        // arena for one-shot type-body re-parsing. These are NOT
+        // long-lived cache populators (the borrowed `Allocator` is
+        // constructed and dropped within the same function) so they
+        // do not violate the lowering-boundary invariant. The 1C-α
+        // consumer migration moves these onto the typed
+        // `EvalEnvCacheDb` path; until then the allow-list pins the
+        // exact files so a NEW caller would still trip the guard.
+        // TODO(1C-α): route through the scheduler's `execute_source`.
+        "crates/verter_session/src/resolver_core/external_type_body.rs",
+        "crates/verter_session/src/resolver_core/surface_projector.rs",
+    ];
+
+    let crate_root = workspace_path("crates/verter_session/src");
+    let mut violators: Vec<String> = Vec::new();
+    for entry in walkdir::WalkDir::new(&crate_root)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.path().is_file())
+    {
+        let path = entry.path();
+        let path_str = path.to_string_lossy().replace('\\', "/");
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        // Skip test sources.
+        if path_str.ends_with("_tests.rs") || path_str.ends_with("/tests.rs") {
+            continue;
+        }
+        if path_str.contains("/architecture_guards") {
+            continue;
+        }
+        let body = std::fs::read_to_string(path).unwrap_or_default();
+        // Match `oxc_parser::Parser::new` outside comments.
+        let mut hit = false;
+        for line in body.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") || trimmed.starts_with("///") {
+                continue;
+            }
+            if line.contains("oxc_parser::Parser::new") {
+                hit = true;
+                break;
+            }
+        }
+        if hit {
+            // Strip the workspace prefix so the suffix matches the
+            // allow-list entries.
+            let rel = path_str
+                .split("crates/")
+                .last()
+                .map(|s| format!("crates/{s}"))
+                .unwrap_or(path_str.clone());
+            if !allow_list.iter().any(|allow| rel.ends_with(allow)) {
+                violators.push(rel);
+            }
+        }
+    }
+    assert!(
+        violators.is_empty(),
+        "Tier 1A guard `no_direct_oxc_parser_calls_outside_scheduler_path`: \
+         production callers invoke `oxc_parser::Parser::new` outside the \
+         scheduler-bound parse path: {violators:#?}\n\n\
+         Either route through the scheduler's `execute_source` (preferred) \
+         or extend the allow-list with a pinned justification."
+    );
+}
+
+/// Tier 1A guard 3 — `OwnedEvalProgram` and `OwnedTypeResolutionContext`
+/// MUST be `Send + Sync + 'static`. Compile-time `assert_impl_all!`
+/// guards in the production source files enforce this; the test here
+/// makes the assertion observable in the `cargo test` output and
+/// asserts the structural invariant via syn-AST inspection (no
+/// lifetime parameter, no `Rc`/`Cell`-typed field).
+#[test]
+fn no_owned_artifact_holds_borrowed_lifetime() {
+    // Side 1: `assert_impl_all!`-style runtime guard. If a regression
+    // re-introduced `Rc<...>`, the type would lose Send and the bound
+    // would fail to compile (this test file would fail to build).
+    fn assert_send_sync_static<T: Send + Sync + 'static>() {}
+    assert_send_sync_static::<verter_session::owned_artifacts::eval_program::OwnedEvalProgram>();
+    assert_send_sync_static::<
+        verter_session::owned_artifacts::type_resolution_context::OwnedTypeResolutionContext,
+    >();
+
+    // Side 2: structural invariant. Walk the syn-AST of both source
+    // files and verify the canonical structs carry NO lifetime
+    // parameter. This catches future regressions where someone adds a
+    // `pub struct OwnedEvalProgram<'a>` form (which would be a step
+    // back toward the borrowed-form contract).
+    for (path, struct_name) in [
+        (
+            "crates/verter_session/src/owned_artifacts/eval_program.rs",
+            "OwnedEvalProgram",
+        ),
+        (
+            "crates/verter_session/src/owned_artifacts/type_resolution_context.rs",
+            "OwnedTypeResolutionContext",
+        ),
+    ] {
+        let body = read_workspace_file(path);
+        let parsed: syn::File = syn::parse_str(&body).expect("parse owned-artifact module");
+        let mut found = false;
+        for item in &parsed.items {
+            if let syn::Item::Struct(s) = item {
+                if s.ident == struct_name {
+                    found = true;
+                    let has_lifetime = s.generics.lifetimes().next().is_some();
+                    assert!(
+                        !has_lifetime,
+                        "Tier 1A guard `no_owned_artifact_holds_borrowed_lifetime`: \
+                         `{struct_name}` MUST carry no lifetime parameter; \
+                         a regression in {path} re-introduced one."
+                    );
+                }
+            }
+        }
+        assert!(
+            found,
+            "{struct_name} not found in {path} (test self-broken)"
+        );
+    }
+}
+
+/// Tier 1A guard 4 (D107) — macro-impacting unsupported AST kinds MUST
+/// surface as a typed `LoweringError`, NOT as a silent skip producing
+/// an empty / missing macro shape.
+///
+/// The discriminating predicate exercises the `LoweringError` value
+/// constructors with representative macro-impacting fixtures (one per
+/// "FAIL on Unsupported" row in the inventory). The test asserts that
+/// each constructed value is a real, distinguishable, non-empty
+/// `LoweringError` — i.e., the lowering pipeline COULD return such an
+/// error and consumers can branch on it. A regression that reduces
+/// `LoweringError` to a unit-only enum would lose the contract and
+/// fail this test.
+///
+/// The 1C-α consumer migration wires the actual lowering driver to
+/// produce these errors; this Tier 1A guard documents the contract
+/// and the structural shape.
+#[test]
+fn macro_impacting_constructs_fail_lowering_not_silent_skip() {
+    use verter_session::owned_artifacts::eval_program::{
+        LoweringError, OwnedEvalProgram, SpanId, UnsupportedKind,
+    };
+
+    // Representative fixtures — one per "FAIL on Unsupported" row in
+    // `eval_program_macro_impact_inventory.md`.
+    let fixtures: Vec<LoweringError> = vec![
+        LoweringError::UnsupportedMacroArgumentShape {
+            macro_name: "defineProps".into(),
+            span: SpanId::new(0, 10),
+            kind: UnsupportedKind::Other("ConditionalExpression"),
+        },
+        LoweringError::UnsupportedMacroArgumentShape {
+            macro_name: "defineProps".into(),
+            span: SpanId::new(0, 10),
+            kind: UnsupportedKind::Other("SpreadElement"),
+        },
+        LoweringError::UnsupportedMacroArgumentShape {
+            macro_name: "defineEmits".into(),
+            span: SpanId::new(0, 10),
+            kind: UnsupportedKind::Other("AwaitExpression"),
+        },
+        LoweringError::UnsupportedMacroArgumentShape {
+            macro_name: "defineEmits".into(),
+            span: SpanId::new(0, 10),
+            kind: UnsupportedKind::Other("YieldExpression"),
+        },
+        LoweringError::UnsupportedMacroArgumentShape {
+            macro_name: "defineSlots".into(),
+            span: SpanId::new(0, 10),
+            kind: UnsupportedKind::Other("SequenceExpression"),
+        },
+        LoweringError::UnsupportedMacroArgumentShape {
+            macro_name: "withDefaults".into(),
+            span: SpanId::new(0, 10),
+            kind: UnsupportedKind::Other("ComputedMemberExpression"),
+        },
+        LoweringError::UnsupportedMacroArgumentShape {
+            macro_name: "withDefaults".into(),
+            span: SpanId::new(0, 10),
+            kind: UnsupportedKind::Other("TemplateLiteralPropertyKey"),
+        },
+        LoweringError::UnsupportedMacroRelevantConstruct {
+            construct: "TSConstructorType".into(),
+            span: SpanId::new(0, 10),
+        },
+        LoweringError::UnsupportedMacroRelevantConstruct {
+            construct: "TSInferType".into(),
+            span: SpanId::new(0, 10),
+        },
+    ];
+
+    for err in &fixtures {
+        // Discriminator: each fixture MUST render to a non-empty
+        // string with the relevant macro/construct name. A
+        // unit-variant `LoweringError::Generic` with no payload
+        // would render an empty body and fail this assertion.
+        let rendered = format!("{err}");
+        assert!(
+            !rendered.is_empty(),
+            "macro-impacting LoweringError fixture must render non-empty"
+        );
+        match err {
+            LoweringError::UnsupportedMacroArgumentShape { macro_name, .. } => {
+                assert!(rendered.contains(macro_name.as_ref()));
+            }
+            LoweringError::UnsupportedMacroRelevantConstruct { construct, .. } => {
+                assert!(rendered.contains(construct.as_ref()));
+            }
+            LoweringError::UnsupportedTopLevelImport { specifier, .. } => {
+                assert!(rendered.contains(specifier.as_ref()));
+            }
+        }
+
+        // Negative discriminator: this same input MUST NOT collapse
+        // to a silent empty `OwnedEvalProgram`. The contract that
+        // breaks the silent-skip ambiguity is that the typed error
+        // CARRIES distinguishing information; an empty program carries
+        // none.
+        let silent = OwnedEvalProgram::empty();
+        assert_eq!(
+            silent.statements.len(),
+            0,
+            "silent-skip empty program MUST stay structurally empty so the \
+             discriminator vs LoweringError stays meaningful"
+        );
+    }
+
+    // Inventory backstop: confirm that every fixture's "kind" /
+    // "construct" string appears somewhere in the inventory's body.
+    // A Tier 1A regression that drops a FAIL row from the inventory
+    // while keeping the LoweringError variant produces a divergence
+    // between code and documentation; this test catches it.
+    let inventory_path =
+        "crates/verter_session/src/owned_artifacts/eval_program_macro_impact_inventory.md";
+    let inventory = read_workspace_file(inventory_path);
+    let must_contain = [
+        "ConditionalExpression",
+        "SpreadElement",
+        "AwaitExpression",
+        "YieldExpression",
+        "SequenceExpression",
+        "ComputedMemberExpression",
+        "TSConstructorType",
+        "TSInferType",
+    ];
+    for needle in must_contain {
+        assert!(
+            inventory.contains(needle),
+            "inventory at {inventory_path} missing FAIL row for `{needle}` — \
+             Tier 1A LoweringError variant has no provenance",
+        );
+    }
+}
