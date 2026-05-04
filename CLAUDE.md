@@ -195,6 +195,9 @@ cargo fmt --all
 pnpm install --frozen-lockfile   # Verify lockfile is in sync (CI uses this)
 ```
 
+- Corpus audit-test regenerator (run after audit-record schema or fixture changes; idempotent):
+  `node scripts/gen-corpus-audit-tests.mjs`
+
 For TypeScript changes, also run `pnpm test`. Do not skip workspace-wide testing even for "small" changes.
 
 **Agent test policy:** Do not run bare `cargo test --workspace` by default. In this repository it pulls in doctests and example builds, which adds substantial runtime without improving the normal agent verification loop. Run doctests only when rustdoc examples changed or the user explicitly asks for them.
