@@ -1,7 +1,8 @@
 {
-  "current_sub_step": "1C-β",
-  "completed": ["1A", "1B", "1C-α", "1C-β"],
-  "remaining": ["1C-γ"],
-  "marker": "5695d15b",
-  "marker_filename": "phase-tier-1C-β-complete"
+  "current_sub_step": null,
+  "completed": ["1A", "1B", "1C-α", "1C-β", "1C-γ"],
+  "remaining": [],
+  "tier_1_complete": true,
+  "marker": "71060a37",
+  "marker_filename": "phase-tier-1C-γ-complete"
 }
