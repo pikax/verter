@@ -346,20 +346,21 @@ fn corpus_audit_mod_rs_regenerates_deterministically_across_platforms() {
     }
 }
 
-/// Plan §3 Commit 13 (F10 squash) test list entry — pins the
-/// current incidental-field set so snapshot stability is not
-/// quietly broken. Review fix F6 promoted the previously-hardcoded
-/// masker body to a module-level `INCIDENTAL_FIELD_NAMES` constant;
-/// this test now consumes the constant directly AND verifies every
-/// listed field is actually cleared on the masked output.
+/// Pins the current incidental-field set so snapshot stability is
+/// not quietly broken. The set is enumerated via the
+/// [`IncidentalFields`] trait implementation on
+/// [`RustSemanticFootprintAudit`]; this test reads the slice
+/// directly from the trait method AND verifies every listed field
+/// is actually cleared on the masked output.
 ///
 /// Discriminating along three axes:
 ///
 /// 1. Rename/delete `mask_incidental_spans` → the `contains` check
 ///    on the helper name fails.
-/// 2. Add a field to `INCIDENTAL_FIELD_NAMES` without extending the
-///    match arm → the helper panics at runtime on any footprint
-///    with that field populated, surfacing immediately.
+/// 2. Add a field to the trait's `incidental_fields()` slice
+///    without extending the match arm in `mask_incidental` → the
+///    helper panics at runtime on any footprint with that field
+///    populated, surfacing immediately.
 /// 3. Change the masker so a listed field is NOT cleared → the
 ///    behaviour loop at the bottom of this test fails naming the
 ///    specific field.
@@ -367,7 +368,7 @@ fn corpus_audit_mod_rs_regenerates_deterministically_across_platforms() {
 fn commit_7_snapshots_stable_against_current_incidental_event_names_list() {
     use std::sync::Arc;
     use verter_session::component_meta_audit::{
-        RustSemanticFootprintAudit, VfsLayer, VfsReadRecord, INCIDENTAL_FIELD_NAMES,
+        IncidentalFields, RustSemanticFootprintAudit, VfsLayer, VfsReadRecord,
     };
 
     let root = workspace_root();
@@ -379,26 +380,28 @@ fn commit_7_snapshots_stable_against_current_incidental_event_names_list() {
     assert!(
         audit_src.contains("pub fn mask_incidental_spans"),
         "`pub fn mask_incidental_spans` is missing from \
-         `crates/verter_session/src/component_meta_audit/mod.rs` — Commit 7's pinned \
-         snapshots lose their stability guarantee. Plan §3 Commit 13 requires the \
-         masking affordance to survive (or the test to be updated in lock-step).",
+         `crates/verter_session/src/component_meta_audit/mod.rs` — pinned \
+         snapshots lose their stability guarantee. The masking affordance must \
+         survive (or this test must be updated in lock-step).",
     );
 
-    // Pin the current constant set. Adding a new field to the mask
-    // requires updating BOTH this expected list AND the match
-    // statement in `mask_incidental_spans` — plan §3 Commit 13.
+    // Pin the current trait-declared set. Adding a new field to
+    // the mask requires updating BOTH this expected list AND the
+    // match statement inside `IncidentalFields::mask_incidental`.
+    let incidental_fields = <RustSemanticFootprintAudit as IncidentalFields>::incidental_fields();
     let expected_incidental: &[&str] = &["vfs_reads"];
     assert_eq!(
-        INCIDENTAL_FIELD_NAMES, expected_incidental,
-        "INCIDENTAL_FIELD_NAMES drifted — if this was intentional, update the expected list \
-         here AND regenerate Commit 7 pinned snapshots. Plan §3 Commit 13.",
+        incidental_fields, expected_incidental,
+        "RustSemanticFootprintAudit::incidental_fields() drifted — if this was \
+         intentional, update the expected list here AND regenerate the pinned \
+         corpus_representatives snapshots.",
     );
 
-    // Behaviour check: for every field in INCIDENTAL_FIELD_NAMES,
-    // populate it on a fresh footprint and confirm the masked
+    // Behaviour check: for every field in the trait's declared
+    // set, populate it on a fresh footprint and confirm the masked
     // output clears it. This discriminates against a stealth
     // regression where the match arm returns unchanged.
-    for &field in INCIDENTAL_FIELD_NAMES {
+    for &field in incidental_fields {
         let mut fp = RustSemanticFootprintAudit::default();
         match field {
             "vfs_reads" => fp.vfs_reads.push(VfsReadRecord {
@@ -409,7 +412,7 @@ fn commit_7_snapshots_stable_against_current_incidental_event_names_list() {
                 request_id: 1,
             }),
             unknown => panic!(
-                "commit_7_snapshots_stable: INCIDENTAL_FIELD_NAMES contains `{unknown}` but \
+                "commit_7_snapshots_stable: incidental_fields() contains `{unknown}` but \
                  this test has no population branch for it — extend the match arm in lock-step",
             ),
         }
@@ -418,7 +421,7 @@ fn commit_7_snapshots_stable_against_current_incidental_event_names_list() {
             "vfs_reads" => assert!(
                 masked.vfs_reads.is_empty(),
                 "mask_incidental_spans failed to clear `vfs_reads` — field is listed in \
-                 INCIDENTAL_FIELD_NAMES but survived the mask",
+                 incidental_fields() but survived the mask",
             ),
             _ => unreachable!(),
         }

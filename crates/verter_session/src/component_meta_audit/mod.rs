@@ -341,48 +341,81 @@ impl RustSemanticFootprintAudit {
 
     /// Produce a new footprint with "incidental" events stripped — the
     /// assertion harness uses this to turn flaky snapshots into stable
-    /// ones. The fields that get cleared are enumerated in
-    /// [`INCIDENTAL_FIELD_NAMES`]; the
+    /// ones. The fields that get cleared are enumerated by the
+    /// [`IncidentalFields`] implementation on this type; the
     /// `corpus_generator_parity::commit_7_snapshots_stable_against_current_incidental_event_names_list`
-    /// test pins the current set so a silent expansion surfaces as a
+    /// test pins the declared set so a silent expansion surfaces as a
     /// named failure.
     ///
-    /// References `INCIDENTAL_EVENT_NAMES` as the
-    /// driver for this mask. The set starts with `vfs_reads` (purely
-    /// incidental — cache warmth doesn't change the semantic
-    /// footprint); future additions should append to
-    /// [`INCIDENTAL_FIELD_NAMES`] and extend the `match` below in
-    /// lock-step.
+    /// The driver is the [`IncidentalFields`] trait. The set starts
+    /// with `vfs_reads` (purely incidental — cache warmth doesn't
+    /// change the semantic footprint); future additions extend the
+    /// trait impl on this type, not a parallel constant.
     #[must_use]
     pub fn mask_incidental_spans(&self) -> RustSemanticFootprintAudit {
         let mut out = self.clone();
-        for field in INCIDENTAL_FIELD_NAMES {
-            match *field {
-                "vfs_reads" => out.vfs_reads.clear(),
-                // Every entry in `INCIDENTAL_FIELD_NAMES` must have
-                // a corresponding arm here — the test pinning the
-                // constant will catch any missing wiring.
-                unknown => panic!(
-                    "mask_incidental_spans: INCIDENTAL_FIELD_NAMES entry `{unknown}` has no match arm — \
-                     extend the match statement in lock-step with the constant",
-                ),
-            }
-        }
+        <RustSemanticFootprintAudit as IncidentalFields>::mask_incidental(&mut out);
         out
     }
 }
 
-/// Names of `RustSemanticFootprintAudit` fields that
-/// [`RustSemanticFootprintAudit::mask_incidental_spans`] clears when
-/// producing a snapshot-stable footprint. The set is load-bearing
-/// for fixture snapshots: a new entry implies pinned snapshots need
-/// regeneration.
+/// Contract for audit record types whose fields include
+/// timing-incidental payloads that must be cleared before snapshot
+/// comparison.
+///
+/// `incidental_fields()` enumerates the field names that are
+/// incidental — fixture snapshots are stable against changes to
+/// these fields' contents but not against changes to which fields
+/// are listed (adding a field implies pinned snapshots need
+/// regeneration). `mask_incidental(&mut self)` clears every payload
+/// whose name appears in `incidental_fields()`.
 ///
 /// The `commit_7_snapshots_stable_against_current_incidental_event_names_list`
-/// test (in `crates/verter_session/tests/corpus_generator_parity.rs`)
-/// pins this constant so a silent expansion surfaces as a named
-/// failure rather than flapping snapshots.
-pub const INCIDENTAL_FIELD_NAMES: &[&str] = &["vfs_reads"];
+/// test in `corpus_generator_parity.rs` pins each implementor's
+/// declared set so a silent expansion surfaces as a named failure
+/// rather than flapping snapshots.
+///
+/// Implementors today: [`RustSemanticFootprintAudit`] (one
+/// incidental field, `vfs_reads`).
+//
+// TODO(wave-1): when the `verter_audit` crate exists this trait
+// moves to `verter_audit::record`; for now it lives alongside the
+// only audit record type that implements it.
+pub trait IncidentalFields {
+    /// Names of the fields cleared by [`Self::mask_incidental`].
+    /// `'static` so callers can compare slices and emit names in
+    /// diagnostics without lifetime juggling.
+    fn incidental_fields() -> &'static [&'static str];
+
+    /// Clear every payload whose field name is in
+    /// [`Self::incidental_fields`]. Implementations must branch on
+    /// the listed names — an unknown name is a contract violation
+    /// and should panic so the lock-step regression surfaces
+    /// immediately.
+    fn mask_incidental(&mut self);
+}
+
+impl IncidentalFields for RustSemanticFootprintAudit {
+    fn incidental_fields() -> &'static [&'static str] {
+        &["vfs_reads"]
+    }
+
+    fn mask_incidental(&mut self) {
+        for field in Self::incidental_fields() {
+            match *field {
+                "vfs_reads" => self.vfs_reads.clear(),
+                // Every entry in `incidental_fields()` must have a
+                // corresponding arm here — the test pinning the
+                // declared set will catch any missing wiring.
+                unknown => panic!(
+                    "RustSemanticFootprintAudit::mask_incidental: \
+                     incidental_fields() entry `{unknown}` has no match arm — \
+                     extend the match statement in lock-step with the trait method",
+                ),
+            }
+        }
+    }
+}
 
 /// Fresh `IndexedReady` build observed during the request. Emitted
 /// by the `IndexedReadyBuilt` structured event and surfaced by the

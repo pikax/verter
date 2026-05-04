@@ -341,7 +341,8 @@ function validateExpectedResult(
 export function renderFootprintForSnapshot(fp: RustAuditRecord["footprint"]): string {
   // Normalized JSON for snapshot comparison. Intentionally diverges
   // from the Rust-side `mask_incidental_spans` helper: Rust only
-  // clears the fields named in `INCIDENTAL_FIELD_NAMES` (today:
+  // clears the fields enumerated by the `IncidentalFields` trait
+  // implementation on `RustSemanticFootprintAudit` (today:
   // `vfs_reads`) and keeps every other record-vector as-is. This TS
   // form collapses per-record lists to counts so snapshots are
   // readable in a PR diff without flapping on subgraph detail —
