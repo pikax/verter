@@ -6,7 +6,6 @@
 //! in-flight table consistent across panics and early returns.
 
 use std::cell::RefCell;
-#[cfg(test)]
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -160,12 +159,21 @@ impl<'a> Drop for InflightPanicGuard<'a> {
 /// claims the fresh in-flight as winner.
 pub(super) const MAX_INFLIGHT_RETRIES: usize = 3;
 
-/// Test-only forcing flag: when set, the cold-winner re-check in
+/// Test forcing flag: when set, the cold-winner re-check in
 /// `execute_cooperative` marks its own in-flight entry `aborted = true`
 /// just before the TOCTOU abort-check, simulating a concurrent canonical
 /// invalidation sweep. Drives `cold_aborts_swept` deterministically in
-/// `semantic_graph_stats_cold_aborts_swept_increments_when_forced`.
+/// counter-helper coverage tests.
 ///
-/// Tests must clear the flag before returning (RAII guard pattern).
-#[cfg(test)]
+/// The flag is a single-byte static and the production cold-build
+/// branch reads it once per cold publish (a relaxed atomic load is
+/// ~1 ns and lives on a path that already takes the entries lock —
+/// the load is in the noise). Keeping the static visible at all
+/// build profiles lets integration tests in
+/// `crates/verter_session/tests/*.rs` drive the abort branch through
+/// the public [`SemanticGraphStore::test_force_cold_abort_sweep`]
+/// guard, which is what Slice 0.2's discriminating tests need.
+///
+/// Tests must clear the flag before returning (RAII guard pattern —
+/// see `TestForceColdAbortGuard` in `mod.rs`).
 pub(crate) static FORCE_COLD_ABORT_SWEEP: AtomicBool = AtomicBool::new(false);

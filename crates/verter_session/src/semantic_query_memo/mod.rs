@@ -67,7 +67,6 @@ use family::{
     dep_signature_references_canonical, family_and_slot, FamilyKey, FamilySlots, MemoEntry,
     ModeSlot,
 };
-#[cfg(test)]
 pub(crate) use inflight::FORCE_COLD_ABORT_SWEEP;
 use inflight::{
     InflightEntry, InflightPanicGuard, RecursionStackGuard, IN_FLIGHT_ON_THIS_THREAD,
@@ -1281,14 +1280,7 @@ impl SemanticGraphStore {
                     // still empty, in which case this caller may become
                     // the fresh cold winner.
                     retries += 1;
-                    self.stats
-                        .inflight_aborted_retries
-                        .fetch_add(1, Ordering::Relaxed);
-                    if let Some(ctx) = verter_scheduler::request_context::current_context() {
-                        ctx.0.record_cache_event(
-                            verter_scheduler::request_context::CacheEventKind::InflightAbortedRetry,
-                        );
-                    }
+                    record_inflight_aborted_retry(&self.stats);
                     drop(state);
                     drop(inflight);
                     continue;
@@ -1460,11 +1452,13 @@ impl SemanticGraphStore {
             dep_signature: dep_signature.clone(),
         };
         let mut entries = self.entries_lock_diagnosed();
-        // Test-only forcing: simulate a concurrent sweep that aborted
+        // Test forcing: simulate a concurrent sweep that aborted
         // this in-flight entry just before the TOCTOU re-check.
-        // Deterministically drives the `cold_aborts_swept` counter in
-        // `..._when_forced` tests without needing a racy real invalidation.
-        #[cfg(test)]
+        // Deterministically drives the `cold_aborts_swept` counter
+        // for counter-helper coverage tests without needing a racy
+        // real invalidation. The flag default `false` makes this
+        // branch a single relaxed atomic load on the cold-build
+        // path under normal traffic.
         if FORCE_COLD_ABORT_SWEEP.load(Ordering::Relaxed) {
             inflight.state.lock().aborted = true;
         }
@@ -1476,12 +1470,7 @@ impl SemanticGraphStore {
             drop(entries);
             // Canonical invalidation swept this slot during the cold
             // build; skip warm publish and record the sweep.
-            self.stats.cold_aborts_swept.fetch_add(1, Ordering::Relaxed);
-            if let Some(ctx) = verter_scheduler::request_context::current_context() {
-                ctx.0.record_cache_event(
-                    verter_scheduler::request_context::CacheEventKind::ColdAbortSwept,
-                );
-            }
+            record_cold_abort_swept(&self.stats);
             return;
         }
         let populated_slots = entries
@@ -1670,6 +1659,59 @@ impl SemanticGraphStore {
     }
 }
 
+/// Test drivers visible to integration tests in
+/// `crates/verter_session/tests/*.rs`. These methods exist solely to
+/// admit the discriminating tests Slice 0.2 needs (counter-helper
+/// dual-target write coverage). The body of each method is identical
+/// to its `pub(crate)` cousin in the `#[cfg(test)]` impl block above
+/// — keeping them in a separate un-gated impl block lets the lib
+/// expose them through the `for_tests` re-export shim without
+/// loosening the `pub(crate)` boundary on the in-crate test surface.
+impl SemanticGraphStore {
+    /// Public re-export of [`Self::test_trigger_inflight_abort`] for
+    /// integration tests that drive joiner retry from the
+    /// `crates/verter_session/tests/` surface (where `pub(crate)` is
+    /// not visible). The body inlines the same logic as the `cfg(test)`
+    /// pub(crate) version so the two cannot diverge.
+    #[doc(hidden)]
+    pub fn test_trigger_inflight_abort_pub(&self, key: &SemanticQueryKey) -> bool {
+        let mut table = self.inflight.lock();
+        let Some(inflight) = table.remove(key) else {
+            return false;
+        };
+        drop(table);
+        {
+            let mut state = inflight.state.lock();
+            state.aborted = true;
+            if state.completed.is_none() {
+                state.completed = Some(QueryResult::Error(QueryError::Other(Arc::from(
+                    "aborted by test_trigger_inflight_abort_pub",
+                ))));
+                state.dep_signature = Some(empty_signature());
+            }
+        }
+        inflight.ready.notify_all();
+        true
+    }
+
+    /// Public test driver: set the `FORCE_COLD_ABORT_SWEEP` flag for
+    /// the duration of the returned guard so the next
+    /// `execute_cooperative` cold-build deterministically hits the
+    /// TOCTOU abort path. Used by integration tests in
+    /// `crates/verter_session/tests/` that drive Slice 0.2's
+    /// counter-helper plumbing.
+    ///
+    /// The guard restores the flag to `false` on drop. Tests must
+    /// hold the guard for the duration of the `execute_cooperative`
+    /// call.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_force_cold_abort_sweep() -> TestForceColdAbortGuard {
+        inflight::FORCE_COLD_ABORT_SWEEP.store(true, Ordering::SeqCst);
+        TestForceColdAbortGuard { _private: () }
+    }
+}
+
 impl SemanticGraphRead for SemanticGraphStore {
     fn node_data(&self, node: SemanticNodeId) -> Arc<SemanticNodeData> {
         SemanticGraphStore::node_data(self, node).unwrap_or_else(|| {
@@ -1710,6 +1752,91 @@ impl crate::invalidation_domain::InvalidationByCanonical for SemanticGraphStore 
 
 fn empty_signature() -> DepSignature {
     Arc::from(Vec::new().into_boxed_slice())
+}
+
+/// Public test driver: build an empty `DepSignature` for tests in the
+/// integration-test crate that drive `execute_cooperative` directly.
+/// The integration-test surface is not part of the production resolver
+/// stack — its only job is to discriminate per-request counter
+/// attribution, so an empty signature is sufficient.
+#[doc(hidden)]
+#[allow(dead_code)]
+#[must_use]
+pub fn empty_signature_for_tests() -> DepSignature {
+    empty_signature()
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Counter helpers (Decision #5: single helper, dual-target write)
+// ──────────────────────────────────────────────────────────────────────────
+//
+// `inflight_aborted_retries` and `cold_aborts_swept` need both
+// host-owned global aggregates AND per-request attribution. Bumping
+// only the global leaves the audit miner's `CacheOutcomeTally` blind;
+// bumping only the per-request breaks every existing telemetry
+// consumer that reads `stats_snapshot()`. The helpers below collapse
+// both writes into one call site so the two halves cannot diverge.
+//
+// The helpers consult `current_request_context()` directly (the
+// session-side TLS slot installed by `RequestContextGuard::install`).
+// This matches the existing per-request helpers in `host_manage`
+// (`record_materialize_structure_call`, `record_dep_signature_merge`,
+// etc.) and keeps the audit-mining flow homogeneous: every counter
+// the miner reads from `RequestContext` is written through a helper
+// that consulted `current_request_context()`.
+//
+// Architecture guard `audit_counter_single_helper` (in
+// `crates/verter_session/tests/architecture_guards.rs`) rejects any
+// direct `self.stats.<counter>.fetch_add` for these two counters
+// outside the helper bodies in this module.
+
+/// Bump `inflight_aborted_retries` on both the global
+/// `SemanticGraphStats` AND, when a `RequestContext` is installed in
+/// TLS on the calling thread, the per-request mirror.
+///
+/// The global write is unconditional — non-audited callers continue
+/// to observe the counter via [`SemanticGraphStore::stats_snapshot`].
+/// The per-request write surfaces in the audit miner's
+/// `CacheOutcomeTally` (see
+/// `component_meta_audit/footprint_miner.rs`).
+#[inline]
+fn record_inflight_aborted_retry(stats: &AtomicSemanticGraphStats) {
+    stats
+        .inflight_aborted_retries
+        .fetch_add(1, Ordering::Relaxed);
+    if let Some(ctx) = crate::request_context::current_request_context() {
+        ctx.inflight_aborted_retries.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Bump `cold_aborts_swept` on both the global `SemanticGraphStats`
+/// AND, when a `RequestContext` is installed in TLS on the calling
+/// thread, the per-request mirror.
+///
+/// Mirrors [`record_inflight_aborted_retry`] for the cold-abort sweep
+/// counter that the TOCTOU re-check fires on a swept publish.
+#[inline]
+fn record_cold_abort_swept(stats: &AtomicSemanticGraphStats) {
+    stats.cold_aborts_swept.fetch_add(1, Ordering::Relaxed);
+    if let Some(ctx) = crate::request_context::current_request_context() {
+        ctx.cold_aborts_swept.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// RAII guard returned by
+/// [`SemanticGraphStore::test_force_cold_abort_sweep`]. Restores the
+/// `FORCE_COLD_ABORT_SWEEP` flag to `false` on drop so a panicking
+/// test does not leak the flag onto sibling tests sharing the same
+/// process.
+#[doc(hidden)]
+pub struct TestForceColdAbortGuard {
+    _private: (),
+}
+
+impl Drop for TestForceColdAbortGuard {
+    fn drop(&mut self) {
+        inflight::FORCE_COLD_ABORT_SWEEP.store(false, Ordering::SeqCst);
+    }
 }
 
 #[cfg(test)]
