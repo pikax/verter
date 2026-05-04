@@ -5,7 +5,7 @@
   "status": "success",
   "base_commit": "f5a1d10e",
   "head_commit": "bc98f4f2",
-  "marker_commit": null,
+  "marker_commit": "bc98f4f2",
   "prior_known_passed_count": 10552,
   "test_results": {
     "workspace": {
