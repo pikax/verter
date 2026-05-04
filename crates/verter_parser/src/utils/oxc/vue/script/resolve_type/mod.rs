@@ -5591,5 +5591,5 @@ pub fn hash_resolved_type(resolved: &ResolvedElements, source: &[u8]) -> [u8; 16
 }
 
 #[cfg(test)]
-#[path = "resolve_type_tests.rs"]
+#[path = "../resolve_type_tests.rs"]
 mod resolve_type_tests;
