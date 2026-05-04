@@ -481,7 +481,7 @@ fn component_slot_usage_tracked() {
     // v-slot on the component itself is cached in v_slot (not in props),
     // so our current extraction won't see it in the props loop.
     // This documents the current behavior. Named slot usage on child
-    // <template> elements is a separate extraction concern (Phase 4).
+    // <template> elements is a separate extraction concern.
 }
 
 #[test]

@@ -2771,7 +2771,7 @@ fn cross_file_optimization_with_project_resolver() {
     assert!(child_consts.unwrap().contains("msg"), "msg should be const");
 }
 
-// ── Workspace integration tests (Phase 4) ──
+// ── Workspace integration tests ──
 
 #[test]
 fn new_with_workspace_stores_workspace_ref() {

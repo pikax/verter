@@ -154,7 +154,7 @@ fn component_config_theme_variant_props_use_prepared_theme_fast_path() {
          component_config_theme_variant_fast_path_hits == 0",
     );
     // member_route_calls is observed but not strictly asserted here:
-    // the indexed-access early-out (Phase 6) may handle some of the
+    // the indexed-access early-out may handle some of the
     // field cases, and the remaining fields the fast path covers
     // emit zero member_route_calls (since the fast path publishes
     // and `continue`s before the member-route loop runs). The

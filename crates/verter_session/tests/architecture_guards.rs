@@ -5572,6 +5572,83 @@ fn macro_impacting_constructs_fail_lowering_not_silent_skip() {
 // | W5d | crates/verter_session/src/resolver_core/component_meta      |
 // | W5e | crates/verter_ffi/src/convert                               |
 
+/// Shared helper for the W5f phase-archaeology guards. Reuses the
+/// broader-D111 classifier from `foundations_guards` so the test-file
+/// and production-code predicates stay byte-identical.
+mod w5f_test_archaeology {
+    use std::path::Path;
+    use walkdir::WalkDir;
+
+    use super::workspace_root;
+
+    /// W5f cutoff baseline measured at the commit that landed the W5f
+    /// architecture guards. Update only when Step 2.6 actually reduces
+    /// the count.
+    pub(super) const W5F_BASELINE: usize = 385;
+
+    pub(super) fn is_test_file(path: &Path) -> bool {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        let parent_name = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        name == "tests.rs"
+            || name.ends_with("_tests.rs")
+            || parent_name == "tests"
+            || path
+                .components()
+                .any(|c| c.as_os_str().to_str() == Some("tests"))
+    }
+
+    /// Walks `crates/*/src/` and returns each archaeology line as
+    /// `"<rel>:<line_no>"`. Empty result == invariant satisfied.
+    pub(super) fn collect_test_archaeology_violations() -> Vec<String> {
+        let workspace = workspace_root();
+        let mut violations = Vec::<String>::new();
+        for crate_entry in std::fs::read_dir(workspace.join("crates")).expect("read crates/") {
+            let crate_dir = crate_entry.expect("crate dir entry").path();
+            let src = crate_dir.join("src");
+            if !src.is_dir() {
+                continue;
+            }
+            for entry in WalkDir::new(&src) {
+                let entry = entry.expect("walkdir entry");
+                if !entry.file_type().is_file() {
+                    continue;
+                }
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                if !is_test_file(path) {
+                    continue;
+                }
+                let rel = path
+                    .strip_prefix(&workspace)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let src_text =
+                    std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
+                for (line_no, line) in src_text.lines().enumerate() {
+                    if super::foundations_guards::line_has_phase_archaeology_d111(line) {
+                        violations.push(format!("{rel}:{}", line_no + 1));
+                    }
+                }
+            }
+        }
+        violations
+    }
+
+    pub(super) fn count_test_archaeology_lines() -> usize {
+        collect_test_archaeology_violations().len()
+    }
+}
+
 const TIER_2_SPLIT_TARGETS: &[&str] = &[
     "crates/verter_session/src/semantic_query_memo",
     "crates/verter_parser/src/utils/oxc/vue/script/resolve_type",
@@ -5676,247 +5753,40 @@ fn no_phase_archaeology_in_test_files() {
     // files inside crates/*/src/ — tests.rs, *_tests.rs, and anything
     // under a tests/ subdirectory.
     //
-    // The Tier 0 inventory at
-    // crates/verter_session/tests/perf_bounds/golden-archaeology-test-inventory.txt
-    // captures the snapshot at SHA 60b1295a (254 entries). Until the
-    // Step 2.6 sweep completes, this guard operates as a regression
-    // backstop: the current count must stay at-or-below the baseline.
-    // Once the sweep finishes, the baseline drops to zero and
+    // Until the Step 2.6 sweep completes, this guard operates as a
+    // regression backstop: the current count must stay at-or-below the
+    // baseline. Once the sweep finishes, the baseline drops to zero and
     // phase_archaeology_test_files_count_zero becomes the strict
     // invariant.
-    use walkdir::WalkDir;
+    //
+    // Predicate is shared with foundations_guards::line_has_phase_archaeology_d111
+    // (the existing broader-D111 production-code guard) so the test-file
+    // and production-code classifiers stay byte-identical.
+    let count = w5f_test_archaeology::count_test_archaeology_lines();
 
-    fn line_has_phase_archaeology_d111(line: &str) -> bool {
-        const FIXED_NEEDLES: &[&str] = &[
-            "d-cutover",
-            "D-Cutover",
-            "post-cutover",
-            "Post-cutover",
-            "Post-Cutover",
-            "pre-Phase",
-            "Pre-Phase",
-            "retired in",
-            "Plan \u{00a7}",
-            "plan \u{00a7}",
-            "phase-archaeology",
-        ];
-        for needle in FIXED_NEEDLES {
-            if line.contains(needle) {
-                return true;
-            }
-        }
-        // Phase \d+ / phase \d+ — letter-suffixed is archaeology;
-        // pure-decimal Phase 1: collect is the algorithm-step carve-out
-        // per D111.
-        let lower = line.to_ascii_lowercase();
-        let bytes = lower.as_bytes();
-        for prefix in ["phase ", "phase-"] {
-            let mut search_from = 0usize;
-            while let Some(rel) = lower[search_from..].find(prefix) {
-                let abs = search_from + rel;
-                let after = abs + prefix.len();
-                if after < bytes.len() && bytes[after].is_ascii_digit() {
-                    let mut idx = after;
-                    while idx < bytes.len() && bytes[idx].is_ascii_digit() {
-                        idx += 1;
-                    }
-                    if idx < bytes.len() && bytes[idx] == b':' {
-                        search_from = idx;
-                        continue;
-                    }
-                    return true;
-                }
-                search_from = abs + prefix.len();
-            }
-        }
-        false
-    }
-
-    fn is_test_file(path: &std::path::Path) -> bool {
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default();
-        let parent_name = path
-            .parent()
-            .and_then(|p| p.file_name())
-            .and_then(|n| n.to_str())
-            .unwrap_or_default();
-        name == "tests.rs"
-            || name.ends_with("_tests.rs")
-            || parent_name == "tests"
-            || path
-                .components()
-                .any(|c| c.as_os_str().to_str() == Some("tests"))
-    }
-
-    let workspace = workspace_root();
-    let mut current_count = 0usize;
-    for crate_entry in std::fs::read_dir(workspace.join("crates")).expect("read crates/") {
-        let crate_dir = crate_entry.expect("crate dir entry").path();
-        let src = crate_dir.join("src");
-        if !src.is_dir() {
-            continue;
-        }
-        for entry in WalkDir::new(&src) {
-            let entry = entry.expect("walkdir entry");
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-                continue;
-            }
-            if !is_test_file(path) {
-                continue;
-            }
-            let rel = path
-                .strip_prefix(&workspace)
-                .unwrap()
-                .to_string_lossy()
-                .replace('\\', "/");
-            let src_text =
-                std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
-            for line in src_text.lines() {
-                if line_has_phase_archaeology_d111(line) {
-                    current_count += 1;
-                }
-            }
-        }
-    }
-
-    // Regression baseline. The Tier 0 inventory captured 254 entries
-    // at SHA 60b1295a using the broader D111 regex; the live count
-    // measured here at the W5f cutoff is 378. The two numbers can
-    // diverge because (a) the inventory used the regex form while this
-    // guard uses an in-test predicate that does not perfectly mirror
-    // the regex, and (b) downstream tier work added new test files
-    // since SHA 60b1295a. The guard's job is to prevent further
-    // regressions and to provide a baseline that the Step 2.6 sweep
-    // can ratchet downward as it removes vocabulary; the strict
-    // zero-count invariant is enforced separately by
-    // phase_archaeology_test_files_count_zero (which is ignored until
-    // the sweep completes — see W5f marker).
-    const REGRESSION_BACKSTOP: usize = 378;
+    // W5f cutoff baseline. Re-measured at this commit using the shared
+    // foundations_guards::line_has_phase_archaeology_d111 predicate.
+    // Update only when the Step 2.6 sweep actually removes occurrences.
+    const REGRESSION_BACKSTOP: usize = w5f_test_archaeology::W5F_BASELINE;
     assert!(
-        current_count <= REGRESSION_BACKSTOP,
-        "no_phase_archaeology_in_test_files: count regressed beyond W5f baseline.\ncurrent: {current_count}\nbaseline (W5f cutoff): {REGRESSION_BACKSTOP}\nEither remove the new violations or update the baseline if the increase is intentional.",
+        count <= REGRESSION_BACKSTOP,
+        "no_phase_archaeology_in_test_files: count regressed beyond W5f baseline.\ncurrent: {count}\nbaseline (W5f cutoff): {REGRESSION_BACKSTOP}\nEither remove the new violations or update the baseline if the increase is intentional.",
     );
 }
 
 #[test]
-#[ignore = "Pending Step 2.6 sweep — see plan §4 W5f. The 378-entry baseline must drop to 0 before this guard activates. Tracked in phase-tier-2-complete marker."]
+#[ignore = "Pending Step 2.6 sweep — see plan §4 W5f. The non-zero baseline must drop to 0 before this guard activates. Tracked in phase-tier-2-complete marker."]
 fn phase_archaeology_test_files_count_zero() {
     // Plan §4.6 strict invariant: zero phase-archaeology references in
     // test files inside crates/*/src/. Currently ignored — the W5f
-    // baseline is 378. Step 2.6 (the sweep) removes the vocabulary;
-    // once that lands, flip this from #[ignore] to live and the
-    // regression backstop above can be deleted.
+    // baseline is non-zero. Step 2.6 (the sweep) removes the
+    // vocabulary; once that lands, flip this from #[ignore] to live and
+    // delete the regression backstop above.
     //
-    // Body kept non-empty per the stub-prevention rule: when un-ignored,
-    // the assertion is discriminating (current count must be exactly
-    // zero, not "less than something"). The body shares the predicate
-    // with no_phase_archaeology_in_test_files via the inlined
-    // line_has_phase_archaeology_d111 closure pattern; we re-implement
-    // here to keep each test self-contained.
-    use walkdir::WalkDir;
-
-    fn line_has_phase_archaeology_d111(line: &str) -> bool {
-        const FIXED_NEEDLES: &[&str] = &[
-            "d-cutover",
-            "D-Cutover",
-            "post-cutover",
-            "Post-cutover",
-            "Post-Cutover",
-            "pre-Phase",
-            "Pre-Phase",
-            "retired in",
-            "Plan \u{00a7}",
-            "plan \u{00a7}",
-            "phase-archaeology",
-        ];
-        for needle in FIXED_NEEDLES {
-            if line.contains(needle) {
-                return true;
-            }
-        }
-        let lower = line.to_ascii_lowercase();
-        let bytes = lower.as_bytes();
-        for prefix in ["phase ", "phase-"] {
-            let mut search_from = 0usize;
-            while let Some(rel) = lower[search_from..].find(prefix) {
-                let abs = search_from + rel;
-                let after = abs + prefix.len();
-                if after < bytes.len() && bytes[after].is_ascii_digit() {
-                    let mut idx = after;
-                    while idx < bytes.len() && bytes[idx].is_ascii_digit() {
-                        idx += 1;
-                    }
-                    if idx < bytes.len() && bytes[idx] == b':' {
-                        search_from = idx;
-                        continue;
-                    }
-                    return true;
-                }
-                search_from = abs + prefix.len();
-            }
-        }
-        false
-    }
-
-    fn is_test_file(path: &std::path::Path) -> bool {
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default();
-        let parent_name = path
-            .parent()
-            .and_then(|p| p.file_name())
-            .and_then(|n| n.to_str())
-            .unwrap_or_default();
-        name == "tests.rs"
-            || name.ends_with("_tests.rs")
-            || parent_name == "tests"
-            || path
-                .components()
-                .any(|c| c.as_os_str().to_str() == Some("tests"))
-    }
-
-    let workspace = workspace_root();
-    let mut violations = Vec::<String>::new();
-    for crate_entry in std::fs::read_dir(workspace.join("crates")).expect("read crates/") {
-        let crate_dir = crate_entry.expect("crate dir entry").path();
-        let src = crate_dir.join("src");
-        if !src.is_dir() {
-            continue;
-        }
-        for entry in WalkDir::new(&src) {
-            let entry = entry.expect("walkdir entry");
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-                continue;
-            }
-            if !is_test_file(path) {
-                continue;
-            }
-            let rel = path
-                .strip_prefix(&workspace)
-                .unwrap()
-                .to_string_lossy()
-                .replace('\\', "/");
-            let src_text =
-                std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
-            for (line_no, line) in src_text.lines().enumerate() {
-                if line_has_phase_archaeology_d111(line) {
-                    violations.push(format!("{rel}:{}", line_no + 1));
-                }
-            }
-        }
-    }
-
+    // The predicate is shared with no_phase_archaeology_in_test_files
+    // via the w5f_test_archaeology helper module so both tests stay in
+    // lockstep with the broader-D111 classifier.
+    let violations = w5f_test_archaeology::collect_test_archaeology_violations();
     assert!(
         violations.is_empty(),
         "phase_archaeology_test_files_count_zero: {} violations remain.\nFirst 10:\n{}",

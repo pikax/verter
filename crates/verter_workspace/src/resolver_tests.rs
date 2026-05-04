@@ -1544,7 +1544,7 @@ fn preferred_specifier_workspace_alias_no_double_slash() {
     );
 }
 
-// ── Context-aware resolution tests (Phase 0) ──
+// ── Context-aware resolution tests ──
 
 /// Same specifier → different target depending on (phase, kind).
 /// Package with `exports: { ".": { "types": "./d.ts", "import": "./index.js" } }`

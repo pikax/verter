@@ -1127,7 +1127,7 @@ fn trait_configure_resolver_empty_clears_resolver() {
     );
 }
 
-// ── Context-keyed exact resolution tests (Phase 0) ──
+// ── Context-keyed exact resolution tests ──
 
 /// Exact overrides keyed by (specifier, phase, kind): different contexts
 /// resolve the same specifier to different targets on the same importer.

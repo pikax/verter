@@ -3,7 +3,7 @@
 //!
 //! Each test exercises a pathological recursive/nested shape that
 //! the static `no_unbounded_recursion_in_resolver_core` guard
-//! (Phase 10b) cannot fully cover — the static guard catches
+//! cannot fully cover — the static guard catches
 //! source patterns; runtime fixtures here close the loop by
 //! asserting terminate-without-stack-overflow + the expected
 //! sentinel/result on the runtime path.
@@ -58,7 +58,7 @@ fn build_hermetic_host(files: &[(&str, &str)]) -> Arc<VerterHost> {
 //        is structurally self-referential) ─────────────────────────────
 //
 // The userland alias declares itself as its own body — a literal
-// self-reference. The resolver-context shadow gate (Phase 5h) makes
+// self-reference. The resolver-context shadow gate makes
 // the userland declaration the chosen target; the engine's
 // `push_instantiate_active` same-identity guard then catches the
 // structural self-reference and emits `Opaque(RecursiveRef)` at

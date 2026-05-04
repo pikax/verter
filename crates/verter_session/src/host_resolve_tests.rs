@@ -3588,7 +3588,7 @@ fn workspace_resolution_used_for_aliased_imports() {
 
 #[test]
 fn workspace_resolution_does_not_override_exact_resolution() {
-    // Exact resolutions (Phase 1) should take priority over workspace resolution.
+    // Exact resolutions should take priority over workspace resolution.
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
     ));

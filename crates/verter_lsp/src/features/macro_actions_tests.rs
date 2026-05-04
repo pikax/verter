@@ -673,7 +673,7 @@ fn no_actions_with_empty_template() {
     );
 }
 
-// ── Type resolution tests (Phase 2-3) ───────────────────────────────
+// ── Type resolution tests ───────────────────────────────
 
 fn make_binding(name: &str, type_annotation: Option<&str>) -> AnalyzedBinding {
     AnalyzedBinding {
