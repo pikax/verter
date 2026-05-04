@@ -1170,31 +1170,46 @@ impl DependencyResolution {
 // CompileCacheEntry — scheduler-backed compile state (native only)
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Per-file compile cache entry for the scheduler-backed host.
+/// Profile-domain state for the scheduler-backed compile cache (D48).
 ///
-/// Three conceptual subdomains — kept in one struct for DashMap efficiency:
-///
-/// **ProfileState**: per-profile override + compile outputs
-/// - `content_overrides`, `style_overrides`, `compile_slots`, `latest_diagnostics`
-///
-/// **DerivedRawState**: source-hash-keyed caches
-/// - `cached_tsc_extract`, `raw_template_analysis`
-///
-/// **DependencyState**: resolution metadata + invalidation hashes
-/// - `import_routes`, `dependencies`, `resolved_type_hashes`, `aliases`
+/// Stored in [`crate::project_type_store::CompileCacheDb`] keyed by canonical id.
+/// Profile-flag changes invalidate this; source-content changes preserve it;
+/// dep-closure changes preserve it; project-generation bumps invalidate it.
+/// See the §3.4.2 invalidation matrix.
 #[derive(Debug, Default)]
-#[allow(dead_code)] // Fields used progressively during migration
-pub(crate) struct CompileCacheEntry {
-    // ── ProfileState: per-profile override + compile outputs ──
+pub struct ProfileState {
     pub(crate) content_overrides: FxHashMap<u64, ContentOverrideWithParse>,
     pub(crate) style_overrides: FxHashMap<u64, StyleOverrideWithAnalysis>,
     pub(crate) compile_slots: FxHashMap<u64, CompileSlot>,
     pub(crate) latest_diagnostics: FxHashMap<u64, DiagnosticsSnapshot>,
     pub(crate) diagnostics_generation: u64,
+}
 
-    // ── DerivedRawState: source-hash-keyed caches ──
+/// Source-content-domain state for the scheduler-backed compile cache (D48).
+///
+/// Stored in [`crate::project_type_store::DerivedRawCacheDb`] keyed by canonical id.
+/// Source-content changes invalidate this; profile-flag changes preserve it;
+/// dep-closure changes preserve it; project-generation bumps invalidate it.
+/// See the §3.4.2 invalidation matrix.
+///
+/// `import_routes` is a sub-mirror of
+/// [`crate::project_type_store::IndexedReady`]`.import_routes`: same content,
+/// different invalidation trigger. Source-content change for the owner drops
+/// this DerivedRawState entry (along with the IndexedReady entry it mirrored);
+/// profile-flag change preserves DerivedRawState while leaving IndexedReady
+/// untouched. The asymmetry that motivated D48 is the per-domain trigger
+/// independence — keeping `import_routes` here means a profile-flag sweep
+/// no longer drops the resolved-route cache redundantly.
+#[derive(Debug, Default)]
+pub struct DerivedRawState {
+    /// Sub-mirror of [`IndexedReady.import_routes`](crate::project_type_store::IndexedReady).
+    /// Same content, different invalidation trigger from the IndexedReady source —
+    /// see the §3.4.2 invalidation matrix on the rehoming doc. Source content change
+    /// for the owner drops this; profile-flag change preserves it.
+    pub(crate) import_routes: FxHashMap<String, DependencyResolution>,
+
     /// Cached TSC extract keyed by whole_hash. On read: stored hash must match
-    /// effective_file_state().whole_hash. Cleared on upsert when whole_hash changes.
+    /// `effective_file_state().whole_hash`. Cleared on upsert when whole_hash changes.
     pub(crate) cached_tsc_extract: Option<(Hash16, Arc<verter_compiler::tsc::ExtractedTscState>)>,
     /// Mode-aware cached resolved component-meta sidecar keyed by owner/dependency hashes.
     pub(crate) cached_resolved_meta: FxHashMap<ProjectionMode, ResolvedComponentMetaCacheEntry>,
@@ -1202,50 +1217,24 @@ pub(crate) struct CompileCacheEntry {
     pub(crate) cached_meta_payload: Option<CachedMetaPayload>,
 
     /// Raw template analysis (source-derived, profileless).
-    /// Computed by compute_template_analysis_if_missing() from raw scheduler data.
+    /// Computed by `compute_template_analysis_if_missing()` from raw scheduler data.
     /// Always raw — never from overrides.
     ///
     /// EXTERNAL SRC RULE: When src_blocks is non-empty, raw_template_analysis is NOT cached
-    /// (set to None after read). This mirrors current FileEntry behavior because editing
-    /// an external <template src>/<script src> dep only triggers smart_invalidate_dependents
-    /// (which clears compile_slots), not raw_template_analysis.
+    /// (set to None after read). Editing an external `<template src>` / `<script src>` dep
+    /// only triggers `smart_invalidate_dependents` (which clears compile_slots), not
+    /// raw_template_analysis.
     pub(crate) raw_template_analysis:
         Option<Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>>,
 
-    // ── DependencyState: resolution metadata + invalidation hashes ──
-    /// Per-file dependency resolution scoped to the **compile cache
-    /// lifecycle** (cleared on `clear_compile_cache`, on `configure_projects`,
-    /// and on per-file upsert when compile state changes). NOT a mirror of
-    /// [`IndexedReady.import_routes`](crate::project_type_store::IndexedReady)
-    /// — which is scoped to the **project-type-store lifecycle**, evicted
-    /// only on content-hash change via
-    /// [`ProjectTypeStore::evict_canonical`](crate::project_type_store::ProjectTypeStore::evict_canonical).
-    /// The two store the same `DependencyResolution` shape but follow
-    /// different invalidation triggers:
-    /// - This field follows COMPILE-event invalidation (profile changes,
-    ///   slot mutations).
-    /// - `IndexedReady.import_routes` follows FILE-CONTENT-event invalidation.
-    ///
-    /// A profile change that doesn't touch file content evicts this field
-    /// but preserves `IndexedReady.import_routes`. A content change without
-    /// a profile change evicts both. Consolidating them under one cache
-    /// would require conflating COMPILE-event and FILE-CONTENT-event
-    /// invalidation, which the existing system deliberately keeps separate.
-    /// Classification: `legitimate-authority` (sub-mirror). See
-    /// sub-
-    pub(crate) import_routes: FxHashMap<String, DependencyResolution>,
-    pub(crate) dependencies: std::collections::BTreeSet<String>,
-    pub(crate) resolved_type_hashes: FxHashMap<(String, String), Hash16>,
-    pub(crate) aliases: std::collections::BTreeSet<String>,
-    pub(crate) generation: u64,
-
     /// Cached fallthrough resolution keyed by semantic fact versions and
-    /// generic-root-propagation behavior.
-    /// Cleared everywhere `cached_resolved_meta` is cleared.
+    /// generic-root-propagation behavior. Cleared everywhere
+    /// `cached_resolved_meta` is cleared.
     pub(crate) cached_fallthrough: Option<CachedFallthroughEntry>,
 
     /// Eviction flag — when true, the file is invisible to host accessors
-    /// but deps/aliases are preserved for old-state diffing during reload.
+    /// but deps/aliases (in [`DependencyState`]) are preserved for old-state
+    /// diffing during reload.
     pub(crate) evicted: bool,
 
     /// Whole-hash recorded at eviction time, when available. `None` indicates
@@ -1256,6 +1245,20 @@ pub(crate) struct CompileCacheEntry {
     /// cache across no-op reloads. `None` triggers the conservative bump that
     /// matches pre-fix behavior.
     pub(crate) evicted_whole_hash: Option<Hash16>,
+}
+
+/// Dependency-closure-domain state for the scheduler-backed compile cache (D48).
+///
+/// Stored in [`crate::project_type_store::DependencyCacheDb`] keyed by canonical id.
+/// Dep-closure changes invalidate this; source-content changes invalidate it
+/// (because dep-closure is recomputed); profile-flag changes preserve it;
+/// project-generation bumps invalidate it. See the §3.4.2 invalidation matrix.
+#[derive(Debug, Default)]
+pub struct DependencyState {
+    pub(crate) dependencies: std::collections::BTreeSet<String>,
+    pub(crate) resolved_type_hashes: FxHashMap<(String, String), Hash16>,
+    pub(crate) aliases: std::collections::BTreeSet<String>,
+    pub(crate) generation: u64,
 }
 
 /// Override-aware file state returned by `effective_file_state()`.

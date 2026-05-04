@@ -920,17 +920,19 @@ impl VerterHost {
         canonical_id: &str,
         resolution: Arc<crate::types::FallthroughResolution>,
     ) {
+        // cached_fallthrough lives on DerivedRawState (D48 split).
         {
             if self.effective_file_state(canonical_id, None).is_some() {
-                let mut cc = self
-                    .compile_cache()
+                let mut derived_ref = self
+                    .derived_raw_cache()
                     .entry(canonical_id.to_string())
                     .or_default();
-                cc.cached_fallthrough = Some(crate::types::CachedFallthroughEntry {
-                    fact_versions: resolution.fact_versions.clone(),
-                    generic_root_propagation: self.config.generic_root_propagation,
-                    resolution,
-                });
+                derived_ref.value_mut().cached_fallthrough =
+                    Some(crate::types::CachedFallthroughEntry {
+                        fact_versions: resolution.fact_versions.clone(),
+                        generic_root_propagation: self.config.generic_root_propagation,
+                        resolution,
+                    });
             }
         }
     }
@@ -985,15 +987,21 @@ impl VerterHost {
         transitive_deps: &std::collections::BTreeSet<String>,
     ) {
         let mut new_deps = self.parse_dependency_set_for_file(canonical_id);
+        // import_routes lives on DerivedRawState; dependencies on
+        // DependencyState (D48 split).
         {
-            let mut cc_ref = self
-                .compile_cache()
+            let derived_routes = self
+                .derived_raw_cache()
+                .get(canonical_id)
+                .map(|d| d.import_routes.clone())
+                .unwrap_or_default();
+            new_deps.extend(Self::resolved_dependency_targets(&derived_routes));
+            new_deps.extend(transitive_deps.iter().cloned());
+            let mut dep_ref = self
+                .dependency_cache()
                 .entry(canonical_id.to_string())
                 .or_default();
-            let cc = cc_ref.value_mut();
-            new_deps.extend(Self::resolved_dependency_targets(&cc.import_routes));
-            new_deps.extend(transitive_deps.iter().cloned());
-            cc.dependencies = new_deps;
+            dep_ref.value_mut().dependencies = new_deps;
         }
         // ALWAYS fires — even when cc.dependencies union is unchanged, the
         // semantic-class slice may have changed (closes F15).

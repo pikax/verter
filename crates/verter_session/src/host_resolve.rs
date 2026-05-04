@@ -806,13 +806,27 @@ impl VerterHost {
             possible_canonical_ids: vec![resolved_canonical_id.to_string()],
         };
 
+        // import_routes is on DerivedRawState; dependencies is on
+        // DependencyState (D48 split).
         {
-            if let Some(mut entry) = self.compile_cache().get_mut(owner_canonical) {
-                entry
-                    .import_routes
-                    .insert(import_source.to_string(), resolution.clone());
-                entry.dependencies.insert(resolved_canonical_id.to_string());
-            }
+            let mut derived_ref = self
+                .derived_raw_cache()
+                .entry(owner_canonical.to_string())
+                .or_default();
+            derived_ref
+                .value_mut()
+                .import_routes
+                .insert(import_source.to_string(), resolution.clone());
+        }
+        {
+            let mut dep_ref = self
+                .dependency_cache()
+                .entry(owner_canonical.to_string())
+                .or_default();
+            dep_ref
+                .value_mut()
+                .dependencies
+                .insert(resolved_canonical_id.to_string());
         }
     }
 
@@ -3321,14 +3335,18 @@ impl VerterHost {
 
         // Commit to scheduler artifact snapshot (scheduler path only).
         {
-            // Persist raw template analysis to compile_cache for profileless consumers
-            // (e.g. cross_file, get_analysis). Only for non-override compiles.
+            // Persist raw template analysis on DerivedRawState (D48
+            // split — profileless source-derived cache). Only for
+            // non-override compiles.
             if compiled_template_analysis.is_some()
                 && compile_input.content_override_layer.is_none()
             {
-                if let Some(mut cc) = self.compile_cache().get_mut(&canonical_id) {
-                    cc.raw_template_analysis = compiled_template_analysis.clone().map(Arc::new);
-                }
+                let mut derived_ref = self
+                    .derived_raw_cache()
+                    .entry(canonical_id.clone())
+                    .or_default();
+                derived_ref.value_mut().raw_template_analysis =
+                    compiled_template_analysis.clone().map(Arc::new);
             }
 
             if let Some(ref snap) = sched_snapshot_at_start {
@@ -3382,10 +3400,10 @@ impl VerterHost {
         let profile_hash = compile_profile_hash(profile);
 
         {
-            let cc = self.compile_cache().get(&canonical)?;
-            if cc.evicted {
+            if self.is_canonical_evicted(&canonical) {
                 return None;
             }
+            let cc = self.compile_cache().get(&canonical)?;
             let slot = cc.compile_slots.get(&profile_hash)?;
             let tsx = slot.tsx.as_ref()?;
             Some(IdeResponse {
@@ -3426,10 +3444,8 @@ impl VerterHost {
         let canonical = self.resolve_alias_or_canonical(canonical_id);
         let profile_hash = profile.map(compile_profile_hash);
 
-        if let Some(cc) = self.compile_cache().get(&canonical) {
-            if cc.evicted {
-                return None;
-            }
+        if self.is_canonical_evicted(&canonical) {
+            return None;
         }
 
         let (source, file_kind, macro_type_deps, script_imports, cached_extract, whole_hash) = {
@@ -3441,7 +3457,8 @@ impl VerterHost {
             if file_kind != FileKind::VueSfc {
                 return None;
             }
-            let cached = self.compile_cache().get(&canonical).and_then(|cc| {
+            // cached_tsc_extract lives on DerivedRawState (D48 split).
+            let cached = self.derived_raw_cache().get(&canonical).and_then(|cc| {
                 cc.cached_tsc_extract.as_ref().and_then(|(hash, extract)| {
                     if *hash == efs.whole_hash {
                         Some(Arc::clone(extract))
@@ -3495,9 +3512,12 @@ impl VerterHost {
         ) {
             let arc = Arc::new(fresh);
             {
-                if let Some(mut cc) = self.compile_cache().get_mut(&canonical) {
-                    cc.cached_tsc_extract = Some((whole_hash, Arc::clone(&arc)));
-                }
+                // cached_tsc_extract lives on DerivedRawState (D48 split).
+                let mut derived_ref = self
+                    .derived_raw_cache()
+                    .entry(canonical.clone())
+                    .or_default();
+                derived_ref.value_mut().cached_tsc_extract = Some((whole_hash, Arc::clone(&arc)));
             }
 
             arc

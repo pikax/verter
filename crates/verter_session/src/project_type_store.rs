@@ -983,28 +983,24 @@ impl EvalEnvCacheDb {
     }
 }
 
-/// Host-owned super-shape for the existing `compile_cache` (D48).
+/// Profile-domain DB for the per-canonical compile cache (D48).
 ///
-/// Tier 1A introduced this as an empty shell. Tier 1C-α moves the
-/// existing `VerterHost::compile_cache` body into this DB verbatim
-/// (super-shape preserved per option (b)). Tier 1C-β will split the
-/// super-shape into `ProfileState` / `DerivedRawState` /
-/// `DependencyState` per the §3.4.2 invalidation matrix.
+/// Stores [`crate::types::ProfileState`] keyed by canonical id. Holds
+/// per-profile compile outputs (`compile_slots`, `content_overrides`,
+/// `style_overrides`, `latest_diagnostics`, `diagnostics_generation`).
+/// Profile-flag changes invalidate this entry; source-content changes
+/// preserve it; dep-closure changes preserve it. The unified
+/// `bump_project_generation_and_evict` cascade clears all three domain
+/// DBs together.
 ///
-/// Until 1C-β lands, the inner storage is the same
-/// `DashMap<String, CompileCacheEntry>` that previously lived directly
-/// on `VerterHost`. Accessors return references to the underlying map
-/// so call sites can keep using the `entry().or_default()` /
-/// `get(canonical)` / `get_mut(canonical)` / `iter()` shapes they
-/// already expect; future commits introduce typed get/insert helpers
-/// in their place.
+/// Accessors return references to the underlying map so call sites use
+/// the `entry().or_default()` / `get(canonical)` / `get_mut(canonical)` /
+/// `iter()` shapes typical of `DashMap`.
 #[derive(Debug, Default)]
 pub struct CompileCacheDb {
-    /// Tier 1C-α storage: the rehomed
-    /// `DashMap<String, CompileCacheEntry>` body. Public accessors
-    /// expose this as `entries()` for call sites that previously
-    /// reached `host.compile_cache` directly.
-    entries: DashMap<String, crate::types::CompileCacheEntry>,
+    /// Backing map: `DashMap<String, ProfileState>`. Public accessors
+    /// expose this as `entries()`.
+    entries: DashMap<String, crate::types::ProfileState>,
 }
 
 impl CompileCacheDb {
@@ -1013,12 +1009,96 @@ impl CompileCacheDb {
         Self::default()
     }
 
-    /// Return a reference to the inner storage. Call sites that
-    /// previously used `host.compile_cache` directly keep their
-    /// `entry(...) / get(...) / get_mut(...) / iter()` shape by
-    /// reaching through this accessor.
+    /// Return a reference to the inner storage. Call sites use
+    /// `entry(...) / get(...) / get_mut(...) / iter()` directly on the
+    /// returned `DashMap`.
     #[must_use]
-    pub(crate) fn entries(&self) -> &DashMap<String, crate::types::CompileCacheEntry> {
+    pub(crate) fn entries(&self) -> &DashMap<String, crate::types::ProfileState> {
+        &self.entries
+    }
+
+    pub fn clear(&self) {
+        self.entries.clear();
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+/// Source-content-domain DB for the per-canonical compile cache (D48).
+///
+/// Stores [`crate::types::DerivedRawState`] keyed by canonical id. Holds
+/// source-content-derived caches (`cached_tsc_extract`, `cached_resolved_meta`,
+/// `cached_meta_payload`, `raw_template_analysis`, `cached_fallthrough`,
+/// `import_routes`, `evicted`, `evicted_whole_hash`). Source-content changes
+/// invalidate this entry; profile-flag changes preserve it; dep-closure
+/// changes preserve it. The unified `bump_project_generation_and_evict`
+/// cascade clears all three domain DBs together.
+///
+/// `DerivedRawState::import_routes` is a sub-mirror of
+/// [`IndexedReady`]`.import_routes`: same content, different invalidation
+/// trigger from the IndexedReady source — see the per-type docstring on
+/// [`crate::types::DerivedRawState`] for the sub-mirror lifecycle rationale.
+#[derive(Debug, Default)]
+pub struct DerivedRawCacheDb {
+    /// Backing map: `DashMap<String, DerivedRawState>`. Public accessors
+    /// expose this as `entries()`.
+    entries: DashMap<String, crate::types::DerivedRawState>,
+}
+
+impl DerivedRawCacheDb {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub(crate) fn entries(&self) -> &DashMap<String, crate::types::DerivedRawState> {
+        &self.entries
+    }
+
+    pub fn clear(&self) {
+        self.entries.clear();
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+/// Dependency-closure-domain DB for the per-canonical compile cache (D48).
+///
+/// Stores [`crate::types::DependencyState`] keyed by canonical id. Holds
+/// resolution metadata (`dependencies`, `resolved_type_hashes`, `aliases`,
+/// `generation`). Dep-closure changes invalidate this entry;
+/// source-content changes invalidate it (because dep-closure is recomputed
+/// on parse); profile-flag changes preserve it. The unified
+/// `bump_project_generation_and_evict` cascade clears all three domain
+/// DBs together.
+#[derive(Debug, Default)]
+pub struct DependencyCacheDb {
+    /// Backing map: `DashMap<String, DependencyState>`. Public accessors
+    /// expose this as `entries()`.
+    entries: DashMap<String, crate::types::DependencyState>,
+}
+
+impl DependencyCacheDb {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub(crate) fn entries(&self) -> &DashMap<String, crate::types::DependencyState> {
         &self.entries
     }
 
@@ -1212,9 +1292,61 @@ impl crate::invalidation_domain::ParticipatesInInvalidation for CompileCacheDb {
 
 impl crate::invalidation_domain::InvalidationByCanonical for CompileCacheDb {
     fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
-        // Tier 1C-α — DashMap-backed storage. Per-canonical eviction
-        // mirrors the off-store `compile_cache.remove(canonical)`
-        // path that the rehoming subsumed.
+        // Per-canonical eviction mirrors the off-store
+        // `compile_cache.remove(canonical)` path that the rehoming
+        // subsumed.
+        if self.entries.remove(canonical_id).is_some() {
+            1
+        } else {
+            0
+        }
+    }
+}
+
+impl crate::invalidation_domain::ParticipatesInInvalidation for DerivedRawCacheDb {
+    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        &[FileContent, ProjectGeneration]
+    }
+
+    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        match domain {
+            ProjectGeneration => self.clear(),
+            FileContent => {}
+            ResolverState | TypeGraph | ComponentMeta | AppConfigInterfaceMerge => {}
+        }
+    }
+}
+
+impl crate::invalidation_domain::InvalidationByCanonical for DerivedRawCacheDb {
+    fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
+        if self.entries.remove(canonical_id).is_some() {
+            1
+        } else {
+            0
+        }
+    }
+}
+
+impl crate::invalidation_domain::ParticipatesInInvalidation for DependencyCacheDb {
+    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        &[FileContent, ProjectGeneration]
+    }
+
+    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        match domain {
+            ProjectGeneration => self.clear(),
+            FileContent => {}
+            ResolverState | TypeGraph | ComponentMeta | AppConfigInterfaceMerge => {}
+        }
+    }
+}
+
+impl crate::invalidation_domain::InvalidationByCanonical for DependencyCacheDb {
+    fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
         if self.entries.remove(canonical_id).is_some() {
             1
         } else {
@@ -1428,10 +1560,20 @@ pub struct ProjectTypeStore {
     /// Empty in 1A; populated in 1C-α (replaces `HOST_PARSED_EVAL_PROGRAM_CACHE`
     /// thread-local).
     eval_env_cache_db: EvalEnvCacheDb,
-    /// Tier 1A — Host-owned super-shape for the compile cache (D48).
-    /// Empty in 1A; populated in 1C-α; split into `ProfileState` /
-    /// `DerivedRawState` / `DependencyState` in 1C-β.
+    /// Profile-domain DB for the per-canonical compile cache (D48). Holds
+    /// [`crate::types::ProfileState`] entries; the §3.4.2 invalidation
+    /// matrix governs eviction triggers.
     compile_cache_db: CompileCacheDb,
+    /// Source-content-domain DB for the per-canonical compile cache (D48).
+    /// Holds [`crate::types::DerivedRawState`] entries (sub-mirror of
+    /// `IndexedReady.import_routes` plus source-derived analyses); the
+    /// §3.4.2 invalidation matrix governs eviction triggers.
+    derived_raw_cache_db: DerivedRawCacheDb,
+    /// Dependency-closure-domain DB for the per-canonical compile cache
+    /// (D48). Holds [`crate::types::DependencyState`] entries (deps,
+    /// resolved-type hashes, aliases, generation); the §3.4.2 invalidation
+    /// matrix governs eviction triggers.
+    dependency_cache_db: DependencyCacheDb,
     /// Tier 1A — Host-owned typed cache for resolved-type entries (D16).
     /// Tier 1C-α moved the existing `VerterHost::resolved_type_cache`
     /// body in here verbatim (super-shape preserved); the bounded
@@ -1564,6 +1706,8 @@ impl ProjectTypeStore {
             type_resolution_context_db: TypeResolutionContextDb::new(),
             eval_env_cache_db: EvalEnvCacheDb::new(),
             compile_cache_db: CompileCacheDb::new(),
+            derived_raw_cache_db: DerivedRawCacheDb::new(),
+            dependency_cache_db: DependencyCacheDb::new(),
             resolved_type_cache_db: ResolvedTypeCacheDb::new(),
             semantic_db: parking_lot::Mutex::new(verter_semantic::db::SemanticDb::new()),
             counters,
@@ -1652,10 +1796,26 @@ impl ProjectTypeStore {
         &self.eval_env_cache_db
     }
 
-    /// Tier 1A — typed super-shape DB for the compile cache (D48).
-    /// Empty in 1A; populated in 1C-α; split in 1C-β.
+    /// Profile-domain DB for the per-canonical compile cache (D48).
+    /// Stores [`crate::types::ProfileState`] entries; profile-flag
+    /// changes invalidate, source-content changes preserve.
     pub fn compile_cache(&self) -> &CompileCacheDb {
         &self.compile_cache_db
+    }
+
+    /// Source-content-domain DB for the per-canonical compile cache
+    /// (D48). Stores [`crate::types::DerivedRawState`] entries;
+    /// source-content changes invalidate, profile-flag changes preserve.
+    pub fn derived_raw_cache(&self) -> &DerivedRawCacheDb {
+        &self.derived_raw_cache_db
+    }
+
+    /// Dependency-closure-domain DB for the per-canonical compile cache
+    /// (D48). Stores [`crate::types::DependencyState`] entries;
+    /// dep-closure / source-content changes invalidate, profile-flag
+    /// changes preserve.
+    pub fn dependency_cache(&self) -> &DependencyCacheDb {
+        &self.dependency_cache_db
     }
 
     /// Tier 1A — typed DB for resolved-type entries (D16).
@@ -1840,6 +2000,33 @@ impl ProjectTypeStore {
         // app_config_decl_canonical_id IS this canonical.
         self.app_config_no_override_proof
             .invalidate_canonical(canonical_id);
+        // D48 split: the per-domain compile-cache entries
+        // (CompileCacheDb / DerivedRawCacheDb / DependencyCacheDb) are
+        // NOT dropped here. The matrix routes the "source content
+        // change for owner" trigger through
+        // [`Self::evict_for_source_content_change`] (called from the
+        // host-level upsert flow before per-domain re-population).
+        // `evict_canonical` is the project-type-store-level cascade
+        // for the project-global graph (IndexedReady, analysis, owner
+        // surfaces, etc.) and stays orthogonal to the per-canonical
+        // compile-cache caches.
+    }
+
+    /// D48 matrix row 1 — Source content change for owner.
+    ///
+    /// Drops the source-content-domain (`DerivedRawCacheDb`) and
+    /// dep-closure-domain (`DependencyCacheDb`) entries for `canonical_id`
+    /// while PRESERVING the profile-domain (`CompileCacheDb`) entry.
+    /// Called from the host-level upsert flow when source content
+    /// changes; the upsert then re-populates the dropped entries with
+    /// freshly-computed state.
+    ///
+    /// This is the per-domain analogue to `evict_canonical`: the
+    /// project-global graph evictions go through `evict_canonical`,
+    /// the per-canonical compile-cache evictions go through this method.
+    pub fn evict_for_source_content_change(&self, canonical_id: &str) {
+        self.derived_raw_cache_db.entries().remove(canonical_id);
+        self.dependency_cache_db.entries().remove(canonical_id);
     }
 
     /// Targeted invalidation of a project-generation bump.
@@ -1891,7 +2078,15 @@ impl ProjectTypeStore {
         // cascade (host-cache-rehoming.md §3.4). Routes / intrinsics
         // drive each of these caches' freshness, so a tsconfig-style
         // bump invalidates them along with the typed DBs above.
+        //
+        // D48 invalidation matrix — `bump_project_generation_and_evict`
+        // row: ALL THREE per-canonical compile-cache sub-domains drop
+        // (ProfileState + DerivedRawState + DependencyState) because a
+        // project-shape change can shift profile flags AND content
+        // routing AND dep closures simultaneously.
         self.compile_cache_db.clear();
+        self.derived_raw_cache_db.clear();
+        self.dependency_cache_db.clear();
         self.resolved_type_cache_db.clear();
         self.eval_env_cache_db.clear();
         *self.semantic_db.lock() = verter_semantic::db::SemanticDb::new();
@@ -1958,6 +2153,11 @@ pub const PROJECT_TYPE_STORE_DB_INVENTORY: &[&str] = &[
     "type_resolution_context_db",
     "eval_env_cache_db",
     "compile_cache_db",
+    // Tier 1C-β D48 split: source-content-domain and dep-closure-domain
+    // siblings of `compile_cache_db`. Each fans into the unified
+    // `bump_project_generation_and_evict` cascade.
+    "derived_raw_cache_db",
+    "dependency_cache_db",
     "resolved_type_cache_db",
     // The Tier 1C-α `semantic_db: Mutex<verter_semantic::db::SemanticDb>`
     // handle is intentionally absent from this inventory — it is the
@@ -2010,6 +2210,10 @@ impl ProjectTypeStore {
             &self.type_resolution_context_db,
             &self.eval_env_cache_db,
             &self.compile_cache_db,
+            // Tier 1C-β D48 split: source-content-domain and dep-closure-domain
+            // siblings of `compile_cache_db`.
+            &self.derived_raw_cache_db,
+            &self.dependency_cache_db,
             &self.resolved_type_cache_db,
         ]
     }
@@ -2115,6 +2319,14 @@ impl ProjectTypeStore {
                 .invalidate_canonical_for(canonical_id),
         );
         total = total.saturating_add(self.compile_cache_db.invalidate_canonical_for(canonical_id));
+        total = total.saturating_add(
+            self.derived_raw_cache_db
+                .invalidate_canonical_for(canonical_id),
+        );
+        total = total.saturating_add(
+            self.dependency_cache_db
+                .invalidate_canonical_for(canonical_id),
+        );
         total = total.saturating_add(
             self.resolved_type_cache_db
                 .invalidate_canonical_for(canonical_id),

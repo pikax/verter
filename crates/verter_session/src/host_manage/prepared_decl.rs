@@ -722,12 +722,14 @@ impl VerterHost {
             // materialization. Later resolver stages read these facts instead of
             // treating compile-cache/store-view import-route maps as truth.
             //
-            // Seed import routes from compile_cache if present (set by
-            // `set_import_dependencies`). These are authoritative when the host
-            // caller has explicitly provided resolution targets.
+            // Seed import routes from DerivedRawState if present (set by
+            // `set_import_dependencies` — D48 split: import_routes live on
+            // DerivedRawState as a sub-mirror of IndexedReady.import_routes).
+            // These are authoritative when the host caller has explicitly
+            // provided resolution targets.
             let mut import_routes = rustc_hash::FxHashMap::default();
             {
-                if let Some(cc) = self.compile_cache().get(canonical_id) {
+                if let Some(cc) = self.derived_raw_cache().get(canonical_id) {
                     for (specifier, resolution) in cc.import_routes.iter() {
                         import_routes.insert(specifier.clone(), resolution.clone());
                     }
@@ -1102,14 +1104,15 @@ impl VerterHost {
         canonical_id: &str,
         import_source: &str,
     ) -> Option<DependencyResolution> {
-        // Post-cut: the project-global cache already validates entries
-        // through `HostFenceValidator` at publish time, so readers consume
-        // the cache permissively here.
-        let cc = self.compile_cache().get(canonical_id)?;
-        if cc.evicted {
+        // The project-global cache already validates entries through
+        // `HostFenceValidator` at publish time, so readers consume the
+        // cache permissively here.
+        // import_routes lives on DerivedRawState (D48 split).
+        if self.is_canonical_evicted(canonical_id) {
             return None;
         }
-        cc.import_routes.get(import_source).cloned()
+        let derived = self.derived_raw_cache().get(canonical_id)?;
+        derived.import_routes.get(import_source).cloned()
     }
 
     fn append_file_whole_and_route_fact_versions(

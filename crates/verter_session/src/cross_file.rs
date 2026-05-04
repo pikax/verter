@@ -85,7 +85,7 @@ impl VerterHost {
             self.scheduler
                 .node_ids()
                 .into_iter()
-                .filter(|id| self.compile_cache().get(id).is_none_or(|cc| !cc.evicted))
+                .filter(|id| !self.is_canonical_evicted(id))
                 .filter_map(|id| {
                     // Use raw_template_analysis_for_file which lazily computes
                     // template analysis if not already cached.

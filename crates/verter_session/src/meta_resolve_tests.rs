@@ -62,7 +62,8 @@ fn clear_legacy_cached_resolved_state(
 ) {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        if let Some(mut entry) = project.host().compile_cache().get_mut(canonical) {
+        // cached_resolved_meta lives on DerivedRawState (D48 split).
+        if let Some(mut entry) = project.host().derived_raw_cache().get_mut(canonical) {
             entry.cached_resolved_meta.remove(&mode);
         }
     }

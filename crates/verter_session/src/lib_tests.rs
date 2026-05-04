@@ -734,10 +734,11 @@ fn generation_counter_increments_on_upsert() {
 
     #[cfg(not(target_arch = "wasm32"))]
     {
+        // generation lives on DependencyState (D48 split).
         let gen1 = host
-            .compile_cache()
+            .dependency_cache()
             .get("Comp.vue")
-            .expect("compile_cache entry should exist")
+            .expect("dependency_cache entry should exist")
             .generation;
         assert_eq!(gen1, 1);
 
@@ -745,9 +746,9 @@ fn generation_counter_increments_on_upsert() {
         let _ = upsert_vue(&host, "Comp.vue", src2);
 
         let gen2 = host
-            .compile_cache()
+            .dependency_cache()
             .get("Comp.vue")
-            .expect("compile_cache entry should exist")
+            .expect("dependency_cache entry should exist")
             .generation;
         assert_eq!(gen2, 2);
     }
@@ -1034,9 +1035,9 @@ fn relative_imports_auto_register_deps() {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
-            .compile_cache()
+            .dependency_cache()
             .get("/src/Comp.vue")
-            .expect("compile_cache entry should exist");
+            .expect("dependency_cache entry should exist");
         assert!(
             cc.dependencies.contains("/src/types"),
             "relative import should auto-register as dependency, got: {:?}",
@@ -1625,9 +1626,9 @@ fn tier3_stores_resolved_type_hashes() {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
-            .compile_cache()
+            .dependency_cache()
             .get("/src/Comp.vue")
-            .expect("compile_cache entry exists");
+            .expect("dependency_cache entry exists");
         assert!(
             cc.resolved_type_hashes.contains_key(&key),
             "resolved_type_hashes should store hash for (dep_id, type_name)"
@@ -3541,14 +3542,16 @@ const count = ref(0)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Phase 1 — Structural types: HostSourceData, HostAnalysisData, CompileCacheEntry
+// Structural types: HostSourceData, HostAnalysisData, scheduler-backed
+// per-canonical compile cache (D48: ProfileState / DerivedRawState /
+// DependencyState).
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[cfg(not(target_arch = "wasm32"))]
 mod phase1_structural_tests {
     use super::*;
     use crate::host_executor::{AnalysisArcs, HostAnalysisData, HostSourceData};
-    use crate::types::CompileCacheEntry;
+    use crate::types::{DependencyState, DerivedRawState, ProfileState};
 
     #[test]
     fn test_source_data_has_cached_parse() {
@@ -3681,20 +3684,24 @@ mod phase1_structural_tests {
 
     #[test]
     fn test_compile_cache_entry_default() {
-        let cc = CompileCacheEntry::default();
-        assert!(cc.content_overrides.is_empty());
-        assert!(cc.style_overrides.is_empty());
-        assert!(cc.compile_slots.is_empty());
-        assert!(cc.latest_diagnostics.is_empty());
-        assert_eq!(cc.diagnostics_generation, 0);
-        assert!(cc.cached_tsc_extract.is_none());
-        assert!(cc.raw_template_analysis.is_none());
-        assert!(cc.import_routes.is_empty());
-        assert!(cc.dependencies.is_empty());
-        assert!(cc.resolved_type_hashes.is_empty());
-        assert!(cc.aliases.is_empty());
-        assert_eq!(cc.generation, 0);
-        assert!(!cc.evicted, "new entry should not be evicted");
+        let profile = ProfileState::default();
+        assert!(profile.content_overrides.is_empty());
+        assert!(profile.style_overrides.is_empty());
+        assert!(profile.compile_slots.is_empty());
+        assert!(profile.latest_diagnostics.is_empty());
+        assert_eq!(profile.diagnostics_generation, 0);
+
+        let derived = DerivedRawState::default();
+        assert!(derived.cached_tsc_extract.is_none());
+        assert!(derived.raw_template_analysis.is_none());
+        assert!(derived.import_routes.is_empty());
+        assert!(!derived.evicted, "new entry should not be evicted");
+
+        let dep = DependencyState::default();
+        assert!(dep.dependencies.is_empty());
+        assert!(dep.resolved_type_hashes.is_empty());
+        assert!(dep.aliases.is_empty());
+        assert_eq!(dep.generation, 0);
     }
 
     #[test]
@@ -3731,7 +3738,7 @@ mod phase1_structural_tests {
     fn test_compile_cache_on_host() {
         let host = VerterHost::new_standalone(HostConfig::default());
 
-        // compile_cache should be accessible and empty
+        // compile_cache (profile-domain) should be accessible and empty
         assert!(
             host.compile_cache().is_empty(),
             "compile_cache should start empty"
@@ -3739,13 +3746,19 @@ mod phase1_structural_tests {
 
         // Insert and verify
         host.compile_cache()
-            .insert("/src/App.vue".to_string(), CompileCacheEntry::default());
+            .insert("/src/App.vue".to_string(), ProfileState::default());
         assert_eq!(host.compile_cache().len(), 1);
 
         // Verify it's accessible
         let entry = host.compile_cache().get("/src/App.vue");
         assert!(entry.is_some());
-        assert!(!entry.unwrap().evicted);
+
+        // DerivedRawState (source-content domain) — `evicted` flag lives here.
+        host.derived_raw_cache()
+            .insert("/src/App.vue".to_string(), DerivedRawState::default());
+        let derived = host.derived_raw_cache().get("/src/App.vue");
+        assert!(derived.is_some());
+        assert!(!derived.unwrap().evicted, "new entry should not be evicted");
     }
 }
 
@@ -3786,13 +3799,15 @@ mod phase2a_upsert_tests {
             "<template><div>hello</div></template>",
         );
 
-        // compile_cache must have an entry
+        // compile_cache must have an entry (D48 split: profile-domain).
         let cc = host.compile_cache().get("/src/App.vue");
         assert!(cc.is_some(), "compile_cache should have entry after upsert");
-        let cc = cc.unwrap();
-        assert!(!cc.evicted);
-        assert_eq!(cc.generation, 1);
-        assert!(cc.aliases.contains("/src/App.vue"));
+        // evicted flag lives on DerivedRawState (D48 split).
+        assert!(!host.is_canonical_evicted("/src/App.vue"));
+        // generation + aliases live on DependencyState (D48 split).
+        let dep = host.dependency_cache().get("/src/App.vue").unwrap();
+        assert_eq!(dep.generation, 1);
+        assert!(dep.aliases.contains("/src/App.vue"));
     }
 
     #[test]
@@ -3827,7 +3842,9 @@ mod phase2a_upsert_tests {
             cc.compile_slots.is_empty(),
             "compile_slots should be cleared on semantic change"
         );
-        assert_eq!(cc.generation, 2);
+        // generation lives on DependencyState (D48 split).
+        let dep = host.dependency_cache().get("/src/App.vue").unwrap();
+        assert_eq!(dep.generation, 2);
     }
 
     #[test]
@@ -3886,9 +3903,10 @@ mod phase2a_upsert_tests {
             "<script setup>\nimport Foo from './Foo.vue'\n</script>\n<template><Foo/></template>";
         let _ = upsert_vue(&host, "/src/App.vue", src);
 
-        let cc = host.compile_cache().get("/src/App.vue").unwrap();
+        // dependencies live on DependencyState (D48 split).
+        let dep = host.dependency_cache().get("/src/App.vue").unwrap();
         assert!(
-            !cc.dependencies.is_empty(),
+            !dep.dependencies.is_empty(),
             "dependencies should be populated from parse"
         );
     }
@@ -3902,22 +3920,28 @@ mod phase2a_upsert_tests {
             "<template><div>hello</div></template>",
         );
 
-        // Verify entry exists and is not evicted
-        assert!(!host.compile_cache().get("/src/App.vue").unwrap().evicted);
+        // Verify entry exists and is not evicted (evicted flag on
+        // DerivedRawState, D48 split).
+        assert!(!host.is_canonical_evicted("/src/App.vue"));
 
         // Evict
         host.evict("/src/App.vue");
 
-        // Entry still exists but is evicted
+        // ProfileState entry: compile_slots should be cleared.
         let cc = host.compile_cache().get("/src/App.vue").unwrap();
-        assert!(cc.evicted, "evict should set evicted flag");
         assert!(
             cc.compile_slots.is_empty(),
             "profile state should be cleared"
         );
-        // But deps/aliases are preserved for reload diffing
+        // DerivedRawState entry: evicted flag is set.
         assert!(
-            !cc.aliases.is_empty(),
+            host.is_canonical_evicted("/src/App.vue"),
+            "evict should set evicted flag"
+        );
+        // DependencyState entry: aliases are preserved for reload diffing.
+        let dep = host.dependency_cache().get("/src/App.vue").unwrap();
+        assert!(
+            !dep.aliases.is_empty(),
             "aliases should be preserved for reload"
         );
     }
@@ -3952,17 +3976,23 @@ mod phase2a_upsert_tests {
             "cold ensure_loaded should not re-submit identical source and bump generation twice"
         );
 
-        let cc = host
+        // ProfileState entry materialized; evicted flag lives on
+        // DerivedRawState; generation lives on DependencyState (D48 split).
+        let _profile = host
             .compile_cache()
             .get("/src/App.vue")
-            .expect("ensure_loaded should materialize compile_cache state");
+            .expect("ensure_loaded should materialize ProfileState entry");
         assert!(
-            !cc.evicted,
+            !host.is_canonical_evicted("/src/App.vue"),
             "cold ensure_loaded should leave the entry visible"
         );
+        let dep = host
+            .dependency_cache()
+            .get("/src/App.vue")
+            .expect("ensure_loaded should materialize DependencyState entry");
         assert_eq!(
-            cc.generation, snap.generation,
-            "compile_cache generation should track the committed scheduler generation"
+            dep.generation, snap.generation,
+            "DependencyState generation should track the committed scheduler generation"
         );
     }
 
@@ -4014,13 +4044,14 @@ mod phase2a_upsert_tests {
         let snap = host
             .scheduler_source("/src/App.vue")
             .expect("scheduler source should still exist");
-        let cc = host
-            .compile_cache()
+        // generation lives on DependencyState (D48 split).
+        let dep = host
+            .dependency_cache()
             .get("/src/App.vue")
-            .expect("byte-identical upsert should still materialize compile_cache state");
+            .expect("byte-identical upsert should still materialize DependencyState");
         assert_eq!(
-            cc.generation, snap.generation,
-            "fast-path upsert should align compile_cache generation with the scheduler"
+            dep.generation, snap.generation,
+            "fast-path upsert should align DependencyState generation with the scheduler"
         );
     }
 
@@ -4050,8 +4081,11 @@ mod phase2a_upsert_tests {
             "ensure_loaded after evict must reload the latest workspace content"
         );
 
-        let cc = host.compile_cache().get("/src/App.vue").unwrap();
-        assert!(!cc.evicted, "ensure_loaded should clear evicted flag");
+        // evicted flag lives on DerivedRawState (D48 split).
+        assert!(
+            !host.is_canonical_evicted("/src/App.vue"),
+            "ensure_loaded should clear evicted flag"
+        );
     }
 
     #[test]
@@ -4456,14 +4490,15 @@ mod phase2a_upsert_tests {
             "workspace exact-resolution edge must survive integrate (R7 fix); got {owners:?}"
         );
 
-        // (d) cc.import_routes is preserved (host source-of-truth).
+        // (d) import_routes is preserved (host source-of-truth).
+        // import_routes lives on DerivedRawState (D48 split).
         let cc = host
-            .compile_cache()
+            .derived_raw_cache()
             .get("/lib/types.ts")
-            .expect("compile_cache entry");
+            .expect("derived_raw_cache entry");
         assert!(
             cc.import_routes.contains_key("./alias"),
-            "cc.import_routes must be preserved across integrate (Codex 2 round 7 #1 fix); got: {:?}",
+            "DerivedRawState.import_routes must be preserved across integrate; got: {:?}",
             cc.import_routes.keys().collect::<Vec<_>>()
         );
     }

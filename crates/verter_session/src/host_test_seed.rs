@@ -81,11 +81,14 @@ impl VerterHost {
             }
         }
 
-        // Insert import_routes into compile_cache if non-empty.
+        // Insert import_routes into the source-content-domain DB
+        // (DerivedRawState — D48 split). `import_routes` is a sub-mirror
+        // of `IndexedReady.import_routes` with its own invalidation
+        // trigger; see DerivedRawState type docstring.
         if !import_routes.is_empty() {
-            self.compile_cache()
+            self.derived_raw_cache()
                 .entry(canonical_id.to_string())
-                .or_insert_with(crate::CompileCacheEntry::default)
+                .or_default()
                 .import_routes = import_routes.clone();
         }
 

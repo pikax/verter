@@ -94,7 +94,8 @@ impl HostStoreView {
                     }
                 }
 
-                if let Some(entry) = host.compile_cache().get(&canonical_id) {
+                // import_routes lives on DerivedRawState (D48 split).
+                if let Some(entry) = host.derived_raw_cache().get(&canonical_id) {
                     for (specifier, resolution) in entry.import_routes.iter() {
                         view.import_routes.insert(
                             (canonical_id.clone(), specifier.clone()),
@@ -172,10 +173,13 @@ impl HostStoreView {
 
             let import_route_hash = {
                 {
-                    host.compile_cache().get(&canonical_id).and_then(|entry| {
-                        (!entry.import_routes.is_empty())
-                            .then(|| hash_import_route_targets(&entry.import_routes))
-                    })
+                    // import_routes lives on DerivedRawState (D48 split).
+                    host.derived_raw_cache()
+                        .get(&canonical_id)
+                        .and_then(|entry| {
+                            (!entry.import_routes.is_empty())
+                                .then(|| hash_import_route_targets(&entry.import_routes))
+                        })
                 }
 
                 // WASM-only: scheduler is unavailable on web; see CLAUDE.md "Scheduler as Sole Compile Authority".

@@ -278,9 +278,10 @@ fn cached_resolved_state(
 ) -> Option<Arc<crate::meta_resolve::ResolvedComponentMetaState>> {
     #[cfg(not(target_arch = "wasm32"))]
     {
+        // cached_resolved_meta lives on DerivedRawState (D48 split).
         project
             .host()
-            .compile_cache()
+            .derived_raw_cache()
             .get(canonical)
             .and_then(|entry| {
                 entry
@@ -309,7 +310,8 @@ fn clear_legacy_cached_resolved_state(
 ) {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        if let Some(mut entry) = project.host().compile_cache().get_mut(canonical) {
+        // cached_resolved_meta lives on DerivedRawState (D48 split).
+        if let Some(mut entry) = project.host().derived_raw_cache().get_mut(canonical) {
             entry.cached_resolved_meta.remove(&mode);
         }
     }
@@ -328,9 +330,10 @@ fn cached_fallthrough_state(
     project: &MetaProject,
     canonical: &str,
 ) -> Option<Arc<crate::types::FallthroughResolution>> {
+    // cached_fallthrough lives on DerivedRawState (D48 split).
     project
         .host()
-        .compile_cache()
+        .derived_raw_cache()
         .get(canonical)
         .and_then(|entry| {
             entry
@@ -342,7 +345,8 @@ fn cached_fallthrough_state(
 
 #[cfg(not(target_arch = "wasm32"))]
 fn clear_legacy_cached_fallthrough_state(project: &MetaProject, canonical: &str) {
-    if let Some(mut entry) = project.host().compile_cache().get_mut(canonical) {
+    // cached_fallthrough lives on DerivedRawState (D48 split).
+    if let Some(mut entry) = project.host().derived_raw_cache().get_mut(canonical) {
         entry.cached_fallthrough = None;
     }
 }
@@ -380,9 +384,10 @@ fn cached_fallthrough_entry(
     project: &MetaProject,
     canonical: &str,
 ) -> Option<crate::types::CachedFallthroughEntry> {
+    // cached_fallthrough lives on DerivedRawState (D48 split).
     project
         .host()
-        .compile_cache()
+        .derived_raw_cache()
         .get(canonical)
         .and_then(|entry| entry.cached_fallthrough.clone())
 }
@@ -398,12 +403,13 @@ fn fact_versions_match_uses_derived_fact_kind_specific_validation() {
         .upsert_base("/inner.ts", "export interface Inner {}")
         .unwrap();
 
+    // import_routes lives on DerivedRawState (D48 split).
     let mut entry = project
         .host()
-        .compile_cache()
-        .get_mut("/index.ts")
-        .expect("compile cache entry should exist");
-    entry.import_routes.insert(
+        .derived_raw_cache()
+        .entry("/index.ts".to_string())
+        .or_default();
+    entry.value_mut().import_routes.insert(
         "./inner".to_string(),
         crate::types::DependencyResolution {
             specifier: "./inner".to_string(),
@@ -416,9 +422,9 @@ fn fact_versions_match_uses_derived_fact_kind_specific_validation() {
     let import_route_hash = {
         let entry = project
             .host()
-            .compile_cache()
+            .derived_raw_cache()
             .get("/index.ts")
-            .expect("compile cache entry should exist");
+            .expect("derived_raw_cache entry should exist");
         crate::resolver_store::hash_import_route_targets(&entry.import_routes)
     };
 
@@ -660,12 +666,13 @@ fn current_dependency_fact_versions_include_derived_resolver_facts() {
         .get_whole_hash("/index.ts")
         .expect("whole hash should exist");
 
+    // import_routes lives on DerivedRawState (D48 split).
     let mut entry = project
         .host()
-        .compile_cache()
-        .get_mut("/index.ts")
-        .expect("compile cache entry should exist");
-    entry.import_routes.insert(
+        .derived_raw_cache()
+        .entry("/index.ts".to_string())
+        .or_default();
+    entry.value_mut().import_routes.insert(
         "./inner".to_string(),
         crate::types::DependencyResolution {
             specifier: "./inner".to_string(),

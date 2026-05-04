@@ -727,18 +727,20 @@ fn prepared_decl_bundle_with_store_view_reuses_cache_for_structural_exact_resolu
         "warm lookup with the same captured store view should register a bundle cache hit, got {:?}",
         after_second
     );
-    // Verify the dependency resolution is persisted in the compile_cache
-    let compile_entry = host
-        .compile_cache()
+    // Verify the dependency resolution is persisted on DerivedRawState
+    // (D48 split — import_routes is the sub-mirror of
+    // IndexedReady.import_routes).
+    let derived_entry = host
+        .derived_raw_cache()
         .get("/workspace/types.ts")
-        .expect("types file should have a compile cache entry");
+        .expect("types file should have a derived_raw_cache entry");
     assert_eq!(
-        compile_entry
+        derived_entry
             .import_routes
             .get("./dep")
             .and_then(|dep| dep.resolved_canonical_id.as_deref()),
         Some("/workspace/dep.ts"),
-        "structurally derived exact resolutions should be persisted onto the compile cache entry",
+        "structurally derived exact resolutions should be persisted onto the DerivedRawState entry",
     );
 }
 

@@ -293,14 +293,67 @@ impl VerterHost {
     // `host.<field>().<method>()`.
     // ──────────────────────────────────────────────────────────────────
 
-    /// Reference to the rehomed compile-cache storage. Equivalent to
-    /// the deleted `compile_cache` field; call sites use
-    /// `host.compile_cache().entry(...)` / `.get(...)` / `.iter()` etc.
+    /// Reference to the profile-domain DB's underlying storage (D48 split).
+    /// Stores [`crate::types::ProfileState`] keyed by canonical id; call
+    /// sites use `host.compile_cache().entry(...)` / `.get(...)` / `.iter()`
+    /// etc. to access per-profile compile outputs (`compile_slots`,
+    /// `content_overrides`, `style_overrides`, `latest_diagnostics`,
+    /// `diagnostics_generation`).
     #[must_use]
-    pub(crate) fn compile_cache(
-        &self,
-    ) -> &dashmap::DashMap<String, crate::types::CompileCacheEntry> {
+    pub(crate) fn compile_cache(&self) -> &dashmap::DashMap<String, crate::types::ProfileState> {
         self.project_type_store.compile_cache().entries()
+    }
+
+    /// Reference to the source-content-domain DB's underlying storage
+    /// (D48 split). Stores [`crate::types::DerivedRawState`] keyed by
+    /// canonical id; call sites access source-derived caches
+    /// (`cached_tsc_extract`, `cached_resolved_meta`, `cached_meta_payload`,
+    /// `raw_template_analysis`, `cached_fallthrough`, `import_routes`,
+    /// `evicted`, `evicted_whole_hash`).
+    #[must_use]
+    pub(crate) fn derived_raw_cache(
+        &self,
+    ) -> &dashmap::DashMap<String, crate::types::DerivedRawState> {
+        self.project_type_store.derived_raw_cache().entries()
+    }
+
+    /// Reference to the dependency-closure-domain DB's underlying storage
+    /// (D48 split). Stores [`crate::types::DependencyState`] keyed by
+    /// canonical id; call sites access resolution metadata
+    /// (`dependencies`, `resolved_type_hashes`, `aliases`, `generation`).
+    #[must_use]
+    pub(crate) fn dependency_cache(
+        &self,
+    ) -> &dashmap::DashMap<String, crate::types::DependencyState> {
+        self.project_type_store.dependency_cache().entries()
+    }
+
+    /// Aggregate "drop ALL three per-canonical compile-cache sub-states"
+    /// helper — used by file-deletion and explicit-eviction paths that
+    /// need to clear ProfileState + DerivedRawState + DependencyState in
+    /// one call. Per D48 the matrix governs *automatic* cascade triggers;
+    /// this helper covers the file-removal path which is outside the
+    /// matrix (a deleted file no longer exists, so all three sub-states
+    /// drop together).
+    pub(crate) fn drop_all_per_canonical_compile_caches(&self, canonical: &str) {
+        self.compile_cache().remove(canonical);
+        self.derived_raw_cache().remove(canonical);
+        self.dependency_cache().remove(canonical);
+    }
+
+    /// True if the canonical is currently flagged as evicted on its
+    /// DerivedRawState entry. The eviction flag (D48 split) lives in
+    /// the source-content-domain DB; this helper centralizes the check
+    /// so call sites that previously used `compile_cache().get(c).evicted`
+    /// migrate cleanly. Returns `false` for unknown canonicals (not
+    /// present in any DB) — matching the pre-split semantics where a
+    /// missing entry was treated as not-evicted.
+    #[must_use]
+    pub(crate) fn is_canonical_evicted(&self, canonical: &str) -> bool {
+        self.derived_raw_cache()
+            .get(canonical)
+            .map(|d| d.evicted)
+            .unwrap_or(false)
     }
 
     /// Reference to the rehomed resolved-type cache wrapper. Use

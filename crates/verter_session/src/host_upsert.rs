@@ -202,24 +202,50 @@ impl VerterHost {
             .collect();
 
         // ── Fast path: byte-identical source ──
+        // Per D48: byte-identical source change is still a "source-content"
+        // event for the purposes of deriving downstream artifacts (the
+        // re-upsert can come from a fresh workspace where overlay state was
+        // dropped). DerivedRawState's caches (cached_resolved_meta,
+        // cached_meta_payload, cached_fallthrough, import_routes) are dropped;
+        // ProfileState's per-profile compile_slots are cleared so the next
+        // compile rebuilds with the new generation; DependencyState is
+        // overwritten with the new deps set.
         let old_whole_hash = old_host_data.map(|h| h.parse.whole_hash);
         if !changes.changed && old_whole_hash == Some(parse.whole_hash) {
-            let old_aliases = {
-                let mut cc_ref = self
+            // ProfileState fast-path mutation.
+            {
+                let mut profile_ref = self
                     .compile_cache()
                     .entry(canonical_id.clone())
                     .or_default();
-                let cc = cc_ref.value_mut();
-                let old_aliases = cc.aliases.clone();
-                cc.evicted = false;
-                cc.compile_slots.clear();
-                cc.cached_resolved_meta.clear();
-                cc.cached_meta_payload = None;
-                cc.cached_fallthrough = None;
-                cc.import_routes.clear();
-                cc.aliases = alias_set.clone();
-                cc.dependencies = new_deps.clone();
-                cc.generation = new_source_snap.generation;
+                let profile = profile_ref.value_mut();
+                profile.compile_slots.clear();
+            }
+            // DerivedRawState fast-path mutation.
+            {
+                let mut derived_ref = self
+                    .derived_raw_cache()
+                    .entry(canonical_id.clone())
+                    .or_default();
+                let derived = derived_ref.value_mut();
+                derived.evicted = false;
+                derived.cached_resolved_meta.clear();
+                derived.cached_meta_payload = None;
+                derived.cached_fallthrough = None;
+                derived.import_routes.clear();
+            }
+            // DependencyState fast-path mutation; capture old aliases for
+            // alias-map diff before overwriting.
+            let old_aliases = {
+                let mut dep_ref = self
+                    .dependency_cache()
+                    .entry(canonical_id.clone())
+                    .or_default();
+                let dep = dep_ref.value_mut();
+                let old_aliases = dep.aliases.clone();
+                dep.aliases = alias_set.clone();
+                dep.dependencies = new_deps.clone();
+                dep.generation = new_source_snap.generation;
                 old_aliases
             };
             self.update_alias_map(&canonical_id, &old_aliases, &alias_set);
@@ -266,51 +292,72 @@ impl VerterHost {
             });
         }
 
-        // ── Compile cache invalidation ──
+        // ── Per-domain invalidation per D48 invalidation matrix ──
+        // A source-content-change (whole_hash_changed or semantic_changed)
+        // is the per-canonical "Source content change for owner" trigger:
+        // DerivedRawState + DependencyState are dropped/refreshed; ProfileState
+        // is preserved for byte-identical compile reuse, but per-profile
+        // outputs that depended on the changed slices are evicted from the
+        // ProfileState entry below.
         let whole_hash_changed = old_whole_hash != Some(parse.whole_hash);
-        let old_export_signatures;
+        let old_export_signatures = old_host_data
+            .map(|h| h.parse.export_signatures.clone())
+            .unwrap_or_default();
+        let prev_nodes = old_host_data
+            .map(|h| h.parse.meta.virtual_nodes())
+            .unwrap_or_default();
         let old_aliases;
-        let prev_nodes;
+
+        // ── ProfileState (compile_cache_db) — per-profile compile outputs ──
+        // The matrix preserves ProfileState on a source-content trigger; the
+        // per-slice eviction below mutates only the profile fields whose
+        // freshness depends on the changed source slice (e.g. compile_slots
+        // when semantic_changed). Override maps are cleared on whole_hash
+        // change because synthetic parses and remapped CSS spans become
+        // stale on byte-offset shifts.
         {
-            let mut cc_ref = self
+            let mut profile_ref = self
                 .compile_cache()
                 .entry(canonical_id.clone())
                 .or_default();
-            let cc = cc_ref.value_mut();
-
-            // Read old state before mutation
-            old_aliases = cc.aliases.clone();
-            old_export_signatures = old_host_data
-                .map(|h| h.parse.export_signatures.clone())
-                .unwrap_or_default();
-            prev_nodes = old_host_data
-                .map(|h| h.parse.meta.virtual_nodes())
-                .unwrap_or_default();
-
-            // Invalidation per the plan's matrix (delegated-noodling-knuth.md line 237).
-            // Override caches cleared on whole_hash change — whitespace-only edits shift
-            // SFC-absolute byte offsets, making cached synthetic parses and remapped CSS
-            // spans stale. The bundler re-applies overrides after the next transform().
+            let profile = profile_ref.value_mut();
             if whole_hash_changed {
-                cc.content_overrides.clear();
-                cc.style_overrides.clear();
-                cc.cached_tsc_extract = None;
-                cc.cached_resolved_meta.clear();
-                cc.cached_meta_payload = None;
-                cc.cached_fallthrough = None;
-            }
-            if changes.changed {
-                cc.cached_resolved_meta.clear();
-                cc.cached_meta_payload = None;
-                cc.cached_fallthrough = None;
+                profile.content_overrides.clear();
+                profile.style_overrides.clear();
             }
             if changes.changed && changes.semantic_changed {
-                cc.compile_slots.clear();
-                cc.latest_diagnostics.clear();
-                cc.diagnostics_generation += 1;
-                cc.cached_resolved_meta.clear();
-                cc.cached_meta_payload = None;
-                cc.cached_fallthrough = None;
+                profile.compile_slots.clear();
+                profile.latest_diagnostics.clear();
+                profile.diagnostics_generation += 1;
+            }
+        }
+
+        // ── DerivedRawState (derived_raw_cache_db) — source-derived caches ──
+        // The matrix invalidates DerivedRawState on a source-content trigger.
+        // Resolved-meta + tsc-extract + raw-template-analysis are
+        // source-derived; clearing them on whole-hash / semantic / slice
+        // changes flushes stale derived projections.
+        {
+            let mut derived_ref = self
+                .derived_raw_cache()
+                .entry(canonical_id.clone())
+                .or_default();
+            let derived = derived_ref.value_mut();
+            if whole_hash_changed {
+                derived.cached_tsc_extract = None;
+                derived.cached_resolved_meta.clear();
+                derived.cached_meta_payload = None;
+                derived.cached_fallthrough = None;
+            }
+            if changes.changed {
+                derived.cached_resolved_meta.clear();
+                derived.cached_meta_payload = None;
+                derived.cached_fallthrough = None;
+            }
+            if changes.changed && changes.semantic_changed {
+                derived.cached_resolved_meta.clear();
+                derived.cached_meta_payload = None;
+                derived.cached_fallthrough = None;
             }
             if changes.changed
                 && (changes.slice_changes.script_changed
@@ -318,19 +365,36 @@ impl VerterHost {
                     || changes.slice_changes.template_changed
                     || changes.slice_changes.descriptor_changed)
             {
-                cc.cached_tsc_extract = None;
-                cc.cached_resolved_meta.clear();
-                cc.cached_meta_payload = None;
-                cc.cached_fallthrough = None;
+                derived.cached_tsc_extract = None;
+                derived.cached_resolved_meta.clear();
+                derived.cached_meta_payload = None;
+                derived.cached_fallthrough = None;
             }
             if whole_hash_changed || changes.semantic_changed {
-                cc.raw_template_analysis = None;
+                derived.raw_template_analysis = None;
             }
-            cc.import_routes.clear();
-            cc.dependencies = new_deps.clone();
-            cc.aliases = alias_set.clone();
-            cc.generation = cc.generation.saturating_add(1);
-            cc.evicted = false;
+            // import_routes is the sub-mirror of IndexedReady.import_routes.
+            // It is recomputed by downstream resolver passes after this
+            // upsert; clear here so stale entries do not leak into the next
+            // resolver run.
+            derived.import_routes.clear();
+            derived.evicted = false;
+        }
+
+        // ── DependencyState (dependency_cache_db) — dep-closure metadata ──
+        // The matrix invalidates DependencyState on a source-content trigger
+        // (the new deps set replaces the old). Read old aliases before
+        // overwriting so the alias-map diff sees the prior state.
+        {
+            let mut dep_ref = self
+                .dependency_cache()
+                .entry(canonical_id.clone())
+                .or_default();
+            let dep = dep_ref.value_mut();
+            old_aliases = dep.aliases.clone();
+            dep.dependencies = new_deps.clone();
+            dep.aliases = alias_set.clone();
+            dep.generation = dep.generation.saturating_add(1);
         }
 
         // ── Build result data from parse ──

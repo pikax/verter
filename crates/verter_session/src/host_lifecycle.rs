@@ -191,25 +191,45 @@ impl VerterHost {
             )
             .collect();
 
-        let (old_aliases, preserved_routes) = {
-            let mut cc_ref = self
+        // D48 split — DependencyState owns aliases/dependencies/generation;
+        // DerivedRawState owns import_routes/evicted; ProfileState owns
+        // per-profile compile outputs. Update each in turn (the
+        // ProfileState `or_default()` materializes the entry so callers
+        // observing post-load state see all three sub-state DBs populated
+        // for the canonical).
+        {
+            let _ = self
                 .compile_cache()
                 .entry(canonical_id.to_string())
                 .or_default();
-            let cc = cc_ref.value_mut();
-            let old_aliases = cc.aliases.clone();
-            // PRESERVE cc.import_routes. Bundler may have set them via
-            // set_import_dependencies before source was loaded. Cloning
-            // here so we can re-apply to workspace below without holding
-            // the cc lock.
-            let preserved_routes = cc.import_routes.clone();
-            cc.aliases = aliases.clone();
-            cc.dependencies = deps;
-            cc.generation = snap.generation;
-            cc.evicted = false;
-            // cc.import_routes is NOT cleared (preserves bundler
+        }
+        let old_aliases = {
+            let mut dep_ref = self
+                .dependency_cache()
+                .entry(canonical_id.to_string())
+                .or_default();
+            let dep = dep_ref.value_mut();
+            let old_aliases = dep.aliases.clone();
+            dep.aliases = aliases.clone();
+            dep.dependencies = deps;
+            dep.generation = snap.generation;
+            old_aliases
+        };
+        // PRESERVE derived.import_routes. Bundler may have set them via
+        // set_import_dependencies before source was loaded. Cloning
+        // here so we can re-apply to workspace below without holding the
+        // entry lock.
+        let preserved_routes = {
+            let mut derived_ref = self
+                .derived_raw_cache()
+                .entry(canonical_id.to_string())
+                .or_default();
+            let derived = derived_ref.value_mut();
+            let preserved_routes = derived.import_routes.clone();
+            derived.evicted = false;
+            // derived.import_routes is NOT cleared (preserves bundler
             // pre-load route flow).
-            (old_aliases, preserved_routes)
+            preserved_routes
         };
 
         self.update_alias_map(canonical_id, &old_aliases, &aliases);
@@ -243,8 +263,15 @@ impl VerterHost {
     /// compile results are flushed. Useful for invalidating stale
     /// compile results while keeping the file set intact.
     pub fn clear_compile_cache(&self) {
+        // ProfileState (D48 — compile_cache_db): per-profile compile
+        // outputs are flushed.
         for mut entry in self.compile_cache().iter_mut() {
             entry.compile_slots.clear();
+        }
+        // DerivedRawState (D48 — derived_raw_cache_db): source-derived
+        // caches (raw template analysis, tsc extract, resolved meta,
+        // fallthrough) are flushed. import_routes and evicted flag stay.
+        for mut entry in self.derived_raw_cache().iter_mut() {
             entry.raw_template_analysis = None;
             entry.cached_tsc_extract = None;
             entry.cached_resolved_meta.clear();
@@ -329,8 +356,12 @@ impl VerterHost {
         projects: Vec<verter_semantic::analysis::project_resolver::IdeProjectConfig>,
     ) {
         self.ws().configure_resolver(projects);
-        for mut entry in self.compile_cache().iter_mut() {
+        // Project-config change drops resolution-derived state: import_routes
+        // (DerivedRawState) and dependencies (DependencyState).
+        for mut entry in self.derived_raw_cache().iter_mut() {
             entry.import_routes.clear();
+        }
+        for mut entry in self.dependency_cache().iter_mut() {
             entry.dependencies.clear();
         }
         self.resolver.reset_all();
@@ -497,20 +528,34 @@ impl VerterHost {
             .scheduler
             .try_get_source(canonical_id)
             .map(|s| s.whole_hash);
-        if let Some(mut cc) = self.compile_cache().get_mut(canonical_id) {
-            cc.evicted = true;
-            cc.evicted_whole_hash = pre_evict_hash;
-            // Clear profile state but preserve deps/aliases for reload diffing
-            cc.content_overrides.clear();
-            cc.style_overrides.clear();
-            cc.compile_slots.clear();
-            cc.latest_diagnostics.clear();
-            cc.cached_tsc_extract = None;
-            cc.raw_template_analysis = None;
-            cc.cached_resolved_meta.clear();
-            cc.cached_meta_payload = None;
-            cc.cached_fallthrough = None;
+        // ProfileState (compile_cache_db): clear per-profile compile
+        // outputs. ProfileState has no `evicted` flag; the eviction
+        // marker lives on DerivedRawState.
+        if let Some(mut profile) = self.compile_cache().get_mut(canonical_id) {
+            profile.content_overrides.clear();
+            profile.style_overrides.clear();
+            profile.compile_slots.clear();
+            profile.latest_diagnostics.clear();
         }
+        // DerivedRawState (derived_raw_cache_db): set the evicted flag
+        // and capture pre-evict whole_hash; clear all source-derived
+        // caches.
+        {
+            let mut derived_ref = self
+                .derived_raw_cache()
+                .entry(canonical_id.to_string())
+                .or_default();
+            let derived = derived_ref.value_mut();
+            derived.evicted = true;
+            derived.evicted_whole_hash = pre_evict_hash;
+            derived.cached_tsc_extract = None;
+            derived.raw_template_analysis = None;
+            derived.cached_resolved_meta.clear();
+            derived.cached_meta_payload = None;
+            derived.cached_fallthrough = None;
+        }
+        // DependencyState (dependency_cache_db): preserve deps/aliases for
+        // reload diffing — no mutation here.
         self.bump_store_view_epoch();
     }
 
@@ -528,22 +573,26 @@ impl VerterHost {
         let canonical_id = normalized_canonical.as_ref();
         // Fast path: already in host and not evicted. Also verify the
         // scheduler still has the source — `set_import_dependencies`
-        // may create an empty compile_cache stub before the file is
+        // may create an empty derived_raw_cache stub before the file is
         // loaded into the scheduler; in that case we must proceed to
-        // submit a load request.
-        if let Some(cc) = self.compile_cache().get(canonical_id) {
-            if !cc.evicted && self.scheduler.try_get_source(canonical_id).is_some() {
-                return true;
-            }
+        // submit a load request. The `evicted` flag lives on
+        // DerivedRawState (D48 split).
+        let evicted_flag = self
+            .derived_raw_cache()
+            .get(canonical_id)
+            .map(|d| d.evicted)
+            .unwrap_or(false);
+        if !evicted_flag && self.scheduler.try_get_source(canonical_id).is_some() {
+            return true;
         }
 
         use verter_scheduler::job::CompletionState;
 
         let (reload_from_workspace, pre_evict_hash) = self
-            .compile_cache()
+            .derived_raw_cache()
             .get(canonical_id)
-            .filter(|cc| cc.evicted)
-            .map(|cc| (true, cc.evicted_whole_hash))
+            .filter(|d| d.evicted)
+            .map(|d| (true, d.evicted_whole_hash))
             .unwrap_or((false, None));
 
         if reload_from_workspace {
@@ -681,8 +730,7 @@ impl VerterHost {
 
         let ws_ref = self.workspace.read();
         let cleared = deps::smart_invalidate_dependents_via_scheduler(
-            &self.scheduler,
-            self.compile_cache(),
+            self,
             owners.clone(),
             Some(ws_ref.as_ref()),
             &self.config,

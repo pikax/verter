@@ -2354,10 +2354,8 @@ impl VerterHost {
         let canonical = normalized_canonical.as_ref();
 
         {
-            if let Some(cc) = self.compile_cache().get(canonical) {
-                if cc.evicted {
-                    return None;
-                }
+            if self.is_canonical_evicted(canonical) {
+                return None;
             }
 
             // Route-owned cache fast path for imported-only files: if we
@@ -2521,7 +2519,8 @@ impl VerterHost {
             return Some(cached.as_ref().clone());
         }
 
-        let entry = self.compile_cache().get(canonical)?;
+        // cached_resolved_meta lives on DerivedRawState (D48 split).
+        let entry = self.derived_raw_cache().get(canonical)?;
         let cached = entry.cached_resolved_meta.get(&mode)?;
         let view = self.resolver_store_view();
         let invalid_details = view.invalid_fact_details(&cached.fact_versions, 6);
@@ -2584,10 +2583,16 @@ impl VerterHost {
             state,
         };
 
+        // cached_resolved_meta lives on DerivedRawState (D48 split).
         {
-            if let Some(mut entry) = self.compile_cache().get_mut(canonical) {
-                entry.cached_resolved_meta.insert(mode, cached);
-            }
+            let mut derived_ref = self
+                .derived_raw_cache()
+                .entry(canonical.to_string())
+                .or_default();
+            derived_ref
+                .value_mut()
+                .cached_resolved_meta
+                .insert(mode, cached);
         }
     }
 
@@ -2600,7 +2605,8 @@ impl VerterHost {
     /// state.
     pub(crate) fn try_get_cached_meta_payload(&self, canonical: &str) -> Option<Vec<u8>> {
         use crate::resolver_core::StoreView;
-        let entry = self.compile_cache().get(canonical)?;
+        // cached_meta_payload lives on DerivedRawState (D48 split).
+        let entry = self.derived_raw_cache().get(canonical)?;
         let cached = entry.cached_meta_payload.as_ref()?;
         let view = self.resolver_store_view();
         if cached.fact_versions.iter().all(|fact| view.validates(fact)) {
@@ -2621,10 +2627,13 @@ impl VerterHost {
             payload,
         };
 
+        // cached_meta_payload lives on DerivedRawState (D48 split).
         {
-            if let Some(mut entry) = self.compile_cache().get_mut(canonical) {
-                entry.cached_meta_payload = Some(cached);
-            }
+            let mut derived_ref = self
+                .derived_raw_cache()
+                .entry(canonical.to_string())
+                .or_default();
+            derived_ref.value_mut().cached_meta_payload = Some(cached);
         }
     }
 
@@ -2739,11 +2748,16 @@ impl VerterHost {
             .and_then(|facts| facts.import_route_hash)
             .or_else(|| {
                 {
-                    self.compile_cache().get(canonical_id).and_then(|entry| {
-                        (!entry.import_routes.is_empty()).then(|| {
-                            crate::resolver_store::hash_import_route_targets(&entry.import_routes)
+                    // import_routes lives on DerivedRawState (D48 split).
+                    self.derived_raw_cache()
+                        .get(canonical_id)
+                        .and_then(|entry| {
+                            (!entry.import_routes.is_empty()).then(|| {
+                                crate::resolver_store::hash_import_route_targets(
+                                    &entry.import_routes,
+                                )
+                            })
                         })
-                    })
                 }
             })
     }

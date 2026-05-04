@@ -317,15 +317,16 @@ pub(crate) fn should_invalidate_dependent_view(
 /// the workspace's authoritative `EdgeStore` — the workspace is the
 /// sole authority; there is no host-side `reverse_dependencies`
 /// mirror.
-/// Scheduler-backed smart invalidation. Reads analysis from scheduler snapshots
-/// and dependency metadata from compile_cache. Clears compile_cache slots directly.
+/// Scheduler-backed smart invalidation. Reads analysis from scheduler
+/// snapshots, dependency metadata from the host's per-domain D48 caches
+/// (DerivedRawState + DependencyState), and clears per-profile compile
+/// outputs (ProfileState) for invalidated owners.
 #[allow(clippy::too_many_arguments)]
 /// Returns the set of owner canonical IDs that were actually invalidated
 /// (compile slots cleared). Callers can use this to evict other caches
 /// (e.g., `IndexedReadyDb`) only for affected dependents.
 pub(crate) fn smart_invalidate_dependents_via_scheduler(
-    scheduler: &verter_scheduler::scheduler::Scheduler,
-    compile_cache: &dashmap::DashMap<String, crate::types::CompileCacheEntry>,
+    host: &crate::VerterHost,
     owners: BTreeSet<String>,
     workspace: Option<&dyn verter_workspace::WorkspaceAccess>,
     config: &HostConfig,
@@ -340,13 +341,14 @@ pub(crate) fn smart_invalidate_dependents_via_scheduler(
     let changed_exports = compute_changed_exports(old_export_signatures, new_export_signatures);
     let no_signatures = old_export_signatures.is_empty() && new_export_signatures.is_empty();
 
-    let dep_source = scheduler
+    let dep_source = host
+        .scheduler
         .try_get_source(dependency_id)
         .map(|s| s.source.clone());
 
     let mut cleared = BTreeSet::new();
     for owner in owners {
-        let Some(mut view) = build_dependent_view(scheduler, compile_cache, &owner) else {
+        let Some(mut view) = build_dependent_view(host, &owner) else {
             continue;
         };
         let should_clear = should_invalidate_dependent_view(
@@ -358,51 +360,68 @@ pub(crate) fn smart_invalidate_dependents_via_scheduler(
             &config.resolve_extensions,
             workspace,
         );
-        if let Some(mut cc) = compile_cache.get_mut(&owner) {
-            if should_clear {
+        // ProfileState (compile_cache_db): clear per-profile compile
+        // outputs when the dep change should invalidate.
+        if should_clear {
+            if let Some(mut cc) = host.compile_cache().get_mut(&owner) {
                 cc.compile_slots.clear();
-                cc.cached_resolved_meta.clear();
-                cc.cached_meta_payload = None;
-                cc.cached_fallthrough = None;
-                cleared.insert(owner.clone());
             }
-            cc.resolved_type_hashes = view.resolved_type_hashes;
-            cc.import_routes = view.import_routes;
-            cc.dependencies = view.dependencies;
+            // DerivedRawState (derived_raw_cache_db): drop derived caches
+            // (cached_resolved_meta, cached_meta_payload, cached_fallthrough)
+            // because their dep-signature includes the dependent's resolved
+            // type hashes which we are about to overwrite.
+            if let Some(mut derived) = host.derived_raw_cache().get_mut(&owner) {
+                derived.cached_resolved_meta.clear();
+                derived.cached_meta_payload = None;
+                derived.cached_fallthrough = None;
+            }
+            cleared.insert(owner.clone());
+        }
+        // DerivedRawState (import_routes) and DependencyState
+        // (resolved_type_hashes, dependencies) update in lockstep with the
+        // newly-computed view. import_routes lives on DerivedRawState (D48
+        // sub-mirror); resolved_type_hashes + dependencies live on
+        // DependencyState.
+        {
+            let mut derived_ref = host.derived_raw_cache().entry(owner.clone()).or_default();
+            derived_ref.value_mut().import_routes = view.import_routes;
+        }
+        {
+            let mut dep_ref = host.dependency_cache().entry(owner.clone()).or_default();
+            let dep = dep_ref.value_mut();
+            dep.resolved_type_hashes = view.resolved_type_hashes;
+            dep.dependencies = view.dependencies;
         }
     }
     cleared
 }
 
-/// Build a `DependentView` from scheduler analysis + compile_cache metadata.
-fn build_dependent_view(
-    scheduler: &verter_scheduler::scheduler::Scheduler,
-    compile_cache: &dashmap::DashMap<String, crate::types::CompileCacheEntry>,
-    canonical_id: &str,
-) -> Option<DependentView> {
+/// Build a `DependentView` from scheduler analysis + the host's per-domain
+/// D48 caches (DerivedRawState + DependencyState).
+fn build_dependent_view(host: &crate::VerterHost, canonical_id: &str) -> Option<DependentView> {
     use crate::host_executor::{HostAnalysisData, HostSourceData};
 
-    let source_snap = scheduler.try_get_source(canonical_id)?;
+    let source_snap = host.scheduler.try_get_source(canonical_id)?;
     let hd = source_snap.downcast_data::<HostSourceData>()?;
     let script_lang = hd.parse.meta.script_lang.clone();
     drop(source_snap);
 
-    let analysis_snap = scheduler.try_get_analysis(canonical_id)?;
+    let analysis_snap = host.scheduler.try_get_analysis(canonical_id)?;
     let ad = analysis_snap.downcast_data::<HostAnalysisData>()?;
     let macro_type_deps = ad.script_analysis.macro_type_deps.clone();
     let imports = ad.script_analysis.imports.clone();
     drop(analysis_snap);
 
-    let (import_routes, dependencies, resolved_type_hashes) =
-        if let Some(cc) = compile_cache.get(canonical_id) {
-            (
-                cc.import_routes.clone(),
-                cc.dependencies.clone(),
-                cc.resolved_type_hashes.clone(),
-            )
-        } else {
-            Default::default()
-        };
+    let import_routes = host
+        .derived_raw_cache()
+        .get(canonical_id)
+        .map(|d| d.import_routes.clone())
+        .unwrap_or_default();
+    let (dependencies, resolved_type_hashes) = host
+        .dependency_cache()
+        .get(canonical_id)
+        .map(|d| (d.dependencies.clone(), d.resolved_type_hashes.clone()))
+        .unwrap_or_default();
 
     Some(DependentView {
         canonical_id: canonical_id.to_string(),

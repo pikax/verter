@@ -632,13 +632,14 @@ defineProps<{ msg: string }>()
     let api = host.get_public_api("/test/Cached.vue");
     assert!(api.is_some(), "should produce public API output");
 
-    // Verify cache is populated
+    // Verify cache is populated. cached_tsc_extract lives on
+    // DerivedRawState (D48 split).
     #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
-            .compile_cache()
+            .derived_raw_cache()
             .get("/test/Cached.vue")
-            .expect("compile_cache entry exists");
+            .expect("derived_raw_cache entry exists");
         assert!(
             cc.cached_tsc_extract.is_some(),
             "cached_tsc_extract should be populated after first get_public_api call"
@@ -692,10 +693,11 @@ defineProps<{ a: string }>()
     let _api = host.get_public_api("/test/Clear.vue");
     #[cfg(not(target_arch = "wasm32"))]
     {
+        // cached_tsc_extract lives on DerivedRawState (D48 split).
         let cc = host
-            .compile_cache()
+            .derived_raw_cache()
             .get("/test/Clear.vue")
-            .expect("compile_cache entry exists");
+            .expect("derived_raw_cache entry exists");
         assert!(cc.cached_tsc_extract.is_some(), "cache should be populated");
     }
     #[cfg(target_arch = "wasm32")]
@@ -721,10 +723,11 @@ defineProps<{ b: number }>()
     // Cache should be cleared
     #[cfg(not(target_arch = "wasm32"))]
     {
+        // cached_tsc_extract lives on DerivedRawState (D48 split).
         let cc = host
-            .compile_cache()
+            .derived_raw_cache()
             .get("/test/Clear.vue")
-            .expect("compile_cache entry exists");
+            .expect("derived_raw_cache entry exists");
         assert!(
             cc.cached_tsc_extract.is_none(),
             "cached_tsc_extract should be cleared after source change"
@@ -757,10 +760,11 @@ defineProps<{ msg: string }>()
     let _api = host.get_public_api("/test/TplChange.vue");
     #[cfg(not(target_arch = "wasm32"))]
     {
+        // cached_tsc_extract lives on DerivedRawState (D48 split).
         let cc = host
-            .compile_cache()
+            .derived_raw_cache()
             .get("/test/TplChange.vue")
-            .expect("compile_cache entry exists");
+            .expect("derived_raw_cache entry exists");
         assert!(
             cc.cached_tsc_extract.is_some(),
             "cache should be populated after first get_public_api call"
@@ -789,10 +793,11 @@ defineProps<{ msg: string }>()
     // Cache should be cleared because root_element_tag is template-derived
     #[cfg(not(target_arch = "wasm32"))]
     {
+        // cached_tsc_extract lives on DerivedRawState (D48 split).
         let cc = host
-            .compile_cache()
+            .derived_raw_cache()
             .get("/test/TplChange.vue")
-            .expect("compile_cache entry exists");
+            .expect("derived_raw_cache entry exists");
         assert!(
             cc.cached_tsc_extract.is_none(),
             "cached_tsc_extract should be cleared after template change"
@@ -867,10 +872,11 @@ defineProps<{ x: T }>()
     let _api = host.get_public_api("/test/DescChange.vue");
     #[cfg(not(target_arch = "wasm32"))]
     {
+        // cached_tsc_extract lives on DerivedRawState (D48 split).
         let cc = host
-            .compile_cache()
+            .derived_raw_cache()
             .get("/test/DescChange.vue")
-            .expect("compile_cache entry exists");
+            .expect("derived_raw_cache entry exists");
         assert!(
             cc.cached_tsc_extract.is_some(),
             "cache should be populated after first get_public_api call"
@@ -899,10 +905,11 @@ defineProps<{ x: T }>()
     // Cache should be cleared because generic_params is descriptor-derived
     #[cfg(not(target_arch = "wasm32"))]
     {
+        // cached_tsc_extract lives on DerivedRawState (D48 split).
         let cc = host
-            .compile_cache()
+            .derived_raw_cache()
             .get("/test/DescChange.vue")
-            .expect("compile_cache entry exists");
+            .expect("derived_raw_cache entry exists");
         assert!(
             cc.cached_tsc_extract.is_none(),
             "cached_tsc_extract should be cleared after descriptor change (generic attr)"
