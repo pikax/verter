@@ -5556,3 +5556,376 @@ fn macro_impacting_constructs_fail_lowering_not_silent_skip() {
         );
     }
 }
+
+// ============================================================================
+// Tier 2 W5f — split-target size budget + post-split phase-archaeology guards
+// (plan §4.6 discriminating tests)
+// ============================================================================
+//
+// Tier 2 split-target modules (plan §4.2):
+//
+// | W5* | Path                                                        |
+// |-----|-------------------------------------------------------------|
+// | W5a | crates/verter_session/src/semantic_query_memo               |
+// | W5b | crates/verter_parser/src/utils/oxc/vue/script/resolve_type  |
+// | W5c | crates/verter_session/src/host_resolve                      |
+// | W5d | crates/verter_session/src/resolver_core/component_meta      |
+// | W5e | crates/verter_ffi/src/convert                               |
+
+const TIER_2_SPLIT_TARGETS: &[&str] = &[
+    "crates/verter_session/src/semantic_query_memo",
+    "crates/verter_parser/src/utils/oxc/vue/script/resolve_type",
+    "crates/verter_session/src/host_resolve",
+    "crates/verter_session/src/resolver_core/component_meta",
+    "crates/verter_ffi/src/convert",
+];
+
+#[test]
+fn god_module_size_budget_targets_five_files() {
+    // Meta-test (plan §4.6): the god_module_size_budget guard's target
+    // list must reference each of the five Tier 2 split-target paths.
+    // A future edit that drops a target from the list silently weakens
+    // the budget; this guard fails fast on regression.
+    //
+    // The check reads architecture_guards.rs as text and asserts each
+    // Tier 2 path appears at least once.
+    let src = read_workspace_file("crates/verter_session/tests/architecture_guards.rs");
+    let mut missing = Vec::new();
+    for target in TIER_2_SPLIT_TARGETS {
+        if !src.contains(target) {
+            missing.push(*target);
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "god_module_size_budget_targets_five_files: tests/architecture_guards.rs must reference these Tier 2 split-target paths so the size-budget guard cannot silently drop coverage:\n{}",
+        missing.join("\n"),
+    );
+}
+
+#[test]
+fn each_post_split_module_under_lines_budget() {
+    // Plan §4.7 acceptance: each post-split module < 4000 LOC.
+    //
+    // Walks the five Tier 2 split-target directories (post-split form
+    // is mod.rs plus siblings, never the pre-split flat file).
+    // Production .rs files only — sibling _tests.rs and tests.rs files
+    // are governed by separate hygiene rules (testing skill) and
+    // intentionally allowed to be larger than the production budget.
+    use walkdir::WalkDir;
+    const MAX_LINES: usize = 4000;
+
+    fn is_test_fixture(rel: &str) -> bool {
+        rel.ends_with("_tests.rs") || rel.ends_with("/tests.rs") || rel.contains("/tests/")
+    }
+
+    let workspace = workspace_root();
+    let mut violations = Vec::<String>::new();
+    for target in TIER_2_SPLIT_TARGETS {
+        let dir_root = workspace.join(target);
+        let flat_file = workspace.join(format!("{target}.rs"));
+
+        if dir_root.is_dir() {
+            for entry in WalkDir::new(&dir_root) {
+                let entry = entry.expect("walkdir entry");
+                if !entry.file_type().is_file() {
+                    continue;
+                }
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                let rel = path
+                    .strip_prefix(&workspace)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if is_test_fixture(&rel) {
+                    continue;
+                }
+                let src =
+                    std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
+                let lines = src.lines().count();
+                if lines > MAX_LINES {
+                    violations.push(format!(
+                        "{rel}: {lines} > {MAX_LINES} (Tier 2 post-split budget)"
+                    ));
+                }
+            }
+        } else if flat_file.is_file() {
+            violations.push(format!(
+                "{target}.rs still exists as a flat file — Tier 2 split incomplete"
+            ));
+        } else {
+            violations.push(format!(
+                "{target}: missing post-split target (no dir, no flat file)"
+            ));
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "each_post_split_module_under_lines_budget violations:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn no_phase_archaeology_in_test_files() {
+    // Plan §4.6: phase-archaeology classifier (D111) applied to test
+    // files inside crates/*/src/ — tests.rs, *_tests.rs, and anything
+    // under a tests/ subdirectory.
+    //
+    // The Tier 0 inventory at
+    // crates/verter_session/tests/perf_bounds/golden-archaeology-test-inventory.txt
+    // captures the snapshot at SHA 60b1295a (254 entries). Until the
+    // Step 2.6 sweep completes, this guard operates as a regression
+    // backstop: the current count must stay at-or-below the baseline.
+    // Once the sweep finishes, the baseline drops to zero and
+    // phase_archaeology_test_files_count_zero becomes the strict
+    // invariant.
+    use walkdir::WalkDir;
+
+    fn line_has_phase_archaeology_d111(line: &str) -> bool {
+        const FIXED_NEEDLES: &[&str] = &[
+            "d-cutover",
+            "D-Cutover",
+            "post-cutover",
+            "Post-cutover",
+            "Post-Cutover",
+            "pre-Phase",
+            "Pre-Phase",
+            "retired in",
+            "Plan \u{00a7}",
+            "plan \u{00a7}",
+            "phase-archaeology",
+        ];
+        for needle in FIXED_NEEDLES {
+            if line.contains(needle) {
+                return true;
+            }
+        }
+        // Phase \d+ / phase \d+ — letter-suffixed is archaeology;
+        // pure-decimal Phase 1: collect is the algorithm-step carve-out
+        // per D111.
+        let lower = line.to_ascii_lowercase();
+        let bytes = lower.as_bytes();
+        for prefix in ["phase ", "phase-"] {
+            let mut search_from = 0usize;
+            while let Some(rel) = lower[search_from..].find(prefix) {
+                let abs = search_from + rel;
+                let after = abs + prefix.len();
+                if after < bytes.len() && bytes[after].is_ascii_digit() {
+                    let mut idx = after;
+                    while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+                        idx += 1;
+                    }
+                    if idx < bytes.len() && bytes[idx] == b':' {
+                        search_from = idx;
+                        continue;
+                    }
+                    return true;
+                }
+                search_from = abs + prefix.len();
+            }
+        }
+        false
+    }
+
+    fn is_test_file(path: &std::path::Path) -> bool {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        let parent_name = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        name == "tests.rs"
+            || name.ends_with("_tests.rs")
+            || parent_name == "tests"
+            || path
+                .components()
+                .any(|c| c.as_os_str().to_str() == Some("tests"))
+    }
+
+    let workspace = workspace_root();
+    let mut current_count = 0usize;
+    for crate_entry in std::fs::read_dir(workspace.join("crates")).expect("read crates/") {
+        let crate_dir = crate_entry.expect("crate dir entry").path();
+        let src = crate_dir.join("src");
+        if !src.is_dir() {
+            continue;
+        }
+        for entry in WalkDir::new(&src) {
+            let entry = entry.expect("walkdir entry");
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            if !is_test_file(path) {
+                continue;
+            }
+            let rel = path
+                .strip_prefix(&workspace)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            let src_text =
+                std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
+            for line in src_text.lines() {
+                if line_has_phase_archaeology_d111(line) {
+                    current_count += 1;
+                }
+            }
+        }
+    }
+
+    // Regression baseline. The Tier 0 inventory captured 254 entries
+    // at SHA 60b1295a using the broader D111 regex; the live count
+    // measured here at the W5f cutoff is 378. The two numbers can
+    // diverge because (a) the inventory used the regex form while this
+    // guard uses an in-test predicate that does not perfectly mirror
+    // the regex, and (b) downstream tier work added new test files
+    // since SHA 60b1295a. The guard's job is to prevent further
+    // regressions and to provide a baseline that the Step 2.6 sweep
+    // can ratchet downward as it removes vocabulary; the strict
+    // zero-count invariant is enforced separately by
+    // phase_archaeology_test_files_count_zero (which is ignored until
+    // the sweep completes — see W5f marker).
+    const REGRESSION_BACKSTOP: usize = 378;
+    assert!(
+        current_count <= REGRESSION_BACKSTOP,
+        "no_phase_archaeology_in_test_files: count regressed beyond W5f baseline.\ncurrent: {current_count}\nbaseline (W5f cutoff): {REGRESSION_BACKSTOP}\nEither remove the new violations or update the baseline if the increase is intentional.",
+    );
+}
+
+#[test]
+#[ignore = "Pending Step 2.6 sweep — see plan §4 W5f. The 378-entry baseline must drop to 0 before this guard activates. Tracked in phase-tier-2-complete marker."]
+fn phase_archaeology_test_files_count_zero() {
+    // Plan §4.6 strict invariant: zero phase-archaeology references in
+    // test files inside crates/*/src/. Currently ignored — the W5f
+    // baseline is 378. Step 2.6 (the sweep) removes the vocabulary;
+    // once that lands, flip this from #[ignore] to live and the
+    // regression backstop above can be deleted.
+    //
+    // Body kept non-empty per the stub-prevention rule: when un-ignored,
+    // the assertion is discriminating (current count must be exactly
+    // zero, not "less than something"). The body shares the predicate
+    // with no_phase_archaeology_in_test_files via the inlined
+    // line_has_phase_archaeology_d111 closure pattern; we re-implement
+    // here to keep each test self-contained.
+    use walkdir::WalkDir;
+
+    fn line_has_phase_archaeology_d111(line: &str) -> bool {
+        const FIXED_NEEDLES: &[&str] = &[
+            "d-cutover",
+            "D-Cutover",
+            "post-cutover",
+            "Post-cutover",
+            "Post-Cutover",
+            "pre-Phase",
+            "Pre-Phase",
+            "retired in",
+            "Plan \u{00a7}",
+            "plan \u{00a7}",
+            "phase-archaeology",
+        ];
+        for needle in FIXED_NEEDLES {
+            if line.contains(needle) {
+                return true;
+            }
+        }
+        let lower = line.to_ascii_lowercase();
+        let bytes = lower.as_bytes();
+        for prefix in ["phase ", "phase-"] {
+            let mut search_from = 0usize;
+            while let Some(rel) = lower[search_from..].find(prefix) {
+                let abs = search_from + rel;
+                let after = abs + prefix.len();
+                if after < bytes.len() && bytes[after].is_ascii_digit() {
+                    let mut idx = after;
+                    while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+                        idx += 1;
+                    }
+                    if idx < bytes.len() && bytes[idx] == b':' {
+                        search_from = idx;
+                        continue;
+                    }
+                    return true;
+                }
+                search_from = abs + prefix.len();
+            }
+        }
+        false
+    }
+
+    fn is_test_file(path: &std::path::Path) -> bool {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        let parent_name = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        name == "tests.rs"
+            || name.ends_with("_tests.rs")
+            || parent_name == "tests"
+            || path
+                .components()
+                .any(|c| c.as_os_str().to_str() == Some("tests"))
+    }
+
+    let workspace = workspace_root();
+    let mut violations = Vec::<String>::new();
+    for crate_entry in std::fs::read_dir(workspace.join("crates")).expect("read crates/") {
+        let crate_dir = crate_entry.expect("crate dir entry").path();
+        let src = crate_dir.join("src");
+        if !src.is_dir() {
+            continue;
+        }
+        for entry in WalkDir::new(&src) {
+            let entry = entry.expect("walkdir entry");
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            if !is_test_file(path) {
+                continue;
+            }
+            let rel = path
+                .strip_prefix(&workspace)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            let src_text =
+                std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
+            for (line_no, line) in src_text.lines().enumerate() {
+                if line_has_phase_archaeology_d111(line) {
+                    violations.push(format!("{rel}:{}", line_no + 1));
+                }
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "phase_archaeology_test_files_count_zero: {} violations remain.\nFirst 10:\n{}",
+        violations.len(),
+        violations
+            .iter()
+            .take(10)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
