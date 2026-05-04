@@ -171,7 +171,7 @@ WIP exemption: staging-branch commits may contain `todo!()` / stubs / empty test
 
 Stop ONLY for:
 
-1. Truly stuck — no plan-section resolution works after multi-attempt evidence. Record in `.claude/feedback/feedback-<YYYY-MM-DD>-<track>.md` and report.
+1. Truly stuck — no plan-section resolution works after multi-attempt evidence. Record in `.feedback/feedback-<YYYY-MM-DD>-<track>.md` and report.
 2. Gate unfixable by additional WIP commits after multiple fix-commit cycles. Record evidence.
 3. Context crosses 85%. Hand off per protocol below. Not before 85%. Not after 85%.
 
@@ -180,7 +180,7 @@ Token cost of long cargo / test runs is NOT a stop case. "Plan is big" is NOT a 
 ## 85% context handoff protocol
 
 1. Commit pending work with `wip(session): <track> handoff at <step> — <summary>`.
-2. Write `.claude/feedback/feedback-<YYYY-MM-DD>-<track>-handoff.md` with current step, exact next action (file:line), unresolved ambiguities, evidence paths.
+2. Write `.feedback/feedback-<YYYY-MM-DD>-<track>-handoff.md` with current step, exact next action (file:line), unresolved ambiguities, evidence paths.
 3. Do NOT run `{{GATE_SECTION}}` at handoff — it burns remaining context.
 4. Return with one short status line.
 
@@ -258,7 +258,7 @@ Continue the plan's sequencing from the next unlanded step. Pass `{{GATE_SECTION
 ## 85% handoff protocol
 
 1. Commit pending with `wip(session): <track> handoff at <step> — <summary>`.
-2. Write `.claude/feedback/feedback-<YYYY-MM-DD>-<track>-handoff.md`.
+2. Write `.feedback/feedback-<YYYY-MM-DD>-<track>-handoff.md`.
 3. Do NOT run `{{GATE_SECTION}}` at handoff.
 4. Return with one short status line.
 
@@ -402,7 +402,7 @@ You are applying the review findings from the prior agent. The review output is 
 - Do NOT negotiate, summarise, or produce menus.
 - Do NOT ask permission between fixes.
 - Do NOT introduce new stubs while fixing existing ones. Re-read Stub Prevention in `{{GLOBAL_RULES}}` and `{{PROJECT_RULES}}`.
-- Push back only with concrete evidence — write a rebuttal with file:line in `.claude/feedback/feedback-<YYYY-MM-DD>-<track>.md` and skip that finding. Do not skip findings you merely dislike.
+- Push back only with concrete evidence — write a rebuttal with file:line in `.feedback/feedback-<YYYY-MM-DD>-<track>.md` and skip that finding. Do not skip findings you merely dislike.
 - Do NOT rewrite scaffolding commits via `--amend` or `rebase -i`. Additive fix commits only.
 
 ## Only-stop cases

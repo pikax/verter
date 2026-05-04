@@ -18,7 +18,7 @@ Repository-specific constraints:
 - For VS Code extension or LSP changes, use automated tests: Vitest for pure logic, Mocha/E2E for LSP integration. Manual testing is not sufficient.
 - For generated code, use `CodeTransform` operations rather than post-hoc string manipulation so sourcemaps remain valid.
 - When replacing/refactoring, delete superseded code in the same change; do not leave compatibility shims or dual paths unless explicitly required by the approved plan.
-- Agents are expected to record noteworthy issues/improvements/debt/docs gaps in `.claude/feedback/feedback-{YYYY-MM-DD}-{short-id}.md` during work sessions.
+- Agents are expected to record noteworthy issues/improvements/debt/docs gaps in `.feedback/feedback-{YYYY-MM-DD}-{short-id}.md` during work sessions.
 
 Commit/publish hygiene:
 - Use conventional commits: `<type>(<scope>): <description>`.

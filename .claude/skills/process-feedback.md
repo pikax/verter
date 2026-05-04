@@ -1,16 +1,16 @@
 ---
 name: process-feedback
-description: "Review .claude/feedback/ files and process them into actionable plans grouped by scope. Use when: user says 'process feedback', 'review feedback', or 'turn feedback into plans'."
+description: "Review .feedback/ files and process them into actionable plans grouped by scope. Use when: user says 'process feedback', 'review feedback', or 'turn feedback into plans'."
 ---
 
 # Process Agent Feedback into Actionable Plans
 
 ## Workflow
 
-1. **Read all feedback files** from `.claude/feedback/`:
+1. **Read all feedback files** from `.feedback/`:
 
    ```bash
-   ls .claude/feedback/
+   ls .feedback/
    ```
 
    Read each `feedback-*.md` file.
@@ -44,10 +44,10 @@ description: "Review .claude/feedback/ files and process them into actionable pl
 
 6. **Output format** — present the plans to the user as markdown. If there are multiple scopes, present them as separate sections so the user can choose which to tackle.
 
-7. **Archive processed feedback** — after the user reviews and approves the plans, move processed feedback files to `.claude/feedback/processed/` (create dir if needed):
+7. **Archive processed feedback** — after the user reviews and approves the plans, move processed feedback files to `.feedback/processed/` (create dir if needed):
    ```bash
-   mkdir -p .claude/feedback/processed
-   mv .claude/feedback/feedback-2026-03-07-*.md .claude/feedback/processed/
+   mkdir -p .feedback/processed
+   mv .feedback/feedback-2026-03-07-*.md .feedback/processed/
    ```
 
 ## Plan Template

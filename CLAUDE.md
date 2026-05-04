@@ -327,7 +327,7 @@ Do not use empty test bodies, trivially-passing stubs, or "deferred to follow-up
 
 ### Agent Feedback Capture
 
-During work sessions, agents MUST continuously log feedback to a per-conversation file at `.claude/feedback/feedback-{YYYY-MM-DD}-{short-id}.md`. The `.claude/feedback/` directory is gitignored.
+During work sessions, agents MUST continuously log feedback to a per-conversation file at `.feedback/feedback-{YYYY-MM-DD}-{short-id}.md`. The `.feedback/` directory is gitignored.
 
 **What to log** — append entries whenever encountering something noteworthy:
 

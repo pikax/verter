@@ -37,7 +37,7 @@ Use this file as the neutral entry point. Reuse the shared sources below instead
 - Keep durable project knowledge in shared docs such as `CLAUDE.md`, `docs/`, or the relevant reference file under `.claude/skills/`.
 - Keep agent-specific files thin. They should point at shared documentation, not become separate sources of truth.
 - `.claude/settings.local.json` is local tool configuration, not repository policy.
-- `.claude/feedback/` contains optional working notes and is not committed project documentation.
+- `.feedback/` contains optional working notes and is not committed project documentation.
 
 ## Working Rules
 
