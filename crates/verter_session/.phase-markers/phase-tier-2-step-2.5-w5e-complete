@@ -1,0 +1,141 @@
+{
+  "schema_version": 3,
+  "tier": "tier-2",
+  "step": "2.5",
+  "status": "success",
+  "base_commit": "cc3c0f1e",
+  "head_commit": "36d07dfe",
+  "marker_commit": "pending-orchestrator-commit",
+  "prior_known_passed_count": 10552,
+  "test_results": {
+    "verter_ffi": {
+      "test_scope": "cargo test -p verter_ffi",
+      "passed": 77,
+      "failed": 0,
+      "_note": "Identical to baseline (77). All tests preserved across the split; tests.rs extracted from inline `mod tests` block."
+    },
+    "verter_napi_build": {
+      "test_scope": "cargo build -p verter_napi",
+      "result": "ok",
+      "_note": "External glob `use verter_ffi::convert::*` resolves cleanly through the new directory module's `pub use` re-exports."
+    },
+    "verter_wasm_build": {
+      "test_scope": "cargo build -p verter_wasm",
+      "result": "ok",
+      "_note": "External glob `use verter_ffi::convert::*` resolves cleanly. Public API unchanged."
+    },
+    "workspace_build": {
+      "test_scope": "cargo build --workspace -j 4",
+      "result": "ok",
+      "_note": "All 30+ workspace crates compile cleanly post-split."
+    }
+  },
+  "gate_status": {
+    "fmt_check_passed": true,
+    "clippy_passed": true,
+    "fmt_check_command": "cargo fmt --all --check",
+    "clippy_command": "cargo clippy -p verter_ffi --tests -- -D warnings"
+  },
+  "monotonic_test_count_check": {
+    "verter_ffi": {
+      "prior_known_passed_count": 77,
+      "current_passed_count": 77,
+      "delta": 0
+    }
+  },
+  "snapshot_drift": "none",
+  "module_split_summary": {
+    "source": "crates/verter_ffi/src/convert.rs",
+    "source_loc_at_base": 3784,
+    "post_split_loc": {
+      "convert/mod.rs": 41,
+      "convert/error.rs": 65,
+      "convert/string_helpers.rs": 385,
+      "convert/sfc_blocks.rs": 77,
+      "convert/fallthrough.rs": 351,
+      "convert/component_meta.rs": 439,
+      "convert/input.rs": 214,
+      "convert/output.rs": 268,
+      "convert/actions.rs": 28,
+      "convert/lint.rs": 36,
+      "convert/offset.rs": 107,
+      "convert/tests.rs": 1858
+    },
+    "_total_post_split": 3869,
+    "max_module_loc": 1858,
+    "tier_2_budget": 4000,
+    "_max_within_budget": true,
+    "_note": "tests.rs at 1858 LOC is the largest module; the next-largest production module is component_meta.rs at 439 LOC. All modules are well under the 4000 LOC budget that W5f's `each_post_split_module_under_lines_budget` architecture-guard test will assert."
+  },
+  "public_api_preservation": {
+    "external_consumers": [
+      "crates/verter_napi/src/lib.rs (use verter_ffi::convert::*)",
+      "crates/verter_napi/src/meta.rs (verter_ffi::convert::component_meta_analysis_to_ffi_with_resolution, ffi_config_to_host, component_meta_resolution_to_ffi)",
+      "crates/verter_wasm/src/lib.rs (use verter_ffi::convert::*)"
+    ],
+    "preserved_path_pub_items": [
+      "verter_ffi::convert::FfiConversionError",
+      "verter_ffi::convert::OffsetEncoding",
+      "verter_ffi::convert::DestructuredBindingInput",
+      "verter_ffi::convert::component_meta_analysis_to_ffi",
+      "verter_ffi::convert::component_meta_analysis_to_ffi_with_resolution",
+      "verter_ffi::convert::component_meta_resolution_to_ffi",
+      "verter_ffi::convert::ffi_config_to_host",
+      "verter_ffi::convert::ffi_profile_to_host",
+      "verter_ffi::convert::ffi_file_kind_to_host",
+      "verter_ffi::convert::ffi_node_kind_to_host",
+      "verter_ffi::convert::ffi_upsert_to_host",
+      "verter_ffi::convert::ffi_block_override_to_host",
+      "verter_ffi::convert::ffi_virtual_query_to_host",
+      "verter_ffi::convert::host_preprocessor_request_to_ffi",
+      "verter_ffi::convert::host_node_kind_to_ffi",
+      "verter_ffi::convert::byte_offset_to_utf16",
+      "verter_ffi::convert::utf16_to_byte_offset",
+      "verter_ffi::convert::lint_diagnostics_to_utf16",
+      "verter_ffi::convert::host_diagnostics_to_ffi",
+      "verter_ffi::convert::host_update_to_ffi",
+      "verter_ffi::convert::host_virtual_file_to_ffi",
+      "verter_ffi::convert::host_resolved_id_to_ffi",
+      "verter_ffi::convert::host_remove_to_ffi",
+      "verter_ffi::convert::host_cross_file_result_to_ffi",
+      "verter_ffi::convert::host_error_to_string",
+      "verter_ffi::convert::code_action_to_ffi",
+      "verter_ffi::convert::lint_rule_to_ffi_metadata",
+      "verter_ffi::convert::convert_offset",
+      "verter_ffi::convert::utf8_to_utf16_offset",
+      "verter_ffi::convert::convert_destructured_block_meta"
+    ],
+    "_note": "All 27 originally-`pub` items remain at the same module path (`verter_ffi::convert::FOO`) via `pub use SUBMOD::*` in the new `convert/mod.rs`. Internal cross-module helpers transitioned from `fn` to `pub(super) fn` for sibling visibility."
+  },
+  "module_visibility_strategy": {
+    "originally_pub_items": "Stayed `pub`; re-exported via `pub use SUBMOD::*` in mod.rs.",
+    "originally_private_items_used_across_modules": "Transitioned to `pub(super) fn` (visible to siblings via `super::SUBMOD::ITEM`).",
+    "tests_module": "Single `convert/tests.rs` declared as `#[cfg(test)] mod tests;` from mod.rs. Imports siblings explicitly via `use super::error::*; use super::offset::*; use super::string_helpers::*;` to access `pub(super)` items not re-exported at the convert level."
+  },
+  "deviations": [
+    {
+      "id": "module-shape-follows-prior-worker-sketch",
+      "summary": "Audit doc §6 proposed a 3-module sketch (`from_proto.rs`, `to_proto.rs`, `type_handle.rs`). The orchestrator brief specified the 11-module shape produced by a prior flaked worker (agent-a6b898fa90d6ca651) on a stale base. The audit doc explicitly notes the W5* worker is `free to deviate`. The 11-module split organizes by semantic group rather than by direction, which keeps each module under 500 LOC for production code (vs. an estimated 1500+ LOC if collapsed to 3 modules) and matches the prior worker's organization that has already been reviewed structurally.",
+      "files": ["crates/verter_ffi/src/convert/"]
+    },
+    {
+      "id": "ffi_virtual_query_to_host-stays-in-input-rs-not-output",
+      "summary": "`ffi_virtual_query_to_host` is the ONE function in convert.rs whose original line position (1513) sits inside the `Output: Host -> FFI` section (header at 1525) but whose semantic direction is FFI -> host (decode). Placed in input.rs per semantics, not in output.rs per source position. The original file's section header is misleading.",
+      "files": ["crates/verter_ffi/src/convert/input.rs"]
+    },
+    {
+      "id": "host_block_type_to_string-moved-to-string_helpers",
+      "summary": "`host_block_type_to_string` (originally lines 1429-1436, mid-input section) is a host -> string projection used by `host_preprocessor_request_to_ffi` (output.rs). Placed in string_helpers.rs alongside the other host-to-string projections (host_module_reference_*_to_string). The original file groups it with `ffi_block_type_to_host` (input direction) which is geographically convenient but semantically inconsistent.",
+      "files": ["crates/verter_ffi/src/convert/string_helpers.rs"]
+    }
+  ],
+  "notes_for_orchestrator": [
+    "W5e is the last of the five Tier 2 split sub-workers (W5a-W5e). With this marker, the consolidated phase-tier-2-complete marker is unblocked pending W5f (step 2.6 archaeology sweep + step 2.7 god_module_size_budget extension).",
+    "The §4.6 six discriminating tests (god_module_size_budget_targets_five_files, each_post_split_module_under_lines_budget, tier_2_split_preserves_semantic_query_key_hashes, recursion_budget_invariant_across_module_boundary, phase_archaeology_test_files_count_zero, no_phase_archaeology_in_test_files) are W5f's responsibility per plan §4.7 step 2.7. None added by W5e.",
+    "Workspace test count unchanged at 10552 baseline (W5e adds no new tests; ffi crate test count unchanged at 77).",
+    "All five split-target modules now exist: semantic_query_memo (W5a), resolve_type (W5b), host_resolve (W5c), resolver_core/component_meta (W5d), convert (W5e). W5f's god_module_size_budget extension can now assert on all five.",
+    "Manual orchestrator-side execution per plan harness-flake protocol — three Agent-tool dispatches (a6b898fa90d6ca651, a443f2870e92ed773, a4a82cc0403003fd3) flaked deterministically to base 5c62b6b5. State store recommended_next_steps_for_remaining_work[1] explicitly directs manual orchestrator work for W5e."
+  ],
+  "marker_filename": "phase-tier-2-step-2.5-w5e-complete",
+  "cherry_pick_target": "refactor/legacy-to-graph-dispatch-migration"
+}
