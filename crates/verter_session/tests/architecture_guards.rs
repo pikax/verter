@@ -3183,7 +3183,7 @@ mod foundations_guards {
             "crates/verter_workspace/src/ambient_parse.rs",
             "crates/verter_workspace/src/intrinsic_library.rs",
             "crates/verter_workspace/src/resolver.rs",
-            "crates/verter_parser/src/utils/oxc/vue/script/resolve_type.rs",
+            "crates/verter_parser/src/utils/oxc/vue/script/resolve_type/mod.rs",
             "crates/verter_scheduler/src/source_loader.rs",
             "crates/verter_tsc/src/checker.rs",
             "crates/verter_tsc/src/reporter.rs",
@@ -3705,7 +3705,8 @@ mod foundations_guards {
             "crates/verter_parser/src/parser/mod.rs",
             "crates/verter_parser/src/tokenizer/byte.rs",
             "crates/verter_parser/src/utils/oxc/bindings/helpers.rs",
-            "crates/verter_parser/src/utils/oxc/vue/script/resolve_type.rs",
+            "crates/verter_parser/src/utils/oxc/vue/script/resolve_type/mod.rs",
+            "crates/verter_parser/src/utils/oxc/vue/script/resolve_type/external.rs",
             "crates/verter_parser/src/utils/oxc/vue/script/setup.rs",
             "crates/verter_parser/src/utils/oxc/vue/script/usage.rs",
             "crates/verter_protocol/src/component_meta.rs",
@@ -4319,7 +4320,7 @@ mod foundations_guards {
             "MCP baseline output — reads/writes JSON snapshots for regression diffing of MCP tool responses; not semantic state.",
         ),
         (
-            "crates/verter_parser/src/utils/oxc/vue/script/resolve_type.rs",
+            "crates/verter_parser/src/utils/oxc/vue/script/resolve_type/mod.rs",
             "diagnostic trace logger gated behind a debug flag (`OpenOptions::new().append(true)` to a per-process trace file); not on the resolution hot path.",
         ),
         (
