@@ -26,11 +26,32 @@ fn workspace_path(rel: &str) -> std::path::PathBuf {
 
 #[test]
 fn no_read_source_in_component_meta() {
-    let src = read_workspace_file("crates/verter_session/src/resolver_core/component_meta.rs");
-    let count = src.matches("host.read_source").count();
+    // After the Tier 2 W5d split `component_meta.rs` became a directory
+    // module (`component_meta/{mod,cold_resolver,projected_type_expr,
+    // direct_macro,tests}.rs`). Scan every `.rs` file in the directory
+    // so the guard keeps catching `host.read_source` regressions wherever
+    // they land within the split.
+    use std::fs;
+    let dir = workspace_root().join("crates/verter_session/src/resolver_core/component_meta");
+    let mut total = 0usize;
+    let mut details = Vec::<String>::new();
+    for entry in fs::read_dir(&dir).expect("read component_meta dir") {
+        let entry = entry.expect("dir entry");
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let src = fs::read_to_string(&path).expect("read component_meta file");
+        let count = src.matches("host.read_source").count();
+        if count > 0 {
+            details.push(format!("{}: {count}", path.display()));
+            total += count;
+        }
+    }
     assert_eq!(
-        count, 0,
-        "component_meta.rs must not contain host.read_source after Phase 4; found {count}"
+        total, 0,
+        "component_meta module must not contain host.read_source after Phase 4; found {total} occurrences:\n  {}",
+        details.join("\n  ")
     );
 }
 
@@ -53,20 +74,37 @@ fn no_text_based_macro_surface_projection_helpers() {
     // After Phase 4b, the three text-projection helper functions are
     // deleted from the resolver_core. Their function names appearing
     // anywhere in resolver_core indicates a regression.
+    use std::fs;
     let symbols = [
         "source_for_local_type_projection",
         "project_macro_surfaces_from_source_type_name",
         "project_macro_surfaces_from_expanded_text",
     ];
-    for rel in [
-        "crates/verter_session/src/resolver_core/component_meta.rs",
-        "crates/verter_session/src/resolver_core/surface_projector.rs",
-    ] {
-        let src = read_workspace_file(rel);
+
+    // After the Tier 2 W5d split, `component_meta.rs` became the
+    // directory module `component_meta/`. Scan every file in the
+    // directory plus the still-flat `surface_projector.rs`.
+    let component_meta_dir =
+        workspace_root().join("crates/verter_session/src/resolver_core/component_meta");
+    let mut targets: Vec<std::path::PathBuf> = Vec::new();
+    for entry in fs::read_dir(&component_meta_dir).expect("read component_meta dir") {
+        let entry = entry.expect("dir entry");
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+            targets.push(path);
+        }
+    }
+    targets.push(
+        workspace_root().join("crates/verter_session/src/resolver_core/surface_projector.rs"),
+    );
+
+    for path in targets {
+        let src = fs::read_to_string(&path).expect("read target");
         for needle in symbols {
             assert!(
                 !src.contains(needle),
-                "{rel} must not contain {needle} after Phase 4b (graph-only resolver)"
+                "{} must not contain {needle} after Phase 4b (graph-only resolver)",
+                path.display()
             );
         }
     }
@@ -957,15 +995,16 @@ mod resolver_core_recursion {
     /// must reject allow-list growth that lacks a structural bound.
     pub(super) const ALLOWED_BOUNDED_RECURSIONS: &[(&str, &str, &str)] = &[
         // -----------------------------------------------------------------
-        // component_meta.rs — TypeExpr/text walkers
+        // component_meta/projected_type_expr.rs + direct_macro.rs — TypeExpr/text walkers
+        // (pre-Tier-2-W5d: both lived inside component_meta.rs)
         // -----------------------------------------------------------------
         (
-            "component_meta",
+            "projected_type_expr",
             "render_type_expr_for_projected_surface",
             "Phase 5l-supplement: bounded by TypeExpr AST depth.",
         ),
         (
-            "component_meta",
+            "direct_macro",
             "type_expr_has_direct_macro_reference",
             "Phase 5l-supplement: bounded by TypeExpr AST depth.",
         ),
