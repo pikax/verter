@@ -610,7 +610,47 @@ fn request_view_is_retired_from_crate_sources() {
     // tolerated — those are historical notes about the retirement.
     let sources: &[(&str, &str)] = &[
         ("host_manage.rs", include_str!("host_manage.rs")),
-        ("host_resolve.rs", include_str!("host_resolve.rs")),
+        (
+            "host_resolve/dependency_resolution.rs",
+            include_str!("host_resolve/dependency_resolution.rs"),
+        ),
+        (
+            "host_resolve/external_macro_collector.rs",
+            include_str!("host_resolve/external_macro_collector.rs"),
+        ),
+        (
+            "host_resolve/external_type_resolution.rs",
+            include_str!("host_resolve/external_type_resolution.rs"),
+        ),
+        (
+            "host_resolve/frontier_adapter.rs",
+            include_str!("host_resolve/frontier_adapter.rs"),
+        ),
+        (
+            "host_resolve/frontier_engine.rs",
+            include_str!("host_resolve/frontier_engine.rs"),
+        ),
+        (
+            "host_resolve/frontier_helpers.rs",
+            include_str!("host_resolve/frontier_helpers.rs"),
+        ),
+        ("host_resolve/mod.rs", include_str!("host_resolve/mod.rs")),
+        (
+            "host_resolve/route_owned_shallow.rs",
+            include_str!("host_resolve/route_owned_shallow.rs"),
+        ),
+        (
+            "host_resolve/test_guards.rs",
+            include_str!("host_resolve/test_guards.rs"),
+        ),
+        (
+            "host_resolve/virtual_file_pipeline.rs",
+            include_str!("host_resolve/virtual_file_pipeline.rs"),
+        ),
+        (
+            "host_resolve/vue_script_extract.rs",
+            include_str!("host_resolve/vue_script_extract.rs"),
+        ),
         ("meta_resolve.rs", include_str!("meta_resolve.rs")),
         ("meta.rs", include_str!("meta.rs")),
         (
