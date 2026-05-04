@@ -1,0 +1,154 @@
+{
+  "schema_version": 3,
+  "tier": "tier-5b",
+  "step": "W7",
+  "status": "success",
+  "base_commit": "bfa91d1c",
+  "head_commit": "954bedbc",
+  "marker_commit": "pending-orchestrator-commit",
+  "prior_known_passed_count": 10552,
+  "test_results": {
+    "verter_session": {
+      "test_scope": "cargo test -p verter_session --tests",
+      "passed": 2561,
+      "failed": 0,
+      "_note": "Refactor introduced two new free helpers (assemble_surface_from_analysis, resolve_type_expansion) in component_meta_payload.rs and two new VerterHost methods (get_component_meta_surface, get_component_meta_type_expansion). MetaSession's existing methods now delegate to the free helpers; the previously private MetaSession::assemble_surface_from_analysis was removed. No new tests added by W7 (test count unchanged from Tier 1B baseline of 2561)."
+    },
+    "verter_lsp_build": {
+      "test_scope": "cargo build -p verter_lsp",
+      "result": "ok",
+      "_note": "D96 module conversion + D113 method registration + new component_meta.rs handler module compile cleanly. The new dependency `verter_ffi` was added to verter_lsp/Cargo.toml so handlers can use the existing FFI projection for the Volar payload shape."
+    },
+    "downstream_consumers_build": {
+      "test_scope": "cargo build -p verter_napi -p verter_wasm",
+      "result": "ok",
+      "_note": "FFI re-exports unchanged. The two new VerterHost methods are additive and do not break existing callers."
+    },
+    "language_shared_build": {
+      "test_scope": "pnpm --filter language-shared build",
+      "result": "ok",
+      "_note": "Three new RequestType entries (GetComponentMeta, GetComponentMetaSurface, GetComponentMetaTypeExpansion) plus the typed Params / Response interfaces compile cleanly."
+    }
+  },
+  "gate_status": {
+    "fmt_check_passed": true,
+    "clippy_passed": true,
+    "pnpm_install_clean": true,
+    "fmt_check_command": "cargo fmt --all --check",
+    "clippy_command": "cargo clippy -p verter_session -p verter_lsp -p verter_ffi --tests -- -D warnings"
+  },
+  "monotonic_test_count_check": {
+    "verter_session": {
+      "prior_known_passed_count": 2561,
+      "current_passed_count": 2561,
+      "delta": 0
+    }
+  },
+  "snapshot_drift": "none",
+  "module_conversion_d96": {
+    "before": {
+      "path": "crates/verter_lsp/src/server/custom_methods.rs",
+      "loc": 731,
+      "registered_methods": 13
+    },
+    "after": {
+      "directory": "crates/verter_lsp/src/server/custom_methods/",
+      "files": {
+        "mod.rs": "renamed from custom_methods.rs (existing 13 handlers preserved); +2 LOC for `mod component_meta;` + updated module doc",
+        "component_meta.rs": "164 LOC NEW — three selective handlers as `impl VerterLanguageServer` extensions"
+      },
+      "registered_methods_after": 16
+    }
+  },
+  "method_registration_d113": {
+    "main_rs_change": "crates/verter_lsp/src/main.rs:138..148 — 3 new .custom_method(...) lines appended to the builder chain immediately before .finish()",
+    "registered_methods": [
+      "$/verter/getComponentMeta",
+      "$/verter/getComponentMetaSurface",
+      "$/verter/getComponentMetaTypeExpansion"
+    ]
+  },
+  "shared_substrate_refactor": {
+    "rationale": "Plan §7.2.2 says handlers `delegate to corresponding MetaSession methods`. Since the LSP holds Arc<VerterHost> rather than a MetaSession instance, W7 lifts the pure logic from MetaSession into free functions on `crate::component_meta_payload` and adds VerterHost wrappers that delegate to those free functions. MetaSession's existing methods were updated to delegate to the same free functions, preserving the single shared substrate per the `shared optimized codebase` architecture rule (CLAUDE.md).",
+    "new_free_functions": [
+      "verter_session::component_meta_payload::assemble_surface_from_analysis(&ComponentMetaAnalysis) -> ComponentMetaSurface",
+      "verter_session::component_meta_payload::resolve_type_expansion(&VerterHost, TypeHandle, Option<usize>) -> Result<TypeExpansion, TypeHandleError>"
+    ],
+    "new_verter_host_methods": [
+      "VerterHost::get_component_meta_surface(canonical_or_alias) -> Option<ComponentMetaSurface>",
+      "VerterHost::get_component_meta_type_expansion(handle, depth) -> Result<TypeExpansion, TypeHandleError>"
+    ],
+    "deleted_private_methods": [
+      "MetaSession::assemble_surface_from_analysis (~117 lines, replaced by call to free function)"
+    ],
+    "new_proto_helpers": [
+      "TypeHandle::to_proto_bytes / from_proto_bytes",
+      "TypeExpansion::to_proto_bytes"
+    ]
+  },
+  "wire_format": {
+    "get_component_meta": "JSON projection of FfiComponentMeta via verter_ffi::convert::component_meta_analysis_to_ffi (D19 byte-equivalence with NAPI/WASM)",
+    "get_component_meta_surface": "JSON Vec<u8> — proto-encoded ComponentMetaSurface bytes",
+    "get_component_meta_type_expansion": "JSON { expansion_bytes: Vec<u8>, error?: TypeHandleErrorPayload }; error is a tagged-union { kind: 'projectMismatch' | 'staleHandle' | 'depthExceeded' | 'other', ... } per D104+D114"
+  },
+  "e2e_tests": {
+    "file": "packages/vue-vscode/e2e/suite/component-meta.test.ts",
+    "test_count": 8,
+    "tests": [
+      "T1: getComponentMeta returns Volar-shape payload for a component (uses comp fixture, asserts top-level keys exist)",
+      "T2: getComponentMetaSurface returns non-empty proto bytes",
+      "T3: getComponentMetaTypeExpansion returns expansion bytes for a surface-root handle (no error)",
+      "T4: getComponentMetaTypeExpansion accepts SubExpression query_path round-trip (Tier 1B identity contract per D104 — full SubExpression projection lands in 1C-α)",
+      "T5: getComponentMetaTypeExpansion accepts Instantiation query_path round-trip (Tier 1B identity contract)",
+      "T6: getComponentMeta returns null gracefully for a non-component file",
+      "T7: getComponentMetaTypeExpansion returns StaleHandle for a deleted/unknown canonical",
+      "T8: getComponentMetaTypeExpansion returns ProjectMismatch for a non-empty foreign project_id"
+    ],
+    "test_command_bridge": {
+      "extension_ts_change": "packages/vue-vscode/src/extension.ts — three VERTER_E2E_TEST-gated commands (verter._getComponentMeta, verter._getComponentMetaSurface, verter._getComponentMetaTypeExpansion) forward to LanguageClient.sendRequest so e2e tests can drive the methods without holding the language client"
+    }
+  },
+  "discriminating_tests_per_plan_7_2_4": {
+    "addressed_by_w7": [
+      "lsp_custom_methods_module_converted_to_directory (verified by D96 module structure)",
+      "lsp_full_method_handler_registered ($/verter/getComponentMeta in main.rs builder chain)",
+      "lsp_selective_surface_method_handler_registered ($/verter/getComponentMetaSurface in main.rs)",
+      "lsp_selective_type_expansion_method_handler_registered ($/verter/getComponentMetaTypeExpansion in main.rs)",
+      "e2e_full_get_component_meta_happy_path (T1)",
+      "e2e_selective_get_component_meta_surface_happy_path (T2)",
+      "e2e_selective_get_component_meta_type_expansion_anonymous_property (T4)",
+      "e2e_selective_get_component_meta_type_expansion_generic_instantiation (T5)",
+      "e2e_selective_stale_handle_returns_error (T7)",
+      "e2e_selective_cross_project_returns_error (T8)"
+    ],
+    "_note": "10/10 plan §7.2.4 discriminating tests addressed. Tier 1B test scenarios (T4, T5) verify the identity round-trip contract; full SubExpression / Instantiation projection is 1C-α work and the comments in the test file document this explicitly."
+  },
+  "deviations": [
+    {
+      "id": "shared-substrate-pull-rather-than-metasession-instance-in-lsp",
+      "summary": "Plan §7.2.2 says handlers `delegate to corresponding MetaSession methods`. Strictly delegating would require the LSP to hold a MetaSession (or MetaProject) instance. Since the LSP is built around `Arc<VerterHost>`, W7 lifts the pure logic out of MetaSession into free functions on `component_meta_payload` and adds VerterHost wrappers; MetaSession's existing methods now delegate to the same free functions, so the substrate is genuinely shared per CLAUDE.md's `shared optimized codebase` rule.",
+      "files": [
+        "crates/verter_session/src/component_meta_payload.rs",
+        "crates/verter_session/src/host_manage/component_meta_entry.rs",
+        "crates/verter_session/src/meta.rs"
+      ]
+    },
+    {
+      "id": "fixture-uses-existing-myComp-not-chatmessage",
+      "summary": "Plan §7.2.3 names ChatMessage.vue as the T1 fixture; the e2e/fixtures/single-project/src directory does not contain ChatMessage. Tests use `getCompVuePath()` (the standard helper that resolves to MyComp.vue or fixture-specific equivalent) so the suite is portable across the fixture matrix the e2e runner already iterates over.",
+      "files": ["packages/vue-vscode/e2e/suite/component-meta.test.ts"]
+    },
+    {
+      "id": "manual-proto-encoding-in-e2e-tests",
+      "summary": "The e2e tests construct TypeHandle proto bytes manually (small varint+length-delimited helpers in the test file) rather than depending on a generated TS proto binding. This keeps the e2e suite hermetic and avoids forcing a JS proto runtime into the test harness. The encoding is small (~40 lines) and well-documented inline.",
+      "files": ["packages/vue-vscode/e2e/suite/component-meta.test.ts"]
+    }
+  ],
+  "notes_for_orchestrator": [
+    "W7 is Tier 5b's only sub-worker per plan §7.2; this marker completes Tier 5b. Combined with Tier 5a (already complete per state store), Tier 5 is now fully landed.",
+    "The W7 dispatch (agent-ae106d68125571cdf) flaked deterministically per the plan harness-flake protocol; per the briefing's recommended_next_steps_for_remaining_work[2], W7 was executed manually orchestrator-side.",
+    "E2E tests are written but not executed in this commit (E2E execution requires the full vscode-test runner which is outside the per-commit gate). The full workspace gate at the end of the migration will run them; in the meantime, the cargo workspace is green."
+  ],
+  "marker_filename": "phase-tier-5b-complete",
+  "cherry_pick_target": "refactor/legacy-to-graph-dispatch-migration"
+}
