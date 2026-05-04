@@ -226,6 +226,15 @@ pub struct AnalysisReady {
 /// rejected without rerunning a live lookup.
 pub struct IndexedReadyDb {
     entries: DashMap<Arc<str>, Arc<IndexedReady>>,
+    /// Per-canonical last-access tick (monotonically increasing). Used
+    /// by [`Self::evict_lru`] under explicit memory pressure to drop
+    /// the oldest entries down to a configured floor. Updated on
+    /// every `get` / `insert`. The sidecar shape avoids changing the
+    /// `DashMap<_, Arc<IndexedReady>>` value type and keeps the
+    /// pointer-equality invariants on cached `IndexedReady` entries.
+    last_access: DashMap<Arc<str>, u64>,
+    /// Monotonic counter for `last_access` ticks.
+    access_tick: AtomicU64,
     /// Live entry counter — bumped on insert of a new canonical key,
     /// decremented on remove. Replacement (insert with existing key) does
     /// not change the count.
@@ -250,6 +259,8 @@ impl IndexedReadyDb {
     pub(crate) fn with_counters(live: Arc<AtomicU64>, stale: Arc<AtomicU64>) -> Self {
         Self {
             entries: DashMap::new(),
+            last_access: DashMap::new(),
+            access_tick: AtomicU64::new(0),
             live_counter: live,
             stale_sweeps: stale,
             #[cfg(test)]
@@ -281,6 +292,7 @@ impl IndexedReadyDb {
     ) -> Option<Arc<IndexedReady>> {
         let entry = self.entries.get(canonical_id)?;
         if entry.whole_hash == expected_whole_hash {
+            self.bump_access_tick(canonical_id);
             Some(entry.clone())
         } else {
             None
@@ -295,7 +307,82 @@ impl IndexedReadyDb {
     /// `IndexedReadyDb::get_any` access pattern.
     #[must_use]
     pub fn get_any(&self, canonical_id: &str) -> Option<Arc<IndexedReady>> {
-        self.entries.get(canonical_id).map(|entry| entry.clone())
+        let result = self.entries.get(canonical_id).map(|entry| entry.clone());
+        if result.is_some() {
+            self.bump_access_tick(canonical_id);
+        }
+        result
+    }
+
+    /// Bump the per-canonical last-access tick. Used by [`Self::evict_lru`]
+    /// under explicit memory pressure to drop the oldest entries down to a
+    /// configured floor.
+    fn bump_access_tick(&self, canonical_id: &str) {
+        let tick = self.access_tick.fetch_add(1, Ordering::Relaxed) + 1;
+        self.last_access.insert(Arc::from(canonical_id), tick);
+    }
+
+    /// Snapshot every `(canonical_id, content_hash)` key in the cache.
+    ///
+    /// Callers that need to compute a live-publish-set complement
+    /// against the cache should iterate this snapshot — every returned
+    /// pair is a live cache entry at the call's point-in-time.
+    /// Concurrent inserts/removes after the snapshot are observed by
+    /// the next call.
+    #[must_use]
+    pub fn keys(&self) -> Vec<(Arc<str>, Hash16)> {
+        self.entries
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().whole_hash))
+            .collect()
+    }
+
+    /// LRU floor — drop entries down to `min_floor` by oldest-access
+    /// order.
+    ///
+    /// Per D40 + D119 this path is **only** invoked from
+    /// [`ProjectTypeStore::evict_unreachable_indexed_ready`] when the
+    /// caller explicitly passes `memory_pressure: true`. The default
+    /// build never enters it (`HostConfig::eviction_policy.memory_pressure_threshold`
+    /// is `usize::MAX`); the LRU code path is preserved as an unused
+    /// capability.
+    ///
+    /// When fewer than `min_floor` entries are cached, this is a
+    /// no-op. Otherwise, entries are sorted ascending by their
+    /// last-access tick (oldest first) and the front of the list is
+    /// dropped until exactly `min_floor` entries remain. Entries
+    /// without a recorded tick (e.g., never accessed since insert)
+    /// are treated as having tick `0` and are evicted first.
+    pub fn evict_lru(&self, min_floor: usize) {
+        let len = self.entries.len();
+        if len <= min_floor {
+            return;
+        }
+        let drop_count = len - min_floor;
+        // Snapshot keys with their ticks. `last_access` is keyed by
+        // the same `Arc<str>` as `entries`; pairs without a recorded
+        // tick are treated as tick `0` and evicted first.
+        let mut tick_pairs: Vec<(Arc<str>, u64)> = self
+            .entries
+            .iter()
+            .map(|entry| {
+                let canonical = entry.key().clone();
+                let tick = self
+                    .last_access
+                    .get(&canonical)
+                    .map(|t| *t.value())
+                    .unwrap_or(0);
+                (canonical, tick)
+            })
+            .collect();
+        tick_pairs.sort_by_key(|(_, tick)| *tick);
+        for (canonical, _) in tick_pairs.into_iter().take(drop_count) {
+            if self.entries.remove(canonical.as_ref()).is_some() {
+                self.live_counter.fetch_sub(1, Ordering::Relaxed);
+                self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
+            }
+            self.last_access.remove(canonical.as_ref());
+        }
     }
 
     /// Snapshot every live entry for auditing / diagnostics.
@@ -315,6 +402,10 @@ impl IndexedReadyDb {
     pub fn insert(&self, canonical_id: Arc<str>, indexed: Arc<IndexedReady>) {
         let whole_hash = indexed.whole_hash;
         let canonical_for_event = Arc::clone(&canonical_id);
+        // Bump last-access tick so the LRU floor sees this canonical
+        // as the most-recently-accessed entry.
+        let tick = self.access_tick.fetch_add(1, Ordering::Relaxed) + 1;
+        self.last_access.insert(Arc::clone(&canonical_id), tick);
         let prev = self.entries.insert(canonical_id, indexed);
         if prev.is_some() {
             self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
@@ -348,6 +439,7 @@ impl IndexedReadyDb {
             self.live_counter.fetch_sub(1, Ordering::Relaxed);
             self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
         }
+        self.last_access.remove(canonical_id);
     }
 
     /// Number of live entries. Primarily intended for per-layer debug
@@ -918,6 +1010,33 @@ impl EvalEnvCacheDb {
         self.entries.insert(key, value);
     }
 
+    /// Cooperative cold admission — atomically look up `key`, and if
+    /// absent, compute a value via `compute()` and store it. Concurrent
+    /// callers racing the same key collapse onto a single closure
+    /// invocation: only the first caller observes the empty slot and
+    /// runs `compute()`; subsequent callers wait on the `entry()`
+    /// shard lock and see the just-inserted value.
+    ///
+    /// This is the storage-shape side of the cooperative-admission
+    /// contract: the rehoming-doc §3.3 test #3 discriminator races two
+    /// cold callers and asserts `compute_count == 1`. Pre-rehoming the
+    /// `Mutex.lookup_or_insert` shape allowed both callers to bypass
+    /// the dedup; post-rehoming this method is the single admission
+    /// surface for cold computes.
+    pub fn get_or_insert_with(
+        &self,
+        key: OwnedArtifactKey,
+        compute: impl FnOnce() -> Arc<crate::owned_artifacts::OwnedEvalProgram>,
+    ) -> Arc<crate::owned_artifacts::OwnedEvalProgram> {
+        // DashMap's `entry()` API is the right primitive here — it
+        // returns a shard-locked entry that can `or_insert_with` in a
+        // single critical section. Concurrent racers serialize on the
+        // shard lock and the second one observes the just-inserted
+        // value.
+        let entry = self.entries.entry(key).or_insert_with(compute);
+        Arc::clone(entry.value())
+    }
+
     /// Look up a cached env arc by canonical id, validating against
     /// `whole_hash`. Returns `None` if the cached entry is stale or
     /// missing. Used by the rehomed
@@ -1172,6 +1291,17 @@ impl ResolvedTypeCacheDb {
 
     pub fn clear(&self) {
         self.entries.lock().clear();
+    }
+
+    /// Drain every entry whose `dep_canonical_id` matches
+    /// `canonical_id`. Per the rehoming-doc §3.3 contract: a per-canonical
+    /// content edit invalidates the resolved-type entries that
+    /// depended on the same canonical so the next resolution pass
+    /// recomputes against fresh source.
+    pub(crate) fn evict_canonical(&self, canonical_id: &str) {
+        self.entries
+            .lock()
+            .retain(|key, _| key.dep_canonical_id != canonical_id);
     }
 
     pub fn len(&self) -> usize {
@@ -2000,6 +2130,18 @@ impl ProjectTypeStore {
         // app_config_decl_canonical_id IS this canonical.
         self.app_config_no_override_proof
             .invalidate_canonical(canonical_id);
+        // Unified cascade — F2 (resolved_type_cache) participates per
+        // the rehoming-doc §3.3 contract: per-canonical content edits
+        // drain entries whose `dep_canonical_id` references the same
+        // canonical. Pre-rehoming the off-store cache only had
+        // clear-all-at-cap; this method is the per-canonical drain.
+        self.resolved_type_cache_db.evict_canonical(canonical_id);
+        // Unified cascade — F5 (semantic_db) participates per the
+        // rehoming-doc §3.3 contract: a per-canonical content edit
+        // invalidates the semantic-fact cache for the same canonical
+        // so subsequent semantic queries observe an unavailable cache
+        // and recompute against fresh facts.
+        self.semantic_db.lock().invalidate(canonical_id);
         // D48 split: the per-domain compile-cache entries
         // (CompileCacheDb / DerivedRawCacheDb / DependencyCacheDb) are
         // NOT dropped here. The matrix routes the "source content
@@ -2010,6 +2152,43 @@ impl ProjectTypeStore {
         // for the project-global graph (IndexedReady, analysis, owner
         // surfaces, etc.) and stays orthogonal to the per-canonical
         // compile-cache caches.
+    }
+
+    /// Live-content reachability sweep on [`IndexedReadyDb`].
+    ///
+    /// Per D33: any cached `IndexedReady` entry whose
+    /// `(canonical_id, content_hash)` pair is not present in
+    /// `live_publish_set` is dropped. The publish set is the union of
+    /// every `(canonical_id, content_hash)` reachable from any open
+    /// editor / live VFS state — callers compute it from their VFS
+    /// snapshot and pass it in.
+    ///
+    /// Per D40 + D119: when `memory_pressure: true`, an additional
+    /// LRU floor sweep runs after reachability and drops entries down
+    /// to `min_floor` by oldest-access order. The default
+    /// [`crate::types::EvictionPolicyConfig`]
+    /// has `memory_pressure_threshold == usize::MAX`, so callers
+    /// derived from `HostConfig::eviction_policy` never enter this
+    /// branch in default builds.
+    pub fn evict_unreachable_indexed_ready(
+        &self,
+        live_publish_set: &rustc_hash::FxHashSet<(Arc<str>, Hash16)>,
+        memory_pressure: bool,
+        min_floor: usize,
+    ) {
+        // D33: live-content reachability first.
+        for (canonical, content_hash) in self.indexed.keys() {
+            if !live_publish_set.contains(&(Arc::clone(&canonical), content_hash)) {
+                self.indexed.remove(canonical.as_ref());
+            }
+        }
+        // D40 + D119: LRU floor only under explicit memory pressure.
+        // memory_pressure_threshold = usize::MAX by default — never
+        // triggered. The capability is preserved for production
+        // callers that opt in.
+        if memory_pressure {
+            self.indexed.evict_lru(min_floor);
+        }
     }
 
     /// D48 matrix row 1 — Source content change for owner.

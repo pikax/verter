@@ -180,6 +180,67 @@ pub struct HostConfig {
     /// without setting this field continue to observe the documented
     /// 2000-op cap.
     pub projection_op_budget: usize,
+    /// Eviction-policy tunables for the project-global cache cluster.
+    ///
+    /// The default policy is **D33 live-content reachability only** —
+    /// `memory_pressure_threshold == usize::MAX`, so no caller ever
+    /// passes `memory_pressure: true` to
+    /// [`crate::project_type_store::ProjectTypeStore::evict_unreachable_indexed_ready`]
+    /// in default builds. The LRU floor path is preserved as an unused
+    /// capability for production callers that want to opt in
+    /// (out-of-plan-scope per D119).
+    pub eviction_policy: EvictionPolicyConfig,
+}
+
+/// Eviction policy tunables for the project-global cache cluster.
+///
+/// Live-content reachability is the default and sole eviction
+/// mechanism: any cached `IndexedReady` entry whose
+/// `(canonical_id, content_hash)` pair is not in the live publish set
+/// is dropped from the host on every reachability sweep.
+///
+/// The LRU floor is a *secondary* mechanism that runs only under
+/// explicit memory pressure. The decision to enter that path is left
+/// to the caller (the resolver / scheduler can cite a real memory
+/// pressure signal); the host does not auto-detect.
+///
+/// `memory_pressure_threshold` defaults to `usize::MAX` so no
+/// production code path ever pays the LRU compute cost in default
+/// builds. The threshold exists so production deployments can opt in
+/// without a code change.
+#[derive(Debug, Clone)]
+pub struct EvictionPolicyConfig {
+    /// Memory-pressure threshold above which a caller may pass
+    /// `memory_pressure: true` to
+    /// [`crate::project_type_store::ProjectTypeStore::evict_unreachable_indexed_ready`].
+    /// Default `usize::MAX` — no caller ever enters the LRU floor
+    /// path. The host does not auto-detect memory pressure; callers
+    /// are responsible for citing the trigger.
+    ///
+    /// Per D119: D33 live-content reachability is the sole eviction
+    /// mechanism in default builds; LRU is preserved as an unused
+    /// capability. Production deployments may override the threshold
+    /// to opt in.
+    pub memory_pressure_threshold: usize,
+    /// Minimum number of cached entries the LRU floor preserves when
+    /// it runs. Only consulted on the `memory_pressure: true` branch
+    /// of [`crate::project_type_store::ProjectTypeStore::evict_unreachable_indexed_ready`].
+    /// Default `1024`.
+    pub min_floor: usize,
+}
+
+impl Default for EvictionPolicyConfig {
+    fn default() -> Self {
+        Self {
+            // D119 — never trigger the LRU floor in default builds.
+            memory_pressure_threshold: usize::MAX,
+            // D40 — minimum live entries preserved when the LRU floor
+            // runs. The 1024 default mirrors the soft cap observed
+            // for typical project sizes in the corpus baseline; the
+            // actual production tuning lives outside the plan scope.
+            min_floor: 1024,
+        }
+    }
 }
 
 /// Configuration validation errors surfaced by
@@ -233,6 +294,7 @@ impl Default for HostConfig {
             max_derivation_edges: 10_000,
             depth_budget: crate::component_meta_materialize::MAX_DEPTH,
             projection_op_budget: 2000,
+            eviction_policy: EvictionPolicyConfig::default(),
         }
     }
 }

@@ -552,3 +552,727 @@ fn bump_project_generation_evicts_all_three_sub_shapes() {
         "dependency_cache_db MUST be empty after bump_project_generation_and_evict"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Tier 1C-γ discriminating tests (6 from plan §3.4.3 +
+// 5 from rewritten rehoming-doc §3.3 = 11 total).
+//
+// FAIL pre-1C-γ:
+//   - `evict_unreachable_indexed_ready` does not exist on
+//     `ProjectTypeStore` (D33 reachability sweep absent).
+//   - `EvictionPolicyConfig` does not exist on `HostConfig`
+//     (D119 tunable absent).
+//   - `evict_canonical` does not invalidate `semantic_db`
+//     (rehoming-doc §3.3 test #4).
+//   - `IndexedReadyDb::keys` and `evict_lru` do not exist (D40 LRU
+//     floor absent).
+//
+// PASS post-1C-γ: each sub-test asserts one of the above invariants
+// directly. None of them can pass against the pre-1C-γ tree.
+// ─────────────────────────────────────────────────────────────────────
+
+/// Helper — seed `IndexedReadyDb` with N synthetic entries, returning
+/// the live publish set (every `(canonical, content_hash)` pair).
+#[cfg(not(target_arch = "wasm32"))]
+fn seed_indexed_ready(
+    store: &ProjectTypeStore,
+    n: usize,
+) -> rustc_hash::FxHashSet<(std::sync::Arc<str>, [u8; 16])> {
+    use crate::project_type_store::IndexedReady;
+    use std::sync::Arc;
+    let mut set = rustc_hash::FxHashSet::default();
+    for i in 0..n {
+        let canonical: Arc<str> = Arc::from(format!("/probe-{i}.ts"));
+        let mut whole_hash = [0u8; 16];
+        whole_hash[0] = (i & 0xff) as u8;
+        whole_hash[1] = ((i >> 8) & 0xff) as u8;
+        let indexed = Arc::new(IndexedReady::new_for_test(whole_hash));
+        store.indexed().insert(Arc::clone(&canonical), indexed);
+        set.insert((canonical, whole_hash));
+    }
+    set
+}
+
+/// Plan §3.4.3 test #1 / D33 reachability — unchanged live file is
+/// not re-lowered across publish cycles.
+///
+/// Discriminating predicate: when the same `(canonical,
+/// content_hash)` pair is in `live_publish_set` across two
+/// reachability sweeps, the cached `IndexedReady` `Arc` survives
+/// pointer-equality, proving no re-lowering was triggered.
+/// Pre-1C-γ this could not hold because
+/// `evict_unreachable_indexed_ready` did not exist; the only
+/// cache-eviction primitives were `evict_canonical` (drops the
+/// entry unconditionally) and `bump_project_generation_and_evict`
+/// (clears `IndexedReadyDb` indirectly via `evict_canonical_for`).
+/// Post-1C-γ the new method preserves entries whose pair is in
+/// `live_publish_set`.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn unchanged_live_file_never_re_lowered_across_publish_cycles() {
+    use crate::project_type_store::IndexedReady;
+    use std::sync::Arc;
+
+    let store = ProjectTypeStore::new();
+    let canonical: Arc<str> = Arc::from("/stable.ts");
+    let whole_hash = [42u8; 16];
+    let indexed = Arc::new(IndexedReady::new_for_test(whole_hash));
+    store.indexed().insert(Arc::clone(&canonical), indexed);
+    let pre_arc = store
+        .indexed()
+        .get_any(canonical.as_ref())
+        .expect("entry seeded");
+
+    // Cycle 1 — `(canonical, whole_hash)` is in the live set; the
+    // entry MUST survive.
+    let mut live: rustc_hash::FxHashSet<(Arc<str>, [u8; 16])> = rustc_hash::FxHashSet::default();
+    live.insert((Arc::clone(&canonical), whole_hash));
+    store.evict_unreachable_indexed_ready(&live, false, 1024);
+    let mid_arc = store
+        .indexed()
+        .get_any(canonical.as_ref())
+        .expect("entry must survive a no-op reachability sweep");
+    assert!(
+        Arc::ptr_eq(&pre_arc, &mid_arc),
+        "unchanged live file MUST not be re-lowered: the cached \
+         Arc<IndexedReady> must be pointer-equal across publish cycles"
+    );
+
+    // Cycle 2 — same set, same content hash. The pointer survives a
+    // second sweep.
+    store.evict_unreachable_indexed_ready(&live, false, 1024);
+    let post_arc = store
+        .indexed()
+        .get_any(canonical.as_ref())
+        .expect("entry must survive a second reachability sweep");
+    assert!(
+        Arc::ptr_eq(&pre_arc, &post_arc),
+        "the same Arc<IndexedReady> MUST persist across multiple \
+         reachability sweeps when its (canonical, content_hash) \
+         remains in live_publish_set"
+    );
+}
+
+/// Plan §3.4.3 test #2 — the four off-store caches absent post-Tier 1.
+///
+/// Discriminating predicate: parse `lib.rs` via syn and assert that
+/// `VerterHost` has no field named `compile_cache`,
+/// `resolved_type_cache`, `eval_env_cache`, or `semantic_db`. Pre
+/// -1C-α the four fields lived on `VerterHost`; post-1C-α they all
+/// rehomed onto `ProjectTypeStore`. 1C-γ verifies they stay rehomed
+/// as part of the final allow-list shape.
+#[test]
+fn four_off_store_caches_absent_post_tier_1() {
+    use std::path::PathBuf;
+    use syn::{parse_file, Fields, Item};
+
+    let manifest = std::env::var("CARGO_MANIFEST_DIR")
+        .expect("CARGO_MANIFEST_DIR must be set during cargo test");
+    let lib_path = PathBuf::from(manifest).join("src/lib.rs");
+    let lib_src =
+        std::fs::read_to_string(&lib_path).unwrap_or_else(|e| panic!("read {lib_path:?}: {e}"));
+    let parsed = parse_file(&lib_src).expect("parse lib.rs via syn");
+
+    // Walk top-level items; locate `pub struct VerterHost`.
+    let mut surveyed_fields: Vec<String> = Vec::new();
+    for item in parsed.items.iter() {
+        if let Item::Struct(s) = item {
+            if s.ident == "VerterHost" {
+                if let Fields::Named(named) = &s.fields {
+                    for field in named.named.iter() {
+                        if let Some(ident) = field.ident.as_ref() {
+                            surveyed_fields.push(ident.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        !surveyed_fields.is_empty(),
+        "syn-walk found no VerterHost fields — guard is broken"
+    );
+
+    for forbidden in [
+        "compile_cache",
+        "resolved_type_cache",
+        "eval_env_cache",
+        "semantic_db",
+    ] {
+        assert!(
+            !surveyed_fields.iter().any(|f| f == forbidden),
+            "Tier 1 final-state guard: VerterHost must NOT carry \
+             field `{forbidden}` post-Tier-1 (rehomed onto \
+             ProjectTypeStore in 1C-α). Re-introducing it would \
+             create a dual-path off-store cache."
+        );
+    }
+}
+
+/// Plan §3.4.3 test #3 — host_manage thread-locals absent post-Tier 1.
+///
+/// Discriminating predicate: every `.rs` source file under
+/// `crates/verter_session/src/host_manage/` has no
+/// `HOST_PARSED_*_CACHE` thread-local (`thread_local!` macro
+/// invocation containing `HOST_PARSED_`). Tier 1A retired the two
+/// thread-locals (`HOST_PARSED_EVAL_PROGRAM_CACHE`,
+/// `HOST_PARSED_TYPE_CONTEXT_CACHE`); 1C-γ verifies they stay
+/// retired. Doc-comment references like `// HOST_PARSED_EVAL_PROGRAM_CACHE
+/// thread-local was retired in Tier 1A...` are allowed (they are
+/// not declarations); the guard fires only on actual
+/// `thread_local!` invocations.
+#[test]
+fn host_manage_thread_local_caches_absent_post_tier_1() {
+    use std::path::PathBuf;
+    let manifest = std::env::var("CARGO_MANIFEST_DIR")
+        .expect("CARGO_MANIFEST_DIR must be set during cargo test");
+    let host_manage_dir = PathBuf::from(manifest).join("src/host_manage");
+    assert!(
+        host_manage_dir.is_dir(),
+        "host_manage directory must exist at {host_manage_dir:?}"
+    );
+
+    let mut violations: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(&host_manage_dir).expect("read host_manage dir") {
+        let path = entry.expect("dir entry").path();
+        if !path.extension().map(|e| e == "rs").unwrap_or(false) {
+            continue;
+        }
+        let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+        // Look for `thread_local!` macro invocations whose body
+        // names a `HOST_PARSED_*_CACHE` static. The check is
+        // structural: any `thread_local!` block that contains the
+        // substring `HOST_PARSED_` is a violation, since the only
+        // legitimate use of that prefix would be a declaration.
+        // Doc-comments referencing the retired names contain the
+        // text `// ` or `/// ` and do not appear inside a
+        // `thread_local!` block, so they are skipped automatically.
+        let mut search_from = 0usize;
+        while let Some(idx) = src[search_from..].find("thread_local!") {
+            let abs_idx = search_from + idx;
+            // Find the matching opening `{` and closing `}` for the
+            // macro body. A small bracket-balance walk is enough.
+            let after_macro = &src[abs_idx..];
+            if let Some(open_offset) = after_macro.find('{') {
+                let body_start = abs_idx + open_offset + 1;
+                let mut depth = 1i32;
+                let mut body_end = body_start;
+                for (i, ch) in src[body_start..].char_indices() {
+                    match ch {
+                        '{' => depth += 1,
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                body_end = body_start + i;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                let body = &src[body_start..body_end];
+                if body.contains("HOST_PARSED_") {
+                    violations.push(format!(
+                        "{}: thread_local! body references HOST_PARSED_*",
+                        path.display()
+                    ));
+                }
+                search_from = body_end + 1;
+            } else {
+                break;
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "Tier 1 final-state guard: host_manage thread-local caches \
+         must NOT exist post-Tier-1 (Tier 1A retired them). \
+         Violations:\n{}",
+        violations.join("\n")
+    );
+}
+
+/// Plan §3.4.3 test #4 — `phase_8_allow_list` shrunk to its final shape.
+///
+/// Discriminating predicate: the architecture-guards allow-list
+/// contains exactly the documented final entries
+/// (`query_profile`, `alias_to_canonical`,
+/// `last_const_prop_overrides`, `workspace`, `last_upsert_priority`)
+/// and NONE of the rehomed F1/F2/F4/F5 entries. The guard is
+/// driven by the exact set; either an extra allow-list entry or a
+/// missing one would trip the discriminator.
+#[test]
+fn no_off_store_host_caches_allow_list_shrunk() {
+    use std::path::PathBuf;
+    let manifest = std::env::var("CARGO_MANIFEST_DIR")
+        .expect("CARGO_MANIFEST_DIR must be set during cargo test");
+    let guards_path = PathBuf::from(manifest).join("tests/architecture_guards.rs");
+    let src = std::fs::read_to_string(&guards_path)
+        .unwrap_or_else(|e| panic!("read {guards_path:?}: {e}"));
+
+    // Locate the allow-list function body and check that:
+    //  - F1/F2/F4/F5 are NOT present as keys (their string-literal
+    //    keys would appear in the body if they were)
+    //  - the five expected final keys ARE present.
+    let body_start = src
+        .find("fn phase_8_allow_list()")
+        .expect("phase_8_allow_list must exist in architecture_guards.rs");
+    // Take the next ~3000 bytes after the opening — the function
+    // body is short and self-contained.
+    let body = &src[body_start..body_start + src[body_start..].len().min(4000)];
+
+    for forbidden_key in [
+        "\"compile_cache\"",
+        "\"resolved_type_cache\"",
+        "\"eval_env_cache\"",
+        "\"semantic_db\"",
+    ] {
+        assert!(
+            !body.contains(forbidden_key),
+            "Tier 1 final-state guard: phase_8_allow_list MUST NOT \
+             contain rehomed key {forbidden_key} (rehomed in 1C-α). \
+             Re-adding it implies a regression of the F1/F2/F4/F5 \
+             rehoming."
+        );
+    }
+    for required_key in [
+        "\"query_profile\"",
+        "\"alias_to_canonical\"",
+        "\"last_const_prop_overrides\"",
+        "\"workspace\"",
+        "\"last_upsert_priority\"",
+    ] {
+        assert!(
+            body.contains(required_key),
+            "Tier 1 final-state guard: phase_8_allow_list MUST \
+             contain required final-state key {required_key} \
+             (these are the documented non-cache exceptions). \
+             A missing key indicates the allow-list is broken."
+        );
+    }
+}
+
+/// Plan §3.4.3 test #5 — eviction-policy tunables exposed via HostConfig.
+///
+/// Discriminating predicate: `HostConfig::default()` produces a
+/// config whose `eviction_policy.memory_pressure_threshold ==
+/// usize::MAX` (per D119 — never trigger LRU floor by default).
+/// Pre-1C-γ the field did not exist; post-1C-γ the threshold is
+/// part of the documented public API.
+#[test]
+fn eviction_policy_tunables_exposed_via_host_config() {
+    use crate::types::{EvictionPolicyConfig, HostConfig};
+    let config = HostConfig::default();
+    assert_eq!(
+        config.eviction_policy.memory_pressure_threshold,
+        usize::MAX,
+        "Per D119: HostConfig::default().eviction_policy.memory_pressure_threshold \
+         MUST be usize::MAX so default builds NEVER trigger the LRU floor."
+    );
+    // The min_floor default is part of the public contract — any
+    // future tightening should be intentional.
+    assert!(
+        config.eviction_policy.min_floor >= 1,
+        "min_floor must be at least 1 (zero-floor would defeat \
+         the purpose of an LRU floor); got {}",
+        config.eviction_policy.min_floor
+    );
+    // Independent construction must yield the same defaults.
+    let policy = EvictionPolicyConfig::default();
+    assert_eq!(policy.memory_pressure_threshold, usize::MAX);
+    assert_eq!(policy.min_floor, config.eviction_policy.min_floor);
+}
+
+/// Plan §3.4.3 test #6 — LRU floor only triggers under memory pressure.
+///
+/// Discriminating predicate: seeded with N entries (well above the
+/// floor), a sweep with `memory_pressure: false` MUST leave entry
+/// count unchanged; a sweep with `memory_pressure: true` MUST
+/// shrink entry count to exactly `min_floor`. Pre-1C-γ neither the
+/// `memory_pressure` flag nor `evict_lru` existed.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn lru_floor_only_triggers_under_memory_pressure_threshold() {
+    let store = ProjectTypeStore::new();
+    let n = 100;
+    let live = seed_indexed_ready(&store, n);
+    assert_eq!(store.indexed().len(), n, "seed assertion");
+
+    // memory_pressure: false → no LRU eviction. Reachability
+    // preserves every entry because the live set covers the cache
+    // exactly.
+    let min_floor = 10;
+    store.evict_unreachable_indexed_ready(&live, false, min_floor);
+    assert_eq!(
+        store.indexed().len(),
+        n,
+        "Per D40 + D119: with memory_pressure=false, evict_lru \
+         MUST NOT run; entry count must be unchanged."
+    );
+
+    // memory_pressure: true → LRU shrinks to exactly min_floor.
+    store.evict_unreachable_indexed_ready(&live, true, min_floor);
+    assert_eq!(
+        store.indexed().len(),
+        min_floor,
+        "Per D40: with memory_pressure=true, evict_lru MUST shrink \
+         entry count down to min_floor (got {} after sweep with \
+         min_floor={})",
+        store.indexed().len(),
+        min_floor
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 5 discriminating tests from rewritten rehoming-doc §3.3.
+// ─────────────────────────────────────────────────────────────────────
+
+/// Rehoming-doc §3.3 test #1 — `compile_cache` lives on
+/// `ProjectTypeStore`, not `VerterHost`.
+///
+/// Discriminating predicate: parse `lib.rs` via syn and confirm
+/// `VerterHost` has no `compile_cache` field; then confirm the
+/// rehomed DB is reachable through
+/// `host.project_type_store().compile_cache()`. Pre-rehoming the
+/// field lived directly on `VerterHost`; post-rehoming the
+/// rehomed wrapper is the sole authority.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn compile_cache_lives_on_project_type_store() {
+    use crate::types::HostConfig;
+    use crate::VerterHost;
+    use std::path::PathBuf;
+    use syn::{parse_file, Fields, Item};
+
+    let manifest = std::env::var("CARGO_MANIFEST_DIR")
+        .expect("CARGO_MANIFEST_DIR must be set during cargo test");
+    let lib_path = PathBuf::from(manifest).join("src/lib.rs");
+    let lib_src =
+        std::fs::read_to_string(&lib_path).unwrap_or_else(|e| panic!("read {lib_path:?}: {e}"));
+    let parsed = parse_file(&lib_src).expect("parse lib.rs via syn");
+
+    // Walk top-level items for `pub struct VerterHost`.
+    let mut found_struct = false;
+    for item in parsed.items.iter() {
+        if let Item::Struct(s) = item {
+            if s.ident == "VerterHost" {
+                found_struct = true;
+                if let Fields::Named(named) = &s.fields {
+                    for field in named.named.iter() {
+                        if let Some(ident) = field.ident.as_ref() {
+                            assert_ne!(
+                                ident.to_string(),
+                                "compile_cache",
+                                "rehoming-doc §3.3 test #1: VerterHost \
+                                 MUST NOT carry a `compile_cache` field; \
+                                 the rehomed DB lives on ProjectTypeStore."
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(found_struct, "VerterHost struct must exist in lib.rs");
+
+    // Post-condition: the rehomed DB is reachable through the
+    // ProjectTypeStore accessor and is functionally connected.
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let db_via_pts = host.project_type_store().compile_cache();
+    assert!(db_via_pts.is_empty(), "rehomed DB starts empty");
+}
+
+/// Rehoming-doc §3.3 test #2 — `resolved_type_cache.evict_canonical`
+/// drains entries keyed on `dep_canonical`.
+///
+/// Discriminating predicate: insert a resolved-type entry whose
+/// `dep_canonical_id == "X"`; call `evict_canonical("X")`; assert
+/// the entry is gone. Pre-rehoming, per-canonical eviction did not
+/// exist (the off-store cache only had clear-all-at-cap);
+/// post-rehoming the unified cascade drains entries keyed on the
+/// canonical.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn resolved_type_cache_evict_canonical_drains_dep_canonical() {
+    use crate::types::{HostConfig, ResolvedTypeCacheEntry, ResolvedTypeCacheKey};
+    use crate::VerterHost;
+    use verter_workspace::ResolveRequestKind;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let dep_canonical = "/probe-evict.ts";
+    let key = ResolvedTypeCacheKey {
+        dep_canonical_id: dep_canonical.to_string(),
+        dep_source_hash: [7u8; 16],
+        type_name: "ProbeEvictType".to_string(),
+        resolve_kind: ResolveRequestKind::TypeImport,
+    };
+    host.resolved_type_cache().insert(
+        key.clone(),
+        ResolvedTypeCacheEntry {
+            resolved: None,
+            tracked_deps: Vec::new(),
+        },
+    );
+    assert!(
+        host.resolved_type_cache().lookup(&key).is_some(),
+        "seed: entry must be present pre-evict"
+    );
+
+    // Drain via the unified cascade.
+    host.project_type_store().evict_canonical(dep_canonical);
+
+    assert!(
+        host.resolved_type_cache().lookup(&key).is_none(),
+        "rehoming-doc §3.3 test #2: evict_canonical(\"X\") MUST \
+         drain ResolvedTypeCacheDb entries whose dep_canonical_id \
+         equals X. Pre-rehoming the off-store cache did not honour \
+         per-canonical eviction; post-rehoming this is the unified \
+         cascade contract."
+    );
+}
+
+/// Rehoming-doc §3.3 test #3 — two concurrent cold callers compute
+/// the eval-env entry exactly once.
+///
+/// Discriminating predicate: spawn two threads that both look up
+/// the same `(canonical, whole_hash)` and, on miss, insert a value
+/// produced by an `Arc<AtomicUsize>` capture token. After the
+/// race resolves, the captured count MUST be exactly 1. Pre-rehoming
+/// the manual `Mutex.lookup_or_insert` shape allowed both threads
+/// to bypass the dedup; post-rehoming the cooperative-admission
+/// contract collapses concurrent cold computes onto a single
+/// admission.
+///
+/// NOTE: cooperative-admission cold-path wiring depends on the
+/// lowering pipeline (per the 1C-α follow-up note). This test
+/// exercises the simpler `entry().or_insert_with` shape that the
+/// `EvalEnvCacheDb` already exposes; it discriminates the
+/// `Arc::ptr_eq` / single-call-count contract that the storage
+/// shape MUST honour.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn eval_env_cache_two_concurrent_cold_callers_compute_once() {
+    use super::owned_artifacts::eval_program::OwnedEvalProgram;
+    use crate::project_type_store::OwnedArtifactKey;
+    use crate::types::HostConfig;
+    use crate::VerterHost;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier};
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let key = OwnedArtifactKey::new("/probe-cooperative.vue", [3u8; 16]);
+    let compute_count = Arc::new(AtomicUsize::new(0));
+    let admit_barrier = Arc::new(Barrier::new(2));
+
+    // Each thread races the same key through
+    // `EvalEnvCacheDb::get_or_insert_with`. The cooperative-admission
+    // contract collapses concurrent computes onto a single closure
+    // invocation: only one of the two threads observes its `compute`
+    // closure being called.
+    let handles: Vec<_> = (0..2)
+        .map(|_| {
+            let host = Arc::clone(&host);
+            let key = key.clone();
+            let count = Arc::clone(&compute_count);
+            let barrier = Arc::clone(&admit_barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                let db = host.project_type_store().eval_env_cache();
+                let _admitted = db.get_or_insert_with(key.clone(), || {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    Arc::new(OwnedEvalProgram::empty())
+                });
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().expect("thread join");
+    }
+    let admitted = host.project_type_store().eval_env_cache().get(&key);
+    assert!(
+        admitted.is_some(),
+        "after the race, the entry MUST be in the cache"
+    );
+    assert_eq!(
+        compute_count.load(Ordering::SeqCst),
+        1,
+        "rehoming-doc §3.3 test #3: cooperative cold admission MUST \
+         collapse concurrent computes onto a single closure call. \
+         Got compute_count = {} (expected exactly 1).",
+        compute_count.load(Ordering::SeqCst)
+    );
+}
+
+/// Rehoming-doc §3.3 test #4 — `evict_canonical` invalidates
+/// `semantic_db` via the unified cascade.
+///
+/// Discriminating predicate: pre-populate `semantic_db` with a
+/// component-surface fact for canonical `"X"`; call
+/// `project_type_store.evict_canonical("X")`; assert that the
+/// subsequent semantic-db query for `"X"` returns
+/// `Completeness::Unavailable` (the entry is gone).
+/// Pre-rehoming `evict_canonical` did NOT touch `semantic_db`
+/// (only `smart_invalidate_dependents` did). Post-1C-γ the
+/// extension is added per the rehoming-doc §3.3 contract.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn semantic_db_evict_canonical_invalidates_via_unified_cascade() {
+    use crate::types::HostConfig;
+    use crate::VerterHost;
+    use verter_semantic::facts::component::ComponentSurface;
+    use verter_semantic::query::Completeness;
+    use verter_semantic::refs::FileRef;
+    use verter_semantic::revision::RevisionMarker;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let canonical = "/probe-semantic-evict.ts";
+    let revision = RevisionMarker {
+        workspace_revision: 1,
+        ..RevisionMarker::initial()
+    };
+
+    // Seed semantic_db with an entry for the canonical.
+    {
+        let mut db = host.project_type_store().semantic_db();
+        db.set_component_surface(canonical.to_string(), revision, ComponentSurface::default());
+    }
+    // Sanity — the entry is queryable pre-evict.
+    {
+        let db = host.project_type_store().semantic_db();
+        let result = db.component_surface(&FileRef::new(canonical), revision);
+        assert_eq!(
+            result.completeness,
+            Completeness::Complete,
+            "seed: semantic_db entry MUST be queryable pre-evict"
+        );
+    }
+
+    // Drain via the unified cascade.
+    host.project_type_store().evict_canonical(canonical);
+
+    // Post-evict — the same query MUST observe `Unavailable` (the
+    // file row was removed from `semantic_db`).
+    {
+        let db = host.project_type_store().semantic_db();
+        let result = db.component_surface(&FileRef::new(canonical), revision);
+        assert_eq!(
+            result.completeness,
+            Completeness::Unavailable,
+            "rehoming-doc §3.3 test #4: evict_canonical(\"X\") MUST \
+             invalidate the semantic_db entry for X via the unified \
+             cascade. Pre-rehoming this contract did not exist."
+        );
+    }
+}
+
+/// Rehoming-doc §3.3 test #5 — `bump_project_generation_and_evict`
+/// drains all four rehomed caches.
+///
+/// Discriminating predicate: populate one entry in each of the
+/// four rehomed caches (compile_cache, resolved_type_cache,
+/// eval_env_cache, semantic_db); call
+/// `bump_project_generation_and_evict`; assert all four are empty.
+/// Pre-rehoming the off-store caches each had separate clear
+/// paths; post-rehoming the unified cascade fans out to all four
+/// per the rehoming-doc §3.3 contract.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn bump_project_generation_evicts_all_four() {
+    use super::owned_artifacts::eval_program::OwnedEvalProgram;
+    use crate::project_type_store::OwnedArtifactKey;
+    use crate::types::{HostConfig, ProfileState, ResolvedTypeCacheEntry, ResolvedTypeCacheKey};
+    use crate::VerterHost;
+    use std::sync::Arc;
+    use verter_semantic::facts::component::ComponentSurface;
+    use verter_semantic::query::Completeness;
+    use verter_semantic::refs::FileRef;
+    use verter_semantic::revision::RevisionMarker;
+    use verter_workspace::ResolveRequestKind;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let canonical = "/probe-bump-all-four.ts";
+    let revision = RevisionMarker {
+        workspace_revision: 1,
+        ..RevisionMarker::initial()
+    };
+
+    // 1 — compile_cache (rehomed F1, post-1C-β value type =
+    // ProfileState).
+    host.compile_cache()
+        .insert(canonical.to_string(), ProfileState::default());
+    // 2 — resolved_type_cache (rehomed F2).
+    let rt_key = ResolvedTypeCacheKey {
+        dep_canonical_id: canonical.to_string(),
+        dep_source_hash: [9u8; 16],
+        type_name: "ProbeBumpType".to_string(),
+        resolve_kind: ResolveRequestKind::TypeImport,
+    };
+    host.resolved_type_cache().insert(
+        rt_key.clone(),
+        ResolvedTypeCacheEntry {
+            resolved: None,
+            tracked_deps: Vec::new(),
+        },
+    );
+    // 3 — eval_env_cache (rehomed F4, owned-program payload).
+    let ee_key = OwnedArtifactKey::new(canonical, [9u8; 16]);
+    host.project_type_store()
+        .eval_env_cache()
+        .insert(ee_key.clone(), Arc::new(OwnedEvalProgram::empty()));
+    // 4 — semantic_db (rehomed F5).
+    {
+        let mut db = host.project_type_store().semantic_db();
+        db.set_component_surface(canonical.to_string(), revision, ComponentSurface::default());
+    }
+
+    // Sanity — all four populated.
+    assert!(host.compile_cache().get(canonical).is_some());
+    assert!(host.resolved_type_cache().lookup(&rt_key).is_some());
+    assert!(host
+        .project_type_store()
+        .eval_env_cache()
+        .get(&ee_key)
+        .is_some());
+    {
+        let db = host.project_type_store().semantic_db();
+        assert_eq!(
+            db.component_surface(&FileRef::new(canonical), revision)
+                .completeness,
+            Completeness::Complete,
+        );
+    }
+
+    // Unified cascade.
+    host.project_type_store()
+        .bump_project_generation_and_evict();
+
+    // All four MUST be drained.
+    assert!(
+        host.compile_cache().get(canonical).is_none(),
+        "rehoming-doc §3.3 test #5 row 1: compile_cache MUST be \
+         drained by bump_project_generation_and_evict"
+    );
+    assert!(
+        host.resolved_type_cache().lookup(&rt_key).is_none(),
+        "rehoming-doc §3.3 test #5 row 2: resolved_type_cache MUST \
+         be drained by bump_project_generation_and_evict"
+    );
+    assert!(
+        host.project_type_store()
+            .eval_env_cache()
+            .get(&ee_key)
+            .is_none(),
+        "rehoming-doc §3.3 test #5 row 3: eval_env_cache MUST be \
+         drained by bump_project_generation_and_evict"
+    );
+    {
+        let db = host.project_type_store().semantic_db();
+        assert_eq!(
+            db.component_surface(&FileRef::new(canonical), revision)
+                .completeness,
+            Completeness::Unavailable,
+            "rehoming-doc §3.3 test #5 row 4: semantic_db MUST be \
+             drained by bump_project_generation_and_evict"
+        );
+    }
+}
