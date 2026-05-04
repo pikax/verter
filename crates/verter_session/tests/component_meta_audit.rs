@@ -2,7 +2,7 @@
 //!
 //! Each submodule resolves a curated SFC fixture under a hermetic
 //! [`AuditedRequest`] and asserts on the resulting
-//! [`RustAuditRecord`](verter_session::component_meta_audit::RustAuditRecord).
+//! [`RequestAuditRecord`](verter_session::component_meta_audit::RequestAuditRecord).
 //!
 //! See [`harness`] for the shared helpers + fixture constants.
 

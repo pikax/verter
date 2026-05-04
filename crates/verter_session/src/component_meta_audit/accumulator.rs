@@ -19,7 +19,7 @@ use parking_lot::Mutex;
 
 use super::{
     AliasResolveRecord, ConditionalRecord, IndexedReadyBuildRecord, InstantiationRecord,
-    MaterializationRecord, ProjectionRecord, SharedLoadReuseRecord, StructuredComponentMetaEvent,
+    MaterializationRecord, ProjectionRecord, SharedLoadReuseRecord, StructuredAuditEvent,
     SubstitutionRecord, VfsReadRecord,
 };
 use crate::semantic_query::{OriginEdge, OriginEdgeKind, SemanticNodeId};
@@ -64,7 +64,7 @@ pub struct AccumulatorState {
     pub materializations: Vec<MaterializationRecord>,
     /// Structured events emitted via `component_meta_trace_structured!`
     /// — retained verbatim for snapshot-exact assertions.
-    pub structured_events: Vec<StructuredComponentMetaEvent>,
+    pub structured_events: Vec<StructuredAuditEvent>,
     /// Raw derivation edges captured by the `record_origin_edge` hook
     /// before the miner canonicalises them.
     pub derivation_edges_raw: Vec<DerivationEdgeRaw>,
@@ -151,7 +151,7 @@ impl RequestFootprintAccumulator {
 
     /// Append a structured event emitted by
     /// `component_meta_trace_structured!`.
-    pub fn push_structured_event(&self, event: StructuredComponentMetaEvent) {
+    pub fn push_structured_event(&self, event: StructuredAuditEvent) {
         self.state.lock().structured_events.push(event);
     }
 
@@ -215,7 +215,7 @@ mod tests {
     #[test]
     fn accumulator_push_structured_event_appends() {
         let acc = RequestFootprintAccumulator::new();
-        acc.push_structured_event(StructuredComponentMetaEvent::RequestStart {
+        acc.push_structured_event(StructuredAuditEvent::RequestStart {
             canonical_id: Arc::from("/d.vue"),
             request_id: 7,
         });

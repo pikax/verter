@@ -1,6 +1,7 @@
 //! Curated corpus representative — root app shell with no external
 //! type dependencies. Tests the single-file happy path.
 
+use crate::harness::RequestAuditRecordAssertions;
 use crate::harness::{build_hermetic_host, resolve_under_audit};
 
 const APP_VUE: &str = r#"<script setup lang="ts">

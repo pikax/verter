@@ -1,6 +1,7 @@
 //! Curated corpus representative — auth form with cross-file
 //! field-config types.
 
+use crate::harness::RequestAuditRecordAssertions;
 use crate::harness::{build_hermetic_host, resolve_under_audit};
 
 const AUTH_FORM_VUE: &str = r#"<script setup lang="ts">

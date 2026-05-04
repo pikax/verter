@@ -47,7 +47,7 @@ Two entry points — see `AuditedRequest::builder()`:
 
 ### Loaded files vs declared-dependency files
 
-Two distinct contracts on `RustSemanticFootprintAudit`:
+Two distinct contracts on `RequestFootprintAudit`:
 
 - `loaded_files()` — exactly the canonical IDs the scheduler
   actually read on behalf of this request. Union of `vfs_reads`
@@ -57,14 +57,14 @@ Two distinct contracts on `RustSemanticFootprintAudit`:
   rendering; **not** an exact-read contract. Plan §3.B Commit 7.B.
 
 Assertion helpers mirror both:
-`RustAuditRecord::assert_loaded_files_exactly` and
-`RustAuditRecord::assert_declared_dependency_files_exactly`. Pick
+`RequestAuditRecord::assert_loaded_files_exactly` and
+`RequestAuditRecord::assert_declared_dependency_files_exactly`. Pick
 the helper whose semantics match the fixture's intent.
 
 ### Walker — `why_loaded` / `why_instantiated`
 
 Iterative backward walk over the derivation subgraph. Single
-implementation in Rust (`RustAuditRecord::why_loaded`); NAPI + WASM
+implementation in Rust (`RequestAuditRecord::why_loaded`); NAPI + WASM
 bindings serialize `ProvenanceChain` JSON, TS helpers render the
 chain as plain text. Depth cap is 256 hops; `SharedLoadReuse`
 terminates only the affected branch (winner-context details
@@ -142,7 +142,7 @@ Inspect with any JSON tool:
 ## u64 / i64 transport (plan §1.4 + §3.B Commit 7.A)
 
 Every audit integer field larger than 32 bits — signed or
-unsigned — transports as a decimal string. `RustAuditRecord`'s
+unsigned — transports as a decimal string. `RequestAuditRecord`'s
 `request_id`, `bytes_read`, `duration_ns`, and
 `process_rss_delta_bytes` (i64) round-trip through
 `JSON.parse` / `JSON.stringify` with zero precision loss.

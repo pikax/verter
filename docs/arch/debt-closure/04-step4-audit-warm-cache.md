@@ -4,8 +4,8 @@ Source plan: `D:/tmp/architectural-debt-closure.md` (revision 10), Step 4.
 
 ## What landed in this commit
 
-**Sub-task 4.1 — `RustAuditRecord::from_cache`.**
-`crates/verter_session/src/component_meta_audit/mod.rs::RustAuditRecord`
+**Sub-task 4.1 — `RequestAuditRecord::from_cache`.**
+`crates/verter_session/src/component_meta_audit/mod.rs::RequestAuditRecord`
 gains a `pub from_cache: bool` field. Serde-defaulted for back-compat
 with old audit payloads:
 
@@ -53,7 +53,7 @@ fresh id even on the warm path):
 3. Rehydrate the cached `ResolutionTemplate` into a fresh per-request
    `ResolvedComponentMetaState` (snapshot reloaded from
    `ProjectTypeStore::indexed()`).
-4. Synthesize a `RustAuditRecord { from_cache: true, total_ms: 0.0,
+4. Synthesize a `RequestAuditRecord { from_cache: true, total_ms: 0.0,
    request_id: <fresh>, ... }` and publish into `host.audit_records`
    (when audit is on) so consumers via
    `take_audit_record(resolution.request_id)` work uniformly.
@@ -79,7 +79,7 @@ audit-enabled resolver fans out across:
 - `verter_napi` / `verter_wasm` audit-enabled exports — they go through
   `AuditedRequest::resolve` which goes through
   `get_component_meta_with_resolution`. No additional plumbing required.
-- LSP `hover_provenance` — consumes `RustAuditRecord` (now includes
+- LSP `hover_provenance` — consumes `RequestAuditRecord` (now includes
   `from_cache`); rendering may need a follow-up to surface the warm
   state visually, but the structural addition is back-compat.
 
@@ -140,6 +140,6 @@ commit.
   `component_meta_result_db.rs::get`.
 - `ComponentMetaResultEntry<P> { payload: Arc<P>, dep_signature:
   DepSignature }` — generic shape unchanged.
-- `RustAuditRecord.canonical_id: String` (verified — NOT `canonical`).
+- `RequestAuditRecord.canonical_id: String` (verified — NOT `canonical`).
 - `take_audit_record(request_id)` — `host_manage.rs:5217`.
 - `publish_audit_record(record)` — `host_manage.rs:5226`.

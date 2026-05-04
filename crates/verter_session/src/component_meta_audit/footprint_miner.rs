@@ -1,7 +1,7 @@
 #![deny(missing_docs)]
 //! Footprint miner — converts a drained `AccumulatorState` plus a
 //! reference to the live [`SemanticGraphStore`] into a deterministic
-//! [`RustSemanticFootprintAudit`].
+//! [`RequestFootprintAudit`].
 //!
 //! Determinism rules:
 //!
@@ -39,8 +39,8 @@ use super::{
     AliasResolveRecord, CacheOutcomeTally, ConditionalBranch, ConditionalRecord,
     DerivationEdgeRecord, DerivationSubgraph, GraphCompletenessReport, IndexedReadyBuildRecord,
     InstantiationRecord, NamedIdentity, NodeId, NodeRecord, NormalizeKind, OriginEdgeKind,
-    OriginEdgeMetaDto, ProjectPathSegment, ProjectionRecord, RustSemanticFootprintAudit,
-    SemanticNodeKind, StructuredComponentMetaEvent, SubstitutionRecord,
+    OriginEdgeMetaDto, ProjectPathSegment, ProjectionRecord, RequestFootprintAudit,
+    SemanticNodeKind, StructuredAuditEvent, SubstitutionRecord,
 };
 use crate::request_context::RequestContext;
 use crate::semantic_query::{
@@ -50,7 +50,7 @@ use crate::semantic_query::{
 use crate::semantic_query_memo::SemanticGraphStore;
 use crate::types::Hash16;
 
-/// Mine a deterministic [`RustSemanticFootprintAudit`] from the drained
+/// Mine a deterministic [`RequestFootprintAudit`] from the drained
 /// accumulator state, using `graph` for node-data lookups and `ctx` for
 /// per-context cache counters. `max_edges` caps the derivation subgraph
 /// — when truncation happens, the report's
@@ -60,7 +60,7 @@ pub fn mine_footprint(
     state: AccumulatorState,
     ctx: &RequestContext,
     max_edges: usize,
-) -> RustSemanticFootprintAudit {
+) -> RequestFootprintAudit {
     // ── 1. Collect unique SemanticNodeIds touched by raw edges ──────
     let mut touched: Vec<SemanticNodeId> = Vec::new();
     {
@@ -212,7 +212,7 @@ pub fn mine_footprint(
         cold_aborts_swept: ctx.cold_aborts_swept.load(Ordering::Relaxed) as u32,
     };
 
-    RustSemanticFootprintAudit {
+    RequestFootprintAudit {
         indexed_ready_builds,
         vfs_reads: state.vfs_reads,
         shared_load_reuses: state.shared_load_reuses,
@@ -427,6 +427,12 @@ fn node_kind_discriminant(kind: &SemanticNodeKind) -> u32 {
         SemanticNodeKind::NormalizeUnion => 17,
         SemanticNodeKind::NormalizeIntersection => 18,
         SemanticNodeKind::Other { .. } => 19,
+        // `SemanticNodeKind` is `#[non_exhaustive]`; the catch-all
+        // here is a defensive guard for future variants added to the
+        // substrate. The miner's sort order is canonicalised so a
+        // new variant lands in the highest-discriminant slot until
+        // an explicit arm is added.
+        _ => 20,
     }
 }
 
@@ -581,12 +587,10 @@ fn translate_path_segment(seg: &PathSegment) -> ProjectPathSegment {
 // Helpers for typed-record extraction
 // ──────────────────────────────────────────────────────────────────────
 
-fn extract_indexed_ready_builds(
-    events: &[StructuredComponentMetaEvent],
-) -> Vec<IndexedReadyBuildRecord> {
+fn extract_indexed_ready_builds(events: &[StructuredAuditEvent]) -> Vec<IndexedReadyBuildRecord> {
     let mut out = Vec::new();
     for e in events {
-        if let StructuredComponentMetaEvent::IndexedReadyBuilt {
+        if let StructuredAuditEvent::IndexedReadyBuilt {
             canonical_id,
             whole_hash,
         } = e
@@ -842,13 +846,13 @@ mod tests {
         let mut state = AccumulatorState::default();
         state
             .structured_events
-            .push(StructuredComponentMetaEvent::IndexedReadyBuilt {
+            .push(StructuredAuditEvent::IndexedReadyBuilt {
                 canonical_id: Arc::from("/a.ts"),
                 whole_hash: [9u8; 16],
             });
         state
             .structured_events
-            .push(StructuredComponentMetaEvent::IndexedReadyBuilt {
+            .push(StructuredAuditEvent::IndexedReadyBuilt {
                 canonical_id: Arc::from("/b.ts"),
                 whole_hash: [10u8; 16],
             });

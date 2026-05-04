@@ -2,7 +2,7 @@
 //!
 //! The trait replaces the previously-hand-maintained
 //! `INCIDENTAL_FIELD_NAMES` constant + `mask_incidental_spans` match
-//! statement on `RustSemanticFootprintAudit`. The trait contract is
+//! statement on `RequestFootprintAudit`. The trait contract is
 //! that:
 //!
 //! 1. `incidental_fields()` returns a `'static` slice of field names
@@ -67,7 +67,7 @@ impl IncidentalFields for NoIncidentalFields {
 
     // Empty incidental list, so the loop body is unreachable in the
     // current contract. The structure deliberately mirrors the real
-    // implementation on `RustSemanticFootprintAudit` so a reviewer
+    // implementation on `RequestFootprintAudit` so a reviewer
     // can see the same shape; clippy correctly flags it as
     // `never_loop` / `match_single_binding` for this empty-list
     // case, which is exactly the contract this test pins.

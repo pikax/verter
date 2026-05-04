@@ -11,17 +11,17 @@ diff if the two drift.
 
 | Rust type                      | Summary                                                                |
 | ------------------------------ | ---------------------------------------------------------------------- |
-| `RustAuditRecord`              | Top-level envelope. Carries timings, solver, store, memory, footprint. |
-| `RustTimingAudit`              | Phase timings in milliseconds (`f64`).                                 |
-| `RustSolverAudit`              | Solver counters (`total_resolve_steps`, `solve_count`).                |
-| `RustStoreAudit`               | Store/view counters + imported-dependency byte total + materialiser counters (plan §3.2). |
-| `RustMemoryAudit`              | RSS + host-cache + workspace byte snapshots.                           |
-| `RustSemanticFootprintAudit`   | Derived footprint — see below.                                         |
+| `RequestAuditRecord`              | Top-level envelope. Carries timings, solver, store, memory, footprint. |
+| `RequestTimingAudit`              | Phase timings in milliseconds (`f64`).                                 |
+| `ComponentMetaPayload`              | Solver counters (`total_resolve_steps`, `solve_count`).                |
+| `RequestStoreAudit`               | Store/view counters + imported-dependency byte total + materialiser counters (plan §3.2). |
+| `RequestMemoryAudit`              | RSS + host-cache + workspace byte snapshots.                           |
+| `RequestFootprintAudit`   | Derived footprint — see below.                                         |
 
-### `RustStoreAudit` materialiser counters (plan §3.2)
+### `RequestStoreAudit` materialiser counters (plan §3.2)
 
 Six `u64` counters (decimal-string serialized, `string` in TS)
-were added to `RustStoreAudit` for the session-layer materialiser
+were added to `RequestStoreAudit` for the session-layer materialiser
 cutover:
 
 | Field                          | Meaning                                                                                |
@@ -43,8 +43,8 @@ fence.
 
 ### Cache-outcome enum
 
-`CacheOutcomeKind` (used by both `RustStoreAudit::cache_outcomes`
-and `StructuredComponentMetaEvent::MaterializeStructureExit`):
+`CacheOutcomeKind` (used by both `RequestStoreAudit::cache_outcomes`
+and `StructuredAuditEvent::MaterializeStructureExit`):
 
 | Variant                | Meaning                                                                  |
 | ---------------------- | ------------------------------------------------------------------------ |
@@ -60,7 +60,7 @@ and `StructuredComponentMetaEvent::MaterializeStructureExit`):
 ### Materialise-skip-reason enum
 
 `MaterializeSkipReason` (carried by
-`StructuredComponentMetaEvent::MaterializeStructurePolicySkip`):
+`StructuredAuditEvent::MaterializeStructurePolicySkip`):
 
 | Variant                                | Meaning                                                                 |
 | -------------------------------------- | ----------------------------------------------------------------------- |
@@ -72,7 +72,7 @@ and `StructuredComponentMetaEvent::MaterializeStructureExit`):
 
 ### Footprint
 
-`RustSemanticFootprintAudit` fields, each a `Vec<R>` where `R`
+`RequestFootprintAudit` fields, each a `Vec<R>` where `R`
 derives `serde + ts-rs::TS`:
 
 - `indexed_ready_builds: Vec<IndexedReadyBuildRecord>`
@@ -119,7 +119,7 @@ regardless of thread interleaving.
 ## Walker
 
 ```rust
-impl RustAuditRecord {
+impl RequestAuditRecord {
     pub fn why_loaded(&self, canonical_id: &str) -> ProvenanceChain;
     pub fn why_instantiated(
         &self,
@@ -190,5 +190,5 @@ the sync call in `Promise.resolve(...)` at the consumer layer.
 controls eviction; oldest entries evict on overflow. Strict
 insert-then-take — no access refresh.
 
-`VerterHost::take_audit_record(request_id) -> Option<RustAuditRecord>`
+`VerterHost::take_audit_record(request_id) -> Option<RequestAuditRecord>`
 drains the entry.

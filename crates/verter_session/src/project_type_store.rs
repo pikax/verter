@@ -416,7 +416,7 @@ impl IndexedReadyDb {
             // active request's accumulator on every FRESH insert.
             // Gate on fresh-insert (prev.is_none()) so overwrites
             // after a stale-sweep do not double-emit. Also feeds
-            // `RustSemanticFootprintAudit.indexed_ready_builds` via
+            // `RequestFootprintAudit.indexed_ready_builds` via
             // the miner.
             crate::component_meta_audit::record_indexed_ready_built(
                 Arc::clone(&canonical_for_event),

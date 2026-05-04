@@ -59,7 +59,7 @@ Three plan-vs-tooling mismatches were surfaced during B-00-baselines and resolve
 
 2. **`scripts/benchmark/trace-component-corpus.mjs` does not support `--trace` / `--no-trace` flags.** The script accepts only `--ui-root`, `--output-dir`, `--timeout-ms`, `--filter`. The `--trace` infrastructure referenced in §10.3 lives in a different runner. `trace_query_ms` / `trace_resolve_ms` are NOT captured pre-A0.
 
-3. **Pre-A0 audit harness exposes only aggregate counters.** Per-DB hits/misses (`MaterializeMemoDb`, `ComponentMetaResultDb`, `RefCycleResultDb`) and per-`SemanticQueryKey`-family dispatch splits are NOT reachable until B-A0's `CaptureSnapshot::cache_hits/cache_misses` and `dispatch_count(KeyFamily::...)` API cherry-picks onto integration. B-00-baselines uses `RustStoreAudit::materialize_structure_calls` as a conservative surrogate for `max_materialize_memo_db_entries` in committed bound JSONs.
+3. **Pre-A0 audit harness exposes only aggregate counters.** Per-DB hits/misses (`MaterializeMemoDb`, `ComponentMetaResultDb`, `RefCycleResultDb`) and per-`SemanticQueryKey`-family dispatch splits are NOT reachable until B-A0's `CaptureSnapshot::cache_hits/cache_misses` and `dispatch_count(KeyFamily::...)` API cherry-picks onto integration. B-00-baselines uses `RequestStoreAudit::materialize_structure_calls` as a conservative surrogate for `max_materialize_memo_db_entries` in committed bound JSONs.
 
 The follow-up dispatches re-run captures with B-A0's authoritative API.
 

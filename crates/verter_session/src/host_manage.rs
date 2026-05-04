@@ -302,7 +302,7 @@ pub(crate) fn component_meta_debug(message: impl AsRef<str>) {
 // The legacy file/stderr trace is deleted. The
 // remaining infrastructure below is the thin shim that keeps
 // component_meta_trace_scope! / component_meta_trace_event! macro
-// call sites compiling — each now pushes `StructuredComponentMetaEvent::Custom`
+// call sites compiling — each now pushes `StructuredAuditEvent::Custom`
 // into the active request's accumulator via
 // `component_meta_trace_structured!`. When no accumulator is
 // installed, the push is a no-op.
@@ -577,7 +577,7 @@ impl HostFenceValidator<'_> {
 
 /// Push a structured event into the active request's accumulator.
 /// No-op when no request context is installed.
-pub fn push_structured_event(event: crate::component_meta_audit::StructuredComponentMetaEvent) {
+pub fn push_structured_event(event: crate::component_meta_audit::StructuredAuditEvent) {
     if let Some(acc) = crate::request_context::current_accumulator() {
         acc.push_structured_event(event);
     }
@@ -626,7 +626,7 @@ pub(crate) fn emit_policy_skip(
     if crate::request_context::current_accumulator().is_some() {
         let base_str: std::sync::Arc<str> = std::sync::Arc::from(format!("Node#{}", base.0));
         push_structured_event(
-            crate::component_meta_audit::StructuredComponentMetaEvent::MaterializeStructurePolicySkip {
+            crate::component_meta_audit::StructuredAuditEvent::MaterializeStructurePolicySkip {
                 base: base_str,
                 scope_axis: scope_axis.into(),
                 reason,
@@ -671,7 +671,7 @@ pub fn record_dep_signature_intern_hit() {
     }
 }
 
-/// Construct and push a `StructuredComponentMetaEvent::Custom` into
+/// Construct and push a `StructuredAuditEvent::Custom` into
 /// the active request's accumulator. Single in-tree construction
 /// site for the `Custom` variant — the
 /// `every_custom_variant_construction_site_has_justification_comment`
@@ -684,7 +684,7 @@ pub(crate) fn push_structured_custom(name: &'static str, detail: impl Into<Strin
     // Custom justified: debug/trace sites across host_manage,
     // host_resolve, meta_resolve, component_meta_host, and
     // component_meta_audit do not map to typed variants of
-    // `StructuredComponentMetaEvent` (RequestStart / VfsRead /
+    // `StructuredAuditEvent` (RequestStart / VfsRead /
     // MaterializeMemberRoute{Start,End} / etc.). The `Custom`
     // variant exists precisely for ad-hoc structured logging; every
     // call site funnels through this single helper so the
@@ -693,12 +693,13 @@ pub(crate) fn push_structured_custom(name: &'static str, detail: impl Into<Strin
     // Custom justified: single construction site for `Custom`
     // across the session crate — see the rationale in the
     // `push_structured_custom` doc comment above.
-    push_structured_event(
-        crate::component_meta_audit::StructuredComponentMetaEvent::Custom { name, detail },
-    );
+    push_structured_event(crate::component_meta_audit::StructuredAuditEvent::Custom {
+        name,
+        detail,
+    });
 }
 
-/// Push a typed `StructuredComponentMetaEvent` variant into the
+/// Push a typed `StructuredAuditEvent` variant into the
 /// current accumulator. — preferred for any call site
 /// that maps to a named variant (`IndexedReadyBuilt`, `VfsRead`,
 /// `MaterializeMemberRouteStart`, …).
@@ -710,7 +711,7 @@ macro_rules! component_meta_trace_structured {
 }
 
 /// Convenience macro for debug/trace call-sites that don't fit a
-/// typed `StructuredComponentMetaEvent` variant — the successor to
+/// typed `StructuredAuditEvent` variant — the successor to
 /// the deleted `component_meta_trace_scope!` /
 /// `component_meta_trace_event!` macros. Expands to a single call
 /// into [`push_structured_custom`].

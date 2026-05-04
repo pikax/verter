@@ -1,6 +1,7 @@
 //! Curated corpus representative — avatar group with an array of
 //! avatar-shaped props (re-uses avatar's size type).
 
+use crate::harness::RequestAuditRecordAssertions;
 use crate::harness::{build_hermetic_host, resolve_under_audit};
 
 const AVATAR_GROUP_VUE: &str = r#"<script setup lang="ts">

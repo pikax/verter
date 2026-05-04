@@ -2,7 +2,7 @@
 //! grep-based assertions that the legacy
 //! `component_meta_trace_scope!` / `component_meta_trace_event!` macros
 //! do not exist anywhere in the workspace, and that every
-//! `StructuredComponentMetaEvent::Custom { ... }` construction site
+//! `StructuredAuditEvent::Custom { ... }` construction site
 //! carries a `// Custom justified:` comment.
 //!
 //! These are integration tests because the grep scope crosses the
@@ -160,7 +160,7 @@ fn legacy_trace_env_vars_not_consumed_anywhere() {
     );
 }
 
-/// Every literal `StructuredComponentMetaEvent::Custom { … }`
+/// Every literal `StructuredAuditEvent::Custom { … }`
 /// construction site in the session crate must carry a
 /// `// Custom justified: …` comment within the preceding 3 lines.
 ///
@@ -190,10 +190,10 @@ fn every_custom_variant_construction_site_has_justification_comment() {
                 continue;
             }
 
-            // Match only the specific `StructuredComponentMetaEvent::Custom` variant.
+            // Match only the specific `StructuredAuditEvent::Custom` variant.
             // (`VirtualNodeKind::Custom {` from a different enum is intentionally
             // excluded by the explicit path prefix.)
-            let construct = line.contains("StructuredComponentMetaEvent::Custom {")
+            let construct = line.contains("StructuredAuditEvent::Custom {")
                 || (line.contains("Event::Custom {") && is_struct_event_alias(&text, i));
 
             if !construct {
@@ -240,7 +240,7 @@ fn every_custom_variant_construction_site_has_justification_comment() {
     }
     assert!(
         violations.is_empty(),
-        "Every `StructuredComponentMetaEvent::Custom {{ … }}` construction site must \
+        "Every `StructuredAuditEvent::Custom {{ … }}` construction site must \
          document why a typed variant isn't available (plan §3.A Commit 6.E). Found:\n{}",
         violations.join("\n")
     );
@@ -248,13 +248,13 @@ fn every_custom_variant_construction_site_has_justification_comment() {
 
 /// In the `expected_display_snapshots` module and the
 /// `structured_event::tests` module, `Event` is aliased to
-/// `StructuredComponentMetaEvent` via `use super::StructuredComponentMetaEvent as Event`.
+/// `StructuredAuditEvent` via `use super::StructuredAuditEvent as Event`.
 /// We grep the file for that alias so `Event::Custom { ... }` is
-/// identified as a StructuredComponentMetaEvent construction.
+/// identified as a StructuredAuditEvent construction.
 fn is_struct_event_alias(text: &str, _line_idx: usize) -> bool {
-    text.contains("StructuredComponentMetaEvent as Event")
-        || text.contains("StructuredComponentMetaEvent,")
-        || text.contains("super::StructuredComponentMetaEvent")
+    text.contains("StructuredAuditEvent as Event")
+        || text.contains("StructuredAuditEvent,")
+        || text.contains("super::StructuredAuditEvent")
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -318,7 +318,7 @@ fn component_meta_trace_structured_macro_does_not_write_to_file_or_stderr_trace(
 fn indexed_ready_built_event_fires_once_per_fresh_whole_hash() {
     use std::sync::Arc;
     use verter_session::component_meta_audit::{
-        accumulator::RequestFootprintAccumulator, StructuredComponentMetaEvent,
+        accumulator::RequestFootprintAccumulator, StructuredAuditEvent,
     };
     use verter_session::project_type_store::{IndexedReady, IndexedReadyDb};
     use verter_session::request_context::{RequestContext, RequestContextGuard};
@@ -338,7 +338,7 @@ fn indexed_ready_built_event_fires_once_per_fresh_whole_hash() {
     let fresh_events: Vec<_> = state
         .structured_events
         .iter()
-        .filter(|ev| matches!(ev, StructuredComponentMetaEvent::IndexedReadyBuilt { .. }))
+        .filter(|ev| matches!(ev, StructuredAuditEvent::IndexedReadyBuilt { .. }))
         .collect();
     assert_eq!(
         fresh_events.len(),
@@ -353,7 +353,7 @@ fn indexed_ready_built_event_fires_once_per_fresh_whole_hash() {
 fn indexed_ready_built_event_not_fired_on_overwrite() {
     use std::sync::Arc;
     use verter_session::component_meta_audit::{
-        accumulator::RequestFootprintAccumulator, StructuredComponentMetaEvent,
+        accumulator::RequestFootprintAccumulator, StructuredAuditEvent,
     };
     use verter_session::project_type_store::{IndexedReady, IndexedReadyDb};
     use verter_session::request_context::{RequestContext, RequestContextGuard};
@@ -383,7 +383,7 @@ fn indexed_ready_built_event_not_fired_on_overwrite() {
     let fresh_events: Vec<_> = state
         .structured_events
         .iter()
-        .filter(|ev| matches!(ev, StructuredComponentMetaEvent::IndexedReadyBuilt { .. }))
+        .filter(|ev| matches!(ev, StructuredAuditEvent::IndexedReadyBuilt { .. }))
         .collect();
     assert_eq!(
         fresh_events.len(),

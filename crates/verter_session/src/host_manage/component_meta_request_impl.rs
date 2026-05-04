@@ -363,8 +363,8 @@ pub type ResolvedJsdocTag = crate::resolver_core::ResolvedJsdocTag;
 /// identity/location only.
 #[derive(Debug, Clone)]
 pub struct ResolvedComponentMetaComputeAudit {
-    pub timings: crate::component_meta_audit::RustTimingAudit,
-    pub solver: crate::component_meta_audit::RustSolverAudit,
+    pub timings: crate::component_meta_audit::RequestTimingAudit,
+    pub solver: crate::component_meta_audit::ComponentMetaPayload,
 }
 
 pub(crate) fn resolved_meta_cache_key(

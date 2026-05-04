@@ -349,7 +349,7 @@ fn corpus_audit_mod_rs_regenerates_deterministically_across_platforms() {
 /// Pins the current incidental-field set so snapshot stability is
 /// not quietly broken. The set is enumerated via the
 /// [`IncidentalFields`] trait implementation on
-/// [`RustSemanticFootprintAudit`]; this test reads the slice
+/// [`RequestFootprintAudit`]; this test reads the slice
 /// directly from the trait method AND verifies every listed field
 /// is actually cleared on the masked output.
 ///
@@ -368,31 +368,33 @@ fn corpus_audit_mod_rs_regenerates_deterministically_across_platforms() {
 fn commit_7_snapshots_stable_against_current_incidental_event_names_list() {
     use std::sync::Arc;
     use verter_session::component_meta_audit::{
-        IncidentalFields, RustSemanticFootprintAudit, VfsLayer, VfsReadRecord,
+        IncidentalFields, RequestFootprintAudit, VfsLayer, VfsReadRecord,
     };
 
     let root = workspace_root();
-    let audit_mod_path = root.join("crates/verter_session/src/component_meta_audit/mod.rs");
+    // The masking affordance lives on the substrate side now; pin
+    // its presence in `verter_audit::footprint`.
+    let audit_mod_path = root.join("crates/verter_audit/src/footprint.rs");
 
     let audit_src =
-        fs::read_to_string(&audit_mod_path).unwrap_or_else(|e| panic!("read audit mod: {e}"));
+        fs::read_to_string(&audit_mod_path).unwrap_or_else(|e| panic!("read audit footprint: {e}"));
 
     assert!(
         audit_src.contains("pub fn mask_incidental_spans"),
         "`pub fn mask_incidental_spans` is missing from \
-         `crates/verter_session/src/component_meta_audit/mod.rs` — pinned \
-         snapshots lose their stability guarantee. The masking affordance must \
-         survive (or this test must be updated in lock-step).",
+         `crates/verter_audit/src/footprint.rs` — pinned snapshots lose their \
+         stability guarantee. The masking affordance must survive (or this \
+         test must be updated in lock-step).",
     );
 
     // Pin the current trait-declared set. Adding a new field to
     // the mask requires updating BOTH this expected list AND the
     // match statement inside `IncidentalFields::mask_incidental`.
-    let incidental_fields = <RustSemanticFootprintAudit as IncidentalFields>::incidental_fields();
+    let incidental_fields = <RequestFootprintAudit as IncidentalFields>::incidental_fields();
     let expected_incidental: &[&str] = &["vfs_reads"];
     assert_eq!(
         incidental_fields, expected_incidental,
-        "RustSemanticFootprintAudit::incidental_fields() drifted — if this was \
+        "RequestFootprintAudit::incidental_fields() drifted — if this was \
          intentional, update the expected list here AND regenerate the pinned \
          corpus_representatives snapshots.",
     );
@@ -402,7 +404,7 @@ fn commit_7_snapshots_stable_against_current_incidental_event_names_list() {
     // output clears it. This discriminates against a stealth
     // regression where the match arm returns unchanged.
     for &field in incidental_fields {
-        let mut fp = RustSemanticFootprintAudit::default();
+        let mut fp = RequestFootprintAudit::default();
         match field {
             "vfs_reads" => fp.vfs_reads.push(VfsReadRecord {
                 canonical_id: Arc::from("/x.ts"),

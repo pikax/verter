@@ -3,6 +3,7 @@
 //! known-at-call-site LHS). The solver should pick exactly one
 //! arm, not distribute.
 
+use crate::harness::RequestAuditRecordAssertions;
 use crate::harness::{build_hermetic_host, resolve_under_audit};
 
 const CLOSED_CONDITIONAL_VUE: &str = r#"<script setup lang="ts">

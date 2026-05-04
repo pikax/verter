@@ -3686,6 +3686,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "verter_audit"
+version = "0.0.1-beta.1"
+dependencies = [
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "ts-rs",
+ "verter_span",
+ "web-time",
+ "windows-sys",
+]
+
+[[package]]
 name = "verter_bench"
 version = "0.0.1-beta.1"
 dependencies = [
@@ -3979,6 +3992,7 @@ dependencies = [
  "tracing",
  "trybuild",
  "ts-rs",
+ "verter_audit",
  "verter_compiler",
  "verter_parser",
  "verter_protocol",

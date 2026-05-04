@@ -1,5 +1,5 @@
 //! Byte-exact `Display` snapshots for every variant of
-//! [`StructuredComponentMetaEvent`](super::StructuredComponentMetaEvent).
+//! [`StructuredAuditEvent`](super::StructuredAuditEvent).
 //!
 //! / §3.A. The
 //! `structured_event_display_snapshot_byte_exact_for_every_variant`
@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use super::{
     CacheOutcomeKind, DispatchKeyKind, MaterializationScopeAudit, MaterializationSubject,
-    MaterializeSkipReason, ProjectionModeAudit, StructuredComponentMetaEvent as Event, VfsLayer,
+    MaterializeSkipReason, ProjectionModeAudit, StructuredAuditEvent as Event, VfsLayer,
 };
 use crate::types::Hash16;
 
@@ -278,7 +278,7 @@ pub fn fixture_custom() -> Event {
 /// Pair each fixture with its expected Display string. The
 /// `structured_event_display_snapshot_byte_exact_for_every_variant`
 /// test iterates this table, and the companion `all_variants_covered`
-/// test reflects on `StructuredComponentMetaEvent`'s match discriminants
+/// test reflects on `StructuredAuditEvent`'s match discriminants
 /// to ensure no variant is missing.
 pub fn all_snapshots() -> Vec<(Event, &'static str)> {
     vec![

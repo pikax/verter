@@ -243,6 +243,15 @@ impl RequestContext {
             dep_signature_intern_hits: AtomicU64::new(0),
         })
     }
+
+    /// Audit-side request kind. Component-meta is the only entry
+    /// point that lands today; producers in lower crates pass their
+    /// own kinds through dedicated `*_with_audit` entry-points
+    /// without going through this context.
+    #[must_use]
+    pub fn kind(&self) -> verter_audit::RequestKind {
+        verter_audit::RequestKind::ComponentMeta
+    }
 }
 
 impl RequestContextLike for RequestContext {

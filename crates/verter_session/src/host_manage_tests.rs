@@ -313,7 +313,7 @@ fn clear_cached_parse(host: &VerterHost) {
 
 // Legacy trace-line formatting tests 5 ( clean-cut rule). `format_component_meta_trace_line`,
 // `ComponentMetaTraceEvent`, and `ComponentMetaTraceLine` no longer
-// exist; their replacement is `StructuredComponentMetaEvent` tested
+// exist; their replacement is `StructuredAuditEvent` tested
 // in `component_meta_audit/structured_event.rs`.
 
 #[test]
@@ -5662,7 +5662,7 @@ export const defaults: Props = { label: 'ok' }
         "on-demand prepared value materialization should be available through the bundle cache",
     );
 
-    let audit = host.component_meta_audit_store_snapshot(None);
+    let (audit, _cm_counters) = host.component_meta_audit_store_snapshot(None);
     assert_eq!(
         audit.prepared_type_decls, 1,
         "audit store snapshot should count prepared type decls from the bundle cache",
@@ -9940,7 +9940,7 @@ export type Props = { render: typeof Button }
 mod imported_root_trace_dedup_tests {
     use super::*;
     use crate::component_meta_audit::accumulator::RequestFootprintAccumulator;
-    use crate::component_meta_audit::structured_event::StructuredComponentMetaEvent;
+    use crate::component_meta_audit::structured_event::StructuredAuditEvent;
     use crate::request_context::{RequestContext, RequestContextGuard};
     use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
@@ -9999,13 +9999,13 @@ mod imported_root_trace_dedup_tests {
         }
 
         let state = acc.drain();
-        let resolve_events: Vec<&StructuredComponentMetaEvent> = state
+        let resolve_events: Vec<&StructuredAuditEvent> = state
             .structured_events
             .iter()
             .filter(|e| {
                 matches!(
                     e,
-                    StructuredComponentMetaEvent::Custom { name, .. }
+                    StructuredAuditEvent::Custom { name, .. }
                         if name.as_ref() == "resolve_imported_type_root"
                 )
             })

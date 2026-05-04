@@ -17,7 +17,7 @@ use std::sync::Arc;
 use verter_session::component_meta_audit::accumulator::RequestFootprintAccumulator;
 use verter_session::component_meta_audit::{
     CacheOutcomeKind, MaterializationScopeAudit, MaterializeSkipReason, ProjectionModeAudit,
-    StructuredComponentMetaEvent,
+    StructuredAuditEvent,
 };
 use verter_session::host_manage::{
     push_structured_event, record_dep_signature_intern_hit, record_dep_signature_merge,
@@ -79,42 +79,36 @@ fn phase1_new_structured_events_appended_to_accumulator() {
     let ctx = RequestContext::new(202, Arc::from("/d.vue"), true, Some(Arc::clone(&acc)));
     let _g = RequestContextGuard::install(Arc::clone(&ctx));
 
-    push_structured_event(StructuredComponentMetaEvent::MaterializeStructureEnter {
+    push_structured_event(StructuredAuditEvent::MaterializeStructureEnter {
         base: Arc::from("Object#7"),
         scope_axis: MaterializationScopeAudit::TopLevel,
         mode: ProjectionModeAudit::Expanded,
         depth: 1,
     });
-    push_structured_event(StructuredComponentMetaEvent::MaterializeStructureExit {
+    push_structured_event(StructuredAuditEvent::MaterializeStructureExit {
         base: Arc::from("Object#7"),
         scope_axis: MaterializationScopeAudit::TopLevel,
         mode: ProjectionModeAudit::Expanded,
         outcome: CacheOutcomeKind::Hit,
         duration_ns: 1234,
     });
-    push_structured_event(
-        StructuredComponentMetaEvent::MaterializeStructurePolicySkip {
-            base: Arc::from("Object#7"),
-            scope_axis: MaterializationScopeAudit::Nested,
-            reason: MaterializeSkipReason::FunctionPropertyAtNested,
-        },
-    );
-    push_structured_event(
-        StructuredComponentMetaEvent::MaterializeStructureCycleDetected {
-            base: Arc::from("Object#7"),
-            scope_axis: MaterializationScopeAudit::Nested,
-            mode: ProjectionModeAudit::Expanded,
-            depth: 3,
-        },
-    );
-    push_structured_event(
-        StructuredComponentMetaEvent::MaterializeStructureDepthFuseTripped {
-            base: Arc::from("Object#7"),
-            scope_axis: MaterializationScopeAudit::Nested,
-            mode: ProjectionModeAudit::Expanded,
-            depth: 4096,
-        },
-    );
+    push_structured_event(StructuredAuditEvent::MaterializeStructurePolicySkip {
+        base: Arc::from("Object#7"),
+        scope_axis: MaterializationScopeAudit::Nested,
+        reason: MaterializeSkipReason::FunctionPropertyAtNested,
+    });
+    push_structured_event(StructuredAuditEvent::MaterializeStructureCycleDetected {
+        base: Arc::from("Object#7"),
+        scope_axis: MaterializationScopeAudit::Nested,
+        mode: ProjectionModeAudit::Expanded,
+        depth: 3,
+    });
+    push_structured_event(StructuredAuditEvent::MaterializeStructureDepthFuseTripped {
+        base: Arc::from("Object#7"),
+        scope_axis: MaterializationScopeAudit::Nested,
+        mode: ProjectionModeAudit::Expanded,
+        depth: 4096,
+    });
 
     let state = acc.drain();
     assert_eq!(state.structured_events.len(), 5);
@@ -127,15 +121,11 @@ fn phase1_new_structured_events_appended_to_accumulator() {
     let mut saw_fuse = false;
     for ev in &state.structured_events {
         match ev {
-            StructuredComponentMetaEvent::MaterializeStructureEnter { .. } => saw_enter = true,
-            StructuredComponentMetaEvent::MaterializeStructureExit { .. } => saw_exit = true,
-            StructuredComponentMetaEvent::MaterializeStructurePolicySkip { .. } => saw_skip = true,
-            StructuredComponentMetaEvent::MaterializeStructureCycleDetected { .. } => {
-                saw_cycle = true
-            }
-            StructuredComponentMetaEvent::MaterializeStructureDepthFuseTripped { .. } => {
-                saw_fuse = true
-            }
+            StructuredAuditEvent::MaterializeStructureEnter { .. } => saw_enter = true,
+            StructuredAuditEvent::MaterializeStructureExit { .. } => saw_exit = true,
+            StructuredAuditEvent::MaterializeStructurePolicySkip { .. } => saw_skip = true,
+            StructuredAuditEvent::MaterializeStructureCycleDetected { .. } => saw_cycle = true,
+            StructuredAuditEvent::MaterializeStructureDepthFuseTripped { .. } => saw_fuse = true,
             _ => {}
         }
     }

@@ -11,7 +11,9 @@ use napi::{Error, Status};
 use napi_derive::napi;
 use serde::{Deserialize, Serialize};
 use verter_protocol::types::{FfiComponentMeta, FfiComponentMetaResolution};
-use verter_session::component_meta_audit::RustAuditRecord;
+use verter_session::component_meta_audit::{
+    assertions::RequestAuditRecordAssertions, RequestAuditRecord,
+};
 use verter_session::component_meta_host::{
     ComponentMetaHost, ComponentMetaHostError, ComponentMetaSession as HostComponentMetaSession,
 };
@@ -39,14 +41,14 @@ fn encode_meta_payload(
 ///   already derives `Serialize` (camelCase).
 /// - `resolution`: FFI projection of `ResolvedComponentMetaState` —
 ///   `FfiComponentMetaResolution` (camelCase).
-/// - `record`: `RustAuditRecord` (ts-rs–generated type surface; u64/i64
+/// - `record`: `RequestAuditRecord` (ts-rs–generated type surface; u64/i64
 ///   fields transport as decimal strings).
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AuditBundle {
     analysis: FfiComponentMeta,
     resolution: FfiComponentMetaResolution,
-    record: RustAuditRecord,
+    record: RequestAuditRecord,
 }
 
 /// Minimal decoder for `whyLoadedFromAuditJson` / `whyInstantiatedFromAuditJson`.
@@ -56,7 +58,7 @@ struct AuditBundle {
 /// struct omits them entirely (no dead-code fields to carry).
 #[derive(Deserialize)]
 struct AuditBundleForWalker {
-    record: RustAuditRecord,
+    record: RequestAuditRecord,
 }
 
 /// Parse a 32-character lowercase hex string into a
@@ -292,7 +294,7 @@ impl NapiMetaSession {
 
     /// Synchronous audit bundle — returns JSON bytes of
     /// `{ analysis: FfiComponentMeta, resolution: FfiComponentMetaResolution,
-    ///   record: RustAuditRecord }`. Requires the host to have
+    ///   record: RequestAuditRecord }`. Requires the host to have
     /// `audit_enabled` + `footprint_capture` set on construction.
     ///
     /// NOT async. Audit capture completes on the same call that produces
@@ -519,7 +521,7 @@ mod tests {
         // receive a full `AuditBundle` JSON — `{ analysis, resolution,
         // record }` — but only need `record`. If a future refactor
         // accidentally adds `#[serde(deny_unknown_fields)]` to
-        // `AuditBundleForWalker` (or to `RustAuditRecord`), the walker
+        // `AuditBundleForWalker` (or to `RequestAuditRecord`), the walker
         // bindings silently regress: consumers who stringify their
         // full bundle would start hitting "unknown field `analysis`"
         // deserialization errors that only surface at runtime.
@@ -533,6 +535,8 @@ mod tests {
             "record": {
                 "request_id": "42",
                 "canonical_id": "/Widget.vue",
+                "kind": "ComponentMeta",
+                "parent_request_id": null,
                 "timings": {
                     "total_ms": 0.0,
                     "capture_inputs_ms": 0.0,
@@ -544,7 +548,6 @@ mod tests {
                     "materialize_ms": 0.0,
                     "serialize_ms": 0.0
                 },
-                "solver": { "total_resolve_steps": "0", "solve_count": 0 },
                 "store": {
                     "store_view_hits": 0,
                     "store_view_misses": 0,
@@ -563,7 +566,18 @@ mod tests {
                     "workspace_before_bytes": "0",
                     "workspace_after_bytes": "0"
                 },
-                "footprint": null
+                "footprint": null,
+                "kind_payload": {
+                    "kind": "ComponentMeta",
+                    "total_resolve_steps": "0",
+                    "solve_count": 0,
+                    "materialize_structure_calls": "0",
+                    "materialize_structure_cache_hits": "0",
+                    "node_arena_lock_acquisitions": "0",
+                    "family_map_lock_acquisitions": "0",
+                    "dep_signature_merges": "0",
+                    "dep_signature_intern_hits": "0"
+                }
             }
         });
         let bundle_json = serde_json::to_string(&full_bundle).expect("encode");

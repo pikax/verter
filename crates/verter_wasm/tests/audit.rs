@@ -10,7 +10,7 @@
 //! These tests form the Rust half of a layered coverage story:
 //!
 //! - **This file** — pins the `serde::Serialize`/`Deserialize` impls
-//!   on `RustAuditRecord` against `serde_json`. Catches regressions
+//!   on `RequestAuditRecord` against `serde_json`. Catches regressions
 //!   in the serde annotation surface (missing `#[serde(with =
 //!   "u64_as_decimal_string")]`, accidental `#[serde(skip)]`,
 //!   enum-tagging drift) without requiring a live WASM runtime.
@@ -32,16 +32,17 @@
 use std::sync::Arc;
 
 use verter_session::component_meta_audit::{
-    ChainTermination, DerivationEdgeRecord, DerivationSubgraph, IndexedReadyBuildRecord,
-    InstantiationRecord, NamedIdentity, NodeId, NodeRecord, OriginEdgeKind, OriginEdgeMetaDto,
-    RustAuditRecord, RustMemoryAudit, RustSemanticFootprintAudit, RustSolverAudit, RustStoreAudit,
-    RustTimingAudit, SemanticNodeKind, SharedLoadReuseRecord, VfsLayer, VfsReadRecord,
+    assertions::RequestAuditRecordAssertions, ChainTermination, ComponentMetaPayload,
+    DerivationEdgeRecord, DerivationSubgraph, IndexedReadyBuildRecord, InstantiationRecord,
+    NamedIdentity, NodeId, NodeRecord, OriginEdgeKind, OriginEdgeMetaDto, RequestAuditRecord,
+    RequestFootprintAudit, RequestKind, RequestKindPayload, RequestMemoryAudit, RequestStoreAudit,
+    RequestTimingAudit, SemanticNodeKind, SharedLoadReuseRecord, VfsLayer, VfsReadRecord,
 };
 
-/// Build a synthetic `RustAuditRecord` that covers every record
+/// Build a synthetic `RequestAuditRecord` that covers every record
 /// vector and both code paths in `why_loaded` (derivation-graph root
 /// + shared-load fallback).
-fn synthesize_record() -> RustAuditRecord {
+fn synthesize_record() -> RequestAuditRecord {
     let nodes = vec![
         NodeRecord {
             kind: SemanticNodeKind::Primitive,
@@ -68,7 +69,7 @@ fn synthesize_record() -> RustAuditRecord {
             alias_name: Arc::from("from-source"),
         },
     }];
-    let footprint = RustSemanticFootprintAudit {
+    let footprint = RequestFootprintAudit {
         derivation_subgraph: DerivationSubgraph { nodes, edges },
         vfs_reads: vec![VfsReadRecord {
             canonical_id: Arc::from("/a.ts"),
@@ -95,31 +96,34 @@ fn synthesize_record() -> RustAuditRecord {
         }],
         ..Default::default()
     };
-    RustAuditRecord {
+    RequestAuditRecord {
         request_id: 7,
         canonical_id: "/Widget.vue".to_string(),
-        timings: RustTimingAudit {
+        kind: RequestKind::ComponentMeta,
+        parent_request_id: None,
+        timings: RequestTimingAudit {
             total_ms: 12.5,
             solver_ms: 2.5,
             ..Default::default()
         },
-        solver: RustSolverAudit {
-            total_resolve_steps: 4,
-            solve_count: 1,
-        },
-        store: RustStoreAudit::default(),
-        memory: RustMemoryAudit {
+        store: RequestStoreAudit::default(),
+        memory: RequestMemoryAudit {
             process_rss_delta_bytes: -128,
             ..Default::default()
         },
         footprint: Some(footprint),
         from_cache: false,
+        kind_payload: RequestKindPayload::ComponentMeta(ComponentMetaPayload {
+            total_resolve_steps: 4,
+            solve_count: 1,
+            ..Default::default()
+        }),
     }
 }
 
 /// `wasm_get_component_meta_with_audit_serializes_across_boundary`
 /// (plan §3 Commit 8 test list). Verify that the Rust-side
-/// `RustAuditRecord` round-trips through `serde_json` without loss —
+/// `RequestAuditRecord` round-trips through `serde_json` without loss —
 /// this exercises the exact serde impls `serde-wasm-bindgen` consumes
 /// to produce a `JsValue` bundle.
 #[test]
@@ -146,7 +150,7 @@ fn wasm_get_component_meta_with_audit_serializes_across_boundary() {
         "i64 fields must serialize as decimal strings, got JSON: {json}",
     );
 
-    let recovered: RustAuditRecord = serde_json::from_str(&json).expect("deserialize");
+    let recovered: RequestAuditRecord = serde_json::from_str(&json).expect("deserialize");
 
     assert_eq!(recovered.request_id, original.request_id);
     assert_eq!(recovered.canonical_id, original.canonical_id);
@@ -178,7 +182,7 @@ fn wasm_why_loaded_binding_invokes_rust_walker() {
     let original = synthesize_record();
 
     let audit_json = serde_json::to_string(&original).expect("serialize");
-    let recovered: RustAuditRecord = serde_json::from_str(&audit_json).expect("deserialize");
+    let recovered: RequestAuditRecord = serde_json::from_str(&audit_json).expect("deserialize");
 
     // (A) Graph-root lookup — `/Widget.vue` appears as a named
     // identity on NodeId(1), so the walker roots there and produces
@@ -215,7 +219,7 @@ fn wasm_why_loaded_binding_invokes_rust_walker() {
 fn wasm_audit_record_json_is_value_stable_through_round_trip() {
     let original = synthesize_record();
     let once = serde_json::to_string(&original).expect("first serialize");
-    let recovered: RustAuditRecord = serde_json::from_str(&once).expect("deserialize to struct");
+    let recovered: RequestAuditRecord = serde_json::from_str(&once).expect("deserialize to struct");
     let twice = serde_json::to_string(&recovered).expect("re-serialize struct");
     assert_eq!(
         once, twice,

@@ -177,8 +177,8 @@ fn skill_references_audit_api_names_exactly_as_exported() {
     // reference in the skill file, append the name here — the test
     // pins the mapping so "I mentioned X but X was renamed" surfaces.
     let audit_api_names = &[
-        "RustAuditRecord",
-        "RustSemanticFootprintAudit",
+        "RequestAuditRecord",
+        "RequestFootprintAudit",
         "AuditedRequest",
         "loaded_files",
         "declared_dependency_files",

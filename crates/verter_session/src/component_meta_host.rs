@@ -349,7 +349,7 @@ impl ComponentMetaSession {
         Option<(
             verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
             crate::meta_resolve::ResolvedComponentMetaState,
-            crate::component_meta_audit::RustAuditRecord,
+            crate::component_meta_audit::RequestAuditRecord,
         )>,
         ComponentMetaHostError,
     > {

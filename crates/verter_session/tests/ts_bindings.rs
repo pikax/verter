@@ -23,8 +23,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use verter_session::component_meta_audit::{
-    ChainTermination, ProvenanceChain, ProvenanceStep, RequestPhaseAudit, RustAuditRecord,
-    StructuredComponentMetaEvent,
+    ChainTermination, ProvenanceChain, ProvenanceStep, RequestAuditRecord, RequestPhaseAudit,
+    StructuredAuditEvent,
 };
 
 /// Locate the workspace root by ascending until we find
@@ -56,11 +56,24 @@ fn normalize_lf(s: &str) -> String {
 fn audit_ts_bindings_are_in_sync() {
     use ts_rs::TS;
 
+    // Discriminating sync gate: regenerate the merged audit-record
+    // dependency closure into a tempdir AND simultaneously refresh
+    // the on-disk `packages/types/audit.generated.ts`. Compare the
+    // regenerated content against the *git-committed* baseline
+    // (snapshotted via `git show HEAD:<rel>` when available). The
+    // auto-export tests emitted by `#[ts(export)]` derives each
+    // overwrite the on-disk file with their own dependency closure
+    // during workspace-wide `cargo test`; that race makes the
+    // on-disk file unstable mid-suite, so the test compares
+    // against the git-tracked baseline rather than the live file.
     let root = workspace_root();
     let committed_path = root.join("packages/types/audit.generated.ts");
-    let committed_raw = fs::read_to_string(&committed_path)
-        .unwrap_or_else(|e| panic!("read committed `{committed_path:?}`: {e}"));
-    let committed = normalize_lf(&committed_raw);
+    // Capture the git-committed baseline BEFORE refreshing.
+    let committed = normalize_lf(
+        &read_git_committed_baseline(&committed_path)
+            .or_else(|| fs::read_to_string(&committed_path).ok())
+            .unwrap_or_default(),
+    );
 
     // Regenerate into a tempdir. `export_all_to` explicitly disregards
     // `TS_RS_EXPORT_DIR` (per ts-rs docs) and uses the given path.
@@ -70,15 +83,15 @@ fn audit_ts_bindings_are_in_sync() {
     //
     // `export_all_to` walks the dependency graph reachable from the
     // root type. Types not transitively reachable from
-    // `RustAuditRecord` (the walker types in `assertions.rs`,
-    // `StructuredComponentMetaEvent`, `RequestPhaseAudit`) need their
+    // `RequestAuditRecord` (the walker types in `assertions.rs`,
+    // `StructuredAuditEvent`, `RequestPhaseAudit`) need their
     // own export_all_to call. All four calls write into the SAME
     // `audit.generated.ts` (ts-rs merges by file path).
     let tempdir = tempfile::tempdir().expect("create tempdir for ts-rs regeneration");
-    RustAuditRecord::export_all_to(tempdir.path())
-        .expect("regenerate RustAuditRecord graph via ts-rs export_all_to");
-    StructuredComponentMetaEvent::export_all_to(tempdir.path())
-        .expect("regenerate StructuredComponentMetaEvent graph via ts-rs export_all_to");
+    RequestAuditRecord::export_all_to(tempdir.path())
+        .expect("regenerate RequestAuditRecord graph via ts-rs export_all_to");
+    StructuredAuditEvent::export_all_to(tempdir.path())
+        .expect("regenerate StructuredAuditEvent graph via ts-rs export_all_to");
     ProvenanceChain::export_all_to(tempdir.path())
         .expect("regenerate ProvenanceChain graph via ts-rs export_all_to");
     ChainTermination::export_all_to(tempdir.path())
@@ -87,82 +100,119 @@ fn audit_ts_bindings_are_in_sync() {
         .expect("regenerate ProvenanceStep graph via ts-rs export_all_to");
     RequestPhaseAudit::export_all_to(tempdir.path())
         .expect("regenerate RequestPhaseAudit graph via ts-rs export_all_to");
+    // `DerivationEdgeRaw` is the accumulator-side mirror of the
+    // canonicalised `DerivationEdgeRecord`; it is exported by the
+    // substrate but not transitively reachable from
+    // `RequestAuditRecord` (the record carries
+    // `DerivationEdgeRecord` only). Pull it in explicitly so the
+    // committed file stays in sync.
+    verter_audit::DerivationEdgeRaw::export_all_to(tempdir.path())
+        .expect("regenerate DerivationEdgeRaw graph via ts-rs export_all_to");
 
     let generated_path = tempdir.path().join("audit.generated.ts");
     let generated_raw = fs::read_to_string(&generated_path)
         .unwrap_or_else(|e| panic!("read regenerated `{generated_path:?}`: {e}"));
     let generated = normalize_lf(&generated_raw);
 
+    // Always refresh the on-disk file (or the
+    // `VERTER_TS_BINDINGS_DUMP` override). The discriminating
+    // assertion below compares the git-committed baseline
+    // (captured BEFORE the refresh) against the regenerated
+    // content.
+    let refresh_target = std::env::var("VERTER_TS_BINDINGS_DUMP")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| committed_path.to_string_lossy().into_owned());
+    std::fs::write(&refresh_target, &generated_raw)
+        .unwrap_or_else(|e| panic!("refresh `{refresh_target}`: {e}"));
+
     if committed != generated {
         let diff = similar::TextDiff::from_lines(&committed, &generated);
         let rendered = diff
             .unified_diff()
             .context_radius(3)
-            .header("committed", "regenerated")
+            .header("git-committed", "regenerated")
             .to_string();
         panic!(
-            "`packages/types/audit.generated.ts` is out of sync with the Rust source. \
-             Re-run `cargo test -p verter_session` to refresh the committed file via the \
-             ts-rs automatic export tests (they write to `packages/types/` via the \
-             workspace `.cargo/config.toml` `TS_RS_EXPORT_DIR` env), or manually call \
-             `RustAuditRecord::export_all_to(\"packages/types\")`.\n\n\
-             Unified diff:\n{rendered}"
+            "`packages/types/audit.generated.ts` is out of sync with the \n             Rust source. The test has refreshed the on-disk file; \n             review and commit the new content. Unified diff against the \n             git-committed baseline:
+{rendered}"
         );
     }
 }
 
+/// Regenerate the merged audit-record dependency closure into a
+/// fresh tempdir and return its contents. Decouples the assertion
+/// suite from the (potentially stale or partially-written) committed
+/// `packages/types/audit.generated.ts` so concurrent `cargo test`
+/// auto-export clobbers do not race the integration tests.
+fn regenerate_audit_bindings_into_tempdir() -> String {
+    use ts_rs::TS;
+    let tempdir = tempfile::tempdir().expect("create tempdir for ts-rs regeneration");
+    RequestAuditRecord::export_all_to(tempdir.path()).expect("regenerate RequestAuditRecord graph");
+    StructuredAuditEvent::export_all_to(tempdir.path())
+        .expect("regenerate StructuredAuditEvent graph");
+    ProvenanceChain::export_all_to(tempdir.path()).expect("regenerate ProvenanceChain graph");
+    ChainTermination::export_all_to(tempdir.path()).expect("regenerate ChainTermination graph");
+    ProvenanceStep::export_all_to(tempdir.path()).expect("regenerate ProvenanceStep graph");
+    RequestPhaseAudit::export_all_to(tempdir.path()).expect("regenerate RequestPhaseAudit graph");
+    verter_audit::DerivationEdgeRaw::export_all_to(tempdir.path())
+        .expect("regenerate DerivationEdgeRaw graph");
+    let path = tempdir.path().join("audit.generated.ts");
+    fs::read_to_string(&path).unwrap_or_else(|e| panic!("read regenerated `{path:?}`: {e}"))
+}
+
 #[test]
 fn ts_bindings_export_succeeds_for_every_audit_record_type() {
-    // The per-type `export_bindings_*` tests emitted by the
-    // `#[ts(export)]` derive are the load-bearing drivers; they run
-    // automatically with the rest of the suite. This test asserts
-    // that the committed file exists and carries the load-bearing
-    // top-level type names — a sentinel for "the exports produced
-    // something coherent". `audit_ts_bindings_are_in_sync` covers
-    // byte-exact correctness.
-    let root = workspace_root();
-    let path = root.join("packages/types/audit.generated.ts");
-    let contents = fs::read_to_string(&path).unwrap();
+    // Regenerate into a tempdir so this test does not race the
+    // auto-export tests in the rest of the workspace. Each
+    // `#[ts(export)]` derive auto-test overwrites
+    // `packages/types/audit.generated.ts` with its own dependency
+    // closure; reading the committed file mid-`cargo test` would
+    // surface flaky failures.
+    let contents = regenerate_audit_bindings_into_tempdir();
     assert!(!contents.is_empty(), "generated TS file must be non-empty");
     assert!(
-        contents.contains("RustAuditRecord"),
-        "generated file must include the top-level RustAuditRecord type",
+        contents.contains("RequestAuditRecord"),
+        "generated file must include the top-level RequestAuditRecord type",
     );
     assert!(
-        contents.contains("RustSemanticFootprintAudit"),
+        contents.contains("RequestFootprintAudit"),
         "generated file must include the footprint record type",
     );
     assert!(
         contents.contains("SemanticNodeKind"),
         "generated file must include the node-kind enum",
     );
+    assert!(
+        contents.contains("ComponentMetaPayload"),
+        "generated file must include the component-meta payload type",
+    );
 }
 
 #[test]
 fn audit_record_u64_fields_serialize_as_json_strings_not_numbers() {
-    // A constructed `RustAuditRecord` with request_id=42 serializes
+    // A constructed `RequestAuditRecord` with request_id=42 serializes
     // to JSON with `"request_id":"42"` (quoted string), NOT
     // `"request_id":42` (unquoted number). Every `u64` field in the
     // audit record goes through `crate::u64_as_decimal_string` per
-    // plan §1.4 so JS/TS consumers can round-trip through
+    // the audit transport contract so JS/TS consumers can round-trip through
     // `JSON.parse`/`JSON.stringify` without precision loss.
     use verter_session::component_meta_audit::{
-        RustAuditRecord, RustMemoryAudit, RustSolverAudit, RustStoreAudit, RustTimingAudit,
+        ComponentMetaPayload, RequestAuditRecord, RequestKind, RequestKindPayload,
+        RequestMemoryAudit, RequestStoreAudit, RequestTimingAudit,
     };
 
-    let record = RustAuditRecord {
+    let record = RequestAuditRecord {
         request_id: 42,
         canonical_id: "/a.vue".into(),
-        timings: RustTimingAudit::default(),
-        solver: RustSolverAudit {
-            total_resolve_steps: 1_234_567,
-            solve_count: 3,
-        },
-        store: RustStoreAudit {
+        kind: RequestKind::ComponentMeta,
+        parent_request_id: None,
+        timings: RequestTimingAudit::default(),
+        store: RequestStoreAudit {
             imported_dependency_bytes: u64::MAX,
             ..Default::default()
         },
-        memory: RustMemoryAudit {
+        memory: RequestMemoryAudit {
             process_rss_before_bytes: 9_999,
             process_rss_after_bytes: 10_000,
             process_rss_delta_bytes: 1,
@@ -173,6 +223,11 @@ fn audit_record_u64_fields_serialize_as_json_strings_not_numbers() {
         },
         footprint: None,
         from_cache: false,
+        kind_payload: RequestKindPayload::ComponentMeta(ComponentMetaPayload {
+            total_resolve_steps: 1_234_567,
+            solve_count: 3,
+            ..Default::default()
+        }),
     };
 
     let value = serde_json::to_value(&record).expect("serialize");
@@ -185,16 +240,17 @@ fn audit_record_u64_fields_serialize_as_json_strings_not_numbers() {
     );
     assert_eq!(value["request_id"].as_str(), Some("42"));
 
-    // solver.total_resolve_steps (u64)
+    // kind_payload.total_resolve_steps (u64) — moved off the
+    // generic envelope into the component-meta payload.
     assert_eq!(
-        value["solver"]["total_resolve_steps"].as_str(),
+        value["kind_payload"]["total_resolve_steps"].as_str(),
         Some("1234567"),
-        "solver.total_resolve_steps must be quoted decimal string"
+        "component-meta payload total_resolve_steps must be quoted decimal string"
     );
-    // solver.solve_count stays as a JS number (u32, always safe)
+    // solve_count stays as a JS number (u32, always safe).
     assert!(
-        value["solver"]["solve_count"].is_number(),
-        "solver.solve_count (u32) must remain a JSON number"
+        value["kind_payload"]["solve_count"].is_number(),
+        "component-meta payload solve_count (u32) must remain a JSON number"
     );
 
     // u64::MAX round-trip preserved
@@ -205,7 +261,7 @@ fn audit_record_u64_fields_serialize_as_json_strings_not_numbers() {
     );
 
     // Memory snapshots — every integer > 32 bits (signed or unsigned)
-    // is a decimal string per plan §3.B Commit 7.A (uniform transport).
+    // is a decimal string per the audit transport contract.
     assert_eq!(
         value["memory"]["process_rss_before_bytes"].as_str(),
         Some("9999")
@@ -217,15 +273,17 @@ fn audit_record_u64_fields_serialize_as_json_strings_not_numbers() {
     assert_eq!(
         value["memory"]["process_rss_delta_bytes"].as_str(),
         Some("1"),
-        "process_rss_delta_bytes (i64) must serialize as decimal string — \
-         plan §3.B Commit 7.A extends u64-as-string to every i64 field"
+        "process_rss_delta_bytes (i64) must serialize as decimal string"
     );
 
     // Full round-trip: deserialize to native, compare scalars
-    let back: RustAuditRecord =
+    let back: RequestAuditRecord =
         serde_json::from_value(value).expect("deserialize audit record from JSON value");
     assert_eq!(back.request_id, 42);
-    assert_eq!(back.solver.total_resolve_steps, 1_234_567);
+    let cm = back
+        .component_meta_payload()
+        .expect("component-meta payload");
+    assert_eq!(cm.total_resolve_steps, 1_234_567);
     assert_eq!(back.store.imported_dependency_bytes, u64::MAX);
     assert_eq!(back.memory.process_rss_before_bytes, 9_999);
 }
@@ -243,9 +301,8 @@ fn audit_ts_bindings_are_in_sync_actually_regenerates_and_diffs() {
     // Same root list as `audit_ts_bindings_are_in_sync` — keep them
     // in lock-step so this meta-test actually validates the same
     // regeneration path.
-    RustAuditRecord::export_all_to(tempdir.path()).expect("regenerate RustAuditRecord");
-    StructuredComponentMetaEvent::export_all_to(tempdir.path())
-        .expect("regenerate StructuredComponentMetaEvent");
+    RequestAuditRecord::export_all_to(tempdir.path()).expect("regenerate RequestAuditRecord");
+    StructuredAuditEvent::export_all_to(tempdir.path()).expect("regenerate StructuredAuditEvent");
     ProvenanceChain::export_all_to(tempdir.path()).expect("regenerate ProvenanceChain");
     ChainTermination::export_all_to(tempdir.path()).expect("regenerate ChainTermination");
     ProvenanceStep::export_all_to(tempdir.path()).expect("regenerate ProvenanceStep");
@@ -286,17 +343,19 @@ fn rust_memory_audit_process_rss_delta_bytes_serializes_as_json_string() {
     // the TS contract claimed `bigint`; that runtime-vs-type
     // mismatch is the bug this test guards against.
     use verter_session::component_meta_audit::{
-        RustAuditRecord, RustMemoryAudit, RustSolverAudit, RustStoreAudit, RustTimingAudit,
+        ComponentMetaPayload, RequestAuditRecord, RequestKind, RequestKindPayload,
+        RequestMemoryAudit, RequestStoreAudit, RequestTimingAudit,
     };
 
     for delta in [-42i64, -1, 0, 1, i64::MIN, i64::MAX] {
-        let record = RustAuditRecord {
+        let record = RequestAuditRecord {
             request_id: 1,
             canonical_id: "/a.vue".into(),
-            timings: RustTimingAudit::default(),
-            solver: RustSolverAudit::default(),
-            store: RustStoreAudit::default(),
-            memory: RustMemoryAudit {
+            kind: RequestKind::ComponentMeta,
+            parent_request_id: None,
+            timings: RequestTimingAudit::default(),
+            store: RequestStoreAudit::default(),
+            memory: RequestMemoryAudit {
                 process_rss_before_bytes: 0,
                 process_rss_after_bytes: 0,
                 process_rss_delta_bytes: delta,
@@ -307,6 +366,7 @@ fn rust_memory_audit_process_rss_delta_bytes_serializes_as_json_string() {
             },
             footprint: None,
             from_cache: false,
+            kind_payload: RequestKindPayload::ComponentMeta(ComponentMetaPayload::default()),
         };
         let value = serde_json::to_value(&record).expect("serialize");
         assert!(
@@ -320,7 +380,7 @@ fn rust_memory_audit_process_rss_delta_bytes_serializes_as_json_string() {
             "delta={delta}: serialized string must match decimal repr"
         );
         // Round-trip.
-        let back: RustAuditRecord = serde_json::from_value(value).expect("deserialize");
+        let back: RequestAuditRecord = serde_json::from_value(value).expect("deserialize");
         assert_eq!(back.memory.process_rss_delta_bytes, delta);
     }
 }
@@ -328,17 +388,15 @@ fn rust_memory_audit_process_rss_delta_bytes_serializes_as_json_string() {
 #[test]
 fn audit_generated_ts_uses_string_for_every_i64_field() {
     // Grep-based regression guard for the i64 extension of the
-    // stringified-transport rule. Plan §3.B Commit 7.A enumerated
+    // stringified-transport rule. The audit transport contract enumerates
     // the audit `i64` field set at exactly one entry:
-    // `RustMemoryAudit::process_rss_delta_bytes`. If a future
+    // `RequestMemoryAudit::process_rss_delta_bytes`. If a future
     // commit adds another `i64` audit field, it must land in this
     // list and in `crate::i64_as_decimal_string` annotations
     // simultaneously.
-    let root = workspace_root();
-    let path = root.join("packages/types/audit.generated.ts");
-    let contents = fs::read_to_string(&path).unwrap();
+    let contents = regenerate_audit_bindings_into_tempdir();
 
-    let i64_fields: &[(&str, &str)] = &[("process_rss_delta_bytes", "RustMemoryAudit")];
+    let i64_fields: &[(&str, &str)] = &[("process_rss_delta_bytes", "RequestMemoryAudit")];
 
     for (name, location) in i64_fields {
         let bigint_pat = format!("{name}: bigint");
@@ -346,13 +404,13 @@ fn audit_generated_ts_uses_string_for_every_i64_field() {
         let string_pat = format!("{name}: string");
         assert!(
             !contents.contains(&bigint_pat),
-            "`{name}` (location: {location}) still types as `bigint` — plan §3.B Commit 7.A \
+            "`{name}` (location: {location}) still types as `bigint` — the audit transport contract \
              requires `string` via `#[serde(with = \"crate::i64_as_decimal_string\")] \
              #[ts(type = \"string\")]`"
         );
         assert!(
             !contents.contains(&number_pat),
-            "`{name}` (location: {location}) still types as `number` — plan §3.B Commit 7.A \
+            "`{name}` (location: {location}) still types as `number` — the audit transport contract \
              requires `string` via `#[serde(with = \"crate::i64_as_decimal_string\")] \
              #[ts(type = \"string\")]`"
         );
@@ -365,31 +423,26 @@ fn audit_generated_ts_uses_string_for_every_i64_field() {
 
 #[test]
 fn loaded_files_has_no_comment_rationalizing_divergence() {
-    // Plan §3.B Commit 7.B regression guard: the rationalization
-    // comment at `mod.rs:167–181` (which argued the widened three-lane
-    // union was "what the audit caller wants") was the stub-prevention
-    // violation — it camouflaged a gate-bypass as a design choice.
-    // Any future edit that reintroduces that rationalization MUST
-    // trip this test, because the TS contract and the helper name
-    // will again be lying about exactness.
+    // Regression guard: the rationalization comment that once argued
+    // the widened three-lane union was "what the audit caller wants"
+    // was a stub-prevention violation — it camouflaged a gate-bypass
+    // as a design choice. Any future edit that reintroduces that
+    // rationalization MUST trip this test, because the TS contract
+    // and the helper name will again be lying about exactness.
+    //
+    // The `loaded_files` impl now lives on the substrate side
+    // (`verter_audit::footprint`); the guard searches there.
     let root = workspace_root();
-    let path = root.join("crates/verter_session/src/component_meta_audit/mod.rs");
+    let path = root.join("crates/verter_audit/src/footprint.rs");
     let contents = fs::read_to_string(&path).unwrap();
 
-    // The `loaded_files` docblock lives just above the `pub fn
-    // loaded_files` signature. Bound the grep to the region between
-    // `impl RustSemanticFootprintAudit {` and the end of `loaded_files`
-    // so unrelated comments elsewhere in the file cannot mask a
-    // regression.
     let impl_start = contents
-        .find("impl RustSemanticFootprintAudit {")
-        .expect("impl RustSemanticFootprintAudit block missing from mod.rs");
+        .find("impl RequestFootprintAudit {")
+        .expect("impl RequestFootprintAudit block missing from verter_audit::footprint");
     let after_impl = &contents[impl_start..];
-    // `declared_dependency_files` doc lives just after `loaded_files`
-    // body — bound there.
     let bound_end = after_impl
         .find("pub fn declared_dependency_files")
-        .expect("declared_dependency_files accessor missing — 7.B split not applied");
+        .expect("declared_dependency_files accessor missing — splits not applied");
     let loaded_files_region = &after_impl[..bound_end];
 
     // Forbidden: the rationalization strings the reviewer flagged.
@@ -426,9 +479,7 @@ fn audit_generated_ts_has_zero_bigint_occurrences() {
     // extension, `bigint` must never appear in audit.generated.ts.
     // Every integer field > 32 bits is transported as a decimal
     // string; every integer field ≤ 32 bits is a JS number.
-    let root = workspace_root();
-    let path = root.join("packages/types/audit.generated.ts");
-    let contents = fs::read_to_string(&path).unwrap();
+    let contents = regenerate_audit_bindings_into_tempdir();
     let count = contents.matches("bigint").count();
     assert_eq!(
         count, 0,
@@ -457,44 +508,43 @@ fn json_emission_round_trips_structurally_equivalent_to_rust() {
     //
     // Discriminating: run this test against a tree where any audit
     // field is misannotated and the re-serialized Value will either
-    // (a) fail to deserialize back into `RustAuditRecord`, or (b)
+    // (a) fail to deserialize back into `RequestAuditRecord`, or (b)
     // deserialize with a silently different scalar value, tripping
     // the structural `assert_eq!` below.
     use std::sync::Arc;
     use verter_session::component_meta_audit::{
-        DerivationEdgeRecord, DerivationSubgraph, IndexedReadyBuildRecord, InstantiationRecord,
-        NamedIdentity, NodeId, NodeRecord, OriginEdgeKind, OriginEdgeMetaDto, RustAuditRecord,
-        RustMemoryAudit, RustSemanticFootprintAudit, RustSolverAudit, RustStoreAudit,
-        RustTimingAudit, SemanticNodeKind, SharedLoadReuseRecord, VfsLayer, VfsReadRecord,
+        ComponentMetaPayload, DerivationEdgeRecord, DerivationSubgraph, IndexedReadyBuildRecord,
+        InstantiationRecord, NamedIdentity, NodeId, NodeRecord, OriginEdgeKind, OriginEdgeMetaDto,
+        RequestAuditRecord, RequestFootprintAudit, RequestKind, RequestKindPayload,
+        RequestMemoryAudit, RequestStoreAudit, RequestTimingAudit, SemanticNodeKind,
+        SharedLoadReuseRecord, VfsLayer, VfsReadRecord,
     };
 
     // Original record — populated with representative values that
     // exercise every `u64`/`i64` transport field plus the full
     // footprint schema.
-    let original = RustAuditRecord {
+    let original = RequestAuditRecord {
         request_id: 9_007_199_254_740_993, // 2^53 + 1 — JS Number would lose precision here
         canonical_id: "/Widget.vue".to_string(),
-        timings: RustTimingAudit {
+        kind: RequestKind::ComponentMeta,
+        parent_request_id: None,
+        timings: RequestTimingAudit {
             total_ms: 123.456,
             solver_ms: 12.3,
             materialize_ms: 45.6,
             ..Default::default()
         },
-        solver: RustSolverAudit {
-            total_resolve_steps: u64::MAX - 1,
-            solve_count: 7,
-        },
-        store: RustStoreAudit {
+        store: RequestStoreAudit {
             imported_dependency_bytes: 1_000_000,
             ..Default::default()
         },
-        memory: RustMemoryAudit {
+        memory: RequestMemoryAudit {
             process_rss_before_bytes: 1_234_567,
             process_rss_after_bytes: 2_345_678,
             process_rss_delta_bytes: -42,
             ..Default::default()
         },
-        footprint: Some(RustSemanticFootprintAudit {
+        footprint: Some(RequestFootprintAudit {
             vfs_reads: vec![VfsReadRecord {
                 canonical_id: Arc::from("/a.ts"),
                 layer: VfsLayer::Disk,
@@ -549,6 +599,11 @@ fn json_emission_round_trips_structurally_equivalent_to_rust() {
             ..Default::default()
         }),
         from_cache: false,
+        kind_payload: RequestKindPayload::ComponentMeta(ComponentMetaPayload {
+            total_resolve_steps: u64::MAX - 1,
+            solve_count: 7,
+            ..Default::default()
+        }),
     };
 
     // (1) Rust-side emission: the JSON string an @verter/native or
@@ -570,18 +625,24 @@ fn json_emission_round_trips_structurally_equivalent_to_rust() {
     // (4) Rust re-decoding the re-emitted form. If any audit field
     // is round-trip-lossy, this step either fails or silently drops
     // a scalar.
-    let recovered: RustAuditRecord = serde_json::from_str(&ts_stringified).expect("JSON → Rust");
+    let recovered: RequestAuditRecord = serde_json::from_str(&ts_stringified).expect("JSON → Rust");
 
     // Structural equality assertions — we do NOT derive `PartialEq`
-    // on `RustAuditRecord`, so field-by-field checks cover the
+    // on `RequestAuditRecord`, so field-by-field checks cover the
     // audit-critical scalars.
     assert_eq!(recovered.request_id, original.request_id);
     assert_eq!(recovered.canonical_id, original.canonical_id);
+    let recovered_cm = recovered
+        .component_meta_payload()
+        .expect("recovered component-meta payload");
+    let original_cm = original
+        .component_meta_payload()
+        .expect("original component-meta payload");
     assert_eq!(
-        recovered.solver.total_resolve_steps,
-        original.solver.total_resolve_steps
+        recovered_cm.total_resolve_steps,
+        original_cm.total_resolve_steps
     );
-    assert_eq!(recovered.solver.solve_count, original.solver.solve_count);
+    assert_eq!(recovered_cm.solve_count, original_cm.solve_count);
     assert_eq!(
         recovered.store.imported_dependency_bytes,
         original.store.imported_dependency_bytes,
@@ -660,30 +721,28 @@ fn audit_generated_ts_uses_string_for_every_u64_field() {
     // Grep-based regression guard: every known-u64 field in the
     // audit schema must appear typed as `string` in
     // `audit.generated.ts`, never `number` or `bigint`. Plan §1.4.
-    let root = workspace_root();
-    let path = root.join("packages/types/audit.generated.ts");
-    let contents = fs::read_to_string(&path).unwrap();
+    let contents = regenerate_audit_bindings_into_tempdir();
 
     // (field_name, enclosing_type_hint) for every u64 field that
     // MUST be `: string` in the generated TS. The list is derived
     // from the Commit 6.C pre-flight grep against
     // `crates/verter_session/src/component_meta_audit/**`.
     let u64_fields: &[(&str, &str)] = &[
-        ("request_id", "RustAuditRecord"),
-        ("total_resolve_steps", "RustSolverAudit"),
-        ("imported_dependency_bytes", "RustStoreAudit"),
-        ("process_rss_before_bytes", "RustMemoryAudit"),
-        ("process_rss_after_bytes", "RustMemoryAudit"),
-        ("host_cache_before_bytes", "RustMemoryAudit"),
-        ("host_cache_after_bytes", "RustMemoryAudit"),
-        ("workspace_before_bytes", "RustMemoryAudit"),
-        ("workspace_after_bytes", "RustMemoryAudit"),
-        ("bytes_read", "VfsReadRecord | StructuredComponentMetaEvent::VfsRead"),
+        ("request_id", "RequestAuditRecord"),
+        ("total_resolve_steps", "ComponentMetaPayload"),
+        ("imported_dependency_bytes", "RequestStoreAudit"),
+        ("process_rss_before_bytes", "RequestMemoryAudit"),
+        ("process_rss_after_bytes", "RequestMemoryAudit"),
+        ("host_cache_before_bytes", "RequestMemoryAudit"),
+        ("host_cache_after_bytes", "RequestMemoryAudit"),
+        ("workspace_before_bytes", "RequestMemoryAudit"),
+        ("workspace_after_bytes", "RequestMemoryAudit"),
+        ("bytes_read", "VfsReadRecord | StructuredAuditEvent::VfsRead"),
         (
             "winner_request_id",
-            "SharedLoadReuseRecord | OriginEdgeMetaDto::SharedLoadReuse | StructuredComponentMetaEvent::SharedLoadReuse",
+            "SharedLoadReuseRecord | OriginEdgeMetaDto::SharedLoadReuse | StructuredAuditEvent::SharedLoadReuse",
         ),
-        ("duration_ns", "StructuredComponentMetaEvent::Dispatch/Materialize/CurrentEvalState"),
+        ("duration_ns", "StructuredAuditEvent::Dispatch/Materialize/CurrentEvalState"),
     ];
 
     for (name, location) in u64_fields {
@@ -691,12 +750,12 @@ fn audit_generated_ts_uses_string_for_every_u64_field() {
         let number_pat_strict = format!("{name}: number");
         assert!(
             !contents.contains(&bigint_pat),
-            "`{name}` (location: {location}) still types as `bigint` — plan §1.4 requires \
+            "`{name}` (location: {location}) still types as `bigint` — the audit transport contract requires \
              `string` via `#[serde(with = \"crate::u64_as_decimal_string\")] #[ts(type = \"string\")]`"
         );
         assert!(
             !contents.contains(&number_pat_strict),
-            "`{name}` (location: {location}) still types as `number` — plan §1.4 requires \
+            "`{name}` (location: {location}) still types as `number` — the audit transport contract requires \
              `string` via `#[serde(with = \"crate::u64_as_decimal_string\")] #[ts(type = \"string\")]`"
         );
         // Positive assertion: somewhere in the file, `<name>: string` appears.
@@ -706,4 +765,27 @@ fn audit_generated_ts_uses_string_for_every_u64_field() {
             "expected `{name}: string` to appear in audit.generated.ts (location: {location})"
         );
     }
+}
+
+/// Read the git-committed baseline of `path` via `git show HEAD:<rel>`.
+/// Returns `None` when git is unavailable, the path is untracked, or
+/// the read otherwise fails.
+fn read_git_committed_baseline(path: &std::path::Path) -> Option<String> {
+    let root = workspace_root();
+    let rel = path
+        .strip_prefix(&root)
+        .ok()?
+        .to_string_lossy()
+        .into_owned();
+    let rel_unix = rel.replace('\\', "/");
+    let output = std::process::Command::new("git")
+        .arg("show")
+        .arg(format!("HEAD:{rel_unix}"))
+        .current_dir(&root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout).ok()
 }

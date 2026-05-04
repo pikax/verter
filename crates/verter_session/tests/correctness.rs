@@ -51,7 +51,7 @@ fn snapshot_path_for(fixture: &fixtures::CorrectnessFixture) -> PathBuf {
 /// pattern that the `component_meta_audit::harness` already uses
 /// (§0.6.1 small decision: adopt the existing fixture helper).
 /// `audit_enabled` is on because [`AuditedRequest::resolve`] requires
-/// a published `RustAuditRecord` — the gate ignores the record and
+/// a published `RequestAuditRecord` — the gate ignores the record and
 /// only consumes the [`ComponentMetaAnalysis`] payload.
 fn build_host(files: &[(&str, &str)]) -> std::sync::Arc<VerterHost> {
     let workspace = std::sync::Arc::new(MemoryWorkspace::new(MemoryOptions::default()));

@@ -3188,6 +3188,12 @@ mod foundations_guards {
             "crates/verter_tsc/src/checker.rs",
             "crates/verter_tsc/src/reporter.rs",
             "crates/verter_tsc/src/tsconfig.rs",
+            // Audit substrate's `current_process_rss` reads
+            // `/proc/self/statm` (Linux) for memory-delta
+            // accounting; matches the historic
+            // `verter_session::component_meta_audit::mod` exemption
+            // that lived here before the substrate split.
+            "crates/verter_audit/src/memory.rs",
         ]
         .into_iter()
         .map(String::from)
@@ -3516,6 +3522,17 @@ mod foundations_guards {
         "pub mod component_meta_audit",
         // verter_napi::meta
         "pub mod component_meta_host",
+        // host_audit_runtime — owns the AuditRecordsStore + AuditConfig
+        // snapshot + active-request registry. Public so integration
+        // tests can call `host.host_audit_runtime().snapshot()` and
+        // so `AuditRequestRegistration::new` resolves through the
+        // public accessor.
+        "pub mod host_audit_runtime",
+        // Re-exports the new audit-runtime types at the crate root
+        // (`verter_session::HostAuditRuntime`, `AuditRequestRegistration`,
+        // `AuditRuntimeSnapshot`) so callers of the audited
+        // entry-points do not need to reach into the module path.
+        "pub use host_audit_runtime::",
         // verter_ffi::convert (host::cross_file::CrossFileResult)
         "pub mod cross_file",
         // tests/host_tests.rs (host_compile module surface)
@@ -3570,7 +3587,6 @@ mod foundations_guards {
         "pub(crate) mod cooperative_admission",
         "pub(crate) mod host_executor",
         "pub(crate) mod host_test_audit",
-        "pub(crate) mod i64_as_decimal_string",
         "pub(crate) mod intrinsic_registry",
         "pub(crate) mod owner_import_surface",
         "pub(crate) mod project_semantic_dispatch",
@@ -3579,7 +3595,6 @@ mod foundations_guards {
         "pub(crate) mod source_map_remap",
         "pub(crate) mod spike_instrumentation",
         "pub(crate) mod template_convert",
-        "pub(crate) mod u64_as_decimal_string",
         "pub(crate) mod capture_token",
         // ─── test-only re-export shim ──────────────────────────────
         "pub mod for_tests",
@@ -4336,8 +4351,12 @@ mod foundations_guards {
             "scheduler source-loader fallback — reads disk only when the workspace overlay/snapshot is absent for a host-loaded path; transitional pending the full WorkspaceAccess integration.",
         ),
         (
+            "crates/verter_audit/src/memory.rs",
+            "audit telemetry — `/proc/self/statm` resource sample for memory-delta accounting (Linux RSS branch). Off by default and gated behind audit_enabled at the call site.",
+        ),
+        (
             "crates/verter_session/src/component_meta_audit/mod.rs",
-            "audit telemetry — `/proc/self/statm` resource sample for memory-delta accounting + JSON dump file output for footprint capture; off by default and gated behind audit_enabled.",
+            "audit telemetry — JSON dump file output for footprint capture (`emit_audit_trace`); off by default and gated behind `VERTER_COMPONENT_META_AUDIT_JSON_OUT`.",
         ),
         (
             "crates/verter_tsc/src/checker.rs",
@@ -6076,5 +6095,255 @@ fn record_inflight_aborted_retry(stats: &AtomicSemanticGraphStats) {
         "audit_counter_single_helper matcher must NOT flag fetch_add \
          inside a helper body — got {} false positives",
         violations.len(),
+    );
+}
+
+// ----------------------------------------------------------------
+// Audit substrate isolation guards — created with the verter_audit
+// crate and the cascade-move that retired the in-session DTO copies.
+// ----------------------------------------------------------------
+
+/// `verter_audit` MUST stay a leaf crate: its `Cargo.toml` lists
+/// only `verter_span` as the verter_*-prefixed dependency.
+#[test]
+fn verter_audit_no_upward_deps() {
+    let toml = read_workspace_file("crates/verter_audit/Cargo.toml");
+
+    let header = "[dependencies]";
+    let start = toml
+        .find(header)
+        .expect("verter_audit/Cargo.toml must declare a [dependencies] section");
+    let after = &toml[start + header.len()..];
+    let next_header = after
+        .find("\n[")
+        .map(|idx| start + header.len() + idx)
+        .unwrap_or(toml.len());
+    let section = &toml[start + header.len()..next_header];
+
+    let mut violations = Vec::new();
+    for line in section.lines() {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with("verter_") {
+            continue;
+        }
+        let dep_name = trimmed
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_end_matches('=')
+            .trim();
+        if dep_name == "verter_span" {
+            continue;
+        }
+        violations.push(line.trim().to_string());
+    }
+
+    assert!(
+        violations.is_empty(),
+        "verter_audit_no_upward_deps: `verter_audit/Cargo.toml` declares \
+         non-leaf verter_*-prefixed dependencies in `[dependencies]`. The substrate \
+         must depend ONLY on `verter_span` plus ecosystem crates. Offending lines:\n  {}",
+        violations.join("\n  ")
+    );
+}
+
+/// Source files under `crates/verter_audit/src/` MUST `use` only
+/// `verter_span`, `std`, and external crates.
+#[test]
+fn audit_substrate_isolation() {
+    use std::path::PathBuf;
+    let root = workspace_root();
+    let audit_src: PathBuf = root.join("crates/verter_audit/src");
+    let mut violations: Vec<String> = Vec::new();
+    walk_dir_collect_rs(&audit_src, &mut |path: &std::path::Path| {
+        let src = std::fs::read_to_string(path).unwrap_or_else(|e| {
+            panic!(
+                "audit_substrate_isolation: cannot read `{}`: {e}",
+                path.display()
+            )
+        });
+        for (line_no, line) in src.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if !trimmed.starts_with("use verter_") {
+                continue;
+            }
+            if trimmed.starts_with("use verter_span") {
+                continue;
+            }
+            let rel = path
+                .strip_prefix(&root)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            violations.push(format!("{rel}:{}: {}", line_no + 1, line.trim()));
+        }
+    });
+    assert!(
+        violations.is_empty(),
+        "audit_substrate_isolation: source files under \
+         `crates/verter_audit/src/` import non-leaf `verter_*` crates. \
+         The substrate must use only `verter_span`, `std`, and external \
+         crates. Offending lines:\n  {}",
+        violations.join("\n  ")
+    );
+}
+
+fn walk_dir_collect_rs(dir: &std::path::Path, f: &mut dyn FnMut(&std::path::Path)) {
+    let entries = std::fs::read_dir(dir).unwrap_or_else(|e| {
+        panic!(
+            "walk_dir_collect_rs: cannot read directory `{}`: {e}",
+            dir.display()
+        )
+    });
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            walk_dir_collect_rs(&path, f);
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            f(&path);
+        }
+    }
+}
+
+/// Every [`verter_audit::RequestKind`] variant must have a sibling
+/// [`verter_audit::RequestKindPayload`] variant.
+#[test]
+fn request_kind_payload_parity() {
+    let src = read_workspace_file("crates/verter_audit/src/record.rs");
+
+    fn enum_variant_names(src: &str, enum_name: &str) -> Vec<String> {
+        let header = format!("pub enum {enum_name}");
+        let start = src
+            .find(&header)
+            .unwrap_or_else(|| panic!("enum {enum_name} not found in record.rs"));
+        let body_start = src[start..]
+            .find('{')
+            .map(|i| start + i + 1)
+            .unwrap_or_else(|| panic!("enum {enum_name} body not found"));
+        let bytes = src.as_bytes();
+        let mut depth = 1usize;
+        let mut idx = body_start;
+        while idx < bytes.len() && depth > 0 {
+            match bytes[idx] {
+                b'{' => depth += 1,
+                b'}' => depth -= 1,
+                _ => {}
+            }
+            idx += 1;
+        }
+        let body_end = idx - 1;
+        let body = &src[body_start..body_end];
+        let mut names = Vec::new();
+        for raw_line in body.lines() {
+            let line = raw_line.trim();
+            if line.is_empty() || line.starts_with("//") || line.starts_with("///") {
+                continue;
+            }
+            // Variant declarations: Name, Name(Payload), Name { ... } — split on `(`, `{`, or `,`, whichever comes first.
+            let head_end = [line.find('('), line.find('{'), line.find(',')]
+                .into_iter()
+                .flatten()
+                .min()
+                .unwrap_or(line.len());
+            let head: &str = line[..head_end].trim();
+            if head.is_empty() {
+                continue;
+            }
+            if head.starts_with('#') {
+                continue;
+            }
+            let name = head.split_whitespace().next().unwrap_or("");
+            if name.is_empty() {
+                continue;
+            }
+            if name
+                .chars()
+                .all(|c: char| c.is_ascii_alphanumeric() || c == '_')
+            {
+                names.push(name.to_string());
+            }
+        }
+        names
+    }
+
+    let request_kinds = enum_variant_names(&src, "RequestKind");
+    let payload_kinds = enum_variant_names(&src, "RequestKindPayload");
+
+    let payload_no_none: Vec<String> = payload_kinds
+        .iter()
+        .filter(|n| n.as_str() != "None")
+        .cloned()
+        .collect();
+
+    let kinds_for_parity: Vec<String> = request_kinds
+        .iter()
+        .filter(|n| n.as_str() != "Custom")
+        .cloned()
+        .collect();
+
+    assert_eq!(
+        kinds_for_parity, payload_no_none,
+        "request_kind_payload_parity: every `RequestKind` variant must have \
+         a same-named sibling on `RequestKindPayload` (apart from `Custom` \
+         which maps to `RequestKindPayload::None` by design)."
+    );
+
+    assert!(
+        !request_kinds.is_empty(),
+        "request_kind_payload_parity: `RequestKind` enum has no variants — parser broke."
+    );
+    assert!(
+        payload_kinds.contains(&String::from("None")),
+        "request_kind_payload_parity: `RequestKindPayload` must retain its `None` variant."
+    );
+}
+
+/// `HostAuditRuntime::active_requests` is private; the lifecycle
+/// methods that mutate it must each have exactly ONE in-tree call
+/// site inside `host_audit_runtime.rs`.
+#[test]
+fn audit_request_registration_lifecycle() {
+    use std::path::PathBuf;
+    let root = workspace_root();
+
+    let methods = [
+        "register_active_request",
+        "finalize_active_request",
+        "drop_active_request",
+    ];
+    let allowed_file = "crates/verter_session/src/host_audit_runtime.rs";
+
+    let mut violations: Vec<String> = Vec::new();
+    let crates_dir: PathBuf = root.join("crates");
+
+    walk_dir_collect_rs(&crates_dir, &mut |path: &std::path::Path| {
+        let rel = path
+            .strip_prefix(&root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if rel == allowed_file {
+            return;
+        }
+        let src = std::fs::read_to_string(path).unwrap_or_else(|e| {
+            panic!("audit_request_registration_lifecycle: cannot read `{rel}`: {e}")
+        });
+        for (line_no, line) in src.lines().enumerate() {
+            for method in &methods {
+                let pattern = format!(".{method}(");
+                if line.contains(&pattern) {
+                    violations.push(format!("{rel}:{}: {}", line_no + 1, line.trim()));
+                }
+            }
+        }
+    });
+
+    assert!(
+        violations.is_empty(),
+        "audit_request_registration_lifecycle: the three lifecycle methods on \
+         `HostAuditRuntime` must each have exactly ONE in-tree call site, all \
+         inside `crates/verter_session/src/host_audit_runtime.rs`. Found callers \
+         outside that file:\n  {}",
+        violations.join("\n  ")
     );
 }

@@ -1,5 +1,22 @@
 use crate::types::Hash16;
 use crate::VerterHost;
+
+/// Per-request component-meta store counters captured by
+/// [`VerterHost::component_meta_audit_store_snapshot`]. The fields
+/// live on [`crate::component_meta_audit::ComponentMetaPayload`]
+/// rather than the generic
+/// [`crate::component_meta_audit::RequestStoreAudit`] envelope; this
+/// struct is the cross-call carrier between the snapshot site and
+/// the audit-builder finalisation.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ComponentMetaStoreCounters {
+    pub materialize_structure_calls: u64,
+    pub materialize_structure_cache_hits: u64,
+    pub node_arena_lock_acquisitions: u64,
+    pub family_map_lock_acquisitions: u64,
+    pub dep_signature_merges: u64,
+    pub dep_signature_intern_hits: u64,
+}
 use rustc_hash::FxHashMap;
 use std::hash::{Hash, Hasher};
 
@@ -423,7 +440,10 @@ impl VerterHost {
     pub(crate) fn component_meta_audit_store_snapshot(
         &self,
         store_view: Option<&HostStoreView>,
-    ) -> crate::component_meta_audit::RustStoreAudit {
+    ) -> (
+        crate::component_meta_audit::RequestStoreAudit,
+        ComponentMetaStoreCounters,
+    ) {
         let indexed_entries = self.project_type_store.indexed().len() as u32;
         let indexed_bytes = self
             .project_type_store
@@ -446,36 +466,37 @@ impl VerterHost {
             count.saturating_add(bundle.prepared_value_decls.len() as u32)
         });
 
-        // §3.2 — pull per-request materialiser/storage counters
-        // off the active `RequestContext` (zero ops when no context is
+        // Pull per-request materialiser/storage counters off the
+        // active `RequestContext` (zero ops when no context is
         // installed; the audit pipeline always installs one before
-        // taking this snapshot).
-        let (
-            materialize_structure_calls,
-            materialize_structure_cache_hits,
-            node_arena_lock_acquisitions,
-            family_map_lock_acquisitions,
-            dep_signature_merges,
-            dep_signature_intern_hits,
-        ) = match crate::request_context::current_request_context() {
-            Some(ctx) => (
-                ctx.materialize_structure_calls
+        // taking this snapshot). These counters move into the
+        // component-meta payload — they are kind-specific and do
+        // not belong on the generic `RequestStoreAudit`.
+        let component_meta_counters = match crate::request_context::current_request_context() {
+            Some(ctx) => ComponentMetaStoreCounters {
+                materialize_structure_calls: ctx
+                    .materialize_structure_calls
                     .load(std::sync::atomic::Ordering::Relaxed),
-                ctx.materialize_structure_cache_hits
+                materialize_structure_cache_hits: ctx
+                    .materialize_structure_cache_hits
                     .load(std::sync::atomic::Ordering::Relaxed),
-                ctx.node_arena_lock_acquisitions
+                node_arena_lock_acquisitions: ctx
+                    .node_arena_lock_acquisitions
                     .load(std::sync::atomic::Ordering::Relaxed),
-                ctx.family_map_lock_acquisitions
+                family_map_lock_acquisitions: ctx
+                    .family_map_lock_acquisitions
                     .load(std::sync::atomic::Ordering::Relaxed),
-                ctx.dep_signature_merges
+                dep_signature_merges: ctx
+                    .dep_signature_merges
                     .load(std::sync::atomic::Ordering::Relaxed),
-                ctx.dep_signature_intern_hits
+                dep_signature_intern_hits: ctx
+                    .dep_signature_intern_hits
                     .load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            None => (0, 0, 0, 0, 0, 0),
+            },
+            None => ComponentMetaStoreCounters::default(),
         };
 
-        crate::component_meta_audit::RustStoreAudit {
+        let store_audit = crate::component_meta_audit::RequestStoreAudit {
             store_view_hits: u32::from(store_view.is_some()),
             store_view_misses: u32::from(store_view.is_none()),
             structural_merges: 0,
@@ -483,13 +504,8 @@ impl VerterHost {
             imported_dependency_bytes: indexed_bytes,
             prepared_type_decls,
             prepared_value_decls,
-            materialize_structure_calls,
-            materialize_structure_cache_hits,
-            node_arena_lock_acquisitions,
-            family_map_lock_acquisitions,
-            dep_signature_merges,
-            dep_signature_intern_hits,
-        }
+        };
+        (store_audit, component_meta_counters)
     }
 
     pub(crate) fn component_meta_audit_memory_bytes(&self) -> (u64, u64) {

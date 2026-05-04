@@ -232,7 +232,7 @@ impl VerterHost {
     /// cache hit with a valid `dep_signature`,
     /// the cached `ResolutionTemplate` rehydrates a per-request
     /// `ResolvedComponentMetaState` (snapshot reloaded from `IndexedReadyDb`)
-    /// and a synthesized `RustAuditRecord` with `from_cache = true`,
+    /// and a synthesized `RequestAuditRecord` with `from_cache = true`,
     /// `total_ms = 0.0` is published into `host.audit_records` so audit
     /// consumers via `take_audit_record(resolution.request_id)` work
     /// uniformly.
@@ -331,7 +331,7 @@ impl VerterHost {
     /// or eviction-race rehydrate failure). Caller falls through to
     /// the cold resolver on `None`.
     ///
-    /// Synthesizes a `RustAuditRecord` with `from_cache = true` and
+    /// Synthesizes a `RequestAuditRecord` with `from_cache = true` and
     /// `total_ms = 0.0` and publishes it into `host.audit_records` (when
     /// audit is on) so `take_audit_record(resolution.request_id)`
     /// returns it uniformly with cold-resolver records.
@@ -377,15 +377,19 @@ impl VerterHost {
         // `take_audit_record(resolution.request_id)` get uniform
         // observability.
         if self.config.audit_enabled {
-            let synthesized = crate::component_meta_audit::RustAuditRecord {
+            let synthesized = crate::component_meta_audit::RequestAuditRecord {
                 request_id,
                 canonical_id: canonical.to_string(),
-                timings: crate::component_meta_audit::RustTimingAudit::default(),
-                solver: crate::component_meta_audit::RustSolverAudit::default(),
-                store: crate::component_meta_audit::RustStoreAudit::default(),
-                memory: crate::component_meta_audit::RustMemoryAudit::default(),
+                kind: crate::component_meta_audit::RequestKind::ComponentMeta,
+                parent_request_id: None,
+                timings: crate::component_meta_audit::RequestTimingAudit::default(),
+                store: crate::component_meta_audit::RequestStoreAudit::default(),
+                memory: crate::component_meta_audit::RequestMemoryAudit::default(),
                 footprint: None,
                 from_cache: true,
+                kind_payload: crate::component_meta_audit::RequestKindPayload::ComponentMeta(
+                    crate::component_meta_audit::ComponentMetaPayload::default(),
+                ),
             };
             debug_assert_eq!(synthesized.request_id, resolution.request_id);
             self.publish_audit_record(synthesized);
@@ -401,20 +405,20 @@ impl VerterHost {
         self.request_id_counter.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    /// Drain the `RustAuditRecord` matching `request_id` from the host's
+    /// Drain the `RequestAuditRecord` matching `request_id` from the host's
     /// bounded audit-record store. Returns `None` when the record was
     /// never inserted (capture disabled) or already drained by a prior
     /// `take_audit_record` call.
     pub fn take_audit_record(
         &self,
         request_id: u64,
-    ) -> Option<crate::component_meta_audit::RustAuditRecord> {
+    ) -> Option<crate::component_meta_audit::RequestAuditRecord> {
         self.audit_records.take(request_id)
     }
 
     /// Publish a finished audit record into the host's store. Typically
     /// called by `emit_audit_trace` once per audited request.
-    pub fn publish_audit_record(&self, record: crate::component_meta_audit::RustAuditRecord) {
+    pub fn publish_audit_record(&self, record: crate::component_meta_audit::RequestAuditRecord) {
         self.audit_records.insert(record);
     }
 

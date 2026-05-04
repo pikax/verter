@@ -1,14 +1,14 @@
 #![deny(missing_docs)]
-//! Inherent assertions + iterative walker for [`RustAuditRecord`].
+//! Inherent assertions + iterative walker for [`RequestAuditRecord`].
 //!
 //! + §3. Public surface:
 //!
-//! - [`RustAuditRecord::assert_loaded_files_exactly`] — set-equality
+//! - [`RequestAuditRecord::assert_loaded_files_exactly`] — set-equality
 //!   assertion against the union of `vfs_reads` and `shared_load_reuses`
 //!   canonical ids. Failure renders a unified-diff style explanation.
-//! - [`RustAuditRecord::why_loaded`] — iterative backward walker
+//! - [`RequestAuditRecord::why_loaded`] — iterative backward walker
 //!   producing a [`ProvenanceChain`] for the canonical.
-//! - [`RustAuditRecord::why_instantiated`] — same shape, rooted at the
+//! - [`RequestAuditRecord::why_instantiated`] — same shape, rooted at the
 //!   matching [`InstantiationRecord`].
 //! - [`render_chain_text`] — pure formatter; NAPI / WASM / LSP all
 //!   delegate to it via Rust-walker bindings (single walker
@@ -25,7 +25,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    DerivationEdgeRecord, EdgeId, InstantiationRecord, NodeId, OriginEdgeKind, RustAuditRecord,
+    DerivationEdgeRecord, EdgeId, InstantiationRecord, NodeId, OriginEdgeKind, RequestAuditRecord,
     SharedLoadReuseRecord,
 };
 use crate::types::Hash16;
@@ -34,8 +34,8 @@ use crate::types::Hash16;
 /// terminates the affected branch with a `DepthExceeded` marker
 pub const WALKER_DEPTH_CAP: u16 = 256;
 
-/// Provenance chain returned by [`RustAuditRecord::why_loaded`] /
-/// [`RustAuditRecord::why_instantiated`]. Always carries a
+/// Provenance chain returned by [`RequestAuditRecord::why_loaded`] /
+/// [`RequestAuditRecord::why_instantiated`]. Always carries a
 /// [`ChainTermination`] so renderers can distinguish a complete walk
 /// from a depth-capped, cycle-terminated, or shared-load-redirected
 /// one.
@@ -98,17 +98,51 @@ pub enum ChainTermination {
 }
 
 // ──────────────────────────────────────────────────────────────────────
-// Inherent assertion / walker methods on RustAuditRecord
+// Extension trait providing assertion / walker methods on
+// RequestAuditRecord. Inherent impls are not possible here because
+// the type is owned by `verter_audit` (orphan rule); the trait keeps
+// the historic `record.assert_loaded_files_exactly(...)` call shape.
 // ──────────────────────────────────────────────────────────────────────
 
-impl RustAuditRecord {
+/// Session-side assertion / walker extension methods on
+/// [`RequestAuditRecord`]. Bring this trait into scope to call
+/// `record.assert_loaded_files_exactly(...)`,
+/// `record.why_loaded(...)`, etc.
+pub trait RequestAuditRecordAssertions {
     /// Assert that the union of `vfs_reads` and `shared_load_reuses`
     /// canonical ids equals `expected` exactly (set equality).
-    ///
-    /// Returns `Err(AssertionDiff)` on mismatch — the diff renders a
-    /// unified-format explanation with the symmetric difference grouped
-    /// into `+expected` and `-actual` arms.
-    pub fn assert_loaded_files_exactly<I, S>(&self, expected: I) -> Result<(), AssertionDiff>
+    fn assert_loaded_files_exactly<I, S>(&self, expected: I) -> Result<(), AssertionDiff>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>;
+
+    /// Assert that the broader dependency set
+    /// (`vfs_reads ∪ shared_load_reuses ∪ indexed_ready_builds`)
+    /// equals `expected` exactly (set equality).
+    fn assert_declared_dependency_files_exactly<I, S>(
+        &self,
+        expected: I,
+    ) -> Result<(), AssertionDiff>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>;
+
+    /// Walk the derivation subgraph backward starting from any node
+    /// naming `canonical_id`.
+    fn why_loaded(&self, canonical_id: &str) -> ProvenanceChain;
+
+    /// Walk the derivation subgraph backward from the
+    /// [`InstantiationRecord`] matching the given identity triple.
+    fn why_instantiated(
+        &self,
+        decl_canonical_id: &str,
+        decl_symbol_name: &str,
+        args_fingerprint: Hash16,
+    ) -> ProvenanceChain;
+}
+
+impl RequestAuditRecordAssertions for RequestAuditRecord {
+    fn assert_loaded_files_exactly<I, S>(&self, expected: I) -> Result<(), AssertionDiff>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
@@ -116,7 +150,7 @@ impl RustAuditRecord {
         let actual: Vec<Arc<str>> = self
             .footprint
             .as_ref()
-            .map(super::RustSemanticFootprintAudit::loaded_files)
+            .map(super::RequestFootprintAudit::loaded_files)
             .unwrap_or_default();
         let mut expected_sorted: Vec<String> = expected
             .into_iter()
@@ -136,14 +170,7 @@ impl RustAuditRecord {
         Err(AssertionDiff::new_loaded_files(missing, extra))
     }
 
-    /// Assert that the broader dependency set
-    /// (`vfs_reads ∪ shared_load_reuses ∪ indexed_ready_builds`)
-    /// equals `expected` exactly (set equality).
-    /// Use this when the fixture's intent is "the request's dependency
-    /// closure included these files", which is a distinct semantic
-    /// claim from [`Self::assert_loaded_files_exactly`]'s "the
-    /// scheduler actually read these files on behalf of this request".
-    pub fn assert_declared_dependency_files_exactly<I, S>(
+    fn assert_declared_dependency_files_exactly<I, S>(
         &self,
         expected: I,
     ) -> Result<(), AssertionDiff>
@@ -154,7 +181,7 @@ impl RustAuditRecord {
         let actual: Vec<Arc<str>> = self
             .footprint
             .as_ref()
-            .map(super::RustSemanticFootprintAudit::declared_dependency_files)
+            .map(super::RequestFootprintAudit::declared_dependency_files)
             .unwrap_or_default();
         let mut expected_sorted: Vec<String> = expected
             .into_iter()
@@ -174,11 +201,7 @@ impl RustAuditRecord {
         Err(AssertionDiff::new_declared_dependency_files(missing, extra))
     }
 
-    /// Walk the derivation subgraph backward starting from any node
-    /// that names `canonical_id` (via [`super::NamedIdentity`]) — or,
-    /// failing that, surface the `vfs_reads` and `shared_load_reuses`
-    /// records for `canonical_id` as terminals.
-    pub fn why_loaded(&self, canonical_id: &str) -> ProvenanceChain {
+    fn why_loaded(&self, canonical_id: &str) -> ProvenanceChain {
         let Some(footprint) = self.footprint.as_ref() else {
             return ProvenanceChain {
                 root: None,
@@ -219,10 +242,7 @@ impl RustAuditRecord {
         chain
     }
 
-    /// Walk the derivation subgraph backward from the
-    /// [`InstantiationRecord`] matching
-    /// `(decl_canonical_id, decl_symbol_name, args_fingerprint)`.
-    pub fn why_instantiated(
+    fn why_instantiated(
         &self,
         decl_canonical_id: &str,
         decl_symbol_name: &str,
@@ -265,7 +285,7 @@ impl RustAuditRecord {
 /// `Vec<(NodeId, u16)>` work-stack so heap-deep chains do not overflow
 /// the OS stack ( test
 /// `why_loaded_iterative_walker_handles_heap_depth_1000_without_stack_overflow`).
-fn walk_back(footprint: &super::RustSemanticFootprintAudit, root: NodeId) -> ProvenanceChain {
+fn walk_back(footprint: &super::RequestFootprintAudit, root: NodeId) -> ProvenanceChain {
     let edges = &footprint.derivation_subgraph.edges;
     let nodes = &footprint.derivation_subgraph.nodes;
 
@@ -442,25 +462,29 @@ impl std::error::Error for AssertionDiff {}
 mod tests {
     use super::*;
     use crate::component_meta_audit::{
-        DerivationEdgeRecord, DerivationSubgraph, NodeRecord, OriginEdgeMetaDto, RustAuditRecord,
-        RustMemoryAudit, RustSemanticFootprintAudit, RustSolverAudit, RustStoreAudit,
-        RustTimingAudit, SemanticNodeKind, VfsLayer, VfsReadRecord,
+        ComponentMetaPayload, DerivationEdgeRecord, DerivationSubgraph, NodeRecord,
+        OriginEdgeMetaDto, RequestAuditRecord, RequestFootprintAudit, RequestMemoryAudit,
+        RequestStoreAudit, RequestTimingAudit, SemanticNodeKind, VfsLayer, VfsReadRecord,
     };
 
-    fn empty_record() -> RustAuditRecord {
-        RustAuditRecord {
+    fn empty_record() -> RequestAuditRecord {
+        RequestAuditRecord {
             request_id: 1,
             canonical_id: "/x.vue".into(),
-            timings: RustTimingAudit::default(),
-            solver: RustSolverAudit::default(),
-            store: RustStoreAudit::default(),
-            memory: RustMemoryAudit::default(),
+            kind: super::super::RequestKind::ComponentMeta,
+            parent_request_id: None,
+            timings: RequestTimingAudit::default(),
+            store: RequestStoreAudit::default(),
+            memory: RequestMemoryAudit::default(),
             footprint: None,
             from_cache: false,
+            kind_payload: super::super::RequestKindPayload::ComponentMeta(
+                ComponentMetaPayload::default(),
+            ),
         }
     }
 
-    fn record_with_footprint(footprint: RustSemanticFootprintAudit) -> RustAuditRecord {
+    fn record_with_footprint(footprint: RequestFootprintAudit) -> RequestAuditRecord {
         let mut r = empty_record();
         r.footprint = Some(footprint);
         r
@@ -488,7 +512,7 @@ mod tests {
 
     #[test]
     fn assert_loaded_files_exactly_passes_when_sets_match() {
-        let fp = RustSemanticFootprintAudit {
+        let fp = RequestFootprintAudit {
             vfs_reads: vec![VfsReadRecord {
                 canonical_id: Arc::from("/a.ts"),
                 layer: VfsLayer::Disk,
@@ -510,7 +534,7 @@ mod tests {
 
     #[test]
     fn assert_loaded_files_exactly_renders_diff_on_mismatch() {
-        let fp = RustSemanticFootprintAudit {
+        let fp = RequestFootprintAudit {
             vfs_reads: vec![VfsReadRecord {
                 canonical_id: Arc::from("/a.ts"),
                 layer: VfsLayer::Disk,
@@ -534,7 +558,7 @@ mod tests {
     #[test]
     fn loaded_files_returns_exactly_vfs_reads_plus_shared_load_reuses_no_indexed_ready() {
         use crate::component_meta_audit::IndexedReadyBuildRecord;
-        let fp = RustSemanticFootprintAudit {
+        let fp = RequestFootprintAudit {
             vfs_reads: vec![VfsReadRecord {
                 canonical_id: Arc::from("/a.ts"),
                 layer: VfsLayer::Disk,
@@ -568,7 +592,7 @@ mod tests {
     fn declared_dependency_files_returns_vfs_reads_plus_shared_load_reuses_plus_indexed_ready_builds(
     ) {
         use crate::component_meta_audit::IndexedReadyBuildRecord;
-        let fp = RustSemanticFootprintAudit {
+        let fp = RequestFootprintAudit {
             vfs_reads: vec![VfsReadRecord {
                 canonical_id: Arc::from("/a.ts"),
                 layer: VfsLayer::Disk,
@@ -608,7 +632,7 @@ mod tests {
         // shared warmup) and was observed by THIS request via the
         // dependency graph, but the request itself did not trigger a
         // read on its behalf.
-        let fp = RustSemanticFootprintAudit {
+        let fp = RequestFootprintAudit {
             vfs_reads: vec![VfsReadRecord {
                 canonical_id: Arc::from("/a.ts"),
                 layer: VfsLayer::Disk,
@@ -647,7 +671,7 @@ mod tests {
     #[test]
     fn assert_declared_dependency_files_exactly_passes_when_sets_match() {
         use crate::component_meta_audit::IndexedReadyBuildRecord;
-        let fp = RustSemanticFootprintAudit {
+        let fp = RequestFootprintAudit {
             vfs_reads: vec![VfsReadRecord {
                 canonical_id: Arc::from("/a.ts"),
                 layer: VfsLayer::Disk,
@@ -669,7 +693,7 @@ mod tests {
     #[test]
     fn assert_declared_dependency_files_exactly_renders_diff_on_mismatch() {
         use crate::component_meta_audit::IndexedReadyBuildRecord;
-        let fp = RustSemanticFootprintAudit {
+        let fp = RequestFootprintAudit {
             indexed_ready_builds: vec![IndexedReadyBuildRecord {
                 canonical_id: Arc::from("/c.ts"),
                 whole_hash: [0u8; 16],
@@ -695,7 +719,7 @@ mod tests {
 
     #[test]
     fn why_loaded_surfaces_shared_load_reuse_terminal_when_canonical_matches() {
-        let fp = RustSemanticFootprintAudit {
+        let fp = RequestFootprintAudit {
             shared_load_reuses: vec![SharedLoadReuseRecord {
                 canonical_id: Arc::from("/x.ts"),
                 winner_request_id: 7,
@@ -729,7 +753,7 @@ mod tests {
             alias_edge(2, &[1], "two_hop"),
             alias_edge(1, &[0], "one_hop"),
         ];
-        let fp = RustSemanticFootprintAudit {
+        let fp = RequestFootprintAudit {
             derivation_subgraph: DerivationSubgraph { nodes, edges },
             ..Default::default()
         };
@@ -762,7 +786,7 @@ mod tests {
             .rev()
             .map(|i| alias_edge(i, &[i - 1], "hop"))
             .collect();
-        let fp = RustSemanticFootprintAudit {
+        let fp = RequestFootprintAudit {
             derivation_subgraph: DerivationSubgraph { nodes, edges },
             ..Default::default()
         };
@@ -797,7 +821,7 @@ mod tests {
             display_label: Arc::from("Cyc"),
         };
         let edges = vec![alias_edge(0, &[1], "fwd"), alias_edge(1, &[0], "back")];
-        let fp = RustSemanticFootprintAudit {
+        let fp = RequestFootprintAudit {
             derivation_subgraph: DerivationSubgraph { nodes, edges },
             ..Default::default()
         };
@@ -829,7 +853,7 @@ mod tests {
             display_label: Arc::from("M"),
         };
         let edges = vec![alias_edge(2, &[0], "via_a"), alias_edge(2, &[1], "via_b")];
-        let fp = RustSemanticFootprintAudit {
+        let fp = RequestFootprintAudit {
             derivation_subgraph: DerivationSubgraph { nodes, edges },
             ..Default::default()
         };
@@ -855,7 +879,7 @@ mod tests {
         let mut nodes = vec![primitive_node("n0")];
         nodes.push(primitive_node("n1"));
         let edges = vec![alias_edge(1, &[0], "hop")];
-        let fp = RustSemanticFootprintAudit {
+        let fp = RequestFootprintAudit {
             derivation_subgraph: DerivationSubgraph {
                 nodes: nodes.clone(),
                 edges,
@@ -914,7 +938,7 @@ mod tests {
         // `NotFound` when only a shared-load terminal exists, or if
         // `render_chain_text` dropped the `winner_audited == false`
         // branch, the assertions below fail with clear diffs.
-        let fp = RustSemanticFootprintAudit {
+        let fp = RequestFootprintAudit {
             vfs_reads: Vec::new(),
             shared_load_reuses: vec![SharedLoadReuseRecord {
                 canonical_id: Arc::from("/shared.ts"),
@@ -976,7 +1000,7 @@ mod tests {
         use crate::component_meta_audit::InstantiationRecord;
         let nodes = vec![primitive_node("decl"), primitive_node("inst_result")];
         let edges = vec![alias_edge(1, &[0], "from_decl")];
-        let fp = RustSemanticFootprintAudit {
+        let fp = RequestFootprintAudit {
             derivation_subgraph: DerivationSubgraph { nodes, edges },
             instantiations: vec![InstantiationRecord {
                 result: NodeId(1),
@@ -995,7 +1019,7 @@ mod tests {
 
     #[test]
     fn why_instantiated_returns_not_found_when_triple_does_not_match() {
-        let r = record_with_footprint(RustSemanticFootprintAudit::default());
+        let r = record_with_footprint(RequestFootprintAudit::default());
         let chain = r.why_instantiated("/missing.ts", "Nope", [0u8; 16]);
         assert!(matches!(chain.terminated, ChainTermination::NotFound));
     }

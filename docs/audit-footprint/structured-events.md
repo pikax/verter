@@ -1,4 +1,4 @@
-# Structured events — `StructuredComponentMetaEvent`
+# Structured events — `StructuredAuditEvent`
 
 The session-side trace macro `component_meta_trace_structured!` is
 the only way to emit a component-meta telemetry event. Every call
@@ -8,7 +8,7 @@ writes to stderr, nothing writes to disk (apart from the
 
 Defined at
 [`crates/verter_session/src/component_meta_audit/structured_event.rs`](../../crates/verter_session/src/component_meta_audit/structured_event.rs).
-TS type: [`StructuredComponentMetaEvent`](../../packages/types/audit.generated.ts).
+TS type: [`StructuredAuditEvent`](../../packages/types/audit.generated.ts).
 
 ## Variants
 

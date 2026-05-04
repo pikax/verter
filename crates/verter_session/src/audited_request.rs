@@ -7,11 +7,11 @@
 //! counter, runs the resolution (or a caller-supplied closure),
 //! validates that exactly one request was created, and returns the
 //! triple `(ComponentMetaAnalysis, ResolvedComponentMetaState,
-//! RustAuditRecord)`.
+//! RequestAuditRecord)`.
 //!
 //! The harness is the sole entry point for tests that need a mined
 //! footprint. Direct callers of `get_component_meta_with_resolution`
-//! get a `RustAuditRecord` via `take_audit_record(request_id)` but
+//! get a `RequestAuditRecord` via `take_audit_record(request_id)` but
 //! must manage context/accumulator themselves.
 
 use std::sync::Arc;
@@ -19,7 +19,7 @@ use std::sync::Arc;
 use verter_semantic::analysis::component_meta::ComponentMetaAnalysis;
 use verter_workspace::WorkspaceAccess;
 
-use crate::component_meta_audit::RustAuditRecord;
+use crate::component_meta_audit::RequestAuditRecord;
 use crate::meta_resolve::ResolvedComponentMetaState;
 use crate::request_context::{
     nested_audit_in_progress, requests_created_snapshot, reset_requests_created, NestedAuditGuard,
@@ -39,7 +39,7 @@ pub enum AuditedRequestError {
     /// inside a `run_custom` closure. Each audited run must produce
     /// exactly one request.
     MultipleRequestsInSingleRun,
-    /// The request completed but no `RustAuditRecord` was published
+    /// The request completed but no `RequestAuditRecord` was published
     /// (capture disabled, misconfigured host, or a store eviction).
     AuditRecordMissing,
     /// `HostConfig::validate` rejected the configuration the builder
@@ -63,7 +63,7 @@ impl std::fmt::Display for AuditedRequestError {
             ),
             Self::AuditRecordMissing => write!(
                 f,
-                "no RustAuditRecord was published for the request — check HostConfig::audit_enabled"
+                "no RequestAuditRecord was published for the request — check HostConfig::audit_enabled"
             ),
             Self::PrerequisitesNotMet(err) => write!(f, "prerequisites not met: {err}"),
             Self::ResolutionFailed => write!(f, "get_component_meta_with_resolution returned None"),
@@ -165,7 +165,7 @@ impl AuditedRequestBuilder {
         (
             ComponentMetaAnalysis,
             ResolvedComponentMetaState,
-            RustAuditRecord,
+            RequestAuditRecord,
         ),
         AuditedRequestError,
     > {
@@ -188,7 +188,7 @@ impl AuditedRequestBuilder {
         (
             ComponentMetaAnalysis,
             ResolvedComponentMetaState,
-            RustAuditRecord,
+            RequestAuditRecord,
         ),
         AuditedRequestError,
     >
@@ -248,7 +248,7 @@ fn run_audited<F>(
     (
         ComponentMetaAnalysis,
         ResolvedComponentMetaState,
-        RustAuditRecord,
+        RequestAuditRecord,
     ),
     AuditedRequestError,
 >

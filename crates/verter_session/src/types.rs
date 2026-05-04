@@ -134,11 +134,11 @@ pub struct HostConfig {
     pub generic_root_propagation: bool,
     /// Enable the Rust-first native audit surface for component-meta requests.
     /// When true, timing/memory/store snapshots are captured and emitted as
-    /// structured `RustAuditRecord` data. Default: false (zero overhead).
+    /// structured `RequestAuditRecord` data. Default: false (zero overhead).
     pub audit_enabled: bool,
     /// Enable semantic-footprint capture. Requires `audit_enabled = true`.
     /// When true, each audited request attaches a
-    /// `RustSemanticFootprintAudit` to its record, populated from a
+    /// `RequestFootprintAudit` to its record, populated from a
     /// per-request accumulator. Default: false.
     pub footprint_capture: bool,
     /// Upper bound on derivation-subgraph edges captured per request.

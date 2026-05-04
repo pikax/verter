@@ -36,7 +36,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use verter_session::audited_request::{AuditedRequest, AuditedRequestError};
-use verter_session::component_meta_audit::{RustAuditRecord, VfsLayer};
+use verter_session::component_meta_audit::{RequestAuditRecord, VfsLayer};
 use verter_session::{HostConfig, VerterHost};
 use verter_workspace::{
     FilesystemOptions, FilesystemWorkspace, ProjectGraph, ViteConfigOptions, WorkspaceAccess,
@@ -259,7 +259,7 @@ struct PassRow {
     /// `MAX_BRIDGE_DEPTH = 32` constant is justified at ~3x that floor.
     bridge_max_depth_observed: u32,
     /// Count of structured events emitted by the request and surfaced
-    /// on `RustSemanticFootprintAudit::structured_events`. The
+    /// on `RequestFootprintAudit::structured_events`. The
     /// audit dump always includes the full event log in the per-fixture
     /// JSON; the summary CSV reports only the count so operators can
     /// spot fixtures whose log is much larger than peers (signal of
@@ -269,7 +269,7 @@ struct PassRow {
     error: Option<String>,
 }
 
-fn summarize(pass: &str, target: &str, elapsed_ms: f64, record: &RustAuditRecord) -> PassRow {
+fn summarize(pass: &str, target: &str, elapsed_ms: f64, record: &RequestAuditRecord) -> PassRow {
     let fp = record.footprint.as_ref();
     let (vfs_reads, vfs_disk, vfs_snapshot, vfs_overlay, vfs_missing) = match fp {
         Some(f) => {
@@ -390,7 +390,12 @@ fn error_row(pass: &str, target: &str, elapsed_ms: f64, error: String) -> PassRo
     }
 }
 
-fn dump_record(out_dir: &Path, pass: &str, slug: &str, record: &RustAuditRecord) -> io::Result<()> {
+fn dump_record(
+    out_dir: &Path,
+    pass: &str,
+    slug: &str,
+    record: &RequestAuditRecord,
+) -> io::Result<()> {
     // Replace path separators in slug with `--` so nested components
     // (e.g. `prose/PCallout`) produce flat files like
     // `prose--PCallout.json` and we don't need to mkdir parents.

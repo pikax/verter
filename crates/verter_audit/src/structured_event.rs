@@ -1,0 +1,355 @@
+#![deny(missing_docs)]
+//! [`StructuredAuditEvent`] — typed structured events emitted by
+//! audited request paths. The session-side macro
+//! `component_meta_trace_structured!` constructs these variants and
+//! pushes them onto the per-request accumulator.
+//!
+//! The enum is authoritative; producers MUST add a `// Custom
+//! justified: <reason>` comment at every `Custom` construction site
+//! (the
+//! `every_custom_variant_construction_site_has_justification_comment`
+//! architecture guard enforces this).
+
+use std::sync::Arc;
+
+use serde::{Deserialize, Serialize};
+
+use crate::origin_graph::{
+    DispatchKeyKind, MaterializationScopeAudit, MaterializationSubject, MaterializeSkipReason,
+    ProjectionModeAudit, VfsLayer,
+};
+use crate::payloads::cache_outcomes::CacheOutcomeKind;
+use crate::record::{u64_as_decimal_string, Hash16};
+
+/// Typed structured event emitted by an audited request path.
+///
+/// All variants are `Serialize + Deserialize` so they can be written
+/// to the TLS accumulator's event log and, later, to the footprint
+/// miner's output without a trip through a format string.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "audit.generated.ts")]
+pub enum StructuredAuditEvent {
+    /// Emitted at the entry of `get_component_meta_with_resolution`.
+    RequestStart {
+        /// Canonical id being resolved.
+        canonical_id: Arc<str>,
+        /// Stamped request id (decimal-string transport).
+        #[serde(with = "u64_as_decimal_string")]
+        #[ts(type = "string")]
+        request_id: u64,
+    },
+    /// Emitted when `get_component_meta_with_resolution` returns.
+    RequestEnd {
+        /// Request id this event closes.
+        #[serde(with = "u64_as_decimal_string")]
+        #[ts(type = "string")]
+        request_id: u64,
+        /// `true` when the resolution produced `Some(...)`.
+        success: bool,
+    },
+    /// A fresh `IndexedReady` entry was installed.
+    IndexedReadyBuilt {
+        /// Canonical id of the newly-built entry.
+        canonical_id: Arc<str>,
+        /// Content hash of the source snapshot.
+        whole_hash: Hash16,
+    },
+    /// One VFS read was observed by the session-side sink.
+    VfsRead {
+        /// Canonical id that was read.
+        canonical_id: Arc<str>,
+        /// VFS layer that served the read.
+        layer: VfsLayer,
+        /// `true` when served by an in-memory cache.
+        cache_hit: bool,
+        /// Number of bytes returned.
+        #[serde(with = "u64_as_decimal_string")]
+        #[ts(type = "string")]
+        bytes_read: u64,
+    },
+    /// This request attached to a winner's in-flight slot.
+    SharedLoadReuse {
+        /// Canonical id of the shared artifact.
+        canonical_id: Arc<str>,
+        /// Winning request's id.
+        #[serde(with = "u64_as_decimal_string")]
+        #[ts(type = "string")]
+        winner_request_id: u64,
+        /// `true` when the winner was itself audited.
+        winner_audited: bool,
+    },
+    /// Entering a semantic-query dispatch envelope.
+    DispatchEnter {
+        /// Kind of dispatch key being resolved.
+        key_kind: DispatchKeyKind,
+        /// Nesting depth within the envelope stack.
+        depth: u16,
+    },
+    /// Leaving a semantic-query dispatch envelope.
+    DispatchExit {
+        /// Kind of dispatch key that was resolved.
+        key_kind: DispatchKeyKind,
+        /// Cache outcome recorded for the dispatch.
+        outcome: CacheOutcomeKind,
+        /// Wall-clock duration in nanoseconds.
+        #[serde(with = "u64_as_decimal_string")]
+        #[ts(type = "string")]
+        duration_ns: u64,
+    },
+    /// Start envelope for member-route materialization.
+    MaterializeMemberRouteStart {
+        /// What is being materialized.
+        subject: MaterializationSubject,
+    },
+    /// End envelope with captured duration.
+    MaterializeMemberRouteEnd {
+        /// Subject this event closes.
+        subject: MaterializationSubject,
+        /// Wall-clock duration (ns).
+        #[serde(with = "u64_as_decimal_string")]
+        #[ts(type = "string")]
+        duration_ns: u64,
+    },
+    /// Start envelope for public-prop-type rematerialization.
+    RematerializePublicPropTypeStart {
+        /// Subject (owner + prop).
+        subject: MaterializationSubject,
+    },
+    /// End envelope with captured duration.
+    RematerializePublicPropTypeEnd {
+        /// Subject this event closes.
+        subject: MaterializationSubject,
+        /// Wall-clock duration (ns).
+        #[serde(with = "u64_as_decimal_string")]
+        #[ts(type = "string")]
+        duration_ns: u64,
+    },
+    /// `defineProps<…>()` member materialization event.
+    MaterializeDefinePropsMember {
+        /// Subject (owner + member).
+        subject: MaterializationSubject,
+    },
+    /// Fallthrough-inheritance was computed for an owner file.
+    FallthroughInheritanceComputed {
+        /// Subject (owner).
+        subject: MaterializationSubject,
+    },
+    /// Imported type-root resolution hop.
+    ResolveImportedTypeRoot {
+        /// Canonical id of the declaring file.
+        canonical_id: Arc<str>,
+        /// Symbol name that was being resolved.
+        symbol_name: Arc<str>,
+    },
+    /// Eval-state checkpoint with captured duration.
+    CurrentEvalState {
+        /// Canonical id whose eval state was captured.
+        canonical_id: Arc<str>,
+        /// Wall-clock duration (ns).
+        #[serde(with = "u64_as_decimal_string")]
+        #[ts(type = "string")]
+        duration_ns: u64,
+    },
+    /// Entering `materialize_component_meta_structure`.
+    MaterializeStructureEnter {
+        /// Stable display key for the input semantic node.
+        base: Arc<str>,
+        /// Axis the input was lowered at.
+        scope_axis: MaterializationScopeAudit,
+        /// Caller-side projection mode the materialiser ran with.
+        mode: ProjectionModeAudit,
+        /// Materialiser stack depth at the entry (post-increment).
+        depth: u16,
+    },
+    /// Leaving `materialize_component_meta_structure`.
+    MaterializeStructureExit {
+        /// Stable display key for the input semantic node.
+        base: Arc<str>,
+        /// Axis the input was lowered at.
+        scope_axis: MaterializationScopeAudit,
+        /// Caller-side projection mode the materialiser ran with.
+        mode: ProjectionModeAudit,
+        /// Cache outcome recorded for the materialiser entry.
+        outcome: CacheOutcomeKind,
+        /// Wall-clock duration (ns).
+        #[serde(with = "u64_as_decimal_string")]
+        #[ts(type = "string")]
+        duration_ns: u64,
+    },
+    /// Policy gate fired before dispatch.
+    MaterializeStructurePolicySkip {
+        /// Stable display key for the input semantic node.
+        base: Arc<str>,
+        /// Axis the input was at when the gate fired.
+        scope_axis: MaterializationScopeAudit,
+        /// Specific policy arm that bailed.
+        reason: MaterializeSkipReason,
+    },
+    /// Same-key re-entry detected on the materialiser's thread-local
+    /// in-flight stack.
+    MaterializeStructureCycleDetected {
+        /// Stable display key for the input semantic node.
+        base: Arc<str>,
+        /// Axis the input was at when the cycle was detected.
+        scope_axis: MaterializationScopeAudit,
+        /// Caller-side projection mode the materialiser ran with.
+        mode: ProjectionModeAudit,
+        /// Materialiser stack depth at detection.
+        depth: u16,
+    },
+    /// Defensive depth fuse tripped.
+    MaterializeStructureDepthFuseTripped {
+        /// Stable display key for the input semantic node.
+        base: Arc<str>,
+        /// Axis the input was at when the fuse tripped.
+        scope_axis: MaterializationScopeAudit,
+        /// Caller-side projection mode the materialiser ran with.
+        mode: ProjectionModeAudit,
+        /// Materialiser stack depth at trip.
+        depth: u16,
+    },
+    /// Escape hatch for ad-hoc events. Every construction site MUST
+    /// carry a `// Custom justified: <reason>` comment.
+    Custom {
+        /// Short identifier for the event kind.
+        name: Arc<str>,
+        /// Free-form detail payload.
+        detail: Arc<str>,
+    },
+}
+
+impl std::fmt::Display for StructuredAuditEvent {
+    /// Hand-authored `Display` — produces a compact single-line
+    /// representation matching the snapshot test pinning in
+    /// `verter_session::component_meta_audit::expected_display_snapshots`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RequestStart {
+                canonical_id,
+                request_id,
+            } => write!(f, "RequestStart({canonical_id}, #{request_id})"),
+            Self::RequestEnd {
+                request_id,
+                success,
+            } => write!(f, "RequestEnd(#{request_id}, success={success})"),
+            Self::IndexedReadyBuilt {
+                canonical_id,
+                whole_hash,
+            } => write!(
+                f,
+                "IndexedReadyBuilt({canonical_id}, hash={})",
+                short_hash(whole_hash)
+            ),
+            Self::VfsRead {
+                canonical_id,
+                layer,
+                cache_hit,
+                bytes_read,
+            } => write!(
+                f,
+                "VfsRead({canonical_id}, {layer:?}, hit={cache_hit}, bytes={bytes_read})"
+            ),
+            Self::SharedLoadReuse {
+                canonical_id,
+                winner_request_id,
+                winner_audited,
+            } => write!(
+                f,
+                "SharedLoadReuse({canonical_id}, winner=#{winner_request_id}, audited={winner_audited})"
+            ),
+            Self::DispatchEnter { key_kind, depth } => {
+                write!(f, "DispatchEnter({key_kind:?}, depth={depth})")
+            }
+            Self::DispatchExit {
+                key_kind,
+                outcome,
+                duration_ns,
+            } => write!(f, "DispatchExit({key_kind:?}, {outcome:?}, {duration_ns}ns)"),
+            Self::MaterializeMemberRouteStart { subject } => {
+                write!(f, "MaterializeMemberRouteStart({subject:?})")
+            }
+            Self::MaterializeMemberRouteEnd {
+                subject,
+                duration_ns,
+            } => write!(f, "MaterializeMemberRouteEnd({subject:?}, {duration_ns}ns)"),
+            Self::RematerializePublicPropTypeStart { subject } => {
+                write!(f, "RematerializePublicPropTypeStart({subject:?})")
+            }
+            Self::RematerializePublicPropTypeEnd {
+                subject,
+                duration_ns,
+            } => write!(
+                f,
+                "RematerializePublicPropTypeEnd({subject:?}, {duration_ns}ns)"
+            ),
+            Self::MaterializeDefinePropsMember { subject } => {
+                write!(f, "MaterializeDefinePropsMember({subject:?})")
+            }
+            Self::FallthroughInheritanceComputed { subject } => {
+                write!(f, "FallthroughInheritanceComputed({subject:?})")
+            }
+            Self::ResolveImportedTypeRoot {
+                canonical_id,
+                symbol_name,
+            } => write!(f, "ResolveImportedTypeRoot({canonical_id}::{symbol_name})"),
+            Self::CurrentEvalState {
+                canonical_id,
+                duration_ns,
+            } => write!(f, "CurrentEvalState({canonical_id}, {duration_ns}ns)"),
+            Self::MaterializeStructureEnter {
+                base,
+                scope_axis,
+                mode,
+                depth,
+            } => write!(
+                f,
+                "MaterializeStructureEnter({base}, {scope_axis:?}, {mode:?}, depth={depth})"
+            ),
+            Self::MaterializeStructureExit {
+                base,
+                scope_axis,
+                mode,
+                outcome,
+                duration_ns,
+            } => write!(
+                f,
+                "MaterializeStructureExit({base}, {scope_axis:?}, {mode:?}, {outcome:?}, {duration_ns}ns)"
+            ),
+            Self::MaterializeStructurePolicySkip {
+                base,
+                scope_axis,
+                reason,
+            } => write!(
+                f,
+                "MaterializeStructurePolicySkip({base}, {scope_axis:?}, {reason:?})"
+            ),
+            Self::MaterializeStructureCycleDetected {
+                base,
+                scope_axis,
+                mode,
+                depth,
+            } => write!(
+                f,
+                "MaterializeStructureCycleDetected({base}, {scope_axis:?}, {mode:?}, depth={depth})"
+            ),
+            Self::MaterializeStructureDepthFuseTripped {
+                base,
+                scope_axis,
+                mode,
+                depth,
+            } => write!(
+                f,
+                "MaterializeStructureDepthFuseTripped({base}, {scope_axis:?}, {mode:?}, depth={depth})"
+            ),
+            Self::Custom { name, detail } => write!(f, "Custom({name}, {detail})"),
+        }
+    }
+}
+
+fn short_hash(hash: &Hash16) -> String {
+    let mut s = String::with_capacity(8);
+    for byte in hash.iter().take(4) {
+        s.push_str(&format!("{byte:02x}"));
+    }
+    s
+}

@@ -3,7 +3,7 @@
 //!
 //! Validates that `VerterHost::get_component_meta_with_resolution` consults
 //! the `ComponentMetaResultDb` on warm replays and synthesizes a
-//! `RustAuditRecord { from_cache: true, total_ms: 0 }` for audit consumers.
+//! `RequestAuditRecord { from_cache: true, total_ms: 0 }` for audit consumers.
 //!
 //! These tests are the FAIL-FIRST contract for the cache-hit flow:
 //!   - First call: cold; produces a record with `from_cache = false`.

@@ -123,7 +123,7 @@ fn concurrent_audits_on_same_host_each_see_their_own_record() {
 fn audited_request_record_carries_populated_footprint_when_capture_enabled() {
     // Plan §3 Commit 4 wire-up: when `footprint_capture` is enabled,
     // the request path mines the per-request accumulator and attaches a
-    // `RustSemanticFootprintAudit` to the record. Without the
+    // `RequestFootprintAudit` to the record. Without the
     // `mine_footprint` call inserted in `meta_resolve.rs`, the
     // `record.footprint` field would always be `None`.
     let host = setup_host();

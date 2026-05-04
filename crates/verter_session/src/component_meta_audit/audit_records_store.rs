@@ -2,7 +2,7 @@
 //! Bounded insert-ordered store for finished audit records.
 //!
 //! `VerterHost` owns a single `AuditRecordsStore` instance;
-//! every audited request inserts its `RustAuditRecord` at completion;
+//! every audited request inserts its `RequestAuditRecord` at completion;
 //! consumers (harness, NAPI, WASM, LSP) retrieve via
 //! `take_audit_record(request_id)` — a strict insert-then-take flow.
 //!
@@ -13,15 +13,15 @@
 use indexmap::IndexMap;
 use parking_lot::Mutex;
 
-use super::RustAuditRecord;
+use super::RequestAuditRecord;
 
 /// Default capacity per.
 pub const AUDIT_RECORDS_STORE_CAPACITY: usize = 256;
 
-/// Thread-safe insert-ordered store of `(request_id, RustAuditRecord)`.
+/// Thread-safe insert-ordered store of `(request_id, RequestAuditRecord)`.
 #[derive(Debug)]
 pub struct AuditRecordsStore {
-    inner: Mutex<IndexMap<u64, RustAuditRecord>>,
+    inner: Mutex<IndexMap<u64, RequestAuditRecord>>,
     capacity: usize,
 }
 
@@ -46,7 +46,7 @@ impl AuditRecordsStore {
     /// oldest-by-insertion entry is evicted first. If the same
     /// `request_id` was already present, the prior entry is
     /// replaced in-place without affecting insertion order.
-    pub fn insert(&self, record: RustAuditRecord) {
+    pub fn insert(&self, record: RequestAuditRecord) {
         let mut map = self.inner.lock();
         let key = record.request_id;
         if !map.contains_key(&key) && map.len() >= self.capacity {
@@ -56,7 +56,7 @@ impl AuditRecordsStore {
     }
 
     /// Remove and return the record for `request_id`, if present.
-    pub fn take(&self, request_id: u64) -> Option<RustAuditRecord> {
+    pub fn take(&self, request_id: u64) -> Option<RequestAuditRecord> {
         let mut map = self.inner.lock();
         map.shift_remove(&request_id)
     }
@@ -76,19 +76,23 @@ impl AuditRecordsStore {
 mod tests {
     use super::*;
     use crate::component_meta_audit::{
-        RustMemoryAudit, RustSolverAudit, RustStoreAudit, RustTimingAudit,
+        ComponentMetaPayload, RequestMemoryAudit, RequestStoreAudit, RequestTimingAudit,
     };
 
-    fn dummy_record(request_id: u64) -> RustAuditRecord {
-        RustAuditRecord {
+    fn dummy_record(request_id: u64) -> RequestAuditRecord {
+        RequestAuditRecord {
             request_id,
             canonical_id: format!("/req{request_id}.vue"),
-            timings: RustTimingAudit::default(),
-            solver: RustSolverAudit::default(),
-            store: RustStoreAudit::default(),
-            memory: RustMemoryAudit::default(),
+            kind: super::super::RequestKind::ComponentMeta,
+            parent_request_id: None,
+            timings: RequestTimingAudit::default(),
+            store: RequestStoreAudit::default(),
+            memory: RequestMemoryAudit::default(),
             footprint: None,
             from_cache: false,
+            kind_payload: super::super::RequestKindPayload::ComponentMeta(
+                ComponentMetaPayload::default(),
+            ),
         }
     }
 

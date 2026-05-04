@@ -2,6 +2,7 @@
 //! separate `.ts` file. The canonical scenario the footprint miner
 //! targets: cross-file type deps show up in `loaded_files()`.
 
+use crate::harness::RequestAuditRecordAssertions;
 use crate::harness::{build_hermetic_host, footprint_of, resolve_under_audit};
 
 const EXTERNAL_TYPE_VUE: &str = r#"<script setup lang="ts">

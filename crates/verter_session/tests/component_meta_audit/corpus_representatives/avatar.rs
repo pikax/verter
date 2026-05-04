@@ -1,6 +1,7 @@
 //! Curated corpus representative — avatar with size enum from
 //! a shared size-scale types file.
 
+use crate::harness::RequestAuditRecordAssertions;
 use crate::harness::{build_hermetic_host, resolve_under_audit};
 
 const AVATAR_VUE: &str = r#"<script setup lang="ts">

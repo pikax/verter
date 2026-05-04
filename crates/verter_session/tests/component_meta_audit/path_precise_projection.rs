@@ -3,6 +3,7 @@
 //! path-precise navigation rule: intermediate hops run in
 //! `Navigate` mode, only the terminal hop expands.
 
+use crate::harness::RequestAuditRecordAssertions;
 use crate::harness::{build_hermetic_host, resolve_under_audit};
 
 const PATH_PROJECTION_VUE: &str = r#"<script setup lang="ts">

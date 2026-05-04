@@ -59,6 +59,7 @@ pub(crate) mod completion_fence;
 pub mod component_meta_audit;
 #[cfg(test)]
 mod component_meta_cache_discipline_tests;
+pub mod host_audit_runtime;
 // tests/invalidation_perf.rs — InvalidationByCanonical impl on
 // ImportedRegistryDb is exercised by the §12.A12 perf gate.
 pub mod component_meta_caches;
@@ -129,7 +130,6 @@ pub(crate) mod host_test_audit;
 mod host_test_seed;
 mod host_upsert;
 mod host_views;
-pub(crate) mod i64_as_decimal_string;
 mod id;
 pub(crate) mod intrinsic_registry;
 pub mod invalidation_domain;
@@ -158,7 +158,6 @@ pub(crate) mod source_map_remap;
 pub(crate) mod spike_instrumentation;
 pub(crate) mod template_convert;
 mod types;
-pub(crate) mod u64_as_decimal_string;
 mod upsert;
 
 // Test harness module — defines the per-request `CaptureToken` API
@@ -215,6 +214,9 @@ pub mod for_tests {
     };
 }
 
+pub use host_audit_runtime::{
+    ActiveRegistration, AuditRequestRegistration, AuditRuntimeSnapshot, HostAuditRuntime,
+};
 pub use types::*;
 
 // Re-export for the LSP: standalone @verter/types .d.ts content.
@@ -415,7 +417,7 @@ pub struct VerterHost {
     /// Bounded insert-ordered store of finished audit records.
     ///
     /// Backing shape:
-    /// `Mutex<IndexMap<u64, RustAuditRecord>>` with capacity 256 and
+    /// `Mutex<IndexMap<u64, RequestAuditRecord>>` with capacity 256 and
     /// **FIFO eviction** via `shift_remove_index(0)` at capacity (verified
     /// at `audit_records_store.rs:23–26, 49–56`). Different artifact type
     /// than anything in `ProjectTypeStore`; the audit subsystem has its own
@@ -423,6 +425,13 @@ pub struct VerterHost {
     /// `emit_audit_trace`; consumers retrieve via
     /// `take_audit_record(request_id)`.
     pub(crate) audit_records: Arc<crate::component_meta_audit::AuditRecordsStore>,
+    /// Host-owned audit runtime — wraps [`crate::component_meta_audit::AuditRecordsStore`],
+    /// the [`verter_audit::AuditConfig`] snapshot, and the active-request
+    /// registry that [`crate::host_audit_runtime::AuditRequestRegistration`]
+    /// populates. The records store and this runtime share the same
+    /// `Arc<AuditRecordsStore>`, so writes through either surface land in
+    /// the same map.
+    pub(crate) host_audit_runtime: Arc<crate::host_audit_runtime::HostAuditRuntime>,
     /// Cumulative host-level test audit state — accessible via
     /// [`Self::audit`] (test-only). Counters increment from
     /// `#[cfg(test)]` hooks at the production read / shallow-process

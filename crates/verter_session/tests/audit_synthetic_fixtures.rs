@@ -13,7 +13,7 @@
 //! events is intentionally NOT done here:
 //!
 //! 1. The hermetic `AuditedRequest` flow drains its accumulator into
-//!    a `RustAuditRecord` whose footprint records do not surface
+//!    a `RequestAuditRecord` whose footprint records do not surface
 //!    `MaterializeSkipReason` variants individually (the audit
 //!    pipeline mines `structured_events` into shape-aware records).
 //! 2. The cycle-guard predicates themselves are unit-tested directly:

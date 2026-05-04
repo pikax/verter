@@ -1,6 +1,7 @@
 //! Curated corpus representative — alert component with a color
 //! variant enum in a separate types file.
 
+use crate::harness::RequestAuditRecordAssertions;
 use crate::harness::{build_hermetic_host, resolve_under_audit};
 
 const ALERT_VUE: &str = r#"<script setup lang="ts">

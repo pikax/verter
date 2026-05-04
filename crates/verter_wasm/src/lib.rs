@@ -24,7 +24,9 @@ use verter_ffi::convert::*;
 use verter_ffi::types::*;
 use verter_protocol::types::{FfiComponentMeta, FfiComponentMetaResolution};
 use verter_session as host;
-use verter_session::component_meta_audit::RustAuditRecord;
+use verter_session::component_meta_audit::{
+    assertions::RequestAuditRecordAssertions, RequestAuditRecord,
+};
 use wasm_bindgen::prelude::*;
 
 /// WASM audit bundle — mirror of the NAPI binding's bundle shape.
@@ -33,7 +35,7 @@ use wasm_bindgen::prelude::*;
 struct WasmAuditBundle {
     analysis: FfiComponentMeta,
     resolution: FfiComponentMetaResolution,
-    record: RustAuditRecord,
+    record: RequestAuditRecord,
 }
 
 /// Minimal decoder for `whyLoadedFromAuditJson` / `whyInstantiatedFromAuditJson`
@@ -42,7 +44,7 @@ struct WasmAuditBundle {
 /// serde's default unknown-field handling.
 #[derive(Deserialize)]
 struct WasmAuditBundleForWalker {
-    record: RustAuditRecord,
+    record: RequestAuditRecord,
 }
 
 /// Parse a 32-char lowercase hex string into `Hash16`. WASM-error
@@ -1139,7 +1141,7 @@ impl WasmMetaSession {
 
     /// Synchronous audit bundle — returns
     /// `{ analysis: FfiComponentMeta, resolution: FfiComponentMetaResolution,
-    ///   record: RustAuditRecord } | null` as a JS object. Host must
+    ///   record: RequestAuditRecord } | null` as a JS object. Host must
     /// have `audit_enabled` + `footprint_capture` set; otherwise throws.
     ///
     /// NOT a Promise. Consumer-side Promise ergonomics (if desired)

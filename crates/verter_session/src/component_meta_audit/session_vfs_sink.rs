@@ -28,7 +28,9 @@ use std::sync::{Arc, Weak};
 
 use verter_workspace::audit_sink::{VfsAuditSink, VfsReadEvent};
 
-use super::{RequestFootprintAccumulator, VfsLayer, VfsReadRecord};
+#[cfg(test)]
+use super::VfsLayer;
+use super::{RequestFootprintAccumulator, VfsReadRecord};
 
 /// Session-owned VFS audit sink. Filters fan-out events by
 /// `request_id` and forwards matches to the accumulator as
@@ -77,7 +79,7 @@ impl VfsAuditSink for SessionVfsSink {
 
         acc.push_vfs_read(VfsReadRecord {
             canonical_id: Arc::clone(&event.canonical_id),
-            layer: VfsLayer::from(event.layer),
+            layer: super::vfs_layer_from_workspace(event.layer),
             cache_hit: event.cache_hit,
             bytes_read: event.bytes_read,
             request_id: self.request_id,

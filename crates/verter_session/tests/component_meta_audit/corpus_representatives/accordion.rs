@@ -5,6 +5,7 @@
 //! set of loaded files under resolution so semantic drift shows
 //! up as a set-difference.
 
+use crate::harness::RequestAuditRecordAssertions;
 use crate::harness::{build_hermetic_host, resolve_under_audit};
 
 const ACCORDION_VUE: &str = r#"<script setup lang="ts">

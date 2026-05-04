@@ -2,6 +2,7 @@
 //! generic bound declared inline. Exercises the IDE's generic-SFC
 //! component-meta path without cross-file dependencies.
 
+use crate::harness::RequestAuditRecordAssertions;
 use crate::harness::{build_hermetic_host, footprint_of, resolve_under_audit};
 
 const SINGLE_FILE_GENERIC_VUE: &str = r#"<script setup lang="ts" generic="T extends { id: string }">

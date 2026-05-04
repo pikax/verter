@@ -227,7 +227,8 @@ impl VerterHost {
             workspace_before_bytes,
         )) = audit
         {
-            audit_builder.record_store(self.component_meta_audit_store_snapshot(None));
+            let (store_audit, cm_counters) = self.component_meta_audit_store_snapshot(None);
+            audit_builder.record_store(store_audit);
             let (host_cache_after_bytes, workspace_after_bytes) =
                 self.component_meta_audit_memory_bytes();
             audit_builder.record_memory_snapshots(
@@ -236,6 +237,12 @@ impl VerterHost {
                 workspace_before_bytes,
                 workspace_after_bytes,
             );
+            // Install the resolver-side solver counters FIRST, then
+            // layer materializer counters on top. Order matters
+            // because `record_component_meta_payload` replaces the
+            // in-flight payload wholesale, while
+            // `record_component_meta_store` mutates only the
+            // materializer fields.
             if request_source_performed_compute(result.source) {
                 if let Some(compute_audit) = result
                     .value
@@ -246,14 +253,22 @@ impl VerterHost {
                     timings.imported_root_proof_ms =
                         request_audit_guard.snapshot().imported_root_proof_ms;
                     audit_builder.record_timings(timings);
-                    audit_builder.record_solver(compute_audit.solver.clone());
+                    audit_builder.record_component_meta_payload(compute_audit.solver.clone());
                 }
             }
+            audit_builder.record_component_meta_store(
+                cm_counters.materialize_structure_calls,
+                cm_counters.materialize_structure_cache_hits,
+                cm_counters.node_arena_lock_acquisitions,
+                cm_counters.family_map_lock_acquisitions,
+                cm_counters.dep_signature_merges,
+                cm_counters.dep_signature_intern_hits,
+            );
             // Mine the semantic footprint when the active request is
             // capturing. drains the per-request
             // accumulator and feeds the result through the deterministic
             // miner before the builder finalises. Without this step,
-            // `RustAuditRecord.footprint` would always be `None` even
+            // `RequestAuditRecord.footprint` would always be `None` even
             // for footprint-enabled requests.
             if let Some(ctx) = crate::request_context::current_request_context() {
                 if ctx.footprint_capture {
@@ -348,7 +363,7 @@ impl VerterHost {
         let audit_enabled = self.config.audit_enabled;
         let mut audit_timings = if audit_enabled {
             captured
-                .map(|captured| crate::component_meta_audit::RustTimingAudit {
+                .map(|captured| crate::component_meta_audit::RequestTimingAudit {
                     capture_inputs_ms: captured.audit_capture_inputs_ms,
                     store_read_ms: captured.audit_store_read_ms,
                     direct_import_proof_ms: captured.audit_direct_import_proof_ms,
@@ -356,7 +371,7 @@ impl VerterHost {
                 })
                 .unwrap_or_default()
         } else {
-            crate::component_meta_audit::RustTimingAudit::default()
+            crate::component_meta_audit::RequestTimingAudit::default()
         };
         component_meta_trace_custom!(
             "compute_component_meta_state",
@@ -547,9 +562,10 @@ impl VerterHost {
                     );
                 }
             }
-            crate::component_meta_audit::RustSolverAudit {
+            crate::component_meta_audit::ComponentMetaPayload {
                 total_resolve_steps: 0u64,
                 solve_count: 0u32,
+                ..Default::default()
             }
         } else {
             crate::host_manage::component_meta_trace_custom!(
@@ -559,7 +575,7 @@ impl VerterHost {
                     canonical,
                 ),
             );
-            crate::component_meta_audit::RustSolverAudit::default()
+            crate::component_meta_audit::ComponentMetaPayload::default()
         };
         audit_timings.materialize_ms = append_start.elapsed().as_secs_f64() * 1000.0;
         let store_merge_started = audit_enabled.then(Instant::now);

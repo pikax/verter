@@ -2,6 +2,7 @@
 //! barrel that re-exports from a leaf module. Exercises the
 //! ImportTarget → canonical walk.
 
+use crate::harness::RequestAuditRecordAssertions;
 use crate::harness::{build_hermetic_host, resolve_under_audit};
 
 const BARREL_CHAIN_VUE: &str = r#"<script setup lang="ts">

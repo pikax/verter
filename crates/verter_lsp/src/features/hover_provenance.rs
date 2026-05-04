@@ -38,7 +38,7 @@ use std::num::NonZeroUsize;
 use lru::LruCache;
 use parking_lot::Mutex;
 use tower_lsp_server::ls_types::Position;
-use verter_session::component_meta_audit::RustAuditRecord;
+use verter_session::component_meta_audit::RequestAuditRecord;
 
 /// Maximum number of hover-provenance entries retained in the cache.
 /// LRU bounded at 100.
@@ -154,7 +154,7 @@ impl Default for HoverProvenanceCache {
 /// graph (single-walker rule); it summarizes the footprint
 /// counters and lists the union of `loaded_files()`.
 #[must_use]
-pub fn render_provenance_markdown(record: &RustAuditRecord) -> String {
+pub fn render_provenance_markdown(record: &RequestAuditRecord) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
     out.push_str("\n\n---\n\n**Provenance**\n\n");
@@ -333,19 +333,21 @@ mod tests {
     #[test]
     fn render_provenance_markdown_handles_footprint_absent_and_present() {
         use verter_session::component_meta_audit::{
-            RustAuditRecord, RustMemoryAudit, RustSemanticFootprintAudit, RustSolverAudit,
-            RustStoreAudit, RustTimingAudit,
+            ComponentMetaPayload, RequestAuditRecord, RequestFootprintAudit, RequestKind,
+            RequestKindPayload, RequestMemoryAudit, RequestStoreAudit, RequestTimingAudit,
         };
 
-        let mut base = RustAuditRecord {
+        let mut base = RequestAuditRecord {
             request_id: 42,
             canonical_id: "/c.vue".into(),
-            timings: RustTimingAudit::default(),
-            solver: RustSolverAudit::default(),
-            store: RustStoreAudit::default(),
-            memory: RustMemoryAudit::default(),
+            kind: RequestKind::ComponentMeta,
+            parent_request_id: None,
+            timings: RequestTimingAudit::default(),
+            store: RequestStoreAudit::default(),
+            memory: RequestMemoryAudit::default(),
             footprint: None,
             from_cache: false,
+            kind_payload: RequestKindPayload::ComponentMeta(ComponentMetaPayload::default()),
         };
 
         // Missing footprint → the renderer surfaces a clear hint
@@ -365,7 +367,7 @@ mod tests {
         // Present footprint → the renderer enumerates loaded files +
         // cache outcomes. This discriminates against
         // a stub-renderer that ignored `footprint.loaded_files()`.
-        base.footprint = Some(RustSemanticFootprintAudit::default());
+        base.footprint = Some(RequestFootprintAudit::default());
         let rendered_empty = render_provenance_markdown(&base);
         assert!(rendered_empty.contains("Loaded files (0)"));
         assert!(

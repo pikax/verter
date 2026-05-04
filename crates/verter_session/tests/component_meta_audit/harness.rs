@@ -2,7 +2,7 @@
 //! correctness suite (plan §3 Commit 7 / F6). Each sibling test
 //! module injects the relevant fixtures into a hermetic
 //! [`AuditedRequest`], resolves a canonical SFC, and asserts on
-//! the resulting [`RustAuditRecord`].
+//! the resulting [`RequestAuditRecord`].
 //!
 //! All fixtures live under `crates/verter_session/test_fixtures/`
 //! and are reached via `include_str!`. This keeps fixtures in the
@@ -16,7 +16,7 @@
 //!   `mask_incidental_spans()`. These fail loudly on accidental
 //!   shape changes but don't assert exact semantic content.
 //! - `corpus_representatives/*` — `_exactly` assertions using
-//!   [`RustAuditRecord::assert_loaded_files_exactly`]. These fail
+//!   [`RequestAuditRecord::assert_loaded_files_exactly`]. These fail
 //!   when the loaded-files set changes for a curated representative
 //!   from the nuxt-ui corpus.
 //! - Standalone — each exercises one audit-surface facet
@@ -26,7 +26,8 @@
 use std::sync::Arc;
 
 use verter_session::audited_request::AuditedRequest;
-use verter_session::component_meta_audit::{RustAuditRecord, RustSemanticFootprintAudit};
+pub use verter_session::component_meta_audit::assertions::RequestAuditRecordAssertions;
+use verter_session::component_meta_audit::{RequestAuditRecord, RequestFootprintAudit};
 use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{
     AmbientLibSpec, IdeProjectCompilerOptions, MemoryOptions, MemoryWorkspace, ProjectGraph,
@@ -97,7 +98,7 @@ pub fn resolve_under_audit(
 ) -> (
     verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
     verter_session::meta_resolve::ResolvedComponentMetaState,
-    RustAuditRecord,
+    RequestAuditRecord,
 ) {
     AuditedRequest::builder()
         .attach_to(host)
@@ -107,7 +108,7 @@ pub fn resolve_under_audit(
 
 /// Convenience: return the footprint, panicking when absent. Every
 /// test in this suite opts into `footprint_capture`.
-pub fn footprint_of(record: &RustAuditRecord) -> &RustSemanticFootprintAudit {
+pub fn footprint_of(record: &RequestAuditRecord) -> &RequestFootprintAudit {
     record
         .footprint
         .as_ref()
