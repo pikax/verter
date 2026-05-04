@@ -172,7 +172,13 @@ pub(super) const MAX_INFLIGHT_RETRIES: usize = 3;
 /// build profiles lets integration tests in
 /// `crates/verter_session/tests/*.rs` drive the abort branch through
 /// the public [`SemanticGraphStore::test_force_cold_abort_sweep`]
-/// guard, which is what Slice 0.2's discriminating tests need.
+/// guard required by integration tests in
+/// `crates/verter_session/tests/`.
+///
+/// This static is reachable from integration tests via `for_tests`;
+/// cost is one byte plus one relaxed atomic load on the cold-publish
+/// path. The un-gating is a deliberate test-reachability decision and
+/// must not be used as a production primitive.
 ///
 /// Tests must clear the flag before returning (RAII guard pattern —
 /// see `TestForceColdAbortGuard` in `mod.rs`).

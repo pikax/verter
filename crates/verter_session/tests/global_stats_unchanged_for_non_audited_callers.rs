@@ -1,11 +1,13 @@
-//! Slice 0.2 (Wave 0) — global counter regression test.
+//! Global counter regression test for the dual-target counter helper.
 //!
-//! The Decision #5 helper writes the global stat unconditionally and
-//! mirrors to the per-request stat only when a context is installed.
-//! This test pins the unconditional global write — it is what
-//! discriminates the v4.1 single-helper design from the rejected v4
-//! drop-time aggregation design (which would have moved the global
-//! into a finalize step and broken non-audited callers).
+//! The dual-target helper writes the global stat unconditionally and
+//! mirrors to the per-request stat only when a `RequestContext` is
+//! installed in TLS. This test pins the unconditional global write
+//! invariant — without a request context, telemetry consumers
+//! (Prometheus exporters, debug dumps) that read `stats_snapshot()`
+//! still see the increment. If a future refactor accidentally moves
+//! the global write behind a per-request guard (for example by
+//! collapsing both targets into a finalize step), this test fails.
 
 use std::sync::Arc;
 
@@ -62,7 +64,7 @@ fn cold_abort_sweep_global_counter_increments_without_request_context() {
     assert_eq!(
         snap.cold_aborts_swept, 1,
         "global stats.cold_aborts_swept must increment for non-audited callers \
-         (got {}). If this regresses, Slice 0.2's helper has accidentally \
+         (got {}). If this regresses, the dual-target helper has accidentally \
          moved the global write behind a per-request guard — that would \
          break every existing telemetry consumer that reads stats_snapshot.",
         snap.cold_aborts_swept,
