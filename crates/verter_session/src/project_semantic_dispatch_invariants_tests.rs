@@ -1514,7 +1514,7 @@ fn semantic_graph_store_has_relation_memo_field() {
     // Plan §2 + §3 Change S: SemanticGraphStore must carry a
     // `relation_memo` DashMap field for the post-cutover relation
     // engine.
-    let memo_src = include_str!("semantic_query_memo.rs");
+    let memo_src = include_str!("semantic_query_memo/mod.rs");
     assert!(
         memo_src.contains("relation_memo: DashMap<"),
         "SemanticGraphStore must have a `relation_memo: DashMap<...>` field"
