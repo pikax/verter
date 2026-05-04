@@ -3707,6 +3707,7 @@ mod foundations_guards {
             "crates/verter_parser/src/utils/oxc/bindings/helpers.rs",
             "crates/verter_parser/src/utils/oxc/vue/script/resolve_type/mod.rs",
             "crates/verter_parser/src/utils/oxc/vue/script/resolve_type/external.rs",
+            "crates/verter_parser/src/utils/oxc/vue/script/resolve_type/decl.rs",
             "crates/verter_parser/src/utils/oxc/vue/script/setup.rs",
             "crates/verter_parser/src/utils/oxc/vue/script/usage.rs",
             "crates/verter_protocol/src/component_meta.rs",
