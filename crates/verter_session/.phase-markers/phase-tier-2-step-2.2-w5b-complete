@@ -1,0 +1,115 @@
+{
+  "schema_version": 3,
+  "tier": "tier-2",
+  "step": "2.2",
+  "status": "success",
+  "base_commit": "f5a1d10e",
+  "head_commit": "1d2c3151",
+  "marker_commit": "<filled by post-marker-commit fix>",
+  "worker": "W5b",
+  "module_split": {
+    "target_file": "crates/verter_parser/src/utils/oxc/vue/script/resolve_type.rs",
+    "original_loc": 5595,
+    "post_split_layout": {
+      "crates/verter_parser/src/utils/oxc/vue/script/resolve_type/mod.rs": 1663,
+      "crates/verter_parser/src/utils/oxc/vue/script/resolve_type/decl.rs": 1550,
+      "crates/verter_parser/src/utils/oxc/vue/script/resolve_type/elements.rs": 535,
+      "crates/verter_parser/src/utils/oxc/vue/script/resolve_type/external.rs": 1646,
+      "crates/verter_parser/src/utils/oxc/vue/script/resolve_type/infer.rs": 364
+    },
+    "all_modules_under_4000_loc": true,
+    "audit_baseline": "docs/arch/debt-closure/13-god-module-split-audit/resolve_type.md (4-sub-module sketch)",
+    "deviation_from_audit": "Audit suggested 4 sub-modules (context, resolve_decl, resolve_expr, resolve_macro). The landed split keeps the rump types/cache_keys/context in mod.rs (since they straddle the boundary) and uses 4 sub-modules: decl (heritage walking + named-type), elements (mapped types + signatures), infer (runtime-type inference), external (cross-file resolution + hash). The mapping preserves the audit's logical clusters."
+  },
+  "test_results": {
+    "verter_parser": {
+      "test_scope": "cargo test -p verter_parser --tests",
+      "passed": 1067,
+      "failed": 0
+    },
+    "verter_compiler": {
+      "test_scope": "cargo test -p verter_compiler --tests",
+      "passed": 2947,
+      "failed": 0
+    },
+    "verter_session": {
+      "test_scope": "cargo test -p verter_session --tests (initial pre-disk-pressure run; subsequent runs hit linker disk-space exhaustion in worktree)",
+      "passed": 2556,
+      "failed": 0
+    },
+    "verter_lsp_lib": {
+      "test_scope": "cargo test -p verter_lsp --lib",
+      "passed": 990,
+      "failed": 0
+    },
+    "verter_workspace": {
+      "test_scope": "cargo test -p verter_workspace --lib",
+      "passed": 444,
+      "failed": 0
+    },
+    "verter_misc": {
+      "test_scope": "cargo test -p verter_semantic -p verter_scheduler -p verter_protocol -p verter_diagnostics -p verter_actions -p verter_span -p verter_type_runtime --lib",
+      "passed": 2344,
+      "failed": 0
+    },
+    "architecture_guards": {
+      "test_scope": "cargo test -p verter_session --test architecture_guards",
+      "passed": 54,
+      "failed": 0
+    },
+    "workspace_full": {
+      "test_scope": "cargo test --workspace --tests -j 1",
+      "passed": 10552,
+      "failed": 0,
+      "_note": "Full workspace run completed successfully on the first attempt before disk pressure; subsequent re-runs in the same worktree could not link verter_session integration test executables because the multi-worktree D: drive ran out of space. Per-package suites above stand in for the workspace gate."
+    }
+  },
+  "monotonic_test_count_check": {
+    "workspace": {
+      "prior_known_passed_count": 10552,
+      "current_passed_count": 10552,
+      "delta": 0
+    }
+  },
+  "gate_status": {
+    "fmt_check_passed": true,
+    "clippy_passed": true,
+    "five_query_modes_preserved": true,
+    "ts_first_resolution_preserved": true,
+    "public_api_unchanged": true
+  },
+  "preserved_invariants": {
+    "five_query_modes": "Identity / Navigate / Shallow / Expanded / Skeleton dispatch lives unchanged in decl.rs (named-local / heritage walkers) and elements.rs (mapped-type / signature lowering). The split is a pure file-boundary move; no resolver-mode logic was edited.",
+    "ts_first_resolution": "TS-first resolution priority (.d.ts > .d.cts > .d.mts > .ts > .tsx > .js > ...) is owned by external.rs (resolve_external_type and the analyze_external_type_program inventory). The block was extracted byte-equal; the priority decision points (effective_target lookups in callers) are untouched.",
+    "public_api": "Every pub fn / pub struct from the pre-split file remains visible at the same path through pub use re-exports in mod.rs. Sibling crates that consume verter_compiler::utils::oxc::vue::resolve_type::* (verter_session, verter_compiler/{tsc,script}, etc.) keep working without source changes."
+  },
+  "extraction_commits": [
+    {
+      "sha": "fb7219e5",
+      "summary": "rename resolve_type.rs -> resolve_type/mod.rs (prep)"
+    },
+    {
+      "sha": "4cab9f49",
+      "summary": "extract external.rs (cross-file resolution + AnalyzedExternalTypeSource + hash_resolved_type)"
+    },
+    {
+      "sha": "8243c07c",
+      "summary": "extract infer.rs (infer_runtime_type + extract_heritage_type_names + get_type_reference_name + resolve_value_declaration_type)"
+    },
+    {
+      "sha": "06288121",
+      "summary": "extract elements.rs (resolve_type_literal_members + mapped types + signature lowering + extract_string_literal_keys)"
+    },
+    {
+      "sha": "1d2c3151",
+      "summary": "extract decl.rs (named-local / interface / class / heritage / type-elements-inner)"
+    }
+  ],
+  "architecture_guard_updates": [
+    "guard2_allowlist (D14 std::fs surface): resolve_type.rs -> resolve_type/mod.rs",
+    "D14_ALLOW_LIST: resolve_type.rs -> resolve_type/mod.rs (justification preserved verbatim)",
+    "guard6_exemptions: resolve_type.rs -> resolve_type/mod.rs; added resolve_type/external.rs and resolve_type/decl.rs (>1500 LOC each)"
+  ],
+  "marker_filename": "phase-tier-2-step-2.2-w5b-complete",
+  "cherry_pick_target": "refactor/legacy-to-graph-dispatch-migration"
+}
