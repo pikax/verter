@@ -202,6 +202,14 @@ pub mod for_tests {
     /// existence. Internal callers continue to reach
     /// `crate::semantic_query_memo::SemanticGraphStore` directly.
     pub use crate::semantic_query_memo::{BatchExpandError, SemanticGraphStore};
+
+    /// Slice 0.2: integration tests that drive the counter-helper
+    /// dual-target write (`record_inflight_aborted_retry` /
+    /// `record_cold_abort_swept`) need a `DepSignature` constructor
+    /// to feed `execute_cooperative` and a `cfg(test)` guard struct
+    /// to force the cold-abort branch. Both surfaces are
+    /// `#[doc(hidden)]` and gated through this `for_tests` module.
+    pub use crate::semantic_query_memo::{empty_signature_for_tests, TestForceColdAbortGuard};
 }
 
 pub use types::*;

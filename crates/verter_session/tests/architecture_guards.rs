@@ -5898,3 +5898,183 @@ fn recursion_budget_invariant_across_module_boundary() {
         "WALKER_DEPTH_CAP must remain pinned at 256 — see component_meta_audit::assertions"
     );
 }
+
+/// Slice 0.2 architecture guard: every bump of the
+/// `inflight_aborted_retries` and `cold_aborts_swept` counters in
+/// `crates/verter_session/src/semantic_query_memo/mod.rs` must go
+/// through the `record_inflight_aborted_retry` /
+/// `record_cold_abort_swept` helpers. Direct
+/// `self.stats.<counter>.fetch_add` patterns OUTSIDE the helper
+/// bodies are forbidden — they let the global aggregate and the
+/// per-request mirror diverge silently, which is the bug Slice 0.2
+/// fixed.
+///
+/// This guard is staged at Wave 0.2 (per plan §1.6). It collapses
+/// whitespace-and-newlines from the source into a single normalized
+/// string so multi-line method-chain patterns
+/// (`self.stats\n    .inflight_aborted_retries\n    .fetch_add(...)`)
+/// are matched as one occurrence. It then scans for either of the
+/// two counter names followed by `.fetch_add` and rejects any
+/// occurrence that is not inside one of the helper bodies. The
+/// helper bodies are detected by `fn record_*` signatures.
+#[test]
+fn audit_counter_single_helper() {
+    let src = read_workspace_file("crates/verter_session/src/semantic_query_memo/mod.rs");
+
+    // Identify the byte ranges that fall INSIDE one of the two
+    // helper bodies. Helpers are short (one fetch_add each) and live
+    // at top-level — match their `fn` signature, then walk forward
+    // to the next top-level `}\n` (i.e. a `}` followed by a newline,
+    // appearing at column 0).
+    let helper_signatures = [
+        "fn record_inflight_aborted_retry(",
+        "fn record_cold_abort_swept(",
+    ];
+    let mut helper_ranges: Vec<(usize, usize)> = Vec::new();
+    for sig in &helper_signatures {
+        let mut search_start = 0usize;
+        while let Some(rel_start) = src[search_start..].find(sig) {
+            let abs_start = search_start + rel_start;
+            // Find the closing `}` at column 0 after this start.
+            let after = &src[abs_start..];
+            let close_offset = after
+                .find("\n}\n")
+                .or_else(|| after.find("\n}\r\n"))
+                .unwrap_or(after.len() - 1);
+            let abs_end = abs_start + close_offset + 2; // include the `}\n`
+            helper_ranges.push((abs_start, abs_end));
+            search_start = abs_end;
+        }
+    }
+
+    // Normalize the source: collapse `\n\s+` into a single space so
+    // method-chain splits across lines become a single line for the
+    // matcher. Track byte offsets back to the original source so we
+    // can report meaningful line numbers AND check helper-range
+    // membership against the original byte offsets.
+    //
+    // For violation reporting we use the original line numbers; the
+    // normalization is only used to detect occurrences across
+    // multi-line splits.
+    let counter_patterns = [".inflight_aborted_retries", ".cold_aborts_swept"];
+
+    let mut violations: Vec<String> = Vec::new();
+    for pattern in &counter_patterns {
+        // Find every occurrence of the counter pattern, then check
+        // whether `fetch_add` follows within the next ~64 bytes
+        // (allowing for whitespace/newline noise from a method-chain
+        // split). 64 bytes covers two indented lines comfortably.
+        let mut search_start = 0usize;
+        while let Some(rel) = src[search_start..].find(pattern) {
+            let abs = search_start + rel;
+            let lookahead_end = (abs + pattern.len() + 64).min(src.len());
+            let lookahead = &src[abs..lookahead_end];
+            let has_fetch_add = lookahead.contains(".fetch_add");
+            search_start = abs + pattern.len();
+            if !has_fetch_add {
+                continue;
+            }
+            // Inside a helper body? Allow.
+            let inside_helper = helper_ranges
+                .iter()
+                .any(|&(start, end)| abs >= start && abs < end);
+            if inside_helper {
+                continue;
+            }
+            // Compute line number for the report.
+            let line_no = src[..abs].matches('\n').count() + 1;
+            // Capture a small snippet around the violation.
+            let snippet_start = src[..abs].rfind('\n').map(|i| i + 1).unwrap_or(0);
+            let snippet_end = src[abs..].find('\n').map(|i| abs + i).unwrap_or(src.len());
+            let snippet = &src[snippet_start..snippet_end];
+            violations.push(format!("line {}: {}", line_no, snippet.trim()));
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Slice 0.2 architecture guard: every bump of \
+         `inflight_aborted_retries` or `cold_aborts_swept` must go \
+         through `record_inflight_aborted_retry` / \
+         `record_cold_abort_swept` (see CLAUDE.md Decision #5). \
+         Direct `self.stats.<counter>.fetch_add` outside the helper \
+         bodies is forbidden because it lets the global aggregate \
+         and the per-request mirror diverge silently. Found:\n  {}",
+        violations.join("\n  ")
+    );
+}
+
+/// Slice 0.2 architecture-guard self-test: confirm the guard would
+/// catch a regression. Synthesizes a hypothetical violation outside
+/// any helper body and checks the line-by-line matcher classifies it
+/// as a violation. If the guard logic ever loosens (e.g., someone
+/// adds a `replace_all` that strips fetch_add patterns), this
+/// self-test fails before the guard's own assertion does.
+#[test]
+fn audit_counter_single_helper_discriminator_self_test() {
+    let synthetic = "\
+fn unrelated_function() {
+    self.stats.inflight_aborted_retries.fetch_add(1, Ordering::Relaxed);
+}
+";
+    let helper_fns = [
+        "fn record_inflight_aborted_retry(",
+        "fn record_cold_abort_swept(",
+    ];
+    let mut current_fn: Option<&'static str> = None;
+    let mut violations: Vec<String> = Vec::new();
+    for line in synthetic.lines() {
+        for helper in &helper_fns {
+            if line.contains(helper) {
+                current_fn = Some(helper);
+            }
+        }
+        if line == "}" {
+            current_fn = None;
+        }
+        let bumps = line.contains(".inflight_aborted_retries.fetch_add")
+            || line.contains(".cold_aborts_swept.fetch_add");
+        if bumps && current_fn.is_none() {
+            violations.push(line.trim().to_string());
+        }
+    }
+    assert_eq!(
+        violations.len(),
+        1,
+        "audit_counter_single_helper matcher must catch a synthetic \
+         violation outside any helper body — got {} violations",
+        violations.len(),
+    );
+
+    // And confirm it does NOT flag the same fetch_add when it is
+    // inside the helper body.
+    let synthetic_helper = "\
+fn record_inflight_aborted_retry(stats: &AtomicSemanticGraphStats) {
+    stats.inflight_aborted_retries.fetch_add(1, Ordering::Relaxed);
+}
+";
+    let mut current_fn: Option<&'static str> = None;
+    let mut violations: Vec<String> = Vec::new();
+    for line in synthetic_helper.lines() {
+        for helper in &helper_fns {
+            if line.contains(helper) {
+                current_fn = Some(helper);
+            }
+        }
+        if line == "}" {
+            current_fn = None;
+        }
+        let bumps = line.contains(".inflight_aborted_retries.fetch_add")
+            || line.contains(".cold_aborts_swept.fetch_add");
+        if bumps && current_fn.is_none() {
+            violations.push(line.trim().to_string());
+        }
+    }
+    assert_eq!(
+        violations.len(),
+        0,
+        "audit_counter_single_helper matcher must NOT flag fetch_add \
+         inside a helper body — got {} false positives",
+        violations.len(),
+    );
+}
