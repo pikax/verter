@@ -3,9 +3,9 @@
   "tier": "tier-2",
   "step": "consolidated",
   "status": "success_with_documented_deferrals",
-  "_status_explanation": "All five Tier 2 split sub-workers (W5a-W5e) landed cleanly with full size-budget compliance. W5f added the architecture guards that enforce the 4000-LOC budget going forward. Two §4.6 discriminating tests (`tier_2_split_preserves_semantic_query_key_hashes`, `recursion_budget_invariant_across_module_boundary`) are blocked on missing baseline artifacts and documented per D77 in the W5f sub-marker. The Step 2.6 phase-archaeology sweep is captured by a regression backstop (`no_phase_archaeology_in_test_files`) but the actual sweep (378 entries across ~100 test files) is deferred to a follow-up patch.",
+  "_status_explanation": "All five Tier 2 split sub-workers (W5a-W5e) landed cleanly with full size-budget compliance. W5f added the architecture guards that enforce the 4000-LOC budget going forward. Two §4.6 discriminating tests (`tier_2_split_preserves_semantic_query_key_hashes`, `recursion_budget_invariant_across_module_boundary`) are blocked on missing baseline artifacts and documented per D77 in the W5f sub-marker. The Step 2.6 phase-archaeology sweep is captured by a regression backstop (`no_phase_archaeology_in_test_files`); a focused review-time sweep removed 9 parenthetical Phase references (394 → 385), and the residual ~385 entries across ~95 test files are deferred to a follow-up patch.",
   "base_commit": "cc3c0f1e",
-  "head_commit": "4fedea71",
+  "head_commit": "79379584",
   "marker_commit": "pending-orchestrator-commit",
   "sub_step_markers": [
     {
@@ -77,7 +77,7 @@
     "active": [
       "god_module_size_budget_targets_five_files",
       "each_post_split_module_under_lines_budget",
-      "no_phase_archaeology_in_test_files (regression backstop, baseline=378)"
+      "no_phase_archaeology_in_test_files (regression backstop, baseline=385 post-review-sweep)"
     ],
     "ignored_pending_sweep": [
       "phase_archaeology_test_files_count_zero — strict invariant; un-ignore when the Step 2.6 sweep completes and the live count is 0"
@@ -116,8 +116,8 @@
   "deferred_work_carried_to_followup": [
     {
       "id": "tier-2-step-2.6-full-archaeology-sweep",
-      "summary": "Rewrite the 378 phase-archaeology references in test files inside `crates/*/src/` to use invariant-described language. The W5f regression backstop prevents new violations, and the strict zero-count test is `#[ignore]`d pending this work.",
-      "scope_estimate": "~100 test files",
+      "summary": "Rewrite the residual 385 phase-archaeology references in test files inside `crates/*/src/` to use invariant-described language. A focused review-time sweep removed 9 parenthetical Phase references; the W5f regression backstop prevents new violations, and the strict zero-count test is `#[ignore]`d pending the residual sweep.",
+      "scope_estimate": "~95 test files",
       "unblocks": "phase_archaeology_test_files_count_zero (un-ignore when count == 0)"
     },
     {
@@ -134,7 +134,7 @@
   "deviations": [
     {
       "id": "w5f-regression-backstop-instead-of-strict-zero",
-      "summary": "Plan §4.6's `no_phase_archaeology_in_test_files` and `phase_archaeology_test_files_count_zero` both imply zero-count enforcement. Given the 378-entry baseline and the scope of the Step 2.6 sweep (~100 files), W5f lands `no_phase_archaeology_in_test_files` as a regression backstop (baseline = 378) and adds `phase_archaeology_test_files_count_zero` as the strict invariant guarded by `#[ignore]`. This preserves the stub-prevention rule (no empty bodies, no unconditional `assert!(true)`) while creating an explicit cleanup target that the Step 2.6 sweep can ratchet to zero.",
+      "summary": "Plan §4.6's `no_phase_archaeology_in_test_files` and `phase_archaeology_test_files_count_zero` both imply zero-count enforcement. Given the 385-entry residual baseline and the scope of the Step 2.6 sweep (~95 files), W5f lands `no_phase_archaeology_in_test_files` as a regression backstop (baseline = 385 post review-time sweep) and adds `phase_archaeology_test_files_count_zero` as the strict invariant guarded by `#[ignore]`. This preserves the stub-prevention rule (no empty bodies, no unconditional `assert!(true)`) while creating an explicit cleanup target that the Step 2.6 sweep can ratchet to zero. After self-review, the two guards share a single helper module that delegates to `foundations_guards::line_has_phase_archaeology_d111` — eliminating ~80 lines of duplicated code and keeping the test-file and production-code classifiers byte-identical.",
       "files": ["crates/verter_session/tests/architecture_guards.rs"]
     },
     {

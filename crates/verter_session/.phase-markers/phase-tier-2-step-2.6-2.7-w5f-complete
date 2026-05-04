@@ -3,9 +3,9 @@
   "tier": "tier-2",
   "step": "2.6+2.7",
   "status": "partial",
-  "_status_explanation": "The size-budget extension (Step 2.7) is fully implemented and live. The phase-archaeology sweep (Step 2.6) is captured by a regression backstop (no_phase_archaeology_in_test_files guard with a 378-entry baseline) but the actual sweep (rewriting 378 occurrences across 100+ test files) is deferred per D77. The strict zero-count invariant lives as `phase_archaeology_test_files_count_zero` with `#[ignore]` until the sweep completes.",
+  "_status_explanation": "The size-budget extension (Step 2.7) is fully implemented and live. The phase-archaeology sweep (Step 2.6) is captured by a regression backstop (no_phase_archaeology_in_test_files guard with a 385-entry baseline after a focused sweep) but the residual sweep (rewriting 385 remaining occurrences across ~95 test files) is deferred per D77. The strict zero-count invariant lives as `phase_archaeology_test_files_count_zero` with `#[ignore]` until the sweep completes.",
   "base_commit": "994451d0",
-  "head_commit": "4fedea71",
+  "head_commit": "79379584",
   "marker_commit": "pending-orchestrator-commit",
   "prior_known_passed_count": 10552,
   "test_results": {
@@ -15,7 +15,8 @@
       "failed": 0,
       "ignored": 1,
       "_baseline": "Tier 1 baseline was 54 passed; W5f added 4 tests (3 active + 1 ignored) for a delta of +3 passed +1 ignored.",
-      "_ignored_test": "phase_archaeology_test_files_count_zero — un-ignored when Step 2.6 sweep completes."
+      "_ignored_test": "phase_archaeology_test_files_count_zero — un-ignored when Step 2.6 sweep completes.",
+      "_post_review_baseline": "After the self-review refactor (commit 79379584): the two archaeology guards now share a `w5f_test_archaeology` helper module that delegates to the existing `foundations_guards::line_has_phase_archaeology_d111` predicate; the W5F_BASELINE constant tracks 385 (down from 394 after a focused sweep removing parenthetical Phase references in 8 test files)."
     }
   },
   "gate_status": {
@@ -55,14 +56,14 @@
   },
   "deferred_work": {
     "step_2_6_sweep": {
-      "summary": "Step 2.6 calls for rewriting phase-archaeology vocabulary in test files inside `crates/*/src/` to use invariant-described language (per the testing skill rule). The Tier 0 inventory at `crates/verter_session/tests/perf_bounds/golden-archaeology-test-inventory.txt` captured 254 entries via regex at SHA 60b1295a. The live in-test predicate measures 378 entries at the W5f cutoff (regex/predicate divergence + downstream additions). The full sweep would touch ~100 test files — large enough that W5f bundles it with the consolidated tier-2-complete marker rather than landing it inline.",
-      "regression_backstop": "no_phase_archaeology_in_test_files (baseline 378). Any new archaeology FAILS the build immediately.",
+      "summary": "Step 2.6 calls for rewriting phase-archaeology vocabulary in test files inside `crates/*/src/` to use invariant-described language (per the testing skill rule). The Tier 0 inventory at `crates/verter_session/tests/perf_bounds/golden-archaeology-test-inventory.txt` captured 254 entries via regex at SHA 60b1295a. The live in-test predicate (now `foundations_guards::line_has_phase_archaeology_d111` shared across both archaeology guards) measured 394 entries pre-review and 385 post-review (after a focused sweep that stripped parenthetical Phase references in 8 test files). The residual sweep would touch ~95 test files — large enough to defer.",
+      "regression_backstop": "no_phase_archaeology_in_test_files (baseline 385). Any new archaeology FAILS the build immediately.",
       "strict_invariant_path": "phase_archaeology_test_files_count_zero is `#[ignore]`d with a clear pointer to this marker. Un-ignore it when the sweep is complete and the live count is 0."
     }
   },
   "notes_for_orchestrator": [
     "W5f closes Tier 2's structural work: every Tier 2 split-target (W5a..W5e) now has a `<4000 LOC` budget enforced by `each_post_split_module_under_lines_budget`. The size-budget guard guarantees that future edits to the post-split modules cannot regress past the budget.",
-    "The phase-archaeology guards are split into a regression backstop (live) and a strict invariant (ignored). This is the cleanest pattern given the inability to do the full 378-entry sweep in scope; the ignore mechanism plus the named blocker test means stub-prevention is preserved (no empty bodies, no unconditional returns, no `assert!(true)`).",
+    "The phase-archaeology guards are split into a regression backstop (live) and a strict invariant (ignored). This is the cleanest pattern given the inability to do the full 385-entry sweep in scope; the ignore mechanism plus the named blocker test means stub-prevention is preserved (no empty bodies, no unconditional returns, no `assert!(true)`). After self-review, the two guards share a single `w5f_test_archaeology` helper module that delegates to the existing `foundations_guards::line_has_phase_archaeology_d111` predicate — eliminating ~80 lines of duplicated code and keeping the test-file and production-code classifiers byte-identical.",
     "Two plan §4.6 discriminating tests (`tier_2_split_preserves_semantic_query_key_hashes`, `recursion_budget_invariant_across_module_boundary`) are blocked on missing baseline artifacts. Per D77, the markers document these as blockers rather than shipping stubs. They unblock when the missing fixtures and reference files land — most likely as a follow-up tier 1B/0 patch.",
     "With this marker, all five Tier 2 split sub-workers (W5a-W5e) plus W5f are landed. The consolidated `phase-tier-2-complete` marker can land next."
   ],
