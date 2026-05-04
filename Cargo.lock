@@ -3794,6 +3794,7 @@ dependencies = [
  "tracing-subscriber",
  "verter_actions",
  "verter_diagnostics",
+ "verter_ffi",
  "verter_scheduler",
  "verter_semantic",
  "verter_session",

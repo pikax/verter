@@ -10,6 +10,8 @@
 //! reachable from main.rs unchanged (per Rust's method resolution
 //! rules).
 
+mod component_meta;
+
 use std::sync::Arc;
 
 use tower_lsp_server::jsonrpc::Result;

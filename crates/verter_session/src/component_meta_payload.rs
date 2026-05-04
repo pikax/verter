@@ -93,6 +93,24 @@ impl TypeHandle {
             query_path: p.query_path.map(TypeQueryPath::from_proto).transpose()?,
         })
     }
+
+    /// Encode this `TypeHandle` to its protobuf wire bytes (D100). Used by
+    /// the LSP custom-method bridge to round-trip handles to JS clients.
+    pub fn to_proto_bytes(&self) -> Vec<u8> {
+        use prost::Message;
+        let mut buf = Vec::with_capacity(64);
+        self.to_proto()
+            .encode(&mut buf)
+            .expect("TypeHandle encode is infallible for owned bytes");
+        buf
+    }
+
+    /// Decode a `TypeHandle` from its protobuf wire bytes (D100).
+    pub fn from_proto_bytes(bytes: &[u8]) -> Result<Self, String> {
+        use prost::Message;
+        let proto = proto::TypeHandle::decode(bytes).map_err(|e| e.to_string())?;
+        Self::from_proto(proto).map_err(|e| e.to_string())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -446,6 +464,17 @@ impl TypeExpansion {
     pub fn lazy_children(&self) -> Vec<TypeHandle> {
         self.children.iter().map(|c| c.handle.clone()).collect()
     }
+
+    /// Encode this `TypeExpansion` to its protobuf wire bytes (D100). Used
+    /// by the LSP custom-method bridge to round-trip expansions to JS.
+    pub fn to_proto_bytes(&self) -> Vec<u8> {
+        use prost::Message;
+        let mut buf = Vec::with_capacity(128);
+        self.to_proto()
+            .encode(&mut buf)
+            .expect("TypeExpansion encode is infallible for owned bytes");
+        buf
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -705,6 +734,163 @@ pub fn assemble_volar_payload(
     // session as the producer.
     let _ = expansions; // expansions are consumed via the surface handles
     surface.to_proto_bytes()
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// assemble_surface_from_analysis (D32 / D102 — pure)
+// ─────────────────────────────────────────────────────────────────────
+
+/// Project a `ComponentMetaAnalysis` into the selective surface envelope.
+///
+/// Pure function — does not touch the host, the session, or any cache.
+/// Each type-bearing field becomes a `NamedTypeHandle` carrying a root
+/// `TypeHandle` for the analysis's canonical id. Eager opaque fields
+/// (`*_bytes`) are emitted empty in Tier 1B; 1C-α maps them through the
+/// existing `verter_protocol::component_meta` converters once the surface
+/// envelope encoder is wired.
+///
+/// Tier 1B: `project_id` is a stable empty string for the single-project
+/// host model. `query_path` on every handle is `None` (surface root) until
+/// 1C-α populates `OwnedTypeResolutionContext::declaration_fingerprints`
+/// at lowering time.
+pub fn assemble_surface_from_analysis(
+    analysis: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+) -> ComponentMetaSurface {
+    let canonical = analysis.file_path.clone();
+    let project_id = String::new();
+    let make_handle = || TypeHandle::root(project_id.clone(), canonical.clone());
+    let named = |name: &str, required: bool, doc: Option<&str>| NamedTypeHandle {
+        name: name.to_string(),
+        handle: make_handle(),
+        required,
+        doc: doc.unwrap_or("").to_string(),
+    };
+
+    let props: Vec<NamedTypeHandle> = analysis
+        .props
+        .iter()
+        .map(|p| named(&p.name, p.required, p.description.as_deref()))
+        .collect();
+    let events: Vec<NamedTypeHandle> = analysis
+        .events
+        .iter()
+        .map(|e| named(&e.name, false, e.description.as_deref()))
+        .collect();
+    let slots: Vec<NamedTypeHandle> = analysis
+        .slots
+        .iter()
+        .map(|s| named(&s.name, s.is_required, s.description.as_deref()))
+        .collect();
+    let models: Vec<NamedTypeHandle> = analysis
+        .models
+        .iter()
+        .map(|m| named(&m.name, false, None))
+        .collect();
+    let exposed: Vec<NamedTypeHandle> = analysis
+        .exposed
+        .iter()
+        .map(|e| named(&e.name, false, e.description.as_deref()))
+        .collect();
+    let accepted_props: Vec<NamedTypeHandle> = analysis
+        .accepted_props
+        .iter()
+        .map(|p| named(&p.name, p.required, None))
+        .collect();
+    let accepted_events: Vec<NamedTypeHandle> = analysis
+        .accepted_events
+        .iter()
+        .map(|e| named(&e.name, false, None))
+        .collect();
+    let type_registry: Vec<NamedTypeHandle> = analysis
+        .type_registry
+        .iter()
+        .map(|t| named(&t.name, false, None))
+        .collect();
+
+    let fallthrough_surface =
+        match &analysis.fallthrough_surface {
+            verter_semantic::analysis::component_meta::FallthroughSurface::Branches {
+                branches,
+            } if !branches.is_empty() => Some(FallthroughSurfaceLazy {
+                branches: branches
+                    .iter()
+                    .map(|_branch| FallthroughBranchLazy::default())
+                    .collect(),
+            }),
+            _ => None,
+        };
+
+    ComponentMetaSurface {
+        file_path: analysis.file_path.clone(),
+        options_api: analysis.options_api,
+        flags_bytes: Vec::new(),
+        root_reachability_bytes: Vec::new(),
+        accepted_surface_completeness_bytes: Vec::new(),
+        macro_expansion_diagnostics_bytes: Vec::new(),
+        vue_api_calls_bytes: Vec::new(),
+        sfc_blocks_bytes: None,
+        imports_bytes: Vec::new(),
+        bindings_bytes: Vec::new(),
+        styles_bytes: Vec::new(),
+        components_bytes: Vec::new(),
+        template_refs_bytes: Vec::new(),
+        public_instance_bytes: None,
+        props,
+        events,
+        slots,
+        models,
+        exposed,
+        accepted_props,
+        accepted_events,
+        fallthrough_surface,
+        type_registry,
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// resolve_type_expansion (D32 / D104 — pure on host)
+// ─────────────────────────────────────────────────────────────────────
+
+/// Resolve a `TypeHandle` to a one-layer `TypeExpansion` against the shared
+/// `VerterHost` (D32 / D104).
+///
+/// Tier 1B resolution: a handle whose `query_path` is `None` (the surface
+/// root) returns an empty Object expansion; handles with a populated query
+/// path round-trip the proto identity. Tier 1C-α wires the real walk against
+/// `OwnedTypeResolutionContext::declaration_fingerprints`.
+///
+/// Errors are typed (D104 + D114): `ProjectMismatch` when the handle's
+/// project_id does not match the host's project; `StaleHandle` when the
+/// canonical file is no longer readable.
+pub fn resolve_type_expansion(
+    host: &crate::VerterHost,
+    handle: TypeHandle,
+    _depth: Option<usize>,
+) -> Result<TypeExpansion, TypeHandleError> {
+    let session_project_id = String::new();
+    if handle.project_id != session_project_id {
+        return Err(TypeHandleError::ProjectMismatch {
+            expected: session_project_id,
+            actual: handle.project_id.clone(),
+        });
+    }
+
+    let resolved = host.resolve_alias_or_canonical(handle.canonical_id.as_str());
+    if host.get_source(resolved.as_str()).is_none() {
+        return Err(TypeHandleError::StaleHandle {
+            reason: StaleHandleReason::FileDeleted,
+        });
+    }
+
+    let shape = match handle.query_path.as_ref() {
+        None => ShapeOutline::Object { property_count: 0 },
+        Some(_) => ShapeOutline::Object { property_count: 0 },
+    };
+    Ok(TypeExpansion {
+        handle,
+        shape,
+        children: Vec::new(),
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────

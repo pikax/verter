@@ -22,6 +22,7 @@ verter_diagnostics = { path = "../verter_diagnostics" }
 verter_actions = { path = "../verter_actions" }
 verter_span = { path = "../verter_span" }
 verter_type_runtime = { path = "../verter_type_runtime" }
+verter_ffi = { path = "../verter_ffi" }
 oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }
 oxc_parser = { workspace = true }

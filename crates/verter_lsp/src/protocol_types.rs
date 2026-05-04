@@ -364,3 +364,60 @@ pub struct ProjectOverviewStats {
 /// The `diagnostics_generation` comes from `VerterHost::get_diagnostics_generation()` and
 /// detects host-driven recompiles (e.g., dependency hydration) without a document version change.
 pub(crate) type CachedVerterDiagEntry = (i32, u64, Vec<Diagnostic>);
+
+// ─────────────────────────────────────────────────────────────────
+// Component-meta selective API (D32 / D102 / D104 / D113)
+// ─────────────────────────────────────────────────────────────────
+
+/// Params for `$/verter/getComponentMeta` request — full Volar-shape payload.
+#[derive(Debug, Deserialize)]
+pub struct GetComponentMetaParams {
+    /// Document URI of the Vue SFC whose component metadata is being requested.
+    pub uri: String,
+}
+
+/// Params for `$/verter/getComponentMetaSurface` request — selective surface
+/// envelope (Tier 1B / D102).
+#[derive(Debug, Deserialize)]
+pub struct GetComponentMetaSurfaceParams {
+    pub uri: String,
+}
+
+/// Params for `$/verter/getComponentMetaTypeExpansion` request — one-layer
+/// `TypeHandle` resolution (Tier 1B / D104).
+///
+/// `handle_bytes` carries the protobuf-encoded `TypeHandle` (D100 wire format).
+/// `depth` is reserved for 1C-α; Tier 1B ignores it.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetComponentMetaTypeExpansionParams {
+    pub handle_bytes: Vec<u8>,
+    #[serde(default)]
+    pub depth: Option<u32>,
+}
+
+/// Response envelope for `$/verter/getComponentMetaTypeExpansion`.
+///
+/// `expansion_bytes` is the protobuf-encoded `TypeExpansion` on success.
+/// `error` carries the structured `TypeHandleError` on failure (D104 + D114).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetComponentMetaTypeExpansionResponse {
+    /// Encoded `TypeExpansion` proto bytes. Empty on error.
+    pub expansion_bytes: Vec<u8>,
+    /// Structured handle error (e.g. `projectMismatch`, `staleHandle`).
+    /// `None` on success.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<TypeHandleErrorPayload>,
+}
+
+/// JSON-side projection of `TypeHandleError`. The wire form keeps a discriminator
+/// `kind` to mirror the proto union shape so the TS-side switch can stay typed.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum TypeHandleErrorPayload {
+    ProjectMismatch { expected: String, actual: String },
+    StaleHandle { reason: String },
+    DepthExceeded { cap: u32 },
+    Other { message: String },
+}

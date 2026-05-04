@@ -417,4 +417,37 @@ impl VerterHost {
     pub fn publish_audit_record(&self, record: crate::component_meta_audit::RustAuditRecord) {
         self.audit_records.insert(record);
     }
+
+    /// Selective surface API (D32 / D102) — host-level entry point.
+    ///
+    /// Convenience wrapper that combines [`Self::get_component_meta_with_resolution`]
+    /// with [`crate::component_meta_payload::assemble_surface_from_analysis`] so
+    /// host-only consumers (LSP, MCP, bundler) can request the surface
+    /// envelope without holding a `MetaSession`. Returns `None` when the
+    /// canonical does not resolve to a component.
+    pub fn get_component_meta_surface(
+        &self,
+        canonical_or_alias: &str,
+    ) -> Option<crate::component_meta_payload::ComponentMetaSurface> {
+        let (analysis, _resolution) =
+            self.get_component_meta_with_resolution(canonical_or_alias)?;
+        Some(crate::component_meta_payload::assemble_surface_from_analysis(&analysis))
+    }
+
+    /// Selective type-expansion API (D32 / D104) — host-level entry point.
+    ///
+    /// Resolves a `TypeHandle` to a one-layer `TypeExpansion`. Errors are
+    /// typed (D104 + D114): `ProjectMismatch` when the handle's project_id
+    /// does not match the host's project; `StaleHandle` when the canonical
+    /// file is no longer readable.
+    pub fn get_component_meta_type_expansion(
+        &self,
+        handle: crate::component_meta_payload::TypeHandle,
+        depth: Option<usize>,
+    ) -> Result<
+        crate::component_meta_payload::TypeExpansion,
+        crate::component_meta_payload::TypeHandleError,
+    > {
+        crate::component_meta_payload::resolve_type_expansion(self, handle, depth)
+    }
 }
