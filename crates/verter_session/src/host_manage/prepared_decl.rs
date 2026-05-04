@@ -727,7 +727,7 @@ impl VerterHost {
             // caller has explicitly provided resolution targets.
             let mut import_routes = rustc_hash::FxHashMap::default();
             {
-                if let Some(cc) = self.compile_cache.get(canonical_id) {
+                if let Some(cc) = self.compile_cache().get(canonical_id) {
                     for (specifier, resolution) in cc.import_routes.iter() {
                         import_routes.insert(specifier.clone(), resolution.clone());
                     }
@@ -1105,7 +1105,7 @@ impl VerterHost {
         // Post-cut: the project-global cache already validates entries
         // through `HostFenceValidator` at publish time, so readers consume
         // the cache permissively here.
-        let cc = self.compile_cache.get(canonical_id)?;
+        let cc = self.compile_cache().get(canonical_id)?;
         if cc.evicted {
             return None;
         }

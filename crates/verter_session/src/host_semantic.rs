@@ -56,7 +56,7 @@ impl VerterHost {
 
         // Check cache first
         {
-            let db = self.semantic_db.lock();
+            let db = self.semantic_db();
             let cached = db.component_surface(&file_ref, revision);
             if cached.is_complete() {
                 return cached;
@@ -69,7 +69,7 @@ impl VerterHost {
 
         // Cache and return
         if let Some(ref s) = surface {
-            let mut db = self.semantic_db.lock();
+            let mut db = self.semantic_db();
             db.set_component_surface(canonical_id.to_string(), revision, s.clone());
         }
 
@@ -96,7 +96,7 @@ impl VerterHost {
 
         // Check cache first
         {
-            let db = self.semantic_db.lock();
+            let db = self.semantic_db();
             let cached = db.bindings(&file_ref, revision);
             if cached.is_complete() {
                 return cached;
@@ -109,7 +109,7 @@ impl VerterHost {
         let bindings = analysis.map(|a| verter_semantic::extract::extract_bindings(&a));
 
         if let Some(ref b) = bindings {
-            let mut db = self.semantic_db.lock();
+            let mut db = self.semantic_db();
             db.set_bindings(canonical_id.to_string(), revision, b.clone());
         }
 
@@ -137,7 +137,7 @@ impl VerterHost {
         // Import graph
         let import_graph = {
             let file_ref = verter_semantic::refs::FileRef::new(canonical_id);
-            let cached = self.semantic_db.lock().import_graph(&file_ref, revision);
+            let cached = self.semantic_db().import_graph(&file_ref, revision);
             if cached.is_complete() {
                 cached.value.unwrap_or_default()
             } else {
@@ -146,7 +146,7 @@ impl VerterHost {
                 let graph = analysis
                     .map(|a| verter_semantic::extract::extract_import_graph(&a))
                     .unwrap_or_default();
-                self.semantic_db.lock().set_import_graph(
+                self.semantic_db().set_import_graph(
                     canonical_id.to_string(),
                     revision,
                     graph.clone(),
@@ -268,7 +268,7 @@ impl VerterHost {
     /// Called when the VFS reports a file change, a provider restarts,
     /// or project config changes.
     pub fn semantic_invalidate(&self, canonical_id: &str) {
-        self.semantic_db.lock().invalidate(canonical_id);
+        self.semantic_db().invalidate(canonical_id);
     }
 
     /// Invalidate all semantic caches (e.g., after provider restart).
@@ -276,7 +276,7 @@ impl VerterHost {
     /// Per plan: "provider restart, backend switch, project-config change,
     /// or external-type delta must invalidate dependent semantic queries."
     pub fn semantic_invalidate_all(&self) {
-        *self.semantic_db.lock() = verter_semantic::db::SemanticDb::new();
+        *self.semantic_db() = verter_semantic::db::SemanticDb::new();
     }
 
     /// Access the unified resolver runtime for counter reads and diagnostics.

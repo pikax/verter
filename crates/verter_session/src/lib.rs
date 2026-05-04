@@ -377,56 +377,12 @@ pub struct VerterHost {
     /// with generation tracking, priority queuing, and blocker management.
     /// It is the sole parser â€” upsert() delegates to the scheduler.
     pub(crate) scheduler: Arc<verter_scheduler::scheduler::Scheduler>,
-    /// Per-file compile cache: overrides, compile slots, diagnostics, deps.
-    /// Scheduler owns raw source + analysis; this cache owns per-profile state.
-    ///
-    /// The [`CompileCacheEntry::import_routes`](crate::types::CompileCacheEntry::import_routes)
-    /// sub-shape and `IndexedReady.import_routes` share the same
-    /// `DependencyResolution` shape but follow different invalidation
-    /// triggers — see the doc on `CompileCacheEntry.import_routes` for the
-    /// lifecycle disclosure.
-    pub(crate) compile_cache: dashmap::DashMap<String, CompileCacheEntry>,
     /// Provenance counters for component-meta observability.
     /// Shared with sessions via `Arc`.
     pub(crate) provenance: Arc<MetaProvenance>,
-    /// Shared external-type cache with profile-gated writes. All callers
-    /// (including component-meta) read via
-    /// `lookup_resolved_external_type_cache`; only callers passing
-    /// `profile_hash: None` populate via `store_resolved_external_type_cache`.
-    /// The profile gate prevents overlay-tainted resolutions from polluting
-    /// project-global cache state.
-    ///
-    /// Bounded **clear-all** at `RESOLVED_TYPE_CACHE_CAP` entries (NOT LRU —
-    /// see `host_resolve.rs:1538–1540`). Distinct from
-    /// `SemanticGraphStore.HostResolvedNamedTypeKey`, which serves the
-    /// component-meta resolved-named-type pipeline with a richer identity
-    /// (surface, companion, type-param bindings).
-    pub(crate) resolved_type_cache:
-        parking_lot::Mutex<rustc_hash::FxHashMap<ResolvedTypeCacheKey, ResolvedTypeCacheEntry>>,
     /// Consolidated resolver state: sub-node caches (symbol + fallthrough),
     /// top-level host caches (meta + fallthrough), and singleflight groups.
     pub(crate) resolver: HostResolverState,
-    /// Pre-evaluated [`EvalEnv`](verter_semantic::analysis::type_eval::EvalEnv)
-    /// snapshots, content-hash-validated. **Owned data** (no
-    /// allocator-lifetime constraints — `EvalEnv` is built from `String` /
-    /// `Arc<TypeExpr>` / `EvalLimits` fields, no AST-borrowed types). Kept
-    /// host-local because consumers all run within the host and no other
-    /// cache surface benefits from project-global sharing of `EvalEnv`
-    /// values. Migration to a hypothetical `ProjectTypeStore.EvalEnvDb` is
-    /// possible but unmotivated by current consumer patterns.
-    pub(crate) eval_env_cache: parking_lot::Mutex<
-        rustc_hash::FxHashMap<String, (Hash16, Arc<verter_semantic::analysis::type_eval::EvalEnv>)>,
-    >,
-    /// Semantic query database: revision-gated caches for component surfaces,
-    /// binding facts, and reactivity provenance.
-    ///
-    /// **Different crate, different artifact.** [`verter_semantic::db::SemanticDb`]
-    /// is a SEPARATE crate's query-memo DB serving the surfaces / bindings /
-    /// reactivity provenance layer — orthogonal to
-    /// [`ProjectTypeStore.semantic_graph()`](crate::project_type_store::ProjectTypeStore::semantic_graph)
-    /// which is the resolved-named-type graph arena. Two databases, two
-    /// crates, two artifact types.
-    pub(crate) semantic_db: parking_lot::Mutex<verter_semantic::db::SemanticDb>,
     /// Active per-host query profile — execution-policy decisions
     /// (prewarming, budgets, allowed query families). **Not a cache** — does
     /// not memoise query results. Different artifact type than anything in

@@ -258,12 +258,10 @@ impl VerterHost {
         cache_key: &str,
         whole_hash: Hash16,
     ) -> Option<Arc<verter_semantic::analysis::type_eval::EvalEnv>> {
-        self.eval_env_cache
-            .lock()
-            .get(cache_key)
-            .and_then(|(cached_hash, cached_env)| {
-                (*cached_hash == whole_hash).then(|| Arc::clone(cached_env))
-            })
+        // Tier 1C-α — delegate to the rehomed `EvalEnvCacheDb`'s legacy
+        // `Arc<EvalEnv>` storage. The DB validates `whole_hash` against
+        // the cached entry internally.
+        self.eval_env_cache().legacy_env_for(cache_key, whole_hash)
     }
 
     /// Tier 1A — produces a fresh `ParsedEvalProgram` per call.

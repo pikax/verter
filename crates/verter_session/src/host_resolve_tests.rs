@@ -164,7 +164,7 @@ fn assert_missing_src_compile_error(
     #[cfg(not(target_arch = "wasm32"))]
     {
         let compile_slots_empty = host
-            .compile_cache
+            .compile_cache()
             .get(canonical_id)
             .map(|cc| cc.compile_slots.is_empty())
             .unwrap_or(true);
@@ -289,7 +289,7 @@ fn missing_macro_type_dependency_produces_compile_error_and_no_outputs() {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let compile_slots_empty = host
-            .compile_cache
+            .compile_cache()
             .get("/src/Comp.vue")
             .map(|cc| cc.compile_slots.is_empty())
             .unwrap_or(true);
@@ -636,7 +636,7 @@ defineProps<{ msg: string }>()
     #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
-            .compile_cache
+            .compile_cache()
             .get("/test/Cached.vue")
             .expect("compile_cache entry exists");
         assert!(
@@ -693,7 +693,7 @@ defineProps<{ a: string }>()
     #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
-            .compile_cache
+            .compile_cache()
             .get("/test/Clear.vue")
             .expect("compile_cache entry exists");
         assert!(cc.cached_tsc_extract.is_some(), "cache should be populated");
@@ -722,7 +722,7 @@ defineProps<{ b: number }>()
     #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
-            .compile_cache
+            .compile_cache()
             .get("/test/Clear.vue")
             .expect("compile_cache entry exists");
         assert!(
@@ -758,7 +758,7 @@ defineProps<{ msg: string }>()
     #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
-            .compile_cache
+            .compile_cache()
             .get("/test/TplChange.vue")
             .expect("compile_cache entry exists");
         assert!(
@@ -790,7 +790,7 @@ defineProps<{ msg: string }>()
     #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
-            .compile_cache
+            .compile_cache()
             .get("/test/TplChange.vue")
             .expect("compile_cache entry exists");
         assert!(
@@ -868,7 +868,7 @@ defineProps<{ x: T }>()
     #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
-            .compile_cache
+            .compile_cache()
             .get("/test/DescChange.vue")
             .expect("compile_cache entry exists");
         assert!(
@@ -900,7 +900,7 @@ defineProps<{ x: T }>()
     #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
-            .compile_cache
+            .compile_cache()
             .get("/test/DescChange.vue")
             .expect("compile_cache entry exists");
         assert!(
@@ -1273,7 +1273,7 @@ fn exact_resolution_invalidates_on_dep_change() {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
-            .compile_cache
+            .compile_cache()
             .get("/src/Comp.vue")
             .expect("compile_cache entry exists");
         assert!(
@@ -2306,7 +2306,7 @@ defineProps<Props>()
         .expect("first resolution should complete");
     assert!(first.is_some(), "Props should resolve on the first request");
 
-    host.resolved_type_cache.lock().clear();
+    host.resolved_type_cache().clear();
     host.provenance().reset();
 
     let mut tracked_deps = std::collections::BTreeSet::new();

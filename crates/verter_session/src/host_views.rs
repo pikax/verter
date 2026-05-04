@@ -121,7 +121,7 @@ impl VerterHost {
         let hd = snap.downcast_data::<HostSourceData>()?;
 
         if let Some(profile_hash) = profile {
-            if let Some(cc) = self.compile_cache.get(canonical_id) {
+            if let Some(cc) = self.compile_cache().get(canonical_id) {
                 if let Some(ovr) = cc.content_overrides.get(&profile_hash) {
                     return Some(EffectiveFileState {
                         source: ovr.source.clone(),
@@ -160,7 +160,7 @@ impl VerterHost {
         let raw = &ad.style_analyses;
 
         if let Some(profile_hash) = profile {
-            if let Some(cc) = self.compile_cache.get(canonical_id) {
+            if let Some(cc) = self.compile_cache().get(canonical_id) {
                 if let Some(so) = cc.style_overrides.get(&profile_hash) {
                     let merged: Vec<_> = raw
                         .iter()
@@ -197,7 +197,7 @@ impl VerterHost {
         let mut meta = hd.parse.meta.clone();
 
         if let Some(profile_hash) = profile {
-            if let Some(cc) = self.compile_cache.get(canonical_id) {
+            if let Some(cc) = self.compile_cache().get(canonical_id) {
                 if let Some(so) = cc.style_overrides.get(&profile_hash) {
                     for (idx, lang) in so.lang_overrides.iter().enumerate() {
                         if let Some(ref l) = lang {

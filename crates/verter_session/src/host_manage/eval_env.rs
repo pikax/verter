@@ -31,19 +31,14 @@ impl VerterHost {
         whole_hash: Hash16,
         cached_env: Arc<verter_semantic::analysis::type_eval::EvalEnv>,
     ) -> Arc<verter_semantic::analysis::type_eval::EvalEnv> {
-        let mut cache = self.eval_env_cache.lock();
-        for cache_key in cache_keys {
-            if let Some((cached_hash, existing_env)) = cache.get(cache_key) {
-                if *cached_hash == whole_hash {
-                    return Arc::clone(existing_env);
-                }
-            }
-        }
-
-        for cache_key in cache_keys {
-            cache.insert(cache_key.clone(), (whole_hash, Arc::clone(&cached_env)));
-        }
-        cached_env
+        // Tier 1C-α — delegate to the rehomed `EvalEnvCacheDb`. The
+        // legacy `(canonical_id, whole_hash) -> Arc<EvalEnv>` storage
+        // lives inside the DB; per D46 the long-term contract caches
+        // `Arc<OwnedEvalProgram>` and derives `EvalEnv` ad-hoc, but
+        // until lowering produces owned programs for live parses the
+        // legacy env-arc cache stays warm under the same wrapper.
+        self.eval_env_cache()
+            .legacy_env_cache_or_insert(cache_keys, whole_hash, cached_env)
     }
 
     pub(crate) fn base_eval_env_arc(

@@ -676,7 +676,7 @@ fn custom_resolve_extensions_config() {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
-            .compile_cache
+            .compile_cache()
             .get("/src/Comp.vue")
             .expect("compile_cache entry exists");
         assert!(
@@ -735,7 +735,7 @@ fn generation_counter_increments_on_upsert() {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let gen1 = host
-            .compile_cache
+            .compile_cache()
             .get("Comp.vue")
             .expect("compile_cache entry should exist")
             .generation;
@@ -745,7 +745,7 @@ fn generation_counter_increments_on_upsert() {
         let _ = upsert_vue(&host, "Comp.vue", src2);
 
         let gen2 = host
-            .compile_cache
+            .compile_cache()
             .get("Comp.vue")
             .expect("compile_cache entry should exist")
             .generation;
@@ -1034,7 +1034,7 @@ fn relative_imports_auto_register_deps() {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
-            .compile_cache
+            .compile_cache()
             .get("/src/Comp.vue")
             .expect("compile_cache entry should exist");
         assert!(
@@ -1142,7 +1142,7 @@ fn set_import_dependencies_subsequent_upsert_invalidates() {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
-            .compile_cache
+            .compile_cache()
             .get("/src/Comp.vue")
             .expect("compile_cache entry exists");
         assert!(
@@ -1194,7 +1194,7 @@ fn invalidate_dependents_of_works_when_dependency_was_never_loaded() {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
-            .compile_cache
+            .compile_cache()
             .get("/src/Comp.vue")
             .expect("compile_cache entry exists");
         assert!(
@@ -1259,7 +1259,7 @@ fn smart_invalidation_no_signatures_full_invalidation() {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
-            .compile_cache
+            .compile_cache()
             .get("/src/Comp.vue")
             .expect("compile_cache entry exists");
         assert!(
@@ -1328,7 +1328,7 @@ fn smart_invalidation_unchanged_export_no_invalidation() {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
-            .compile_cache
+            .compile_cache()
             .get("/src/Comp.vue")
             .expect("compile_cache entry exists");
         assert!(
@@ -1433,7 +1433,7 @@ fn tier3_comment_added_no_invalidation() {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
-            .compile_cache
+            .compile_cache()
             .get("/src/Comp.vue")
             .expect("compile_cache entry exists");
         assert!(
@@ -1497,7 +1497,7 @@ fn tier3_property_added_invalidates() {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
-            .compile_cache
+            .compile_cache()
             .get("/src/Comp.vue")
             .expect("compile_cache entry exists");
         assert!(
@@ -1560,7 +1560,7 @@ fn tier3_property_type_changed_invalidates() {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
-            .compile_cache
+            .compile_cache()
             .get("/src/Comp.vue")
             .expect("compile_cache entry exists");
         assert!(
@@ -1625,7 +1625,7 @@ fn tier3_stores_resolved_type_hashes() {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
-            .compile_cache
+            .compile_cache()
             .get("/src/Comp.vue")
             .expect("compile_cache entry exists");
         assert!(
@@ -1692,7 +1692,7 @@ fn transitive_workspace_macro_type_dep_change_invalidates_owner() {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
-            .compile_cache
+            .compile_cache()
             .get("/src/App.vue")
             .expect("compile_cache entry exists");
         assert!(
@@ -1760,7 +1760,7 @@ fn tier3_unrelated_type_change_no_invalidation() {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
-            .compile_cache
+            .compile_cache()
             .get("/src/Comp.vue")
             .expect("compile_cache entry exists");
         assert!(
@@ -1827,7 +1827,7 @@ fn tier3_whitespace_only_change_no_invalidation() {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
-            .compile_cache
+            .compile_cache()
             .get("/src/Comp.vue")
             .expect("compile_cache entry exists");
         assert!(
@@ -2403,7 +2403,7 @@ fn close_clears_all_caches() {
             "scheduler nodes should be empty after close"
         );
         assert!(
-            host.compile_cache.is_empty(),
+            host.compile_cache().is_empty(),
             "compile_cache should be empty after close"
         );
     }
@@ -3733,17 +3733,17 @@ mod phase1_structural_tests {
 
         // compile_cache should be accessible and empty
         assert!(
-            host.compile_cache.is_empty(),
+            host.compile_cache().is_empty(),
             "compile_cache should start empty"
         );
 
         // Insert and verify
-        host.compile_cache
+        host.compile_cache()
             .insert("/src/App.vue".to_string(), CompileCacheEntry::default());
-        assert_eq!(host.compile_cache.len(), 1);
+        assert_eq!(host.compile_cache().len(), 1);
 
         // Verify it's accessible
-        let entry = host.compile_cache.get("/src/App.vue");
+        let entry = host.compile_cache().get("/src/App.vue");
         assert!(entry.is_some());
         assert!(!entry.unwrap().evicted);
     }
@@ -3787,7 +3787,7 @@ mod phase2a_upsert_tests {
         );
 
         // compile_cache must have an entry
-        let cc = host.compile_cache.get("/src/App.vue");
+        let cc = host.compile_cache().get("/src/App.vue");
         assert!(cc.is_some(), "compile_cache should have entry after upsert");
         let cc = cc.unwrap();
         assert!(!cc.evicted);
@@ -3802,7 +3802,7 @@ mod phase2a_upsert_tests {
 
         // Manually add a compile slot to verify it gets cleared
         {
-            let mut cc = host.compile_cache.get_mut("/src/App.vue").unwrap();
+            let mut cc = host.compile_cache().get_mut("/src/App.vue").unwrap();
             cc.compile_slots.insert(
                 42,
                 CompileSlot {
@@ -3822,7 +3822,7 @@ mod phase2a_upsert_tests {
         // Semantic change
         let _ = upsert_vue(&host, "/src/App.vue", "<template><div>v2</div></template>");
 
-        let cc = host.compile_cache.get("/src/App.vue").unwrap();
+        let cc = host.compile_cache().get("/src/App.vue").unwrap();
         assert!(
             cc.compile_slots.is_empty(),
             "compile_slots should be cleared on semantic change"
@@ -3840,7 +3840,7 @@ mod phase2a_upsert_tests {
 
         // Manually add content override
         {
-            let mut cc = host.compile_cache.get_mut("/src/App.vue").unwrap();
+            let mut cc = host.compile_cache().get_mut("/src/App.vue").unwrap();
             cc.content_overrides.insert(
                 42,
                 crate::types::ContentOverrideWithParse {
@@ -3859,7 +3859,7 @@ mod phase2a_upsert_tests {
         let _ = upsert_vue(&host, "/src/App.vue", v2);
 
         // Per plan: whole_hash changed → overrides cleared (byte offsets shifted)
-        let cc = host.compile_cache.get("/src/App.vue").unwrap();
+        let cc = host.compile_cache().get("/src/App.vue").unwrap();
         assert!(
             cc.content_overrides.is_empty(),
             "content_overrides should be cleared when whole_hash changes"
@@ -3886,7 +3886,7 @@ mod phase2a_upsert_tests {
             "<script setup>\nimport Foo from './Foo.vue'\n</script>\n<template><Foo/></template>";
         let _ = upsert_vue(&host, "/src/App.vue", src);
 
-        let cc = host.compile_cache.get("/src/App.vue").unwrap();
+        let cc = host.compile_cache().get("/src/App.vue").unwrap();
         assert!(
             !cc.dependencies.is_empty(),
             "dependencies should be populated from parse"
@@ -3903,13 +3903,13 @@ mod phase2a_upsert_tests {
         );
 
         // Verify entry exists and is not evicted
-        assert!(!host.compile_cache.get("/src/App.vue").unwrap().evicted);
+        assert!(!host.compile_cache().get("/src/App.vue").unwrap().evicted);
 
         // Evict
         host.evict("/src/App.vue");
 
         // Entry still exists but is evicted
-        let cc = host.compile_cache.get("/src/App.vue").unwrap();
+        let cc = host.compile_cache().get("/src/App.vue").unwrap();
         assert!(cc.evicted, "evict should set evicted flag");
         assert!(
             cc.compile_slots.is_empty(),
@@ -3934,7 +3934,7 @@ mod phase2a_upsert_tests {
         let host = VerterHost::new(HostConfig::default(), ws);
 
         assert!(
-            host.compile_cache.get("/src/App.vue").is_none(),
+            host.compile_cache().get("/src/App.vue").is_none(),
             "cold file should start without compile_cache state"
         );
 
@@ -3953,7 +3953,7 @@ mod phase2a_upsert_tests {
         );
 
         let cc = host
-            .compile_cache
+            .compile_cache()
             .get("/src/App.vue")
             .expect("ensure_loaded should materialize compile_cache state");
         assert!(
@@ -3993,7 +3993,7 @@ mod phase2a_upsert_tests {
             "scheduler-only cold load should succeed"
         );
         assert!(
-            host.compile_cache.get("/src/App.vue").is_none(),
+            host.compile_cache().get("/src/App.vue").is_none(),
             "scheduler-only load should not implicitly create compile_cache state"
         );
 
@@ -4015,7 +4015,7 @@ mod phase2a_upsert_tests {
             .scheduler_source("/src/App.vue")
             .expect("scheduler source should still exist");
         let cc = host
-            .compile_cache
+            .compile_cache()
             .get("/src/App.vue")
             .expect("byte-identical upsert should still materialize compile_cache state");
         assert_eq!(
@@ -4050,7 +4050,7 @@ mod phase2a_upsert_tests {
             "ensure_loaded after evict must reload the latest workspace content"
         );
 
-        let cc = host.compile_cache.get("/src/App.vue").unwrap();
+        let cc = host.compile_cache().get("/src/App.vue").unwrap();
         assert!(!cc.evicted, "ensure_loaded should clear evicted flag");
     }
 
@@ -4084,12 +4084,12 @@ mod phase2a_upsert_tests {
         let _ = upsert_vue(&host, "/src/A.vue", "<template><div>a</div></template>");
         let _ = upsert_vue(&host, "/src/B.vue", "<template><div>b</div></template>");
 
-        assert_eq!(host.compile_cache.len(), 2);
+        assert_eq!(host.compile_cache().len(), 2);
 
         host.close();
 
         assert!(
-            host.compile_cache.is_empty(),
+            host.compile_cache().is_empty(),
             "compile_cache should be empty after close"
         );
         assert!(crate::shared::read_lock(&host.alias_to_canonical).is_empty());
@@ -4458,7 +4458,7 @@ mod phase2a_upsert_tests {
 
         // (d) cc.import_routes is preserved (host source-of-truth).
         let cc = host
-            .compile_cache
+            .compile_cache()
             .get("/lib/types.ts")
             .expect("compile_cache entry");
         assert!(

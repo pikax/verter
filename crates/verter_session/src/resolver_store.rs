@@ -77,7 +77,7 @@ impl HostStoreView {
 
         {
             let mut canonical_ids = host.scheduler.node_ids();
-            canonical_ids.extend(host.compile_cache.iter().map(|entry| entry.key().clone()));
+            canonical_ids.extend(host.compile_cache().iter().map(|entry| entry.key().clone()));
             canonical_ids.sort();
             canonical_ids.dedup();
 
@@ -94,7 +94,7 @@ impl HostStoreView {
                     }
                 }
 
-                if let Some(entry) = host.compile_cache.get(&canonical_id) {
+                if let Some(entry) = host.compile_cache().get(&canonical_id) {
                     for (specifier, resolution) in entry.import_routes.iter() {
                         view.import_routes.insert(
                             (canonical_id.clone(), specifier.clone()),
@@ -172,7 +172,7 @@ impl HostStoreView {
 
             let import_route_hash = {
                 {
-                    host.compile_cache.get(&canonical_id).and_then(|entry| {
+                    host.compile_cache().get(&canonical_id).and_then(|entry| {
                         (!entry.import_routes.is_empty())
                             .then(|| hash_import_route_targets(&entry.import_routes))
                     })

@@ -807,7 +807,7 @@ impl VerterHost {
         };
 
         {
-            if let Some(mut entry) = self.compile_cache.get_mut(owner_canonical) {
+            if let Some(mut entry) = self.compile_cache().get_mut(owner_canonical) {
                 entry
                     .import_routes
                     .insert(import_source.to_string(), resolution.clone());
@@ -1526,7 +1526,9 @@ impl VerterHost {
             type_name: type_name.to_string(),
             resolve_kind: kind,
         };
-        self.resolved_type_cache.lock().get(&key).cloned()
+        // Tier 1C-α — delegate to the rehomed `ResolvedTypeCacheDb`.
+        // The DB owns the bounded clear-all-at-cap policy internally.
+        self.resolved_type_cache().lookup(&key)
     }
 
     fn store_resolved_external_type_cache(
@@ -1547,11 +1549,10 @@ impl VerterHost {
             type_name: type_name.to_string(),
             resolve_kind: kind,
         };
-        let mut host_cache = self.resolved_type_cache.lock();
-        if host_cache.len() >= crate::types::RESOLVED_TYPE_CACHE_CAP {
-            host_cache.clear();
-        }
-        host_cache.insert(
+        // Tier 1C-α — `ResolvedTypeCacheDb::insert` honours the
+        // bounded clear-all-at-`RESOLVED_TYPE_CACHE_CAP` policy
+        // internally. The off-store `parking_lot::Mutex` is gone.
+        self.resolved_type_cache().insert(
             key,
             crate::types::ResolvedTypeCacheEntry {
                 resolved,
@@ -2941,7 +2942,7 @@ impl VerterHost {
                 if hd.file_kind == FileKind::NonSfc {
                     return Ok(());
                 }
-                if let Some(cc) = self.compile_cache.get(&canonical) {
+                if let Some(cc) = self.compile_cache().get(&canonical) {
                     let soh = cc
                         .style_overrides
                         .get(&profile_hash)
@@ -3009,7 +3010,7 @@ impl VerterHost {
         };
         let parse = &hd.parse;
 
-        let cc = match self.compile_cache.get(&canonical) {
+        let cc = match self.compile_cache().get(&canonical) {
             Some(c) => c,
             None => return false,
         };
@@ -3097,7 +3098,7 @@ impl VerterHost {
                     })?;
                 let parse = &hd.parse;
 
-                let cc_ref = self.compile_cache.get(&canonical_id);
+                let cc_ref = self.compile_cache().get(&canonical_id);
 
                 // Cache hit check from compile_cache
                 let soh = cc_ref
@@ -3293,7 +3294,7 @@ impl VerterHost {
         // Store compile results.
         // compile_cache is the authority for profile state.
         {
-            if let Some(mut cc) = self.compile_cache.get_mut(&canonical_id) {
+            if let Some(mut cc) = self.compile_cache().get_mut(&canonical_id) {
                 cc.compile_slots.insert(
                     profile_hash,
                     CompileSlot {
@@ -3325,7 +3326,7 @@ impl VerterHost {
             if compiled_template_analysis.is_some()
                 && compile_input.content_override_layer.is_none()
             {
-                if let Some(mut cc) = self.compile_cache.get_mut(&canonical_id) {
+                if let Some(mut cc) = self.compile_cache().get_mut(&canonical_id) {
                     cc.raw_template_analysis = compiled_template_analysis.clone().map(Arc::new);
                 }
             }
@@ -3381,7 +3382,7 @@ impl VerterHost {
         let profile_hash = compile_profile_hash(profile);
 
         {
-            let cc = self.compile_cache.get(&canonical)?;
+            let cc = self.compile_cache().get(&canonical)?;
             if cc.evicted {
                 return None;
             }
@@ -3425,7 +3426,7 @@ impl VerterHost {
         let canonical = self.resolve_alias_or_canonical(canonical_id);
         let profile_hash = profile.map(compile_profile_hash);
 
-        if let Some(cc) = self.compile_cache.get(&canonical) {
+        if let Some(cc) = self.compile_cache().get(&canonical) {
             if cc.evicted {
                 return None;
             }
@@ -3440,7 +3441,7 @@ impl VerterHost {
             if file_kind != FileKind::VueSfc {
                 return None;
             }
-            let cached = self.compile_cache.get(&canonical).and_then(|cc| {
+            let cached = self.compile_cache().get(&canonical).and_then(|cc| {
                 cc.cached_tsc_extract.as_ref().and_then(|(hash, extract)| {
                     if *hash == efs.whole_hash {
                         Some(Arc::clone(extract))
@@ -3494,7 +3495,7 @@ impl VerterHost {
         ) {
             let arc = Arc::new(fresh);
             {
-                if let Some(mut cc) = self.compile_cache.get_mut(&canonical) {
+                if let Some(mut cc) = self.compile_cache().get_mut(&canonical) {
                     cc.cached_tsc_extract = Some((whole_hash, Arc::clone(&arc)));
                 }
             }
@@ -3546,7 +3547,7 @@ impl VerterHost {
         profile_hash: u64,
         diagnostics: DiagnosticsSnapshot,
     ) {
-        if let Some(mut cc) = self.compile_cache.get_mut(canonical_id) {
+        if let Some(mut cc) = self.compile_cache().get_mut(canonical_id) {
             cc.latest_diagnostics.insert(profile_hash, diagnostics);
             cc.diagnostics_generation += 1;
         }

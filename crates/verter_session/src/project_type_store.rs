@@ -865,11 +865,31 @@ impl TypeResolutionContextDb {
 /// — the DB therefore caches programs (not pre-built envs); consumers
 /// derive the env on demand from the cached program.
 ///
-/// Tier 1A introduces this empty; Tier 1C-α migrates
-/// `HOST_PARSED_EVAL_PROGRAM_CACHE` consumers onto it.
+/// Tier 1A introduced this with the [`OwnedArtifactKey`] →
+/// `Arc<OwnedEvalProgram>` storage shape (D17). Tier 1C-α retains that
+/// owned-program storage AND rehomes the existing
+/// `VerterHost::eval_env_cache` body alongside it under the same
+/// wrapper. Until the lowering pipeline produces
+/// [`crate::owned_artifacts::OwnedEvalProgram`] for live host parses,
+/// the legacy `Arc<EvalEnv>` cache stays warm here so
+/// `base_eval_env_arc` / `cache_eval_env_arc` callers preserve
+/// deterministic env reuse. The Tier 1C-α discriminating tests verify
+/// that the owned-program storage shape exists with `Arc<OwnedEvalProgram>`
+/// values; future commits remove the legacy `Arc<EvalEnv>` cache once
+/// lowering populates the owned form.
 #[derive(Debug, Default)]
 pub struct EvalEnvCacheDb {
+    /// 1A storage — owned-program cache (D17). Empty until the lowering
+    /// pipeline produces `OwnedEvalProgram` for live parses; tests
+    /// populate it directly today.
     entries: DashMap<OwnedArtifactKey, Arc<crate::owned_artifacts::OwnedEvalProgram>>,
+    /// 1C-α legacy storage — the rehomed
+    /// `Mutex<FxHashMap<String, (Hash16, Arc<EvalEnv>)>>` body.
+    /// Existing `cache_eval_env_arc` / `clone_cached_eval_env_arc`
+    /// callers route through this map.
+    legacy_env_entries: parking_lot::Mutex<
+        FxHashMap<String, (Hash16, Arc<verter_semantic::analysis::type_eval::EvalEnv>)>,
+    >,
 }
 
 impl EvalEnvCacheDb {
@@ -878,6 +898,7 @@ impl EvalEnvCacheDb {
         Self::default()
     }
 
+    /// Look up the owned program for the given content-pinned key.
     #[must_use]
     pub fn get(
         &self,
@@ -886,6 +907,9 @@ impl EvalEnvCacheDb {
         self.entries.get(key).map(|r| Arc::clone(r.value()))
     }
 
+    /// Insert an owned program. Per D46, the program is the canonical
+    /// cache value; consumers derive `EvalEnv` from the program on
+    /// demand.
     pub fn insert(
         &self,
         key: OwnedArtifactKey,
@@ -894,8 +918,54 @@ impl EvalEnvCacheDb {
         self.entries.insert(key, value);
     }
 
+    /// Look up a cached env arc by canonical id, validating against
+    /// `whole_hash`. Returns `None` if the cached entry is stale or
+    /// missing. Used by the rehomed
+    /// `clone_cached_eval_env_arc` accessor.
+    #[must_use]
+    pub fn legacy_env_for(
+        &self,
+        canonical_id: &str,
+        whole_hash: Hash16,
+    ) -> Option<Arc<verter_semantic::analysis::type_eval::EvalEnv>> {
+        let guard = self.legacy_env_entries.lock();
+        let (cached_hash, env) = guard.get(canonical_id)?;
+        (*cached_hash == whole_hash).then(|| Arc::clone(env))
+    }
+
+    /// Atomically read-or-insert a cached env arc across multiple
+    /// candidate keys. Replaces the off-store
+    /// `cache_eval_env_arc` lock-and-mutate path.
+    pub fn legacy_env_cache_or_insert(
+        &self,
+        cache_keys: &[String],
+        whole_hash: Hash16,
+        cached_env: Arc<verter_semantic::analysis::type_eval::EvalEnv>,
+    ) -> Arc<verter_semantic::analysis::type_eval::EvalEnv> {
+        let mut guard = self.legacy_env_entries.lock();
+        for cache_key in cache_keys {
+            if let Some((cached_hash, existing_env)) = guard.get(cache_key) {
+                if *cached_hash == whole_hash {
+                    return Arc::clone(existing_env);
+                }
+            }
+        }
+        for cache_key in cache_keys {
+            guard.insert(cache_key.clone(), (whole_hash, Arc::clone(&cached_env)));
+        }
+        cached_env
+    }
+
     pub fn clear(&self) {
         self.entries.clear();
+        self.legacy_env_entries.lock().clear();
+    }
+
+    /// Drain the legacy `Arc<EvalEnv>` storage only — used by callers
+    /// that want to invalidate env-shape state without touching the
+    /// owned-program cache.
+    pub fn clear_legacy_envs(&self) {
+        self.legacy_env_entries.lock().clear();
     }
 
     pub fn len(&self) -> usize {
@@ -905,24 +975,51 @@ impl EvalEnvCacheDb {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    /// Total occupancy across both storage shapes — exposed for
+    /// observability tests that need to see the legacy cache size.
+    pub fn total_entries(&self) -> usize {
+        self.entries.len() + self.legacy_env_entries.lock().len()
+    }
 }
 
 /// Host-owned super-shape for the existing `compile_cache` (D48).
 ///
-/// Tier 1A introduces this as an empty shell. Tier 1C-α populates
-/// consumers; Tier 1C-β splits the super-shape into `ProfileState` /
-/// `DerivedRawState` / `DependencyState` per the §3.4.2 invalidation
-/// matrix. Tier 1A keeps the shape generic so the 1C-β split can rebind
-/// the inner type without callers refactoring around an interim API.
+/// Tier 1A introduced this as an empty shell. Tier 1C-α moves the
+/// existing `VerterHost::compile_cache` body into this DB verbatim
+/// (super-shape preserved per option (b)). Tier 1C-β will split the
+/// super-shape into `ProfileState` / `DerivedRawState` /
+/// `DependencyState` per the §3.4.2 invalidation matrix.
+///
+/// Until 1C-β lands, the inner storage is the same
+/// `DashMap<String, CompileCacheEntry>` that previously lived directly
+/// on `VerterHost`. Accessors return references to the underlying map
+/// so call sites can keep using the `entry().or_default()` /
+/// `get(canonical)` / `get_mut(canonical)` / `iter()` shapes they
+/// already expect; future commits introduce typed get/insert helpers
+/// in their place.
 #[derive(Debug, Default)]
 pub struct CompileCacheDb {
-    entries: DashMap<Arc<str>, ()>,
+    /// Tier 1C-α storage: the rehomed
+    /// `DashMap<String, CompileCacheEntry>` body. Public accessors
+    /// expose this as `entries()` for call sites that previously
+    /// reached `host.compile_cache` directly.
+    entries: DashMap<String, crate::types::CompileCacheEntry>,
 }
 
 impl CompileCacheDb {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Return a reference to the inner storage. Call sites that
+    /// previously used `host.compile_cache` directly keep their
+    /// `entry(...) / get(...) / get_mut(...) / iter()` shape by
+    /// reaching through this accessor.
+    #[must_use]
+    pub(crate) fn entries(&self) -> &DashMap<String, crate::types::CompileCacheEntry> {
+        &self.entries
     }
 
     pub fn clear(&self) {
@@ -939,11 +1036,26 @@ impl CompileCacheDb {
 }
 
 /// Host-owned typed cache for resolved-type entries (D16). Tier 1A
-/// introduces this empty; the existing `resolved_type_cache` field on
-/// `VerterHost` migrates onto this DB in 1C-α.
+/// introduced this empty; Tier 1C-α moves the existing
+/// `VerterHost::resolved_type_cache` body in here verbatim. The
+/// bounded clear-all-at-`RESOLVED_TYPE_CACHE_CAP` policy
+/// (`crate::types::RESOLVED_TYPE_CACHE_CAP` = 4096) lives INSIDE the
+/// DB so the policy moves with the storage.
+///
+/// **Profile-gated writes preserved**: callers that previously routed
+/// through `lookup_resolved_external_type_cache` /
+/// `store_resolved_external_type_cache` keep that behaviour; the DB
+/// just hosts the inner mutex.
 #[derive(Debug, Default)]
 pub struct ResolvedTypeCacheDb {
-    entries: DashMap<OwnedArtifactKey, ()>,
+    /// Tier 1C-α storage: the rehomed shared external-type cache.
+    /// Held behind a `Mutex` for the same reason the off-store form
+    /// did — the bounded clear-all-at-cap policy needs an atomic
+    /// `len() >= cap → clear() → insert(...)` envelope that
+    /// `parking_lot::Mutex::lock()` provides.
+    entries: parking_lot::Mutex<
+        FxHashMap<crate::types::ResolvedTypeCacheKey, crate::types::ResolvedTypeCacheEntry>,
+    >,
 }
 
 impl ResolvedTypeCacheDb {
@@ -952,16 +1064,42 @@ impl ResolvedTypeCacheDb {
         Self::default()
     }
 
+    /// Look up an entry by key. Caller acquires nothing; the DB
+    /// internally locks for the read.
+    #[must_use]
+    pub(crate) fn lookup(
+        &self,
+        key: &crate::types::ResolvedTypeCacheKey,
+    ) -> Option<crate::types::ResolvedTypeCacheEntry> {
+        self.entries.lock().get(key).cloned()
+    }
+
+    /// Insert an entry. Honours the bounded clear-all-at-cap policy
+    /// (D16 — `crate::types::RESOLVED_TYPE_CACHE_CAP`): when the cache
+    /// reaches `RESOLVED_TYPE_CACHE_CAP` entries, the entire map
+    /// clears before the new entry is inserted. NOT LRU.
+    pub(crate) fn insert(
+        &self,
+        key: crate::types::ResolvedTypeCacheKey,
+        entry: crate::types::ResolvedTypeCacheEntry,
+    ) {
+        let mut guard = self.entries.lock();
+        if guard.len() >= crate::types::RESOLVED_TYPE_CACHE_CAP {
+            guard.clear();
+        }
+        guard.insert(key, entry);
+    }
+
     pub fn clear(&self) {
-        self.entries.clear();
+        self.entries.lock().clear();
     }
 
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.entries.lock().len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.entries.lock().is_empty()
     }
 }
 
@@ -1074,16 +1212,14 @@ impl crate::invalidation_domain::ParticipatesInInvalidation for CompileCacheDb {
 
 impl crate::invalidation_domain::InvalidationByCanonical for CompileCacheDb {
     fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
-        let mut removed = 0usize;
-        self.entries.retain(|key, _| {
-            if key.as_ref() == canonical_id {
-                removed += 1;
-                false
-            } else {
-                true
-            }
-        });
-        removed
+        // Tier 1C-α — DashMap-backed storage. Per-canonical eviction
+        // mirrors the off-store `compile_cache.remove(canonical)`
+        // path that the rehoming subsumed.
+        if self.entries.remove(canonical_id).is_some() {
+            1
+        } else {
+            0
+        }
     }
 }
 
@@ -1105,9 +1241,14 @@ impl crate::invalidation_domain::ParticipatesInInvalidation for ResolvedTypeCach
 
 impl crate::invalidation_domain::InvalidationByCanonical for ResolvedTypeCacheDb {
     fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
+        // Linear scan over the rehomed mutex-protected map. Tier 1C-α
+        // preserves the bounded clear-all-at-cap semantics from the
+        // off-store form; per-canonical invalidation walks the map
+        // once and drops the matching dep_canonical entries.
+        let mut guard = self.entries.lock();
         let mut removed = 0usize;
-        self.entries.retain(|key, _| {
-            if key.canonical_id.as_ref() == canonical_id {
+        guard.retain(|key, _| {
+            if key.dep_canonical_id == canonical_id {
                 removed += 1;
                 false
             } else {
@@ -1292,9 +1433,18 @@ pub struct ProjectTypeStore {
     /// `DerivedRawState` / `DependencyState` in 1C-β.
     compile_cache_db: CompileCacheDb,
     /// Tier 1A — Host-owned typed cache for resolved-type entries (D16).
-    /// Empty in 1A; the existing `resolved_type_cache` field on
-    /// `VerterHost` migrates onto this DB in 1C-α.
+    /// Tier 1C-α moved the existing `VerterHost::resolved_type_cache`
+    /// body in here verbatim (super-shape preserved); the bounded
+    /// clear-all-at-cap policy lives inside the DB.
     resolved_type_cache_db: ResolvedTypeCacheDb,
+    /// Tier 1C-α — Host-owned handle for `verter_semantic::db::SemanticDb`.
+    /// **Different crate, different artifact.** This is NOT a typed-DB
+    /// wrapper around the project-global graph; it is the
+    /// orthogonal query-memo DB serving the semantic surfaces /
+    /// bindings / reactivity provenance layer. The handle lives on
+    /// `ProjectTypeStore` so the unified `bump_project_generation_and_evict`
+    /// cascade can reset it alongside the typed DBs.
+    semantic_db: parking_lot::Mutex<verter_semantic::db::SemanticDb>,
     /// Debug / diagnostic counters.
     pub counters: ProjectTypeStoreCounters,
 }
@@ -1415,6 +1565,7 @@ impl ProjectTypeStore {
             eval_env_cache_db: EvalEnvCacheDb::new(),
             compile_cache_db: CompileCacheDb::new(),
             resolved_type_cache_db: ResolvedTypeCacheDb::new(),
+            semantic_db: parking_lot::Mutex::new(verter_semantic::db::SemanticDb::new()),
             counters,
         }
     }
@@ -1511,6 +1662,15 @@ impl ProjectTypeStore {
     /// Empty in 1A; consumer migration in 1C-α.
     pub fn resolved_type_cache(&self) -> &ResolvedTypeCacheDb {
         &self.resolved_type_cache_db
+    }
+
+    /// Tier 1C-α — handle to the rehomed
+    /// [`verter_semantic::db::SemanticDb`] (different crate, different
+    /// artifact type than [`Self::semantic_graph`]). Returns the
+    /// `MutexGuard` so call sites that previously used
+    /// `host.semantic_db.lock()` keep their shape.
+    pub fn semantic_db(&self) -> parking_lot::MutexGuard<'_, verter_semantic::db::SemanticDb> {
+        self.semantic_db.lock()
     }
 
     /// Route-only shallow cache. F6/F7 destination DB.
@@ -1727,6 +1887,14 @@ impl ProjectTypeStore {
         // proof entry; the proof's dep signature includes routes and
         // workspace-level interface-merging state.
         self.app_config_no_override_proof.invalidate_all();
+        // Rehomed off-store caches join the unified project-generation
+        // cascade (host-cache-rehoming.md §3.4). Routes / intrinsics
+        // drive each of these caches' freshness, so a tsconfig-style
+        // bump invalidates them along with the typed DBs above.
+        self.compile_cache_db.clear();
+        self.resolved_type_cache_db.clear();
+        self.eval_env_cache_db.clear();
+        *self.semantic_db.lock() = verter_semantic::db::SemanticDb::new();
         generation
     }
 }
@@ -1791,6 +1959,13 @@ pub const PROJECT_TYPE_STORE_DB_INVENTORY: &[&str] = &[
     "eval_env_cache_db",
     "compile_cache_db",
     "resolved_type_cache_db",
+    // The Tier 1C-α `semantic_db: Mutex<verter_semantic::db::SemanticDb>`
+    // handle is intentionally absent from this inventory — it is the
+    // *handle* sitting inside `ProjectTypeStore`, not a typed-DB wrapper
+    // that implements `ParticipatesInInvalidation`. The unified
+    // `bump_project_generation_and_evict` resets it directly via
+    // `*self.semantic_db.lock() = SemanticDb::new()` (host-cache-rehoming.md
+    // §3.4 F5).
 ];
 
 impl ProjectTypeStore {

@@ -828,7 +828,7 @@ impl FallthroughRequestHost for VerterHost {
 
         if prop_type_overrides.is_none() {
             {
-                if let Some(cc) = self.compile_cache.get(canonical_id) {
+                if let Some(cc) = self.compile_cache().get(canonical_id) {
                     if let Some(ref cached) = cc.cached_fallthrough {
                         if cached.generic_root_propagation == self.config.generic_root_propagation
                             && cached

@@ -58,8 +58,8 @@ impl VerterHost {
         self.project_type_store.bump_project_generation_and_evict();
         self.project_type_store.route_owned_shallow().clear_all();
         self.resolver.reset_all();
-        self.resolved_type_cache.lock().clear();
-        self.eval_env_cache.lock().clear();
+        self.resolved_type_cache().clear();
+        self.eval_env_cache().clear();
         self.semantic_invalidate_all();
         self.bump_store_view_epoch();
     }
@@ -193,7 +193,7 @@ impl VerterHost {
 
         let (old_aliases, preserved_routes) = {
             let mut cc_ref = self
-                .compile_cache
+                .compile_cache()
                 .entry(canonical_id.to_string())
                 .or_default();
             let cc = cc_ref.value_mut();
@@ -243,7 +243,7 @@ impl VerterHost {
     /// compile results are flushed. Useful for invalidating stale
     /// compile results while keeping the file set intact.
     pub fn clear_compile_cache(&self) {
-        for mut entry in self.compile_cache.iter_mut() {
+        for mut entry in self.compile_cache().iter_mut() {
             entry.compile_slots.clear();
             entry.raw_template_analysis = None;
             entry.cached_tsc_extract = None;
@@ -251,8 +251,8 @@ impl VerterHost {
             entry.cached_meta_payload = None;
             entry.cached_fallthrough = None;
         }
-        self.resolved_type_cache.lock().clear();
-        self.eval_env_cache.lock().clear();
+        self.resolved_type_cache().clear();
+        self.eval_env_cache().clear();
         // Extend cascade with the new `RouteOwnedShallowDb` bulk
         // eviction. Mirrors the route-resolution invalidation discipline.
         self.project_type_store.route_owned_shallow().clear_all();
@@ -293,18 +293,18 @@ impl VerterHost {
         write_lock(&self.alias_to_canonical).clear();
         write_lock(&self.last_const_prop_overrides).clear();
 
-        self.compile_cache.clear();
+        self.compile_cache().clear();
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.scheduler.reset();
             self.scheduler.restart_driver();
         }
-        self.resolved_type_cache.lock().clear();
+        self.resolved_type_cache().clear();
         self.resolver.reset_all();
-        self.eval_env_cache.lock().clear();
+        self.eval_env_cache().clear();
         self.provenance.reset();
         // Clear all semantic caches
-        *self.semantic_db.lock() = verter_semantic::db::SemanticDb::new();
+        *self.semantic_db() = verter_semantic::db::SemanticDb::new();
         // close-cascade extension for the `RouteOwnedShallowDb`.
         // `close()` already resets the resolver (which clears RouteDb /
         // ImportedRootDb), so route-resolution facts are gone; clear
@@ -329,13 +329,13 @@ impl VerterHost {
         projects: Vec<verter_semantic::analysis::project_resolver::IdeProjectConfig>,
     ) {
         self.ws().configure_resolver(projects);
-        for mut entry in self.compile_cache.iter_mut() {
+        for mut entry in self.compile_cache().iter_mut() {
             entry.import_routes.clear();
             entry.dependencies.clear();
         }
         self.resolver.reset_all();
-        self.resolved_type_cache.lock().clear();
-        self.eval_env_cache.lock().clear();
+        self.resolved_type_cache().clear();
+        self.eval_env_cache().clear();
         self.semantic_invalidate_all();
         // `configure_projects` is a route-resolution mutation: the
         // project graph changes, which means the cached route-only
@@ -418,7 +418,7 @@ impl VerterHost {
         self.ws().set_exact_resolutions(canonical, resolutions);
         self.resolver.runtime.invalidate_canonical(canonical);
         self.project_type_store.evict_canonical(canonical); // belt-and-suspenders per-canonical
-        self.resolved_type_cache.lock().clear();
+        self.resolved_type_cache().clear();
         self.semantic_invalidate(canonical);
         self.bump_store_view_epoch();
     }
@@ -488,7 +488,7 @@ impl VerterHost {
     /// `ensure_loaded()` re-integrates.
     pub fn evict(&self, canonical_id: &str) {
         self.ws().notify_close(canonical_id);
-        self.semantic_db.lock().invalidate(canonical_id);
+        self.semantic_db().invalidate(canonical_id);
 
         // Capture pre-evict whole_hash from the scheduler so
         // `ensure_loaded` can detect no-op reloads (identical content)
@@ -497,7 +497,7 @@ impl VerterHost {
             .scheduler
             .try_get_source(canonical_id)
             .map(|s| s.whole_hash);
-        if let Some(mut cc) = self.compile_cache.get_mut(canonical_id) {
+        if let Some(mut cc) = self.compile_cache().get_mut(canonical_id) {
             cc.evicted = true;
             cc.evicted_whole_hash = pre_evict_hash;
             // Clear profile state but preserve deps/aliases for reload diffing
@@ -531,7 +531,7 @@ impl VerterHost {
         // may create an empty compile_cache stub before the file is
         // loaded into the scheduler; in that case we must proceed to
         // submit a load request.
-        if let Some(cc) = self.compile_cache.get(canonical_id) {
+        if let Some(cc) = self.compile_cache().get(canonical_id) {
             if !cc.evicted && self.scheduler.try_get_source(canonical_id).is_some() {
                 return true;
             }
@@ -540,7 +540,7 @@ impl VerterHost {
         use verter_scheduler::job::CompletionState;
 
         let (reload_from_workspace, pre_evict_hash) = self
-            .compile_cache
+            .compile_cache()
             .get(canonical_id)
             .filter(|cc| cc.evicted)
             .map(|cc| (true, cc.evicted_whole_hash))
@@ -682,7 +682,7 @@ impl VerterHost {
         let ws_ref = self.workspace.read();
         let cleared = deps::smart_invalidate_dependents_via_scheduler(
             &self.scheduler,
-            &self.compile_cache,
+            self.compile_cache(),
             owners.clone(),
             Some(ws_ref.as_ref()),
             &self.config,
@@ -696,7 +696,7 @@ impl VerterHost {
             &cleared
         };
         if !evict_targets.is_empty() {
-            self.eval_env_cache.lock().clear();
+            self.eval_env_cache().clear();
         }
         for owner in evict_targets {
             self.resolver.runtime.invalidate_canonical(owner);

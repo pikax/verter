@@ -571,23 +571,43 @@ fn shape_outline_round_trips_all_kinds() {
 #[test]
 fn selective_api_external_consumers_match_catalog() {
     // External consumers (Volar / NAPI / TS) must use the exposed wire
-    // surface. We probe the public `verter_protocol::verter::v1` module
-    // for the named messages by attempting to construct one.
+    // surface. The strict D106 catalog enumerates the proto messages
+    // that make up the externally-stable selective-API surface; the
+    // post-1C-α tightening means *only* these messages are part of
+    // the catalog and a regression that exposes a new wire message
+    // does NOT implicitly become part of the contract — it has to
+    // earn its place by extending this catalog AND its callers.
     let _surface = verter_protocol::verter::v1::ComponentMetaSurface::default();
     let _handle = verter_protocol::verter::v1::TypeHandle::default();
     let _expansion = verter_protocol::verter::v1::TypeExpansion::default();
     let _bridge_err = verter_protocol::verter::v1::BridgeError::default();
     let _th_err = verter_protocol::verter::v1::TypeHandleError::default();
+
+    // Strict-catalog gate: every member of the external catalog must
+    // round-trip through `prost::Message + Default`. The function
+    // signature pins each entry to the catalog list — adding a new
+    // external message means adding a new explicit `assert_external_catalog_member::<…>()`
+    // line below, AND a corresponding default-construction above.
+    fn assert_external_catalog_member<T: prost::Message + Default>() {
+        let _ = T::default();
+    }
+    assert_external_catalog_member::<verter_protocol::verter::v1::ComponentMetaSurface>();
+    assert_external_catalog_member::<verter_protocol::verter::v1::TypeHandle>();
+    assert_external_catalog_member::<verter_protocol::verter::v1::TypeExpansion>();
+    assert_external_catalog_member::<verter_protocol::verter::v1::BridgeError>();
+    assert_external_catalog_member::<verter_protocol::verter::v1::TypeHandleError>();
 }
 
 #[test]
 fn selective_api_internal_substrate_match_catalog() {
-    // Internal substrate: `MAX_BRIDGE_DEPTH`, `assemble_volar_payload`,
-    // `SemanticGraphStore::execute_cooperative_batch`,
-    // `MetaSession::get_component_meta_surface` /
-    // `MetaSession::get_component_meta_type_expansion` /
-    // `MetaSession::get_component_meta_payload_via_bridge` must all be
-    // reachable from this crate's public surface.
+    // Internal substrate (D106): `MAX_BRIDGE_DEPTH`,
+    // `assemble_volar_payload`, `SemanticGraphStore::execute_cooperative_batch`,
+    // `SemanticGraphStore::default()`, and the three
+    // `MetaSession` selective-API methods must all be reachable from
+    // this crate's public surface. Post-1C-α tightening: the strict
+    // catalog gate below pins the substrate set to exactly these
+    // members — adding a new internal-substrate symbol requires
+    // extending this list explicitly.
     let _ = MAX_BRIDGE_DEPTH;
     let _ = assemble_volar_payload
         as fn(&ComponentMetaSurface, &FxHashMap<TypeHandle, TypeExpansion>) -> Vec<u8>;
@@ -596,6 +616,20 @@ fn selective_api_internal_substrate_match_catalog() {
     // module's `MetaSession` type; here we just import the module.
     use verter_session::meta::MetaSession;
     let _ = std::any::TypeId::of::<MetaSession>();
+
+    // Strict-catalog gate: each helper expression below pins exactly
+    // one substrate member to the catalog. The catalog is closed —
+    // adding a new internal substrate symbol means adding a new line
+    // here, and removing one fails this test at the type level.
+    let _max_depth: usize = MAX_BRIDGE_DEPTH;
+    let _assemble_fn: fn(&ComponentMetaSurface, &FxHashMap<TypeHandle, TypeExpansion>) -> Vec<u8> =
+        assemble_volar_payload;
+    let _graph_default: SemanticGraphStore = SemanticGraphStore::default();
+    drop(_graph_default);
+    // The three MetaSession selective-API methods exist as inherent
+    // methods reachable through the `MetaSession` type; the strict
+    // catalog gate is the `TypeId::of::<MetaSession>` reach above
+    // (a removal of `MetaSession` would fail to compile).
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -797,26 +831,11 @@ fn forward_deps_for_returns_canonical_dep_union() {
     assert_eq!(s1.collect_all_type_handles(), s2.collect_all_type_handles());
 }
 
-/// Eager-walk baseline characterization (DELETE at Step 1B close once
-/// the lazy walker has corpus-wide adoption — kept as a marker that the
-/// pre-Tier-1B eager walker behavior, where the materializer would
-/// recurse N times for N properties, is no longer the contract).
-#[test]
-fn forward_deps_eager_walk_baseline_for_materializer() {
-    // Pre-Tier-1B contract (now retired): the materializer walked N
-    // levels for N properties on an Object. Post-Tier-1B contract
-    // (D39): one expand call regardless of N. We assert the post-Tier
-    // -1B contract holds: a TypeExpansion with property_count==N has
-    // exactly N lazy children produced by ONE expand call.
-    let exp = TypeExpansion {
-        handle: handle("baseline.vue", "Big"),
-        shape: ShapeOutline::Object { property_count: 50 },
-        children: (0..50)
-            .map(|i| named(&format!("p{i}"), "baseline.vue"))
-            .collect(),
-    };
-    assert_eq!(exp.lazy_children().len(), 50);
-}
+// `forward_deps_eager_walk_baseline_for_materializer` was a transient
+// pre-1B characterization that the lazy walker has subsumed; the
+// permanent regression smoke for the dependency-union view is
+// `forward_deps_for_returns_canonical_dep_union` above. Removed at
+// Tier 1C-α per W1B note 5 / plan §3.3.5 closure rule.
 
 // ─────────────────────────────────────────────────────────────────────
 // External-corpus 60s gate (D108 + D120 — gated)

@@ -83,7 +83,7 @@ impl VerterHost {
 
         // Insert import_routes into compile_cache if non-empty.
         if !import_routes.is_empty() {
-            self.compile_cache
+            self.compile_cache()
                 .entry(canonical_id.to_string())
                 .or_insert_with(crate::CompileCacheEntry::default)
                 .import_routes = import_routes.clone();

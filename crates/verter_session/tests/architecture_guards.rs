@@ -1948,22 +1948,13 @@ fn phase_8_allow_list() -> std::collections::HashMap<&'static str, &'static str>
             "last_const_prop_overrides",
             "phase-06b-report.md §F13: Phase-7 invalidation state-diff record (NOT a cache of resolution results). No equivalent in ProjectTypeStore.",
         ),
-        (
-            "compile_cache",
-            "phase-06b-report.md §F1: per-profile compile state with sub-mirror lifecycle on import_routes (compile-event invalidation differs from file-content-event invalidation that drives IndexedReady.import_routes).",
-        ),
-        (
-            "resolved_type_cache",
-            "phase-06b-report.md §F2: shared external-type cache with profile-gated writes; bounded clear-all at RESOLVED_TYPE_CACHE_CAP (NOT LRU). Distinct from SemanticGraphStore.HostResolvedNamedTypeKey identity.",
-        ),
-        (
-            "eval_env_cache",
-            "phase-06b-report.md §F4: owned-data EvalEnv snapshots; consumers are host-local, no project-global sharing benefit. Migration to a hypothetical ProjectTypeStore.EvalEnvDb is unmotivated by current consumer patterns.",
-        ),
-        (
-            "semantic_db",
-            "phase-06b-report.md §F5: different crate, different artifact than ProjectTypeStore.semantic_graph(). verter_semantic::db::SemanticDb is a separate query-memo DB serving the surfaces / bindings / reactivity provenance layer.",
-        ),
+        // F1, F2, F4, F5 — rehomed in Tier 1C-α (host-cache-rehoming.md
+        // §3.4 + plan §3.4.1). The four fields (`compile_cache`,
+        // `resolved_type_cache`, `eval_env_cache`, `semantic_db`) no
+        // longer live on `VerterHost`; the syn-walk that drives this
+        // allow-list will not surface them. Re-adding any of them to
+        // `VerterHost` would fail this guard until a fresh
+        // rehoming-doc rationale is added.
         (
             "query_profile",
             "phase-06b-report.md §F10: execution-policy state, not a result memoiser. Different artifact type than anything in ProjectTypeStore.",
@@ -2180,11 +2171,13 @@ fn no_off_store_host_caches_discriminator_self_test() {
     let allow_list = phase_8_allow_list();
 
     // (a) Synthetic struct with ONLY allow-listed fields — must produce
-    //     zero violations.
+    //     zero violations. `query_profile` is allow-listed (execution-
+    //     policy state); `workspace` is allow-listed (re-pointable
+    //     handle, not a hashmap-cache).
     let synthetic_pass = r#"
         pub struct SyntheticHost {
             pub(crate) instance_id: u64,
-            pub(crate) compile_cache: dashmap::DashMap<String, u64>,
+            pub(crate) query_profile: parking_lot::Mutex<verter_semantic::profile::QueryProfile>,
             pub(crate) workspace: Arc<parking_lot::RwLock<Arc<dyn WorkspaceAccess>>>,
             pub(crate) tick: AtomicU64,
         }
@@ -2195,7 +2188,7 @@ fn no_off_store_host_caches_discriminator_self_test() {
     assert!(
         pass_violations.is_empty(),
         "discriminator self-test: synthetic_pass should produce zero \
-         violations (compile_cache and workspace are allow-listed, the \
+         violations (query_profile and workspace are allow-listed, the \
          others are non-cache shapes), but got:\n{}",
         pass_violations.join("\n")
     );
@@ -2203,9 +2196,9 @@ fn no_off_store_host_caches_discriminator_self_test() {
     // detector is failing to flag them as candidates in the first place).
     let surveyed_names: Vec<String> = pass_surveyed.iter().map(|(n, _)| n.clone()).collect();
     assert!(
-        surveyed_names.contains(&"compile_cache".to_string()),
+        surveyed_names.contains(&"query_profile".to_string()),
         "discriminator self-test: synthetic_pass must surface \
-         `compile_cache` as a cache-shape candidate; surveyed: {surveyed_names:?}"
+         `query_profile` as a cache-shape candidate; surveyed: {surveyed_names:?}"
     );
     assert!(
         surveyed_names.contains(&"workspace".to_string()),

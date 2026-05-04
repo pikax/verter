@@ -65,7 +65,7 @@ impl VerterHost {
         // invariant" — batch upserts route through here, NOT through
         // `upsert_via_scheduler_with_priority` directly.
         if let Some(ref id) = req.canonical_id {
-            self.semantic_db.lock().invalidate(id);
+            self.semantic_db().invalidate(id);
         }
 
         // Test-only observable: lets `compile_many_propagates_*_priority`
@@ -205,7 +205,10 @@ impl VerterHost {
         let old_whole_hash = old_host_data.map(|h| h.parse.whole_hash);
         if !changes.changed && old_whole_hash == Some(parse.whole_hash) {
             let old_aliases = {
-                let mut cc_ref = self.compile_cache.entry(canonical_id.clone()).or_default();
+                let mut cc_ref = self
+                    .compile_cache()
+                    .entry(canonical_id.clone())
+                    .or_default();
                 let cc = cc_ref.value_mut();
                 let old_aliases = cc.aliases.clone();
                 cc.evicted = false;
@@ -238,8 +241,8 @@ impl VerterHost {
 
             self.resolver.runtime.evict_canonical(&canonical_id);
             self.project_type_store.evict_canonical(&canonical_id);
-            self.resolved_type_cache.lock().clear();
-            self.eval_env_cache.lock().clear();
+            self.resolved_type_cache().clear();
+            self.eval_env_cache().clear();
             self.semantic_invalidate(&canonical_id);
             self.ws().notify_upsert(&canonical_id, req.source.clone());
             self.bump_store_view_epoch();
@@ -269,7 +272,10 @@ impl VerterHost {
         let old_aliases;
         let prev_nodes;
         {
-            let mut cc_ref = self.compile_cache.entry(canonical_id.clone()).or_default();
+            let mut cc_ref = self
+                .compile_cache()
+                .entry(canonical_id.clone())
+                .or_default();
             let cc = cc_ref.value_mut();
 
             // Read old state before mutation
@@ -344,7 +350,7 @@ impl VerterHost {
         // prior generation after a content change.
         self.resolver.runtime.evict_canonical(&canonical_id);
         self.project_type_store.evict_canonical(&canonical_id);
-        self.resolved_type_cache.lock().clear();
+        self.resolved_type_cache().clear();
         self.semantic_invalidate(&canonical_id);
 
         self.update_alias_map(&canonical_id, &old_aliases, &alias_set);
@@ -537,7 +543,7 @@ impl VerterHost {
 
             // Check previous hash
             let previous_hash = self
-                .compile_cache
+                .compile_cache()
                 .get(&canonical)
                 .and_then(|cc| cc.style_overrides.get(&profile_hash).map(|o| o.hash))
                 .unwrap_or(0);
@@ -610,7 +616,7 @@ impl VerterHost {
                 hash: override_hash,
                 by_index: by_index.clone(),
             };
-            if let Some(mut cc) = self.compile_cache.get_mut(&canonical) {
+            if let Some(mut cc) = self.compile_cache().get_mut(&canonical) {
                 cc.style_overrides.insert(
                     profile_hash,
                     StyleOverrideWithAnalysis {
@@ -758,7 +764,7 @@ impl VerterHost {
                 })?;
 
             let previous_hash = self
-                .compile_cache
+                .compile_cache()
                 .get(&canonical)
                 .and_then(|cc| {
                     cc.content_overrides
@@ -792,7 +798,7 @@ impl VerterHost {
             };
 
             // Store ContentOverrideWithParse in compile_cache
-            if let Some(mut cc) = self.compile_cache.get_mut(&canonical) {
+            if let Some(mut cc) = self.compile_cache().get_mut(&canonical) {
                 cc.content_overrides.insert(
                     profile_hash,
                     ContentOverrideWithParse {

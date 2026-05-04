@@ -128,12 +128,8 @@ impl VerterHost {
             #[cfg(feature = "session_metrics")]
             metrics: HostMetrics::default(),
             scheduler,
-            compile_cache: dashmap::DashMap::new(),
             provenance,
-            resolved_type_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             resolver: HostResolverState::new(routes_handle, imported_roots_handle),
-            eval_env_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
-            semantic_db: parking_lot::Mutex::new(verter_semantic::db::SemanticDb::new()),
             query_profile: parking_lot::Mutex::new(verter_semantic::profile::QueryProfile::Build),
             project_type_store,
             request_id_counter: std::sync::atomic::AtomicU64::new(0),
@@ -284,5 +280,51 @@ impl VerterHost {
     /// taking the host lock.
     pub fn project_type_store(&self) -> &Arc<crate::project_type_store::ProjectTypeStore> {
         &self.project_type_store
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Rehomed off-store cache accessors.
+    //
+    // The four off-store fields (`compile_cache`, `resolved_type_cache`,
+    // `eval_env_cache`, `semantic_db`) live on the `ProjectTypeStore`
+    // typed-DB wrappers, not on `VerterHost`. These accessors return
+    // references to the rehomed storage so call sites that previously
+    // used `host.<field>.<method>()` keep their shape via
+    // `host.<field>().<method>()`.
+    // ──────────────────────────────────────────────────────────────────
+
+    /// Reference to the rehomed compile-cache storage. Equivalent to
+    /// the deleted `compile_cache` field; call sites use
+    /// `host.compile_cache().entry(...)` / `.get(...)` / `.iter()` etc.
+    #[must_use]
+    pub(crate) fn compile_cache(
+        &self,
+    ) -> &dashmap::DashMap<String, crate::types::CompileCacheEntry> {
+        self.project_type_store.compile_cache().entries()
+    }
+
+    /// Reference to the rehomed resolved-type cache wrapper. Use
+    /// `host.resolved_type_cache().lookup(...)` and `.insert(...)`
+    /// (the bounded clear-all-at-cap policy lives inside the DB).
+    #[must_use]
+    pub(crate) fn resolved_type_cache(&self) -> &crate::project_type_store::ResolvedTypeCacheDb {
+        self.project_type_store.resolved_type_cache()
+    }
+
+    /// Reference to the rehomed eval-env / owned-program cache
+    /// wrapper.
+    #[must_use]
+    pub(crate) fn eval_env_cache(&self) -> &crate::project_type_store::EvalEnvCacheDb {
+        self.project_type_store.eval_env_cache()
+    }
+
+    /// `MutexGuard` access to the rehomed
+    /// [`verter_semantic::db::SemanticDb`] handle. Call sites that
+    /// previously used `host.semantic_db.lock()` now use
+    /// `host.semantic_db()` and receive the same guard type.
+    pub(crate) fn semantic_db(
+        &self,
+    ) -> parking_lot::MutexGuard<'_, verter_semantic::db::SemanticDb> {
+        self.project_type_store.semantic_db()
     }
 }

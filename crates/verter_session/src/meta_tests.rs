@@ -280,7 +280,7 @@ fn cached_resolved_state(
     {
         project
             .host()
-            .compile_cache
+            .compile_cache()
             .get(canonical)
             .and_then(|entry| {
                 entry
@@ -309,7 +309,7 @@ fn clear_legacy_cached_resolved_state(
 ) {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        if let Some(mut entry) = project.host().compile_cache.get_mut(canonical) {
+        if let Some(mut entry) = project.host().compile_cache().get_mut(canonical) {
             entry.cached_resolved_meta.remove(&mode);
         }
     }
@@ -330,7 +330,7 @@ fn cached_fallthrough_state(
 ) -> Option<Arc<crate::types::FallthroughResolution>> {
     project
         .host()
-        .compile_cache
+        .compile_cache()
         .get(canonical)
         .and_then(|entry| {
             entry
@@ -342,7 +342,7 @@ fn cached_fallthrough_state(
 
 #[cfg(not(target_arch = "wasm32"))]
 fn clear_legacy_cached_fallthrough_state(project: &MetaProject, canonical: &str) {
-    if let Some(mut entry) = project.host().compile_cache.get_mut(canonical) {
+    if let Some(mut entry) = project.host().compile_cache().get_mut(canonical) {
         entry.cached_fallthrough = None;
     }
 }
@@ -382,7 +382,7 @@ fn cached_fallthrough_entry(
 ) -> Option<crate::types::CachedFallthroughEntry> {
     project
         .host()
-        .compile_cache
+        .compile_cache()
         .get(canonical)
         .and_then(|entry| entry.cached_fallthrough.clone())
 }
@@ -400,7 +400,7 @@ fn fact_versions_match_uses_derived_fact_kind_specific_validation() {
 
     let mut entry = project
         .host()
-        .compile_cache
+        .compile_cache()
         .get_mut("/index.ts")
         .expect("compile cache entry should exist");
     entry.import_routes.insert(
@@ -416,7 +416,7 @@ fn fact_versions_match_uses_derived_fact_kind_specific_validation() {
     let import_route_hash = {
         let entry = project
             .host()
-            .compile_cache
+            .compile_cache()
             .get("/index.ts")
             .expect("compile cache entry should exist");
         crate::resolver_store::hash_import_route_targets(&entry.import_routes)
@@ -662,7 +662,7 @@ fn current_dependency_fact_versions_include_derived_resolver_facts() {
 
     let mut entry = project
         .host()
-        .compile_cache
+        .compile_cache()
         .get_mut("/index.ts")
         .expect("compile cache entry should exist");
     entry.import_routes.insert(
@@ -9578,7 +9578,7 @@ defineProps<SharedProps>()
         "component-meta should not hit the legacy resolved type cache on first owner resolution"
     );
     assert!(
-        project.host().resolved_type_cache.lock().is_empty(),
+        project.host().resolved_type_cache().is_empty(),
         "component-meta queries should leave the legacy host resolved type cache empty"
     );
 
@@ -9599,7 +9599,7 @@ defineProps<SharedProps>()
         "component-meta should not miss the legacy host resolved type cache for a second owner"
     );
     assert!(
-        project.host().resolved_type_cache.lock().is_empty(),
+        project.host().resolved_type_cache().is_empty(),
         "component-meta queries should leave the legacy host resolved type cache empty"
     );
 }
@@ -9684,7 +9684,7 @@ defineProps<SharedProps>()
         "component-meta should not hit the legacy resolved type cache on first workspace-only dep resolution"
     );
     assert!(
-        project.host().resolved_type_cache.lock().is_empty(),
+        project.host().resolved_type_cache().is_empty(),
         "component-meta queries should leave the legacy host resolved type cache empty"
     );
 
@@ -9709,7 +9709,7 @@ defineProps<SharedProps>()
         "component-meta should not miss the legacy host resolved type cache for a second workspace-only owner"
     );
     assert!(
-        project.host().resolved_type_cache.lock().is_empty(),
+        project.host().resolved_type_cache().is_empty(),
         "component-meta queries should leave the legacy host resolved type cache empty"
     );
 }
@@ -9743,14 +9743,14 @@ defineProps<Props>()
     let _ = session.get_component_meta("/App.vue").unwrap();
 
     assert!(
-        project.host().resolved_type_cache.lock().is_empty(),
+        project.host().resolved_type_cache().is_empty(),
         "component-meta should no longer populate the legacy resolved type cache"
     );
 
     project.clear_caches().unwrap();
 
     assert!(
-        project.host().resolved_type_cache.lock().is_empty(),
+        project.host().resolved_type_cache().is_empty(),
         "clear_caches should leave the legacy resolved type cache empty"
     );
 }
@@ -9763,8 +9763,11 @@ fn resolved_type_cache_is_bounded() {
     });
 
     {
-        let mut cache = host.resolved_type_cache.lock();
-        // Fill to cap
+        let cache = host.resolved_type_cache();
+        // Fill to cap. Each insert routes through the rehomed DB; the
+        // bounded clear-all-at-cap policy fires on the (cap+1)-th
+        // insert and the test only goes up to cap so the policy stays
+        // dormant.
         for i in 0..crate::types::RESOLVED_TYPE_CACHE_CAP {
             cache.insert(
                 crate::types::ResolvedTypeCacheKey {

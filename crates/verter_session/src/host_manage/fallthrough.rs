@@ -923,7 +923,7 @@ impl VerterHost {
         {
             if self.effective_file_state(canonical_id, None).is_some() {
                 let mut cc = self
-                    .compile_cache
+                    .compile_cache()
                     .entry(canonical_id.to_string())
                     .or_default();
                 cc.cached_fallthrough = Some(crate::types::CachedFallthroughEntry {
@@ -987,7 +987,7 @@ impl VerterHost {
         let mut new_deps = self.parse_dependency_set_for_file(canonical_id);
         {
             let mut cc_ref = self
-                .compile_cache
+                .compile_cache()
                 .entry(canonical_id.to_string())
                 .or_default();
             let cc = cc_ref.value_mut();

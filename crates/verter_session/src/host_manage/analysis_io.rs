@@ -39,7 +39,7 @@ impl VerterHost {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
 
         {
-            if let Some(cc) = self.compile_cache.get(&canonical) {
+            if let Some(cc) = self.compile_cache().get(&canonical) {
                 if cc.evicted {
                     return None;
                 }
@@ -341,7 +341,7 @@ impl VerterHost {
             // blocks are NOT persisted to avoid stale cache when the external
             // dep changes (reverse-dep invalidation only clears compile_slots).
             if src_blocks.is_empty() {
-                if let Some(mut cc) = self.compile_cache.get_mut(canonical) {
+                if let Some(mut cc) = self.compile_cache().get_mut(canonical) {
                     cc.raw_template_analysis = Some(tpl_arc);
                 }
             }
@@ -373,7 +373,7 @@ impl VerterHost {
     ) -> Option<FileAnalysisSnapshot> {
         // Eviction gate (scheduler path)
         {
-            if let Some(cc) = self.compile_cache.get(canonical) {
+            if let Some(cc) = self.compile_cache().get(canonical) {
                 if cc.evicted {
                     return None;
                 }
@@ -412,7 +412,7 @@ impl VerterHost {
                     })
                     .unwrap_or_else(|| Arc::new(Vec::new()));
                 let template = self
-                    .compile_cache
+                    .compile_cache()
                     .get(canonical)
                     .and_then(|cc| cc.raw_template_analysis.clone());
                 let export_sigs = self
@@ -495,7 +495,7 @@ impl VerterHost {
         {
             use crate::host_executor::HostSourceData;
             if self
-                .compile_cache
+                .compile_cache()
                 .get(canonical)
                 .is_some_and(|entry| !entry.evicted)
             {
@@ -560,7 +560,7 @@ impl VerterHost {
 
         {
             use crate::host_executor::HostSourceData;
-            if let Some(cc) = self.compile_cache.get(&canonical) {
+            if let Some(cc) = self.compile_cache().get(&canonical) {
                 if cc.evicted {
                     return None;
                 }
@@ -583,7 +583,7 @@ impl VerterHost {
 
         {
             use crate::host_executor::{HostAnalysisData, HostSourceData};
-            if let Some(cc) = self.compile_cache.get(&canonical) {
+            if let Some(cc) = self.compile_cache().get(&canonical) {
                 if cc.evicted {
                     return None;
                 }
@@ -625,7 +625,7 @@ impl VerterHost {
         {
             for &id in canonical_ids {
                 let canonical = self.resolve_alias_or_canonical(id);
-                if let Some(cc) = self.compile_cache.get(&canonical) {
+                if let Some(cc) = self.compile_cache().get(&canonical) {
                     if cc.evicted {
                         continue;
                     }
@@ -653,7 +653,7 @@ impl VerterHost {
             let ids = self.scheduler.node_ids();
             let mut results = Vec::with_capacity(ids.len());
             for id in ids {
-                if let Some(cc) = self.compile_cache.get(&id) {
+                if let Some(cc) = self.compile_cache().get(&id) {
                     if cc.evicted {
                         continue;
                     }
@@ -687,7 +687,7 @@ impl VerterHost {
         let ad = analysis_snap.downcast_data::<HostAnalysisData>()?;
 
         let template = self
-            .compile_cache
+            .compile_cache()
             .get(canonical)
             .and_then(|cc| cc.raw_template_analysis.clone());
 
@@ -886,7 +886,7 @@ impl VerterHost {
         let profile_hash = compile_profile_hash(profile);
 
         {
-            let cc = self.compile_cache.get(&canonical)?;
+            let cc = self.compile_cache().get(&canonical)?;
             if cc.evicted {
                 return None;
             }
@@ -901,7 +901,7 @@ impl VerterHost {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
 
         {
-            let cc = self.compile_cache.get(&canonical)?;
+            let cc = self.compile_cache().get(&canonical)?;
             if cc.evicted {
                 return None;
             }
@@ -914,7 +914,7 @@ impl VerterHost {
     pub fn bump_diagnostics_generation(&self, canonical_or_alias: &str) {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
 
-        if let Some(mut cc) = self.compile_cache.get_mut(&canonical) {
+        if let Some(mut cc) = self.compile_cache().get_mut(&canonical) {
             cc.diagnostics_generation += 1;
         }
     }
@@ -923,7 +923,7 @@ impl VerterHost {
     pub fn invalidate_compile_slots(&self, canonical_or_alias: &str) {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
 
-        if let Some(mut cc) = self.compile_cache.get_mut(&canonical) {
+        if let Some(mut cc) = self.compile_cache().get_mut(&canonical) {
             cc.compile_slots.clear();
             cc.cached_resolved_meta.clear();
             cc.cached_meta_payload = None;
@@ -951,7 +951,7 @@ impl VerterHost {
 
         // Read aliases from compile_cache before removing.
         let aliases = {
-            let cc = self.compile_cache.get(&canonical)?;
+            let cc = self.compile_cache().get(&canonical)?;
             cc.aliases.clone()
         };
 
@@ -965,7 +965,7 @@ impl VerterHost {
         // Workspace-authoritative: read dependents BEFORE notify_delete.
         let dependents = self.ws().reverse_deps_for(&canonical);
         for owner in &dependents {
-            if let Some(mut cc) = self.compile_cache.get_mut(owner) {
+            if let Some(mut cc) = self.compile_cache().get_mut(owner) {
                 cc.compile_slots.clear();
                 cc.cached_resolved_meta.clear();
                 cc.cached_meta_payload = None;
@@ -976,7 +976,7 @@ impl VerterHost {
         // canonical-axis + active-stem cleanup; closes Gemini CRITICAL
         // PERFORMANCE).
         self.ws().notify_delete(&canonical);
-        self.compile_cache.remove(&canonical);
+        self.compile_cache().remove(&canonical);
         self.scheduler.remove(&canonical);
         // Evict all resolver caches so that untracked-file acceptance in
         // the store view's `validates` method does not return stale facts
@@ -1002,7 +1002,7 @@ impl VerterHost {
 
         {
             use crate::host_executor::HostSourceData;
-            if let Some(cc) = self.compile_cache.get(&canonical) {
+            if let Some(cc) = self.compile_cache().get(&canonical) {
                 if cc.evicted {
                     return Vec::new();
                 }
@@ -1145,7 +1145,7 @@ impl VerterHost {
         // Preserve already-discovered transitive macro-type deps; compilation
         // refreshes them, but direct import updates should not discard them.
         let old_transitive_deps = {
-            let mut cc_ref = self.compile_cache.entry(canonical.clone()).or_default();
+            let mut cc_ref = self.compile_cache().entry(canonical.clone()).or_default();
             let cc = cc_ref.value_mut();
             let old_deps = cc.dependencies.clone();
             let old_direct_deps = {
@@ -1169,7 +1169,7 @@ impl VerterHost {
         self.invalidate_route_owned_shallow_cache(&canonical);
         self.resolver.runtime.invalidate_canonical(&canonical);
         self.project_type_store.evict_canonical(&canonical);
-        self.resolved_type_cache.lock().clear();
+        self.resolved_type_cache().clear();
         self.semantic_invalidate(&canonical);
         self.bump_store_view_epoch();
     }
@@ -1182,7 +1182,7 @@ impl VerterHost {
                 .node_ids()
                 .into_iter()
                 .filter_map(|id| {
-                    if let Some(cc) = self.compile_cache.get(&id) {
+                    if let Some(cc) = self.compile_cache().get(&id) {
                         if cc.evicted {
                             return None;
                         }
@@ -1201,7 +1201,7 @@ impl VerterHost {
     ) -> Option<Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>> {
         {
             use crate::host_executor::HostSourceData;
-            if let Some(cc) = self.compile_cache.get(canonical) {
+            if let Some(cc) = self.compile_cache().get(canonical) {
                 if cc.evicted {
                     return None;
                 }
@@ -1224,7 +1224,7 @@ impl VerterHost {
         profile_hash: u64,
     ) -> Option<Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>> {
         let override_with_parse = {
-            let cc = self.compile_cache.get(canonical)?;
+            let cc = self.compile_cache().get(canonical)?;
             cc.content_overrides.get(&profile_hash)?.clone()
         };
 
@@ -1259,7 +1259,7 @@ impl VerterHost {
             .scheduler
             .node_ids()
             .into_iter()
-            .filter(|id| self.compile_cache.get(id).is_none_or(|cc| !cc.evicted))
+            .filter(|id| self.compile_cache().get(id).is_none_or(|cc| !cc.evicted))
             .collect();
 
         let mut flow = verter_semantic::analysis::CssVarFlow {
@@ -1292,7 +1292,7 @@ impl VerterHost {
 
             // Check template for :style CSS variable bindings
             let template_analysis = if let Some(profile_hash) = profile_hash {
-                self.compile_cache
+                self.compile_cache()
                     .get(&canonical_id)
                     .and_then(|cc| {
                         if cc.content_overrides.contains_key(&profile_hash) {
@@ -1348,7 +1348,7 @@ impl VerterHost {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
 
         {
-            if let Some(cc) = self.compile_cache.get(&canonical) {
+            if let Some(cc) = self.compile_cache().get(&canonical) {
                 if cc.evicted {
                     return None;
                 }
@@ -1413,7 +1413,7 @@ impl VerterHost {
         {
             use crate::host_executor::{HostAnalysisData, HostSourceData};
 
-            if let Some(cc) = self.compile_cache.get(&canonical) {
+            if let Some(cc) = self.compile_cache().get(&canonical) {
                 if cc.evicted {
                     return None;
                 }
@@ -1503,7 +1503,7 @@ impl VerterHost {
         binding_name: &str,
     ) -> Option<(String, u32, u32)> {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
-        if let Some(cc) = self.compile_cache.get(&canonical) {
+        if let Some(cc) = self.compile_cache().get(&canonical) {
             if cc.evicted {
                 return None;
             }
@@ -1519,7 +1519,7 @@ impl VerterHost {
     /// (e.g., bare specifiers like `vue` or unregistered files).
     pub fn resolve_import(&self, parent_canonical_id: &str, import_source: &str) -> Option<String> {
         let canonical_parent = self.resolve_alias_or_canonical(parent_canonical_id);
-        if let Some(cc) = self.compile_cache.get(&canonical_parent) {
+        if let Some(cc) = self.compile_cache().get(&canonical_parent) {
             if cc.evicted {
                 return None;
             }
@@ -1538,7 +1538,7 @@ impl VerterHost {
         is_type: Option<bool>,
     ) -> Option<ResolvedExport> {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
-        if let Some(cc) = self.compile_cache.get(&canonical) {
+        if let Some(cc) = self.compile_cache().get(&canonical) {
             if cc.evicted {
                 return None;
             }
@@ -1584,7 +1584,7 @@ impl VerterHost {
     /// Uses cycle detection to prevent infinite loops in circular re-exports.
     pub fn resolve_exports(&self, canonical_or_alias: &str) -> Vec<ResolvedExport> {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
-        if let Some(cc) = self.compile_cache.get(&canonical) {
+        if let Some(cc) = self.compile_cache().get(&canonical) {
             if cc.evicted {
                 return Vec::new();
             }

@@ -729,7 +729,7 @@ fn prepared_decl_bundle_with_store_view_reuses_cache_for_structural_exact_resolu
     );
     // Verify the dependency resolution is persisted in the compile_cache
     let compile_entry = host
-        .compile_cache
+        .compile_cache()
         .get("/workspace/types.ts")
         .expect("types file should have a compile cache entry");
     assert_eq!(
@@ -6647,7 +6647,7 @@ fn store_view_import_routes_do_not_depend_on_live_owner_state() {
 
     ws.reset_resolves();
     ws.remove_file("/src/types/index.ts");
-    host.compile_cache.remove("/src/types/index.ts");
+    host.compile_cache().remove("/src/types/index.ts");
 
     let resolved =
         host.resolve_type_dependency_canonical_shallow("/src/types/index.ts", "./target");
@@ -6750,7 +6750,7 @@ export interface UnusedProps {
         .expect("barrel should seed shallow import routes");
 
     ws.remove_file("/src/types.ts");
-    host.compile_cache.remove("/src/types.ts");
+    host.compile_cache().remove("/src/types.ts");
 
     let resolved = host.resolve_type_dependency_canonical_shallow("/src/types.ts", "./Button.vue");
 
@@ -7864,7 +7864,7 @@ const emit = defineEmits<PackageEmits>()
         "package targets should stay off IndexedReadyDb on the current component-meta path",
     );
     assert!(
-        host.resolved_type_cache.lock().is_empty(),
+        host.resolved_type_cache().is_empty(),
         "component-meta package lookups should leave the legacy resolved-type cache empty",
     );
 }
