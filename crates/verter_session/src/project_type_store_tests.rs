@@ -245,7 +245,7 @@ fn type_resolution_context_db_stores_owned_arc() {
 // domain per the §3.4.2 matrix; the asymmetric drops/preserves below
 // are observable.
 //
-// Matrix (D48 plan §3.4.2):
+// Matrix (D48):
 //
 // | Trigger                                  | ProfileState | DerivedRawState | DependencyState |
 // |------------------------------------------|--------------|-----------------|-----------------|
@@ -554,7 +554,7 @@ fn bump_project_generation_evicts_all_three_sub_shapes() {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Tier 1C-γ discriminating tests (6 from plan §3.4.3 +
+// Tier 1C-γ discriminating tests (6 from +
 // 5 from rewritten rehoming-doc §3.3 = 11 total).
 //
 // FAIL pre-1C-γ:
@@ -718,7 +718,7 @@ fn four_off_store_caches_absent_post_tier_1() {
 /// thread-locals (`HOST_PARSED_EVAL_PROGRAM_CACHE`,
 /// `HOST_PARSED_TYPE_CONTEXT_CACHE`); 1C-γ verifies they stay
 /// retired. Doc-comment references like `// HOST_PARSED_EVAL_PROGRAM_CACHE
-/// thread-local was retired in Tier 1A...` are allowed (they are
+/// thread-local was 1A...` are allowed (they are
 /// not declarations); the guard fires only on actual
 /// `thread_local!` invocations.
 #[test]

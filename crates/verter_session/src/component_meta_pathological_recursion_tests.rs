@@ -654,7 +654,7 @@ fn pathological_nested_slot_definitions() {
 }
 
 // ── 5j: self-referential slot payload via interface + indexed-access
-//        (per main plan §5.D.5 r16/Claude-N8 fixture rewrite) ─────────────
+//        (per mainD.5 r16/Claude-N8 fixture rewrite) ─────────────
 //
 // The r15 draft used `defineSlots<{ default: (props: { rec: typeof
 // props }) => any }>` — `typeof props` references a function-type
@@ -685,7 +685,7 @@ defineSlots<SlotsRec>();
 
 /// 5j §5.D.5 — `pathological_self_referential_slot_payload`.
 ///
-/// Per parent plan §5.D.5 r16/Claude-N8 fixture rewrite: a TS-valid
+/// Per parentD.5 r16/Claude-N8 fixture rewrite: a TS-valid
 /// named-type-alias self-reference where the slot's payload type
 /// recursively contains itself via the `SlotsRec['default']`
 /// indexed-access. The resolver-side recursion guard

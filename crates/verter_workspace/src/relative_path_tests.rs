@@ -1,6 +1,6 @@
 //! Unit tests for [`crate::relative_path`].
 //!
-//! Per sub-plan §4.4 — these tests verify the single source of truth for
+//! Per sub- — these tests verify the single source of truth for
 //! relative path resolution and stem normalization is correctly implemented
 //! BEFORE any session-side delegation lands.
 

@@ -612,7 +612,7 @@ fn async_setup_for_await_of() {
 }
 
 // ═══════════════════════════════════════════════════════════
-// Phase 1a: Span information tests
+// Span information tests
 // ═══════════════════════════════════════════════════════════
 
 #[test]
@@ -717,7 +717,7 @@ fn import_resolved_canonical_id_none_by_default() {
 }
 
 // ═══════════════════════════════════════════════════════════
-// Phase 1b: ReactivityKind classification tests
+// ReactivityKind classification tests
 // ═══════════════════════════════════════════════════════════
 
 #[test]
@@ -872,7 +872,7 @@ fn type_annotation_none_when_absent() {
 }
 
 // ═══════════════════════════════════════════════════════════
-// Phase 1c: Exported function analysis tests
+// Exported function analysis tests
 // ═══════════════════════════════════════════════════════════
 
 fn analyze_with_scope(code: &str, scope: AnalysisScope) -> ScriptAnalysisSnapshot {

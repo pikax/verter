@@ -1043,7 +1043,7 @@ fn nested_selector_text_does_not_contain_declarations() {
 }
 
 // =============================================================================
-// CSS Variable Analysis Tests (Phase 1+2)
+// CSS Variable Analysis Tests
 // =============================================================================
 
 fn analyze_css_with_offset(css: &str, content_offset: u32) -> StyleBlockAnalysis {

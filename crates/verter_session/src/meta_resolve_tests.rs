@@ -9043,7 +9043,7 @@ defineProps<TreeNode>()
 // regression test (subsuming spike #1) and Step 3 captures the spike
 // #2 classification table into its disposition commit body (subsuming
 // spike #2's discriminator assertion). The hook call sites and the
-// `spike_instrumentation` module are deleted in the same removal pass.
+// `spike_instrumentation` module are same removal pass.
 // ===========================================================================
 
 /// Spike #1: validates that `dispatch.lower_type_expr_in_scope` +
@@ -9204,9 +9204,9 @@ fn spike_classify_engine_cache_work_origin() {
         "prepared_target_cache",
         "materialize_memo",
         // `materialized_member_surfaces` removed post-Phase-9 cutover
-        // (plan §11.2): the engine's per-request mirror that fronted
+        // (): the engine's per-request mirror that fronted
         // the legacy walker's `materialized_member_surface_db` is dead
-        // post-cutover — `query_engine.materialize_member_surface_expr`
+        //  — `query_engine.materialize_member_surface_expr`
         // now delegates to the `materialize_component_meta_structure`
         // entry which publishes through `MaterializeStructureDb`. The
         // dead cache is dual-guarded by `tests/no_legacy_walker.rs`'s
@@ -10256,9 +10256,9 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
 }
 
 // ===========================================================================
-// Plan §1.12 — graph-native registry-route + cycle-BFS predicates
+// graph-native registry-route + cycle-BFS predicates
 //
-// Discriminating tests for the round-7 parity matrix (plan §1.12 / §10.8):
+// Discriminating tests for the round-7 parity matrix ():
 //
 // 1. `Pick<Foo<T>, 'a'>` (generic root) — rejected.
 // 2. `Foo[0]` (numeric index) — rejected.
@@ -10314,7 +10314,7 @@ mod node_predicates_tests {
     }
 
     fn pick_or_omit_identity(name: &'static str) -> DeclIdentity {
-        // Plan §4.4 / B0+B1: builtin Pick/Omit use the `__builtin__`
+        // builtin Pick/Omit use the `__builtin__`
         // sentinel canonical id; the registry-route extractor only
         // dispatches builtin (not userland) Pick/Omit through the
         // route branch so userland shadowing is preserved.
@@ -10601,7 +10601,7 @@ mod node_predicates_tests {
     /// Round-7 parity row 7: A → B → C → A cycle through a complex
     /// helper.
     ///
-    /// Plan §4.1 / R7-13 / R7-14 — the legacy parity BFS only flags a
+    /// 13 / R7-14 — the legacy parity BFS only flags a
     /// self-cycle as "transitively cyclic" when the path carries a
     /// **complex signal**: either the body has a complex top-level
     /// shape (Conditional / Mapped / KeyOf / IndexedAccess / etc.) OR
@@ -10689,7 +10689,7 @@ defineProps<{ value: A }>()
         );
     }
 
-    /// Plan §6.6 / E — Pick / Omit shapes through `evaluate_types`
+    /// Pick / Omit shapes through `evaluate_types`
     /// stay healthy after the alias-body rescue chain and the
     /// inline-registry-member-route candidate chain were deleted.
     /// B1's materialiser registry-route branch dispatches Pick/Omit
@@ -10769,7 +10769,7 @@ defineProps<{ value: Pick<Foo, 'a'> }>()
         ));
     }
 
-    /// Plan §6.7 / §6.15 — characterisation: the canonical graph-native
+    /// characterisation: the canonical graph-native
     /// cycle predicate `ref_root_reaches_transitive_cycle_node` detects
     /// generic-helper cycles when reached from a TypeExpr root via the
     /// `lowered_*` migration path (commits N + P), AND BFS dep-signature
@@ -10860,7 +10860,7 @@ defineProps<{ value: GetItemKeys<unknown> }>()
         );
     }
 
-    /// Plan §6.8 — G's TDD: `engine.materialize_member_surface_expr`
+    /// G's TDD: `engine.materialize_member_surface_expr`
     /// (the graph-native replacement for the deleted legacy walker
     /// shim) must accumulate the materialiser's `dep_signature` into
     /// the per-request thread-local accumulator, so callers'
@@ -10919,9 +10919,9 @@ defineProps<{ value: Foo }>()
         );
     }
 
-    /// Plan §6.11 / J0 — `type_node_has_package_backed_root` is the
+    /// `type_node_has_package_backed_root` is the
     /// graph-native package-backed root predicate (former TypeExpr
-    /// counterpart deleted in Plan §6.15 / N). Operates on
+    /// counterpart §6.15 / N). Operates on
     /// `SemanticNodeId`. Equivalence baseline: for representative
     /// shapes (DeclRef, InstantiationRef, IndexedAccess chain, Array,
     /// KeyOf, Tuple), the predicate produces the legacy result.
@@ -11077,9 +11077,9 @@ defineProps<{ value: Foo }>()
         );
     }
 
-    /// Plan §6.11 / J1 — `type_node_needs_member_route_materialization`
+    /// `type_node_needs_member_route_materialization`
     /// is the graph-native member-route-materialisation predicate
-    /// (former TypeExpr counterpart deleted in Plan §6.15 / N).
+    /// (former TypeExpr counterpart §6.15 / N).
     /// Operates on `SemanticNodeId`. Equivalence baseline on small
     /// fixtures across DeclRef/InstantiationRef/IndexedAccess/TypeOf/
     /// TypeParam/Array/KeyOf/Tuple shapes.
@@ -11253,7 +11253,7 @@ defineProps<{ value: Foo }>()
         );
     }
 
-    /// Plan §6.11 / J1 — verifies the cycle BFS path is exercised when
+    /// verifies the cycle BFS path is exercised when
     /// the input node carries an `IndexedAccess` chain whose root is a
     /// recursive helper. The graph-native predicate must invoke the
     /// shared cycle predicate `ref_root_reaches_transitive_cycle_node`
@@ -11283,7 +11283,7 @@ defineProps<{ value: Foo }>()
         );
     }
 
-    /// Plan §6.11 / J2 — `slot_binding_param_can_stay_symbolic_node`
+    /// `slot_binding_param_can_stay_symbolic_node`
     /// is the graph-native slot-binding-param-can-stay-symbolic
     /// predicate (former nested TypeExpr counterpart, defined inside
     /// `walk_component_meta_macro_shape_member_types`, deleted in
@@ -11459,7 +11459,7 @@ defineProps<{ value: Foo }>()
         );
     }
 
-    /// Plan §6.11 / J0 — depth fuse: pathological synthetic graphs do
+    /// depth fuse: pathological synthetic graphs do
     /// not stack-overflow. The predicate fuses at depth=256 and returns
     /// `false` (matching the legacy walker's runaway-recursion behaviour
     /// elsewhere in the file).
@@ -11490,9 +11490,9 @@ defineProps<{ value: Foo }>()
         let _ = type_node_has_package_backed_root(graph, current, 0);
     }
 
-    /// Plan §6.11 / J4 — `preserve_package_backed_symbolic_refs_node`
+    /// `preserve_package_backed_symbolic_refs_node`
     /// is the graph-native parallel-pair walker (former TypeExpr
-    /// counterpart deleted in Plan §6.15 / N). Operates on
+    /// counterpart §6.15 / N). Operates on
     /// `SemanticNodeId` parallel pairs. Walks materialized + raw
     /// surfaces; when a raw property's value is a package-backed
     /// `DeclRef`/`InstantiationRef`, the corresponding materialized
@@ -11630,7 +11630,7 @@ defineProps<{ value: Foo }>()
         );
     }
 
-    /// Plan §6.11 / J4 — non-Object pair: pass-through (returns
+    /// non-Object pair: pass-through (returns
     /// materialized unchanged). Mirrors the TypeExpr predicate's
     /// `_ => materialized.clone()` arm.
     #[test]
@@ -11666,7 +11666,7 @@ defineProps<{ value: Foo }>()
         );
     }
 
-    /// Plan §6.11 / J3 — refactored
+    /// refactored
     /// `materialize_component_meta_registry_structural_expr` (inner
     /// closure migrated to graph-native cycle tracking). Equivalence
     /// fixture: package-backed `Ref { name, [] }` short-circuits
@@ -11777,7 +11777,7 @@ defineProps<{ a: LocalLeaf; b: FromPkg }>()
 }
 
 // ===========================================================================
-// Plan §4.10 / K1 — MacroFieldGraphState scaffold tests
+// MacroFieldGraphState scaffold tests
 // ===========================================================================
 
 #[cfg(test)]
@@ -11805,7 +11805,7 @@ mod macro_field_graph_state_tests {
         host
     }
 
-    /// Plan §4.10 / K1 — `MacroFieldGraphState::new` constructs with
+    /// `MacroFieldGraphState::new` constructs with
     /// `node_rewrite_dirty == false` and `published_type` returning the
     /// initial value verbatim.
     #[test]
@@ -11821,7 +11821,7 @@ mod macro_field_graph_state_tests {
         assert_eq!(state.published_type(), &initial);
     }
 
-    /// Plan §4.10 / K1 — clean publish (no rewrite, no set_current_type)
+    /// clean publish (no rewrite, no set_current_type)
     /// returns the initial value verbatim.
     #[test]
     fn macro_field_graph_state_publish_clean_returns_initial() {
@@ -11836,7 +11836,7 @@ mod macro_field_graph_state_tests {
         assert_eq!(result, initial);
     }
 
-    /// Plan §4.10 / K1 — `set_current_type` updates `published_type` and
+    /// `set_current_type` updates `published_type` and
     /// `publish()` returns the new value.
     #[test]
     fn macro_field_graph_state_set_current_type_round_trips() {
@@ -11856,7 +11856,7 @@ mod macro_field_graph_state_tests {
         assert_eq!(state.publish(), replacement);
     }
 
-    /// Plan §4.10 / K1 — `current_node()` lazy-lowers and DOES NOT set
+    /// `current_node()` lazy-lowers and DOES NOT set
     /// `node_rewrite_dirty`. After `current_node()` only,
     /// `publish()` returns the original `published_type` unchanged
     /// (no raise-on-non-dirty).
@@ -11890,7 +11890,7 @@ mod macro_field_graph_state_tests {
         );
     }
 
-    /// Plan §4.10 / K1 — `raw_node()` lazy-lowers the raw expression.
+    /// `raw_node()` lazy-lowers the raw expression.
     /// Independent from `current_node()` memoisation.
     #[test]
     fn macro_field_graph_state_raw_node_lazy_and_memoised() {
@@ -11918,7 +11918,7 @@ mod macro_field_graph_state_tests {
         );
     }
 
-    /// Plan §6.14 / K3 — `DISPATCH_LOWER_COUNTER` invariant: after
+    /// `DISPATCH_LOWER_COUNTER` invariant: after
     /// K2's predicate migration + K3's raise-once-at-publish, the
     /// per-field lower count must be ≤ 2 (one for `current_node()`
     /// for the gate predicate, one for `raw_node()` for the raw-type
@@ -11996,7 +11996,7 @@ defineProps<{ first: Pick<Inner, 'primary'> }>()
         );
     }
 
-    /// Plan §6.14 / K2 — equivalence sanity for the J1
+    /// equivalence sanity for the J1
     /// `type_node_needs_member_route_materialization` migration. After
     /// K2, the function calls go through field_state.current_node() /
     /// raw_node() and the J1 _node predicate. This test verifies the
@@ -12056,7 +12056,7 @@ defineProps<{ first: Pick<Inner, 'primary'> }>()
         );
     }
 
-    /// Plan §4.10 / K3 — `publish()` MUST NOT raise back to TypeExpr
+    /// `publish()` MUST NOT raise back to TypeExpr
     /// when only `current_node()` was called (no graph-native
     /// rewrite). This guards against the regression where a future
     /// implementer might set `node_rewrite_dirty = true` from
@@ -12090,7 +12090,7 @@ defineProps<{ first: Pick<Inner, 'primary'> }>()
         );
     }
 
-    /// Plan §4.10 / K3 — `publish()` after `set_current_node_rewrite`
+    /// `publish()` after `set_current_node_rewrite`
     /// raises back to TypeExpr. This pins down the dirty-flag
     /// contract: ONLY graph-native rewrite (set_current_node_rewrite)
     /// triggers raise.
@@ -12127,7 +12127,7 @@ defineProps<{ first: Pick<Inner, 'primary'> }>()
         );
     }
 
-    /// Plan §6.14 / L — equivalence test for the graph-native
+    /// equivalence test for the graph-native
     /// `component_meta_registry_prefers_structural_materialization_node`
     /// counterpart of the TypeExpr predicate. The predicate returns
     /// `true` for shapes the materializer should expand structurally
@@ -12171,7 +12171,7 @@ defineProps<{ first: Pick<Inner, 'primary'> }>()
         );
     }
 
-    /// Plan §6.14 / L — Object shape returns false in both versions.
+    /// Object shape returns false in both versions.
     #[test]
     fn l_node_predicate_agrees_with_typeexpr_on_object_returns_false() {
         use crate::meta_resolve::component_meta_registry_prefers_structural_materialization_node;
@@ -12201,7 +12201,7 @@ defineProps<{ first: Pick<Inner, 'primary'> }>()
         );
     }
 
-    /// Plan §6.14 / M — equivalence test for the slot-rescue chain's
+    /// equivalence test for the slot-rescue chain's
     /// graph-native `slot_binding_param_can_stay_symbolic_node` (J2)
     /// vs the legacy TypeExpr predicate. The graph-native version
     /// must agree with the TypeExpr version on a Conditional shape
@@ -12258,7 +12258,7 @@ defineProps<{ first: Pick<Inner, 'primary'> }>()
         assert!(matches!(result, true | false));
     }
 
-    /// Plan §4.10 / K1 — `set_current_type` after `current_node()`
+    /// `set_current_type` after `current_node()`
     /// invalidates the cached node and clears the dirty flag.
     #[test]
     fn macro_field_graph_state_set_current_type_invalidates_node() {

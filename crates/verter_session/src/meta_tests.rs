@@ -14,9 +14,9 @@ fn make_project() -> Arc<MetaProject> {
     })
 }
 
-/// Path C C12 (per plan §14.5): test hosts construct schedulers with
+/// Path C C12 (per): test hosts construct schedulers with
 /// `cpu_threads = 1` to avoid CPU oversubscription when many parallel
-/// test threads each spin up their own Rayon pools. See plan §13.2 for
+/// test threads each spin up their own Rayon pools. See for
 /// the diagnosis (Option R1) that retired `HEAVY_COMPONENT_META_TEST_MUTEX`.
 fn test_scheduler_config() -> verter_scheduler::scheduler::SchedulerConfig {
     verter_scheduler::scheduler::SchedulerConfig {
@@ -5423,7 +5423,7 @@ defineProps<{
         "evaluate_types should keep imported object-like fields symbolic after cache invalidation too, got {:?}",
         evaluated_prop_type(&second, "user")
     );
-    // Phase 4B: after dep change, the resolved Object body picks up the new
+    // after dep change, the resolved Object body picks up the new
     // `label` member. Cache invalidation contract verified by the
     // `!Arc::ptr_eq(first_cache, second_cache)` assertion above.
     match &second_meta

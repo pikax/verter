@@ -1,5 +1,5 @@
 //! Inline tests for `ComponentMetaQueryEngine` extracted from
-//! `component_meta_query_engine/mod.rs` in Phase 11b.9.
+//! `component_meta_query_engine/mod.rs`.
 //!
 //! This module is gated behind `#[cfg(test)]` via the parent's
 //! `mod tests;` declaration. Tests reference parent-private items
@@ -1344,7 +1344,7 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
     // A9 (c) interning-efficiency rule). Pre-cutover the
     // counter == 3 form asserted "ColorModeSelectProps +
     // SelectMenuProps + RootProps queried once each"; the
-    // post-cutover form asserts a strict bound on host
+    //  form asserts a strict bound on host
     // prepared-surface entries written during the projection
     // (must not exceed 3) AND the merged Object surface
     // includes the inherited Pick props with `items` omitted.
@@ -3203,7 +3203,7 @@ defineProps<{
     );
 }
 
-/// FAIL-FIRST (plan §3 Step 6.2): assert the structural ordering
+/// FAIL-FIRST ( Step 6.2): assert the structural ordering
 /// invariant inside
 /// `materialize_component_meta_macro_shape_member_type_expr`: the
 /// route/project candidate loop must precede the eager
@@ -3342,7 +3342,7 @@ fn step7_rematerialize_function_deleted_post_outcome3() {
     );
 }
 
-/// FAIL-FIRST (plan §3 Step 6.6.A —
+/// FAIL-FIRST ( Step 6.6.A —
 /// `dispatch_dep_signatures_propagate_to_fact_versions`): when
 /// component-meta resolution runs, the dispatch round-trip's
 /// `DepSignature` must merge into
@@ -3430,7 +3430,7 @@ defineProps<Pick<HelperProps, 'size'>>()
     );
 }
 
-/// FAIL-FIRST (plan §3 Step 8 / F5 — route_hash_pure_content_derived):
+/// FAIL-FIRST ( Step 8 / F5 — route_hash_pure_content_derived):
 /// `hash_route_surface` must produce the same Hash16 for the same
 /// `ShallowFileState` regardless of intervening host mutations.
 /// Pre-fix any ambient state read would make this fail. Post-fix
@@ -3468,7 +3468,7 @@ fn step8_route_hash_pure_content_derived() {
     assert_eq!(h2, h3, "route hash must be deterministic across calls");
 }
 
-/// FAIL-FIRST (plan §3 Step 8 / F5 — route_hash_cached_in_indexed_ready):
+/// FAIL-FIRST ( Step 8 / F5 — route_hash_cached_in_indexed_ready):
 /// after `current_derived_fact_hash(canonical, Route)` runs, the
 /// `IndexedReady` for that canonical should carry the cached
 /// `route_hash`. Pre-fix the field didn't exist; post-fix it's
@@ -3539,7 +3539,7 @@ defineProps<SourceProps>()
     );
 }
 
-/// FAIL-FIRST (plan §3 Step 8 / F5 — route_hash_invalidated_on_content_change):
+/// FAIL-FIRST ( Step 8 / F5 — route_hash_invalidated_on_content_change):
 /// when a tracked dep's source changes, the `IndexedReady` for that
 /// canonical rebuilds and `route_hash` changes too. Pre-fix any
 /// caching that is NOT keyed by content-hash would return the same
@@ -3639,7 +3639,7 @@ export interface SourceProps {
     );
 }
 
-/// FAIL-FIRST (plan §3 Step 9.1 / D32 / D24 — `surface_node_ids_partition`):
+/// FAIL-FIRST ( Step 9.1 / D32 / D24 — `surface_node_ids_partition`):
 /// when audit is on, `ResolvedComponentMetaState.surface_identities`
 /// is populated with vector-aligned `Option<SemanticNodeId>` per
 /// output entry in `evaluated_types`. Pre-Step-9.1 the field was
@@ -3722,7 +3722,7 @@ defineProps<{
     );
 }
 
-/// REGRESSION INVARIANT (plan §3 Step 9.1): when audit is OFF,
+/// REGRESSION INVARIANT ( Step 9.1): when audit is OFF,
 /// `surface_identities` stays `None` so the dispatch round-trip
 /// for capture is skipped (perf cost gate). The Step 9.2 scoped
 /// origin export is itself audit-gated, so the partition is
@@ -3768,7 +3768,7 @@ defineProps<{ size?: 'sm' | 'md' | 'lg' }>()
     );
 }
 
-/// REGRESSION INVARIANT (plan §3 Step 6.2): an indexed-access
+/// REGRESSION INVARIANT ( Step 6.2): an indexed-access
 /// fixture that previously round-tripped to concrete literal
 /// unions still does so post-reorder. The reorder must not change
 /// the public contract for fixtures where the eager materialize

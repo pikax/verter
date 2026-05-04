@@ -1,12 +1,12 @@
 //! Integration-style tests for ambient lib registration on a real
-//! `MemoryWorkspace` (Phase 5a sub-plan §6.8).
+//! `MemoryWorkspace` (Phase 5a sub-).
 //!
 //! Each test sets up a `MemoryWorkspace` with one or more projects, registers
 //! ambient libs, and asserts on the public surface (`read_ambient_lib`,
 //! `lookup_ambient_symbol`, `ambient_libs_view`, `file_exists` shadowing).
 //! Tests covering host-side machinery (HostFenceValidator,
 //! scheduler-driven lazy parse) live in the `verter_session` crate per
-//! sub-plan §6.6 / §6.7.
+//! sub-
 
 use std::sync::Arc;
 

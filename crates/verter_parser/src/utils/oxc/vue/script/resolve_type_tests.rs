@@ -3992,7 +3992,7 @@ type Test = TableSlots
 fn resolution_depth_is_bounded_per_call_chain() {
     // Phase 1 §4.7 test 5.7 Test 3. Updated in Phase D §5.10 WIP-P — the
     // parser cap is renamed `PARSER_SYNTACTIC_DEPTH_LIMIT = 256` and is
-    // documented as syntactic stack-safety (plan §3 Change H), not a
+    // documented as syntactic stack-safety ( Change H), not a
     // semantic budget.
     //
     // Depth-as-argument refactor replaced the `Rc<Cell<u16>>` in
@@ -4046,7 +4046,7 @@ fn parser_syntactic_depth_limit_blocks_excessive_chain_cleanly() {
 
 #[test]
 fn parser_syntactic_depth_limit_records_structured_failure_shape() {
-    // Phase D §5.10 WIP-P / plan §3 Change H — the depth guard emits a
+    // Phase D §5.10 WIP-P / Change H — the depth guard emits a
     // structured `ResolutionBudgetExceeded { limit, actual, context }`
     // record (NOT a silent `None` followed by an `Applied` stub from the
     // retired solver). A deep type-alias chain forces

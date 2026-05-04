@@ -311,8 +311,7 @@ fn clear_cached_parse(host: &VerterHost) {
     entry.cached_parse = None;
 }
 
-// Legacy trace-line formatting tests deleted in Commit 5 (plan §0.1
-// clean-cut rule). `format_component_meta_trace_line`,
+// Legacy trace-line formatting tests 5 ( clean-cut rule). `format_component_meta_trace_line`,
 // `ComponentMetaTraceEvent`, and `ComponentMetaTraceLine` no longer
 // exist; their replacement is `StructuredComponentMetaEvent` tested
 // in `component_meta_audit/structured_event.rs`.
@@ -9926,7 +9925,7 @@ export type Props = { render: typeof Button }
 }
 
 // ----------------------------------------------------------------
-// F7 (Plan §3 Step 4) — `resolve_imported_type_root` trace dedup.
+// F7 — `resolve_imported_type_root` trace dedup.
 // Discriminator: same (canonical, imported_name) queried N times in
 // a single request emits the `resolve_imported_type_root` Custom
 // event exactly ONCE (the cache miss). Pre-fix the event fired on
@@ -10030,7 +10029,7 @@ mod imported_root_trace_dedup_tests {
 
 // ----------------------------------------------------------------
 // F4 — `component_meta_trace_custom!` laziness discriminators.
-// Plan §3 Step 2 (D5): a side-effecting AtomicUsize counter proves
+// a side-effecting AtomicUsize counter proves
 // that the macro's `$detail` expression is NOT evaluated when no
 // audit accumulator is installed. Pre-fix: counter increments on
 // every call. Post-fix: counter increments only when accumulator
@@ -10154,7 +10153,7 @@ mod ambient_fence_validator_tests {
         type Partial<T> = { [P in keyof T]?: T[P] };
     "#;
 
-    /// Sub-plan §6.8 Test 5 (component): the WholeHash arm matches when the
+    /// Sub- Test 5 (component): the WholeHash arm matches when the
     /// expected hash equals the registered lib's content_hash.
     #[test]
     fn validate_matches_registered_ambient_lib_hash() {
@@ -10176,7 +10175,7 @@ mod ambient_fence_validator_tests {
         );
     }
 
-    /// Sub-plan §6.8 Test 5 (re-registration): the WholeHash arm rejects the
+    /// Sub- Test 5 (re-registration): the WholeHash arm rejects the
     /// stale hash after content replacement (re-registration with new source
     /// produces a new content_hash).
     #[test]

@@ -835,7 +835,7 @@ fn ssr_full_compile_negative() {
 }
 
 // ══════════════════════════════════════════════════════════════════
-// Phase 1A: Component slot content (_withCtx dual-branch wrappers)
+// Component slot content (_withCtx dual-branch wrappers)
 // ══════════════════════════════════════════════════════════════════
 
 /// @ai-generated — Component with default slot content should produce
@@ -996,7 +996,7 @@ fn ssr_component_multiple_slots() {
 }
 
 // ══════════════════════════════════════════════════════════════════
-// Phase 1B: <slot> outlet rendering (_ssrRenderSlot)
+// <slot> outlet rendering (_ssrRenderSlot)
 // ══════════════════════════════════════════════════════════════════
 
 /// @ai-generated — Default slot outlet.

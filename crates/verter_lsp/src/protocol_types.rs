@@ -421,3 +421,96 @@ pub enum TypeHandleErrorPayload {
     DepthExceeded { cap: u32 },
     Other { message: String },
 }
+
+#[cfg(test)]
+mod component_meta_protocol_tests {
+    //! D113 / Tier 5b W7 review: JSON round-trip checks for the three new
+    //! component-meta protocol types. These tests guard the wire format
+    //! shared with `packages/language-shared/src/request.ts` (the TS LSP
+    //! client-side bindings) — any field rename or shape drift breaks JSON
+    //! interop with the VS Code extension.
+
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn get_component_meta_params_decodes_camel_case_uri() {
+        let p: GetComponentMetaParams = serde_json::from_value(json!({
+            "uri": "file:///test/Comp.vue"
+        }))
+        .expect("camelCase uri must decode");
+        assert_eq!(p.uri, "file:///test/Comp.vue");
+    }
+
+    #[test]
+    fn get_component_meta_surface_params_decodes_camel_case_uri() {
+        let p: GetComponentMetaSurfaceParams = serde_json::from_value(json!({
+            "uri": "file:///test/Comp.vue"
+        }))
+        .expect("camelCase uri must decode");
+        assert_eq!(p.uri, "file:///test/Comp.vue");
+    }
+
+    #[test]
+    fn get_component_meta_type_expansion_params_uses_camel_case_handle_bytes() {
+        let p: GetComponentMetaTypeExpansionParams = serde_json::from_value(json!({
+            "handleBytes": [10, 0, 18, 9, 47, 116, 101, 115, 116, 46, 118, 117, 101],
+            "depth": 2
+        }))
+        .expect("camelCase handleBytes + depth must decode");
+        assert_eq!(p.handle_bytes.len(), 13);
+        assert_eq!(p.depth, Some(2));
+    }
+
+    #[test]
+    fn get_component_meta_type_expansion_params_depth_optional() {
+        let p: GetComponentMetaTypeExpansionParams =
+            serde_json::from_value(json!({ "handleBytes": [] })).expect("depth must be optional");
+        assert!(p.depth.is_none());
+    }
+
+    #[test]
+    fn type_expansion_response_serializes_with_camel_case_and_skips_none_error() {
+        let response = GetComponentMetaTypeExpansionResponse {
+            expansion_bytes: vec![1, 2, 3],
+            error: None,
+        };
+        let json = serde_json::to_value(&response).expect("must serialize");
+        // expansionBytes camelCase
+        assert_eq!(json["expansionBytes"], json!([1, 2, 3]));
+        // error skipped on None
+        assert!(
+            json.get("error").is_none(),
+            "error: None must be skipped from JSON"
+        );
+    }
+
+    #[test]
+    fn type_expansion_response_error_project_mismatch_serializes_with_kind_discriminator() {
+        let response = GetComponentMetaTypeExpansionResponse {
+            expansion_bytes: vec![],
+            error: Some(TypeHandleErrorPayload::ProjectMismatch {
+                expected: String::new(),
+                actual: "foreign-project".to_string(),
+            }),
+        };
+        let json = serde_json::to_value(&response).expect("must serialize");
+        let err = &json["error"];
+        assert_eq!(err["kind"], "projectMismatch");
+        assert_eq!(err["actual"], "foreign-project");
+    }
+
+    #[test]
+    fn type_expansion_response_error_stale_handle_serializes_with_kind_discriminator() {
+        let response = GetComponentMetaTypeExpansionResponse {
+            expansion_bytes: vec![],
+            error: Some(TypeHandleErrorPayload::StaleHandle {
+                reason: "FileDeleted".to_string(),
+            }),
+        };
+        let json = serde_json::to_value(&response).expect("must serialize");
+        let err = &json["error"];
+        assert_eq!(err["kind"], "staleHandle");
+        assert_eq!(err["reason"], "FileDeleted");
+    }
+}

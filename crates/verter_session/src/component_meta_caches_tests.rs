@@ -316,8 +316,7 @@ fn step3_db_accessors_are_distinct_instances() {
         sorted.len(),
         addrs.len(),
         "Step 3 DB accessors must return 9 distinct instances; some accessor returned an alias \
-         (post-Phase-9 the legacy walker's `materialized_member_surface_db` was retired — \
-         plan §11.2)"
+         (the legacy walker's `materialized_member_surface_db` accessor was previously retired)"
     );
 }
 

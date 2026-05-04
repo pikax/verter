@@ -860,7 +860,7 @@ fn project_type_store_exposes_stable_route_and_imported_root_handles() {
     let i2 = store.imported_roots().clone();
     assert!(Arc::ptr_eq(&i1, &i2));
 
-    // Phase 6b.F3: handles are shared with the resolver runtime — same
+    // handles are shared with the resolver runtime — same
     // project-store-owned `Arc<RouteDb>` / `Arc<ImportedRootDb>`.
     let runtime_routes = host.resolver.runtime.routes_handle();
     let runtime_imported_roots = host.resolver.runtime.imported_roots_handle();

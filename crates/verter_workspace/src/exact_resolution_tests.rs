@@ -1,4 +1,4 @@
-//! EdgeStore unit tests — sub-plan §4.1 (33 tests after R5: #33 deleted, #34 added).
+//! EdgeStore unit tests — sub- (33 tests after R5: #33 deleted, #34 added).
 //!
 //! Tests are written against the new R4/R5 `DependencySnapshot` model with
 //! per-class writers (`replace_parsed_edges`, `replace_exact_resolutions`,

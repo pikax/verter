@@ -1,4 +1,4 @@
-//! Plan §3 Step 4 (architectural-debt-closure rev 10) — audit warm-cache
+//! audit warm-cache
 //! short-circuit tests.
 //!
 //! Validates that `VerterHost::get_component_meta_with_resolution` consults

@@ -165,7 +165,7 @@ fn resolve_decl_recognises_import_local_bindings() {
 /// structurally-distinct concrete result shapes, and those shapes
 /// receive distinct node ids even under the C7 compound-key interner.
 ///
-/// **Fixture rewrite (Path C C7 / plan §14.3, §14.4).** Pre-C7 this
+/// **Fixture rewrite (Path C C7 /, §14.4).** Pre-C7 this
 /// test interned a bare `Primitive(String)` as the `base` and two
 /// distinct arg tuples to distinguish. Under structural interning
 /// both `Instantiate` queries collapse to `Opaque(Miss)` (the base
@@ -926,7 +926,7 @@ fn concurrent_sugar_and_canonical_requests_share_in_flight_entry() {
 }
 
 // ──────────────────────────────────────────────────────────────────
-// DispatchHost adapter routing (plan §7.10 + C1)
+// DispatchHost adapter routing ( + C1)
 // ──────────────────────────────────────────────────────────────────
 
 /// The session-owned [`SessionDispatchHost`] adapter consults the
@@ -1005,7 +1005,7 @@ fn dispatch_host_adapter_routes_per_base_scope() {
 /// `build_resolve_decl` records the declaration's origin scope in
 /// the [`SemanticGraphStore`] sidecar at intern time. Verified
 /// end-to-end through the dispatch API so we exercise the full
-/// integration path (plan §3 C1 + §7.10).
+/// integration path ( C1 + §7.10).
 #[test]
 fn resolve_decl_records_file_scope_in_sidecar() {
     let host = host();
@@ -1048,7 +1048,7 @@ fn resolve_decl_records_file_scope_in_sidecar() {
 }
 
 // ──────────────────────────────────────────────────────────────────
-// C1-Commit-B — real `build_instantiate` (plan §3 C1 + §2 lazy block)
+// C1-Commit-B — real `build_instantiate` ( C1 + §2 lazy block)
 // ──────────────────────────────────────────────────────────────────
 //
 // The tests below exercise the shallow + lazy + mode-free
@@ -1106,7 +1106,7 @@ fn resolve_decl_produces_materialized_body() {
     );
 }
 
-/// `Instantiate(base, args)` is mode-free per plan §7.14. Executing
+/// `Instantiate(base, args)` is mode-free per Executing
 /// the key produces exactly **one** entry in the family memo,
 /// regardless of how many follow-up `ProjectPath(result, [...], mode)`
 /// queries are issued at different modes.
@@ -1472,7 +1472,7 @@ fn distinct_instantiations_share_visited_subpath_lowering_not_full_body() {
 }
 
 // ──────────────────────────────────────────────────────────────────
-// C2 — real `build_conditional` (plan §3 C2 + §2 lazy block)
+// C2 — real `build_conditional` ( C2 + §2 lazy block)
 // ──────────────────────────────────────────────────────────────────
 
 use crate::semantic_query::BranchSelection;
@@ -1572,7 +1572,7 @@ fn open_conditional_stays_deferred_with_shell_branch_refs_not_expanded_bodies() 
 
     // Check / extends are bare `TypeParam` shells — the relation engine
     // returns `Unknown` for two distinct type parameters (deliberately
-    // out-of-scope per plan §9 / relation.rs:454-468), so the
+    // out-of-scope per), so the
     // conditional stays deferred and exercises the shell-branch /
     // path-distribution authority below.
     //
@@ -1638,7 +1638,7 @@ fn open_conditional_stays_deferred_with_shell_branch_refs_not_expanded_bodies() 
     );
 }
 
-/// Phase 2 (component-meta cold-path long-tail plan §4) — Fix A
+/// Phase 2 (component-meta cold-path long-tail) — Fix A
 /// regression guard. The deferred-conditional sub-dispatch in
 /// `walk.rs` must inherit the OUTER caller's mode, NOT downgrade to
 /// `ProjectionMode::Navigate`. The historical `mode_for_hop` bug
@@ -1824,7 +1824,7 @@ fn open_conditional_path_sub_dispatch_inherits_outer_terminal_mode_phase_2_fix_a
     }
 }
 
-/// Phase 6 (component-meta cold-path long-tail plan §8) — Fix D
+/// Phase 6 (component-meta cold-path long-tail) — Fix D
 /// substitute change-tracking optimization. When the substituted
 /// parameter does NOT appear anywhere in the input tree, the
 /// recursive walk must short-circuit each rebuild instead of
@@ -2221,7 +2221,7 @@ fn build_conditional_distributive_union_distributes_per_member_via_execute_no_st
 ///
 /// Pre-cutover this test expected a deferred Conditional shell
 /// because the shallow relation check returned `Unknown` for a
-/// union vs. primitive pair. The post-cutover relation engine
+/// union vs. primitive pair. The  relation engine
 /// decides the pair correctly, so the conditional reduces to the
 /// false branch. This is the gating test that proves distribution
 /// is triggered by the `distributive` flag, not merely by union-
@@ -2357,7 +2357,7 @@ fn build_conditional_distributive_per_member_subquery_has_distributive_false() {
 }
 
 // ──────────────────────────────────────────────────────────────────
-// C3 — real `build_project_path` (plan §3 C3)
+// C3 — real `build_project_path` ( C3)
 // ──────────────────────────────────────────────────────────────────
 
 fn simple_object(
@@ -2450,7 +2450,7 @@ fn intersection_arm_without_path_segment_is_ignored() {
     // combine, so result == num directly.
     assert_eq!(
         result, num,
-        "non-contributing intersection arm is ignored per plan §3 C3"
+        "non-contributing intersection arm is ignored per C3"
     );
 }
 
@@ -2727,7 +2727,7 @@ fn mutual_alias_cycle_x_y_x_returns_opaque_with_chain_of_length_2() {
 }
 
 // ──────────────────────────────────────────────────────────────────
-// C5 — Normalize + KeyOf origin edges (plan §3 C5)
+// C5 — Normalize + KeyOf origin edges ( C5)
 // ──────────────────────────────────────────────────────────────────
 
 /// `NormalizeUnion` / `NormalizeIntersection` emit one `Normalize`
@@ -2823,14 +2823,14 @@ fn key_of_records_source_members() {
 }
 
 // resolve_decl_alias_emits_alias_resolve_edge and
-// barrel_alias_chain_emits_one_edge_per_hop were deleted in F1:
+// barrel_alias_chain_emits_one_edge_per_hop were:
 // resolve_decl returns DeclPlaceholder by design (C16). Alias unwrap
 // happens in the path-walk layer, covered by
 // `alias_unwrap_during_path_walk_emits_alias_resolve` and
 // `alias_identity_extraction_uses_target_not_current`.
 
 // ──────────────────────────────────────────────────────────────────
-// C6 — build_mapped_type (plan §3 C6 + §2 lazy block)
+// C6 — build_mapped_type ( C6 + §2 lazy block)
 // ──────────────────────────────────────────────────────────────────
 
 use crate::semantic_query::{MapperKey, OptionalityMod, ReadonlyMod};
@@ -2838,7 +2838,7 @@ use crate::semantic_query::{MapperKey, OptionalityMod, ReadonlyMod};
 /// Different `(optionality, readonly)` combinations on the same
 /// `(source, key_space, value_expr)` produce distinct mapped
 /// results — the modifiers participate in the cache key via
-/// `MapperKey::Hash/Eq` (plan §3 C6).
+/// `MapperKey::Hash/Eq` ( C6).
 #[test]
 fn mapped_type_optionality_and_readonly_modifiers_in_cache_key() {
     let host = host();
@@ -2913,7 +2913,7 @@ fn mapped_type_optionality_and_readonly_modifiers_in_cache_key() {
 }
 
 /// Mapped-type values are lazy placeholders at shell time — the
-/// Per plan §3 C6 (completed in WIP 3-bis, post-C7):
+/// Per C6 (completed in WIP 3-bis, post-C7):
 /// `build_mapped_type` projects member values from the source object
 /// directly for the common `{ [K in keyof T]: T[K] }` shape. When
 /// the source has a visible member named `K`, the mapped result's
@@ -3220,7 +3220,7 @@ fn mapped_type_uses_source_member_names_when_object_source() {
 }
 
 // ------------------------------------------------------------------
-// C7 — built-in utility dispatch (plan §3 C7 + §2 built-in utilities)
+// C7 — built-in utility dispatch ( C7 + §2 built-in utilities)
 // ------------------------------------------------------------------
 //
 // These tests cover the utility-routing pass in `build_instantiate`.
@@ -3574,7 +3574,7 @@ fn string_intrinsics_return_string_primitive() {
 /// `SemanticQueryKey::MappedType` dispatch.
 ///
 /// Full `SemanticNodeId` equivalence (the ideal userland-equivalence
-/// rule from plan §7.2) requires arena-level structural interning
+/// rule from) requires arena-level structural interning
 /// of `SemanticNodeData::Opaque(Miss)` placeholders — today the
 /// append-only arena creates a distinct node per `intern_node` call,
 /// so two independently-constructed `MapperKey` instances with the
@@ -3726,7 +3726,7 @@ fn deferred_utilities_return_opaque_miss_with_instantiate_edge() {
     }
 }
 
-/// `ReturnType<typeof fn>` routes purely through dispatch (plan §3 C7,
+/// `ReturnType<typeof fn>` routes purely through dispatch ( C7,
 /// §5.8 D-cutover). `build_typeof` lowers the value to a
 /// [`SemanticNodeData::Object`] whose `call_signatures[0]` is a
 /// canonical [`SemanticNodeData::Function`]. `build_builtin_utility`
@@ -3873,7 +3873,7 @@ fn return_type_of_plain_object_stays_opaque() {
 // B4 — shell-carrier tests
 //
 // Array / Tuple / TemplateLiteral publication + solver-scratch
-// publication-boundary rules (plan §3 B4 + §7.14 + §7.18).
+// publication-boundary rules ( B4 + §7.14 + §7.18).
 // ------------------------------------------------------------------
 
 /// `T[]` round-trips through dispatch as a
@@ -4087,7 +4087,7 @@ fn semantic_graph_template_literal_variant_preserves_quasis_and_expression_refs(
 
 /// Function types publish through `SemanticNodeData::Object` with
 /// empty `members` and populated `call_signatures` /
-/// `construct_signatures` per plan §3 B4 + §7.14 — the final-state
+/// `construct_signatures` per B4 + §7.14 — the final-state
 /// publication shape. No separate `Function` semantic-node variant
 /// exists. This test constructs such a view directly (the function
 /// dispatch wiring is out of B4's scope — it lands when function
@@ -4138,14 +4138,13 @@ fn function_surface_publishes_as_object_with_call_signatures() {
 }
 
 /// Solver scratch-only node kinds (`Rest`, `RecursiveRef`) MUST NOT
-/// have dedicated [`SemanticNodeData`] variants per plan §7.14 /
-/// §7.18. This is a build-level invariant: walking the crate source
+/// have dedicated [`SemanticNodeData`] variants per §7.18. This is a build-level invariant: walking the crate source
 /// and asserting the variants are absent lets a future agent notice
 /// instantly if someone tries to promote a scratch-only node into
 /// the publication graph.
 ///
 /// `Infer` was originally included in this list but was promoted to a
-/// first-class variant by plan §3 Cluster A (Pass 3). The infer
+/// first-class variant by Cluster A (Pass 3). The infer
 /// binding has a concrete semantic role — it's the named placeholder
 /// in a conditional's `extends` clause, substituted in the true
 /// branch when the check decides Assignable — so keeping it as a
@@ -4228,14 +4227,14 @@ fn solver_scratch_only_nodes_never_enter_semantic_graph_store() {
     assert!(
         violations.is_empty(),
         "Solver scratch-only nodes (Infer/Rest/RecursiveRef) must never appear as \
-         SemanticNodeData variants — they stay solver-scratch per plan §7.18.\nFound:\n{}",
+         SemanticNodeData variants — they stay solver-scratch per\nFound:\n{}",
         violations.join("\n")
     );
 }
 
 /// Solver `Error` values publish at the boundary as
 /// [`SemanticNodeData::Opaque`] carrying a concrete [`QueryError`]
-/// per plan §3 B4 + §7.14 — there is no dedicated `Error`
+/// per B4 + §7.14 — there is no dedicated `Error`
 /// semantic-node variant. `QueryError::Other(...)` is the
 /// catch-all shape for text-bearing failures; `QueryError::Miss`
 /// is the cache-miss shape. Both round-trip through `Opaque`
@@ -4401,7 +4400,7 @@ fn substitute_preserves_scope_on_shell_rebuilds() {
 }
 
 /// Two unresolved `TypeParameter` references in the same file with
-/// the same name should alias to one identity (plan §14.2 item 2
+/// the same name should alias to one identity ( item 2
 /// file-scoped name-keyed identity). Pre-C6a, each lowering
 /// interns a fresh `TypeParam` payload with
 /// `decl_name = reference.name` (the ref's name) — but in the
@@ -4737,7 +4736,7 @@ fn keyof_intersection_accumulates_enumerable_arms_and_ignores_unresolvable() {
     );
 }
 
-/// Plan §4.12 / B0: Pick/Omit lower as `InstantiationRef` carriers in
+/// Pick/Omit lower as `InstantiationRef` carriers in
 /// `Navigate` mode so the materialiser registry-route guard can apply
 /// cycle / package gates BEFORE dispatch's `build_builtin_utility`
 /// projects. Other utilities (Extract, Exclude, NonNullable, Partial,
@@ -4883,7 +4882,7 @@ fn navigate_lowering_pick_omit_preserve_carrier_other_utilities_unchanged() {
     }
 }
 
-/// Phase 1B path-prefix peek + backfill (plan §1.B).
+/// Phase 1B path-prefix peek + backfill (B).
 ///
 /// **Discriminating contract.** A `ProjectPath { base, [variants,
 /// loadingAnimation], Navigate }` dispatch followed by a sibling
@@ -5073,7 +5072,7 @@ fn project_path_prefix_peek_short_circuits_sibling_walk() {
 
 // ──────────────────────────────────────────────────────────────────────────
 // Phase 5 §5.0 binding amendment — `ResolveMacroPayload` variant body
-// (sub-plan §3.2). Tests cover each macro-kind arm + the §5 commit 2+3
+// (sub-). Tests cover each macro-kind arm + the §5 commit 2+3
 // negative-regression + self-reference recursion-safety obligations.
 // ──────────────────────────────────────────────────────────────────────────
 
@@ -5244,7 +5243,7 @@ fn resolve_macro_payload_define_expose_passthrough() {
     }
 }
 
-/// **Sub-plan §5 commit 2+3 negative-regression test.** The §3.2 body
+/// **Sub- commit 2+3 negative-regression test.** The §3.2 body
 /// dispatches `DefineSlots` through `ProjectPath` over `type_args[0]`.
 /// If the dispatch arm were swapped to a degenerate `Object{}`
 /// (members empty, no projection), the resulting node would NOT
@@ -5353,7 +5352,7 @@ fn resolve_macro_payload_define_model_branches_distinctly() {
     }
 }
 
-/// **Sub-plan §5 commit 2+3 self-reference test.** A self-referential
+/// **Sub- commit 2+3 self-reference test.** A self-referential
 /// type used in a defineEmits payload (`type R = { next: R }; defineEmits<{ recurse: [R] }>()`)
 /// must not stack-overflow — the dispatch's
 /// `Instantiate`-recursion sentinel emits `Opaque(RecursiveRef)`

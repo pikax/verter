@@ -5584,7 +5584,7 @@ mod w5f_test_archaeology {
     /// W5f cutoff baseline measured at the commit that landed the W5f
     /// architecture guards. Update only when Step 2.6 actually reduces
     /// the count.
-    pub(super) const W5F_BASELINE: usize = 385;
+    pub(super) const W5F_BASELINE: usize = 254;
 
     pub(super) fn is_test_file(path: &Path) -> bool {
         let name = path
@@ -5797,5 +5797,104 @@ fn phase_archaeology_test_files_count_zero() {
             .cloned()
             .collect::<Vec<_>>()
             .join("\n")
+    );
+}
+
+#[test]
+fn tier_2_split_preserves_semantic_query_key_hashes() {
+    // Plan §4.4: the W5a split of `semantic_query_memo.rs` into a directory
+    // module must not change the Hash impl of `SemanticQueryKey` — caches
+    // keyed on these hashes would silently miss across the split otherwise.
+    //
+    // The plan calls for a cold-seq run against 32 representative fixtures
+    // and a byte-equal compare against `keys-survivors.json` from Tier 1B.
+    // That baseline file does not exist at the W5f cutoff, so this test
+    // implements the discriminating invariant in a structural form: hash a
+    // small set of stable `SemanticQueryKey` instances and verify (a) the
+    // Hash + Eq invariant holds (equal keys hash equal), and (b) different
+    // keys hash differently. Both properties are byte-stable across
+    // refactors of the surrounding memo module — the W5a split would have
+    // failed this test if the Hash derive had been accidentally dropped or
+    // if a variant had been silently renamed.
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    use std::sync::Arc;
+    use verter_session::semantic_query::{ResolveDeclKey, ScopeId, SemanticQueryKey};
+
+    fn hash_of(key: &SemanticQueryKey) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        key.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    let scope_a = ScopeId {
+        canonical_id: Arc::from("/test/scope-a.vue"),
+        local_scope: None,
+    };
+    let scope_b = ScopeId {
+        canonical_id: Arc::from("/test/scope-b.vue"),
+        local_scope: None,
+    };
+
+    let key_a1 = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        scope: scope_a.clone(),
+        name: Arc::from("MyType"),
+    });
+    let key_a2 = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        scope: scope_a.clone(),
+        name: Arc::from("MyType"),
+    });
+    let key_b = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        scope: scope_b,
+        name: Arc::from("MyType"),
+    });
+    let key_c = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        scope: scope_a,
+        name: Arc::from("OtherType"),
+    });
+
+    assert_eq!(
+        key_a1, key_a2,
+        "Eq invariant: structurally identical keys must compare equal"
+    );
+    assert_eq!(
+        hash_of(&key_a1),
+        hash_of(&key_a2),
+        "Hash + Eq invariant: equal keys must hash equal"
+    );
+    assert_ne!(
+        hash_of(&key_a1),
+        hash_of(&key_b),
+        "different scopes must hash differently"
+    );
+    assert_ne!(
+        hash_of(&key_a1),
+        hash_of(&key_c),
+        "different names must hash differently"
+    );
+}
+
+#[test]
+fn recursion_budget_invariant_across_module_boundary() {
+    // Plan §4.5: the recursion-budget mechanism must remain reachable and
+    // its declared cap must remain pinned across the W5a / W5b / W5d splits.
+    // Cross-module recursion that exceeds this cap is supposed to terminate
+    // the walker via the audited assertion path rather than overflow the
+    // stack.
+    //
+    // The plan calls for a fixture at
+    // `crates/verter_session/tests/fixtures/recursion_budget_invariant_fixture.ts`
+    // and a baseline at `crates/verter_session/tests/perf_bounds/recursion_budget_baseline.txt`.
+    // Neither exists at the W5f cutoff. This test implements the
+    // discriminating invariant in a structural form: assert that the
+    // public `WALKER_DEPTH_CAP` constant remains reachable from outside
+    // the module that owns it (i.e., the split did not break the public
+    // re-export path) and that its declared value matches the expected
+    // pin. A future patch that lands the fixture + baseline can extend
+    // this test with a real per-fixture budget consumption check.
+    use verter_session::component_meta_audit::WALKER_DEPTH_CAP;
+    assert_eq!(
+        WALKER_DEPTH_CAP, 256,
+        "WALKER_DEPTH_CAP must remain pinned at 256 — see component_meta_audit::assertions"
     );
 }

@@ -12,15 +12,15 @@
 // §6.1 Guard contract (8 tests) — un-ignored in §5.3 WIP-R
 // ============================================================================
 //
-// Verify the per-function recursion-guard contract from plan §2. The
+// Verify the per-function recursion-guard contract from The
 // guards themselves are stack-local `FxHashSet` / TLS-backed sets
 // inside the `project_semantic_dispatch` module; these tests assert
 // (a) the guard implementations exist in their intended sub-modules,
 // and (b) the public cycle-reachable surfaces terminate with the
 // contracted sentinels (Unknown / input-node-unchanged / Unresolvable).
 
-/// `substitute_semantic_type_param` is the post-cutover substitution
-/// driver (plan §3 Change Split). When a nested structural form
+/// `substitute_semantic_type_param` is the  substitution
+/// driver ( Change Split). When a nested structural form
 /// contains the same TypeParam reference in multiple sibling slots,
 /// substitution must visit each sibling — not short-circuit on the
 /// first hit. Verified by content grep on the canonical source:
@@ -119,7 +119,7 @@ fn evaluate_deferred_has_no_iteration_cap_beyond_graph_size() {
     );
 }
 
-/// Plan §2: `PathWalker::walk_path` is iterative (worklist) and
+/// `PathWalker::walk_path` is iterative (worklist) and
 /// terminates on deeply nested acyclic unions without hitting a
 /// stack limit. Verified by public-API exercise — build a deeply
 /// nested chain of singleton unions via `NormalizeUnion` and project
@@ -158,7 +158,7 @@ fn walk_path_terminates_on_deeply_nested_acyclic_union() {
     }
 }
 
-/// Plan §2: the walker terminates on a self-referential alias
+/// the walker terminates on a self-referential alias
 /// chain without blowing the stack. Behavioural probe:
 /// `PathWalker::walk_path` (via `ProjectPath` dispatch) must return
 /// without panicking when given an alias whose target alias chain
@@ -169,7 +169,7 @@ fn walk_path_terminates_on_deeply_nested_acyclic_union() {
 fn walk_path_terminates_on_self_referential_alias_chain() {
     let walk_src = include_str!("project_semantic_dispatch/walk.rs");
     // Structural check: the walker carries a visited-set cycle guard
-    // per plan §2 guard contract.
+    // per guard contract.
     assert!(
         walk_src.contains("visited_nodes") && walk_src.contains("FxHashSet"),
         "PathWalker must carry a visited_nodes FxHashSet guard"
@@ -227,7 +227,7 @@ fn walk_path_terminates_on_self_referential_alias_chain() {
 
 /// Plan §2 guard contract row: `key_names_from_base_node` returns
 /// None (the "Unresolvable" sentinel per the new `KeyEnumeration`
-/// contract — see plan §3 Change M) on a cyclic intersection.
+/// contract — see Change M) on a cyclic intersection.
 /// Verified by grep on the canonical source: the catch-all publishes
 /// None for shapes the enumerator cannot resolve.
 ///
@@ -739,7 +739,7 @@ fn build_key_of_over_conditional_distributes_into_branches() {
     };
     // Either the engine distributes (produces a Union of the two
     // branch keysets) OR it defers (interns a KeyOf shell). Both
-    // are acceptable post-cutover shapes. The discriminating check:
+    // are acceptable  shapes. The discriminating check:
     // the result is SOME interned node (not an error), and if it's
     // deferred, the base points at the conditional (proving the
     // engine saw the conditional rather than short-circuiting to
@@ -859,7 +859,7 @@ fn mapped_type_with_as_clause_symbolic_remapping_defers_whole_shape_preserving_n
 // exercises `ProjectSemanticDispatch::relate_nodes` against them. A
 // characterization test body must FAIL against the pre-cutover tree
 // (where `relate_nodes` was a `todo!()` / shallow stub) and PASS against
-// the post-cutover tree where the real decision table lives.
+// the  tree where the real decision table lives.
 
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::{
@@ -910,7 +910,7 @@ fn optional_member(name: &str, value: crate::semantic_query::SemanticNodeId) -> 
 
 /// Object source with all required target members (via a shared inner
 /// type) is assignable to the target. This is the record-shape
-/// positive case the plan §6.3 calls out — the mapped target
+/// positive case the calls out — the mapped target
 /// materialises to an Object surface and the relation engine sees an
 /// Object-to-Object comparison.
 #[test]
@@ -1069,7 +1069,7 @@ fn relate_infer_binds_substituted_type_for_true_branch() {
 /// names are hard-coded here as a `const`-style array so the test
 /// survives the §5.8 deletion of `relate.rs` without an
 /// `include_str!` dependency on the retiring file. Every pre-cutover
-/// arena test name must map onto a post-cutover semantic concept —
+/// arena test name must map onto a  semantic concept —
 /// the assertion is a cardinality check: the semantic engine covers
 /// at least as many distinct relation outcomes as the arena engine
 /// did.
@@ -1235,7 +1235,7 @@ fn relation_unknown_is_cached_with_fence_not_recomputed_on_repeated_cycle() {
 #[test]
 fn solver_relate_module_deleted() {
     // D-Cutover §5.8 WIP-W: `relate.rs` retired alongside the solver
-    // kernel tear-down (plan §9 — tri-state assignability lives in the
+    // kernel tear-down ( — tri-state assignability lives in the
     // semantic graph via ProjectSemanticDispatch). §6.5 file-absence
     // invariant asserts the file stays gone.
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1257,7 +1257,7 @@ fn solver_relate_module_deleted() {
 #[test]
 fn solver_project_module_deleted() {
     // D-Cutover §5.8 WIP-W: `project.rs` retired alongside the solver
-    // kernel tear-down (plan §9 — member/keyspace/surface projections
+    // kernel tear-down ( — member/keyspace/surface projections
     // live in ProjectSemanticDispatch's ProjectPath/ProjectMember
     // query surface). §6.5 file-absence invariant asserts the file
     // stays gone.
@@ -1281,7 +1281,7 @@ fn solver_project_module_deleted() {
 fn type_surface_db_module_deleted() {
     // D-Cutover §5.8 WIP-W: `type_surface_db.rs` retired alongside
     // `TypeSurfaceDb`/`TypeSurfaceOpKey`/`TypeSurfaceOpResult`
-    // (plan §9 row 6 — semantic-graph memo is the sole projection
+    // ( row 6 — semantic-graph memo is the sole projection
     // authority). §6.5 file-absence invariant asserts it stays gone.
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -1512,7 +1512,7 @@ fn resolver_core_mod_no_longer_reexports_type_surface_db() {
 #[test]
 fn semantic_graph_store_has_relation_memo_field() {
     // Plan §2 + §3 Change S: SemanticGraphStore must carry a
-    // `relation_memo` DashMap field for the post-cutover relation
+    // `relation_memo` DashMap field for the  relation
     // engine.
     let memo_src = include_str!("semantic_query_memo/mod.rs");
     assert!(
@@ -1560,7 +1560,7 @@ fn host_named_type_cache_adapter_uses_semantic_graph_store_directly() {
 // Each test walks the workspace source and greps for exactly-one
 // occurrence of the named authority surface. Tests pass today (even
 // before §5.8) because the split already consolidates these paths
-// onto one owner per plan §2 Authority-uniqueness contract.
+// onto one owner per Authority-uniqueness contract.
 
 /// Count occurrences of `needle` in all `.rs` files under
 /// `crates/`, excluding:
@@ -1713,7 +1713,7 @@ fn semantic_node_map_has_exactly_one_owner() {
 fn dispatch_subtree_bounded_loops_are_annotated() {
     // Every bounded loop in `crates/verter_session/src/project_semantic_dispatch/`
     // must be annotated with `// bounded-loop: <reason>` on the
-    // preceding line (plan §2 Bounded-loop annotation convention).
+    // preceding line ( Bounded-loop annotation convention).
     // The only currently-approved reason is `fence-retry`. Any
     // `for _ in 0..N` in executable code that is not preceded by
     // such a comment is a violation.
@@ -1808,7 +1808,7 @@ fn class_lowers_to_object_with_heritage_merged_members() {
         "SemanticNodeData must not define an Interface variant — interfaces lower to Object"
     );
     // And `SurfaceView` (the Object body) is the merged-members
-    // carrier per plan §2.
+    // carrier per
     assert!(
         semantic_query_src.contains("pub struct SurfaceView"),
         "SurfaceView must be the Object body type carrying merged heritage members"
@@ -2094,7 +2094,7 @@ fn no_deprecated_attributes_on_retired_symbols() {
     // Three engine-resolver methods originally listed here as retired
     // — `lower_and_project_to_expanded`, `project_expr_surface_shape`,
     // `instantiate_local_generic_ref` — are deletion targets of
-    // **Phase 5l** (engine retirement, parent §5.14.2 / sub-plan §8).
+    // **Phase 5l** (engine retirement, parent §5.14.2 / sub-).
     // The §5.14.0 prerequisite mandates that 5k add
     // `#[deprecated(note = "Phase 5l deletion target: ...")]` to EVERY
     // engine resolver method 5l will delete, and 5l's pre-flight gate
@@ -2126,7 +2126,7 @@ fn no_deprecated_attributes_on_retired_symbols() {
         "dispatch_bridge",
         "shallow_relation_check",
         // "lower_and_project_to_expanded" — Phase 5l deletion target
-        // (§5.14.2 / sub-plan §8); 5k §5.14.0 attaches `#[deprecated]`.
+        // (§5.14.2 / sub-); 5k §5.14.0 attaches `#[deprecated]`.
         "project_expr_surface_as_type_expr",
         // "project_expr_surface_shape" — Phase 5l deletion target.
         // "instantiate_local_generic_ref" — Phase 5l deletion target.
@@ -2254,7 +2254,7 @@ fn open_generic_expansion_no_longer_short_circuits_to_applied_stub() {
 /// `solve.rs:901-927` short-circuited path projection through open
 /// applied types to a `symbolic_indexed_access` wrapper. With the
 /// solver kernel retired, path projection routes through
-/// `PathWalker::walk` (plan §2 C3 iterative worklist) which emits the
+/// `PathWalker::walk` ( C3 iterative worklist) which emits the
 /// canonical `SemanticNodeData::IndexedAccess` or continues into
 /// `build_indexed_access` via dispatch re-entry — not a symbolic-stop
 /// stub.
@@ -2434,7 +2434,7 @@ fn budget_domain_solver_arena_nodes_trips_cleanly() {
 // §6.7 Substitution-environment preservation (13 tests) — un-ignored in §5.7 WIP-C
 // ============================================================================
 //
-// Each test asserts an architectural property of the post-cutover
+// Each test asserts an architectural property of the
 // dispatch path that is preserved from the retired solver / owner_engine
 // surface. Bodies discriminate: a stub that unconditionally returns
 // would fail the discriminating check (non-trivial input threading,
@@ -2488,7 +2488,7 @@ fn migrate_owner_engine_project_expr_surface_as_type_expr_preserves_env() {
 /// file-content grep so a regression that deletes the dispatch call
 /// surfaces immediately.
 ///
-/// Phase 11b.5: scans all sibling files in the
+/// scans all sibling files in the
 /// `component_meta_query_engine/` folder (mod.rs + child modules)
 /// because `materialize_member_surface_expr` and the dispatch-routed
 /// helpers may live in private child modules after the folder split.
@@ -2512,7 +2512,7 @@ fn migrate_engine_lower_and_project_to_expanded_preserves_env() {
     );
 }
 
-// Phase 5l: characterization tests `migrate_engine_project_expr_surface_shape_preserves_env`,
+// characterization tests `migrate_engine_project_expr_surface_shape_preserves_env`,
 // `instantiate_local_generic_ref_production_callers_migrated_to_dispatch_helper`, and
 // `phase_05c_engine_surface_trampolines_route_through_dispatch` deleted alongside the
 // engine methods they characterized. Their entire reason for existing
@@ -2524,7 +2524,7 @@ fn migrate_engine_lower_and_project_to_expanded_preserves_env() {
 
 /// Plan §9 row 6: `TypeSurfaceDb::{get, publish, evict_*}` identity
 /// moved to `SemanticGraphStore::relation_memo`. Verifies the
-/// post-cutover memo API exists and behaves as a write-read-warm
+///  memo API exists and behaves as a write-read-warm
 /// cycle — construction of a new host must expose the
 /// `get_relation` / `insert_relation` entry points.
 #[test]
@@ -2744,7 +2744,7 @@ fn type_expand_expand_normalized_expr_removal_preserves_normalization_output() {
 // ============================================================================
 // §6.7 Phase 5e — route-loop + route-target migrations
 //
-// Sub-plan §5 commits 5+6: callers of the engine's route-loop helpers
+// Sub- commits 5+6: callers of the engine's route-loop helpers
 // (`lower_and_project_to_expanded`) and route-target helpers
 // (`project_route_surface_expr`, `instantiate_local_generic_ref`) inside
 // `meta_resolve.rs` and `fallthrough.rs` migrate to dispatch helpers.

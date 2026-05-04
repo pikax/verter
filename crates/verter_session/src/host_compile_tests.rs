@@ -1,7 +1,7 @@
 //! Tests for [`crate::host_compile`] — Phase 9b host-backed parallel
 //! SFC batch compile.
 //!
-//! Test matrix (sub-plan §3.6):
+//! Test matrix (sub-):
 //!
 //! | Test | Discriminating assertion |
 //! | ---- | ------------------------ |
@@ -399,7 +399,7 @@ fn compile_many_priority_default_is_background() {
     assert_eq!(
         *host.last_upsert_priority.lock(),
         Some(Priority::Background),
-        "default priority must be Background per sub-plan §0"
+        "default priority must be Background per sub-"
     );
 }
 

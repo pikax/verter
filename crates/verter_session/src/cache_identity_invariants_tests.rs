@@ -365,7 +365,7 @@ use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 /// `frontier_tests.rs:115` patterns — instruments `read_file` /
 /// `read_analysis_source` /paths with an `AtomicU64` counter so T5 can
 /// assert `read_count == 1` after both threads complete (per §6b.0.2 row
-/// T5 + sub-plan §6b.8.3 #14: "do NOT invent new instrumentation").
+/// T5 + sub-b.8.3 #14: "do NOT invent new instrumentation").
 struct CountingWs {
     inner: StdArc<MemoryWorkspace>,
     read_counts: Mutex<FxHashMap<String, u64>>,

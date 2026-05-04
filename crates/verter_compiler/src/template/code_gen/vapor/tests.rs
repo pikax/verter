@@ -185,7 +185,7 @@ fn full_pipeline_interpolation() {
     );
 }
 
-// ==================== Phase 1: HTML minimization ====================
+// ==================== HTML minimization ====================
 
 #[test]
 fn html_minimization_simple_div() {
@@ -290,7 +290,7 @@ fn html_set_attr_for_data_attributes() {
     );
 }
 
-// ==================== Phase 2: Events ====================
+// ==================== Events ====================
 
 #[test]
 fn event_click_delegated() {
@@ -330,7 +330,7 @@ fn event_multiple_delegated() {
     );
 }
 
-// ==================== Phase 3: v-show, v-model ====================
+// ==================== v-show, v-model ====================
 
 #[test]
 fn v_show_simple() {
@@ -406,7 +406,7 @@ fn v_model_with_multiple_modifiers() {
     );
 }
 
-// ==================== Phase 4: v-html ====================
+// ==================== v-html ====================
 
 #[test]
 fn v_html_directive() {
@@ -423,7 +423,7 @@ fn v_html_directive() {
     );
 }
 
-// ==================== Phase 5: Components ====================
+// ==================== Components ====================
 
 #[test]
 fn component_simple() {
@@ -488,7 +488,7 @@ fn component_with_default_slot() {
     );
 }
 
-// ==================== Phase 6: Slot outlets ====================
+// ==================== Slot outlets ====================
 
 #[test]
 fn slot_default_outlet() {
@@ -512,7 +512,7 @@ fn slot_named_outlet() {
     );
 }
 
-// ==================== Phase 7: Structural directives ====================
+// ==================== Structural directives ====================
 
 #[test]
 fn v_if_simple() {
@@ -607,7 +607,7 @@ fn v_for_with_key() {
     );
 }
 
-// ==================== Phase 7.5: Template ref ====================
+// ==================== Template ref ====================
 
 #[test]
 fn template_ref_static() {
@@ -620,7 +620,7 @@ fn template_ref_static() {
     );
 }
 
-// ==================== Phase 8: v-once / v-memo ====================
+// ==================== v-once / v-memo ====================
 
 #[test]
 fn v_once_with_dynamic_binding() {
@@ -1058,7 +1058,7 @@ fn non_root_component_after_sibling() {
     );
 }
 
-// ==================== Phase 8: Named & scoped slots ====================
+// ==================== Named & scoped slots ====================
 
 /// @ai-generated — Named slot via <template #header>
 #[test]
@@ -1155,7 +1155,7 @@ fn component_with_hyphenated_slot_name() {
     );
 }
 
-// ==================== Phase 9: Built-in components ====================
+// ==================== Built-in components ====================
 
 /// @ai-generated — Transition uses direct import, not _resolveComponent
 #[test]

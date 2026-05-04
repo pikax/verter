@@ -1,4 +1,4 @@
-/// @ai-generated — Phase 4 integration tests for verter_lsp.
+/// @ai-generated — integration tests for verter_lsp.
 ///
 /// These tests use the full pipeline: DocumentRegistry (backed by verter_session) →
 /// LSP feature functions → verify results. They test real Vue SFC content end-to-end.

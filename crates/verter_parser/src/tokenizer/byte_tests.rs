@@ -2826,7 +2826,7 @@ fn test_style_no_interpolation_in_rcdata() {
 }
 
 // ============================================================
-// Regression tests for Phase 1-6 fixes
+// Regression tests
 // ============================================================
 
 // --- Phase 1: Critical bug fixes ---

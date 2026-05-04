@@ -1043,6 +1043,72 @@ mod tests {
         assert_eq!(round, h);
     }
 
+    /// Discriminating test (D113 LSP wire bridge): TypeHandle.to_proto_bytes
+    /// must round-trip through TypeHandle::from_proto_bytes exactly. Guards
+    /// the bytes-level wire format used by the LSP custom-method bridge —
+    /// any change to TypeHandle's proto field tags / wire types would break
+    /// the round-trip.
+    #[test]
+    fn type_handle_proto_bytes_round_trip() {
+        let original = handle("/abs/path/Comp.vue", "MyType").with_content_hash([7u8; 16]);
+        let bytes = original.to_proto_bytes();
+        assert!(!bytes.is_empty(), "encoded bytes must be non-empty");
+        let decoded = TypeHandle::from_proto_bytes(&bytes)
+            .expect("from_proto_bytes must accept output of to_proto_bytes");
+        assert_eq!(decoded, original, "round-trip must be byte-stable");
+    }
+
+    /// Discriminating test (D113 LSP wire bridge): a manually-encoded
+    /// surface-root handle (matching the TS-side encoder in
+    /// packages/vue-vscode/e2e/suite/component-meta.test.ts) must decode
+    /// to the expected TypeHandle. Guards the e2e test's manual proto
+    /// encoder against drift in the proto schema's field tags or wire types.
+    #[test]
+    fn type_handle_manually_encoded_root_handle_decodes() {
+        // Mirror of encodeRootTypeHandle("/test.vue") with projectId="".
+        // Wire bytes:
+        //   field 1 (project_id, string): tag 0x0a, length 0
+        //   field 2 (canonical_id, string): tag 0x12, length 9, "/test.vue"
+        //   field 3 (content_hash, bytes): tag 0x1a, length 16, [0u8; 16]
+        //   field 4 (query_path) omitted
+        let mut bytes: Vec<u8> = vec![
+            0x0a, 0x00, // field 1: empty project_id
+            0x12, 0x09, // field 2: canonical_id length 9
+        ];
+        bytes.extend_from_slice(b"/test.vue");
+        bytes.extend_from_slice(&[0x1a, 0x10]); // field 3: content_hash length 16
+        bytes.extend_from_slice(&[0u8; 16]);
+        // field 4 omitted
+
+        let decoded = TypeHandle::from_proto_bytes(&bytes)
+            .expect("manual e2e encoder bytes must decode cleanly");
+        assert_eq!(decoded.project_id, "");
+        assert_eq!(decoded.canonical_id, "/test.vue");
+        assert_eq!(decoded.content_hash, [0u8; 16]);
+        assert!(decoded.query_path.is_none());
+    }
+
+    /// Discriminating test (D113 LSP wire bridge): a manually-encoded
+    /// handle with a non-empty foreign project_id must decode without
+    /// error so the LSP's resolve_type_expansion can detect the mismatch
+    /// and return TypeHandleError::ProjectMismatch (covered by e2e T8).
+    #[test]
+    fn type_handle_manually_encoded_foreign_project_decodes() {
+        let mut bytes: Vec<u8> = vec![
+            0x0a, 15, // field 1: project_id length 15
+        ];
+        bytes.extend_from_slice(b"foreign-project");
+        bytes.extend_from_slice(&[0x12, 8]); // field 2: canonical_id length 8
+        bytes.extend_from_slice(b"/abs.vue");
+        bytes.extend_from_slice(&[0x1a, 0x10]); // field 3: content_hash length 16
+        bytes.extend_from_slice(&[0u8; 16]);
+
+        let decoded = TypeHandle::from_proto_bytes(&bytes)
+            .expect("foreign-project bytes must decode cleanly");
+        assert_eq!(decoded.project_id, "foreign-project");
+        assert_eq!(decoded.canonical_id, "/abs.vue");
+    }
+
     /// Discriminating test (D100): selective surface envelope round-trips.
     #[test]
     fn selective_api_proto_round_trip_byte_equal() {
