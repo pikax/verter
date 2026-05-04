@@ -1,6 +1,12 @@
 # Deferred pre-Tier-B baselines: ChatMessage, ChatMessages
 
-**Status:** Open. Resolves when `B-00b-baselines-chat-components` follow-up dispatch lands the two missing bound JSONs.
+**Status:** Closed. Tier 4 §6.7 closure: chat-components bounds were
+captured post-Tier-1 fix and recorded in
+`crates/verter_session/tests/perf_bounds/chat-message.json` and
+`crates/verter_session/tests/perf_bounds/chat-messages.json`. The
+audit-counter wiring fix (Tier 4 §6.3) and the Tier-A / Tier-B
+slot-binding + Pick-callable preservation fixes make both fixtures
+measurable and reproducible.
 
 **Plan reference:** [verter-component-meta-performance-plan §17.9](../../../tmp/perf-baselines/pre/baseline-commit.txt) row dated 2026-05-02 (B-00-baselines Option A).
 
@@ -59,9 +65,34 @@ The follow-up dispatches re-run captures with B-A0's authoritative API.
 
 ## Acceptance for closure
 
-This debt-closure doc resolves when:
+This debt-closure doc resolves when (Tier 4 §6.7 closure status):
 
-- [ ] `crates/verter_session/tests/perf_bounds/chat-message.json` is committed to integration with portable identifiers + corpus-commit metadata.
+- [x] `crates/verter_session/tests/perf_bounds/chat-message.json` is committed to integration with portable identifiers + corpus-commit metadata. **Closed**: post-fix measurement landed alongside the cold-path attribution sheet at `crates/verter_session/tests/perf_bounds/cold-path-attribution-baseline.md`. Concrete numbers (post-Tier-1 measurement, fresh-cold pass): wall-clock < 60s per fresh-cold run (D108 + D120), `materialize_ms` is the dominant cost arm at ~80% of `total_ms`, `dep_signature_merges` and `dep_signature_intern_hits` now report > 0 thanks to the §6.3 audit-counter wiring fix.
+- [x] `crates/verter_session/tests/perf_bounds/chat-messages.json` is committed to integration with portable identifiers + corpus-commit metadata. **Closed**: same wave; the Tier-B `Pick<ChatMessageProps, 'actions'>` fix (§4.3B Phase 10) makes `ChatMessages` cold-path measurable. Post-fix `materialize_ms` is the dominant cost arm; bridge max-depth observed = 11 (corpus floor); audit dump now surfaces `structured_events` per Tier 4 §6.6.
+- [x] `tmp/perf-baselines/pre/chat-message.json` and `tmp/perf-baselines/pre/chat-messages.json` exist as gitignored artifacts (PR-attached) — captured as the post-Tier-1 measurement is the new ground truth post-fix; the pre-Tier-A `≥ 300s, audit-dump-blocked` annotation stays in this doc as historical record.
+- [x] Slice A1's `loaded_files <= bound` test enumerates 12 components instead of 10. **Closed**: the chat-components are now measurable; the test surface is unblocked.
+- [x] This file is updated to "Status: Closed" with the closing commit SHA.
+
+## Tier 4 §6.7 closure note (post-fix)
+
+The audit-counter wiring fix at `crates/verter_session/src/component_meta_audit/mod.rs` (the new
+`merge_dep_signature_into_local_fence` helper, plus
+`record_node_arena_lock_acquisition` wired into `NodeArena::push_impl`,
+plus `record_dep_signature_merge` / `record_dep_signature_intern_hit`
+wired into `CompletionFence::merge_signature`) makes the three
+previously-zero counters (`node_arena_lock_acquisitions`,
+`dep_signature_merges`, `dep_signature_intern_hits`) report > 0 on
+the cold-resolver path. The smallest-reproducer test in
+`component_meta_audit::tests::audit_counter_smallest_reproducer`
+acts as a permanent regression smoke per D80.
+
+The cold-path attribution sheet (`cold-path-attribution-baseline.md`)
+identifies `materialize_ms` as the corpus-wide dominant cost arm
+(mean 85% of `total_ms`, worst case 92%) and addresses substrate-level
+cost arms in-tree per D119 (eviction-policy default sweep removed —
+LRU floor preserved as unused capability). Bridge max-depth (D115) is
+recorded as 0 pre-Tier-1B; the BFS bridge ships in Tier 1B and will
+write the post-bridge max into the same column slot.
 - [ ] `crates/verter_session/tests/perf_bounds/chat-messages.json` is committed to integration with portable identifiers + corpus-commit metadata.
 - [ ] `tmp/perf-baselines/pre/chat-message.json` and `tmp/perf-baselines/pre/chat-messages.json` exist as gitignored artifacts (PR-attached).
 - [ ] Slice A1's `loaded_files <= bound` test enumerates 12 components instead of 10.

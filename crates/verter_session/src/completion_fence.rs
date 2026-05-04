@@ -121,13 +121,36 @@ impl CompletionFence {
     /// cache hit. Later-observed facts for the same `(canonical, kind)` pair
     /// overwrite prior ones so the fence always carries the most recently
     /// observed value at validation time.
+    ///
+    /// Audit hooks: every call records `dep_signature_merges`. Each
+    /// per-entry redundant insert (the `(canonical, kind)` pair was
+    /// already present at the same `version`) records
+    /// `dep_signature_intern_hits` — the production analog of the
+    /// test-only `DepSignatureInterner::intern` hit semantic
+    /// (avoided redundant work).
     pub fn merge_signature(&self, signature: &DepSignature) {
+        // Record one merge per call, regardless of the signature's
+        // entry count. `merges` measures how many times the production
+        // fence ingested an `Arc<DepSignature>` fragment.
+        crate::host_manage::record_dep_signature_merge();
         let mut inner = self.inner.lock();
         for (canonical, version) in signature.iter() {
-            inner.observed.insert(
-                (canonical.clone(), DepKindKey::from_version(version)),
-                version.clone(),
-            );
+            let key = (canonical.clone(), DepKindKey::from_version(version));
+            // Audit: a redundant insert (same key already at the same
+            // version) is the production "intern hit" — the merge
+            // observed work that was already represented in the fence.
+            // Snapshotting via `==` keeps the hook precise: a different
+            // version at the same key counts as fresh work
+            // (overwrite), only equal versions count as hits.
+            let is_hit = inner
+                .observed
+                .get(&key)
+                .map(|existing| existing == version)
+                .unwrap_or(false);
+            if is_hit {
+                crate::host_manage::record_dep_signature_intern_hit();
+            }
+            inner.observed.insert(key, version.clone());
         }
     }
 

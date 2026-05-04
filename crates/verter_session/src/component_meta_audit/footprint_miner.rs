@@ -197,6 +197,10 @@ pub fn mine_footprint(
     } else {
         state.indexed_ready_builds.clone()
     };
+    // Surface the verbatim structured-event log on the published
+    // footprint so the audit dump exposes materializer envelopes and
+    // dispatch markers without recomputation.
+    let structured_events = state.structured_events.clone();
 
     // ── 7. Cache outcomes from per-context counters (exact) ────────
     let cache_outcomes = CacheOutcomeTally {
@@ -228,6 +232,7 @@ pub fn mine_footprint(
             nodes: node_table,
             edges,
         },
+        structured_events,
     }
 }
 

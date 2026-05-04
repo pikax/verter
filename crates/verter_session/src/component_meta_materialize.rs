@@ -171,8 +171,10 @@ pub fn convert_dispatch_result(
     input_node_for_sentinel: SemanticNodeId,
     local_fence: &mut Vec<(Arc<str>, DepVersion)>,
 ) -> MaterializeOutcome {
-    local_fence.extend(read.dep_signature.iter().cloned());
-    crate::host_manage::record_dep_signature_merge();
+    crate::component_meta_audit::merge_dep_signature_into_local_fence(
+        local_fence,
+        &read.dep_signature,
+    );
     match read.value {
         QueryResult::Value(id) => MaterializeOutcome::Value(id),
         // Recursive promotes to Tainted (not cacheable Miss). Plan
@@ -525,7 +527,10 @@ pub(crate) fn materialize_component_meta_structure(
                         args: Arc::clone(&extraction.root_args),
                         body_mode: crate::semantic_query::ProjectionMode::Navigate,
                     });
-                    local_fence.extend(body_read.dep_signature.iter().cloned());
+                    crate::component_meta_audit::merge_dep_signature_into_local_fence(
+                        &mut local_fence,
+                        &body_read.dep_signature,
+                    );
                     let body_id = match body_read.value {
                         QueryResult::Value(id) => id,
                         _ => {
@@ -561,7 +566,10 @@ pub(crate) fn materialize_component_meta_structure(
                         args: Arc::from(vec![body_id, keys_node].into_boxed_slice()),
                         body_mode: key_for_compute.mode,
                     });
-                    local_fence.extend(projected.dep_signature.iter().cloned());
+                    crate::component_meta_audit::merge_dep_signature_into_local_fence(
+                        &mut local_fence,
+                        &projected.dep_signature,
+                    );
                     let projected_id = match projected.value {
                         QueryResult::Value(id) => id,
                         _ => {
@@ -663,7 +671,10 @@ pub(crate) fn materialize_component_meta_structure(
                     args,
                     body_mode: crate::semantic_query::ProjectionMode::Navigate,
                 });
-                local_fence.extend(read.dep_signature.iter().cloned());
+                crate::component_meta_audit::merge_dep_signature_into_local_fence(
+                    &mut local_fence,
+                    &read.dep_signature,
+                );
                 match read.value {
                     QueryResult::Value(body_id) => {
                         // Recursively materialise the resolved body
@@ -678,7 +689,10 @@ pub(crate) fn materialize_component_meta_structure(
                             mode: key_for_compute.mode,
                         };
                         let body_read = materialize_component_meta_structure(ctx, body_key);
-                        local_fence.extend(body_read.dep_signature.iter().cloned());
+                        crate::component_meta_audit::merge_dep_signature_into_local_fence(
+                            &mut local_fence,
+                            &body_read.dep_signature,
+                        );
                         match body_read.value {
                             MaterializeOutcome::Value(id) | MaterializeOutcome::Miss(id) => {
                                 MaterializeOutcome::Value(id)
@@ -743,7 +757,10 @@ pub(crate) fn materialize_component_meta_structure(
                     path,
                     mode: key_for_compute.mode,
                 });
-                local_fence.extend(read.dep_signature.iter().cloned());
+                crate::component_meta_audit::merge_dep_signature_into_local_fence(
+                    &mut local_fence,
+                    &read.dep_signature,
+                );
                 match read.value {
                     QueryResult::Value(id) => MaterializeOutcome::Value(id),
                     QueryResult::Recursive(_) => MaterializeOutcome::Tainted(key_for_compute.base),
@@ -971,7 +988,10 @@ fn materialize_child_at_nested(
         mode: parent_key.mode,
     };
     let sub_read = materialize_component_meta_structure(ctx, sub_key);
-    local_fence.extend(sub_read.dep_signature.iter().cloned());
+    crate::component_meta_audit::merge_dep_signature_into_local_fence(
+        local_fence,
+        &sub_read.dep_signature,
+    );
     let new_value = match sub_read.value {
         MaterializeOutcome::Value(id) | MaterializeOutcome::Miss(id) => id,
         // Non-cacheable outcomes — keep the input child id symbolic.

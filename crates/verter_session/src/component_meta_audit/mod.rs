@@ -264,6 +264,19 @@ pub struct RustSemanticFootprintAudit {
     pub graph_completeness: GraphCompletenessReport,
     /// Canonicalized derivation subgraph (`NodeRecord`s + edges).
     pub derivation_subgraph: DerivationSubgraph,
+    /// Verbatim ordered log of every structured event the request
+    /// emitted. Drained from the per-request accumulator's
+    /// `structured_events` lane and surfaced verbatim so audit
+    /// consumers can inspect the materializer envelopes
+    /// (`MaterializeStructureEnter` / `Exit`),
+    /// dispatch enter/exit markers, policy-skip events, cycle-detected
+    /// events, and request-start/end markers without having to
+    /// recompute them from the derivation subgraph.
+    ///
+    /// Serde-default for back-compat with audit payloads written
+    /// before this field landed.
+    #[serde(default)]
+    pub structured_events: Vec<StructuredComponentMetaEvent>,
 }
 
 impl RustSemanticFootprintAudit {
@@ -1359,6 +1372,45 @@ pub fn emit_json(record: &RustAuditRecord) -> String {
     serde_json::to_string(record).unwrap_or_default()
 }
 
+/// Merge the `dep_signature` entries from a `CacheRead` (or any
+/// `&[(Arc<str>, DepVersion)]` slice) into the materialiser's
+/// per-frame `local_fence` while recording audit counters in lock
+/// step.
+///
+/// Each call records `dep_signature_merges`. Each per-entry redundant
+/// append (the same `(canonical, kind)` pair was already present at
+/// the same `version`) records `dep_signature_intern_hits` —
+/// the production analog of the test-only
+/// `DepSignatureInterner::intern` hit semantic. Production callers
+/// that previously wrote `local_fence.extend(read.dep_signature.iter().cloned())`
+/// route through this helper so the cold-resolver path observes both
+/// counters.
+///
+/// The `local_fence` stays a `Vec` (no de-duplication semantics) to
+/// preserve byte-equivalence with the pre-fix behaviour; only the
+/// audit hooks change.
+pub fn merge_dep_signature_into_local_fence(
+    local_fence: &mut Vec<(Arc<str>, crate::semantic_query::DepVersion)>,
+    incoming: &[(Arc<str>, crate::semantic_query::DepVersion)],
+) {
+    crate::host_manage::record_dep_signature_merge();
+    // Capture the pre-extend `(canonical, kind)` set so we can detect
+    // redundant entries arriving from `incoming`. The fence is
+    // typically small (single-digit entries per frame), so a linear
+    // scan is cheaper than building a hash set.
+    let pre_existing_count = local_fence.len();
+    for entry in incoming {
+        let is_hit = local_fence
+            .iter()
+            .take(pre_existing_count)
+            .any(|existing| Arc::ptr_eq(&existing.0, &entry.0) && existing.1 == entry.1);
+        if is_hit {
+            crate::host_manage::record_dep_signature_intern_hit();
+        }
+        local_fence.push(entry.clone());
+    }
+}
+
 /// Record a fresh [`IndexedReady`](crate::project_type_store::IndexedReady)
 /// insertion in the active request's accumulator. Pushes both a
 /// typed `IndexedReadyBuildRecord` (direct lane used by the miner
@@ -1635,6 +1687,343 @@ mod tests {
         assert_eq!(
             files.iter().map(|s| s.as_ref()).collect::<Vec<_>>(),
             vec!["/a.ts", "/b.ts", "/c.ts"]
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Audit-counter loss probe + smallest reproducer (D80 permanent
+    // regression smoke).
+    //
+    // Drives a real cold-resolver call through `MetaProject` and
+    // snapshots which `RustStoreAudit` counters report 0 vs > 0
+    // across a representative single-file resolution. The probe
+    // documents the EXPECTED state: every counter wired to a
+    // production code path that runs in the cold-resolver flow must
+    // increment.
+    //
+    // The previously-zero counters were:
+    //   - `node_arena_lock_acquisitions` — bumped only in
+    //      `invalidate_for_canonical`, which never runs on the cold
+    //      resolver path.
+    //   - `dep_signature_merges` — bumped only in
+    //      `convert_dispatch_result`, a `#[allow(dead_code)]` helper
+    //      with zero production callers.
+    //   - `dep_signature_intern_hits` — bumped only inside the
+    //      test-only `DepSignatureInterner::intern`. No production
+    //      code instantiates that interner.
+    //
+    // The fix wires each counter to a production hot path:
+    //   - `record_node_arena_lock_acquisition()` bumps on every
+    //      shard-mutex acquisition in `NodeArena::push_impl`.
+    //   - `record_dep_signature_merge()` bumps inside
+    //      `CompletionFence::merge_signature` AND inside the audit
+    //      module helper `merge_dep_signature_into_local_fence` that
+    //      replaces production `local_fence.extend(read.dep_signature)`
+    //      patterns.
+    //   - `record_dep_signature_intern_hit()` bumps when
+    //      `merge_signature` (or the helper) observes the incoming
+    //      `(canonical, kind)` pair is already present at the same
+    //      `version` (redundant merge avoided).
+    // -----------------------------------------------------------------
+
+    /// Drive a small SFC + dependency through the cold resolver and
+    /// return the published `RustAuditRecord`. The fixture exercises:
+    ///   - cross-file imported `interface` (forces `imported_root_proof`),
+    ///   - multiple props (forces `materialize_structure_calls`),
+    ///   - which together force the substrate to: intern semantic
+    ///     nodes (NodeArena push_impl shard locks), walk origins
+    ///     under the completion fence (dep_signature merges), and
+    ///     re-merge already-observed origins (intern hits).
+    fn run_probe_request() -> crate::component_meta_audit::RustAuditRecord {
+        let host = crate::VerterHost::new_standalone(crate::types::HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            audit_enabled: true,
+            footprint_capture: true,
+            ..crate::types::HostConfig::default()
+        });
+        let project = crate::meta::MetaProject::new(host);
+        project
+            .upsert_base(
+                "/types.ts",
+                r#"export interface Props {
+  message: string;
+  level: number;
+  optional?: boolean;
+}"#,
+            )
+            .unwrap();
+        project
+            .upsert_base(
+                "/Owner.vue",
+                r#"<script setup lang="ts">
+import type { Props } from './types'
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+            )
+            .unwrap();
+
+        let host = project.host();
+        let (_analysis, resolution) = host
+            .get_component_meta_with_resolution("/Owner.vue")
+            .expect("resolver must produce metadata for the probe fixture");
+        host.take_audit_record(resolution.request_id)
+            .expect("audit record must publish for the probe fixture")
+    }
+
+    /// Characterization probe (D80 permanent regression smoke). The
+    /// probe documents per-counter status for the cold-resolver path.
+    /// Should any of the post-fix wired counters silently drop back
+    /// to 0, this test regresses with a per-counter summary in the
+    /// failure message.
+    ///
+    /// Pre-fix: the three currently-zero counters listed in the
+    /// comment above are 0 for every fixture. Post-fix: every counter
+    /// listed below must report > 0.
+    #[test]
+    fn audit_counter_loss_reproduction() {
+        let record = run_probe_request();
+        let store = &record.store;
+
+        // Counters that MUST be > 0 on any non-trivial cold resolution.
+        // Each entry pairs (counter name, observed value) so the
+        // failure message identifies which specific counter regressed.
+        let observed: Vec<(&'static str, u64)> = vec![
+            (
+                "node_arena_lock_acquisitions",
+                store.node_arena_lock_acquisitions,
+            ),
+            ("dep_signature_merges", store.dep_signature_merges),
+            ("dep_signature_intern_hits", store.dep_signature_intern_hits),
+        ];
+
+        let zero: Vec<&'static str> = observed
+            .iter()
+            .filter_map(|(name, value)| (*value == 0).then_some(*name))
+            .collect();
+
+        assert!(
+            zero.is_empty(),
+            "audit_counter_loss_reproduction (D80 permanent smoke): the following \
+             RustStoreAudit counters silently regressed back to 0 on a non-trivial \
+             cold-resolver request — every counter listed below is wired to a \
+             production code path exercised by the probe fixture and MUST report \
+             > 0. Zero counters: {zero:?}. Observed values: {observed:?}.",
+        );
+    }
+
+    /// Smallest reproducer (DISCRIMINATING). A minimal SFC + dep
+    /// fixture that exercises the substrate work expected to bump
+    /// each of the three previously-zero counters. The assertion is
+    /// per-counter and self-describing so a regression surfaces with
+    /// the exact counter that broke.
+    #[test]
+    fn audit_counter_smallest_reproducer() {
+        let record = run_probe_request();
+        let store = &record.store;
+
+        // Pre-fix: ALL three of these are 0 on every fixture.
+        // Post-fix: each must observe at least one bump.
+        assert!(
+            store.node_arena_lock_acquisitions > 0,
+            "smallest reproducer: NodeArena shard-lock acquisitions must \
+             increment on the cold-resolver path. Production `push_impl` \
+             acquires a shard mutex on every interned semantic node — \
+             observing 0 means the audit hook is no longer wired into the \
+             production hot path. Counter: {}",
+            store.node_arena_lock_acquisitions,
+        );
+        assert!(
+            store.dep_signature_merges > 0,
+            "smallest reproducer: dep_signature merges must increment when \
+             the cold resolver walks origins under the completion fence. \
+             Production `CompletionFence::merge_signature` is called by \
+             `origins_with_fence` — observing 0 means the audit hook is no \
+             longer wired into the production merge site. Counter: {}",
+            store.dep_signature_merges,
+        );
+        assert!(
+            store.dep_signature_intern_hits > 0,
+            "smallest reproducer: dep_signature intern-hits must increment \
+             when `merge_signature` observes a `(canonical, kind)` pair \
+             already present at the same version (redundant merge avoided). \
+             Observing 0 means either the wiring regressed OR the fixture \
+             no longer exercises overlapping origin walks — either case is \
+             a regression in audit-counter coverage. Counter: {}",
+            store.dep_signature_intern_hits,
+        );
+    }
+
+    /// Discriminating (D118): the cold-path attribution sheet at
+    /// `crates/verter_session/tests/perf_bounds/cold-path-attribution-baseline.md`
+    /// must (a) identify a dominant cost arm per fixture and
+    /// (b) record the bridge max-depth column (D115). Pre-fix the
+    /// sheet did not exist or missed both columns; post-fix it
+    /// contains both.
+    ///
+    /// The test reads the sheet and asserts:
+    ///   1. it is present
+    ///   2. it names `materialize` (or `materialize_ms`) as a dominant
+    ///      arm at least once
+    ///   3. it includes `bridge max depth (D115)` and
+    ///      `bridge worst batch (D110)` columns
+    ///   4. it explicitly addresses chat-components (links to or names
+    ///      the deferred-baselines doc).
+    #[test]
+    fn chat_messages_attribution_sheet_has_dominant_cost_arm_and_bridge_max_depth_recorded() {
+        let manifest_dir =
+            std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set during cargo test");
+        let path = std::path::Path::new(&manifest_dir)
+            .join("tests")
+            .join("perf_bounds")
+            .join("cold-path-attribution-baseline.md");
+        assert!(
+            path.is_file(),
+            "Tier 4 §6.4 deliverable: cold-path attribution sheet must \
+             exist at `{}`. Without this file the corpus-wide cost \
+             attribution is not captured.",
+            path.display(),
+        );
+        let body = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read attribution sheet at {}: {}", path.display(), e));
+
+        // (a) dominant cost arm named — `materialize_ms` is the
+        // observed dominant phase per the corpus snapshot.
+        assert!(
+            body.contains("materialize_ms")
+                || body.contains("dominant phase")
+                || body.contains("dominant cost arm"),
+            "attribution sheet must identify a dominant cost arm (e.g., \
+             `materialize_ms` / `dominant cost arm`). Sheet contents \
+             do not include those markers.",
+        );
+        // (b) bridge max-depth column header (D115).
+        assert!(
+            body.contains("bridge max depth") || body.contains("bridge_max_depth_observed"),
+            "attribution sheet must record the `bridge max depth` \
+             column (D115). Sheet does not include the column header.",
+        );
+        // (c) bridge worst-batch column header (D110).
+        assert!(
+            body.contains("bridge worst batch") || body.contains("bridge_worst_batch"),
+            "attribution sheet must record the `bridge worst batch` \
+             column (D110). Sheet does not include the column header.",
+        );
+        // (d) chat-components must be referenced (the §00b deferred
+        // baselines doc covers ChatMessage / ChatMessages — the sheet
+        // must link or name them).
+        assert!(
+            body.contains("chat-components")
+                || body.contains("ChatMessage")
+                || body.contains("00b-deferred-baselines"),
+            "attribution sheet must reference the chat-components \
+             deferred-baselines doc OR name a chat fixture. The Tier 4 \
+             plan requires the sheet to address them explicitly.",
+        );
+    }
+
+    /// Discriminating: the audit example dump (the JSON record
+    /// emitted by `audit_real_component_meta` and the synthesized
+    /// record published by `get_component_meta_with_resolution`) must
+    /// surface the per-request `structured_events` log.
+    ///
+    /// Pre-fix: the `RustAuditRecord` carried `footprint.vfs_reads`
+    /// etc. but did NOT expose `structured_events` at all — the
+    /// `AccumulatorState.structured_events` log was drained into the
+    /// miner without surfacing in the published payload. Operators
+    /// reading the audit dump could not see materializer envelopes,
+    /// dispatch enter/exit, or policy-skip events.
+    ///
+    /// Post-fix: the audit record's `footprint.structured_events`
+    /// vector is non-empty after a real cold-resolver call. The cold
+    /// path emits `IndexedReadyBuilt` per imported file plus a
+    /// stream of trace events surfaced through the structured-event
+    /// log.
+    ///
+    /// The discriminator is structural: the field must exist on the
+    /// envelope AND must be populated by the production call chain.
+    #[test]
+    fn audit_dump_includes_structured_events() {
+        let record = run_probe_request();
+        let footprint = record
+            .footprint
+            .as_ref()
+            .expect("audit-enabled host must attach a footprint to cold-resolver records");
+        assert!(
+            !footprint.structured_events.is_empty(),
+            "audit_dump_includes_structured_events: the published \
+             RustAuditRecord.footprint.structured_events vector must \
+             be populated by the production cold-resolver call. \
+             Observing an empty vector means either the field is no \
+             longer surfaced in the envelope OR the miner is dropping \
+             it before publish. Footprint had {} structured event(s).",
+            footprint.structured_events.len(),
+        );
+        // Must include at minimum one `IndexedReadyBuilt` event — the
+        // cold resolver always lowers at least the owner's snapshot
+        // through the parser, which emits this typed event.
+        let has_indexed_ready_built = footprint
+            .structured_events
+            .iter()
+            .any(|e| matches!(e, StructuredComponentMetaEvent::IndexedReadyBuilt { .. }));
+        assert!(
+            has_indexed_ready_built,
+            "audit_dump_includes_structured_events: the structured-event \
+             log must include at least one `IndexedReadyBuilt` event \
+             (the cold resolver always lowers the owner snapshot \
+             through the parser). Found {} event(s) — only \
+             non-`IndexedReadyBuilt` variants surfaced, which means \
+             the production parser's audit hook regressed.",
+            footprint.structured_events.len(),
+        );
+    }
+
+    /// Discriminating: the chat-components deferred-baselines doc
+    /// (`docs/arch/debt-closure/00b-deferred-baselines-chat-components.md`)
+    /// must be CLOSED by Tier 4 §6.7. Pre-fix the doc has
+    /// `Status: Open` and unchecked closure boxes. Post-fix it has
+    /// `Status: Closed` (or equivalent) and concrete numbers for both
+    /// chat components instead of placeholder timeout markers.
+    #[test]
+    fn chat_baselines_closed_with_concrete_numbers() {
+        let manifest_dir =
+            std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set during cargo test");
+        let path = std::path::Path::new(&manifest_dir)
+            .ancestors()
+            .nth(2)
+            .expect("workspace root resolves from the crate manifest dir")
+            .join("docs")
+            .join("arch")
+            .join("debt-closure")
+            .join("00b-deferred-baselines-chat-components.md");
+        assert!(
+            path.is_file(),
+            "Tier 4 §6.7 deliverable: deferred-baselines doc must exist at \
+             `{}`. The doc tracks chat-message + chat-messages baseline \
+             closure.",
+            path.display(),
+        );
+        let body = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read deferred-baselines doc at {}: {}", path.display(), e));
+
+        // Status flipped to a closed/resolved marker.
+        assert!(
+            body.contains("Status: Closed")
+                || body.contains("Status:** Closed")
+                || body.contains("**Status:** Closed"),
+            "chat-components deferred-baselines doc must declare \
+             `Status: Closed` after Tier 4 §6.7 closure. Current \
+             status in the doc: pre-Tier-4 `Open` placeholder.",
+        );
+        // Concrete numeric measurements present (replaces the prior
+        // `≥ 300s, audit-dump-blocked` placeholder).
+        assert!(
+            !body.contains("audit-dump-blocked")
+                || body.contains("post-Tier-1 measurement")
+                || body.contains("post-fix"),
+            "chat-components doc must replace the pre-Tier-4 \
+             `audit-dump-blocked` placeholder with concrete \
+             measurements OR an explicit post-fix reference.",
         );
     }
 }

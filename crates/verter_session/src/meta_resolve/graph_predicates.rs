@@ -789,7 +789,10 @@ pub(crate) fn ref_root_reaches_transitive_cycle_node(
     // the caller's local_fence and return without dispatching any
     // Instantiate query.
     if let Some(read) = crate::component_meta_caches::ref_cycle_db_peek(db, root_identity, ctx) {
-        local_fence.extend(read.dep_signature.iter().cloned());
+        crate::component_meta_audit::merge_dep_signature_into_local_fence(
+            local_fence,
+            &read.dep_signature,
+        );
         return read.value;
     }
 
@@ -808,7 +811,10 @@ pub(crate) fn ref_root_reaches_transitive_cycle_node(
 
     match read_opt {
         Some(read) => {
-            local_fence.extend(read.dep_signature.iter().cloned());
+            crate::component_meta_audit::merge_dep_signature_into_local_fence(
+                local_fence,
+                &read.dep_signature,
+            );
             read.value
         }
         None => {
@@ -889,7 +895,10 @@ pub(crate) fn bfs_compute_inner(
             body_mode: ProjectionMode::Skeleton,
         };
         let read = dispatch.execute_read(key);
-        local_fence.extend(read.dep_signature.iter().cloned());
+        crate::component_meta_audit::merge_dep_signature_into_local_fence(
+            local_fence,
+            &read.dep_signature,
+        );
         let body_id = match read.value {
             QueryResult::Value(id) => id,
             QueryResult::Recursive(_) | QueryResult::Error(_) => continue,

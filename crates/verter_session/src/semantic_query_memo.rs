@@ -198,6 +198,12 @@ impl NodeArena {
             // Fast path: shard-hit. Shard Mutex is short-lived; parallel
             // across shards.
             {
+                // Audit: record every shard-mutex acquisition. Production
+                // `push_impl` always lands on this hot path when interning
+                // a non-VueMacro semantic node. The hook is a single
+                // Relaxed `fetch_add` when a request context is installed;
+                // zero-op otherwise.
+                crate::host_manage::record_node_arena_lock_acquisition();
                 let shard = self.shards[shard_idx].lock();
                 if let Some(&existing) = shard.index.get(&key) {
                     (existing, false, 0u64)
@@ -206,6 +212,7 @@ impl NodeArena {
                     // Miss: re-acquire the shard (to serialize concurrent
                     // misses for the same key on this shard) and then
                     // briefly acquire inner.write() to allocate.
+                    crate::host_manage::record_node_arena_lock_acquisition();
                     let mut shard = self.shards[shard_idx].lock();
                     if let Some(&existing) = shard.index.get(&key) {
                         // Another thread beat us to it.

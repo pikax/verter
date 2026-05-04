@@ -644,7 +644,21 @@ graph_completeness: GraphCompletenessReport,
 /**
  * Canonicalized derivation subgraph (`NodeRecord`s + edges).
  */
-derivation_subgraph: DerivationSubgraph, };
+derivation_subgraph: DerivationSubgraph, 
+/**
+ * Verbatim ordered log of every structured event the request
+ * emitted. Drained from the per-request accumulator's
+ * `structured_events` lane and surfaced verbatim so audit
+ * consumers can inspect the materializer envelopes
+ * (`MaterializeStructureEnter` / `Exit`),
+ * dispatch enter/exit markers, policy-skip events, cycle-detected
+ * events, and request-start/end markers without having to
+ * recompute them from the derivation subgraph.
+ *
+ * Serde-default for back-compat with audit payloads written
+ * before this field landed.
+ */
+structured_events: Array<StructuredComponentMetaEvent>, };
 
 /**
  * Solver-level counters from `SolverResult.steps`.

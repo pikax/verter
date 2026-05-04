@@ -2108,7 +2108,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     let read = self.execute_read(SemanticQueryKey::NormalizeIntersection {
                         members: Arc::clone(type_args),
                     });
-                    local_fence.extend(read.dep_signature.iter().cloned());
+                    crate::component_meta_audit::merge_dep_signature_into_local_fence(
+                        &mut local_fence,
+                        &read.dep_signature,
+                    );
                     read.value
                 }
             }
