@@ -4,8 +4,8 @@
   "step": null,
   "status": "success",
   "base_commit": "f5a1d10e",
-  "head_commit": "<filled by post-marker-commit fix>",
-  "marker_commit": "<filled by post-marker-commit fix>",
+  "head_commit": "88e74956",
+  "marker_commit": "88e74956",
   "test_results": {
     "workspace": {
       "test_scope": "cargo test --workspace --tests -j 4",

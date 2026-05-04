@@ -3,7 +3,7 @@
 ## Branch + final SHA
 
 - Branch: `w6-tier-4-audit-attribution` (off `f5a1d10e`)
-- Final SHA: pending commit
+- Final SHA: `88e74956`
 
 ## Three currently-zero counters now reporting > 0
 
