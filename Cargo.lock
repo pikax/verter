@@ -3988,6 +3988,7 @@ dependencies = [
  "verter_workspace",
  "walkdir",
  "web-time",
+ "windows-sys",
  "xxhash-rust",
 ]
 
