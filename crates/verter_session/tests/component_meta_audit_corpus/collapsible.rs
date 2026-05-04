@@ -15,7 +15,7 @@ fn corpus_audit_collapsible_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/Collapsible.vue");
     let result = AuditedRequest::builder()
         .files([("/Collapsible.vue", src)])
-        .resolve("/Collapsible.vue");
+        .resolve_component_meta("/Collapsible.vue");
 
     match result {
         Ok((_, _, record)) => {

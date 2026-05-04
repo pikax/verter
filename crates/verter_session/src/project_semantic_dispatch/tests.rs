@@ -5558,7 +5558,7 @@ defineProps<Pick<Source, 'alpha' | 'beta'>>();
 
     let (analysis, _resolution, _record) = AuditedRequest::builder()
         .attach_to(host)
-        .resolve("/c.vue")
+        .resolve_component_meta("/c.vue")
         .expect("Class A invisibility: mapped_pick_two_keys resolution must succeed");
 
     let mut prop_names: Vec<String> = analysis.props.iter().map(|p| p.name.clone()).collect();

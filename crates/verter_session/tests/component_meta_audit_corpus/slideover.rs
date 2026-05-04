@@ -15,7 +15,7 @@ fn corpus_audit_slideover_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/Slideover.vue");
     let result = AuditedRequest::builder()
         .files([("/Slideover.vue", src)])
-        .resolve("/Slideover.vue");
+        .resolve_component_meta("/Slideover.vue");
 
     match result {
         Ok((_, _, record)) => {

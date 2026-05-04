@@ -15,7 +15,7 @@ fn corpus_audit_content_content_navigation_produces_audit_record_or_documents_sk
     let src = include_str!("fixtures/content/ContentNavigation.vue");
     let result = AuditedRequest::builder()
         .files([("/content/ContentNavigation.vue", src)])
-        .resolve("/content/ContentNavigation.vue");
+        .resolve_component_meta("/content/ContentNavigation.vue");
 
     match result {
         Ok((_, _, record)) => {

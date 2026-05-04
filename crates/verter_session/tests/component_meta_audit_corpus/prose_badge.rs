@@ -15,7 +15,7 @@ fn corpus_audit_prose_badge_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/prose/Badge.vue");
     let result = AuditedRequest::builder()
         .files([("/prose/Badge.vue", src)])
-        .resolve("/prose/Badge.vue");
+        .resolve_component_meta("/prose/Badge.vue");
 
     match result {
         Ok((_, _, record)) => {

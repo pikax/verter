@@ -15,7 +15,7 @@ fn corpus_audit_breadcrumb_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/Breadcrumb.vue");
     let result = AuditedRequest::builder()
         .files([("/Breadcrumb.vue", src)])
-        .resolve("/Breadcrumb.vue");
+        .resolve_component_meta("/Breadcrumb.vue");
 
     match result {
         Ok((_, _, record)) => {

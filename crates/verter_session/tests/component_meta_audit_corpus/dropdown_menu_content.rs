@@ -15,7 +15,7 @@ fn corpus_audit_dropdown_menu_content_produces_audit_record_or_documents_skip() 
     let src = include_str!("fixtures/DropdownMenuContent.vue");
     let result = AuditedRequest::builder()
         .files([("/DropdownMenuContent.vue", src)])
-        .resolve("/DropdownMenuContent.vue");
+        .resolve_component_meta("/DropdownMenuContent.vue");
 
     match result {
         Ok((_, _, record)) => {

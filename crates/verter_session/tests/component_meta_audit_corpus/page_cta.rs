@@ -15,7 +15,7 @@ fn corpus_audit_page_cta_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/PageCTA.vue");
     let result = AuditedRequest::builder()
         .files([("/PageCTA.vue", src)])
-        .resolve("/PageCTA.vue");
+        .resolve_component_meta("/PageCTA.vue");
 
     match result {
         Ok((_, _, record)) => {

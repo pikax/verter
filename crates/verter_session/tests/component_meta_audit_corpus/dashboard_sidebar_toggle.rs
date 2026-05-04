@@ -15,7 +15,7 @@ fn corpus_audit_dashboard_sidebar_toggle_produces_audit_record_or_documents_skip
     let src = include_str!("fixtures/DashboardSidebarToggle.vue");
     let result = AuditedRequest::builder()
         .files([("/DashboardSidebarToggle.vue", src)])
-        .resolve("/DashboardSidebarToggle.vue");
+        .resolve_component_meta("/DashboardSidebarToggle.vue");
 
     match result {
         Ok((_, _, record)) => {

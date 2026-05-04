@@ -15,7 +15,7 @@ fn corpus_audit_pricing_table_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/PricingTable.vue");
     let result = AuditedRequest::builder()
         .files([("/PricingTable.vue", src)])
-        .resolve("/PricingTable.vue");
+        .resolve_component_meta("/PricingTable.vue");
 
     match result {
         Ok((_, _, record)) => {

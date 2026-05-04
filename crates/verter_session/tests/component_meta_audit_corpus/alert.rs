@@ -15,7 +15,7 @@ fn corpus_audit_alert_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/Alert.vue");
     let result = AuditedRequest::builder()
         .files([("/Alert.vue", src)])
-        .resolve("/Alert.vue");
+        .resolve_component_meta("/Alert.vue");
 
     match result {
         Ok((_, _, record)) => {

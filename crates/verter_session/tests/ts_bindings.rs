@@ -66,6 +66,17 @@ fn audit_ts_bindings_are_in_sync() {
     // during workspace-wide `cargo test`; that race makes the
     // on-disk file unstable mid-suite, so the test compares
     // against the git-tracked baseline rather than the live file.
+    //
+    // Known limitation: when the bindings file is *introduced*
+    // alongside the change under review (the `git show HEAD:<rel>`
+    // baseline IS the version under review, not a prior pinned
+    // version), this test can only detect drift between the
+    // committed file and a fresh ts-rs regen — it cannot validate
+    // that the *initial* committed file came from a clean ts-rs
+    // regen. The protection covers ongoing drift after landing,
+    // not the inception commit itself. A reviewer must therefore
+    // verify the inception commit's bindings file was regenerated
+    // from the canonical ts-rs derives.
     let root = workspace_root();
     let committed_path = root.join("packages/types/audit.generated.ts");
     // Capture the git-committed baseline BEFORE refreshing.

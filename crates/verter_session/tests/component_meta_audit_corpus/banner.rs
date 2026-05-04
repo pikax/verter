@@ -15,7 +15,7 @@ fn corpus_audit_banner_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/Banner.vue");
     let result = AuditedRequest::builder()
         .files([("/Banner.vue", src)])
-        .resolve("/Banner.vue");
+        .resolve_component_meta("/Banner.vue");
 
     match result {
         Ok((_, _, record)) => {

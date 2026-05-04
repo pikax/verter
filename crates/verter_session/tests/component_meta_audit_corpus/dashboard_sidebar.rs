@@ -15,7 +15,7 @@ fn corpus_audit_dashboard_sidebar_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/DashboardSidebar.vue");
     let result = AuditedRequest::builder()
         .files([("/DashboardSidebar.vue", src)])
-        .resolve("/DashboardSidebar.vue");
+        .resolve_component_meta("/DashboardSidebar.vue");
 
     match result {
         Ok((_, _, record)) => {

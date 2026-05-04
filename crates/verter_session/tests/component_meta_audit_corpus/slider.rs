@@ -15,7 +15,7 @@ fn corpus_audit_slider_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/Slider.vue");
     let result = AuditedRequest::builder()
         .files([("/Slider.vue", src)])
-        .resolve("/Slider.vue");
+        .resolve_component_meta("/Slider.vue");
 
     match result {
         Ok((_, _, record)) => {

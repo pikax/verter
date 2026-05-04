@@ -15,7 +15,7 @@ fn corpus_audit_prose_code_collapse_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/prose/CodeCollapse.vue");
     let result = AuditedRequest::builder()
         .files([("/prose/CodeCollapse.vue", src)])
-        .resolve("/prose/CodeCollapse.vue");
+        .resolve_component_meta("/prose/CodeCollapse.vue");
 
     match result {
         Ok((_, _, record)) => {

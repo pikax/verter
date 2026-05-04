@@ -15,7 +15,7 @@ fn corpus_audit_timeline_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/Timeline.vue");
     let result = AuditedRequest::builder()
         .files([("/Timeline.vue", src)])
-        .resolve("/Timeline.vue");
+        .resolve_component_meta("/Timeline.vue");
 
     match result {
         Ok((_, _, record)) => {

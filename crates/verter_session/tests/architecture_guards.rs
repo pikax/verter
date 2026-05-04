@@ -3904,6 +3904,24 @@ mod foundations_guards {
                 return true;
             }
         }
+        // `Slice <digit>` / `slice <digit>` — project-management
+        // vocabulary referring to the Wave/Slice plan vocabulary.
+        // ASCII digit immediately after the separator distinguishes
+        // these from legitimate prose (`a slice of bytes`, etc.).
+        for prefix in ["Slice ", "Slice-", "slice ", "slice-"] {
+            let mut search_from = 0usize;
+            while let Some(rel) = line[search_from..].find(prefix) {
+                let abs = search_from + rel;
+                let after = abs + prefix.len();
+                if after < line.len() {
+                    let next = line.as_bytes()[after];
+                    if next.is_ascii_digit() {
+                        return true;
+                    }
+                }
+                search_from = abs + prefix.len();
+            }
+        }
         // `deleted in 5[a-z]` (lowercase `5` + single ASCII letter).
         let lower = line.to_ascii_lowercase();
         if let Some(idx) = lower.find("deleted in 5") {
@@ -6104,45 +6122,72 @@ fn record_inflight_aborted_retry(stats: &AtomicSemanticGraphStats) {
 // ----------------------------------------------------------------
 
 /// `verter_audit` MUST stay a leaf crate: its `Cargo.toml` lists
-/// only `verter_span` as the verter_*-prefixed dependency.
+/// only `verter_span` as the verter_*-prefixed dependency in any
+/// dependency table (regular, dev, build, target-keyed, or
+/// `workspace.dependencies`).
 #[test]
 fn verter_audit_no_upward_deps() {
-    let toml = read_workspace_file("crates/verter_audit/Cargo.toml");
+    let toml_src = read_workspace_file("crates/verter_audit/Cargo.toml");
+    let parsed: toml::Value =
+        toml::from_str(&toml_src).expect("verter_audit/Cargo.toml must parse as TOML");
 
-    let header = "[dependencies]";
-    let start = toml
-        .find(header)
-        .expect("verter_audit/Cargo.toml must declare a [dependencies] section");
-    let after = &toml[start + header.len()..];
-    let next_header = after
-        .find("\n[")
-        .map(|idx| start + header.len() + idx)
-        .unwrap_or(toml.len());
-    let section = &toml[start + header.len()..next_header];
+    // Walk every dependency table that Cargo recognises:
+    // `dependencies`, `dev-dependencies`, `build-dependencies`,
+    // and target-keyed variants under `target.<cfg>.*` and
+    // `workspace.dependencies`. Reject any `verter_*` entry
+    // (besides `verter_span`) anywhere in that namespace.
+    fn names_in_table(table: &toml::Value) -> impl Iterator<Item = &str> {
+        table
+            .as_table()
+            .into_iter()
+            .flat_map(|t| t.keys().map(String::as_str))
+    }
 
-    let mut violations = Vec::new();
-    for line in section.lines() {
-        let trimmed = line.trim_start();
-        if !trimmed.starts_with("verter_") {
-            continue;
+    let mut violations: Vec<String> = Vec::new();
+    let dep_table_names = ["dependencies", "dev-dependencies", "build-dependencies"];
+
+    // Top-level dependency tables.
+    for table_name in dep_table_names {
+        if let Some(table) = parsed.get(table_name) {
+            for name in names_in_table(table) {
+                if name.starts_with("verter_") && name != "verter_span" {
+                    violations.push(format!("[{table_name}]: {name}"));
+                }
+            }
         }
-        let dep_name = trimmed
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .trim_end_matches('=')
-            .trim();
-        if dep_name == "verter_span" {
-            continue;
+    }
+
+    // `target.<cfg>.{dependencies,dev-dependencies,build-dependencies}`.
+    if let Some(targets) = parsed.get("target").and_then(|v| v.as_table()) {
+        for (cfg, body) in targets {
+            for table_name in dep_table_names {
+                if let Some(table) = body.get(table_name) {
+                    for name in names_in_table(table) {
+                        if name.starts_with("verter_") && name != "verter_span" {
+                            violations.push(format!("[target.{cfg}.{table_name}]: {name}"));
+                        }
+                    }
+                }
+            }
         }
-        violations.push(line.trim().to_string());
+    }
+
+    // `workspace.dependencies`.
+    if let Some(ws) = parsed.get("workspace") {
+        if let Some(table) = ws.get("dependencies") {
+            for name in names_in_table(table) {
+                if name.starts_with("verter_") && name != "verter_span" {
+                    violations.push(format!("[workspace.dependencies]: {name}"));
+                }
+            }
+        }
     }
 
     assert!(
         violations.is_empty(),
         "verter_audit_no_upward_deps: `verter_audit/Cargo.toml` declares \
-         non-leaf verter_*-prefixed dependencies in `[dependencies]`. The substrate \
-         must depend ONLY on `verter_span` plus ecosystem crates. Offending lines:\n  {}",
+         non-leaf verter_*-prefixed dependencies. The substrate must depend ONLY on \
+         `verter_span` plus ecosystem crates. Offending entries:\n  {}",
         violations.join("\n  ")
     );
 }
@@ -6163,25 +6208,61 @@ fn audit_substrate_isolation() {
             )
         });
         for (line_no, line) in src.lines().enumerate() {
+            // Skip comments and doc-comments — they discuss
+            // `verter_*` crates as prose without importing them.
             let trimmed = line.trim_start();
-            if !trimmed.starts_with("use verter_") {
+            if trimmed.starts_with("//") {
                 continue;
             }
-            if trimmed.starts_with("use verter_span") {
-                continue;
+            // Reject any non-`verter_span` reference to a `verter_*`
+            // crate on a non-comment line. The patterns we catch:
+            // `use verter_<other>`, `pub use verter_<other>`,
+            // `extern crate verter_<other>`, `verter_<other>::<...>`,
+            // and bare references in attribute paths. Substring scan
+            // is sufficient because the substrate's imports list is
+            // tiny and we exclude `verter_span` and self-references
+            // (`verter_audit` / `crate::`) explicitly.
+            let mut search_from = 0usize;
+            while let Some(rel) = line[search_from..].find("verter_") {
+                let abs = search_from + rel;
+                let after = abs + "verter_".len();
+                // Capture the trailing identifier characters.
+                let bytes = line.as_bytes();
+                let mut end = after;
+                while end < bytes.len() {
+                    let c = bytes[end];
+                    let alnum = c.is_ascii_alphanumeric() || c == b'_';
+                    if !alnum {
+                        break;
+                    }
+                    end += 1;
+                }
+                if end == after {
+                    search_from = after;
+                    continue;
+                }
+                let crate_name = &line[abs..end];
+                search_from = end;
+                if crate_name == "verter_span" {
+                    continue;
+                }
+                if crate_name == "verter_audit" {
+                    continue;
+                }
+                let rel_path = path
+                    .strip_prefix(&root)
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                violations.push(format!("{rel_path}:{}: {}", line_no + 1, line.trim()));
+                break;
             }
-            let rel = path
-                .strip_prefix(&root)
-                .unwrap_or(path)
-                .to_string_lossy()
-                .replace('\\', "/");
-            violations.push(format!("{rel}:{}: {}", line_no + 1, line.trim()));
         }
     });
     assert!(
         violations.is_empty(),
         "audit_substrate_isolation: source files under \
-         `crates/verter_audit/src/` import non-leaf `verter_*` crates. \
+         `crates/verter_audit/src/` reference non-leaf `verter_*` crates. \
          The substrate must use only `verter_span`, `std`, and external \
          crates. Offending lines:\n  {}",
         violations.join("\n  ")
@@ -6304,14 +6385,32 @@ fn request_kind_payload_parity() {
 #[test]
 fn audit_request_registration_lifecycle() {
     use std::path::PathBuf;
+    use syn::visit::Visit;
     let root = workspace_root();
 
-    let methods = [
+    let allowed_file = "crates/verter_session/src/host_audit_runtime.rs";
+    let methods: &[&str] = &[
         "register_active_request",
         "finalize_active_request",
         "drop_active_request",
     ];
-    let allowed_file = "crates/verter_session/src/host_audit_runtime.rs";
+
+    /// Visitor that collects every method-call expression matching
+    /// the lifecycle vocabulary.
+    struct LifecycleCallCollector<'m> {
+        methods: &'m [&'m str],
+        hits: Vec<String>,
+    }
+
+    impl<'ast, 'm> Visit<'ast> for LifecycleCallCollector<'m> {
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            let name = call.method.to_string();
+            if self.methods.contains(&name.as_str()) {
+                self.hits.push(name);
+            }
+            syn::visit::visit_expr_method_call(self, call);
+        }
+    }
 
     let mut violations: Vec<String> = Vec::new();
     let crates_dir: PathBuf = root.join("crates");
@@ -6328,13 +6427,28 @@ fn audit_request_registration_lifecycle() {
         let src = std::fs::read_to_string(path).unwrap_or_else(|e| {
             panic!("audit_request_registration_lifecycle: cannot read `{rel}`: {e}")
         });
-        for (line_no, line) in src.lines().enumerate() {
-            for method in &methods {
-                let pattern = format!(".{method}(");
-                if line.contains(&pattern) {
-                    violations.push(format!("{rel}:{}: {}", line_no + 1, line.trim()));
+        let parsed = match syn::parse_file(&src) {
+            Ok(p) => p,
+            // Files we cannot parse (e.g. macro-generated bodies)
+            // are skipped — `syn::parse_file` rejects very few real
+            // crate files. The earlier substring scan acted as the
+            // safety net here; we keep the hard panic for unparseable
+            // files outside of `tests/` because that would indicate a
+            // code-corruption signal worth surfacing.
+            Err(e) => {
+                if rel.starts_with("crates/") && rel.contains("/src/") && !rel.contains("/tests/") {
+                    panic!("audit_request_registration_lifecycle: cannot parse `{rel}`: {e}");
                 }
+                return;
             }
+        };
+        let mut collector = LifecycleCallCollector {
+            methods,
+            hits: Vec::new(),
+        };
+        collector.visit_file(&parsed);
+        for hit in collector.hits {
+            violations.push(format!("{rel}: {hit}"));
         }
     });
 

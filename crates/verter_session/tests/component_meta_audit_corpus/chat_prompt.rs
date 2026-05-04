@@ -15,7 +15,7 @@ fn corpus_audit_chat_prompt_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/ChatPrompt.vue");
     let result = AuditedRequest::builder()
         .files([("/ChatPrompt.vue", src)])
-        .resolve("/ChatPrompt.vue");
+        .resolve_component_meta("/ChatPrompt.vue");
 
     match result {
         Ok((_, _, record)) => {

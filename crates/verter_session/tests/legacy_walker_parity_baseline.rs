@@ -34,7 +34,10 @@ fn resolve_with_files(
         .iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
-    match AuditedRequest::builder().files(owned).resolve(canonical) {
+    match AuditedRequest::builder()
+        .files(owned)
+        .resolve_component_meta(canonical)
+    {
         Ok((_analysis, resolution, _record)) => Some(resolution),
         Err(AuditedRequestError::ResolutionFailed) => None,
         Err(other) => panic!("unexpected audited-request error: {other:?}"),

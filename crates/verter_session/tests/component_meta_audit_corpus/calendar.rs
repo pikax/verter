@@ -15,7 +15,7 @@ fn corpus_audit_calendar_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/Calendar.vue");
     let result = AuditedRequest::builder()
         .files([("/Calendar.vue", src)])
-        .resolve("/Calendar.vue");
+        .resolve_component_meta("/Calendar.vue");
 
     match result {
         Ok((_, _, record)) => {

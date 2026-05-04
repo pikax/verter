@@ -15,7 +15,7 @@ fn corpus_audit_locale_locale_select_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/locale/LocaleSelect.vue");
     let result = AuditedRequest::builder()
         .files([("/locale/LocaleSelect.vue", src)])
-        .resolve("/locale/LocaleSelect.vue");
+        .resolve_component_meta("/locale/LocaleSelect.vue");
 
     match result {
         Ok((_, _, record)) => {

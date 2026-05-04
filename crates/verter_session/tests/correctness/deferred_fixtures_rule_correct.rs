@@ -145,7 +145,7 @@ fn run_resolver_under_audit_and_serialize(fixture_id: &str) -> SnapshotView {
     let host = build_host(fixture.files);
     let req = verter_session::audited_request::AuditedRequest::builder()
         .attach_to(host)
-        .resolve(fixture.target);
+        .resolve_component_meta(fixture.target);
     let analysis = match req {
         Ok((analysis, _resolution, _record)) => analysis,
         Err(e) => panic!(

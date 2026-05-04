@@ -15,7 +15,7 @@ fn corpus_audit_prose_blockquote_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/prose/Blockquote.vue");
     let result = AuditedRequest::builder()
         .files([("/prose/Blockquote.vue", src)])
-        .resolve("/prose/Blockquote.vue");
+        .resolve_component_meta("/prose/Blockquote.vue");
 
     match result {
         Ok((_, _, record)) => {

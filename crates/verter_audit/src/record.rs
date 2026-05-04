@@ -272,8 +272,9 @@ pub enum RequestKindPayload {
     /// Producer has not populated a typed payload yet. Generic
     /// envelope fields still apply.
     None,
-    /// Component-meta payload (the original `RustStoreAudit`'s
-    /// materializer-specific fields, plus solver counters).
+    /// Component-meta payload — materializer-specific store counters
+    /// plus solver counters that apply only when the
+    /// [`RequestKind`] is `ComponentMeta`.
     ComponentMeta(ComponentMetaPayload),
     /// Type-resolution payload (per-query mode counters).
     TypeResolution(TypeResolutionPayload),

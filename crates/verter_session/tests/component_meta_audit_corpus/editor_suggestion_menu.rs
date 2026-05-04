@@ -15,7 +15,7 @@ fn corpus_audit_editor_suggestion_menu_produces_audit_record_or_documents_skip()
     let src = include_str!("fixtures/EditorSuggestionMenu.vue");
     let result = AuditedRequest::builder()
         .files([("/EditorSuggestionMenu.vue", src)])
-        .resolve("/EditorSuggestionMenu.vue");
+        .resolve_component_meta("/EditorSuggestionMenu.vue");
 
     match result {
         Ok((_, _, record)) => {

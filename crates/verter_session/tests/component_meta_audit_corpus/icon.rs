@@ -15,7 +15,7 @@ fn corpus_audit_icon_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/Icon.vue");
     let result = AuditedRequest::builder()
         .files([("/Icon.vue", src)])
-        .resolve("/Icon.vue");
+        .resolve_component_meta("/Icon.vue");
 
     match result {
         Ok((_, _, record)) => {

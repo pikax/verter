@@ -15,7 +15,7 @@ fn corpus_audit_changelog_version_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/ChangelogVersion.vue");
     let result = AuditedRequest::builder()
         .files([("/ChangelogVersion.vue", src)])
-        .resolve("/ChangelogVersion.vue");
+        .resolve_component_meta("/ChangelogVersion.vue");
 
     match result {
         Ok((_, _, record)) => {

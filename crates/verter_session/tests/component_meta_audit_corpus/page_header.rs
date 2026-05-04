@@ -15,7 +15,7 @@ fn corpus_audit_page_header_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/PageHeader.vue");
     let result = AuditedRequest::builder()
         .files([("/PageHeader.vue", src)])
-        .resolve("/PageHeader.vue");
+        .resolve_component_meta("/PageHeader.vue");
 
     match result {
         Ok((_, _, record)) => {

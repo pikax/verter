@@ -15,7 +15,7 @@ fn corpus_audit_prose_accordion_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/prose/Accordion.vue");
     let result = AuditedRequest::builder()
         .files([("/prose/Accordion.vue", src)])
-        .resolve("/prose/Accordion.vue");
+        .resolve_component_meta("/prose/Accordion.vue");
 
     match result {
         Ok((_, _, record)) => {

@@ -15,7 +15,7 @@ fn corpus_audit_context_menu_content_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/ContextMenuContent.vue");
     let result = AuditedRequest::builder()
         .files([("/ContextMenuContent.vue", src)])
-        .resolve("/ContextMenuContent.vue");
+        .resolve_component_meta("/ContextMenuContent.vue");
 
     match result {
         Ok((_, _, record)) => {

@@ -15,7 +15,7 @@ fn corpus_audit_tooltip_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/Tooltip.vue");
     let result = AuditedRequest::builder()
         .files([("/Tooltip.vue", src)])
-        .resolve("/Tooltip.vue");
+        .resolve_component_meta("/Tooltip.vue");
 
     match result {
         Ok((_, _, record)) => {

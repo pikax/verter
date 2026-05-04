@@ -227,7 +227,7 @@ fn dump_semantic_keys_eager() {
         let fixture_started = Instant::now();
         let outcome = AuditedRequest::builder()
             .attach_to(Arc::clone(&host))
-            .resolve(&canonical);
+            .resolve_component_meta(&canonical);
         let fixture_elapsed = fixture_started.elapsed();
         match outcome {
             Ok(_) => {

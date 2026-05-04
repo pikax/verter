@@ -20,6 +20,8 @@ use verter_audit::{AuditConfig, RequestAuditRecord};
 use crate::component_meta_audit::AuditRecordsStore;
 use crate::request_context::RequestContext;
 
+#[derive(Debug)]
+
 /// Host-owned audit-runtime concrete type. Wraps the records store,
 /// the audit-config snapshot, and the active-request registry.
 ///
@@ -157,6 +159,7 @@ impl AuditRuntimeSnapshot {
 /// Constructed via [`Self::new`]. Finalised by [`Self::finalize`]
 /// (idempotent). Defensive `Drop` cleans up the active-request
 /// registry entry on panic / cancellation paths.
+#[derive(Debug)]
 pub enum AuditRequestRegistration {
     /// Active registration — the request will produce a record on
     /// finalize.
@@ -212,6 +215,7 @@ impl AuditRequestRegistration {
 /// `Active` arm of the registration enum. Owns the request id, an
 /// `Arc<HostAuditRuntime>` for the finalize / drop path, and a
 /// `finalized` flag so finalize is idempotent.
+#[derive(Debug)]
 pub struct ActiveRegistration {
     request_id: u64,
     runtime: Arc<HostAuditRuntime>,

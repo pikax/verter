@@ -15,10 +15,9 @@ use crate::origin_graph::VfsLayer;
 /// Compact event tag emitted through [`AuditObserver::record_event`].
 ///
 /// Producers prefer the dedicated `record_*` methods over the generic
-/// `record_event`; this enum exists for counter-style attributions
-/// that don't carry a structured payload (e.g. the
-/// `inflight_aborted_retries` / `cold_aborts_swept` mirror writes from
-/// Slice 0.2).
+/// `record_event`; this enum carries counter-style attributions for
+/// events without a structured payload — used today by the
+/// inflight-abort retry mirror and the cold-abort sweep tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AuditEvent {
     /// One inflight-aborted retry observed in the cold-resolver loop.

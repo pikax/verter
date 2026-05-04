@@ -15,7 +15,7 @@ fn corpus_audit_marquee_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/Marquee.vue");
     let result = AuditedRequest::builder()
         .files([("/Marquee.vue", src)])
-        .resolve("/Marquee.vue");
+        .resolve_component_meta("/Marquee.vue");
 
     match result {
         Ok((_, _, record)) => {

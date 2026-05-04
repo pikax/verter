@@ -15,7 +15,7 @@ fn corpus_audit_dashboard_search_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/DashboardSearch.vue");
     let result = AuditedRequest::builder()
         .files([("/DashboardSearch.vue", src)])
-        .resolve("/DashboardSearch.vue");
+        .resolve_component_meta("/DashboardSearch.vue");
 
     match result {
         Ok((_, _, record)) => {

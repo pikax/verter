@@ -15,7 +15,7 @@ fn corpus_audit_editor_emoji_menu_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/EditorEmojiMenu.vue");
     let result = AuditedRequest::builder()
         .files([("/EditorEmojiMenu.vue", src)])
-        .resolve("/EditorEmojiMenu.vue");
+        .resolve_component_meta("/EditorEmojiMenu.vue");
 
     match result {
         Ok((_, _, record)) => {

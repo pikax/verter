@@ -15,7 +15,7 @@ fn corpus_audit_prose_callout_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/prose/Callout.vue");
     let result = AuditedRequest::builder()
         .files([("/prose/Callout.vue", src)])
-        .resolve("/prose/Callout.vue");
+        .resolve_component_meta("/prose/Callout.vue");
 
     match result {
         Ok((_, _, record)) => {

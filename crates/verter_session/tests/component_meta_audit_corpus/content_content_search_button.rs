@@ -15,7 +15,7 @@ fn corpus_audit_content_content_search_button_produces_audit_record_or_documents
     let src = include_str!("fixtures/content/ContentSearchButton.vue");
     let result = AuditedRequest::builder()
         .files([("/content/ContentSearchButton.vue", src)])
-        .resolve("/content/ContentSearchButton.vue");
+        .resolve_component_meta("/content/ContentSearchButton.vue");
 
     match result {
         Ok((_, _, record)) => {

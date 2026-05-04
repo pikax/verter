@@ -15,7 +15,7 @@ fn corpus_audit_chat_shimmer_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/ChatShimmer.vue");
     let result = AuditedRequest::builder()
         .files([("/ChatShimmer.vue", src)])
-        .resolve("/ChatShimmer.vue");
+        .resolve_component_meta("/ChatShimmer.vue");
 
     match result {
         Ok((_, _, record)) => {

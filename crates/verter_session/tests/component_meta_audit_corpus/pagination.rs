@@ -15,7 +15,7 @@ fn corpus_audit_pagination_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/Pagination.vue");
     let result = AuditedRequest::builder()
         .files([("/Pagination.vue", src)])
-        .resolve("/Pagination.vue");
+        .resolve_component_meta("/Pagination.vue");
 
     match result {
         Ok((_, _, record)) => {

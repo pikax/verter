@@ -15,7 +15,7 @@ fn corpus_audit_editor_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/Editor.vue");
     let result = AuditedRequest::builder()
         .files([("/Editor.vue", src)])
-        .resolve("/Editor.vue");
+        .resolve_component_meta("/Editor.vue");
 
     match result {
         Ok((_, _, record)) => {

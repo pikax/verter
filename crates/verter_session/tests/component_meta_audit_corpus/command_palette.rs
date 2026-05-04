@@ -15,7 +15,7 @@ fn corpus_audit_command_palette_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/CommandPalette.vue");
     let result = AuditedRequest::builder()
         .files([("/CommandPalette.vue", src)])
-        .resolve("/CommandPalette.vue");
+        .resolve_component_meta("/CommandPalette.vue");
 
     match result {
         Ok((_, _, record)) => {

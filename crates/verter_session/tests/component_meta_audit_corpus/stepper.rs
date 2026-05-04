@@ -15,7 +15,7 @@ fn corpus_audit_stepper_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/Stepper.vue");
     let result = AuditedRequest::builder()
         .files([("/Stepper.vue", src)])
-        .resolve("/Stepper.vue");
+        .resolve_component_meta("/Stepper.vue");
 
     match result {
         Ok((_, _, record)) => {

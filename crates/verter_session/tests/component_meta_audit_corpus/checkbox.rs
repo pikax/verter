@@ -15,7 +15,7 @@ fn corpus_audit_checkbox_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/Checkbox.vue");
     let result = AuditedRequest::builder()
         .files([("/Checkbox.vue", src)])
-        .resolve("/Checkbox.vue");
+        .resolve_component_meta("/Checkbox.vue");
 
     match result {
         Ok((_, _, record)) => {

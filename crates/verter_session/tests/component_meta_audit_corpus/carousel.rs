@@ -15,7 +15,7 @@ fn corpus_audit_carousel_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/Carousel.vue");
     let result = AuditedRequest::builder()
         .files([("/Carousel.vue", src)])
-        .resolve("/Carousel.vue");
+        .resolve_component_meta("/Carousel.vue");
 
     match result {
         Ok((_, _, record)) => {

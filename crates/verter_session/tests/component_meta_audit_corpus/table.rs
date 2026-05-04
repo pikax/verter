@@ -15,7 +15,7 @@ fn corpus_audit_table_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/Table.vue");
     let result = AuditedRequest::builder()
         .files([("/Table.vue", src)])
-        .resolve("/Table.vue");
+        .resolve_component_meta("/Table.vue");
 
     match result {
         Ok((_, _, record)) => {

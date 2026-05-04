@@ -15,7 +15,7 @@ fn corpus_audit_chat_reasoning_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/ChatReasoning.vue");
     let result = AuditedRequest::builder()
         .files([("/ChatReasoning.vue", src)])
-        .resolve("/ChatReasoning.vue");
+        .resolve_component_meta("/ChatReasoning.vue");
 
     match result {
         Ok((_, _, record)) => {

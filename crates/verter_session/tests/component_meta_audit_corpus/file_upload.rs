@@ -15,7 +15,7 @@ fn corpus_audit_file_upload_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/FileUpload.vue");
     let result = AuditedRequest::builder()
         .files([("/FileUpload.vue", src)])
-        .resolve("/FileUpload.vue");
+        .resolve_component_meta("/FileUpload.vue");
 
     match result {
         Ok((_, _, record)) => {

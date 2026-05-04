@@ -15,7 +15,7 @@ fn corpus_audit_page_anchors_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/PageAnchors.vue");
     let result = AuditedRequest::builder()
         .files([("/PageAnchors.vue", src)])
-        .resolve("/PageAnchors.vue");
+        .resolve_component_meta("/PageAnchors.vue");
 
     match result {
         Ok((_, _, record)) => {

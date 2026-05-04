@@ -419,7 +419,7 @@ fn run_one(
     let started = Instant::now();
     let outcome = AuditedRequest::builder()
         .attach_to(Arc::clone(host))
-        .resolve(&canonical);
+        .resolve_component_meta(&canonical);
     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
     match outcome {
         Ok((_, _, record)) => {

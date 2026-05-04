@@ -27,8 +27,8 @@ use crate::request_context::{
 use crate::types::AnalysisLevel;
 use crate::{HostConfig, VerterHost};
 
-/// Errors surfaced by [`AuditedRequestBuilder::resolve`] and
-/// [`AuditedRequestBuilder::run_custom`].
+/// Errors surfaced by [`AuditedRequestBuilder::resolve_component_meta`]
+/// and [`AuditedRequestBuilder::run_custom`].
 #[derive(Debug)]
 pub enum AuditedRequestError {
     /// Same-thread re-entry — an audited run was already active on this
@@ -48,6 +48,18 @@ pub enum AuditedRequestError {
     /// The underlying `get_component_meta_with_resolution` returned
     /// `None` (canonical not found, analysis failed, etc.).
     ResolutionFailed,
+    /// A typed accessor on [`crate::component_meta_audit::RequestAuditRecord`]
+    /// was asked for a payload that does not match the record's
+    /// `RequestKind`. Surfaced by
+    /// [`AuditedRequestBuilder::resolve_component_meta`] when the host
+    /// returned a record of an unexpected kind.
+    WrongRequestKind {
+        /// Kind the caller requested (e.g.
+        /// `RequestKind::ComponentMeta` for `resolve_component_meta`).
+        expected: verter_audit::RequestKind,
+        /// Kind actually carried by the record.
+        got: verter_audit::RequestKind,
+    },
 }
 
 impl std::fmt::Display for AuditedRequestError {
@@ -67,6 +79,10 @@ impl std::fmt::Display for AuditedRequestError {
             ),
             Self::PrerequisitesNotMet(err) => write!(f, "prerequisites not met: {err}"),
             Self::ResolutionFailed => write!(f, "get_component_meta_with_resolution returned None"),
+            Self::WrongRequestKind { expected, got } => write!(
+                f,
+                "wrong request kind: expected {expected:?}, got {got:?}"
+            ),
         }
     }
 }
@@ -156,9 +172,14 @@ impl AuditedRequestBuilder {
         self
     }
 
-    /// Build (or reuse) a host and resolve `canonical_id`. Returns the
-    /// triple `(analysis, resolution, record)`.
-    pub fn resolve(
+    /// Build (or reuse) a host and resolve `canonical_id` as a
+    /// component-meta request. Returns the triple
+    /// `(analysis, resolution, record)`. Surfaces
+    /// [`AuditedRequestError::WrongRequestKind`] if the host returns
+    /// a record carrying a non-`ComponentMeta` kind (today this
+    /// cannot happen in tree but the typed accessor encodes the
+    /// invariant).
+    pub fn resolve_component_meta(
         self,
         canonical_id: &str,
     ) -> Result<
@@ -170,11 +191,18 @@ impl AuditedRequestBuilder {
         AuditedRequestError,
     > {
         let host = self.build_host()?;
-        run_audited(&host, |host_ref| {
+        let (analysis, resolution, record) = run_audited(&host, |host_ref| {
             host_ref
                 .get_component_meta_with_resolution(canonical_id)
                 .ok_or(AuditedRequestError::ResolutionFailed)
-        })
+        })?;
+        if record.kind != verter_audit::RequestKind::ComponentMeta {
+            return Err(AuditedRequestError::WrongRequestKind {
+                expected: verter_audit::RequestKind::ComponentMeta,
+                got: record.kind.clone(),
+            });
+        }
+        Ok((analysis, resolution, record))
     }
 
     /// Run an arbitrary closure against a fresh (or attached) host.
@@ -199,6 +227,48 @@ impl AuditedRequestBuilder {
         run_audited(&host, |host_ref| {
             f(host_ref).ok_or(AuditedRequestError::ResolutionFailed)
         })
+    }
+
+    /// Generic harness entry-point. Drives a closure against a fresh
+    /// (or attached) host inside the audited-request guard machinery
+    /// and returns the closure's value paired with the audit record
+    /// (if any) drained from the host.
+    ///
+    /// `Some(record)` when the request kind passed the audit-config
+    /// consumer filter and the public audited entry-point produced a
+    /// finalised record; `None` when the filter rejected the kind.
+    /// `WrongRequestKind` is **not** raised by this method — callers
+    /// that need a typed kind narrow the `Option<RequestAuditRecord>`
+    /// downstream (see [`Self::resolve_component_meta`] for the
+    /// component-meta-specific wrapper).
+    pub fn run<T, F>(self, f: F) -> Result<(T, Option<RequestAuditRecord>), AuditedRequestError>
+    where
+        F: FnOnce(&VerterHost) -> Option<(T, u64)>,
+    {
+        let host = self.build_host()?;
+        // Harness-level same-thread re-entry guard.
+        if nested_audit_in_progress() {
+            return Err(AuditedRequestError::NestedAuditNotSupported);
+        }
+        let _guard =
+            NestedAuditGuard::enter().ok_or(AuditedRequestError::NestedAuditNotSupported)?;
+
+        reset_requests_created();
+        let result = f(&host);
+        let created = requests_created_snapshot();
+        reset_requests_created();
+
+        let (value, request_id) = result.ok_or(AuditedRequestError::ResolutionFailed)?;
+        if created > 1 {
+            return Err(AuditedRequestError::MultipleRequestsInSingleRun);
+        }
+        // The record may be absent when the audit-config filter
+        // rejected the kind (the public audited entry-point's
+        // `AuditRequestRegistration::Noop` arm). Surface that as
+        // `Ok((value, None))` so callers can branch on it without a
+        // type error.
+        let record = host.take_audit_record(request_id);
+        Ok((value, record))
     }
 
     fn build_host(&self) -> Result<Arc<VerterHost>, AuditedRequestError> {

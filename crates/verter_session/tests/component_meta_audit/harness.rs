@@ -102,7 +102,7 @@ pub fn resolve_under_audit(
 ) {
     AuditedRequest::builder()
         .attach_to(host)
-        .resolve(canonical)
+        .resolve_component_meta(canonical)
         .unwrap_or_else(|e| panic!("hermetic audit for `{canonical}` must succeed, got {e}"))
 }
 

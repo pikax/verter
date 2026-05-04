@@ -1780,6 +1780,13 @@ pub fn test_trigger_inflight_abort(store: &SemanticGraphStore, key: &SemanticQue
 /// The per-request write surfaces in the audit miner's
 /// `CacheOutcomeTally` (see
 /// `component_meta_audit/footprint_miner.rs`).
+///
+/// `RequestContext` also implements [`verter_audit::AuditObserver`],
+/// so `verter_audit::current_observer()` reaches the same per-request
+/// counters via the substrate-side TLS slot. Producers outside
+/// `verter_session` use the substrate accessor; this in-crate helper
+/// keeps the typed direct path for the per-request mirror to avoid an
+/// unnecessary vtable hop on the hot loop.
 #[inline]
 fn record_inflight_aborted_retry(stats: &AtomicSemanticGraphStats) {
     stats

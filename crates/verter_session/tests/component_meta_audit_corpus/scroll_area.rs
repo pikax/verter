@@ -15,7 +15,7 @@ fn corpus_audit_scroll_area_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/ScrollArea.vue");
     let result = AuditedRequest::builder()
         .files([("/ScrollArea.vue", src)])
-        .resolve("/ScrollArea.vue");
+        .resolve_component_meta("/ScrollArea.vue");
 
     match result {
         Ok((_, _, record)) => {

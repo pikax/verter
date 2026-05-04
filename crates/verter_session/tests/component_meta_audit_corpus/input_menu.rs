@@ -15,7 +15,7 @@ fn corpus_audit_input_menu_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/InputMenu.vue");
     let result = AuditedRequest::builder()
         .files([("/InputMenu.vue", src)])
-        .resolve("/InputMenu.vue");
+        .resolve_component_meta("/InputMenu.vue");
 
     match result {
         Ok((_, _, record)) => {

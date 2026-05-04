@@ -15,7 +15,7 @@ fn corpus_audit_dashboard_sidebar_collapse_produces_audit_record_or_documents_sk
     let src = include_str!("fixtures/DashboardSidebarCollapse.vue");
     let result = AuditedRequest::builder()
         .files([("/DashboardSidebarCollapse.vue", src)])
-        .resolve("/DashboardSidebarCollapse.vue");
+        .resolve_component_meta("/DashboardSidebarCollapse.vue");
 
     match result {
         Ok((_, _, record)) => {

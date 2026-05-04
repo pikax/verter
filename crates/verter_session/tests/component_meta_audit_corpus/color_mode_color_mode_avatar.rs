@@ -15,7 +15,7 @@ fn corpus_audit_color_mode_color_mode_avatar_produces_audit_record_or_documents_
     let src = include_str!("fixtures/color-mode/ColorModeAvatar.vue");
     let result = AuditedRequest::builder()
         .files([("/color-mode/ColorModeAvatar.vue", src)])
-        .resolve("/color-mode/ColorModeAvatar.vue");
+        .resolve_component_meta("/color-mode/ColorModeAvatar.vue");
 
     match result {
         Ok((_, _, record)) => {

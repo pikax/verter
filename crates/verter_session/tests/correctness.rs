@@ -77,7 +77,7 @@ fn compute_for_fixture(fixture: &fixtures::CorrectnessFixture) -> ComponentMetaA
     let host = build_host(fixture.files);
     let req = verter_session::audited_request::AuditedRequest::builder()
         .attach_to(host)
-        .resolve(fixture.target);
+        .resolve_component_meta(fixture.target);
     match req {
         Ok((analysis, _resolution, _record)) => analysis,
         Err(e) => panic!(

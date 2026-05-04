@@ -286,12 +286,15 @@ impl VerterHost {
             }
             let record = audit_builder.finish();
             crate::component_meta_audit::emit_audit_trace(&record);
-            // Publish into the host's bounded audit-record store so
-            // `take_audit_record(resolution.request_id)` can drain it.
-            // Without this line the store stays empty and
-            // every `AuditedRequest::resolve` surfaces
-            // `AuditRecordMissing`.
-            self.publish_audit_record(record);
+            // Finalise through the `AuditRequestRegistration` planted
+            // on the active `RequestContext`. The registration removes
+            // the in-flight slot from the host's active-request
+            // registry and inserts the record into the records store
+            // so `take_audit_record(resolution.request_id)` returns it.
+            // When no registration is in scope (synthetic test
+            // fixture path), the helper falls back to a direct insert
+            // so the host-wide store stays consistent.
+            self.finalize_request_audit_record(record);
         }
 
         result.value

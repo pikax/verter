@@ -15,7 +15,7 @@ fn corpus_audit_color_picker_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/ColorPicker.vue");
     let result = AuditedRequest::builder()
         .files([("/ColorPicker.vue", src)])
-        .resolve("/ColorPicker.vue");
+        .resolve_component_meta("/ColorPicker.vue");
 
     match result {
         Ok((_, _, record)) => {

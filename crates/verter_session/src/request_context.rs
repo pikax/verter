@@ -160,18 +160,37 @@ pub fn current_request_budget() -> Option<Arc<RequestBudget>> {
 }
 
 /// Per-request state. Held as `Arc<RequestContext>` and wrapped into
-/// [`OpaqueRequestContext`] when handed to the scheduler.
+/// [`OpaqueRequestContext`] when handed to the scheduler. Also implements
+/// [`verter_audit::AuditObserver`] so the same `Arc` plants into the
+/// substrate's TLS slot via [`RequestContextGuard::install`].
 #[derive(Debug)]
 pub struct RequestContext {
     /// Monotonic request id. Non-zero by construction.
     pub request_id: u64,
     /// Canonical id the request resolves for.
     pub canonical_id: Arc<str>,
+    /// Audit-side request kind. Defaults to
+    /// [`verter_audit::RequestKind::ComponentMeta`] for the component-meta
+    /// entry-point. Other producer surfaces pass their own kind through
+    /// [`Self::with_kind`] when wiring an audited request through this
+    /// context.
+    pub kind: verter_audit::RequestKind,
     /// Whether the request is capturing its semantic footprint. When
     /// `true`, `audit_accumulator` is populated.
     pub footprint_capture: bool,
     /// The per-request footprint accumulator (opt-in).
     pub audit_accumulator: Option<Arc<RequestFootprintAccumulator>>,
+    /// Audit-record registration handle planted by the public audited
+    /// entry-point. The entry-point constructs an
+    /// [`crate::host_audit_runtime::AuditRequestRegistration`] **before**
+    /// installing this context into TLS, hands it to
+    /// [`Self::install_audit_registration`], and the inner resolver
+    /// path finalises through it instead of calling
+    /// [`crate::VerterHost::finalize_request_audit_record`] directly. `None`
+    /// when no audited entry-point is in scope (rare — direct callers
+    /// of `resolve_component_meta` outside the audited path).
+    pub audit_registration:
+        std::sync::OnceLock<Arc<crate::host_audit_runtime::AuditRequestRegistration>>,
     /// Per-context cold-build counter. Populated by
     /// `execute_cooperative` calling `ctx.record_cache_event(Miss |
     /// ColdBuild)`. Exact per-request even under concurrent audits
@@ -217,18 +236,45 @@ pub struct RequestContext {
 }
 
 impl RequestContext {
-    /// Construct a new per-request context with zeroed counters.
+    /// Construct a new per-request context with zeroed counters. The
+    /// kind defaults to [`verter_audit::RequestKind::ComponentMeta`];
+    /// callers wanting a different kind use [`Self::with_kind`].
     pub fn new(
         request_id: u64,
         canonical_id: Arc<str>,
         footprint_capture: bool,
         audit_accumulator: Option<Arc<RequestFootprintAccumulator>>,
     ) -> Arc<Self> {
+        Self::with_kind(
+            request_id,
+            canonical_id,
+            verter_audit::RequestKind::ComponentMeta,
+            footprint_capture,
+            audit_accumulator,
+        )
+    }
+
+    /// Construct a new per-request context with an explicit
+    /// [`verter_audit::RequestKind`]. Producer surfaces other than the
+    /// component-meta entry-point pass their kind through this
+    /// constructor; the `kind` is consumed by
+    /// [`crate::host_audit_runtime::AuditRequestRegistration::new`] when
+    /// the audit-config consumer filter decides whether to enter the
+    /// active-request registry.
+    pub fn with_kind(
+        request_id: u64,
+        canonical_id: Arc<str>,
+        kind: verter_audit::RequestKind,
+        footprint_capture: bool,
+        audit_accumulator: Option<Arc<RequestFootprintAccumulator>>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             request_id,
             canonical_id,
+            kind,
             footprint_capture,
             audit_accumulator,
+            audit_registration: std::sync::OnceLock::new(),
             cold_builds: AtomicU64::new(0),
             warm_hits: AtomicU64::new(0),
             joined_waits: AtomicU64::new(0),
@@ -244,13 +290,28 @@ impl RequestContext {
         })
     }
 
-    /// Audit-side request kind. Component-meta is the only entry
-    /// point that lands today; producers in lower crates pass their
-    /// own kinds through dedicated `*_with_audit` entry-points
-    /// without going through this context.
+    /// Plant the audit-record registration handle on this context.
+    /// Called by the public audited entry-point after constructing the
+    /// `AuditRequestRegistration`. The inner resolver path consults
+    /// `self.audit_registration.get()` to decide whether to finalise
+    /// through the registration or fall back to direct publication.
+    /// Returns `Err` only on the rare race where two callers race for
+    /// the same slot — the public entry-point is the sole writer in
+    /// tree.
+    pub fn install_audit_registration(
+        &self,
+        registration: Arc<crate::host_audit_runtime::AuditRequestRegistration>,
+    ) -> Result<(), Arc<crate::host_audit_runtime::AuditRequestRegistration>> {
+        self.audit_registration.set(registration)
+    }
+
+    /// Audit-side request kind. Returns the kind set at construction
+    /// time. Defaults to [`verter_audit::RequestKind::ComponentMeta`]
+    /// when the request was constructed via [`Self::new`]; producers
+    /// passing a different kind must use [`Self::with_kind`].
     #[must_use]
     pub fn kind(&self) -> verter_audit::RequestKind {
-        verter_audit::RequestKind::ComponentMeta
+        self.kind.clone()
     }
 }
 
@@ -292,6 +353,78 @@ impl RequestContextLike for RequestContext {
     }
 }
 
+impl verter_audit::AuditObserver for RequestContext {
+    /// Counter-style attribution. The session-side
+    /// `RequestContext` keeps per-request atomics for each event tag;
+    /// this method bumps the matching atomic so producers in lower
+    /// crates can call `verter_audit::current_observer()` and emit
+    /// without reaching into `verter_session`.
+    fn record_event(&self, event: verter_audit::AuditEvent) {
+        match event {
+            verter_audit::AuditEvent::InflightAbortedRetry => {
+                self.inflight_aborted_retries
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            verter_audit::AuditEvent::ColdAbortSwept => {
+                self.cold_aborts_swept.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    fn record_cache_event(&self, layer: &'static str, hit: bool) {
+        // Map the substrate's coarse hit/miss signal onto the
+        // existing per-request cache-event counters. The layer
+        // string is the canonical short name producers use today;
+        // unknown layers are intentionally ignored — this method is
+        // a counter mirror, not a generic observability bus.
+        let counter = match (layer, hit) {
+            ("warm", true) | ("hit", true) => &self.warm_hits,
+            ("cold", false) | ("miss", false) | ("cold_build", _) => &self.cold_builds,
+            ("joined_wait", _) => &self.joined_waits,
+            ("sentinel", _) => &self.sentinels,
+            _ => return,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_file(
+        &self,
+        _canonical_id: &str,
+        _layer: verter_audit::origin_graph::VfsLayer,
+        _bytes_read: u64,
+        _cache_hit: bool,
+    ) {
+        // VFS reads are accumulated by the per-request
+        // `RequestFootprintAccumulator` via the workspace's
+        // `register_audit_sink` path. The `AuditObserver` bridge
+        // does not duplicate that signal — leaving this method as a
+        // typed no-op preserves the substrate API while routing
+        // remains through the dedicated session-side sink.
+    }
+
+    fn record_lock_acquisition(&self, lock_name: &'static str, _wait_ns: u64) {
+        // Map the canonical lock names producers report onto the
+        // per-request lock-acquisition counters maintained on the
+        // request context. Unknown names are intentionally ignored.
+        let counter = match lock_name {
+            "node_arena" => &self.node_arena_lock_acquisitions,
+            "family_map" => &self.family_map_lock_acquisitions,
+            _ => return,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_phase_timing(&self, _phase: &'static str, _elapsed_ms: f64) {
+        // Phase timings are not yet aggregated into
+        // `RequestContext` counters; the typed signal is consumed
+        // by the request-finalisation step which assembles a
+        // `RequestTimingAudit` from the audit-side accumulator.
+        // The trait method is left intentionally empty so producers
+        // may emit through `current_observer()` without any
+        // session-side coupling.
+    }
+}
+
 thread_local! {
     pub(crate) static CURRENT_REQUEST_CONTEXT:
         RefCell<Option<Arc<RequestContext>>> = const { RefCell::new(None) };
@@ -307,7 +440,11 @@ thread_local! {
 /// the `CURRENT_REQUEST_CONTEXT` and `CURRENT_ACCUMULATOR` TLS slots
 /// also plant the scheduler's `OpaqueRequestContext` so worker-thread
 /// code that reads `verter_scheduler::request_context::current_request_id()`
-/// observes this request's id.
+/// observes this request's id. The same `Arc<RequestContext>` is also
+/// planted as an `Arc<dyn verter_audit::AuditObserver>` into the
+/// substrate's `current_observer()` TLS slot so producers in lower
+/// crates emit through `verter_audit` without reaching into
+/// `verter_session`.
 ///
 /// Stack-safe: `RefCell::replace` never panics on an already-occupied
 /// slot; `Drop` uses `take` + `replace` which also never panic.
@@ -317,24 +454,42 @@ pub struct RequestContextGuard {
     // Installs the opaque context into scheduler TLS so workers see
     // `current_request_id()` return the right value.
     _opaque_guard: OpaqueContextGuard,
+    // Installs the same `RequestContext` (as `Arc<dyn AuditObserver>`)
+    // into the `verter_audit` substrate's TLS slot so producers in
+    // lower crates can emit through `verter_audit::current_observer()`
+    // without reaching into `verter_session`. Drops in field order
+    // (after the opaque guard) to leave the substrate slot empty
+    // before the session-side TLS slot empties.
+    _audit_observer_guard: verter_audit::observer::ObserverGuard,
 }
 
 impl RequestContextGuard {
     /// Install `ctx` as both the session-side `CURRENT_REQUEST_CONTEXT`
     /// (together with the accumulator TLS) and the scheduler's
     /// opaque TLS slot, so worker threads see `current_request_id()`
-    /// return the right value. The returned guard restores every
-    /// prior TLS value on drop.
+    /// return the right value. The same `ctx` is also planted as an
+    /// `Arc<dyn verter_audit::AuditObserver>` into the substrate's
+    /// TLS slot so producers in lower crates can emit through
+    /// `verter_audit::current_observer()`. The returned guard restores
+    /// every prior TLS value on drop.
     pub fn install(ctx: Arc<RequestContext>) -> Self {
         let acc = ctx.audit_accumulator.clone();
         let opaque = OpaqueRequestContext(Arc::clone(&ctx) as Arc<dyn RequestContextLike>);
         let opaque_guard = OpaqueContextGuard::install(opaque);
+        // Plant the same `RequestContext` into the `verter_audit`
+        // substrate's TLS slot. Producers in lower crates retrieve it
+        // via `verter_audit::current_observer()` — they never reach
+        // into `verter_session` for context.
+        let audit_observer_guard = verter_audit::observer::install_observer(
+            Arc::clone(&ctx) as Arc<dyn verter_audit::AuditObserver>
+        );
         let prev_context = CURRENT_REQUEST_CONTEXT.with(|c| c.replace(Some(ctx)));
         let prev_accumulator = CURRENT_ACCUMULATOR.with(|c| c.replace(acc));
         Self {
             prev_context,
             prev_accumulator,
             _opaque_guard: opaque_guard,
+            _audit_observer_guard: audit_observer_guard,
         }
     }
 }
@@ -350,8 +505,10 @@ impl Drop for RequestContextGuard {
         CURRENT_REQUEST_CONTEXT.with(|c| {
             c.replace(prev_ctx);
         });
-        // `_opaque_guard` drops after this, restoring the scheduler's
-        // TLS to whatever it held before our install.
+        // `_opaque_guard` drops next, restoring the scheduler's TLS to
+        // whatever it held before our install. `_audit_observer_guard`
+        // drops last, restoring the substrate's `current_observer()`
+        // slot to its prior occupant.
     }
 }
 

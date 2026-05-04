@@ -1,15 +1,13 @@
-//! Positive-path discriminating test for the `Active` arm of
-//! [`verter_session::AuditRequestRegistration`].
+//! Discriminating tests for the `Active` arm of
+//! [`verter_session::host_audit_runtime::AuditRequestRegistration`].
 //!
-//! Pre-change (no `AuditRequestRegistration` substrate): no
-//! active-request registry exists; the test cannot compile because
-//! `host.host_audit_runtime().snapshot()` is absent.
-//!
-//! Post-change: install an audit-config filter that allows
-//! `RequestKind::ComponentMeta`, construct a registration, observe
-//! the request id present in the active map between `new` and
-//! `finalize`, then observe the published record in the records
-//! store after `finalize` and the registry empty.
+//! The first test probes the registration's lifecycle with a
+//! synthetic [`verter_session::request_context::RequestContext`] so
+//! the state machine itself stays unit-testable. The second test
+//! drives a real component-meta request through
+//! [`verter_session::VerterHost::get_component_meta_with_resolution`]
+//! and discriminates against the pre-change tree where the public
+//! audited entry-point did not wire `AuditRequestRegistration::new`.
 
 use std::sync::Arc;
 
@@ -106,6 +104,88 @@ fn active_registration_appears_in_active_requests_until_finalize_then_publishes_
     // accidentally messing up TLS state or the records store).
     let _smoke = AuditedRequest::builder()
         .files([("/x.vue".to_string(), SFC.to_string())])
-        .resolve("/x.vue")
+        .resolve_component_meta("/x.vue")
         .expect("smoke: full audited request still works after the registration probe");
+}
+
+/// **Production-path discriminator.** Drives a real component-meta
+/// request through
+/// [`verter_session::VerterHost::get_component_meta_with_resolution`]
+/// and asserts that the host's records store carries the produced
+/// record after the request finalises (which means the public audited
+/// entry-point wired `AuditRequestRegistration::new` and `finalize`).
+///
+/// Pre-change tree (no production wiring): the entry-point never
+/// constructed an `AuditRequestRegistration`, so `finalize_active_request`
+/// was never called. The records store would be empty after the call
+/// and `take_record(request_id)` would return `None`. This test would
+/// therefore fail against the pre-change tree.
+#[test]
+fn production_audited_entry_point_populates_active_registry_and_records_store() {
+    let host = Arc::new(verter_session::VerterHost::new_standalone(
+        verter_session::HostConfig {
+            audit_enabled: true,
+            footprint_capture: true,
+            ..verter_session::HostConfig::default()
+        },
+    ));
+
+    let canonical = "/Production.vue";
+    let _ = host.upsert(verter_session::UpsertRequest {
+        canonical_id: Some(canonical.to_string()),
+        input_id: canonical.to_string(),
+        source: Arc::from(SFC),
+        file_kind: verter_session::FileKind::from_path(canonical),
+        aliases: Vec::new(),
+    });
+
+    // Pre-state: the host has no active requests and no records.
+    let snap_before = host.host_audit_runtime().snapshot();
+    assert_eq!(
+        snap_before.active_request_count, 0,
+        "pre-state: registry must be empty before any request runs"
+    );
+    assert_eq!(
+        snap_before.records_store_size, 0,
+        "pre-state: records store must be empty before any request runs"
+    );
+
+    // Drive a real request through the public audited entry-point.
+    let (analysis, resolution) = host
+        .get_component_meta_with_resolution(canonical)
+        .expect("component-meta resolution must succeed for the fixture");
+    let request_id = resolution.request_id;
+    assert_ne!(request_id, 0, "request_id must be stamped non-zero");
+    let _ = analysis;
+
+    // Post-state: the active-request registry has been drained
+    // (registration finalised), and the records store carries one
+    // record for our request_id.
+    let snap_after = host.host_audit_runtime().snapshot();
+    assert_eq!(
+        snap_after.active_request_count, 0,
+        "post-state: registry must be empty after the request finalises (registration drained \
+         the active-request slot via `finalize_active_request`)"
+    );
+    assert!(
+        !snap_after.contains_active_request(request_id),
+        "post-state: the request_id must not appear in the active-request registry"
+    );
+    assert_eq!(
+        snap_after.records_store_size, 1,
+        "post-state: the records store must hold the one record produced by the request. \
+         Pre-change tree (no `AuditRequestRegistration` wiring in the entry-point) would \
+         report 0 here because the registration was never created and \
+         `finalize_active_request` was never called."
+    );
+
+    // Drain the record. It must be the one produced for our
+    // request_id and reference the canonical we drove.
+    let taken = host
+        .host_audit_runtime()
+        .take_record(request_id)
+        .expect("records store must hold the record finalised by the registration");
+    assert_eq!(taken.request_id, request_id);
+    assert_eq!(taken.canonical_id, canonical);
+    assert_eq!(taken.kind, RequestKind::ComponentMeta);
 }

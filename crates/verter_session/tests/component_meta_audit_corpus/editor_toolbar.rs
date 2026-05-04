@@ -15,7 +15,7 @@ fn corpus_audit_editor_toolbar_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/EditorToolbar.vue");
     let result = AuditedRequest::builder()
         .files([("/EditorToolbar.vue", src)])
-        .resolve("/EditorToolbar.vue");
+        .resolve_component_meta("/EditorToolbar.vue");
 
     match result {
         Ok((_, _, record)) => {

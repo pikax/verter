@@ -15,7 +15,7 @@ fn corpus_audit_page_grid_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/PageGrid.vue");
     let result = AuditedRequest::builder()
         .files([("/PageGrid.vue", src)])
-        .resolve("/PageGrid.vue");
+        .resolve_component_meta("/PageGrid.vue");
 
     match result {
         Ok((_, _, record)) => {

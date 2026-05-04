@@ -15,7 +15,7 @@ fn corpus_audit_modal_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/Modal.vue");
     let result = AuditedRequest::builder()
         .files([("/Modal.vue", src)])
-        .resolve("/Modal.vue");
+        .resolve_component_meta("/Modal.vue");
 
     match result {
         Ok((_, _, record)) => {

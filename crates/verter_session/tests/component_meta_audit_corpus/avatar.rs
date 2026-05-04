@@ -15,7 +15,7 @@ fn corpus_audit_avatar_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/Avatar.vue");
     let result = AuditedRequest::builder()
         .files([("/Avatar.vue", src)])
-        .resolve("/Avatar.vue");
+        .resolve_component_meta("/Avatar.vue");
 
     match result {
         Ok((_, _, record)) => {

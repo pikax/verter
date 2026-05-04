@@ -15,7 +15,7 @@ fn corpus_audit_separator_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/Separator.vue");
     let result = AuditedRequest::builder()
         .files([("/Separator.vue", src)])
-        .resolve("/Separator.vue");
+        .resolve_component_meta("/Separator.vue");
 
     match result {
         Ok((_, _, record)) => {

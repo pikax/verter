@@ -15,7 +15,7 @@ fn corpus_audit_toaster_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/Toaster.vue");
     let result = AuditedRequest::builder()
         .files([("/Toaster.vue", src)])
-        .resolve("/Toaster.vue");
+        .resolve_component_meta("/Toaster.vue");
 
     match result {
         Ok((_, _, record)) => {

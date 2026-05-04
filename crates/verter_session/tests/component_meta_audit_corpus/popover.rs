@@ -15,7 +15,7 @@ fn corpus_audit_popover_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/Popover.vue");
     let result = AuditedRequest::builder()
         .files([("/Popover.vue", src)])
-        .resolve("/Popover.vue");
+        .resolve_component_meta("/Popover.vue");
 
     match result {
         Ok((_, _, record)) => {

@@ -50,7 +50,7 @@ fn audited_request_attach_to_returns_triple_with_matching_request_id() {
     let host = setup_host();
     let (_, resolution, record) = AuditedRequest::builder()
         .attach_to(Arc::clone(&host))
-        .resolve("/x.vue")
+        .resolve_component_meta("/x.vue")
         .expect("audited resolve should succeed");
 
     assert!(
@@ -70,7 +70,7 @@ fn audited_request_attach_to_take_audit_record_drains_after_resolve() {
     let host = setup_host();
     let (_, resolution, _record) = AuditedRequest::builder()
         .attach_to(Arc::clone(&host))
-        .resolve("/x.vue")
+        .resolve_component_meta("/x.vue")
         .expect("first audited resolve succeeds");
 
     // The harness already drained the record; a second take by the same
@@ -96,7 +96,7 @@ fn concurrent_audits_on_same_host_each_see_their_own_record() {
         thread::spawn(move || {
             AuditedRequest::builder()
                 .attach_to(host)
-                .resolve("/x.vue")
+                .resolve_component_meta("/x.vue")
                 .map(|(_, r, rec)| (r.request_id, rec.request_id))
         })
     };
@@ -105,7 +105,7 @@ fn concurrent_audits_on_same_host_each_see_their_own_record() {
         thread::spawn(move || {
             AuditedRequest::builder()
                 .attach_to(host)
-                .resolve("/x.vue")
+                .resolve_component_meta("/x.vue")
                 .map(|(_, r, rec)| (r.request_id, rec.request_id))
         })
     };
@@ -129,7 +129,7 @@ fn audited_request_record_carries_populated_footprint_when_capture_enabled() {
     let host = setup_host();
     let (_, _resolution, record) = AuditedRequest::builder()
         .attach_to(Arc::clone(&host))
-        .resolve("/x.vue")
+        .resolve_component_meta("/x.vue")
         .expect("audited resolve should succeed");
 
     let footprint = record
@@ -196,7 +196,7 @@ fn audited_request_resolve_produces_non_empty_vfs_reads_for_trivial_vue_sfc() {
 
     let (_, resolution, record) = AuditedRequest::builder()
         .attach_to(Arc::clone(&host))
-        .resolve("/c.vue")
+        .resolve_component_meta("/c.vue")
         .expect("audited resolve succeeds");
 
     let footprint = record
@@ -305,7 +305,7 @@ fn concurrent_attach_to_on_same_host_16_threads_each_audit_sees_only_its_own_vfs
         handles.push(thread::spawn(move || {
             let (_, resolution, record) = AuditedRequest::builder()
                 .attach_to(host)
-                .resolve("/x.vue")
+                .resolve_component_meta("/x.vue")
                 .expect("audit ok");
             let fp = record.footprint.as_ref().expect("footprint present");
             for r in &fp.vfs_reads {

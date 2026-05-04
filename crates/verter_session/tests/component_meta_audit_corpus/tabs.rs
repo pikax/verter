@@ -15,7 +15,7 @@ fn corpus_audit_tabs_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/Tabs.vue");
     let result = AuditedRequest::builder()
         .files([("/Tabs.vue", src)])
-        .resolve("/Tabs.vue");
+        .resolve_component_meta("/Tabs.vue");
 
     match result {
         Ok((_, _, record)) => {

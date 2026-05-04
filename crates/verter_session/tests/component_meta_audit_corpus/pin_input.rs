@@ -15,7 +15,7 @@ fn corpus_audit_pin_input_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/PinInput.vue");
     let result = AuditedRequest::builder()
         .files([("/PinInput.vue", src)])
-        .resolve("/PinInput.vue");
+        .resolve_component_meta("/PinInput.vue");
 
     match result {
         Ok((_, _, record)) => {

@@ -15,7 +15,7 @@ fn corpus_audit_textarea_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/Textarea.vue");
     let result = AuditedRequest::builder()
         .files([("/Textarea.vue", src)])
-        .resolve("/Textarea.vue");
+        .resolve_component_meta("/Textarea.vue");
 
     match result {
         Ok((_, _, record)) => {

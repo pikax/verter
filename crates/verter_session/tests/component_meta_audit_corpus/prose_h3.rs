@@ -15,7 +15,7 @@ fn corpus_audit_prose_h3_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/prose/H3.vue");
     let result = AuditedRequest::builder()
         .files([("/prose/H3.vue", src)])
-        .resolve("/prose/H3.vue");
+        .resolve_component_meta("/prose/H3.vue");
 
     match result {
         Ok((_, _, record)) => {

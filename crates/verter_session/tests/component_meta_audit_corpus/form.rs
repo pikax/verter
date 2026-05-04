@@ -15,7 +15,7 @@ fn corpus_audit_form_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/Form.vue");
     let result = AuditedRequest::builder()
         .files([("/Form.vue", src)])
-        .resolve("/Form.vue");
+        .resolve_component_meta("/Form.vue");
 
     match result {
         Ok((_, _, record)) => {

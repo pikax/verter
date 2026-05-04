@@ -15,7 +15,7 @@ fn corpus_audit_prose_code_tree_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/prose/CodeTree.vue");
     let result = AuditedRequest::builder()
         .files([("/prose/CodeTree.vue", src)])
-        .resolve("/prose/CodeTree.vue");
+        .resolve_component_meta("/prose/CodeTree.vue");
 
     match result {
         Ok((_, _, record)) => {

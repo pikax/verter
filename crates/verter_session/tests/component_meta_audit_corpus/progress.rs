@@ -15,7 +15,7 @@ fn corpus_audit_progress_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/Progress.vue");
     let result = AuditedRequest::builder()
         .files([("/Progress.vue", src)])
-        .resolve("/Progress.vue");
+        .resolve_component_meta("/Progress.vue");
 
     match result {
         Ok((_, _, record)) => {

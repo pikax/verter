@@ -15,7 +15,7 @@ fn corpus_audit_listbox_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/Listbox.vue");
     let result = AuditedRequest::builder()
         .files([("/Listbox.vue", src)])
-        .resolve("/Listbox.vue");
+        .resolve_component_meta("/Listbox.vue");
 
     match result {
         Ok((_, _, record)) => {

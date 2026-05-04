@@ -15,7 +15,7 @@ fn corpus_audit_error_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/Error.vue");
     let result = AuditedRequest::builder()
         .files([("/Error.vue", src)])
-        .resolve("/Error.vue");
+        .resolve_component_meta("/Error.vue");
 
     match result {
         Ok((_, _, record)) => {

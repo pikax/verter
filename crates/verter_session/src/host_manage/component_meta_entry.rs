@@ -227,15 +227,25 @@ impl VerterHost {
     /// double `resolve_component_meta(Expanded)` that happens if callers
     /// invoke `get_component_meta()` + `resolve_component_meta()` separately.
     ///
+    /// **Audit lifecycle.** Constructs an
+    /// [`crate::host_audit_runtime::AuditRequestRegistration`] before
+    /// the per-request TLS guard installs. The `Active` arm captures a
+    /// slot in [`crate::host_audit_runtime::HostAuditRuntime`]'s
+    /// active-request map; the `Noop` arm is returned when the
+    /// configured consumer filter rejects the request's kind, in which
+    /// case no audit record will be produced. Either way the
+    /// substrate's `current_observer()` TLS slot stays populated for
+    /// the duration of the request.
+    ///
     /// **Warm-cache fast path.** Consults the `ComponentMetaResultDb`
     /// warm cache before falling through to the cold resolver. On a
-    /// cache hit with a valid `dep_signature`,
-    /// the cached `ResolutionTemplate` rehydrates a per-request
-    /// `ResolvedComponentMetaState` (snapshot reloaded from `IndexedReadyDb`)
-    /// and a synthesized `RequestAuditRecord` with `from_cache = true`,
-    /// `total_ms = 0.0` is published into `host.audit_records` so audit
-    /// consumers via `take_audit_record(resolution.request_id)` work
-    /// uniformly.
+    /// cache hit with a valid `dep_signature`, the cached
+    /// `ResolutionTemplate` rehydrates a per-request
+    /// `ResolvedComponentMetaState` (snapshot reloaded from
+    /// `IndexedReadyDb`) and a synthesized `RequestAuditRecord` with
+    /// `from_cache = true`, `total_ms = 0.0` is finalised through the
+    /// registration so audit consumers via
+    /// `take_audit_record(resolution.request_id)` work uniformly.
     pub fn get_component_meta_with_resolution(
         &self,
         canonical_or_alias: &str,
@@ -254,11 +264,9 @@ impl VerterHost {
 
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
 
-        // Install a `RequestContext` when footprint capture is enabled.
-        // The guard restores the prior TLS state on drop (normal return
-        // AND panic unwind). If capture is disabled, we still create a
-        // lightweight context so `current_request_id()` works for
-        // attribution — but no accumulator is attached.
+        // Build a `RequestContext` first; the registration consumes
+        // the same `Arc` so the active-request entry is keyed by the
+        // request id and the kind comes from the context.
         let footprint_capture = self.config.footprint_capture && self.config.audit_enabled;
         let accumulator = if footprint_capture {
             Some(std::sync::Arc::new(
@@ -273,6 +281,27 @@ impl VerterHost {
             footprint_capture,
             accumulator.clone(),
         );
+
+        // Construct the audit registration BEFORE installing the TLS
+        // guard. The `Active` arm enters the host's active-request
+        // registry; the `Noop` arm is returned when the consumer
+        // filter rejects the kind (no record will be produced
+        // downstream). Plant the registration on the request context
+        // so the inner resolver path finalises through it instead of
+        // routing the record through a direct host insert.
+        let registration =
+            std::sync::Arc::new(crate::host_audit_runtime::AuditRequestRegistration::new(
+                self,
+                std::sync::Arc::clone(&ctx),
+            ));
+        // The OnceLock returns Err only on a re-entrant install,
+        // which the production entry-point cannot trigger because
+        // the context is freshly constructed.
+        debug_assert!(
+            ctx.audit_registration.get().is_none(),
+            "freshly-constructed RequestContext must have no audit_registration",
+        );
+        let _ = ctx.install_audit_registration(std::sync::Arc::clone(&registration));
 
         // Register a per-request `SessionVfsSink` with the workspace
         // so VFS reads populate the accumulator's `vfs_reads`. The
@@ -332,9 +361,11 @@ impl VerterHost {
     /// the cold resolver on `None`.
     ///
     /// Synthesizes a `RequestAuditRecord` with `from_cache = true` and
-    /// `total_ms = 0.0` and publishes it into `host.audit_records` (when
-    /// audit is on) so `take_audit_record(resolution.request_id)`
-    /// returns it uniformly with cold-resolver records.
+    /// `total_ms = 0.0` and finalises it through the
+    /// `AuditRequestRegistration` planted on the active
+    /// `RequestContext` so audit consumers via
+    /// `take_audit_record(resolution.request_id)` returns it
+    /// uniformly with cold-resolver records.
     fn try_with_resolution_cache_hit(
         &self,
         canonical: &str,
@@ -392,7 +423,7 @@ impl VerterHost {
                 ),
             };
             debug_assert_eq!(synthesized.request_id, resolution.request_id);
-            self.publish_audit_record(synthesized);
+            self.finalize_request_audit_record(synthesized);
         }
 
         Some((cached.analysis.clone(), resolution))
@@ -416,9 +447,32 @@ impl VerterHost {
         self.audit_records.take(request_id)
     }
 
-    /// Publish a finished audit record into the host's store. Typically
-    /// called by `emit_audit_trace` once per audited request.
-    pub fn publish_audit_record(&self, record: crate::component_meta_audit::RequestAuditRecord) {
+    /// Finalise a finished audit record through the
+    /// [`crate::host_audit_runtime::AuditRequestRegistration`] planted
+    /// on the active [`crate::request_context::RequestContext`]. The
+    /// registration removes the in-flight slot from the host's
+    /// active-request registry and inserts the record into the
+    /// records store. When no registration is installed (an audit
+    /// record produced by code paths outside the public audited
+    /// entry-point) the record is inserted directly so the
+    /// host-wide store stays consistent — this branch is rare and
+    /// covers the synthetic test fixture path.
+    pub fn finalize_request_audit_record(
+        &self,
+        record: crate::component_meta_audit::RequestAuditRecord,
+    ) {
+        if let Some(ctx) = crate::request_context::current_request_context() {
+            if let Some(registration) = ctx.audit_registration.get() {
+                registration.finalize(record);
+                return;
+            }
+        }
+        // Fallback: direct insert when no registration is in scope.
+        // The synthetic test fixture path lands here because it
+        // never enters the public audited entry-point. The fallback
+        // is intentionally narrow — production traffic always enters
+        // through `get_component_meta_with_resolution`, which
+        // installs a registration.
         self.audit_records.insert(record);
     }
 

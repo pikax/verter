@@ -15,7 +15,7 @@ fn corpus_audit_page_section_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/PageSection.vue");
     let result = AuditedRequest::builder()
         .files([("/PageSection.vue", src)])
-        .resolve("/PageSection.vue");
+        .resolve_component_meta("/PageSection.vue");
 
     match result {
         Ok((_, _, record)) => {

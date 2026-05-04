@@ -15,7 +15,7 @@ fn corpus_audit_switch_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/Switch.vue");
     let result = AuditedRequest::builder()
         .files([("/Switch.vue", src)])
-        .resolve("/Switch.vue");
+        .resolve_component_meta("/Switch.vue");
 
     match result {
         Ok((_, _, record)) => {

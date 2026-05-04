@@ -15,7 +15,7 @@ fn corpus_audit_dashboard_panel_produces_audit_record_or_documents_skip() {
     let src = include_str!("fixtures/DashboardPanel.vue");
     let result = AuditedRequest::builder()
         .files([("/DashboardPanel.vue", src)])
-        .resolve("/DashboardPanel.vue");
+        .resolve_component_meta("/DashboardPanel.vue");
 
     match result {
         Ok((_, _, record)) => {

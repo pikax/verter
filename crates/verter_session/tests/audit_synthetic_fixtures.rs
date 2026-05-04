@@ -72,7 +72,7 @@ fn registry_route_cycle_guard_keeps_self_pick_terminal() {
             "/c.vue".to_string(),
             REGISTRY_ROUTE_FIXTURE_VUE.to_string(),
         )])
-        .resolve("/c.vue");
+        .resolve_component_meta("/c.vue");
     let (_analysis, resolution, _record) =
         result.expect("audited request must succeed without panicking on the cycle fixture");
     let evaluated = resolution
@@ -142,7 +142,7 @@ fn recursive_helper_cycle_guard_terminates_get_item_keys_expansion() {
             "/c.vue".to_string(),
             RECURSIVE_HELPER_FIXTURE_VUE.to_string(),
         )])
-        .resolve("/c.vue");
+        .resolve_component_meta("/c.vue");
     let (_analysis, resolution, _record) =
         result.expect("audited request must succeed without panicking on the helper-cycle fixture");
     let evaluated = resolution
