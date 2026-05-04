@@ -87,6 +87,18 @@ static_assertions = "1"
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-time = "1"
 
+# Windows process-RSS reporting in `component_meta_audit::current_process_rss`.
+# Requires `K32GetProcessMemoryInfo` (kernel32.dll, exposed by
+# `Win32_System_ProcessStatus`) and `GetCurrentProcess` (kernel32.dll,
+# exposed by `Win32_System_Threading`). Workspace already pulls in
+# `windows-sys = 0.61` via transitive deps, so we pin the same major to
+# avoid a second copy in the dependency graph.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_System_ProcessStatus",
+  "Win32_System_Threading",
+] }
+
 # Phase 9b — Rayon-backed batch compile (`host_compile.rs`) is native-only.
 # WASM continues to use the single-file `upsert` + `get_virtual_file` path.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
