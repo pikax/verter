@@ -61,3 +61,16 @@ mod sourcemap_e2e_tests;
 pub(crate) mod test_helpers;
 #[cfg(test)]
 mod v5_process_ported_tests;
+
+/// Temporary observability probe used by the TLS-propagation harness's
+/// cross-crate self-test. Returns `true` when an audit observer is
+/// installed in the calling thread's TLS slot, `false` otherwise.
+///
+/// Removed once production component-compile audit producers ship from
+/// this crate. At that point a separate architecture guard requires
+/// every production audited entry-point in this crate to carry its
+/// own TLS-propagation test, replacing the role this probe plays.
+#[doc(hidden)]
+pub fn _audit_harness_probe() -> bool {
+    verter_audit::current_observer().is_some()
+}

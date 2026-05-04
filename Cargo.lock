@@ -3750,6 +3750,7 @@ dependencies = [
  "serde_repr",
  "sha2",
  "smallvec",
+ "verter_audit",
  "verter_parser",
  "verter_span",
  "web-time",

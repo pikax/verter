@@ -3598,6 +3598,15 @@ mod foundations_guards {
         "pub(crate) mod capture_token",
         // ─── test-only re-export shim ──────────────────────────────
         "pub mod for_tests",
+        // ─── test-support submodules (gated cfg(any(test, debug_assertions))) ──
+        // Hosts the reusable TLS observer-propagation harness consumed
+        // by `tests/tls_harness_in_crate.rs` and
+        // `tests/tls_harness_cross_crate.rs`. The harness is
+        // `pub mod tests` (rather than `pub(crate)`) only so the
+        // integration tests under `crates/verter_session/tests/*.rs`
+        // can reach it; release builds drop the entire module
+        // because `debug_assertions` is OFF in release.
+        "pub mod tests",
         // ─── public re-exports ─────────────────────────────────────
         // re-exports the canonical data types (HostConfig, VerterHost,
         // UpsertRequest, FileKind, CompileProfile, CompileErrorPolicy,

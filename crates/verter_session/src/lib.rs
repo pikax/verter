@@ -170,6 +170,17 @@ mod upsert;
 // acquisition, no allocation).
 pub(crate) mod capture_token;
 
+// Test-support submodules accessible to integration tests under
+// `crates/verter_session/tests/*.rs`. Gated `cfg(any(test,
+// debug_assertions))` so release builds do not extend the public
+// surface (`debug_assertions` is OFF in `cargo build --release`).
+// The submodules host reusable harnesses (e.g. the TLS observer
+// propagation harness) that integration tests would otherwise need
+// to copy-paste; routing them through one named module makes the
+// test-only entry points easy to grep and audit.
+#[cfg(any(test, debug_assertions))]
+pub mod tests;
+
 // `for_tests` re-export shim for integration tests in
 // `crates/verter_session/tests/*.rs`. Integration tests build the lib
 // WITHOUT `cfg(test)` set, so a `cfg(test)`-gated `pub mod for_tests`
