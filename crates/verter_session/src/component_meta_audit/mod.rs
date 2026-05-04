@@ -378,9 +378,11 @@ impl RustSemanticFootprintAudit {
 /// Implementors today: [`RustSemanticFootprintAudit`] (one
 /// incidental field, `vfs_reads`).
 //
-// TODO(wave-1): when the `verter_audit` crate exists this trait
-// moves to `verter_audit::record`; for now it lives alongside the
-// only audit record type that implements it.
+// TODO: relocate to `verter_audit::record` once that crate exists.
+// The trait currently lives alongside the only audit record type
+// that implements it; once a dedicated audit crate is established
+// it should move there so other audit record types can adopt the
+// same incidental-mask contract.
 pub trait IncidentalFields {
     /// Names of the fields cleared by [`Self::mask_incidental`].
     /// `'static` so callers can compare slices and emit names in

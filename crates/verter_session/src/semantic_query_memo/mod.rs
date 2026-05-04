@@ -1627,18 +1627,25 @@ pub enum BatchExpandError {
     EvictedNode,
 }
 
-#[cfg(test)]
 impl SemanticGraphStore {
-    /// Test-only: set `aborted = true` on the in-flight entry for `key`,
-    /// plant an `Error(Other)` sentinel on `completed` if absent, notify
-    /// waiters, and remove the entry from the table. Mirrors
-    /// `invalidate_canonical` exactly but bypasses the step 1
+    /// Test-only driver: set `aborted = true` on the in-flight entry
+    /// for `key`, plant an `Error(Other)` sentinel on `completed` if
+    /// absent, notify waiters, and remove the entry from the table.
+    /// Mirrors `invalidate_canonical` exactly but bypasses the step 1
     /// warm-slot gate so joiner-retry tests don't have to race a real
     /// invalidation window between publish and inflight retirement.
     ///
     /// Returns `true` when an entry for `key` was aborted, `false` when
     /// the in-flight table did not contain the key.
-    pub(crate) fn test_trigger_inflight_abort(&self, key: &SemanticQueryKey) -> bool {
+    ///
+    /// `#[doc(hidden)]` and reached only through the `for_tests`
+    /// re-export shim (`crate::for_tests::test_trigger_inflight_abort`)
+    /// so the integration-test surface in
+    /// `crates/verter_session/tests/` can drive joiner retry without
+    /// loosening the public API of `SemanticGraphStore`. In-crate
+    /// tests reach the same body via the same shim function.
+    #[doc(hidden)]
+    pub fn test_trigger_inflight_abort_impl(&self, key: &SemanticQueryKey) -> bool {
         let mut table = self.inflight.lock();
         let Some(inflight) = table.remove(key) else {
             return false;
@@ -1657,49 +1664,13 @@ impl SemanticGraphStore {
         inflight.ready.notify_all();
         true
     }
-}
-
-/// Test drivers visible to integration tests in
-/// `crates/verter_session/tests/*.rs`. These methods exist solely to
-/// admit the discriminating tests Slice 0.2 needs (counter-helper
-/// dual-target write coverage). The body of each method is identical
-/// to its `pub(crate)` cousin in the `#[cfg(test)]` impl block above
-/// — keeping them in a separate un-gated impl block lets the lib
-/// expose them through the `for_tests` re-export shim without
-/// loosening the `pub(crate)` boundary on the in-crate test surface.
-impl SemanticGraphStore {
-    /// Public re-export of [`Self::test_trigger_inflight_abort`] for
-    /// integration tests that drive joiner retry from the
-    /// `crates/verter_session/tests/` surface (where `pub(crate)` is
-    /// not visible). The body inlines the same logic as the `cfg(test)`
-    /// pub(crate) version so the two cannot diverge.
-    #[doc(hidden)]
-    pub fn test_trigger_inflight_abort_pub(&self, key: &SemanticQueryKey) -> bool {
-        let mut table = self.inflight.lock();
-        let Some(inflight) = table.remove(key) else {
-            return false;
-        };
-        drop(table);
-        {
-            let mut state = inflight.state.lock();
-            state.aborted = true;
-            if state.completed.is_none() {
-                state.completed = Some(QueryResult::Error(QueryError::Other(Arc::from(
-                    "aborted by test_trigger_inflight_abort_pub",
-                ))));
-                state.dep_signature = Some(empty_signature());
-            }
-        }
-        inflight.ready.notify_all();
-        true
-    }
 
     /// Public test driver: set the `FORCE_COLD_ABORT_SWEEP` flag for
     /// the duration of the returned guard so the next
     /// `execute_cooperative` cold-build deterministically hits the
     /// TOCTOU abort path. Used by integration tests in
-    /// `crates/verter_session/tests/` that drive Slice 0.2's
-    /// counter-helper plumbing.
+    /// `crates/verter_session/tests/` that drive the counter-helper
+    /// plumbing.
     ///
     /// The guard restores the flag to `false` on drop. Tests must
     /// hold the guard for the duration of the `execute_cooperative`
@@ -1764,6 +1735,16 @@ fn empty_signature() -> DepSignature {
 #[must_use]
 pub fn empty_signature_for_tests() -> DepSignature {
     empty_signature()
+}
+
+/// Public test driver: trigger an in-flight abort for `key` on `store`.
+/// Forwards to [`SemanticGraphStore::test_trigger_inflight_abort_impl`]
+/// so integration tests in `crates/verter_session/tests/` and in-crate
+/// `tests.rs` drive the same joiner-retry body through one call site.
+#[doc(hidden)]
+#[allow(dead_code)]
+pub fn test_trigger_inflight_abort(store: &SemanticGraphStore, key: &SemanticQueryKey) -> bool {
+    store.test_trigger_inflight_abort_impl(key)
 }
 
 // ──────────────────────────────────────────────────────────────────────────

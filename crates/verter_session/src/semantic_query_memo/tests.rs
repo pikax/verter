@@ -2729,7 +2729,7 @@ fn semantic_graph_stats_inflight_aborted_retries_increments_on_retry_loop() {
 
     // Abort the joiner's wait — simulate invalidation's step 2
     // without requiring a matching warm slot.
-    let aborted = store.test_trigger_inflight_abort(&key);
+    let aborted = store.test_trigger_inflight_abort_impl(&key);
     assert!(aborted, "inflight entry must have been present to abort");
 
     // Release the winner so its build can run to completion. Its
@@ -2912,7 +2912,7 @@ fn concurrent_stress_16_threads_retry_counters_consistent() {
                         scope: scope("/w/stress.ts"),
                         name: Arc::from(name.as_str()),
                     });
-                    if store.test_trigger_inflight_abort(&key) {
+                    if store.test_trigger_inflight_abort_impl(&key) {
                         abort_count.fetch_add(1, Ordering::Relaxed);
                     }
                 }
