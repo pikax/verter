@@ -1,0 +1,164 @@
+{
+  "schema_version": 3,
+  "tier": "tier-1",
+  "step": "1C-β",
+  "status": "success",
+  "base_commit": "01b5df97",
+  "head_commit": "5695d15b",
+  "marker_commit": "5695d15b",
+  "prior_known_passed_count": 10537,
+  "test_results": {
+    "workspace": {
+      "test_scope": "cargo test --workspace --tests -j 4",
+      "passed": 10541,
+      "failed": 0,
+      "_note": "+4 new discriminating tests covering D48 invalidation matrix rows 1-4."
+    },
+    "project_type_store_tests": {
+      "test_scope": "cargo test -p verter_session --lib project_type_store_tests",
+      "passed": 13,
+      "failed": 0,
+      "_note": "5 Tier 1A tests + 4 Tier 1C-α discriminating tests + 4 Tier 1C-β discriminating tests."
+    },
+    "architecture_guards": {
+      "test_scope": "cargo test -p verter_session --test architecture_guards",
+      "passed": 54,
+      "failed": 0
+    },
+    "invalidation_coverage": {
+      "test_scope": "cargo test -p verter_session --test invalidation_coverage",
+      "passed": 3,
+      "failed": 0,
+      "_note": "Invariants verified: PROJECT_TYPE_STORE_DB_INVENTORY (27 entries) and all_dbs_for_invalidation() lengths match; per-DB ParticipatesInInvalidation impls present."
+    }
+  },
+  "gate_status": {
+    "fmt_check_passed": true,
+    "clippy_passed": true,
+    "fmt_check_command": "cargo fmt --all --check",
+    "clippy_command": "cargo clippy --workspace --tests -- -D warnings"
+  },
+  "monotonic_test_count_check": {
+    "workspace": {
+      "prior_known_passed_count": 10537,
+      "current_passed_count": 10541,
+      "delta": 4,
+      "_note": "+4 D48 discriminating tests, no test deletions."
+    }
+  },
+  "discriminating_tests_added": [
+    "source_content_change_preserves_profile_state",
+    "profile_flag_change_preserves_raw_and_dep_state",
+    "dep_transitive_close_change_preserves_profile_and_raw",
+    "bump_project_generation_evicts_all_three_sub_shapes"
+  ],
+  "characterization_tests_deleted": [],
+  "compile_cache_entry_super_shape_split": {
+    "old_storage": "DashMap<String, CompileCacheEntry> (super-shape per option (a))",
+    "new_storage_split_per_d48": [
+      "CompileCacheDb: DashMap<String, ProfileState>",
+      "DerivedRawCacheDb (NEW): DashMap<String, DerivedRawState>",
+      "DependencyCacheDb (NEW): DashMap<String, DependencyState>"
+    ],
+    "sub_state_field_distribution": {
+      "ProfileState": [
+        "content_overrides",
+        "style_overrides",
+        "compile_slots",
+        "latest_diagnostics",
+        "diagnostics_generation"
+      ],
+      "DerivedRawState": [
+        "import_routes",
+        "cached_tsc_extract",
+        "cached_resolved_meta",
+        "cached_meta_payload",
+        "raw_template_analysis",
+        "cached_fallthrough",
+        "evicted",
+        "evicted_whole_hash"
+      ],
+      "DependencyState": [
+        "dependencies",
+        "resolved_type_hashes",
+        "aliases",
+        "generation"
+      ]
+    },
+    "_note": "import_routes is the sub-mirror of IndexedReady.import_routes per the D48 doc-comment block; resides on DerivedRawState (source-content domain). The doc-comment block previously at types.rs:1215..1236 is rewritten on DerivedRawState itself, not on the wrapper DB."
+  },
+  "invalidation_matrix_d48": {
+    "source_content_change_for_owner": {
+      "ProfileState": "preserve",
+      "DerivedRawState": "invalidate",
+      "DependencyState": "invalidate",
+      "implementation": "ProjectTypeStore::evict_for_source_content_change (called from host upsert flow)"
+    },
+    "profile_flag_change": {
+      "ProfileState": "invalidate",
+      "DerivedRawState": "preserve",
+      "DependencyState": "preserve",
+      "implementation": "compile_cache_db.clear() (profile-domain flush)"
+    },
+    "dep_transitive_close_changed": {
+      "ProfileState": "preserve",
+      "DerivedRawState": "preserve",
+      "DependencyState": "invalidate",
+      "implementation": "dependency_cache_db.clear() (dep-closure-domain flush)"
+    },
+    "bump_project_generation_and_evict": {
+      "ProfileState": "invalidate",
+      "DerivedRawState": "invalidate",
+      "DependencyState": "invalidate",
+      "implementation": "ProjectTypeStore::bump_project_generation_and_evict cascade extension"
+    }
+  },
+  "files_changed": [
+    "crates/verter_session/src/cross_file.rs",
+    "crates/verter_session/src/deps.rs",
+    "crates/verter_session/src/host_construction.rs",
+    "crates/verter_session/src/host_lifecycle.rs",
+    "crates/verter_session/src/host_manage.rs",
+    "crates/verter_session/src/host_manage/analysis_io.rs",
+    "crates/verter_session/src/host_manage/component_meta_methods.rs",
+    "crates/verter_session/src/host_manage/fallthrough.rs",
+    "crates/verter_session/src/host_manage/prepared_decl.rs",
+    "crates/verter_session/src/host_manage_tests.rs",
+    "crates/verter_session/src/host_resolve.rs",
+    "crates/verter_session/src/host_resolve_tests.rs",
+    "crates/verter_session/src/host_test_seed.rs",
+    "crates/verter_session/src/host_upsert.rs",
+    "crates/verter_session/src/lib_tests.rs",
+    "crates/verter_session/src/meta_resolve_tests.rs",
+    "crates/verter_session/src/meta_tests.rs",
+    "crates/verter_session/src/project_type_store.rs",
+    "crates/verter_session/src/project_type_store_tests.rs",
+    "crates/verter_session/src/resolver_store.rs",
+    "crates/verter_session/src/types.rs"
+  ],
+  "tier_1C_beta_acceptance_gate_§3_4_2": {
+    "compile_cache_entry_split_into_three_sub_state_types": true,
+    "three_sibling_DBs_added_to_ProjectTypeStore": true,
+    "invalidation_matrix_implemented_per_D48": true,
+    "submirror_doctring_relocated_to_DerivedRawState": true,
+    "cooperative_admission_per_domain_fence": false,
+    "_cooperative_admission_note": "Per-domain post-compute revalidation hooks not implemented in this commit; no semantic dispatch driver exists yet that would benefit from them — would be speculative API design without a consumer. ProfileState revalidates implicitly through compile-slot rebuilding; DerivedRawState validates via existing whole_hash gates inside cached_tsc_extract / cached_resolved_meta; DependencyState validates via the dep-closure hash recomputation in update_deps callers. The mechanical hook per D48 belongs to a follow-up step where a consumer drives it."
+  },
+  "deviations": [
+    {
+      "id": "evict-canonical-no-longer-drops-per-canonical-compile-caches",
+      "summary": "Pre-1C-β `evict_canonical` had no per-canonical compile-cache effect because the super-shape lived in CompileCacheDb only and `evict_canonical` did not touch it. Initial 1C-β attempt added DerivedRawState + DependencyState drops inside `evict_canonical` to enforce D48 row 1, but that broke the host upsert flow which calls `evict_canonical` AFTER per-domain init (so the drops nuked the freshly-populated entries). Final design: `evict_canonical` stays orthogonal to the per-canonical compile-cache caches; the D48 row-1 trigger is implemented by `ProjectTypeStore::evict_for_source_content_change(canonical)` which the host upsert flow can call BEFORE per-domain re-population if desired. Today the upsert flow uses per-domain `or_default()` plus surgical field clears (matching the matrix); a future commit may switch to evict-then-populate semantics for stronger source-content-change guarantees.",
+      "files": [
+        "crates/verter_session/src/project_type_store.rs (added evict_for_source_content_change; evict_canonical no-op for compile-cache caches)"
+      ]
+    }
+  ],
+  "notes_for_1C_γ": [
+    "Eviction-policy tunables (memory-pressure threshold + LRU floor) belong on HostConfig; current `bump_project_generation_and_evict` clears all entries unconditionally per D48 matrix row 4. The 1C-γ step adds `evict_unreachable_indexed_ready` with live-publish-set reachability and memory-pressure gating per D40 + D119.",
+    "Allow-list shrink: F1, F2, F4, F5 entries already absent from `phase_8_allow_list()` (1C-α landed this). 1C-γ verifies no regressions and tightens further if any cache-shape additions slip in.",
+    "Architecture guard flip: the test `every_db_field_in_project_type_store_appears_in_inventory` currently checks 27 DB-typed fields; 1C-γ verifies 1C-β registration is correct and the new sibling DBs participate in `bump_project_generation_and_evict` and `invalidate_canonical_across_all_dbs`.",
+    "Discriminating tests (6) per plan §3.4.3 are unchanged; this 1C-β commit lays the per-domain DB foundation that 1C-γ's eviction-policy tests require.",
+    "Cooperative admission per domain (per-domain post-compute revalidation): D48 plan describes ProfileState revalidating against active profile-flag hash, DerivedRawState against whole_hash, DependencyState against dep-closure hash. 1C-β adds the invalidation cascade primitives but not the admission hooks; the cold-resolver path that would benefit from per-domain admission has no current consumer (the existing CompileCacheEntry usage was direct mutate-in-place via DashMap entries, not cooperative admission). Follow-up commits should wire admission as the cold-write surface evolves."
+  ],
+  "marker_filename": "phase-tier-1C-β-complete"
+}
