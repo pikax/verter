@@ -303,6 +303,27 @@ pub struct RequestContext {
     /// Per-context counter — lock acquisitions on the family-map
     /// dep-signature reverse index.
     pub family_map_lock_acquisitions: AtomicU64,
+    /// Per-context aggregate — total wall-clock spent waiting on
+    /// lock acquisitions during the audited window, in nanoseconds.
+    /// Populated only when `audit_timing_capture` is `true`; the
+    /// production lock-acquisition helpers short-circuit before
+    /// `Instant::now()` when timing is off so this counter stays
+    /// at `0`. Surfaces as
+    /// [`verter_audit::WaitAudit::lock_wait_ns`].
+    pub lock_wait_ns: AtomicU64,
+    /// Per-context aggregate — total number of lock acquisitions
+    /// (cross-cache) observed for the audited request. Bumped once
+    /// per acquisition through the session-side helpers regardless
+    /// of which shard / canonical owned the mutex. Surfaces as
+    /// [`verter_audit::WaitAudit::lock_acquisitions`].
+    pub lock_acquisitions: AtomicU64,
+    /// Per-context aggregate — total scheduler queue dwell time for
+    /// the audited request, in nanoseconds. Accumulates across
+    /// every dispatch the request observes (initial + retries).
+    /// Always `0` when no scheduler dispatch is observed (e.g. WASM,
+    /// fast paths). Surfaces as
+    /// [`verter_audit::WaitAudit::queue_wait_ns`].
+    pub queue_wait_ns: AtomicU64,
     /// Per-context counter — times a `dep_signature` was merged into
     /// the materialiser's `local_fence`.
     pub dep_signature_merges: AtomicU64,
@@ -427,6 +448,9 @@ impl RequestContext {
             materialize_structure_cache_hits: AtomicU64::new(0),
             node_arena_lock_acquisitions: AtomicU64::new(0),
             family_map_lock_acquisitions: AtomicU64::new(0),
+            lock_wait_ns: AtomicU64::new(0),
+            lock_acquisitions: AtomicU64::new(0),
+            queue_wait_ns: AtomicU64::new(0),
             dep_signature_merges: AtomicU64::new(0),
             dep_signature_intern_hits: AtomicU64::new(0),
             cache_counters: PerRequestCacheCounters::default(),
@@ -551,16 +575,31 @@ impl verter_audit::AuditObserver for RequestContext {
         // remains through the dedicated session-side sink.
     }
 
-    fn record_lock_acquisition(&self, lock_name: &'static str, _wait_ns: u64) {
-        // Map the canonical lock names producers report onto the
-        // per-request lock-acquisition counters maintained on the
-        // request context. Unknown names are intentionally ignored.
-        let counter = match lock_name {
-            "node_arena" => &self.node_arena_lock_acquisitions,
-            "family_map" => &self.family_map_lock_acquisitions,
-            _ => return,
-        };
-        counter.fetch_add(1, Ordering::Relaxed);
+    fn record_lock_acquisition(&self, lock_name: &'static str, wait_ns: u64) {
+        // Per-cache totals: keep the legacy named-counter behaviour so
+        // existing snapshot consumers (component-meta payload counters)
+        // remain populated. Unknown names skip the per-cache bump but
+        // still flow into the cross-cache aggregates below.
+        match lock_name {
+            "node_arena" => {
+                self.node_arena_lock_acquisitions
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            "family_map" => {
+                self.family_map_lock_acquisitions
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+        // Cross-cache aggregates surfaced via `WaitAudit`. The cumulative
+        // wait counter is incremented unconditionally on the assumption
+        // the producer already gated its `Instant::now()` capture: when
+        // the timing flag is off, `wait_ns == 0` and the `fetch_add`
+        // is a no-op-equivalent. The acquisition-count aggregate is
+        // bumped on every lock acquisition regardless of timing-capture
+        // because the count itself is independent of duration.
+        self.lock_wait_ns.fetch_add(wait_ns, Ordering::Relaxed);
+        self.lock_acquisitions.fetch_add(1, Ordering::Relaxed);
     }
 
     fn record_phase_timing(&self, _phase: &'static str, _elapsed_ms: f64) {
@@ -574,13 +613,20 @@ impl verter_audit::AuditObserver for RequestContext {
     }
 
     fn record_scheduler_dispatch(&self, audit: verter_audit::SchedulerAudit) {
+        // Accumulate this dispatch's queue-dwell into the per-request
+        // wait-aggregate so `WaitAudit::queue_wait_ns` reflects the
+        // full contention cost across all dispatches the request
+        // observes (initial + retries). The session-side
+        // `RequestContext` is the canonical owner of the per-request
+        // scheduler audit; `AuditBuilder::finish` consults the slot
+        // and the wait aggregate when building the
+        // [`verter_audit::RequestAuditRecord`].
+        let dwell_ns = (audit.queue_dwell_ms * 1_000_000.0).max(0.0) as u64;
+        self.queue_wait_ns.fetch_add(dwell_ns, Ordering::Relaxed);
         // First dispatch wins on the slot; subsequent dispatches bump
         // the dispatch counter so retries / re-enqueues are visible
         // without overwriting the first-dispatch facts (worker thread
-        // id, depths, dwell). The session-side `RequestContext` is
-        // the canonical owner of the per-request scheduler audit;
-        // `AuditBuilder::finish` consults this slot when building the
-        // [`verter_audit::RequestAuditRecord`].
+        // id, depths, dwell).
         let mut slot = self.scheduler_audit.lock();
         match slot.as_mut() {
             None => *slot = Some(audit),

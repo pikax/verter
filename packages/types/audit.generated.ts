@@ -980,6 +980,15 @@ scheduler: SchedulerAudit | null,
  */
 files: Array<FileAudit>, 
 /**
+ * Optional lock + queue contention attribution. Populated only
+ * when `HostConfig::audit_timing_capture = true`. Always `None`
+ * when the timing flag is off so producers short-circuit their
+ * `Instant::now()` capture and the zero-cost path is preserved.
+ * Serde-default for back-compat with payloads emitted before
+ * this field landed.
+ */
+waits: WaitAudit | null, 
+/**
  * Per-`RequestKind` strongly-typed payload. The variant tag
  * MUST match [`Self::kind`].
  */
@@ -1676,6 +1685,49 @@ bytes_read: string,
  * Request-id the sink routed this event to.
  */
 request_id: string, };
+
+/**
+ * Per-request wall-clock attribution for the locks and scheduler
+ * queues the request blocked on.
+ *
+ * The fields are nanosecond totals across the full audited request
+ * window. They aggregate across the multiple shard / canonical
+ * mutex acquisitions a single request can perform — `lock_wait_ns`
+ * is the SUM of every observed lock-wait, not the maximum, because
+ * the audit consumer wants to know how much wall-clock the request
+ * spent waiting on contention regardless of which lock contributed
+ * it.
+ *
+ * `queue_wait_ns` is derived from the per-dispatch
+ * `SchedulerAudit::queue_dwell_ms` observations summed for this
+ * request — every dispatch contributes its dwell, so retries that
+ * re-queue add their own wait-time. Native-only; on WASM there is
+ * no scheduler so the substrate-level
+ * [`crate::record::RequestAuditRecord::waits`] field is `None`
+ * regardless of the timing flag.
+ */
+export type WaitAudit = { 
+/**
+ * Cumulative wall-clock spent acquiring per-cache shard / canonical
+ * mutexes during the audited window, in nanoseconds. Producers
+ * time the `lock()` call with `Instant::now()` only when the
+ * timing flag is on; otherwise this counter is never incremented.
+ */
+lock_wait_ns: string, 
+/**
+ * Cumulative scheduler queue dwell time for the audited request,
+ * in nanoseconds. Derived from the sum of every
+ * `SchedulerAudit::queue_dwell_ms` observed at every dispatch
+ * site (initial dispatch plus any retries). Always `0` on WASM.
+ */
+queue_wait_ns: string, 
+/**
+ * Total number of lock acquisitions observed for the audited
+ * request. Bumped exactly once per acquisition through the
+ * session-side helper, regardless of which shard or canonical
+ * owned the mutex.
+ */
+lock_acquisitions: string, };
 
 /**
  * Discriminator naming the scheduler pool that dispatched the

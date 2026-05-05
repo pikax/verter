@@ -336,19 +336,41 @@ impl AuditBuilder {
         // built. When no context is in scope (the synthetic test
         // fixture path), the peak stays at 0, matching the WASM /
         // flag-off contract.
-        let (parent_request_id, scheduler) = match crate::request_context::current_request_context()
-        {
-            Some(ctx) if ctx.request_id == self.request_id => {
-                self.memory.process_rss_peak_bytes = ctx
-                    .process_rss_peak_bytes
-                    .load(std::sync::atomic::Ordering::Relaxed);
-                (
-                    ctx.parent_request_id.map(|id| id.to_string()),
-                    ctx.scheduler_audit.lock().clone(),
-                )
-            }
-            _ => (None, None),
-        };
+        let (parent_request_id, scheduler, waits) =
+            match crate::request_context::current_request_context() {
+                Some(ctx) if ctx.request_id == self.request_id => {
+                    self.memory.process_rss_peak_bytes = ctx
+                        .process_rss_peak_bytes
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    // `waits` is populated only when the host's
+                    // `audit_timing_capture` flag is on. The flag is
+                    // mirrored onto the context at construction
+                    // (`RequestContext::with_kind_and_timing`); when off,
+                    // the field stays `None` so the zero-cost path is
+                    // preserved through serialisation.
+                    let waits = if ctx.timing_capture {
+                        Some(verter_audit::WaitAudit {
+                            lock_wait_ns: ctx
+                                .lock_wait_ns
+                                .load(std::sync::atomic::Ordering::Relaxed),
+                            queue_wait_ns: ctx
+                                .queue_wait_ns
+                                .load(std::sync::atomic::Ordering::Relaxed),
+                            lock_acquisitions: ctx
+                                .lock_acquisitions
+                                .load(std::sync::atomic::Ordering::Relaxed),
+                        })
+                    } else {
+                        None
+                    };
+                    (
+                        ctx.parent_request_id.map(|id| id.to_string()),
+                        ctx.scheduler_audit.lock().clone(),
+                        waits,
+                    )
+                }
+                _ => (None, None, None),
+            };
 
         // bytes_parsed (always-on under audit_enabled): sum of bytes_read
         // across non-NotLoaded entries.
@@ -384,6 +406,7 @@ impl AuditBuilder {
             footprint: self.footprint,
             scheduler,
             files: self.files,
+            waits,
             kind_payload: RequestKindPayload::ComponentMeta(self.component_meta_payload),
         }
     }

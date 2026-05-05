@@ -1389,13 +1389,22 @@ impl MaterializeStructureDb {
         key: MaterializeStructureCacheKey,
         dep_signature: DepSignature,
     ) {
+        let timing_on = verter_scheduler::request_context::current_timing_enabled();
         for (canonical, _) in dep_signature.iter() {
-            crate::host_manage::record_family_map_lock_acquisition();
             let shard = self
                 .canonical_to_keys
                 .entry(Arc::clone(canonical))
                 .or_insert_with(|| parking_lot::Mutex::new(rustc_hash::FxHashMap::default()));
+            let lock_start = if timing_on {
+                Some(std::time::Instant::now())
+            } else {
+                None
+            };
             let mut map = shard.value().lock();
+            let lock_wait = lock_start
+                .map(|t| t.elapsed())
+                .unwrap_or(std::time::Duration::ZERO);
+            crate::host_manage::record_family_map_lock_acquisition(lock_wait);
             map.insert(key.clone(), Arc::clone(&dep_signature));
         }
     }
@@ -1542,13 +1551,22 @@ impl RefCycleResultDb {
     /// `MaterializeStructureDb`. Bounded by `dep_signature.len() ≤ 64`
     /// (BFS hop cap from A0).
     pub(crate) fn register_post_publish(&self, key: DeclIdentity, dep_signature: DepSignature) {
+        let timing_on = verter_scheduler::request_context::current_timing_enabled();
         for (canonical, _) in dep_signature.iter() {
-            crate::host_manage::record_family_map_lock_acquisition();
             let shard = self
                 .canonical_to_keys
                 .entry(Arc::clone(canonical))
                 .or_insert_with(|| parking_lot::Mutex::new(rustc_hash::FxHashMap::default()));
+            let lock_start = if timing_on {
+                Some(std::time::Instant::now())
+            } else {
+                None
+            };
             let mut map = shard.value().lock();
+            let lock_wait = lock_start
+                .map(|t| t.elapsed())
+                .unwrap_or(std::time::Duration::ZERO);
+            crate::host_manage::record_family_map_lock_acquisition(lock_wait);
             map.insert(key.clone(), Arc::clone(&dep_signature));
         }
     }

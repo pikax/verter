@@ -164,6 +164,7 @@ fn active_request_registration_survives_worker_tls_install_drop_churn() {
         footprint: None,
         scheduler: None,
         files: Vec::new(),
+        waits: None,
         kind_payload: RequestKindPayload::ComponentMeta(ComponentMetaPayload::default()),
     };
     assert!(

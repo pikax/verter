@@ -25,6 +25,7 @@ fn empty_envelope(kind: RequestKind, kind_payload: RequestKindPayload) -> Reques
         footprint: None,
         scheduler: None,
         files: Vec::new(),
+        waits: None,
         kind_payload,
     }
 }

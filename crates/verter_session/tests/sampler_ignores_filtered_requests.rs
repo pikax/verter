@@ -92,6 +92,7 @@ fn filtered_kind_registration_is_noop_and_invisible_to_sampler() {
         footprint: None,
         scheduler: None,
         files: Vec::new(),
+        waits: None,
         kind_payload: RequestKindPayload::ComponentMeta(ComponentMetaPayload::default()),
     };
     assert!(

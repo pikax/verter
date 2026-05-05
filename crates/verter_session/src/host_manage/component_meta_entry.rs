@@ -430,18 +430,41 @@ impl VerterHost {
             // a few lines above this branch). The same context lookup
             // also surfaces the per-request peak-RSS slot.
             let mut memory = crate::component_meta_audit::RequestMemoryAudit::default();
-            let (parent_request_id, scheduler_audit) =
+            let (parent_request_id, scheduler_audit, waits) =
                 match crate::request_context::current_request_context() {
                     Some(ctx) if ctx.request_id == request_id => {
                         memory.process_rss_peak_bytes = ctx
                             .process_rss_peak_bytes
                             .load(std::sync::atomic::Ordering::Relaxed);
+                        // Surface `WaitAudit` only when the host's
+                        // `audit_timing_capture` flag is on (mirrored on
+                        // `RequestContext::timing_capture`). The warm
+                        // path observed no locks of its own, but the
+                        // aggregate state on the context is the source
+                        // of truth — a stricter rule (always populate
+                        // when context exists) would mask the flag-gate.
+                        let waits = if ctx.timing_capture {
+                            Some(verter_audit::WaitAudit {
+                                lock_wait_ns: ctx
+                                    .lock_wait_ns
+                                    .load(std::sync::atomic::Ordering::Relaxed),
+                                queue_wait_ns: ctx
+                                    .queue_wait_ns
+                                    .load(std::sync::atomic::Ordering::Relaxed),
+                                lock_acquisitions: ctx
+                                    .lock_acquisitions
+                                    .load(std::sync::atomic::Ordering::Relaxed),
+                            })
+                        } else {
+                            None
+                        };
                         (
                             ctx.parent_request_id.map(|id| id.to_string()),
                             ctx.scheduler_audit.lock().clone(),
+                            waits,
                         )
                     }
-                    _ => (None, None),
+                    _ => (None, None, None),
                 };
             let synthesized = crate::component_meta_audit::RequestAuditRecord {
                 request_id,
@@ -454,6 +477,7 @@ impl VerterHost {
                 footprint: None,
                 scheduler: scheduler_audit,
                 files: Vec::new(),
+                waits,
                 from_cache: true,
                 kind_payload: crate::component_meta_audit::RequestKindPayload::ComponentMeta(
                     crate::component_meta_audit::ComponentMetaPayload::default(),

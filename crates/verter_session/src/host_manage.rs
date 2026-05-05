@@ -636,20 +636,42 @@ pub(crate) fn emit_policy_skip(
 }
 
 /// Bump `node_arena_lock_acquisitions` on the current request's
-/// context. No-op without a context.
-pub fn record_node_arena_lock_acquisition() {
+/// context AND feed the `WaitAudit` cross-cache aggregates with the
+/// observed lock-acquire wait. No-op without a context. The `wait`
+/// duration must already be `Duration::ZERO` when the active request's
+/// `audit_timing_capture` flag is off — call sites short-circuit
+/// `Instant::now()` at that point and pass `Duration::ZERO` here so
+/// the zero-cost path is preserved.
+pub fn record_node_arena_lock_acquisition(wait: std::time::Duration) {
     if let Some(ctx) = crate::request_context::current_request_context() {
-        ctx.node_arena_lock_acquisitions
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Single mutation point: the observer-trait method on
+        // `RequestContext` bumps the per-cache counter (matched on
+        // the lock name) AND the cross-cache `WaitAudit` aggregates.
+        let wait_ns = wait.as_nanos().min(u64::MAX as u128) as u64;
+        <crate::request_context::RequestContext as verter_audit::AuditObserver>::record_lock_acquisition(
+            ctx.as_ref(),
+            "node_arena",
+            wait_ns,
+        );
     }
 }
 
 /// Bump `family_map_lock_acquisitions` on the current request's
-/// context. No-op without a context.
-pub fn record_family_map_lock_acquisition() {
+/// context AND feed the `WaitAudit` cross-cache aggregates with the
+/// observed lock-acquire wait. No-op without a context. See
+/// [`record_node_arena_lock_acquisition`] for the timing-flag
+/// contract on the `wait` argument.
+pub fn record_family_map_lock_acquisition(wait: std::time::Duration) {
     if let Some(ctx) = crate::request_context::current_request_context() {
-        ctx.family_map_lock_acquisitions
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Single mutation point: the observer-trait method on
+        // `RequestContext` bumps the per-cache counter (matched on
+        // the lock name) AND the cross-cache `WaitAudit` aggregates.
+        let wait_ns = wait.as_nanos().min(u64::MAX as u128) as u64;
+        <crate::request_context::RequestContext as verter_audit::AuditObserver>::record_lock_acquisition(
+            ctx.as_ref(),
+            "family_map",
+            wait_ns,
+        );
     }
 }
 

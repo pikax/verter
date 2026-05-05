@@ -55,6 +55,7 @@ pub mod scheduler;
 pub mod store;
 pub mod structured_event;
 pub mod timing;
+pub mod waits;
 
 // Common re-exports — keep narrow; consumers `use` the module path
 // for everything else.
@@ -89,3 +90,4 @@ pub use scheduler::{SchedulerAudit, SchedulerDepths, WorkerPool};
 pub use store::RequestStoreAudit;
 pub use structured_event::StructuredAuditEvent;
 pub use timing::RequestTimingAudit;
+pub use waits::WaitAudit;
