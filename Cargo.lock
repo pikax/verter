@@ -4086,6 +4086,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
+ "verter_audit",
  "verter_scheduler",
  "walkdir",
  "xxhash-rust",

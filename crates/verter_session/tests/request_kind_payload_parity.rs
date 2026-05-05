@@ -55,7 +55,7 @@ fn every_request_kind_variant_constructs_a_record_with_matching_payload_variant(
             RequestKind::Workspace {
                 op: WorkspaceOp::AuditResolve {
                     specifier: "vue".to_string(),
-                    from: None,
+                    from: String::new(),
                 },
             },
             RequestKindPayload::Workspace(WorkspacePayload::default()),

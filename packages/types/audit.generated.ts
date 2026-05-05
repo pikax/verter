@@ -1739,8 +1739,11 @@ export type WorkerPool = "Cpu" | "Io";
 
 /**
  * Workspace operation discriminator. Mirrors the surface
- * `verter_workspace::WorkspaceAccess::audit_op` will provide in
- * a future producer.
+ * `verter_workspace::WorkspaceAccess::audit_op` provides; the same
+ * value is stored on the `RequestKind::Workspace { op }` discriminant
+ * and on the [`WorkspacePayload::op`] field carried by the payload
+ * (parallel to how `LspRequestPayload::method` mirrors the
+ * `RequestKind::Lsp { method }` tag).
  */
 export type WorkspaceOp = { "AuditResolve": { 
 /**
@@ -1748,9 +1751,11 @@ export type WorkspaceOp = { "AuditResolve": {
  */
 specifier: string, 
 /**
- * Importer canonical id, if any.
+ * Importer canonical id; empty string when no importer is
+ * in scope (e.g. project-scoped lookup without a source
+ * file).
  */
-from: string | null, } } | { "DepGraphTraverse": { 
+from: string, } } | { "DepGraphTraverse": { 
 /**
  * Root canonical id to traverse from.
  */
@@ -1764,6 +1769,12 @@ specifier: string, } };
  * Workspace request payload.
  */
 export type WorkspacePayload = { 
+/**
+ * Operation discriminator. Mirrors `RequestKind::Workspace { op }`
+ * on the envelope; carried inside the payload so consumers that
+ * only read the typed payload still see the operation type.
+ */
+op: WorkspaceOp, 
 /**
  * Number of files touched while servicing the operation.
  */

@@ -134,6 +134,7 @@ pub(crate) mod host_test_audit;
 mod host_test_seed;
 mod host_upsert;
 mod host_views;
+mod host_workspace_audit;
 mod id;
 pub(crate) mod intrinsic_registry;
 pub mod invalidation_domain;
