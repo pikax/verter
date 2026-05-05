@@ -18,6 +18,7 @@ name = "verter-mcp"
 path = "src/main.rs"
 
 [dependencies]
+verter_audit = { path = "../verter_audit" }
 verter_session = { path = "../verter_session" }
 verter_semantic = { path = "../verter_semantic" }
 verter_workspace = { path = "../verter_workspace" }
