@@ -205,6 +205,7 @@ fn component_meta_payload_accessor_returns_none_for_other_kinds() {
         memory: Default::default(),
         store: Default::default(),
         footprint: None,
+        scheduler: None,
         kind_payload: RequestKindPayload::TypeResolution(Default::default()),
     };
     assert!(record.component_meta_payload().is_none());

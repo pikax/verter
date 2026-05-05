@@ -900,6 +900,14 @@ store: RequestStoreAudit,
  */
 footprint: RequestFootprintAudit | null, 
 /**
+ * Optional scheduler-side attribution captured at first dispatch.
+ * Always `None` on WASM (no scheduler) and `None` on native
+ * requests that did not flow through scheduler dispatch.
+ * Serde-default for back-compat with payloads emitted before
+ * this field landed.
+ */
+scheduler: SchedulerAudit | null, 
+/**
  * Per-`RequestKind` strongly-typed payload. The variant tag
  * MUST match [`Self::kind`].
  */
@@ -1160,6 +1168,51 @@ serialize_ms: number,
  * Defaults to `0.0` when no producer has populated it.
  */
 request_critical_path_ms: number, };
+
+/**
+ * Scheduler-side attribution captured at first dispatch of an audited
+ * request. Populated on native (where the scheduler runs); always
+ * `None` on WASM at the envelope level.
+ */
+export type SchedulerAudit = { 
+/**
+ * String form of the worker thread id (e.g. `"ThreadId(7)"`)
+ * taken via `std::thread::current().id()` on the worker that
+ * dispatched the audited stage. Always non-empty on native.
+ */
+worker_thread_id: string, 
+/**
+ * Which scheduler pool ran the dispatch.
+ */
+worker_pool: WorkerPool, 
+/**
+ * Queue / inbox depths sampled at dispatch time.
+ */
+depths: SchedulerDepths, 
+/**
+ * Time the entry sat in the priority queue between enqueue and
+ * dispatch, in milliseconds.
+ */
+queue_dwell_ms: number, 
+/**
+ * Number of dispatches observed for this audited request through
+ * the scheduler. Defaults to 1 for synchronous component-meta
+ * requests; only retry-driven jobs increment past 1.
+ */
+dispatch_count: number, };
+
+/**
+ * Snapshot of scheduler-internal queue depths at dispatch time.
+ */
+export type SchedulerDepths = { 
+/**
+ * Number of pending submissions in the inbox channel.
+ */
+inbox: number, 
+/**
+ * Number of non-cancelled entries in the priority queue.
+ */
+queue: number, };
 
 /**
  * Semantic-analysis request payload.
@@ -1533,6 +1586,12 @@ bytes_read: string,
  * Request-id the sink routed this event to.
  */
 request_id: string, };
+
+/**
+ * Discriminator naming the scheduler pool that dispatched the
+ * audited stage.
+ */
+export type WorkerPool = "Cpu" | "Io";
 
 /**
  * Workspace operation discriminator. Mirrors the surface

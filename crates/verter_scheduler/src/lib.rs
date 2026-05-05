@@ -13,6 +13,8 @@
 //! - [`OverlayMap`](overlay::OverlayMap) — concurrent editor buffer storage
 //! - [`SourceLoader`](source_loader::SourceLoader) — file loading trait (memory/disk)
 
+#[cfg(not(target_arch = "wasm32"))]
+pub mod audit_publish;
 pub mod driver;
 pub mod edges;
 pub mod executor;

@@ -3933,6 +3933,7 @@ dependencies = [
  "parking_lot",
  "rayon",
  "rustc-hash 2.1.1",
+ "verter_audit",
  "verter_span",
  "web-time",
 ]

@@ -103,6 +103,7 @@ fn finalize_then_drop_does_not_publish_a_second_record() {
             memory: RequestMemoryAudit::default(),
             store: RequestStoreAudit::default(),
             footprint: None,
+            scheduler: None,
             kind_payload: RequestKindPayload::ComponentMeta(ComponentMetaPayload::default()),
         };
         assert!(

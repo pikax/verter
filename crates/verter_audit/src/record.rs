@@ -12,6 +12,7 @@ use crate::payloads::{
     BundlerBatchPayload, CompilePayload, ComponentMetaPayload, LspRequestPayload, McpToolPayload,
     SemanticAnalysisPayload, TypeResolutionPayload, WorkspaceOp, WorkspacePayload,
 };
+use crate::scheduler::SchedulerAudit;
 use crate::store::RequestStoreAudit;
 use crate::timing::RequestTimingAudit;
 
@@ -125,6 +126,13 @@ pub struct RequestAuditRecord {
     /// when `HostConfig::footprint_capture` is true and the
     /// accumulator collected work for this request.
     pub footprint: Option<RequestFootprintAudit>,
+    /// Optional scheduler-side attribution captured at first dispatch.
+    /// Always `None` on WASM (no scheduler) and `None` on native
+    /// requests that did not flow through scheduler dispatch.
+    /// Serde-default for back-compat with payloads emitted before
+    /// this field landed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduler: Option<SchedulerAudit>,
     /// Per-`RequestKind` strongly-typed payload. The variant tag
     /// MUST match [`Self::kind`].
     pub kind_payload: RequestKindPayload,

@@ -346,6 +346,7 @@ mod tests {
             store: RequestStoreAudit::default(),
             memory: RequestMemoryAudit::default(),
             footprint: None,
+            scheduler: None,
             from_cache: false,
             kind_payload: RequestKindPayload::ComponentMeta(ComponentMetaPayload::default()),
         };

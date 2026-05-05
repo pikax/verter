@@ -74,6 +74,7 @@ fn active_registration_appears_in_active_requests_until_finalize_then_publishes_
         memory: RequestMemoryAudit::default(),
         store: RequestStoreAudit::default(),
         footprint: None,
+        scheduler: None,
         kind_payload: RequestKindPayload::ComponentMeta(ComponentMetaPayload::default()),
     };
     assert!(

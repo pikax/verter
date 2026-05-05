@@ -1213,15 +1213,34 @@ impl Scheduler {
     #[cfg(not(target_arch = "wasm32"))]
     fn dispatch_ready_work(&self) {
         loop {
-            let entry = {
+            // Sample queue depth BEFORE dequeueing so the audit
+            // figure matches the depth observed by the entry that is
+            // about to leave. The sample is best-effort under the
+            // single-driver-thread invariant; we read while holding
+            // the lock to avoid a torn dequeue/depth pair.
+            let (entry, queue_depth_pre_dequeue) = {
                 let mut job_index = self.job_index.lock();
-                job_index.dequeue()
+                let depth = job_index.len();
+                let dequeued = job_index.dequeue();
+                (dequeued, depth as u32)
             };
 
             let entry = match entry {
                 Some(e) => e,
                 None => break,
             };
+
+            // Compute queue dwell ms: time the entry spent waiting in
+            // the priority queue between enqueue and this dispatch.
+            let dequeue_at = Instant::now();
+            let queue_dwell_ms = dequeue_at
+                .saturating_duration_since(entry.enqueue_time)
+                .as_secs_f64()
+                * 1000.0;
+            // Inbox depth at dispatch time. The atomic length read
+            // is consistent with the existing `inbox_depth_max`
+            // counter sampling.
+            let inbox_depth = self.inbox.sender.len() as u32;
 
             let inbox_sender = self.inbox.sender.clone();
             let executor = Arc::clone(&self.executor);
@@ -1267,6 +1286,20 @@ impl Scheduler {
                     // as `dep_signature_merges` at 0.
                     let _guard: Option<Box<dyn crate::request_context::TlsUninstall + Send>> =
                         winner_ctx.map(|opaque| Arc::clone(&opaque.0).install_tls());
+                    // Publish scheduler-side attribution AFTER install
+                    // so the audit observer trait routes through the
+                    // active session-side `RequestContext`. The
+                    // observer crate's `record_scheduler_dispatch`
+                    // hook receives worker thread / pool / depths /
+                    // dwell facts.
+                    Self::publish_scheduler_dispatch(
+                        crate::audit_publish::WorkerPoolTag::Io,
+                        crate::audit_publish::SchedulerDepthsSnapshot {
+                            inbox: inbox_depth,
+                            queue: queue_depth_pre_dequeue,
+                        },
+                        queue_dwell_ms,
+                    );
                     // Catch panics so the worker thread (and its TLS
                     // guard's RAII drop) stays intact for subsequent
                     // jobs on the same pool.
@@ -1302,6 +1335,14 @@ impl Scheduler {
                     // correctly on the CPU pool worker thread.
                     let _guard: Option<Box<dyn crate::request_context::TlsUninstall + Send>> =
                         winner_ctx.map(|opaque| Arc::clone(&opaque.0).install_tls());
+                    Self::publish_scheduler_dispatch(
+                        crate::audit_publish::WorkerPoolTag::Cpu,
+                        crate::audit_publish::SchedulerDepthsSnapshot {
+                            inbox: inbox_depth,
+                            queue: queue_depth_pre_dequeue,
+                        },
+                        queue_dwell_ms,
+                    );
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         Self::execute_stage_on_worker(
                             &node,
@@ -1322,6 +1363,31 @@ impl Scheduler {
                     }
                 });
             }
+        }
+    }
+
+    /// Publish a single scheduler-dispatch fact through the audit
+    /// observer TLS slot if one is installed. The session-side
+    /// `RequestContext` impl writes the supplied facts into its
+    /// per-request scheduler-audit slot; non-audit callers are a
+    /// no-op via [`verter_audit::observer::AuditObserver`]'s default
+    /// implementation. Static so it can be called from worker
+    /// closures without holding `&self`.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn publish_scheduler_dispatch(
+        pool: crate::audit_publish::WorkerPoolTag,
+        depths: crate::audit_publish::SchedulerDepthsSnapshot,
+        queue_dwell_ms: f64,
+    ) {
+        if let Some(observer) = verter_audit::current_observer() {
+            let audit = verter_audit::SchedulerAudit {
+                worker_thread_id: format!("{:?}", std::thread::current().id()),
+                worker_pool: pool.into(),
+                depths: depths.into(),
+                queue_dwell_ms,
+                dispatch_count: 1,
+            };
+            observer.record_scheduler_dispatch(audit);
         }
     }
 

@@ -233,6 +233,7 @@ fn audit_record_u64_fields_serialize_as_json_strings_not_numbers() {
             workspace_after_bytes: 0,
         },
         footprint: None,
+        scheduler: None,
         from_cache: false,
         kind_payload: RequestKindPayload::ComponentMeta(ComponentMetaPayload {
             total_resolve_steps: 1_234_567,
@@ -376,6 +377,7 @@ fn rust_memory_audit_process_rss_delta_bytes_serializes_as_json_string() {
                 workspace_after_bytes: 0,
             },
             footprint: None,
+            scheduler: None,
             from_cache: false,
             kind_payload: RequestKindPayload::ComponentMeta(ComponentMetaPayload::default()),
         };
@@ -609,6 +611,7 @@ fn json_emission_round_trips_structurally_equivalent_to_rust() {
             },
             ..Default::default()
         }),
+        scheduler: None,
         from_cache: false,
         kind_payload: RequestKindPayload::ComponentMeta(ComponentMetaPayload {
             total_resolve_steps: u64::MAX - 1,
