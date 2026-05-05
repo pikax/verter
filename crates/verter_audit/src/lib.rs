@@ -84,7 +84,7 @@ pub use payloads::{
 };
 pub use record::{
     Hash16, IncidentalFields, RequestAuditRecord, RequestKind, RequestKindPayload,
-    RequestPhaseAudit,
+    RequestPhaseAudit, WALKER_DEPTH_CAP,
 };
 pub use scheduler::{SchedulerAudit, SchedulerDepths, WorkerPool};
 pub use store::RequestStoreAudit;

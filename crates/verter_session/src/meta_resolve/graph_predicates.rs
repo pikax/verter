@@ -793,6 +793,12 @@ pub(crate) fn ref_root_reaches_transitive_cycle_node(
             local_fence,
             &read.dep_signature,
         );
+        // Type-resolution audit: surface the ref-cycle cache hit on
+        // the active request context so the per-request snapshot
+        // attributes the hit. Cheap when no context is installed.
+        if let Some(req_ctx) = crate::request_context::current_request_context() {
+            req_ctx.bump_type_resolution_ref_root_cycle_hit();
+        }
         return read.value;
     }
 

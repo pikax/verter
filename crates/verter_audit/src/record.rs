@@ -23,6 +23,18 @@ use crate::waits::WaitAudit;
 /// `verter_session::types::Hash16` re-exports this alias.
 pub type Hash16 = [u8; 16];
 
+/// Walker depth cap shared by every depth-sensitive consumer.
+///
+/// Mirrors `verter_session::component_meta_audit::assertions::WALKER_DEPTH_CAP`
+/// (`= 256`). The substrate keeps its own definition so type-resolution
+/// audit producers (and downstream consumers) can compare
+/// `TypeResolutionPayload::depth_high_water` against the cap without
+/// taking a `verter_session` dependency. The
+/// `walker_depth_cap_substrate_matches_session` test in
+/// `verter_session::tests::architecture_guards` keeps the two values
+/// pinned in lock-step so a silent drift surfaces as a named failure.
+pub const WALKER_DEPTH_CAP: u16 = 256;
+
 /// `serde_with`-style helper for the `u64` decimal-string transport
 /// shared across audit DTOs. Encodes a `u64` as a base-10 string in
 /// JSON / TS so the value survives a round-trip through engines that
