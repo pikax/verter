@@ -5,68 +5,114 @@
 //! `verter_session`'s `RequestContextGuard::install` plants the
 //! audit observer into the substrate's TLS slot. This test proves
 //! the wiring is visible from a DIFFERENT crate (`verter_compiler`),
-//! so when real production producers ship in lower crates and
-//! instrument themselves with `verter_audit::current_observer()`,
-//! those producers see `Some(...)` rather than `None`. Without this
-//! cross-crate self-test, every consumer-crate change that fails to
-//! emit could be blamed on the harness rather than on the new
-//! producer's TLS handling; confirming the harness works across
-//! crate boundaries upstream of consumer instrumentation isolates
-//! that failure mode.
+//! by driving a real production audited entry-point — `compile_with_audit`
+//! — and verifying that:
+//! - When audit is enabled (host config flag on), the producer's
+//!   `code_transform_ops` counter on the audit record is non-zero (the
+//!   TLS observer reached `verter_compiler::code_transform`'s `record_event`
+//!   call sites).
+//! - When audit is disabled, no record is published and the harness's
+//!   calling-thread observer-presence check returns `false`.
 //!
-//! The probe lives at
-//! [`verter_compiler::_audit_harness_probe`] — a minimal `pub fn`
-//! that returns `current_observer().is_some()`. It is removed once
-//! production component-compile audit producers ship from
-//! `verter_compiler`; that landing also introduces an architecture
-//! guard requiring real production probes.
-//!
-//! Discrimination contract:
-//! - **Pre-change tree (no substrate TLS wiring):**
-//!   `_audit_harness_probe()` returns `false` even when the harness
-//!   installs `RequestContextGuard`, because nothing planted the
-//!   observer into the substrate's TLS slot →
-//!   `cross_crate_observer_reaches_compiler` fails.
-//! - **Post-change tree (current tree):**
-//!   `RequestContextGuard::install` plants the observer into the
-//!   substrate slot, the probe sees `Some(observer)`, returns
-//!   `true`, and the test passes.
+//! The earlier scaffolding probe (`_audit_harness_probe`) has been
+//! removed; production audit producers now drive this test directly.
 
+use std::sync::Arc;
+
+use verter_compiler::compile::CompileTarget;
 use verter_session::tests::audit_tls_harness::assert_observer_reaches;
+use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
+
+fn build_host(audit_enabled: bool) -> Arc<VerterHost> {
+    let workspace: Arc<dyn WorkspaceAccess> =
+        Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
+    let host = Arc::new(VerterHost::new(
+        HostConfig {
+            audit_enabled,
+            footprint_capture: false,
+            ..HostConfig::default()
+        },
+        workspace,
+    ));
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/cross_crate_probe.vue".into()),
+        input_id: "/cross_crate_probe.vue".into(),
+        source: Arc::from(
+            "<script setup lang=\"ts\">\nconst greeting = 'hello';\n</script>\n\
+             <template><div>{{ greeting }}</div></template>",
+        ),
+        file_kind: FileKind::VueSfc,
+        aliases: Vec::new(),
+    });
+    host
+}
 
 #[test]
-fn cross_crate_observer_reaches_compiler() {
-    let mut probe_saw_observer = false;
+fn cross_crate_observer_reaches_compiler_via_compile_with_audit() {
+    let host = build_host(true);
+    let mut record_kind: Option<verter_audit::RequestKind> = None;
+    let mut code_transform_ops: u32 = 0;
     let report = assert_observer_reaches(true, || {
-        probe_saw_observer = verter_compiler::_audit_harness_probe();
+        // Drive the real production audited entry-point. The producer
+        // crate (`verter_compiler::code_transform`) emits
+        // `record_event(CompileCodeTransformOp)` at every public op —
+        // those events flow through `current_observer()` and bump the
+        // per-request counter that surfaces as
+        // `CompilePayload::code_transform_ops`. Non-zero ⇒ TLS observer
+        // propagation reached the producer crate.
+        let (_result, record) =
+            host.compile_with_audit("/cross_crate_probe.vue", CompileTarget::BUNDLER);
+        if let Some(rec) = record {
+            record_kind = Some(rec.kind.clone());
+            if let Some(payload) = rec.compile_payload() {
+                code_transform_ops = payload.code_transform_ops;
+            }
+        }
     });
 
     assert!(
-        probe_saw_observer,
-        "verter_compiler's `_audit_harness_probe` must see Some(observer) when \
-         the harness installs audit; pre-change tree (no substrate TLS plumbing \
-         in RequestContextGuard::install) would leave the slot empty and the \
-         probe would return false. report = {report:?}",
+        record_kind.is_some(),
+        "compile_with_audit must publish a record when audit_enabled=true; \
+         pre-change tree (no substrate TLS plumbing in RequestContextGuard::install) \
+         would leave the slot empty so the producer's instrumentation would have \
+         no observer to bump and downstream record assembly would still publish a \
+         record but the discriminator below would still fail. report = {report:?}",
+    );
+    assert!(
+        code_transform_ops > 0,
+        "verter_compiler::code_transform's `record_event` call sites must see Some(observer) \
+         so the per-request counter goes up; got code_transform_ops={code_transform_ops}. \
+         A regression that drops the TLS plumbing would leave the producer's \
+         `current_observer()` returning None, the counter would stay at 0, and this \
+         assertion would fail. report = {report:?}",
     );
     assert!(
         report.observer_seen_on_calling_thread,
         "harness must record the calling-thread observation as Some \
-         when the cross-crate probe returns true: {report:?}",
+         when the audited entry-point is driven inside the harness scope: {report:?}",
     );
 }
 
 #[test]
 fn cross_crate_observer_absent_when_audit_disabled() {
-    let mut probe_saw_observer = true;
+    let host = build_host(false);
+    let mut record_kind: Option<verter_audit::RequestKind> = None;
     let report = assert_observer_reaches(false, || {
-        probe_saw_observer = verter_compiler::_audit_harness_probe();
+        // With `audit_enabled=false`, the registration is `Noop` and
+        // `compile_with_audit` returns `record = None`. The compile
+        // itself still runs but no observer is installed in TLS.
+        let (_result, record) =
+            host.compile_with_audit("/cross_crate_probe.vue", CompileTarget::BUNDLER);
+        record_kind = record.map(|r| r.kind);
     });
 
     assert!(
-        !probe_saw_observer,
-        "verter_compiler's `_audit_harness_probe` must see None when audit is \
-         NOT installed; a tautological probe always returning true would fail \
-         this discriminator. report = {report:?}",
+        record_kind.is_none(),
+        "compile_with_audit must NOT publish a record when audit is disabled; \
+         a tautological producer that emits regardless of TLS state would still \
+         publish through the registration's `Noop` path being mis-wired and \
+         this assertion would fail. record_kind = {record_kind:?}",
     );
     assert!(
         !report.observer_seen_on_calling_thread,

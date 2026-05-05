@@ -118,8 +118,25 @@ impl<'a> CodeTransform<'a> {
         self.allocator.alloc_str(s)
     }
 
+    /// Single audit-emit point for one `CodeTransform` operation. Called
+    /// at the entry of every public op (prepend / append / overwrite /
+    /// remove / move / batch) to populate
+    /// [`verter_audit::payloads::compile::CompilePayload::code_transform_ops`].
+    /// `current_observer()` returns `None` outside an audited request,
+    /// so this is a single TLS load with no allocation on the hot path.
+    /// The audit guard `audit_no_hot_loop_instrumentation` must keep
+    /// callers off the per-element / per-attribute inner loops; this
+    /// method itself is the boundary that satisfies the per-op contract.
+    #[inline]
+    fn record_audit_op(&self) {
+        if let Some(observer) = verter_audit::current_observer() {
+            observer.record_event(verter_audit::AuditEvent::CompileCodeTransformOp);
+        }
+    }
+
     /// Prepend content to the very start
     pub fn prepend(&mut self, content: &str) -> &mut Self {
+        self.record_audit_op();
         if !content.is_empty() {
             let mut buf = String::with_capacity(content.len() + self.intro.len());
             buf.push_str(content);
@@ -131,6 +148,7 @@ impl<'a> CodeTransform<'a> {
 
     /// Append content to the very end
     pub fn append(&mut self, content: &str) -> &mut Self {
+        self.record_audit_op();
         if !content.is_empty() {
             let mut buf = String::with_capacity(self.outro.len() + content.len());
             buf.push_str(self.outro);
@@ -143,6 +161,7 @@ impl<'a> CodeTransform<'a> {
     /// Prepend content before a specific position (inserts before the position).
     /// Multiple prepend_left calls at the same index stack in reverse order (last call first).
     pub fn prepend_left(&mut self, index: u32, content: &str) -> &mut Self {
+        self.record_audit_op();
         if !content.is_empty() {
             let content_ref = self.allocator.alloc_str(content);
             let insert_idx = self.find_insert_position_for_prepend(index, false);
@@ -158,6 +177,7 @@ impl<'a> CodeTransform<'a> {
     /// Append content before a specific position (inserts before the position).
     /// Multiple append_left calls at the same index stack in order (first call first).
     pub fn append_left(&mut self, index: u32, content: &str) -> &mut Self {
+        self.record_audit_op();
         if !content.is_empty() {
             let content_ref = self.allocator.alloc_str(content);
             let insert_idx = self.find_insert_position_for_append(index, false);
@@ -173,6 +193,7 @@ impl<'a> CodeTransform<'a> {
     /// Prepend content after a specific position (inserts after the position).
     /// Multiple prepend_right calls at the same index stack in reverse order (last call first).
     pub fn prepend_right(&mut self, index: u32, content: &str) -> &mut Self {
+        self.record_audit_op();
         if !content.is_empty() {
             let content_ref = self.allocator.alloc_str(content);
             let insert_idx = self.find_insert_position_for_prepend(index, true);
@@ -188,6 +209,7 @@ impl<'a> CodeTransform<'a> {
     /// Append content after a specific position (inserts after the position).
     /// Multiple append_right calls at the same index stack in order (first call first).
     pub fn append_right(&mut self, index: u32, content: &str) -> &mut Self {
+        self.record_audit_op();
         if !content.is_empty() {
             let content_ref = self.allocator.alloc_str(content);
             let insert_idx = self.find_insert_position_for_append(index, true);
@@ -418,6 +440,7 @@ impl<'a> CodeTransform<'a> {
     ///
     /// Uses in-place splice instead of drain+rebuild.
     pub fn overwrite(&mut self, start: u32, end: u32, content: &str) -> &mut Self {
+        self.record_audit_op();
         if start >= end {
             return self;
         }
@@ -636,6 +659,7 @@ impl<'a> CodeTransform<'a> {
         prefix: &str,
         suffix: &str,
     ) -> &mut Self {
+        self.record_audit_op();
         if start >= end {
             return self;
         }
@@ -852,6 +876,7 @@ impl<'a> CodeTransform<'a> {
     /// `$setup.`, etc.) after all overwrites are complete.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn batch_prepend_left_static(&mut self, items: &[(u32, &'a str)]) -> &mut Self {
+        self.record_audit_op();
         if items.is_empty() {
             return self;
         }
@@ -942,6 +967,7 @@ impl<'a> CodeTransform<'a> {
         &mut self,
         items: &[(u32, Option<(u32, u32)>, &'a str)],
     ) -> &mut Self {
+        self.record_audit_op();
         if items.is_empty() {
             return self;
         }
@@ -1036,6 +1062,7 @@ impl<'a> CodeTransform<'a> {
     /// This avoids O(n*m) splice cost by rebuilding the chunks Vec once.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn batch_overwrite(&mut self, overwrites: &[(u32, u32, &'a str)]) -> &mut Self {
+        self.record_audit_op();
         if overwrites.is_empty() {
             return self;
         }

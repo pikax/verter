@@ -1,0 +1,325 @@
+//! `VerterHost::compile_with_audit` — single-file audited compile entry-point.
+//!
+//! Wraps one [`verter_compiler::compile::compile`] call in the same
+//! audit-registration / TLS-observer machinery the component-meta entry-point
+//! uses. The producer crate (`verter_compiler`) emits `record_phase_timing`
+//! at phase boundaries (parse / transform / codegen / css_analysis /
+//! sourcemap) and `record_event(CompileCodeTransformOp)` at every
+//! `CodeTransform` operation entry; the session-side `RequestContext`
+//! aggregates these signals into per-request atomics. This entry-point
+//! reads the atomics, assembles a [`verter_audit::CompilePayload`], and
+//! finalises through the registration so consumers via
+//! `take_audit_record(request_id)` work uniformly with the
+//! component-meta path.
+//!
+//! Returns `(VerterCompileResult, Option<RequestAuditRecord>)`. The
+//! record is `None` when the audit-config consumer filter rejects the
+//! `Compile { target }` kind (e.g. `audit_enabled = false`); the
+//! compile itself always runs.
+
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::Instant;
+
+use oxc_allocator::Allocator;
+use verter_audit::{
+    payloads::tags::CompileTargetTag, CompilePayload, RequestAuditRecord, RequestKind,
+    RequestKindPayload,
+};
+use verter_compiler::compile::{
+    compile as compile_sfc, CodegenOptions, CompileTarget, VerterCompileOptions,
+    VerterCompileResult,
+};
+
+use crate::component_meta_audit::{RequestMemoryAudit, RequestStoreAudit, RequestTimingAudit};
+use crate::request_context::{RequestContext, RequestContextGuard};
+use crate::VerterHost;
+
+/// Map a `CompileTarget` bitset to the audit's stringly tag. The tag
+/// reflects the *primary* codegen path the request is exercising:
+/// - `TSX` set → `Ide` (LSP / tsgo path).
+/// - else if `TEMPLATE` set → `Vdom` (the bundler / runtime path).
+/// - otherwise → `Vdom` (no template-codegen target — the tag is still
+///   the closest descriptor of what producers will emit).
+///
+/// Vapor-mode detection requires parsed SFC state; the call-site does
+/// not have that. Callers that need explicit Vapor attribution should
+/// pass [`compile_with_audit_options`] with `force_vapor = true` and
+/// the entry-point will tag the kind as `Vapor` regardless of the bit
+/// presence.
+fn target_to_tag(target: CompileTarget, force_vapor: bool) -> CompileTargetTag {
+    if force_vapor {
+        return CompileTargetTag::Vapor;
+    }
+    if target.contains(CompileTarget::TSX) {
+        CompileTargetTag::Ide
+    } else {
+        CompileTargetTag::Vdom
+    }
+}
+
+impl VerterHost {
+    /// Compile a single canonical SFC with full audit capture.
+    ///
+    /// Looks up the source through the workspace, calls
+    /// [`verter_compiler::compile::compile`] with `target` driving the
+    /// codegen flags, and returns the typed result plus an
+    /// [`RequestAuditRecord`] when capture is enabled. The record
+    /// carries a `RequestKind::Compile { target: <tag> }` discriminant
+    /// and a [`CompilePayload`] populated with per-phase timings and
+    /// codegen counts.
+    ///
+    /// The compile path runs whether or not audit is enabled —
+    /// `audit_enabled = false` short-circuits to `record = None`
+    /// without any record-building cost.
+    pub fn compile_with_audit(
+        self: &Arc<Self>,
+        canonical_id: &str,
+        target: CompileTarget,
+    ) -> (VerterCompileResult, Option<RequestAuditRecord>) {
+        self.compile_with_audit_options(
+            canonical_id,
+            target,
+            VerterCompileOptions {
+                source_map: true,
+                ..VerterCompileOptions::default()
+            },
+        )
+    }
+
+    /// Variant of [`Self::compile_with_audit`] that lets the caller
+    /// override `VerterCompileOptions` (e.g. enable `force_vapor` or
+    /// `force_js`). The default `compile_with_audit` enables
+    /// `source_map: true` so the sourcemap-phase timing has work to
+    /// observe; this entry-point trades convenience for explicit
+    /// control.
+    pub fn compile_with_audit_options(
+        self: &Arc<Self>,
+        canonical_id: &str,
+        target: CompileTarget,
+        verter_options: VerterCompileOptions,
+    ) -> (VerterCompileResult, Option<RequestAuditRecord>) {
+        // 1. Read source through workspace. On miss, return an empty
+        //    result with no record — the audit substrate has nothing
+        //    to attribute when the file does not exist.
+        let source_arc = match self.workspace().read_file(canonical_id) {
+            Some(s) => s,
+            None => {
+                let mut empty = VerterCompileResult {
+                    script: None,
+                    template: None,
+                    styles: Vec::new(),
+                    custom_blocks: Vec::new(),
+                    scope_id: String::new(),
+                    errors: Vec::new(),
+                    parse_duration_ms: 0.0,
+                    total_duration_ms: 0.0,
+                    tsx: None,
+                    tsc: None,
+                    template_data: None,
+                };
+                empty
+                    .errors
+                    .push(verter_compiler::compile::CompileDiagnostic {
+                        severity: verter_compiler::compile::CompileDiagnosticSeverity::Error,
+                        code: "VerterE000".to_string(),
+                        message: format!("file not found in workspace: {canonical_id}"),
+                        span: None,
+                    });
+                return (empty, None);
+            }
+        };
+        let source: &str = source_arc.as_ref();
+
+        let codegen_options = CodegenOptions {
+            target,
+            ..CodegenOptions::default()
+        };
+        let allocator = Allocator::new();
+
+        // 2. Audit-disabled fast path: drive the producer with NO
+        //    `RequestContextGuard` installed. Producer-side
+        //    `current_observer()` returns `None`, the instrumentation
+        //    short-circuits at the TLS check, and we publish nothing.
+        if !self.config.audit_enabled {
+            let result = compile_sfc(source, &codegen_options, &verter_options, &allocator);
+            return (result, None);
+        }
+
+        // 3. Stamp request id and increment created-counter so the
+        //    `AuditedRequest` harness's multi-request guard surfaces
+        //    correctly when a closure issues both a component-meta
+        //    and compile call.
+        let request_id = self.next_request_id();
+        crate::request_context::increment_requests_created();
+
+        let force_vapor = verter_options.force_vapor;
+        let tag = target_to_tag(target, force_vapor);
+
+        // 4. Construct the request context with the Compile kind.
+        let footprint_capture = self.config.footprint_capture;
+        let timing_capture = self.config.audit_timing_capture;
+        let ctx = RequestContext::with_kind_and_timing(
+            request_id,
+            Arc::<str>::from(canonical_id),
+            RequestKind::Compile { target: tag },
+            footprint_capture,
+            timing_capture,
+            None,
+        );
+
+        // 5. Build the audit registration. `Active` adds the request
+        //    to the registry; `Noop` short-circuits when the consumer
+        //    filter rejects the kind.
+        let registration = Arc::new(crate::host_audit_runtime::AuditRequestRegistration::new(
+            self,
+            Arc::clone(&ctx),
+        ));
+        let _ = ctx.install_audit_registration(Arc::clone(&registration));
+
+        // 6. Install the TLS guard so producers in `verter_compiler`
+        //    see `current_observer() = Some(ctx)`.
+        let _ctx_guard = RequestContextGuard::install(ctx);
+
+        // 7. Drive the compile. Producers emit `record_phase_timing`
+        //    + `record_event(CompileCodeTransformOp)` while this
+        //    block runs.
+        let total_start = Instant::now();
+        let result = compile_sfc(source, &codegen_options, &verter_options, &allocator);
+        let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
+
+        // 8. Read accumulators off the active request context.
+        let payload = self.assemble_compile_payload(tag, target, force_vapor, &result);
+        let store = RequestStoreAudit::default();
+        let memory = RequestMemoryAudit::default();
+        let timings = RequestTimingAudit {
+            total_ms,
+            ..RequestTimingAudit::default()
+        };
+
+        let record = RequestAuditRecord {
+            request_id,
+            canonical_id: canonical_id.to_string(),
+            kind: RequestKind::Compile { target: tag },
+            parent_request_id: None,
+            from_cache: false,
+            timings,
+            memory,
+            store,
+            footprint: None,
+            scheduler: None,
+            files: Vec::new(),
+            waits: None,
+            kind_payload: RequestKindPayload::Compile(payload),
+        };
+
+        // 9. Finalise the record. `finalize` returns `false` on a
+        //    `Noop` registration (consumer filter rejected the kind).
+        //    Drop the TLS guard AFTER finalize so the per-request
+        //    counters stay coherent with the record we publish.
+        let finalized = registration.finalize(record.clone());
+        drop(_ctx_guard);
+        if finalized {
+            (result, Some(record))
+        } else {
+            (result, None)
+        }
+    }
+
+    fn assemble_compile_payload(
+        &self,
+        tag: CompileTargetTag,
+        target: CompileTarget,
+        force_vapor: bool,
+        result: &VerterCompileResult,
+    ) -> CompilePayload {
+        // Read the per-request accumulators off the TLS context that
+        // is still installed at the call site of
+        // `compile_with_audit_options`. The `RequestContextGuard`
+        // outlives this call.
+        let (parse_us, transform_us, codegen_us, css_us, sourcemap_us, ct_ops) =
+            match crate::request_context::current_request_context() {
+                Some(ctx) => (
+                    ctx.compile_parse_us.load(Ordering::Relaxed),
+                    ctx.compile_transform_us.load(Ordering::Relaxed),
+                    ctx.compile_codegen_us.load(Ordering::Relaxed),
+                    ctx.compile_css_analysis_us.load(Ordering::Relaxed),
+                    ctx.compile_sourcemap_us.load(Ordering::Relaxed),
+                    ctx.compile_code_transform_ops.load(Ordering::Relaxed),
+                ),
+                None => (0, 0, 0, 0, 0, 0),
+            };
+        let to_ms = |us: u64| -> Option<f64> {
+            if us == 0 {
+                None
+            } else {
+                Some(us as f64 / 1_000.0)
+            }
+        };
+
+        // Output bytes: sum every present block's code length. The
+        // consumer filter doesn't get to see these bytes; they're
+        // strictly observability for "how big was the codegen output".
+        let mut output_bytes: u64 = 0;
+        let mut sourcemap_bytes: u64 = 0;
+        let mut num_script_blocks: u32 = 0;
+        if let Some(s) = result.script.as_ref() {
+            output_bytes = output_bytes.saturating_add(s.code.len() as u64);
+            sourcemap_bytes = sourcemap_bytes.saturating_add(s.source_map.len() as u64);
+            num_script_blocks = num_script_blocks.saturating_add(1);
+        }
+        if let Some(t) = result.template.as_ref() {
+            output_bytes = output_bytes.saturating_add(t.code.len() as u64);
+            sourcemap_bytes = sourcemap_bytes.saturating_add(t.source_map.len() as u64);
+        }
+        for style in result.styles.iter() {
+            output_bytes = output_bytes.saturating_add(style.code.len() as u64);
+        }
+        if let Some(tsx) = result.tsx.as_ref() {
+            output_bytes = output_bytes.saturating_add(tsx.code.len() as u64);
+            sourcemap_bytes = sourcemap_bytes.saturating_add(tsx.source_map.len() as u64);
+        }
+        if let Some(tsc) = result.tsc.as_ref() {
+            output_bytes = output_bytes.saturating_add(tsc.code.len() as u64);
+            sourcemap_bytes = sourcemap_bytes.saturating_add(tsc.source_map.len() as u64);
+        }
+
+        // num_directives / num_components: extracted from
+        // template_data when available. The non-data path leaves them
+        // at 0 — this keeps the producer cost minimal for the
+        // bundler-default code path that does not need analysis.
+        // `template_data.directives` is not a single field on the raw
+        // form — directive observations split across `comment_directives`,
+        // `v_for_directives`, `v_model_directives`, plus event handlers
+        // (which are conceptually directive-shaped). The audit count is
+        // the sum of the structural directive arrays.
+        let (num_directives, num_components) = result
+            .template_data
+            .as_ref()
+            .map(|td| {
+                let directives = (td.comment_directives.len()
+                    + td.v_for_directives.len()
+                    + td.v_model_directives.len()) as u32;
+                let components = td.components.len() as u32;
+                (directives, components)
+            })
+            .unwrap_or((0, 0));
+
+        let _ = (target, force_vapor); // Silence unused warnings — reserved for future tag-derivation refinements.
+        CompilePayload {
+            target: tag,
+            parse_ms: to_ms(parse_us),
+            transform_ms: to_ms(transform_us),
+            codegen_ms: to_ms(codegen_us),
+            css_analysis_ms: to_ms(css_us),
+            sourcemap_ms: to_ms(sourcemap_us),
+            output_bytes,
+            sourcemap_bytes,
+            num_directives,
+            num_components,
+            num_style_blocks: result.styles.len() as u32,
+            num_script_blocks,
+            code_transform_ops: ct_ops as u32,
+        }
+    }
+}
