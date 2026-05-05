@@ -351,6 +351,18 @@ pub enum ProjectionMode {
     Skeleton,
 }
 
+impl From<ProjectionMode> for verter_audit::ProjectionModeTag {
+    fn from(mode: ProjectionMode) -> Self {
+        match mode {
+            ProjectionMode::Identity => verter_audit::ProjectionModeTag::Identity,
+            ProjectionMode::Navigate => verter_audit::ProjectionModeTag::Navigate,
+            ProjectionMode::Shallow => verter_audit::ProjectionModeTag::Shallow,
+            ProjectionMode::Expanded => verter_audit::ProjectionModeTag::Expanded,
+            ProjectionMode::Skeleton => verter_audit::ProjectionModeTag::Skeleton,
+        }
+    }
+}
+
 /// One hop in a navigation path. Used by [`TypeNavigator::choose_next_hop`]
 /// and as the segment list in [`SemanticQueryKey::ProjectPath`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

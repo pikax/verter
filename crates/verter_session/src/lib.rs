@@ -123,6 +123,7 @@ mod host_executor_lowering_tests;
 mod host_lifecycle;
 pub mod host_manage;
 mod host_resolve;
+pub mod host_resolve_type_audit;
 mod host_semantic;
 #[cfg(test)]
 pub(crate) mod host_test_audit;

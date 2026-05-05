@@ -3533,6 +3533,11 @@ mod foundations_guards {
         // `AuditRuntimeSnapshot`) so callers of the audited
         // entry-points do not need to reach into the module path.
         "pub use host_audit_runtime::",
+        // tests/type_resolution_audit_*.rs — public audited
+        // entry-point that wires `VerterHost::resolve_type_with_audit`
+        // for type-resolution requests. Producer side of the
+        // `RequestKind::TypeResolution` audit kind.
+        "pub mod host_resolve_type_audit",
         // verter_ffi::convert (host::cross_file::CrossFileResult)
         "pub mod cross_file",
         // tests/host_tests.rs (host_compile module surface)

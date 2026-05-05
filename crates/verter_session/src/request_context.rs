@@ -20,7 +20,7 @@
 //!   `replace`, both of which are non-panicking.
 
 use std::cell::{Cell, RefCell};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -365,6 +365,40 @@ pub struct RequestContext {
     ///   * the target is `wasm32` (sampler is gated off there), or
     ///   * the registration is `Noop` (filtered kind).
     pub process_rss_peak_bytes: AtomicU64,
+
+    // ─────── Type-resolution counters ───────
+    //
+    // Populated by [`crate::project_semantic_dispatch::ProjectSemanticDispatch::execute`]
+    // and the navigator hop drivers. Snapshotted at request finalisation
+    // into [`verter_audit::TypeResolutionPayload`] for
+    // [`verter_audit::RequestKind::TypeResolution`] requests.
+    /// Number of resolver hops taken — every dispatch through
+    /// `SemanticQueryApi::execute` against the active context bumps
+    /// this once.
+    pub type_resolution_hops: AtomicU64,
+    /// Number of `Navigate` hops — intermediate path-projection hops
+    /// that walked through a member without expanding it.
+    pub type_resolution_navigations: AtomicU64,
+    /// Number of `Expanded` / `Shallow` hops that allocated new
+    /// semantic nodes. Cache hits do NOT bump this counter.
+    pub type_resolution_expansions: AtomicU64,
+    /// Number of conditional-type branch decisions resolved (open
+    /// distributions + closed branch reductions).
+    pub type_resolution_conditional_decisions: AtomicU64,
+    /// Number of `ref_root_reaches_transitive_cycle_node` cache hits
+    /// observed during the request.
+    pub type_resolution_ref_root_cycle_hits: AtomicU64,
+    /// Total projection ops executed against the projection-op
+    /// budget (`SemanticQueryKey::ProjectPath` invocations).
+    pub type_resolution_projection_ops: AtomicU64,
+    /// Maximum walker depth observed during the request — the
+    /// `fetch_max`-monotonic high-water mark for navigator and
+    /// dispatch recursion.
+    pub type_resolution_depth_high_water: AtomicU16,
+    /// Set to `true` when the depth budget
+    /// (`verter_audit::WALKER_DEPTH_CAP`) was exceeded during the
+    /// request.
+    pub type_resolution_recursion_limit_reached: AtomicBool,
 }
 
 impl RequestContext {
@@ -457,6 +491,14 @@ impl RequestContext {
             parent_request_id,
             scheduler_audit: Mutex::new(None),
             process_rss_peak_bytes: AtomicU64::new(0),
+            type_resolution_hops: AtomicU64::new(0),
+            type_resolution_navigations: AtomicU64::new(0),
+            type_resolution_expansions: AtomicU64::new(0),
+            type_resolution_conditional_decisions: AtomicU64::new(0),
+            type_resolution_ref_root_cycle_hits: AtomicU64::new(0),
+            type_resolution_projection_ops: AtomicU64::new(0),
+            type_resolution_depth_high_water: AtomicU16::new(0),
+            type_resolution_recursion_limit_reached: AtomicBool::new(false),
         })
     }
 
@@ -482,6 +524,69 @@ impl RequestContext {
     #[must_use]
     pub fn kind(&self) -> verter_audit::RequestKind {
         self.kind.clone()
+    }
+
+    /// Bump the `type_resolution_hops` counter by one. Called by the
+    /// shared dispatcher (`ProjectSemanticDispatch::execute`) on every
+    /// dispatched query — the per-request snapshot at finalization
+    /// time surfaces as
+    /// [`verter_audit::TypeResolutionPayload::hops`].
+    pub fn bump_type_resolution_hop(&self, mode: crate::semantic_query::ProjectionMode) {
+        self.type_resolution_hops.fetch_add(1, Ordering::Relaxed);
+        match mode {
+            crate::semantic_query::ProjectionMode::Navigate => {
+                self.type_resolution_navigations
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            crate::semantic_query::ProjectionMode::Expanded
+            | crate::semantic_query::ProjectionMode::Shallow => {
+                self.type_resolution_expansions
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            crate::semantic_query::ProjectionMode::Identity
+            | crate::semantic_query::ProjectionMode::Skeleton => {}
+        }
+    }
+
+    /// Bump the conditional-branch decision counter — fired when an
+    /// open conditional distributes the remaining path or a closed
+    /// conditional reduces immediately.
+    pub fn bump_type_resolution_conditional_decision(&self) {
+        self.type_resolution_conditional_decisions
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Bump the `ref_root_reaches_transitive_cycle_node` cache-hit
+    /// counter.
+    pub fn bump_type_resolution_ref_root_cycle_hit(&self) {
+        self.type_resolution_ref_root_cycle_hits
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Bump the `ProjectPath` projection-op counter by one — fired
+    /// once per dispatched `SemanticQueryKey::ProjectPath`.
+    pub fn bump_type_resolution_projection_op(&self) {
+        self.type_resolution_projection_ops
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Update the per-request walker depth high-water mark. Cheap on
+    /// the hot path: one `fetch_max` per recursive entry — saturates
+    /// at `u16::MAX` if a depth value somehow exceeds the cap. When
+    /// `depth >= verter_audit::WALKER_DEPTH_CAP`, also sets the
+    /// `type_resolution_recursion_limit_reached` latch — this is the
+    /// signal the audit consumer surfaces to discriminate
+    /// pathological-recursion paths.
+    pub fn observe_type_resolution_depth(&self, depth: u16) {
+        // fetch_max is monotonic — observers may race with each other
+        // safely. Relaxed is sufficient since the snapshot happens
+        // single-threaded at finalisation.
+        self.type_resolution_depth_high_water
+            .fetch_max(depth, Ordering::Relaxed);
+        if depth >= verter_audit::WALKER_DEPTH_CAP {
+            self.type_resolution_recursion_limit_reached
+                .store(true, Ordering::Relaxed);
+        }
     }
 }
 

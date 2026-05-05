@@ -418,6 +418,47 @@ pub(super) fn canonicalize_node_list(members: &[SemanticNodeId]) -> Arc<[Semanti
 
 impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {
     fn execute(&self, key: SemanticQueryKey) -> QueryResult<SemanticNodeId> {
+        // Type-resolution audit: bump the per-request hop / mode /
+        // projection / conditional counters BEFORE admission-time
+        // rewriting so we attribute the dispatch to the caller's
+        // intent (path-projection sugar still counts as one hop). The
+        // counters are no-ops when no `RequestContext` is installed
+        // on the calling thread.
+        if let Some(ctx) = crate::request_context::current_request_context() {
+            // Walker depth high-water — observe per-dispatch nesting
+            // depth via the dispatcher's `instantiate_active` stack.
+            let depth = self.instantiate_active.borrow().len();
+            ctx.observe_type_resolution_depth(u16::try_from(depth).unwrap_or(u16::MAX));
+            match &key {
+                SemanticQueryKey::ProjectPath { mode, .. }
+                | SemanticQueryKey::ProjectMember { mode, .. }
+                | SemanticQueryKey::IndexedAccess { mode, .. } => {
+                    ctx.bump_type_resolution_hop(*mode);
+                    ctx.bump_type_resolution_projection_op();
+                }
+                SemanticQueryKey::Instantiate { body_mode, .. } => {
+                    ctx.bump_type_resolution_hop(*body_mode);
+                }
+                SemanticQueryKey::Conditional { .. } => {
+                    ctx.bump_type_resolution_conditional_decision();
+                    // Conditional decisions still count as a single
+                    // dispatched hop in `Identity` mode — the
+                    // dispatcher allocates one node id for the
+                    // resolution.
+                    ctx.bump_type_resolution_hop(crate::semantic_query::ProjectionMode::Identity);
+                }
+                // ResolveDecl, KeyOf, MappedType, TypeOf,
+                // NormalizeUnion, NormalizeIntersection,
+                // ResolvedNamedType, Relate, ResolveMacroPayload —
+                // each is a single dispatched hop with no consumer-
+                // visible projection mode. Count them as Identity hops
+                // so the audit's `hops` field is the total dispatch
+                // count, not just the projection-bearing subset.
+                _ => {
+                    ctx.bump_type_resolution_hop(crate::semantic_query::ProjectionMode::Identity);
+                }
+            }
+        }
         // Admission-time canonicalisation per plan B1a:
         //   - `ProjectMember { base, member, mode }` rewrites to
         //     `ProjectPath { base, path: [Member(member)], mode }` BEFORE the
