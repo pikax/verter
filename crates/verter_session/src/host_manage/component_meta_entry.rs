@@ -406,15 +406,25 @@ impl VerterHost {
 
         // Synthesize a from_cache audit record so consumers via
         // `take_audit_record(resolution.request_id)` get uniform
-        // observability.
+        // observability. Snapshot per-request cache counters from
+        // the active TLS context — the warm path consulted
+        // `ComponentMetaResultDb::get` and `IndexedReadyDb::get`
+        // through `shallow_file_state`, both of which bumped
+        // hits/misses on this request's `cache_counters`. The
+        // §1.5 joiner-accounting contract requires the snapshot to
+        // attribute exactly to THIS request, not a host-global delta.
         if self.config.audit_enabled {
+            let store = crate::component_meta_audit::RequestStoreAudit {
+                cache_layers: crate::component_meta_audit::snapshot_cache_layers_from_tls(),
+                ..Default::default()
+            };
             let synthesized = crate::component_meta_audit::RequestAuditRecord {
                 request_id,
                 canonical_id: canonical.to_string(),
                 kind: crate::component_meta_audit::RequestKind::ComponentMeta,
                 parent_request_id: None,
                 timings: crate::component_meta_audit::RequestTimingAudit::default(),
-                store: crate::component_meta_audit::RequestStoreAudit::default(),
+                store,
                 memory: crate::component_meta_audit::RequestMemoryAudit::default(),
                 footprint: None,
                 from_cache: true,

@@ -504,6 +504,7 @@ impl VerterHost {
             imported_dependency_bytes: indexed_bytes,
             prepared_type_decls,
             prepared_value_decls,
+            cache_layers: Default::default(),
         };
         (store_audit, component_meta_counters)
     }

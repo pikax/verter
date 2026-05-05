@@ -159,6 +159,74 @@ pub fn current_request_budget() -> Option<Arc<RequestBudget>> {
     CURRENT_REQUEST_BUDGET.with(|c| c.borrow().as_ref().map(Arc::clone))
 }
 
+/// Per-cache hit/miss attribution counter pair. Bumped at the
+/// get/insert boundary of each cache via
+/// [`current_request_context`] so the counts attribute exactly to
+/// the request that performed the lookup. Concurrent requests each
+/// see their own context — no host-global delta misattribution
+/// under concurrency (the joiner-accounting contract in §1.5 of
+/// the audit infrastructure plan).
+#[derive(Debug, Default)]
+pub struct HitMiss {
+    /// Hits observed on this cache layer during the request.
+    pub hits: AtomicU64,
+    /// Misses observed on this cache layer during the request.
+    pub misses: AtomicU64,
+}
+
+impl HitMiss {
+    /// Snapshot the current hit/miss values with relaxed ordering.
+    /// The request is single-threaded at finalisation, so relaxed
+    /// reads observe every prior bump on the same context.
+    #[must_use]
+    pub fn snapshot(&self) -> (u64, u64) {
+        (
+            self.hits.load(Ordering::Relaxed),
+            self.misses.load(Ordering::Relaxed),
+        )
+    }
+}
+
+/// Per-cache hit/miss attribution. One field per cache layer that
+/// participates in the request's per-cache observability surface.
+/// Each field is bumped at the get/insert boundary of its cache
+/// when a [`RequestContext`] is currently installed in TLS. The
+/// host-global counters in
+/// [`crate::project_type_store::ProjectTypeStoreCounters`] remain
+/// unchanged — they observe live entries / stale sweeps
+/// cross-request, while these per-cache counters observe
+/// per-request hit/miss attribution.
+#[derive(Debug, Default)]
+pub struct PerRequestCacheCounters {
+    /// `IndexedReadyDb` — canonical post-parse artifact cache.
+    pub indexed: HitMiss,
+    /// `AnalysisReadyDb` — analysis-stage artifact cache.
+    pub analysis: HitMiss,
+    /// `OwnerImportSurfaceDb` — owner direct-import surface cache.
+    pub owner_import: HitMiss,
+    /// `RouteOwnedShallowDb` — route-only shallow cache.
+    pub route_owned_shallow: HitMiss,
+    /// `ComponentMetaResultDb` — final component-meta result cache.
+    pub component_meta: HitMiss,
+    /// `RouteDb` — host-backed resolver route cache.
+    pub route_db: HitMiss,
+    /// `RefCycleResultDb` — transitive-cycle result cache for
+    /// parameterized generic helpers.
+    pub ref_cycle: HitMiss,
+    /// `IntrinsicRegistry` — intrinsic dispatch lookup cache.
+    pub intrinsic_registry: HitMiss,
+    /// `SemanticGraphStore` — semantic-query memo / graph cache.
+    pub semantic_graph: HitMiss,
+    /// `MaterializeStructureDb` — structural materialisation cache.
+    pub materialize_structure: HitMiss,
+    /// `MaterializeMemoDb` — materialiser memo cache.
+    pub materialize_memo: HitMiss,
+    /// `PreparedSurfaceDb` — prepared-surface cache.
+    pub prepared_surface: HitMiss,
+    /// `PreparedMemberDb` — prepared-member cache.
+    pub prepared_member: HitMiss,
+}
+
 /// Per-request state. Held as `Arc<RequestContext>` and wrapped into
 /// [`OpaqueRequestContext`] when handed to the scheduler. Also implements
 /// [`verter_audit::AuditObserver`] so the same `Arc` plants into the
@@ -233,6 +301,12 @@ pub struct RequestContext {
     /// Per-context counter — subset of `dep_signature_merges` that
     /// hit an existing intern bucket.
     pub dep_signature_intern_hits: AtomicU64,
+    /// Per-cache hit/miss attribution for the cache layers
+    /// participating in the request. Bumped at the get/insert
+    /// boundary of each cache. Snapshotted at request close into
+    /// the audit record's
+    /// [`verter_audit::store::CacheLayerBreakdown`] field.
+    pub cache_counters: PerRequestCacheCounters,
 }
 
 impl RequestContext {
@@ -287,6 +361,7 @@ impl RequestContext {
             family_map_lock_acquisitions: AtomicU64::new(0),
             dep_signature_merges: AtomicU64::new(0),
             dep_signature_intern_hits: AtomicU64::new(0),
+            cache_counters: PerRequestCacheCounters::default(),
         })
     }
 

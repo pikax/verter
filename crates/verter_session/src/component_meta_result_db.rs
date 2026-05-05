@@ -237,7 +237,21 @@ impl<P> ComponentMetaResultDb<P> {
     /// the result; this split keeps the cache decoupled from the live host.
     #[must_use]
     pub fn get(&self, key: &ComponentMetaResultKey) -> Option<ComponentMetaResultEntry<P>> {
-        self.entries.get(key).map(|v| v.clone())
+        let result = self.entries.get(key).map(|v| v.clone());
+        if let Some(ctx) = crate::request_context::current_request_context() {
+            if result.is_some() {
+                ctx.cache_counters
+                    .component_meta
+                    .hits
+                    .fetch_add(1, Ordering::Relaxed);
+            } else {
+                ctx.cache_counters
+                    .component_meta
+                    .misses
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        result
     }
 
     /// Insert a final result entry. Cancelled, budget-exceeded, or partial

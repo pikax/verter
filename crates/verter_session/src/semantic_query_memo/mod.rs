@@ -1101,12 +1101,26 @@ impl SemanticGraphStore {
     pub fn get(&self, key: &SemanticQueryKey) -> Option<CacheRead<QueryResult<SemanticNodeId>>> {
         let (family, slot) = family_and_slot(key);
         let entries = self.entries_lock_diagnosed();
-        entries.get(&family).and_then(|slots| {
+        let result = entries.get(&family).and_then(|slots| {
             slots.slot(slot).cloned().map(|entry| CacheRead {
                 value: entry.result,
                 dep_signature: entry.dep_signature,
             })
-        })
+        });
+        if let Some(rctx) = crate::request_context::current_request_context() {
+            if result.is_some() {
+                rctx.cache_counters
+                    .semantic_graph
+                    .hits
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            } else {
+                rctx.cache_counters
+                    .semantic_graph
+                    .misses
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        result
     }
 
     /// Per-key result for the BFS bridge's batch dispatch (D103). Each

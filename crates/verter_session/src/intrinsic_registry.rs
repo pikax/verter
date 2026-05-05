@@ -130,12 +130,25 @@ impl IntrinsicRegistry {
     #[must_use]
     pub fn lookup(&self, name: &str) -> IntrinsicLookup {
         let entries = self.entries.read();
-        if let Some(impl_id) = entries.get(name).copied() {
-            IntrinsicLookup::Found(impl_id)
-        } else {
-            IntrinsicLookup::Unsupported {
-                name: Arc::from(name),
+        let result = entries.get(name).copied();
+        if let Some(rctx) = crate::request_context::current_request_context() {
+            if result.is_some() {
+                rctx.cache_counters
+                    .intrinsic_registry
+                    .hits
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            } else {
+                rctx.cache_counters
+                    .intrinsic_registry
+                    .misses
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
+        }
+        match result {
+            Some(impl_id) => IntrinsicLookup::Found(impl_id),
+            None => IntrinsicLookup::Unsupported {
+                name: Arc::from(name),
+            },
         }
     }
 
