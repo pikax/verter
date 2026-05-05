@@ -25,6 +25,13 @@ pub enum AuditEvent {
     InflightAbortedRetry,
     /// One cold-abort sweep tick.
     ColdAbortSwept,
+    /// One `CodeTransform` operation entry observed during compile.
+    /// Producers in `verter_compiler::code_transform` emit this at each
+    /// public op entry so the session-side observer can populate
+    /// [`crate::payloads::compile::CompilePayload::code_transform_ops`]
+    /// without bypassing the `CodeTransform` API surface (see CLAUDE.md
+    /// §"CodeTransform Is the Single Source of Truth").
+    CompileCodeTransformOp,
 }
 
 /// Trait implemented by anything wanting to receive audit events.

@@ -430,6 +430,9 @@ pub fn compile(
         options.custom_elements.as_deref(),
     );
     let parse_duration_ms = parse_start.elapsed().as_secs_f64() * 1000.0;
+    if let Some(observer) = verter_audit::current_observer() {
+        observer.record_phase_timing("compile.parse", parse_duration_ms);
+    }
     compile_inner(
         input,
         &parsed,
@@ -537,6 +540,7 @@ fn compile_inner(
     // ── 3. Style codegen ──────────────────────────────────────────
     let mut all_v_bind_vars = Vec::new();
     let mut style_blocks: Vec<VerterStyleBlock> = Vec::new();
+    let mut total_style_duration_ms: f64 = 0.0;
 
     if options.target.needs_style() {
         for style in parsed.style_nodes() {
@@ -590,6 +594,7 @@ fn compile_inner(
             };
 
             let style_duration_ms = style_start.elapsed().as_secs_f64() * 1000.0;
+            total_style_duration_ms += style_duration_ms;
             let lang_str = style.lang.map(|l| match l {
                 StyleLang::Css => "css".to_string(),
                 StyleLang::Scss => "scss".to_string(),
@@ -606,6 +611,15 @@ fn compile_inner(
                 duration_ms: style_duration_ms,
                 attrs: extract_attrs(&style.attributes, input),
             });
+        }
+        // Emit one CSS-analysis phase-boundary timing per compile —
+        // not per <style> block. The audit denylist (see
+        // `audit_no_hot_loop_instrumentation`) keeps instrumentation
+        // out of the per-block loop.
+        if !parsed.style_nodes().is_empty() {
+            if let Some(observer) = verter_audit::current_observer() {
+                observer.record_phase_timing("compile.css_analysis", total_style_duration_ms);
+            }
         }
     } // end if needs_style
 
@@ -812,6 +826,7 @@ fn compile_inner(
         }
 
         let script_code = ct.build_string();
+        let sourcemap_start = Instant::now();
         let script_source_map = if verter_options.source_map {
             let sm_opts = SourceMapOptions {
                 source: options.filename.as_deref(),
@@ -822,7 +837,19 @@ fn compile_inner(
         } else {
             String::new()
         };
+        let sourcemap_duration_ms = sourcemap_start.elapsed().as_secs_f64() * 1000.0;
         let script_duration_ms = script_start.elapsed().as_secs_f64() * 1000.0;
+        // Emit phase boundaries: transform (script) excludes the
+        // sourcemap chunk so timings stay disjoint and the audit
+        // payload's `transform_ms` / `sourcemap_ms` add up to roughly
+        // the wall-clock cost of this block.
+        if let Some(observer) = verter_audit::current_observer() {
+            let transform_only_ms = (script_duration_ms - sourcemap_duration_ms).max(0.0);
+            observer.record_phase_timing("compile.transform", transform_only_ms);
+            if verter_options.source_map {
+                observer.record_phase_timing("compile.sourcemap", sourcemap_duration_ms);
+            }
+        }
 
         let has_script_setup = parsed.script_setup().is_some();
         let script_attrs = if let Some(ss) = parsed.script_setup() {
@@ -999,6 +1026,7 @@ fn compile_inner(
                     // Prefix and suffix were removed via CT operations above,
                     // so build_string() produces only the template region.
                     let tpl_code = tpl_ct.build_string();
+                    let tpl_sourcemap_start = Instant::now();
                     let tpl_source_map = if verter_options.source_map {
                         let sm_opts = SourceMapOptions {
                             source: options.filename.as_deref(),
@@ -1009,7 +1037,15 @@ fn compile_inner(
                     } else {
                         String::new()
                     };
+                    let tpl_sourcemap_ms = tpl_sourcemap_start.elapsed().as_secs_f64() * 1000.0;
                     let tpl_duration_ms = tpl_start.elapsed().as_secs_f64() * 1000.0;
+                    if let Some(observer) = verter_audit::current_observer() {
+                        let codegen_only_ms = (tpl_duration_ms - tpl_sourcemap_ms).max(0.0);
+                        observer.record_phase_timing("compile.codegen", codegen_only_ms);
+                        if verter_options.source_map {
+                            observer.record_phase_timing("compile.sourcemap", tpl_sourcemap_ms);
+                        }
+                    }
 
                     let tpl_attrs = extract_attrs(&template_ast.root.attributes, input);
 
@@ -1243,6 +1279,7 @@ fn compile_inner(
 
         // Build output and source map from the single unified CT
         let tsx_code = tsx_ct.build_string();
+        let tsx_sourcemap_start = Instant::now();
         let tsx_sm = if verter_options.source_map {
             let sm_opts = SourceMapOptions {
                 source: options.filename.as_deref(),
@@ -1253,7 +1290,15 @@ fn compile_inner(
         } else {
             String::new()
         };
+        let tsx_sourcemap_ms = tsx_sourcemap_start.elapsed().as_secs_f64() * 1000.0;
         let tsx_dur = tsx_start.elapsed().as_secs_f64() * 1000.0;
+        if let Some(observer) = verter_audit::current_observer() {
+            let codegen_only_ms = (tsx_dur - tsx_sourcemap_ms).max(0.0);
+            observer.record_phase_timing("compile.codegen", codegen_only_ms);
+            if verter_options.source_map {
+                observer.record_phase_timing("compile.sourcemap", tsx_sourcemap_ms);
+            }
+        }
 
         // Compute block_start/block_end from boundary markers in the final TSX code.
         // The markers are unique constants inserted by script codegen; debug_assert
@@ -1306,6 +1351,9 @@ fn compile_inner(
             },
         );
         let tsc_dur = tsc_start.elapsed().as_secs_f64() * 1000.0;
+        if let Some(observer) = verter_audit::current_observer() {
+            observer.record_phase_timing("compile.codegen", tsc_dur);
+        }
         Some(VerterTsxBlock {
             code: tsc_out.code,
             source_map: tsc_out.source_map,

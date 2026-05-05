@@ -114,6 +114,7 @@ mod cache_identity_invariants_tests;
 pub mod component_meta_payload;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod host_compile;
+pub mod host_compile_audit;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod host_compile_tests;
 mod host_construction;

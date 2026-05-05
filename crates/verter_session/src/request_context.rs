@@ -365,6 +365,31 @@ pub struct RequestContext {
     ///   * the target is `wasm32` (sampler is gated off there), or
     ///   * the registration is `Noop` (filtered kind).
     pub process_rss_peak_bytes: AtomicU64,
+    /// Per-context accumulator for compile-phase wall-clock — parse
+    /// phase. Stored as fixed-point microseconds (`f64` ms × 1_000`)
+    /// so the atomic counter can `fetch_add` cheaply; finalisation
+    /// converts back to milliseconds.
+    pub compile_parse_us: AtomicU64,
+    /// Per-context accumulator for compile-phase wall-clock — script
+    /// (transform) phase. Same fixed-point-microseconds encoding as
+    /// [`Self::compile_parse_us`].
+    pub compile_transform_us: AtomicU64,
+    /// Per-context accumulator for compile-phase wall-clock — codegen
+    /// phase (template / IDE). Same fixed-point-microseconds encoding
+    /// as [`Self::compile_parse_us`].
+    pub compile_codegen_us: AtomicU64,
+    /// Per-context accumulator for compile-phase wall-clock — CSS
+    /// analysis phase. Same fixed-point-microseconds encoding as
+    /// [`Self::compile_parse_us`].
+    pub compile_css_analysis_us: AtomicU64,
+    /// Per-context accumulator for compile-phase wall-clock — sourcemap
+    /// generation. Same fixed-point-microseconds encoding as
+    /// [`Self::compile_parse_us`].
+    pub compile_sourcemap_us: AtomicU64,
+    /// Per-context counter — number of `CodeTransform` operations
+    /// observed during the compile request. Bumped from
+    /// [`verter_audit::AuditEvent::CompileCodeTransformOp`].
+    pub compile_code_transform_ops: AtomicU64,
 }
 
 impl RequestContext {
@@ -457,6 +482,12 @@ impl RequestContext {
             parent_request_id,
             scheduler_audit: Mutex::new(None),
             process_rss_peak_bytes: AtomicU64::new(0),
+            compile_parse_us: AtomicU64::new(0),
+            compile_transform_us: AtomicU64::new(0),
+            compile_codegen_us: AtomicU64::new(0),
+            compile_css_analysis_us: AtomicU64::new(0),
+            compile_sourcemap_us: AtomicU64::new(0),
+            compile_code_transform_ops: AtomicU64::new(0),
         })
     }
 
@@ -541,6 +572,10 @@ impl verter_audit::AuditObserver for RequestContext {
             verter_audit::AuditEvent::ColdAbortSwept => {
                 self.cold_aborts_swept.fetch_add(1, Ordering::Relaxed);
             }
+            verter_audit::AuditEvent::CompileCodeTransformOp => {
+                self.compile_code_transform_ops
+                    .fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 
@@ -602,14 +637,25 @@ impl verter_audit::AuditObserver for RequestContext {
         self.lock_acquisitions.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn record_phase_timing(&self, _phase: &'static str, _elapsed_ms: f64) {
-        // Phase timings are not yet aggregated into
-        // `RequestContext` counters; the typed signal is consumed
-        // by the request-finalisation step which assembles a
-        // `RequestTimingAudit` from the audit-side accumulator.
-        // The trait method is left intentionally empty so producers
-        // may emit through `current_observer()` without any
-        // session-side coupling.
+    fn record_phase_timing(&self, phase: &'static str, elapsed_ms: f64) {
+        // Compile-phase boundary timings flow into the per-request
+        // accumulators that
+        // [`crate::VerterHost::compile_with_audit`] reads when
+        // assembling the `CompilePayload`. Other phase names are
+        // currently unmodeled — the trait method intentionally
+        // returns silently so producers may emit through
+        // `current_observer()` without session-side coupling for
+        // signals not yet plumbed.
+        let micros = (elapsed_ms * 1_000.0).max(0.0) as u64;
+        let counter = match phase {
+            "compile.parse" => &self.compile_parse_us,
+            "compile.transform" => &self.compile_transform_us,
+            "compile.codegen" => &self.compile_codegen_us,
+            "compile.css_analysis" => &self.compile_css_analysis_us,
+            "compile.sourcemap" => &self.compile_sourcemap_us,
+            _ => return,
+        };
+        counter.fetch_add(micros, Ordering::Relaxed);
     }
 
     fn record_scheduler_dispatch(&self, audit: verter_audit::SchedulerAudit) {

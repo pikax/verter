@@ -7,6 +7,12 @@
 use std::fs;
 use std::path::PathBuf;
 
+// Shared denylist consumed by both `audit_no_hot_loop_instrumentation`
+// (defined below) and the focused regression test in
+// `tests/compile_audit_no_hot_loop_instrumentation.rs`.
+#[path = "audit_hot_loop_denylist.rs"]
+mod audit_hot_loop_denylist;
+
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -3537,6 +3543,12 @@ mod foundations_guards {
         "pub mod cross_file",
         // tests/host_tests.rs (host_compile module surface)
         "pub mod host_compile",
+        // Slice 3.B — `compile_with_audit` entry-point. Public because
+        // tests/compile_audit_*.rs and tests/tls_harness_cross_crate.rs
+        // drive the audited compile path; consumer crates (verter_napi,
+        // verter_lsp) pick this up once their audited surfaces ship in
+        // Wave 3+.
+        "pub mod host_compile_audit",
         // tests/host_tests.rs (host_manage::* APIs in integration tests)
         "pub mod host_manage",
         // verter_type_runtime::backend::tests via meta_resolve types,
@@ -6532,5 +6544,316 @@ fn audit_request_registration_lifecycle() {
          inside `crates/verter_session/src/host_audit_runtime.rs`. Found callers \
          outside that file:\n  {}",
         violations.join("\n  ")
+    );
+}
+
+/// Slice 3.B architecture guard — instrumentation lives at phase
+/// boundaries only, never inside hot loops.
+///
+/// Reads the canonical `(crate, function_path)` denylist from
+/// `audit_hot_loop_denylist::HOT_PATH_DENYLIST` and rejects any
+/// `current_observer()` call (the audit substrate's TLS accessor)
+/// inside the body of any listed function. Phase boundaries (parse /
+/// transform / codegen / css_analysis / sourcemap) fire O(1) times
+/// per request — that is the only permitted granularity.
+#[test]
+fn audit_no_hot_loop_instrumentation() {
+    use std::collections::HashMap;
+    use syn::visit::Visit;
+
+    let denylist = audit_hot_loop_denylist::HOT_PATH_DENYLIST;
+    assert!(
+        !denylist.is_empty(),
+        "audit_no_hot_loop_instrumentation: denylist must not be empty — \
+         the guard is meaningless without at least one hot-path entry. \
+         If the system genuinely has no hot loops worth listing, escalate \
+         this guard's purpose for review.",
+    );
+    assert!(
+        denylist.len() <= 20,
+        "audit_no_hot_loop_instrumentation: denylist has {} entries (> 20); \
+         the design guidance is 4–8 typical / ~20 max. Escalate before \
+         adding more — broad lists usually indicate misplaced \
+         instrumentation rather than additional hot loops.",
+        denylist.len(),
+    );
+
+    // The audit-substrate's TLS observer accessor — the canonical
+    // entry point producers use to reach `AuditObserver::record_*`.
+    // Without `verter_audit::current_observer()` (or the unqualified
+    // `current_observer()` form), no producer-side audit emit is
+    // possible. Matching just this name keeps the guard precise:
+    // session-internal helpers that share verbs with the substrate
+    // trait (e.g. `RequestContextLike::record_cache_event` on the
+    // scheduler-side request-context handle) are NOT producer audit
+    // emits and must not be flagged. The cross-crate audit-substrate
+    // surface is identified by the `current_observer` accessor; that
+    // is the gate the guard enforces.
+    const AUDIT_EMIT_FUNCTION_NAMES: &[&str] = &["current_observer"];
+
+    /// Inner visitor — scans a single function body for audit-emit
+    /// call sites without descending into nested `fn`/`impl` items.
+    struct EmitFinder {
+        violations: Vec<String>,
+    }
+    impl<'ast> Visit<'ast> for EmitFinder {
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(p) = &*call.func {
+                if let Some(last) = p.path.segments.last() {
+                    let name = last.ident.to_string();
+                    if AUDIT_EMIT_FUNCTION_NAMES.contains(&name.as_str()) {
+                        self.violations.push(name);
+                    }
+                }
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+    }
+
+    /// Outer visitor — assembles fully-qualified function paths and
+    /// runs `EmitFinder` against any body whose path appears in the
+    /// denylist. The path stack is seeded with the file's own
+    /// module path (derived from `<crate_src>/<sub>/<sub>/foo.rs` →
+    /// `sub::sub::foo`); inline `mod xxx { ... }` blocks and
+    /// `impl Type` blocks then push further segments.
+    struct DenyVisitor<'a> {
+        target_paths: &'a HashMap<&'a str, Vec<(usize, &'a str)>>,
+        path_stack: Vec<String>,
+        violations: Vec<(usize, String)>,
+        matched: Vec<bool>,
+        current_crate: &'a str,
+    }
+    impl<'a, 'ast> Visit<'ast> for DenyVisitor<'a> {
+        fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+            self.path_stack.push(item.ident.to_string());
+            syn::visit::visit_item_mod(self, item);
+            self.path_stack.pop();
+        }
+        fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
+            let segment = if let syn::Type::Path(tp) = &*item.self_ty {
+                tp.path
+                    .segments
+                    .last()
+                    .map(|s| s.ident.to_string())
+                    .unwrap_or_else(|| "<impl>".into())
+            } else {
+                "<impl>".into()
+            };
+            self.path_stack.push(segment);
+            syn::visit::visit_item_impl(self, item);
+            self.path_stack.pop();
+        }
+        fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+            self.path_stack.push(item.sig.ident.to_string());
+            self.check(&item.block);
+            syn::visit::visit_item_fn(self, item);
+            self.path_stack.pop();
+        }
+        fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+            self.path_stack.push(item.sig.ident.to_string());
+            self.check(&item.block);
+            syn::visit::visit_impl_item_fn(self, item);
+            self.path_stack.pop();
+        }
+    }
+    impl<'a> DenyVisitor<'a> {
+        fn check(&mut self, block: &syn::Block) {
+            let path = self.path_stack.join("::");
+            let Some(targets) = self.target_paths.get(self.current_crate) else {
+                return;
+            };
+            for (idx, target_path) in targets {
+                if &path == target_path {
+                    self.matched[*idx] = true;
+                    let mut finder = EmitFinder {
+                        violations: Vec::new(),
+                    };
+                    finder.visit_block(block);
+                    for name in finder.violations {
+                        self.violations.push((*idx, name));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Compute the module-path stack for a file relative to its
+    /// crate's `src/` root.
+    fn module_stack_for_file(crate_src: &std::path::Path, file: &std::path::Path) -> Vec<String> {
+        let rel = match file.strip_prefix(crate_src) {
+            Ok(p) => p,
+            Err(_) => return Vec::new(),
+        };
+        let mut segments: Vec<String> = rel
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        if let Some(last) = segments.last_mut() {
+            if let Some(stripped) = last.strip_suffix(".rs") {
+                *last = stripped.to_string();
+            }
+        }
+        match segments.last().map(|s| s.as_str()) {
+            Some("lib") | Some("main") => {
+                if segments.len() == 1 {
+                    return Vec::new();
+                }
+                segments.pop();
+            }
+            Some("mod") => {
+                segments.pop();
+            }
+            _ => {}
+        }
+        segments
+    }
+
+    let mut by_crate: HashMap<&str, Vec<(usize, &str)>> = HashMap::new();
+    for (idx, (krate, path)) in denylist.iter().enumerate() {
+        by_crate.entry(krate).or_default().push((idx, path));
+    }
+
+    let mut matched: Vec<bool> = vec![false; denylist.len()];
+    let mut all_violations: Vec<String> = Vec::new();
+
+    for krate in by_crate.keys() {
+        let crate_src = workspace_root().join("crates").join(krate).join("src");
+        if !crate_src.exists() {
+            panic!(
+                "audit_no_hot_loop_instrumentation: crate `{krate}` listed in denylist \
+                 but `crates/{krate}/src/` does not exist; the denylist is stale."
+            );
+        }
+        walk_dir_collect_rs(&crate_src, &mut |path: &std::path::Path| {
+            let src = std::fs::read_to_string(path).unwrap_or_else(|e| {
+                panic!(
+                    "audit_no_hot_loop_instrumentation: cannot read `{}`: {e}",
+                    path.display()
+                )
+            });
+            let parsed = match syn::parse_file(&src) {
+                Ok(p) => p,
+                Err(_) => return,
+            };
+            let initial_stack = module_stack_for_file(&crate_src, path);
+            let mut visitor = DenyVisitor {
+                target_paths: &by_crate,
+                path_stack: initial_stack,
+                violations: Vec::new(),
+                matched: vec![false; denylist.len()],
+                current_crate: krate,
+            };
+            visitor.visit_file(&parsed);
+            for (i, m) in visitor.matched.iter().enumerate() {
+                if *m {
+                    matched[i] = true;
+                }
+            }
+            for (idx, name) in visitor.violations {
+                all_violations.push(format!(
+                    "  - [{}] {} :: {} — emit `{}`",
+                    krate,
+                    by_crate[krate]
+                        .iter()
+                        .find(|(i, _)| *i == idx)
+                        .map(|(_, p)| *p)
+                        .unwrap_or("<unknown>"),
+                    path.display(),
+                    name,
+                ));
+            }
+        });
+    }
+
+    let stale: Vec<String> = matched
+        .iter()
+        .enumerate()
+        .filter_map(|(i, m)| {
+            if !m {
+                let (krate, path) = denylist[i];
+                Some(format!("  - {krate} :: {path}"))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    assert!(
+        stale.is_empty(),
+        "audit_no_hot_loop_instrumentation: the following denylist entries did NOT \
+         match any function in the corresponding crate's source tree. The denylist \
+         is stale — the function was renamed, moved, or removed. Update the \
+         denylist in `tests/audit_hot_loop_denylist.rs`:\n{}",
+        stale.join("\n"),
+    );
+
+    assert!(
+        all_violations.is_empty(),
+        "audit_no_hot_loop_instrumentation: producer-side audit emits are FORBIDDEN \
+         inside the hot-path denylist. Move the emit to a phase boundary (parse / \
+         transform / codegen / css_analysis / sourcemap) outside the inner loop. \
+         Found:\n{}",
+        all_violations.join("\n"),
+    );
+}
+
+/// Self-test for `audit_no_hot_loop_instrumentation` discrimination.
+/// Confirms the matcher detects `current_observer()` calls and does
+/// NOT misclassify session-internal helpers (e.g. `record_cache_event`
+/// on `RequestContextLike`) as substrate emits.
+#[test]
+fn audit_no_hot_loop_instrumentation_self_test_rejects_emit_names() {
+    use syn::visit::Visit;
+
+    let synthetic_violator = "\
+        fn busy_loop() {\n\
+        \x20\x20    let _ = verter_audit::current_observer();\n\
+        \x20\x20    drop(verter_audit::current_observer());\n\
+        }\n\
+    ";
+    let synthetic_clean = "\
+        fn busy_loop() {\n\
+        \x20\x20    let _ = self.scratch.len();\n\
+        \x20\x20    let _ = self.allocator.alloc_str(\"hi\");\n\
+        \x20\x20    let _ = ctx.0.record_cache_event(CacheEventKind::Hit);\n\
+        }\n\
+    ";
+
+    fn count_emits(src: &str) -> usize {
+        let parsed = syn::parse_file(src).expect("parse synthetic");
+        struct Counter(usize);
+        impl<'ast> Visit<'ast> for Counter {
+            fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+                if let syn::Expr::Path(p) = &*call.func {
+                    if let Some(last) = p.path.segments.last() {
+                        if last.ident == "current_observer" {
+                            self.0 += 1;
+                        }
+                    }
+                }
+                syn::visit::visit_expr_call(self, call);
+            }
+        }
+        let mut c = Counter(0);
+        c.visit_file(&parsed);
+        c.0
+    }
+
+    assert_eq!(
+        count_emits(synthetic_violator),
+        2,
+        "self-test: synthetic violator with two `current_observer()` calls \
+         MUST produce exactly 2 detected emits. A regression that drops \
+         `current_observer` from the matcher would fail this assertion \
+         before the live guard can silently weaken.",
+    );
+    assert_eq!(
+        count_emits(synthetic_clean),
+        0,
+        "self-test: synthetic clean body MUST produce zero detected emits — \
+         note the body deliberately includes a session-internal \
+         `ctx.0.record_cache_event(...)` to confirm the matcher does NOT \
+         flag session-side helpers that share verbs with the substrate's \
+         `AuditObserver` trait.",
     );
 }
