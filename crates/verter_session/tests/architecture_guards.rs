@@ -3535,6 +3535,13 @@ mod foundations_guards {
         "pub use host_audit_runtime::",
         // verter_ffi::convert (host::cross_file::CrossFileResult)
         "pub mod cross_file",
+        // tests/semantic_analysis_audit_e2e.rs +
+        // tests/semantic_analysis_audit_tls_propagation.rs — public
+        // audited entry-point that wires
+        // `VerterHost::analyze_with_audit` for semantic-analysis
+        // requests. Producer side of the
+        // `RequestKind::SemanticAnalysis` audit kind.
+        "pub mod host_analyze_audit",
         // tests/host_tests.rs (host_compile module surface)
         "pub mod host_compile",
         // tests/host_tests.rs (host_manage::* APIs in integration tests)
