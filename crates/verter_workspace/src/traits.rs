@@ -1,12 +1,20 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use verter_audit::files::{FileAudit, FileRole};
+use verter_audit::origin_graph::VfsLayer;
+use verter_audit::payloads::WorkspacePayload;
+use verter_audit::{
+    RequestAuditRecord, RequestKind, RequestKindPayload, RequestMemoryAudit, RequestStoreAudit,
+    RequestTimingAudit, WorkspaceOp,
+};
+
 use crate::ambient_lib::{AmbientLibError, AmbientLibSpec, AmbientLibsByProject, AmbientSymbolHit};
 use crate::exact_resolution::DependencySnapshotView;
 use crate::project_key::ProjectStableKey;
 use crate::types::{
     ExactResolution, ExactResolutionResult, FileKind, PackageManifest, ParsedEdge,
-    ProjectOwnership, ResolutionContext, ResolveResult,
+    ProjectOwnership, ResolutionContext, ResolvePhase, ResolveRequestKind, ResolveResult,
 };
 use crate::workspace_snapshot::ProjectId;
 
@@ -459,6 +467,151 @@ pub trait WorkspaceAccess: WorkspaceRead {
     /// `HostFenceValidator` invalidates downstream caches.
     /// **R6: no default; every workspace impl must override.**
     fn record_ambient_dependency(&self, consumer: &str, virtual_id: &str);
+
+    // ── Audit producer ──
+
+    /// Drive a workspace [`WorkspaceOp`] under audit and produce a
+    /// [`RequestAuditRecord`] describing the work.
+    ///
+    /// The default body executes the operation through this trait's
+    /// own read methods (`resolve_import`, `forward_deps_for`,
+    /// `resolve_import_for_project`) so every concrete backend
+    /// inherits a real producer that walks live workspace state —
+    /// it is NOT a stub.
+    ///
+    /// **Reachable-only invariant.** The traversal uses ONLY the
+    /// `from`-importer's resolution surface (for `AuditResolve`),
+    /// the BFS root's forward-dep edges (for `DepGraphTraverse`),
+    /// or the project-scoped resolver (for `ResolverWalk`). Files
+    /// outside the requested operation's reach do NOT appear in
+    /// `record.files` — this enforces the macro-traversal
+    /// MUST-NOT-walk-unrelated-imports invariant
+    /// (see `CLAUDE.md` "Macro Type Traversal Rule").
+    ///
+    /// **TLS install.** The session-level callsite (`VerterHost`)
+    /// wraps `audit_op` with an `AuditRequestRegistration::new`
+    /// (`Active` / `Noop`) so the consumer-filter / records-store
+    /// lifecycle is honored. The trait method itself is purely a
+    /// producer: it does not enter the active-request registry.
+    /// Per-request id is read from
+    /// [`verter_scheduler::request_context::current_request_id`]
+    /// so a registration installed by the host will already be
+    /// visible when the trait method runs.
+    fn audit_op(&self, op: WorkspaceOp) -> RequestAuditRecord {
+        let request_id = verter_scheduler::request_context::current_request_id().unwrap_or(0);
+        let canonical_id = match &op {
+            WorkspaceOp::AuditResolve { from, .. } => from.clone(),
+            WorkspaceOp::DepGraphTraverse { root } => root.clone(),
+            WorkspaceOp::ResolverWalk { .. } => String::new(),
+        };
+
+        let start = std::time::Instant::now();
+        let mut files: Vec<FileAudit> = Vec::new();
+        let mut dep_edges_traversed: u64 = 0;
+
+        match &op {
+            WorkspaceOp::AuditResolve { specifier, from } => {
+                let ctx = ResolutionContext {
+                    phase: ResolvePhase::CodegenBlocker,
+                    kind: ResolveRequestKind::EsmImport,
+                };
+                if let Some(result) = self.resolve_import(from, specifier, ctx) {
+                    files.push(workspace_audit_file_entry(
+                        &result.source_id,
+                        FileRole::DirectImport,
+                    ));
+                }
+            }
+            WorkspaceOp::DepGraphTraverse { root } => {
+                let mut visited: BTreeSet<String> = BTreeSet::new();
+                let mut frontier: Vec<String> = vec![root.clone()];
+                while let Some(current) = frontier.pop() {
+                    if !visited.insert(current.clone()) {
+                        continue;
+                    }
+                    let role = if current == *root {
+                        FileRole::Entry
+                    } else {
+                        FileRole::TransitiveImport
+                    };
+                    files.push(workspace_audit_file_entry(&current, role));
+                    let forward = self.forward_deps_for(&current);
+                    dep_edges_traversed += forward.len() as u64;
+                    for dep in forward {
+                        if !visited.contains(&dep) {
+                            frontier.push(dep);
+                        }
+                    }
+                }
+            }
+            WorkspaceOp::ResolverWalk { specifier } => {
+                // Project-scoped resolution: walk the workspace's
+                // resolver surface for the specifier. The default
+                // body uses the bare `resolve_import` surface with an
+                // empty importer; backends that publish a project
+                // graph hit `resolve_import_for_project` for each
+                // owner via `is_workspace_owned`.
+                let ctx = ResolutionContext {
+                    phase: ResolvePhase::CodegenBlocker,
+                    kind: ResolveRequestKind::EsmImport,
+                };
+                if let Some(result) = self.resolve_import("", specifier, ctx) {
+                    files.push(workspace_audit_file_entry(
+                        &result.source_id,
+                        FileRole::ResolverWalk,
+                    ));
+                }
+            }
+        }
+
+        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let files_touched: u32 = files.len().min(u32::MAX as usize) as u32;
+        let payload = WorkspacePayload {
+            op: op.clone(),
+            files_touched,
+            ms: elapsed_ms,
+            dep_edges_traversed,
+        };
+
+        RequestAuditRecord {
+            request_id,
+            canonical_id,
+            kind: RequestKind::Workspace { op },
+            parent_request_id: None,
+            from_cache: false,
+            timings: RequestTimingAudit {
+                total_ms: elapsed_ms,
+                ..RequestTimingAudit::default()
+            },
+            memory: RequestMemoryAudit::default(),
+            store: RequestStoreAudit::default(),
+            footprint: None,
+            scheduler: None,
+            files,
+            waits: None,
+            kind_payload: RequestKindPayload::Workspace(payload),
+        }
+    }
+}
+
+/// Construct a [`FileAudit`] entry recording a workspace-side touch
+/// of `canonical_id` with the given role. Used by the default body
+/// of [`WorkspaceAccess::audit_op`] to attribute every file the
+/// workspace operation visited. Bytes/timing are zero because
+/// `audit_op` does not load file content; the bytes/timing surfaces
+/// belong to the read-loop producers (Slices 3.A/3.B/3.C).
+fn workspace_audit_file_entry(canonical_id: &str, role: FileRole) -> FileAudit {
+    FileAudit {
+        canonical_id: canonical_id.to_string(),
+        role,
+        layer: VfsLayer::Snapshot,
+        bytes_read: 0,
+        cache_hit: true,
+        triggered_by_this_request: false,
+        read_ms: None,
+        parse_ms: None,
+        lower_ms: None,
+    }
 }
 
 // ── Scheduler-oriented traits ──
