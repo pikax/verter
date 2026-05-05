@@ -11,6 +11,7 @@ use std::cell::RefCell;
 use std::sync::Arc;
 
 use crate::origin_graph::VfsLayer;
+use crate::scheduler::SchedulerAudit;
 
 /// Compact event tag emitted through [`AuditObserver::record_event`].
 ///
@@ -62,6 +63,16 @@ pub trait AuditObserver: Send + Sync {
     /// Record a phase boundary timing. Producers call this at the end
     /// of a named phase with the elapsed milliseconds.
     fn record_phase_timing(&self, _phase: &'static str, _elapsed_ms: f64) {}
+
+    /// Record one scheduler dispatch fact for the current request.
+    ///
+    /// Called by the scheduler at every dispatch site that runs an
+    /// audited stage. The first call wins on the per-request slot;
+    /// subsequent calls bump the dispatch counter on the previously
+    /// captured [`SchedulerAudit`]. The session-side `RequestContext`
+    /// implements this; the substrate's [`crate::noop::NoOpObserver`]
+    /// leaves it as a default no-op.
+    fn record_scheduler_dispatch(&self, _audit: SchedulerAudit) {}
 }
 
 thread_local! {

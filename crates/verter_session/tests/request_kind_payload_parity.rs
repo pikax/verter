@@ -23,6 +23,7 @@ fn empty_envelope(kind: RequestKind, kind_payload: RequestKindPayload) -> Reques
         memory: Default::default(),
         store: Default::default(),
         footprint: None,
+        scheduler: None,
         kind_payload,
     }
 }

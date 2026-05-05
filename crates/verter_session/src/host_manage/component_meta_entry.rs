@@ -408,15 +408,29 @@ impl VerterHost {
         // `take_audit_record(resolution.request_id)` get uniform
         // observability.
         if self.config.audit_enabled {
+            // Warm-cache replay carries the same parent-request and
+            // scheduler attribution the live request would have
+            // observed had it run cold — read both off the active
+            // request context (installed by the audited entry-point
+            // a few lines above this branch).
+            let (parent_request_id, scheduler_audit) =
+                match crate::request_context::current_request_context() {
+                    Some(ctx) if ctx.request_id == request_id => (
+                        ctx.parent_request_id.map(|id| id.to_string()),
+                        ctx.scheduler_audit.lock().clone(),
+                    ),
+                    _ => (None, None),
+                };
             let synthesized = crate::component_meta_audit::RequestAuditRecord {
                 request_id,
                 canonical_id: canonical.to_string(),
                 kind: crate::component_meta_audit::RequestKind::ComponentMeta,
-                parent_request_id: None,
+                parent_request_id,
                 timings: crate::component_meta_audit::RequestTimingAudit::default(),
                 store: crate::component_meta_audit::RequestStoreAudit::default(),
                 memory: crate::component_meta_audit::RequestMemoryAudit::default(),
                 footprint: None,
+                scheduler: scheduler_audit,
                 from_cache: true,
                 kind_payload: crate::component_meta_audit::RequestKindPayload::ComponentMeta(
                     crate::component_meta_audit::ComponentMetaPayload::default(),

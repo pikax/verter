@@ -112,6 +112,7 @@ fn synthesize_record() -> RequestAuditRecord {
             ..Default::default()
         },
         footprint: Some(footprint),
+        scheduler: None,
         from_cache: false,
         kind_payload: RequestKindPayload::ComponentMeta(ComponentMetaPayload {
             total_resolve_steps: 4,

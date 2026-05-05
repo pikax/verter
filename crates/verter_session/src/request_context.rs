@@ -23,6 +23,7 @@ use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use parking_lot::Mutex;
 use verter_scheduler::request_context::{
     CacheEventKind, OpaqueContextGuard, OpaqueRequestContext, RequestContextLike, TlsUninstall,
 };
@@ -233,6 +234,20 @@ pub struct RequestContext {
     /// Per-context counter — subset of `dep_signature_merges` that
     /// hit an existing intern bucket.
     pub dep_signature_intern_hits: AtomicU64,
+    /// Optional parent-request id captured at construction time. When
+    /// the scheduler's TLS context (via
+    /// [`verter_scheduler::request_context::current_request_id`]) is
+    /// `Some(parent)` at construction, this slot stores `parent` so
+    /// the audit record's `parent_request_id` field is populated.
+    /// `None` when the request has no parent (top-level audited
+    /// entry-point with no enclosing TLS context).
+    pub parent_request_id: Option<u64>,
+    /// Scheduler-side attribution for this request. Populated by
+    /// [`Self::record_scheduler_dispatch`] (called via the audit
+    /// observer trait by scheduler workers at dispatch time). The
+    /// first dispatch wins on the per-request capture; subsequent
+    /// dispatches increment `dispatch_count` on the captured value.
+    pub scheduler_audit: Mutex<Option<verter_audit::SchedulerAudit>>,
 }
 
 impl RequestContext {
@@ -268,6 +283,14 @@ impl RequestContext {
         footprint_capture: bool,
         audit_accumulator: Option<Arc<RequestFootprintAccumulator>>,
     ) -> Arc<Self> {
+        // Sniff the scheduler's TLS slot for an enclosing parent
+        // request. When a sub-request is created inside another
+        // audited request's TLS context (either on the same thread or
+        // after `install_tls` propagated the parent into a worker),
+        // the new context records the parent's id so the audit record
+        // surfaces parent / child correlation. `None` when no
+        // enclosing context is installed.
+        let parent_request_id = verter_scheduler::request_context::current_request_id();
         Arc::new(Self {
             request_id,
             canonical_id,
@@ -287,6 +310,8 @@ impl RequestContext {
             family_map_lock_acquisitions: AtomicU64::new(0),
             dep_signature_merges: AtomicU64::new(0),
             dep_signature_intern_hits: AtomicU64::new(0),
+            parent_request_id,
+            scheduler_audit: Mutex::new(None),
         })
     }
 
@@ -422,6 +447,23 @@ impl verter_audit::AuditObserver for RequestContext {
         // The trait method is left intentionally empty so producers
         // may emit through `current_observer()` without any
         // session-side coupling.
+    }
+
+    fn record_scheduler_dispatch(&self, audit: verter_audit::SchedulerAudit) {
+        // First dispatch wins on the slot; subsequent dispatches bump
+        // the dispatch counter so retries / re-enqueues are visible
+        // without overwriting the first-dispatch facts (worker thread
+        // id, depths, dwell). The session-side `RequestContext` is
+        // the canonical owner of the per-request scheduler audit;
+        // `AuditBuilder::finish` consults this slot when building the
+        // [`verter_audit::RequestAuditRecord`].
+        let mut slot = self.scheduler_audit.lock();
+        match slot.as_mut() {
+            None => *slot = Some(audit),
+            Some(existing) => {
+                existing.dispatch_count = existing.dispatch_count.saturating_add(1);
+            }
+        }
     }
 }
 

@@ -37,6 +37,8 @@
 //! - [`noop`] — [`noop::NoOpObserver`] trivial implementation.
 //! - [`config`] — [`config::AuditConfig`] + consumer filter.
 //! - [`payloads`] — per-`RequestKind` payload data structs.
+//! - [`scheduler`] — [`scheduler::SchedulerAudit`] +
+//!   [`scheduler::WorkerPool`] / [`scheduler::SchedulerDepths`].
 
 pub mod config;
 pub mod footprint;
@@ -46,6 +48,7 @@ pub mod observer;
 pub mod origin_graph;
 pub mod payloads;
 pub mod record;
+pub mod scheduler;
 pub mod store;
 pub mod structured_event;
 pub mod timing;
@@ -78,6 +81,7 @@ pub use record::{
     Hash16, IncidentalFields, RequestAuditRecord, RequestKind, RequestKindPayload,
     RequestPhaseAudit,
 };
+pub use scheduler::{SchedulerAudit, SchedulerDepths, WorkerPool};
 pub use store::RequestStoreAudit;
 pub use structured_event::StructuredAuditEvent;
 pub use timing::RequestTimingAudit;

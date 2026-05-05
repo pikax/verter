@@ -266,16 +266,32 @@ impl AuditBuilder {
         self.memory.process_rss_delta_bytes = self.memory.process_rss_after_bytes as i64
             - self.memory.process_rss_before_bytes as i64;
 
+        // Read scheduler attribution + parent-request correlation
+        // from the active request context. Both are populated by the
+        // scheduler dispatch sites and the `RequestContext`
+        // constructor respectively; an absent context (rare —
+        // direct callers outside the audited entry-point) leaves both
+        // fields `None`, matching the substrate's WASM behaviour.
+        let (parent_request_id, scheduler) = match crate::request_context::current_request_context()
+        {
+            Some(ctx) if ctx.request_id == self.request_id => (
+                ctx.parent_request_id.map(|id| id.to_string()),
+                ctx.scheduler_audit.lock().clone(),
+            ),
+            _ => (None, None),
+        };
+
         RequestAuditRecord {
             request_id: self.request_id,
             canonical_id: self.canonical_id,
             kind: RequestKind::ComponentMeta,
-            parent_request_id: None,
+            parent_request_id,
             from_cache: false,
             timings: self.timings,
             memory: self.memory,
             store: self.store,
             footprint: self.footprint,
+            scheduler,
             kind_payload: RequestKindPayload::ComponentMeta(self.component_meta_payload),
         }
     }
