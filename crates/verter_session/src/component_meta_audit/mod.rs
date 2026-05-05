@@ -115,6 +115,42 @@ pub fn vfs_layer_from_workspace(layer: verter_workspace::audit_sink::VfsAuditLay
     }
 }
 
+/// Snapshot the per-request cache counters from the currently
+/// installed [`crate::request_context::RequestContext`] into a
+/// [`verter_audit::store::CacheLayerBreakdown`]. Used at request
+/// finalisation to attribute hits/misses to THIS request only.
+///
+/// Returns a default (all-zero) breakdown when no context is
+/// installed — the synthetic-record path (warm-cache fixture) lands
+/// here and emits a zeroed breakdown, which is the correct semantic
+/// for a request that did not exercise the cache layers.
+#[must_use]
+pub fn snapshot_cache_layers_from_tls() -> verter_audit::store::CacheLayerBreakdown {
+    use verter_audit::store::{CacheLayerBreakdown, CacheLayerHitMiss};
+    let Some(ctx) = crate::request_context::current_request_context() else {
+        return CacheLayerBreakdown::default();
+    };
+    let snap = |hm: &crate::request_context::HitMiss| {
+        let (hits, misses) = hm.snapshot();
+        CacheLayerHitMiss { hits, misses }
+    };
+    CacheLayerBreakdown {
+        indexed: snap(&ctx.cache_counters.indexed),
+        analysis: snap(&ctx.cache_counters.analysis),
+        owner_import: snap(&ctx.cache_counters.owner_import),
+        route_owned_shallow: snap(&ctx.cache_counters.route_owned_shallow),
+        component_meta: snap(&ctx.cache_counters.component_meta),
+        route_db: snap(&ctx.cache_counters.route_db),
+        ref_cycle: snap(&ctx.cache_counters.ref_cycle),
+        intrinsic_registry: snap(&ctx.cache_counters.intrinsic_registry),
+        semantic_graph: snap(&ctx.cache_counters.semantic_graph),
+        materialize_structure: snap(&ctx.cache_counters.materialize_structure),
+        materialize_memo: snap(&ctx.cache_counters.materialize_memo),
+        prepared_surface: snap(&ctx.cache_counters.prepared_surface),
+        prepared_member: snap(&ctx.cache_counters.prepared_member),
+    }
+}
+
 // ----------------------------------------------------------------------------
 // Audit builder — accumulates data during a request
 // ----------------------------------------------------------------------------
@@ -258,13 +294,18 @@ impl AuditBuilder {
     }
 
     /// Finalize the builder into a [`RequestAuditRecord`] — captures
-    /// the request-end RSS, computes the signed delta, and fills the
-    /// `total_ms` wall-clock.
+    /// the request-end RSS, computes the signed delta, fills the
+    /// `total_ms` wall-clock, and snapshots the per-request cache
+    /// counters from the currently installed [`crate::request_context::RequestContext`]
+    /// into [`RequestStoreAudit::cache_layers`]. The request is
+    /// single-threaded at finalisation, so the relaxed-ordering
+    /// snapshot observes every prior bump on the same context.
     pub fn finish(mut self) -> RequestAuditRecord {
         self.timings.total_ms = self.request_start.elapsed().as_secs_f64() * 1000.0;
         self.memory.process_rss_after_bytes = current_process_rss();
         self.memory.process_rss_delta_bytes = self.memory.process_rss_after_bytes as i64
             - self.memory.process_rss_before_bytes as i64;
+        self.store.cache_layers = snapshot_cache_layers_from_tls();
 
         RequestAuditRecord {
             request_id: self.request_id,

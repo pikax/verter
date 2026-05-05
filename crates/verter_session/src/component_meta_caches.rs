@@ -700,12 +700,28 @@ impl MaterializeMemoDb {
         key: &MaterializeMemoKey,
         ctx: &dyn ResolverContext,
     ) -> Option<MaterializedTypeExpr> {
-        let entry_arc = self.entries.get(key).map(|e| e.clone())?;
-        if ctx.validate_dep_signature(&entry_arc.dep_signature) {
-            Some(entry_arc.value.clone())
-        } else {
-            None
+        let result = (|| -> Option<MaterializedTypeExpr> {
+            let entry_arc = self.entries.get(key).map(|e| e.clone())?;
+            if ctx.validate_dep_signature(&entry_arc.dep_signature) {
+                Some(entry_arc.value.clone())
+            } else {
+                None
+            }
+        })();
+        if let Some(rctx) = crate::request_context::current_request_context() {
+            if result.is_some() {
+                rctx.cache_counters
+                    .materialize_memo
+                    .hits
+                    .fetch_add(1, Ordering::Relaxed);
+            } else {
+                rctx.cache_counters
+                    .materialize_memo
+                    .misses
+                    .fetch_add(1, Ordering::Relaxed);
+            }
         }
+        result
     }
 
     pub(crate) fn get_or_compute<F>(
@@ -833,12 +849,28 @@ impl PreparedSurfaceDb {
         key: &PreparedSurfaceCacheKey,
         ctx: &dyn ResolverContext,
     ) -> Option<PreparedSurfacePayload> {
-        let entry_arc = self.entries.get(key).map(|e| e.clone())?;
-        if ctx.validate_dep_signature(&entry_arc.dep_signature) {
-            Some(entry_arc.value.clone())
-        } else {
-            None
+        let result = (|| -> Option<PreparedSurfacePayload> {
+            let entry_arc = self.entries.get(key).map(|e| e.clone())?;
+            if ctx.validate_dep_signature(&entry_arc.dep_signature) {
+                Some(entry_arc.value.clone())
+            } else {
+                None
+            }
+        })();
+        if let Some(rctx) = crate::request_context::current_request_context() {
+            if result.is_some() {
+                rctx.cache_counters
+                    .prepared_surface
+                    .hits
+                    .fetch_add(1, Ordering::Relaxed);
+            } else {
+                rctx.cache_counters
+                    .prepared_surface
+                    .misses
+                    .fetch_add(1, Ordering::Relaxed);
+            }
         }
+        result
     }
 
     pub(crate) fn get_or_compute<F>(
@@ -952,12 +984,28 @@ impl PreparedMemberDb {
         key: &PreparedMemberCacheKey,
         ctx: &dyn ResolverContext,
     ) -> Option<Option<Arc<ProjectedMember>>> {
-        let entry_arc = self.entries.get(key).map(|e| e.clone())?;
-        if ctx.validate_dep_signature(&entry_arc.dep_signature) {
-            Some(entry_arc.value.clone())
-        } else {
-            None
+        let result = (|| -> Option<Option<Arc<ProjectedMember>>> {
+            let entry_arc = self.entries.get(key).map(|e| e.clone())?;
+            if ctx.validate_dep_signature(&entry_arc.dep_signature) {
+                Some(entry_arc.value.clone())
+            } else {
+                None
+            }
+        })();
+        if let Some(rctx) = crate::request_context::current_request_context() {
+            if result.is_some() {
+                rctx.cache_counters
+                    .prepared_member
+                    .hits
+                    .fetch_add(1, Ordering::Relaxed);
+            } else {
+                rctx.cache_counters
+                    .prepared_member
+                    .misses
+                    .fetch_add(1, Ordering::Relaxed);
+            }
         }
+        result
     }
 
     pub(crate) fn get_or_compute<F>(
@@ -1228,7 +1276,7 @@ impl MaterializeStructureDb {
     /// When the entry's `dep_signature` is stale, remove it (orphan
     /// reaping) and return `None`.
     ///
-    /// Plan R8-5 — successful stale removal must decrement the shared
+    /// R8-5 — successful stale removal must decrement the shared
     /// `live_counter` so it tracks live entries (not lifetime inserts).
     /// Without this, every stale peek inflates the shared counter
     /// permanently.
@@ -1237,21 +1285,37 @@ impl MaterializeStructureDb {
         key: &MaterializeStructureCacheKey,
         ctx: &dyn ResolverContext,
     ) -> Option<crate::semantic_query::CacheRead<MaterializeOutcome>> {
-        let entry_arc = self.entries.get(key).map(|e| e.clone())?;
-        if !ctx.validate_dep_signature(&entry_arc.dep_signature) {
-            let removed = self
-                .entries
-                .remove_if(key, |_, e| Arc::ptr_eq(e, &entry_arc));
-            if removed.is_some() {
-                self.live_counter.fetch_sub(1, Ordering::Relaxed);
+        let result = (|| -> Option<crate::semantic_query::CacheRead<MaterializeOutcome>> {
+            let entry_arc = self.entries.get(key).map(|e| e.clone())?;
+            if !ctx.validate_dep_signature(&entry_arc.dep_signature) {
+                let removed = self
+                    .entries
+                    .remove_if(key, |_, e| Arc::ptr_eq(e, &entry_arc));
+                if removed.is_some() {
+                    self.live_counter.fetch_sub(1, Ordering::Relaxed);
+                }
+                return None;
             }
-            return None;
+            crate::host_manage::record_materialize_structure_cache_hit();
+            Some(crate::semantic_query::CacheRead {
+                value: entry_arc.outcome.clone(),
+                dep_signature: entry_arc.dep_signature.clone(),
+            })
+        })();
+        if let Some(rctx) = crate::request_context::current_request_context() {
+            if result.is_some() {
+                rctx.cache_counters
+                    .materialize_structure
+                    .hits
+                    .fetch_add(1, Ordering::Relaxed);
+            } else {
+                rctx.cache_counters
+                    .materialize_structure
+                    .misses
+                    .fetch_add(1, Ordering::Relaxed);
+            }
         }
-        crate::host_manage::record_materialize_structure_cache_hit();
-        Some(crate::semantic_query::CacheRead {
-            value: entry_arc.outcome.clone(),
-            dep_signature: entry_arc.dep_signature.clone(),
-        })
+        result
     }
 
     /// Drop every cache entry whose `dep_signature` references
@@ -1504,33 +1568,49 @@ impl RefCycleResultDb {
         id: &DeclIdentity,
         ctx: &dyn ResolverContext,
     ) -> Option<crate::semantic_query::CacheRead<bool>> {
-        let entry_arc = self.entries.get(id).map(|e| Arc::clone(&*e))?;
-        let current_gen = ctx.workspace_content_generation();
-        let cached_gen = entry_arc.validated_at_generation.load(Ordering::Relaxed);
-        if cached_gen == current_gen {
-            return Some(crate::semantic_query::CacheRead {
+        let result = (|| -> Option<crate::semantic_query::CacheRead<bool>> {
+            let entry_arc = self.entries.get(id).map(|e| Arc::clone(&*e))?;
+            let current_gen = ctx.workspace_content_generation();
+            let cached_gen = entry_arc.validated_at_generation.load(Ordering::Relaxed);
+            if cached_gen == current_gen {
+                return Some(crate::semantic_query::CacheRead {
+                    value: entry_arc.result,
+                    dep_signature: Arc::clone(&entry_arc.dep_signature),
+                });
+            }
+            if !ctx.validate_dep_signature(&entry_arc.dep_signature) {
+                // R8-5 — decrement live_counter on stale removal so
+                // the shared counter tracks live entries, not stale ones.
+                let removed = self
+                    .entries
+                    .remove_if(id, |_, e| Arc::ptr_eq(e, &entry_arc));
+                if removed.is_some() {
+                    self.live_counter.fetch_sub(1, Ordering::Relaxed);
+                }
+                return None;
+            }
+            entry_arc
+                .validated_at_generation
+                .store(current_gen, Ordering::Relaxed);
+            Some(crate::semantic_query::CacheRead {
                 value: entry_arc.result,
                 dep_signature: Arc::clone(&entry_arc.dep_signature),
-            });
-        }
-        if !ctx.validate_dep_signature(&entry_arc.dep_signature) {
-            // Plan R8-5 — decrement live_counter on stale removal so
-            // the shared counter tracks live entries, not stale ones.
-            let removed = self
-                .entries
-                .remove_if(id, |_, e| Arc::ptr_eq(e, &entry_arc));
-            if removed.is_some() {
-                self.live_counter.fetch_sub(1, Ordering::Relaxed);
+            })
+        })();
+        if let Some(rctx) = crate::request_context::current_request_context() {
+            if result.is_some() {
+                rctx.cache_counters
+                    .ref_cycle
+                    .hits
+                    .fetch_add(1, Ordering::Relaxed);
+            } else {
+                rctx.cache_counters
+                    .ref_cycle
+                    .misses
+                    .fetch_add(1, Ordering::Relaxed);
             }
-            return None;
         }
-        entry_arc
-            .validated_at_generation
-            .store(current_gen, Ordering::Relaxed);
-        Some(crate::semantic_query::CacheRead {
-            value: entry_arc.result,
-            dep_signature: Arc::clone(&entry_arc.dep_signature),
-        })
+        result
     }
 
     /// Drop every cache entry whose `dep_signature`

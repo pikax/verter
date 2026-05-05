@@ -94,12 +94,26 @@ impl OwnerImportSurfaceDb {
         owner_canonical: &str,
         expected_owner_whole_hash: Hash16,
     ) -> Option<Arc<OwnerImportSurface>> {
-        let entry = self.entries.get(owner_canonical)?;
-        if entry.owner_whole_hash == expected_owner_whole_hash {
-            Some(entry.clone())
-        } else {
-            None
+        let result = match self.entries.get(owner_canonical) {
+            Some(entry) if entry.owner_whole_hash == expected_owner_whole_hash => {
+                Some(entry.clone())
+            }
+            _ => None,
+        };
+        if let Some(ctx) = crate::request_context::current_request_context() {
+            if result.is_some() {
+                ctx.cache_counters
+                    .owner_import
+                    .hits
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            } else {
+                ctx.cache_counters
+                    .owner_import
+                    .misses
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
         }
+        result
     }
 
     /// Insert or replace the surface for `owner_canonical`. A replacement

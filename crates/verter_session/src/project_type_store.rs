@@ -290,13 +290,27 @@ impl IndexedReadyDb {
         canonical_id: &str,
         expected_whole_hash: Hash16,
     ) -> Option<Arc<IndexedReady>> {
-        let entry = self.entries.get(canonical_id)?;
-        if entry.whole_hash == expected_whole_hash {
-            self.bump_access_tick(canonical_id);
-            Some(entry.clone())
-        } else {
-            None
+        let result = match self.entries.get(canonical_id) {
+            Some(entry) if entry.whole_hash == expected_whole_hash => {
+                self.bump_access_tick(canonical_id);
+                Some(entry.clone())
+            }
+            _ => None,
+        };
+        if let Some(ctx) = crate::request_context::current_request_context() {
+            if result.is_some() {
+                ctx.cache_counters
+                    .indexed
+                    .hits
+                    .fetch_add(1, Ordering::Relaxed);
+            } else {
+                ctx.cache_counters
+                    .indexed
+                    .misses
+                    .fetch_add(1, Ordering::Relaxed);
+            }
         }
+        result
     }
 
     /// Look up the cached artifact for `canonical_id` without hash check.
@@ -310,6 +324,19 @@ impl IndexedReadyDb {
         let result = self.entries.get(canonical_id).map(|entry| entry.clone());
         if result.is_some() {
             self.bump_access_tick(canonical_id);
+        }
+        if let Some(ctx) = crate::request_context::current_request_context() {
+            if result.is_some() {
+                ctx.cache_counters
+                    .indexed
+                    .hits
+                    .fetch_add(1, Ordering::Relaxed);
+            } else {
+                ctx.cache_counters
+                    .indexed
+                    .misses
+                    .fetch_add(1, Ordering::Relaxed);
+            }
         }
         result
     }
@@ -505,7 +532,21 @@ impl AnalysisReadyDb {
     /// Strict lookup by full key.
     #[must_use]
     pub fn get(&self, key: &AnalysisArtifactKey) -> Option<Arc<AnalysisReady>> {
-        self.entries.get(key).map(|v| v.clone())
+        let result = self.entries.get(key).map(|v| v.clone());
+        if let Some(ctx) = crate::request_context::current_request_context() {
+            if result.is_some() {
+                ctx.cache_counters
+                    .analysis
+                    .hits
+                    .fetch_add(1, Ordering::Relaxed);
+            } else {
+                ctx.cache_counters
+                    .analysis
+                    .misses
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        result
     }
 
     /// Satisfaction lookup — returns any cached entry whose
@@ -519,16 +560,34 @@ impl AnalysisReadyDb {
         whole_hash: Hash16,
         requested_scope: AnalysisScope,
     ) -> Option<Arc<AnalysisReady>> {
-        for entry in self.entries.iter() {
-            let key = entry.key();
-            if key.canonical_id.as_ref() == canonical_id
-                && key.whole_hash == whole_hash
-                && key.scope.contains(requested_scope)
-            {
-                return Some(entry.value().clone());
+        let result = {
+            let mut found: Option<Arc<AnalysisReady>> = None;
+            for entry in self.entries.iter() {
+                let key = entry.key();
+                if key.canonical_id.as_ref() == canonical_id
+                    && key.whole_hash == whole_hash
+                    && key.scope.contains(requested_scope)
+                {
+                    found = Some(entry.value().clone());
+                    break;
+                }
+            }
+            found
+        };
+        if let Some(ctx) = crate::request_context::current_request_context() {
+            if result.is_some() {
+                ctx.cache_counters
+                    .analysis
+                    .hits
+                    .fetch_add(1, Ordering::Relaxed);
+            } else {
+                ctx.cache_counters
+                    .analysis
+                    .misses
+                    .fetch_add(1, Ordering::Relaxed);
             }
         }
-        None
+        result
     }
 
     pub fn insert(&self, key: AnalysisArtifactKey, analysis: Arc<AnalysisReady>) {
@@ -742,12 +801,24 @@ impl RouteOwnedShallowDb {
         canonical_id: &str,
         expected_whole_hash: Hash16,
     ) -> Option<Arc<RouteOwnedShallowEntry>> {
-        let entry = self.entries.get(canonical_id)?;
-        if entry.whole_hash == expected_whole_hash {
-            Some(entry.clone())
-        } else {
-            None
+        let result = match self.entries.get(canonical_id) {
+            Some(entry) if entry.whole_hash == expected_whole_hash => Some(entry.clone()),
+            _ => None,
+        };
+        if let Some(ctx) = crate::request_context::current_request_context() {
+            if result.is_some() {
+                ctx.cache_counters
+                    .route_owned_shallow
+                    .hits
+                    .fetch_add(1, Ordering::Relaxed);
+            } else {
+                ctx.cache_counters
+                    .route_owned_shallow
+                    .misses
+                    .fetch_add(1, Ordering::Relaxed);
+            }
         }
+        result
     }
 
     /// Look up the cached artifact for `canonical_id` without hash check.
@@ -756,7 +827,21 @@ impl RouteOwnedShallowDb {
     /// returned entry. Mirrors [`IndexedReadyDb::get_any`].
     #[must_use]
     pub fn get_any(&self, canonical_id: &str) -> Option<Arc<RouteOwnedShallowEntry>> {
-        self.entries.get(canonical_id).map(|entry| entry.clone())
+        let result = self.entries.get(canonical_id).map(|entry| entry.clone());
+        if let Some(ctx) = crate::request_context::current_request_context() {
+            if result.is_some() {
+                ctx.cache_counters
+                    .route_owned_shallow
+                    .hits
+                    .fetch_add(1, Ordering::Relaxed);
+            } else {
+                ctx.cache_counters
+                    .route_owned_shallow
+                    .misses
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        result
     }
 
     /// Insert or replace the entry for `canonical_id`. Older versions for

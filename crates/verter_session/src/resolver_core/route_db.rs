@@ -94,7 +94,21 @@ impl RouteDb {
         view: &V,
     ) -> Option<Arc<RouteResult>> {
         let key = (provider_canonical.to_owned(), exported_name.to_owned());
-        self.routes.get_if_valid(&key, view)
+        let result = self.routes.get_if_valid(&key, view);
+        if let Some(ctx) = crate::request_context::current_request_context() {
+            if result.is_some() {
+                ctx.cache_counters
+                    .route_db
+                    .hits
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            } else {
+                ctx.cache_counters
+                    .route_db
+                    .misses
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        result
     }
 
     /// Permissive route lookup without store-view validation.
@@ -104,7 +118,21 @@ impl RouteDb {
         exported_name: &str,
     ) -> Option<Arc<RouteResult>> {
         let key = (provider_canonical.to_owned(), exported_name.to_owned());
-        self.routes.get_if_valid(&key, &PermissiveStoreView)
+        let result = self.routes.get_if_valid(&key, &PermissiveStoreView);
+        if let Some(ctx) = crate::request_context::current_request_context() {
+            if result.is_some() {
+                ctx.cache_counters
+                    .route_db
+                    .hits
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            } else {
+                ctx.cache_counters
+                    .route_db
+                    .misses
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        result
     }
 
     /// Look up or materialize a route for `(provider, name)`.

@@ -46,6 +46,93 @@ from_cache_count: number, };
 export type BundlerKindTag = "Vite" | "Webpack" | "Rollup" | "Esbuild" | "Rolldown" | { "Other": string };
 
 /**
+ * Per-cache hit/miss breakdown for the cache layers participating
+ * in the request's per-cache observability surface. Each field
+ * mirrors a host-owned cache; the values are this-request-only
+ * deltas snapshotted from the per-request counter array.
+ *
+ * The §1.5 joiner-accounting contract attributes:
+ * - The cold winner records `cache: Miss` + `from_cache: false` and
+ *   bumps the cache layer's `misses` counter once on its TLS context.
+ * - Each joiner records `cache: Hit (joined)` + `from_cache: true`
+ *   and bumps the cache layer's `hits` counter once on its TLS
+ *   context.
+ */
+export type CacheLayerBreakdown = { 
+/**
+ * `IndexedReadyDb` — canonical post-parse artifact cache.
+ */
+indexed: CacheLayerHitMiss, 
+/**
+ * `AnalysisReadyDb` — analysis-stage artifact cache.
+ */
+analysis: CacheLayerHitMiss, 
+/**
+ * `OwnerImportSurfaceDb` — owner direct-import surface cache.
+ */
+owner_import: CacheLayerHitMiss, 
+/**
+ * `RouteOwnedShallowDb` — route-only shallow cache.
+ */
+route_owned_shallow: CacheLayerHitMiss, 
+/**
+ * `ComponentMetaResultDb` — final component-meta result cache.
+ */
+component_meta: CacheLayerHitMiss, 
+/**
+ * `RouteDb` — host-backed resolver route cache.
+ */
+route_db: CacheLayerHitMiss, 
+/**
+ * `RefCycleResultDb` — transitive-cycle result cache for
+ * parameterized generic helpers.
+ */
+ref_cycle: CacheLayerHitMiss, 
+/**
+ * `IntrinsicRegistry` — intrinsic dispatch lookup cache.
+ */
+intrinsic_registry: CacheLayerHitMiss, 
+/**
+ * `SemanticGraphStore` — semantic-query memo / graph cache.
+ */
+semantic_graph: CacheLayerHitMiss, 
+/**
+ * `MaterializeStructureDb` — structural materialisation cache.
+ */
+materialize_structure: CacheLayerHitMiss, 
+/**
+ * `MaterializeMemoDb` — materialiser memo cache.
+ */
+materialize_memo: CacheLayerHitMiss, 
+/**
+ * `PreparedSurfaceDb` — prepared-surface cache.
+ */
+prepared_surface: CacheLayerHitMiss, 
+/**
+ * `PreparedMemberDb` — prepared-member cache.
+ */
+prepared_member: CacheLayerHitMiss, };
+
+/**
+ * Per-cache hit/miss attribution for a single cache layer, scoped to
+ * the request that produced this audit record. Snapshotted from the
+ * session-side `RequestContext::cache_counters` field at request
+ * finalisation, so the values are exact deltas for THIS request only
+ * (no host-global accumulation, no cross-request leakage). Bumped by
+ * the cache's get/insert boundary when a `RequestContext` is
+ * installed in TLS.
+ */
+export type CacheLayerHitMiss = { 
+/**
+ * Hits observed on this cache layer during the request.
+ */
+hits: string, 
+/**
+ * Misses observed on this cache layer during the request.
+ */
+misses: string, };
+
+/**
  * Cache-outcome discriminator for per-event tallies.
  */
 export type CacheOutcomeKind = "Hit" | "Miss" | "JoinedWait" | "Sentinel" | "ColdBuild" | "InflightAbortedRetry" | "ColdAbortSwept" | "Tainted";
@@ -1013,7 +1100,14 @@ prepared_type_decls: number,
 /**
  * Prepared value declarations.
  */
-prepared_value_decls: number, };
+prepared_value_decls: number, 
+/**
+ * Per-cache hit/miss breakdown for this request.
+ * Snapshotted at request finalisation from the session-side
+ * `RequestContext::cache_counters`. Each field is a
+ * this-request-only delta.
+ */
+cache_layers: CacheLayerBreakdown, };
 
 /**
  * Per-phase wall-clock timings in milliseconds. Producers initialise
