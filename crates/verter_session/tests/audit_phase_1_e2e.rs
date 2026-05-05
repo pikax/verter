@@ -34,8 +34,8 @@ fn phase1_counters_no_op_without_request_context() {
     // calls compile and return — exercising the fast-path branch.
     record_materialize_structure_call();
     record_materialize_structure_cache_hit();
-    record_node_arena_lock_acquisition();
-    record_family_map_lock_acquisition();
+    record_node_arena_lock_acquisition(std::time::Duration::ZERO);
+    record_family_map_lock_acquisition(std::time::Duration::ZERO);
     record_dep_signature_merge();
     record_dep_signature_intern_hit();
     // If this point is reached, the no-op path works. Nothing more
@@ -51,8 +51,8 @@ fn phase1_counters_increment_under_request_context() {
     record_materialize_structure_call();
     record_materialize_structure_call();
     record_materialize_structure_cache_hit();
-    record_node_arena_lock_acquisition();
-    record_family_map_lock_acquisition();
+    record_node_arena_lock_acquisition(std::time::Duration::ZERO);
+    record_family_map_lock_acquisition(std::time::Duration::ZERO);
     record_dep_signature_merge();
     record_dep_signature_merge();
     record_dep_signature_merge();

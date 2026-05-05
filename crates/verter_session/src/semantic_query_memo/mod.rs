@@ -477,14 +477,33 @@ impl SemanticGraphStore {
         // post-publish write replaced the registered dep_signature).
         let mut affected_pairs: FxHashSet<(FamilyKey, ModeSlot)> = FxHashSet::default();
         let drained: Vec<((FamilyKey, ModeSlot), DepSignature)> = {
-            crate::host_manage::record_family_map_lock_acquisition();
+            let timing_on = verter_scheduler::request_context::current_timing_enabled();
             match self.canonical_to_entries.remove(canonical_id) {
                 Some((_, mutex)) => {
+                    let lock_start = if timing_on {
+                        Some(Instant::now())
+                    } else {
+                        None
+                    };
                     let mut map = mutex.lock();
+                    let lock_wait = lock_start
+                        .map(|t| t.elapsed())
+                        .unwrap_or(std::time::Duration::ZERO);
+                    crate::host_manage::record_family_map_lock_acquisition(lock_wait);
                     let drained: Vec<_> = map.drain().collect();
                     drained
                 }
-                None => Vec::new(),
+                None => {
+                    // Still account for the canonical-shard removal itself
+                    // as one observed acquisition; the DashMap shard read
+                    // is implicit in `remove`. When the entry was absent
+                    // there is no inner mutex to time, so the wait is
+                    // zero.
+                    crate::host_manage::record_family_map_lock_acquisition(
+                        std::time::Duration::ZERO,
+                    );
+                    Vec::new()
+                }
             }
         };
         for ((family, slot), _) in &drained {
@@ -531,14 +550,23 @@ impl SemanticGraphStore {
         // ptr_eq-matches our dep_signature. Lock order respected:
         // `entries` was unlocked at the close of before any
         // shard mutex is acquired here.
+        let timing_on = verter_scheduler::request_context::current_timing_enabled();
         for entry_sig in &evicted_dep_sigs {
             for (other_canonical, _) in entry_sig.iter() {
                 if other_canonical.as_ref() == canonical_id {
                     continue;
                 }
-                crate::host_manage::record_family_map_lock_acquisition();
                 if let Some(shard) = self.canonical_to_entries.get(other_canonical) {
+                    let lock_start = if timing_on {
+                        Some(Instant::now())
+                    } else {
+                        None
+                    };
                     let mut map = shard.value().lock();
+                    let lock_wait = lock_start
+                        .map(|t| t.elapsed())
+                        .unwrap_or(std::time::Duration::ZERO);
+                    crate::host_manage::record_family_map_lock_acquisition(lock_wait);
                     map.retain(|_, registered_sig| {
                         // Keep entries whose registered_sig is a
                         // different `Arc` (fresh build) — only drop
@@ -546,6 +574,12 @@ impl SemanticGraphStore {
                         // evicted entry.
                         !Arc::ptr_eq(registered_sig, entry_sig)
                     });
+                } else {
+                    // Shard absent: account for the canonical-shard
+                    // probe as one observed acquisition with zero wait.
+                    crate::host_manage::record_family_map_lock_acquisition(
+                        std::time::Duration::ZERO,
+                    );
                 }
             }
         }
@@ -1576,13 +1610,22 @@ impl SemanticGraphStore {
         populated_slots: &[ModeSlot],
         dep_signature: &DepSignature,
     ) {
+        let timing_on = verter_scheduler::request_context::current_timing_enabled();
         for populated in populated_slots {
             for (canonical, _) in dep_signature.iter() {
-                crate::host_manage::record_family_map_lock_acquisition();
                 let shard = canonical_to_entries
                     .entry(Arc::clone(canonical))
                     .or_insert_with(|| Mutex::new(FxHashMap::default()));
+                let lock_start = if timing_on {
+                    Some(Instant::now())
+                } else {
+                    None
+                };
                 let mut map = shard.value().lock();
+                let lock_wait = lock_start
+                    .map(|t| t.elapsed())
+                    .unwrap_or(std::time::Duration::ZERO);
+                crate::host_manage::record_family_map_lock_acquisition(lock_wait);
                 map.insert((family.clone(), *populated), Arc::clone(dep_signature));
             }
         }

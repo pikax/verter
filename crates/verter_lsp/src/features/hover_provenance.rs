@@ -348,6 +348,7 @@ mod tests {
             footprint: None,
             scheduler: None,
             files: Vec::new(),
+            waits: None,
             from_cache: false,
             kind_payload: RequestKindPayload::ComponentMeta(ComponentMetaPayload::default()),
         };

@@ -76,6 +76,7 @@ fn active_registration_appears_in_active_requests_until_finalize_then_publishes_
         footprint: None,
         scheduler: None,
         files: Vec::new(),
+        waits: None,
         kind_payload: RequestKindPayload::ComponentMeta(ComponentMetaPayload::default()),
     };
     assert!(

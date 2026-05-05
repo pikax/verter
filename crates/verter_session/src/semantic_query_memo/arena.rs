@@ -161,8 +161,17 @@ impl NodeArena {
             // Fast path: shard-hit. Shard Mutex is short-lived; parallel
             // across shards.
             {
+                let timing_on = verter_scheduler::request_context::current_timing_enabled();
+                let lock_start = if timing_on {
+                    Some(Instant::now())
+                } else {
+                    None
+                };
                 let shard = self.shards[shard_idx].lock();
-                crate::host_manage::record_node_arena_lock_acquisition();
+                let lock_wait = lock_start
+                    .map(|t| t.elapsed())
+                    .unwrap_or(std::time::Duration::ZERO);
+                crate::host_manage::record_node_arena_lock_acquisition(lock_wait);
                 if let Some(&existing) = shard.index.get(&key) {
                     (existing, false, 0u64)
                 } else {
@@ -170,8 +179,16 @@ impl NodeArena {
                     // Miss: re-acquire the shard (to serialize concurrent
                     // misses for the same key on this shard) and then
                     // briefly acquire inner.write() to allocate.
+                    let lock_start = if timing_on {
+                        Some(Instant::now())
+                    } else {
+                        None
+                    };
                     let mut shard = self.shards[shard_idx].lock();
-                    crate::host_manage::record_node_arena_lock_acquisition();
+                    let lock_wait = lock_start
+                        .map(|t| t.elapsed())
+                        .unwrap_or(std::time::Duration::ZERO);
+                    crate::host_manage::record_node_arena_lock_acquisition(lock_wait);
                     if let Some(&existing) = shard.index.get(&key) {
                         // Another thread beat us to it.
                         (existing, false, 0u64)
@@ -248,9 +265,18 @@ impl NodeArena {
     /// O(shard size). When `node_arena_lock_acquisitions` is wired
     /// into the audit context, each shard lock acquisition is recorded.
     pub(super) fn invalidate_for_canonical(&self, canonical_id: &str) {
+        let timing_on = verter_scheduler::request_context::current_timing_enabled();
         for shard in self.shards.iter() {
-            crate::host_manage::record_node_arena_lock_acquisition();
+            let lock_start = if timing_on {
+                Some(Instant::now())
+            } else {
+                None
+            };
             let mut shard = shard.lock();
+            let lock_wait = lock_start
+                .map(|t| t.elapsed())
+                .unwrap_or(std::time::Duration::ZERO);
+            crate::host_manage::record_node_arena_lock_acquisition(lock_wait);
             shard.index.retain(|(_, scope), _| match scope {
                 // Γ.A explicit invariant: Global never drops.
                 NodeScopeId::Global => true,

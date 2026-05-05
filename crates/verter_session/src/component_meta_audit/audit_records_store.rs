@@ -92,6 +92,7 @@ mod tests {
             scheduler: None,
             from_cache: false,
             files: Vec::new(),
+            waits: None,
             kind_payload: super::super::RequestKindPayload::ComponentMeta(
                 ComponentMetaPayload::default(),
             ),

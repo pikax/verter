@@ -16,6 +16,7 @@ use crate::payloads::{
 use crate::scheduler::SchedulerAudit;
 use crate::store::RequestStoreAudit;
 use crate::timing::RequestTimingAudit;
+use crate::waits::WaitAudit;
 
 /// 128-bit content / semantic hash, byte array form. Defined here so
 /// the substrate has zero cross-crate type dependencies; existing
@@ -144,6 +145,14 @@ pub struct RequestAuditRecord {
     /// before this field landed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<FileAudit>,
+    /// Optional lock + queue contention attribution. Populated only
+    /// when `HostConfig::audit_timing_capture = true`. Always `None`
+    /// when the timing flag is off so producers short-circuit their
+    /// `Instant::now()` capture and the zero-cost path is preserved.
+    /// Serde-default for back-compat with payloads emitted before
+    /// this field landed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waits: Option<WaitAudit>,
     /// Per-`RequestKind` strongly-typed payload. The variant tag
     /// MUST match [`Self::kind`].
     pub kind_payload: RequestKindPayload,
