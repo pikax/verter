@@ -84,6 +84,18 @@ impl VfsAuditSink for SessionVfsSink {
             bytes_read: event.bytes_read,
             request_id: self.request_id,
         });
+        // Per-file timing ledger fan-out — the workspace
+        // emits `read_ns` only when the host's `audit_timing_capture`
+        // flag is on (read via TLS by `current_timing_enabled`). The
+        // accumulator stores the ledger entry for `FileAudit` build
+        // at request finalisation.
+        acc.push_file_read_timing(super::accumulator::FileReadTiming {
+            canonical_id: Arc::clone(&event.canonical_id),
+            layer: super::vfs_layer_from_workspace(event.layer),
+            cache_hit: event.cache_hit,
+            bytes_read: event.bytes_read,
+            read_ns: event.read_ns,
+        });
     }
 }
 
@@ -103,6 +115,7 @@ mod tests {
             layer,
             cache_hit: false,
             bytes_read: bytes,
+            read_ns: None,
             request_id,
             thread_id: std::thread::current().id(),
         }

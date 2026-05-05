@@ -265,15 +265,21 @@ impl VerterHost {
                 cm_counters.dep_signature_intern_hits,
             );
             // Mine the semantic footprint when the active request is
-            // capturing. drains the per-request
-            // accumulator and feeds the result through the deterministic
-            // miner before the builder finalises. Without this step,
-            // `RequestAuditRecord.footprint` would always be `None` even
-            // for footprint-enabled requests.
+            // capturing. Drains the per-request accumulator, builds the
+            // per-file attribution vector, then feeds the rest through
+            // the deterministic footprint miner before the builder
+            // finalises. The file ledger is read off the state BEFORE
+            // the miner consumes it.
             if let Some(ctx) = crate::request_context::current_request_context() {
                 if ctx.footprint_capture {
                     if let Some(acc) = ctx.audit_accumulator.as_ref() {
                         let state = acc.drain();
+                        let files = crate::component_meta_audit::build_file_audit_vec(
+                            &state,
+                            ctx.canonical_id.as_ref(),
+                            self.config.audit_timing_capture && self.config.audit_enabled,
+                        );
+                        audit_builder.record_files(files);
                         let footprint = crate::component_meta_audit::mine_footprint(
                             self.project_type_store().semantic_graph(),
                             state,

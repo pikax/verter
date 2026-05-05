@@ -231,9 +231,11 @@ fn audit_record_u64_fields_serialize_as_json_strings_not_numbers() {
             host_cache_after_bytes: 0,
             workspace_before_bytes: 0,
             workspace_after_bytes: 0,
+            bytes_parsed: 0,
         },
         footprint: None,
         from_cache: false,
+        files: Vec::new(),
         kind_payload: RequestKindPayload::ComponentMeta(ComponentMetaPayload {
             total_resolve_steps: 1_234_567,
             solve_count: 3,
@@ -374,9 +376,11 @@ fn rust_memory_audit_process_rss_delta_bytes_serializes_as_json_string() {
                 host_cache_after_bytes: 0,
                 workspace_before_bytes: 0,
                 workspace_after_bytes: 0,
+                bytes_parsed: 0,
             },
             footprint: None,
             from_cache: false,
+            files: Vec::new(),
             kind_payload: RequestKindPayload::ComponentMeta(ComponentMetaPayload::default()),
         };
         let value = serde_json::to_value(&record).expect("serialize");
@@ -610,6 +614,7 @@ fn json_emission_round_trips_structurally_equivalent_to_rust() {
             ..Default::default()
         }),
         from_cache: false,
+        files: Vec::new(),
         kind_payload: RequestKindPayload::ComponentMeta(ComponentMetaPayload {
             total_resolve_steps: u64::MAX - 1,
             solve_count: 7,

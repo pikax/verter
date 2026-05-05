@@ -165,6 +165,7 @@ impl MemoryWorkspace {
         layer: VfsAuditLayer,
         cache_hit: bool,
         bytes_read: u64,
+        read_ns: Option<u64>,
     ) {
         let registered = self.sinks.read();
         if registered.is_empty() {
@@ -175,6 +176,7 @@ impl MemoryWorkspace {
             layer,
             cache_hit,
             bytes_read,
+            read_ns,
             request_id: verter_scheduler::request_context::current_request_id(),
             thread_id: std::thread::current().id(),
         };
@@ -235,6 +237,19 @@ impl MemoryWorkspace {
 
 impl crate::traits::WorkspaceRead for MemoryWorkspace {
     fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
+        // Per-file `read_ns` capture is gated on the active request's
+        // `audit_timing_capture` flag — when `false`, the zero-cost
+        // path skips the `Instant::now()` calls entirely.
+        let timing_on = verter_scheduler::request_context::current_timing_enabled();
+        let started = if timing_on {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
+        let read_ns = |started: Option<std::time::Instant>| -> Option<u64> {
+            started.map(|t| t.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64)
+        };
+
         // 1. Check overlay
         if let Some(content) = self.engine.overlay.read().get(canonical_id) {
             set_last_read_file_trace_detail(canonical_id, "layer=overlay cache=hit");
@@ -243,6 +258,7 @@ impl crate::traits::WorkspaceRead for MemoryWorkspace {
                 VfsAuditLayer::Overlay,
                 true,
                 content.len() as u64,
+                read_ns(started),
             );
             return Some(content);
         }
@@ -256,11 +272,18 @@ impl crate::traits::WorkspaceRead for MemoryWorkspace {
                     VfsAuditLayer::Snapshot,
                     true,
                     content.len() as u64,
+                    read_ns(started),
                 );
             }
             None => {
                 set_last_read_file_trace_detail(canonical_id, "layer=missing cache=miss");
-                self.emit_vfs_read(canonical_id, VfsAuditLayer::Missing, false, 0);
+                self.emit_vfs_read(
+                    canonical_id,
+                    VfsAuditLayer::Missing,
+                    false,
+                    0,
+                    read_ns(started),
+                );
             }
         }
         content

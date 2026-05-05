@@ -23,6 +23,7 @@ fn empty_envelope(kind: RequestKind, kind_payload: RequestKindPayload) -> Reques
         memory: Default::default(),
         store: Default::default(),
         footprint: None,
+        files: Vec::new(),
         kind_payload,
     }
 }
