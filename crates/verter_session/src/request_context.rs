@@ -247,6 +247,13 @@ pub struct RequestContext {
     /// Whether the request is capturing its semantic footprint. When
     /// `true`, `audit_accumulator` is populated.
     pub footprint_capture: bool,
+    /// Whether per-file timing capture is enabled for this request.
+    /// Mirrors `HostConfig::audit_timing_capture`. When `true`, the
+    /// workspace and executor stages wrap their reads / parses / lowers
+    /// in `Instant::now()` and the resulting `*_ns` values flow into
+    /// `FileAudit::read_ms` / `parse_ms` / `lower_ms` for entries this
+    /// request triggered.
+    pub timing_capture: bool,
     /// The per-request footprint accumulator (opt-in).
     pub audit_accumulator: Option<Arc<RequestFootprintAccumulator>>,
     /// Audit-record registration handle planted by the public audited
@@ -357,6 +364,28 @@ impl RequestContext {
         footprint_capture: bool,
         audit_accumulator: Option<Arc<RequestFootprintAccumulator>>,
     ) -> Arc<Self> {
+        Self::with_kind_and_timing(
+            request_id,
+            canonical_id,
+            kind,
+            footprint_capture,
+            false,
+            audit_accumulator,
+        )
+    }
+
+    /// Construct a new per-request context with explicit kind AND
+    /// per-file timing-capture flag. Used by the audited-request
+    /// entry-points that thread `HostConfig::audit_timing_capture`
+    /// through to producers.
+    pub fn with_kind_and_timing(
+        request_id: u64,
+        canonical_id: Arc<str>,
+        kind: verter_audit::RequestKind,
+        footprint_capture: bool,
+        timing_capture: bool,
+        audit_accumulator: Option<Arc<RequestFootprintAccumulator>>,
+    ) -> Arc<Self> {
         // Sniff the scheduler's TLS slot for an enclosing parent
         // request. When a sub-request is created inside another
         // audited request's TLS context (either on the same thread or
@@ -370,6 +399,7 @@ impl RequestContext {
             canonical_id,
             kind,
             footprint_capture,
+            timing_capture,
             audit_accumulator,
             audit_registration: std::sync::OnceLock::new(),
             cold_builds: AtomicU64::new(0),
@@ -421,6 +451,9 @@ impl RequestContextLike for RequestContext {
     }
     fn capture_enabled(&self) -> bool {
         self.footprint_capture
+    }
+    fn timing_enabled(&self) -> bool {
+        self.timing_capture
     }
     fn on_dedup_joiner(
         &self,

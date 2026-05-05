@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::files::FileAudit;
 use crate::footprint::RequestFootprintAudit;
 use crate::memory::RequestMemoryAudit;
 use crate::payloads::tags::{BundlerKindTag, CompileTargetTag, LspMethodTag};
@@ -133,6 +134,16 @@ pub struct RequestAuditRecord {
     /// this field landed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheduler: Option<SchedulerAudit>,
+    /// Per-file attribution for every file the request observed.
+    /// Deduplicated by `canonical_id` — one entry per canonical file.
+    /// The vector is empty when no producer populated per-file
+    /// attribution. Read-once-aware: per-entry `*_ms` timings are
+    /// `Some` only when this request triggered the work.
+    ///
+    /// Serde-default for back-compat with audit payloads written
+    /// before this field landed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<FileAudit>,
     /// Per-`RequestKind` strongly-typed payload. The variant tag
     /// MUST match [`Self::kind`].
     pub kind_payload: RequestKindPayload,

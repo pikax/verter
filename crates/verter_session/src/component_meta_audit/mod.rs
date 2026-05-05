@@ -35,7 +35,9 @@ pub mod structured_event;
 #[cfg(test)]
 mod mod_tests;
 
-pub use accumulator::{AccumulatorState, RequestFootprintAccumulator};
+pub use accumulator::{
+    AccumulatorState, FileParseTiming, FileReadTiming, RequestFootprintAccumulator,
+};
 pub use assertions::{
     render_chain_text, AssertionDiff, ChainTermination, ProvenanceChain, ProvenanceStep,
     WALKER_DEPTH_CAP,
@@ -166,6 +168,7 @@ pub struct AuditBuilder {
     store: RequestStoreAudit,
     memory: RequestMemoryAudit,
     footprint: Option<RequestFootprintAudit>,
+    files: Vec<verter_audit::files::FileAudit>,
     component_meta_payload: ComponentMetaPayload,
 }
 
@@ -188,6 +191,7 @@ impl AuditBuilder {
                 ..Default::default()
             },
             footprint: None,
+            files: Vec::new(),
             component_meta_payload: ComponentMetaPayload::default(),
         }
     }
@@ -293,6 +297,14 @@ impl AuditBuilder {
         self.footprint = Some(footprint);
     }
 
+    /// Record the per-file attribution vector built from the
+    /// per-request file ledger. Called by the host before
+    /// [`Self::finish`] so the read-once-aware `request_critical_path_ms`
+    /// and `bytes_parsed` aggregates can derive from it.
+    pub fn record_files(&mut self, files: Vec<verter_audit::files::FileAudit>) {
+        self.files = files;
+    }
+
     /// Finalize the builder into a [`RequestAuditRecord`] — captures
     /// the request-end RSS, computes the signed delta, fills the
     /// `total_ms` wall-clock, and snapshots the per-request cache
@@ -322,6 +334,28 @@ impl AuditBuilder {
             _ => (None, None),
         };
 
+        // bytes_parsed (always-on under audit_enabled): sum of bytes_read
+        // across non-NotLoaded entries.
+        let bytes_parsed: u64 = self
+            .files
+            .iter()
+            .filter(|f| !matches!(f.role, verter_audit::files::FileRole::NotLoaded))
+            .map(|f| f.bytes_read)
+            .sum();
+        self.memory.bytes_parsed = bytes_parsed;
+
+        // request_critical_path_ms: sum of read+parse+lower for files
+        // this request triggered. Read-once-aware.
+        let critical_path_ms: f64 = self
+            .files
+            .iter()
+            .filter(|f| f.triggered_by_this_request)
+            .map(|f| {
+                f.read_ms.unwrap_or(0.0) + f.parse_ms.unwrap_or(0.0) + f.lower_ms.unwrap_or(0.0)
+            })
+            .sum();
+        self.timings.request_critical_path_ms = critical_path_ms;
+
         RequestAuditRecord {
             request_id: self.request_id,
             canonical_id: self.canonical_id,
@@ -333,6 +367,7 @@ impl AuditBuilder {
             store: self.store,
             footprint: self.footprint,
             scheduler,
+            files: self.files,
             kind_payload: RequestKindPayload::ComponentMeta(self.component_meta_payload),
         }
     }
@@ -399,6 +434,187 @@ impl Drop for RequestAuditGuard {
             }
         });
     }
+}
+
+/// Compute the deduplicated per-file attribution vector for a finished
+/// request from the drained accumulator's file ledger.
+///
+/// Inputs:
+/// - `state` — drained accumulator state with `file_read_timings` /
+///   `file_parse_timings` / `indexed_ready_builds` populated by the
+///   workspace and executor instrumentation.
+/// - `entry_canonical_id` — the request's primary subject. The matching
+///   ledger entry is tagged [`verter_audit::files::FileRole::Entry`].
+/// - `timing_capture_on` — when `true`, per-file `read_ms` / `parse_ms`
+///   / `lower_ms` are populated from `Instant::now()` measurements.
+///
+/// Read-once invariant: a file appearing in `state.indexed_ready_builds`
+/// is treated as triggered by THIS request (the build site only fires
+/// on a fresh insert). Files served entirely from the existing
+/// `IndexedReady` cache do NOT show up in `indexed_ready_builds` and
+/// therefore receive `triggered_by_this_request = false` and all
+/// `*_ms = None`.
+pub fn build_file_audit_vec(
+    state: &accumulator::AccumulatorState,
+    entry_canonical_id: &str,
+    timing_capture_on: bool,
+) -> Vec<verter_audit::files::FileAudit> {
+    use rustc_hash::{FxHashMap, FxHashSet};
+    use verter_audit::files::{FileAudit, FileRole};
+
+    let mut parse_timings: FxHashMap<String, (u64, u64)> = FxHashMap::default();
+    parse_timings.reserve(state.file_parse_timings.len());
+    for entry in &state.file_parse_timings {
+        parse_timings.insert(
+            entry.canonical_id.to_string(),
+            (entry.parse_ns, entry.lower_ns),
+        );
+    }
+
+    let mut triggered: FxHashSet<String> = FxHashSet::default();
+    for build in &state.indexed_ready_builds {
+        triggered.insert(build.canonical_id.to_string());
+    }
+
+    let mut by_id: FxHashMap<String, FileAudit> = FxHashMap::default();
+    let mut order: Vec<String> = Vec::with_capacity(state.file_read_timings.len());
+    for read in &state.file_read_timings {
+        let key = read.canonical_id.to_string();
+        if by_id.contains_key(&key) {
+            continue;
+        }
+        order.push(key.clone());
+
+        let layer = read.layer;
+        let request_triggered = triggered.contains(&key);
+        let role = if key.as_str() == entry_canonical_id {
+            FileRole::Entry
+        } else if request_triggered {
+            FileRole::IndexedReadyBuild
+        } else {
+            FileRole::DirectImport
+        };
+
+        let read_ms = if timing_capture_on && request_triggered {
+            read.read_ns.map(ns_to_ms)
+        } else {
+            None
+        };
+        let (parse_ms, lower_ms) = if timing_capture_on && request_triggered {
+            match parse_timings.get(&key) {
+                Some(&(p_ns, l_ns)) => (Some(ns_to_ms(p_ns)), Some(ns_to_ms(l_ns))),
+                None => (None, None),
+            }
+        } else {
+            (None, None)
+        };
+
+        let audit = if request_triggered {
+            FileAudit {
+                canonical_id: key.clone(),
+                role,
+                layer,
+                bytes_read: read.bytes_read,
+                cache_hit: read.cache_hit,
+                triggered_by_this_request: true,
+                read_ms,
+                parse_ms,
+                lower_ms,
+            }
+        } else {
+            FileAudit::cached(key.clone(), role, layer, read.bytes_read)
+        };
+        by_id.insert(key, audit);
+    }
+
+    for build in &state.indexed_ready_builds {
+        let key = build.canonical_id.to_string();
+        if by_id.contains_key(&key) {
+            continue;
+        }
+        order.push(key.clone());
+        let role = if key.as_str() == entry_canonical_id {
+            FileRole::Entry
+        } else {
+            FileRole::IndexedReadyBuild
+        };
+        let (parse_ms, lower_ms) = if timing_capture_on {
+            match parse_timings.get(&key) {
+                Some(&(p_ns, l_ns)) => (Some(ns_to_ms(p_ns)), Some(ns_to_ms(l_ns))),
+                None => (None, None),
+            }
+        } else {
+            (None, None)
+        };
+        by_id.insert(
+            key.clone(),
+            FileAudit {
+                canonical_id: key,
+                role,
+                layer: verter_audit::origin_graph::VfsLayer::Snapshot,
+                bytes_read: 0,
+                cache_hit: false,
+                triggered_by_this_request: true,
+                read_ms: None,
+                parse_ms,
+                lower_ms,
+            },
+        );
+    }
+
+    let mut out: Vec<FileAudit> = Vec::with_capacity(order.len() + 1);
+    for key in order {
+        if let Some(audit) = by_id.remove(&key) {
+            out.push(audit);
+        }
+    }
+
+    // Defensive cover: the entry canonical id MUST appear in the
+    // file ledger even when no `read_file` event fired (e.g. the
+    // host received the entry via `upsert` and served the request
+    // entirely from the IndexedReady cache without re-reading
+    // through the workspace). Insert at the head with the
+    // appropriate role so consumers can always locate the entry.
+    if !out.iter().any(|f| f.canonical_id == entry_canonical_id) {
+        let bytes = state
+            .indexed_ready_builds
+            .iter()
+            .find(|b| b.canonical_id.as_ref() == entry_canonical_id)
+            .map(|_| 0u64)
+            .unwrap_or(0);
+        let entry_triggered = state
+            .indexed_ready_builds
+            .iter()
+            .any(|b| b.canonical_id.as_ref() == entry_canonical_id);
+        let (parse_ms, lower_ms) = if timing_capture_on && entry_triggered {
+            match parse_timings.get(entry_canonical_id) {
+                Some(&(p_ns, l_ns)) => (Some(ns_to_ms(p_ns)), Some(ns_to_ms(l_ns))),
+                None => (None, None),
+            }
+        } else {
+            (None, None)
+        };
+        out.insert(
+            0,
+            FileAudit {
+                canonical_id: entry_canonical_id.to_string(),
+                role: FileRole::Entry,
+                layer: verter_audit::origin_graph::VfsLayer::Snapshot,
+                bytes_read: bytes,
+                cache_hit: !entry_triggered,
+                triggered_by_this_request: entry_triggered,
+                read_ms: None,
+                parse_ms,
+                lower_ms,
+            },
+        );
+    }
+
+    out
+}
+
+fn ns_to_ms(ns: u64) -> f64 {
+    (ns as f64) / 1_000_000.0
 }
 
 /// Push a new [`RequestPhaseAudit`] entry for `request_id` onto the

@@ -400,6 +400,67 @@ export type DispatchKeyKind = "ResolveDecl" | "Instantiate" | "ProjectMember" | 
 export type EdgeId = number;
 
 /**
+ * Per-file attribution attached to a
+ * [`crate::record::RequestAuditRecord::files`] entry.
+ */
+export type FileAudit = { 
+/**
+ * Canonical id of the file the entry attributes.
+ */
+canonical_id: string, 
+/**
+ * Why this file was visible to the request.
+ */
+role: FileRole, 
+/**
+ * Which VFS layer served the read.
+ */
+layer: VfsLayer, 
+/**
+ * Number of bytes returned by the read. Zero for `NotLoaded`,
+ * `Missing`, and `DirIndexNegative` reads.
+ */
+bytes_read: string, 
+/**
+ * `true` when the read resolved from an in-memory cache (overlay
+ * / snapshot) OR from the existing `IndexedReady` cache. Cache
+ * hits report `triggered_by_this_request = false` and all
+ * `*_ms = None` per the read-once invariant.
+ */
+cache_hit: boolean, 
+/**
+ * `true` when this audited request triggered the I/O / parse /
+ * lower attributed to this file. `false` for warm-cache entries
+ * served by a prior request.
+ */
+triggered_by_this_request: boolean, 
+/**
+ * Wall-clock milliseconds the request spent reading the file.
+ * `Some(value)` only when this request triggered the read; `None`
+ * for warm-cache entries (read-once invariant).
+ */
+read_ms: number | null, 
+/**
+ * Wall-clock milliseconds the request spent parsing the file.
+ * `Some(value)` only when this request triggered the parse;
+ * `None` for warm-cache entries.
+ */
+parse_ms: number | null, 
+/**
+ * Wall-clock milliseconds the request spent lowering the parsed
+ * AST into `IndexedReady`. `Some(value)` only when this request
+ * triggered the lower; `None` otherwise.
+ */
+lower_ms: number | null, };
+
+/**
+ * Why a file was visible to the audited request. Producers attach
+ * the role at the point the file enters the request's bookkeeping;
+ * the role is determined by which path the file came in through.
+ */
+export type FileRole = "Entry" | "DirectImport" | "TransitiveImport" | "TypeDep" | "IndexedReadyBuild" | "NotLoaded" | "ResolverWalk";
+
+/**
  * Report covering derivation-subgraph completeness.
  */
 export type GraphCompletenessReport = { 
@@ -908,6 +969,17 @@ footprint: RequestFootprintAudit | null,
  */
 scheduler: SchedulerAudit | null, 
 /**
+ * Per-file attribution for every file the request observed.
+ * Deduplicated by `canonical_id` — one entry per canonical file.
+ * The vector is empty when no producer populated per-file
+ * attribution. Read-once-aware: per-entry `*_ms` timings are
+ * `Some` only when this request triggered the work.
+ *
+ * Serde-default for back-compat with audit payloads written
+ * before this field landed.
+ */
+files: Array<FileAudit>, 
+/**
  * Per-`RequestKind` strongly-typed payload. The variant tag
  * MUST match [`Self::kind`].
  */
@@ -1061,7 +1133,16 @@ workspace_before_bytes: string,
 /**
  * Workspace memory footprint after the request (bytes).
  */
-workspace_after_bytes: string, };
+workspace_after_bytes: string, 
+/**
+ * Sum of `bytes_read` across every
+ * [`crate::files::FileAudit`] entry whose role is not
+ * [`crate::files::FileRole::NotLoaded`]. Always-on under
+ * `audit_enabled` — derived from the per-request file ledger so
+ * it adds no instrumentation cost. Defaults to `0` when no
+ * producer populated the file ledger.
+ */
+bytes_parsed: string, };
 
 /**
  * Phase-specific audit data threaded through TLS by the request

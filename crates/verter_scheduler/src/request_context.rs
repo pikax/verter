@@ -69,6 +69,16 @@ pub trait RequestContextLike: Send + Sync + 'static {
     /// winner or must fall back to a "winner unaudited" rendering.
     fn capture_enabled(&self) -> bool;
 
+    /// Whether per-file timing capture is enabled for this request.
+    /// Producers gate `Instant::now()` calls and other timing-only
+    /// instrumentation behind this flag so the zero-cost path is
+    /// preserved when the host's `audit_timing_capture` is `false`.
+    /// Default is `false` so adapters and trivial fakes need not
+    /// override unless they want timing.
+    fn timing_enabled(&self) -> bool {
+        false
+    }
+
     /// Called at the scheduler-dedup join point: this request is a
     /// joiner joining an already-admitted group whose winner is
     /// identified by `winner_request_id` (zero if the winner has no
@@ -117,6 +127,18 @@ thread_local! {
 #[must_use]
 pub fn current_request_id() -> Option<u64> {
     CURRENT_OPAQUE_CONTEXT.with(|slot| slot.borrow().as_ref().map(|c| c.0.request_id()))
+}
+
+/// Return the per-file timing-capture flag for the context currently
+/// active on this worker thread, or `false` when no request context
+/// is installed. Called from VFS / workspace code that wants to gate
+/// `Instant::now()` instrumentation on the host's
+/// `audit_timing_capture` flag without pulling in `verter_session`.
+#[must_use]
+pub fn current_timing_enabled() -> bool {
+    CURRENT_OPAQUE_CONTEXT
+        .with(|slot| slot.borrow().as_ref().map(|c| c.0.timing_enabled()))
+        .unwrap_or(false)
 }
 
 /// Return a clone of the currently installed `OpaqueRequestContext`,

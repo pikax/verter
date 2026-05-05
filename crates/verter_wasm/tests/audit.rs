@@ -113,6 +113,7 @@ fn synthesize_record() -> RequestAuditRecord {
         },
         footprint: Some(footprint),
         scheduler: None,
+        files: Vec::new(),
         from_cache: false,
         kind_payload: RequestKindPayload::ComponentMeta(ComponentMetaPayload {
             total_resolve_steps: 4,

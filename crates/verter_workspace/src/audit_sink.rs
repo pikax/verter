@@ -39,6 +39,10 @@ pub struct VfsReadEvent {
     pub cache_hit: bool,
     /// Number of bytes returned (0 for `DirIndexNegative` / `Missing`).
     pub bytes_read: u64,
+    /// Wall-clock nanoseconds spent inside the workspace `read_file`
+    /// path. `Some(value)` only when the host had timing capture
+    /// enabled at event time; `None` on the zero-cost fast path.
+    pub read_ns: Option<u64>,
     /// Request id of the active audited request at event time, read
     /// from `verter_scheduler::request_context::current_request_id()`.
     /// `None` when no context is installed.

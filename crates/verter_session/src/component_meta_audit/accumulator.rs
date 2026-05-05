@@ -47,6 +47,16 @@ pub struct AccumulatorState {
     /// VFS reads pushed by the session-side audit sink (fan-out from
     /// the workspace's `VfsAuditSink`).
     pub vfs_reads: Vec<VfsReadRecord>,
+    /// Per-file timing ledger pushed by the session-side audit sink in
+    /// parallel with `vfs_reads`. Carries optional `read_ns` so the
+    /// `FileAudit` builder can populate read-once-aware `read_ms`
+    /// timings without retaining the substrate's `VfsReadRecord` shape.
+    pub file_read_timings: Vec<FileReadTiming>,
+    /// Per-file parse/lower timing ledger pushed by the executor's
+    /// source stage when timing capture is on. Used by the `FileAudit`
+    /// builder to populate `parse_ms` / `lower_ms` for files this
+    /// request triggered an `IndexedReady` build for.
+    pub file_parse_timings: Vec<FileParseTiming>,
     /// Records where this request joined a winner's in-flight slot
     /// instead of starting cold.
     pub shared_load_reuses: Vec<SharedLoadReuseRecord>,
@@ -68,6 +78,42 @@ pub struct AccumulatorState {
     /// Raw derivation edges captured by the `record_origin_edge` hook
     /// before the miner canonicalises them.
     pub derivation_edges_raw: Vec<DerivationEdgeRaw>,
+}
+
+/// Per-file timing ledger entry — pushed by the session-side VFS sink
+/// alongside `VfsReadRecord`. Carries the optional `read_ns` from the
+/// workspace's `VfsReadEvent` so `FileAudit::read_ms` can be populated
+/// without changing the public `VfsReadRecord` wire shape.
+#[derive(Debug, Clone)]
+pub struct FileReadTiming {
+    /// Canonical id of the file the timing entry attributes.
+    pub canonical_id: Arc<str>,
+    /// Which VFS layer served the read.
+    pub layer: super::VfsLayer,
+    /// `true` when the read resolved from an in-memory cache.
+    pub cache_hit: bool,
+    /// Number of bytes returned (0 for negative / missing reads).
+    pub bytes_read: u64,
+    /// Wall-clock nanoseconds spent inside the workspace `read_file`
+    /// path. `Some(value)` only when timing capture was on at event
+    /// time.
+    pub read_ns: Option<u64>,
+}
+
+/// Per-file parse/lower timing ledger entry — pushed by the executor's
+/// source stage when timing capture is on. The `FileAudit` builder
+/// uses this to populate `parse_ms` / `lower_ms` for files the request
+/// triggered an `IndexedReady` build for. Files served from the
+/// existing cache do not get an entry — the read-once invariant.
+#[derive(Debug, Clone)]
+pub struct FileParseTiming {
+    /// Canonical id of the file whose source stage was executed.
+    pub canonical_id: Arc<str>,
+    /// Wall-clock nanoseconds spent parsing the source.
+    pub parse_ns: u64,
+    /// Wall-clock nanoseconds spent lowering the parsed AST. May be
+    /// `0` when the executor combines parse and lower phases.
+    pub lower_ns: u64,
 }
 
 /// Request-scoped accumulator. Thin wrapper over the locked state so
@@ -99,6 +145,22 @@ impl RequestFootprintAccumulator {
     /// workspace's `VfsAuditSink`).
     pub fn push_vfs_read(&self, record: VfsReadRecord) {
         self.state.lock().vfs_reads.push(record);
+    }
+
+    /// Append a per-file timing ledger entry. Pushed by the session-side
+    /// VFS sink alongside the `VfsReadRecord`. The `read_ns` field is
+    /// `Some` only when the host's `audit_timing_capture` flag was on
+    /// at event time.
+    pub fn push_file_read_timing(&self, record: FileReadTiming) {
+        self.state.lock().file_read_timings.push(record);
+    }
+
+    /// Append a per-file parse/lower timing ledger entry. Pushed by
+    /// the executor's source stage when timing capture is on. The
+    /// caller is responsible for ensuring the entry corresponds to a
+    /// build this request triggered (read-once invariant).
+    pub fn push_file_parse_timing(&self, record: FileParseTiming) {
+        self.state.lock().file_parse_timings.push(record);
     }
 
     /// Append a shared-load reuse record from the scheduler's

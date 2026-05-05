@@ -141,6 +141,13 @@ pub struct HostConfig {
     /// `RequestFootprintAudit` to its record, populated from a
     /// per-request accumulator. Default: false.
     pub footprint_capture: bool,
+    /// Enable per-file timing capture
+    /// (`FileAudit::read_ms` / `parse_ms` / `lower_ms`). Requires
+    /// `audit_enabled = true`. When `false`, per-file timings stay
+    /// `None` even on entries the request triggered, and the workspace
+    /// / executor instrumentation stays on the zero-cost path.
+    /// Default: `false`.
+    pub audit_timing_capture: bool,
     /// Upper bound on derivation-subgraph edges captured per request.
     /// The miner truncates at this count and sets
     /// `graph_completeness.has_orphan_edges = true`. Default: 10_000.
@@ -249,6 +256,8 @@ impl Default for EvictionPolicyConfig {
 pub enum HostConfigError {
     #[error("footprint_capture requires audit_enabled; enable both or neither")]
     FootprintCaptureWithoutAudit,
+    #[error("audit_timing_capture requires audit_enabled; enable both or neither")]
+    TimingCaptureWithoutAudit,
 }
 
 impl HostConfig {
@@ -291,6 +300,7 @@ impl Default for HostConfig {
             generic_root_propagation: false,
             audit_enabled: false,
             footprint_capture: false,
+            audit_timing_capture: false,
             max_derivation_edges: 10_000,
             depth_budget: crate::component_meta_materialize::MAX_DEPTH,
             projection_op_budget: 2000,
@@ -314,6 +324,9 @@ impl HostConfig {
     pub fn validate(&self) -> Result<(), HostConfigError> {
         if self.footprint_capture && !self.audit_enabled {
             return Err(HostConfigError::FootprintCaptureWithoutAudit);
+        }
+        if self.audit_timing_capture && !self.audit_enabled {
+            return Err(HostConfigError::TimingCaptureWithoutAudit);
         }
         Ok(())
     }

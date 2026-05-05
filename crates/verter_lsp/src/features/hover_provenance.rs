@@ -347,6 +347,7 @@ mod tests {
             memory: RequestMemoryAudit::default(),
             footprint: None,
             scheduler: None,
+            files: Vec::new(),
             from_cache: false,
             kind_payload: RequestKindPayload::ComponentMeta(ComponentMetaPayload::default()),
         };

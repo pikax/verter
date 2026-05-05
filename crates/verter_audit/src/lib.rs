@@ -17,6 +17,8 @@
 //! - [`record`] — top-level [`record::RequestAuditRecord`] envelope plus
 //!   [`record::RequestKind`] / [`record::RequestKindPayload`]
 //!   discriminants and the [`record::IncidentalFields`] trait.
+//! - [`files`] — [`files::FileAudit`] / [`files::FileRole`]
+//!   per-file attribution attached to the envelope's `files` field.
 //! - [`timing`] — [`timing::RequestTimingAudit`].
 //! - [`memory`] — [`memory::RequestMemoryAudit`] +
 //!   [`memory::current_process_rss`].
@@ -41,6 +43,7 @@
 //!   [`scheduler::WorkerPool`] / [`scheduler::SchedulerDepths`].
 
 pub mod config;
+pub mod files;
 pub mod footprint;
 pub mod memory;
 pub mod noop;
@@ -57,6 +60,7 @@ pub mod timing;
 // for everything else.
 
 pub use config::{AuditConfig, AuditConsumerFilter};
+pub use files::{FileAudit, FileRole};
 pub use footprint::{
     AliasResolveRecord, CacheOutcomeTally, ConditionalRecord, GraphCompletenessReport,
     IndexedReadyBuildRecord, InstantiationRecord, MaterializationRecord, ProjectionRecord,

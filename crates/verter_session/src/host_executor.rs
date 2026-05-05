@@ -158,6 +158,13 @@ impl StageExecutor for HostStageExecutor {
             FileKind::NonSfc => crate::types::FileKind::NonSfc,
         };
 
+        // Per-file timing capture is gated on the active request's
+        // `audit_timing_capture` flag. The host's own `parse_duration_ms`
+        // on `HostSourceData` keeps its existing semantics; the audit
+        // ledger push happens only when timing capture is on AND a
+        // request context is installed.
+        let timing_on = verter_scheduler::request_context::current_timing_enabled();
+
         let parse_start = Instant::now();
 
         let snapshot = if is_vue {
@@ -200,6 +207,23 @@ impl StageExecutor for HostStageExecutor {
                 }),
             }
         };
+
+        // Push per-file parse-timing into the active request's
+        // accumulator when timing capture is on. The lower-phase is
+        // bundled with parse for both Vue and non-SFC sources here, so
+        // `lower_ns` is reported as `0` — the parse total carries the
+        // observable `parse_ns` for the request's critical-path
+        // accounting.
+        if timing_on {
+            let total_ns = parse_start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
+            if let Some(acc) = crate::request_context::current_accumulator() {
+                acc.push_file_parse_timing(crate::component_meta_audit::FileParseTiming {
+                    canonical_id: Arc::from(canonical_id),
+                    parse_ns: total_ns,
+                    lower_ns: 0,
+                });
+            }
+        }
 
         // Test harness hook: when a CaptureToken is bound on the current
         // thread, increment the parse-count for `canonical_id`. The

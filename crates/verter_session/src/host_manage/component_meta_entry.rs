@@ -275,10 +275,12 @@ impl VerterHost {
         } else {
             None
         };
-        let ctx = crate::request_context::RequestContext::new(
+        let ctx = crate::request_context::RequestContext::with_kind_and_timing(
             request_id,
             std::sync::Arc::<str>::from(canonical.as_str()),
+            verter_audit::RequestKind::ComponentMeta,
             footprint_capture,
+            self.config.audit_timing_capture && self.config.audit_enabled,
             accumulator.clone(),
         );
 
@@ -441,6 +443,7 @@ impl VerterHost {
                 memory: crate::component_meta_audit::RequestMemoryAudit::default(),
                 footprint: None,
                 scheduler: scheduler_audit,
+                files: Vec::new(),
                 from_cache: true,
                 kind_payload: crate::component_meta_audit::RequestKindPayload::ComponentMeta(
                     crate::component_meta_audit::ComponentMetaPayload::default(),

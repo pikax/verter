@@ -39,6 +39,15 @@ pub struct RequestMemoryAudit {
     #[serde(with = "u64_as_decimal_string")]
     #[ts(type = "string")]
     pub workspace_after_bytes: u64,
+    /// Sum of `bytes_read` across every
+    /// [`crate::files::FileAudit`] entry whose role is not
+    /// [`crate::files::FileRole::NotLoaded`]. Always-on under
+    /// `audit_enabled` — derived from the per-request file ledger so
+    /// it adds no instrumentation cost. Defaults to `0` when no
+    /// producer populated the file ledger.
+    #[serde(default, with = "u64_as_decimal_string")]
+    #[ts(type = "string")]
+    pub bytes_parsed: u64,
 }
 
 /// Get current process RSS in bytes. Returns 0 if unavailable.
