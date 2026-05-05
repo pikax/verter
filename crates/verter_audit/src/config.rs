@@ -19,6 +19,20 @@ pub struct AuditConfig {
     /// Filter bitset deciding which `RequestKind` variants emit
     /// records. The default allows every kind.
     pub consumer_filter: AuditConsumerFilter,
+    /// Per-host gate on the timing-capture surface.
+    ///
+    /// When `true`, the session-side `HostAuditRuntime` spawns the
+    /// host-owned peak-RSS sampler thread (native only) on the
+    /// first audit-enabled request and per-file timing helpers run
+    /// their `Instant::now()` captures. When `false`, the sampler
+    /// does not spawn, per-request peak slots stay at `0`, and
+    /// timing helpers short-circuit.
+    ///
+    /// Validation in the session layer requires
+    /// `audit_enabled = true` whenever this flag is enabled (see
+    /// `HostConfigError::TimingCaptureWithoutAudit`). Default
+    /// `false`.
+    pub audit_timing_capture: bool,
 }
 
 /// Bitset deciding which [`RequestKind`] variants emit records.

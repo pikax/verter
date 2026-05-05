@@ -329,6 +329,21 @@ pub struct RequestContext {
     /// first dispatch wins on the per-request capture; subsequent
     /// dispatches increment `dispatch_count` on the captured value.
     pub scheduler_audit: Mutex<Option<verter_audit::SchedulerAudit>>,
+    /// Per-request peak process RSS slot. The host-owned sampler
+    /// thread (see
+    /// [`crate::host_audit_runtime::HostAuditRuntime`]) ticks every
+    /// 50 ms while the matching
+    /// [`crate::host_audit_runtime::AuditRequestRegistration`] is in
+    /// the active-request registry; on each tick it calls
+    /// `current_process_rss()` and writes
+    /// `fetch_max(current_rss)` here. At finalize time, the audit
+    /// builder snapshots the load and surfaces it as
+    /// `RequestAuditRecord::memory.process_rss_peak_bytes`. Stays at
+    /// `0` when:
+    ///   * `HostConfig::audit_timing_capture` is disabled,
+    ///   * the target is `wasm32` (sampler is gated off there), or
+    ///   * the registration is `Noop` (filtered kind).
+    pub process_rss_peak_bytes: AtomicU64,
 }
 
 impl RequestContext {
@@ -417,6 +432,7 @@ impl RequestContext {
             cache_counters: PerRequestCacheCounters::default(),
             parent_request_id,
             scheduler_audit: Mutex::new(None),
+            process_rss_peak_bytes: AtomicU64::new(0),
         })
     }
 

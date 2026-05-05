@@ -415,6 +415,9 @@ impl VerterHost {
         // hits/misses on this request's `cache_counters`. The
         // §1.5 joiner-accounting contract requires the snapshot to
         // attribute exactly to THIS request, not a host-global delta.
+        // The peak-RSS slot is read from the active request context —
+        // if the sampler thread ticked while the warm-cache path ran,
+        // the peak surfaces here too.
         if self.config.audit_enabled {
             let store = crate::component_meta_audit::RequestStoreAudit {
                 cache_layers: crate::component_meta_audit::snapshot_cache_layers_from_tls(),
@@ -424,13 +427,20 @@ impl VerterHost {
             // scheduler attribution the live request would have
             // observed had it run cold — read both off the active
             // request context (installed by the audited entry-point
-            // a few lines above this branch).
+            // a few lines above this branch). The same context lookup
+            // also surfaces the per-request peak-RSS slot.
+            let mut memory = crate::component_meta_audit::RequestMemoryAudit::default();
             let (parent_request_id, scheduler_audit) =
                 match crate::request_context::current_request_context() {
-                    Some(ctx) if ctx.request_id == request_id => (
-                        ctx.parent_request_id.map(|id| id.to_string()),
-                        ctx.scheduler_audit.lock().clone(),
-                    ),
+                    Some(ctx) if ctx.request_id == request_id => {
+                        memory.process_rss_peak_bytes = ctx
+                            .process_rss_peak_bytes
+                            .load(std::sync::atomic::Ordering::Relaxed);
+                        (
+                            ctx.parent_request_id.map(|id| id.to_string()),
+                            ctx.scheduler_audit.lock().clone(),
+                        )
+                    }
                     _ => (None, None),
                 };
             let synthesized = crate::component_meta_audit::RequestAuditRecord {
@@ -440,7 +450,7 @@ impl VerterHost {
                 parent_request_id,
                 timings: crate::component_meta_audit::RequestTimingAudit::default(),
                 store,
-                memory: crate::component_meta_audit::RequestMemoryAudit::default(),
+                memory,
                 footprint: None,
                 scheduler: scheduler_audit,
                 files: Vec::new(),

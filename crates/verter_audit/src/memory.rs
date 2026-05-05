@@ -23,6 +23,15 @@ pub struct RequestMemoryAudit {
     #[serde(with = "i64_as_decimal_string")]
     #[ts(type = "string")]
     pub process_rss_delta_bytes: i64,
+    /// Peak process RSS observed by the host-owned sampler thread
+    /// across the in-flight window of this request (bytes). Populated
+    /// only when `HostConfig::audit_timing_capture` is enabled AND
+    /// the target supports the sampler (native; WASM always reports
+    /// `0`). Default `0` means either the flag was off, the target
+    /// is WASM, or the request was filtered out (Noop registration).
+    #[serde(default, with = "u64_as_decimal_string")]
+    #[ts(type = "string")]
+    pub process_rss_peak_bytes: u64,
     /// Host cache memory footprint before the request (bytes).
     #[serde(with = "u64_as_decimal_string")]
     #[ts(type = "string")]

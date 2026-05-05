@@ -307,11 +307,14 @@ impl AuditBuilder {
 
     /// Finalize the builder into a [`RequestAuditRecord`] — captures
     /// the request-end RSS, computes the signed delta, fills the
-    /// `total_ms` wall-clock, and snapshots the per-request cache
+    /// `total_ms` wall-clock, snapshots the per-request cache
     /// counters from the currently installed [`crate::request_context::RequestContext`]
-    /// into [`RequestStoreAudit::cache_layers`]. The request is
-    /// single-threaded at finalisation, so the relaxed-ordering
-    /// snapshot observes every prior bump on the same context.
+    /// into [`RequestStoreAudit::cache_layers`], and snapshots the
+    /// per-request peak RSS slot maintained by the host-owned
+    /// sampler thread (or `0` when the sampler never ran). The
+    /// request is single-threaded at finalisation, so the
+    /// relaxed-ordering snapshot observes every prior bump on the
+    /// same context.
     pub fn finish(mut self) -> RequestAuditRecord {
         self.timings.total_ms = self.request_start.elapsed().as_secs_f64() * 1000.0;
         self.memory.process_rss_after_bytes = current_process_rss();
@@ -325,12 +328,25 @@ impl AuditBuilder {
         // constructor respectively; an absent context (rare —
         // direct callers outside the audited entry-point) leaves both
         // fields `None`, matching the substrate's WASM behaviour.
+        // The host-owned sampler ticks `fetch_max(current_rss)`
+        // into the per-request peak slot on the matching
+        // `RequestContext`. Read it back through TLS — the public
+        // audited entry-point installs the context BEFORE the
+        // request runs and KEEPS it installed until the record is
+        // built. When no context is in scope (the synthetic test
+        // fixture path), the peak stays at 0, matching the WASM /
+        // flag-off contract.
         let (parent_request_id, scheduler) = match crate::request_context::current_request_context()
         {
-            Some(ctx) if ctx.request_id == self.request_id => (
-                ctx.parent_request_id.map(|id| id.to_string()),
-                ctx.scheduler_audit.lock().clone(),
-            ),
+            Some(ctx) if ctx.request_id == self.request_id => {
+                self.memory.process_rss_peak_bytes = ctx
+                    .process_rss_peak_bytes
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                (
+                    ctx.parent_request_id.map(|id| id.to_string()),
+                    ctx.scheduler_audit.lock().clone(),
+                )
+            }
             _ => (None, None),
         };
 

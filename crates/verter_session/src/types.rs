@@ -142,11 +142,27 @@ pub struct HostConfig {
     /// per-request accumulator. Default: false.
     pub footprint_capture: bool,
     /// Enable per-file timing capture
-    /// (`FileAudit::read_ms` / `parse_ms` / `lower_ms`). Requires
-    /// `audit_enabled = true`. When `false`, per-file timings stay
-    /// `None` even on entries the request triggered, and the workspace
-    /// / executor instrumentation stays on the zero-cost path.
-    /// Default: `false`.
+    /// (`FileAudit::read_ms` / `parse_ms` / `lower_ms`) AND the
+    /// host-owned peak-RSS sampler thread. Requires
+    /// `audit_enabled = true`.
+    ///
+    /// When `false`, per-file timings stay `None` even on entries
+    /// the request triggered, the workspace / executor
+    /// instrumentation stays on the zero-cost path, and the
+    /// peak-RSS sampler does not spawn — `process_rss_peak_bytes`
+    /// stays at `0`.
+    ///
+    /// When `true` (native only), the host-owned peak-RSS sampler
+    /// thread spawns on the first audit-enabled request, ticks
+    /// every 50 ms over the active-request registry, and writes
+    /// `fetch_max(current_process_rss())` into each in-flight
+    /// request's per-request peak slot. The slot value lands in
+    /// `RequestAuditRecord::memory.process_rss_peak_bytes` at
+    /// finalize time.
+    ///
+    /// On WASM the sampler thread does not exist
+    /// (`#[cfg(not(target_arch = "wasm32"))]`); the peak slot stays
+    /// at `0` regardless of flag state. Default: `false`.
     pub audit_timing_capture: bool,
     /// Upper bound on derivation-subgraph edges captured per request.
     /// The miner truncates at this count and sets
@@ -254,8 +270,15 @@ impl Default for EvictionPolicyConfig {
 /// [`HostConfig::validate`].
 #[derive(Debug, Clone, Eq, PartialEq, thiserror::Error)]
 pub enum HostConfigError {
+    /// `footprint_capture` is on but `audit_enabled` is off — the
+    /// accumulator that backs footprint capture is created on the
+    /// audit path and is inert without it.
     #[error("footprint_capture requires audit_enabled; enable both or neither")]
     FootprintCaptureWithoutAudit,
+    /// `audit_timing_capture` is on but `audit_enabled` is off —
+    /// the peak-RSS sampler and per-file timing helpers are gated
+    /// behind the audit envelope and have no consumer when the
+    /// envelope is disabled.
     #[error("audit_timing_capture requires audit_enabled; enable both or neither")]
     TimingCaptureWithoutAudit,
 }
@@ -317,10 +340,13 @@ impl HostConfig {
             .unwrap_or_else(|| self.analysis_level.to_scope())
     }
 
-    /// Validate cross-field invariants. Currently:
+    /// Validate cross-field invariants:
     ///
     /// - `footprint_capture` requires `audit_enabled` (the accumulator
     ///   is attached to the audit builder and is inert without it).
+    /// - `audit_timing_capture` requires `audit_enabled` (the
+    ///   per-host peak-RSS sampler and per-file timing helpers are
+    ///   gated by the audit envelope).
     pub fn validate(&self) -> Result<(), HostConfigError> {
         if self.footprint_capture && !self.audit_enabled {
             return Err(HostConfigError::FootprintCaptureWithoutAudit);
