@@ -51,6 +51,12 @@ pub enum FileRole {
     /// Imported with the `type` modifier (e.g. `import type { T } from
     /// "./types"`). Tracked separately from value imports so consumers
     /// can attribute type-only dependency cost.
+    ///
+    /// Reserved for the resolver-side producer that distinguishes
+    /// type-only imports from value imports at the import-statement
+    /// site. The audit consumer surface is stable and serializable
+    /// today; the producer hooks into the resolver's type-import
+    /// classifier in a follow-up wave.
     TypeDep,
     /// A fresh `IndexedReady` build was triggered for this file. Read
     /// in tandem with [`FileRole::Entry`] / [`FileRole::DirectImport`]
@@ -60,10 +66,22 @@ pub enum FileRole {
     /// Referenced by the resolver / dependency graph but the request
     /// did not load the file's source. Bytes read is zero; timings
     /// stay `None`.
+    ///
+    /// Reserved for the resolver / dependency-graph producer that
+    /// records files referenced but never loaded (e.g. cycle-cut
+    /// targets, negative-cache hits). The audit consumer surface is
+    /// stable and serializable today; the producer hooks into the
+    /// resolver's reference-without-load path in a follow-up wave.
     NotLoaded,
     /// Walked by the resolver during type resolution but not parsed.
     /// May overlap with `DirectImport` / `TransitiveImport` when the
     /// resolver visits a file without producing a parse for it.
+    ///
+    /// Reserved for the resolver-walk producer that records the
+    /// `walk-only-no-parse` files distinctly from imported-and-parsed
+    /// ones. The audit consumer surface is stable and serializable
+    /// today; the producer hooks into the resolver's walk-only path
+    /// in a follow-up wave.
     ResolverWalk,
 }
 

@@ -165,8 +165,8 @@ pub fn current_request_budget() -> Option<Arc<RequestBudget>> {
 /// [`current_request_context`] so the counts attribute exactly to
 /// the request that performed the lookup. Concurrent requests each
 /// see their own context — no host-global delta misattribution
-/// under concurrency (the joiner-accounting contract in §1.5 of
-/// the audit infrastructure plan).
+/// under concurrency (the joiner-accounting contract: per-request
+/// hits/misses attribute exactly even under concurrent dedup-join).
 #[derive(Debug, Default)]
 pub struct HitMiss {
     /// Hits observed on this cache layer during the request.

@@ -413,7 +413,7 @@ impl VerterHost {
         // `ComponentMetaResultDb::get` and `IndexedReadyDb::get`
         // through `shallow_file_state`, both of which bumped
         // hits/misses on this request's `cache_counters`. The
-        // §1.5 joiner-accounting contract requires the snapshot to
+        // joiner-accounting contract requires the snapshot to
         // attribute exactly to THIS request, not a host-global delta.
         // The peak-RSS slot is read from the active request context —
         // if the sampler thread ticked while the warm-cache path ran,

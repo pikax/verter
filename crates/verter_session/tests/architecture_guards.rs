@@ -3907,11 +3907,62 @@ mod foundations_guards {
             "pre-Phase",
             "Pre-Phase",
             "retired in",
+            // Audit-infrastructure plan archaeology — these phrases
+            // unambiguously reference the audit-plan document and
+            // never appear in legitimate final-state prose.
+            "audit infrastructure plan",
+            "audit-infrastructure-plan",
         ];
         for needle in FIXED_NEEDLES {
             if line.contains(needle) {
                 return true;
             }
+        }
+        // `plan §` / `Plan §` — explicit reference to a plan section.
+        // Mirrors the broader D111 guard (guard 7-bis) which already
+        // catches the same pattern. Production source must read as
+        // final-state, not as a citation of plan vocabulary.
+        if line.contains("plan §") || line.contains("Plan §") {
+            return true;
+        }
+        // `§\d+\.\d+` (decimal section ref like `§1.5`, `§3.4`) —
+        // catch when the line ALSO references audit-substrate
+        // vocabulary. Standalone decimal section refs are widespread
+        // in older production code (a pre-existing archaeology surface
+        // tracked under a separate cleanup); the audit-substrate
+        // discriminator is what newly entered the codebase with the
+        // audit infrastructure work, so the focused predicate matches
+        // exactly that surface and prevents regression.
+        let contains_decimal_section_ref = {
+            let bytes = line.as_bytes();
+            let mut hit = false;
+            let mut search_from = 0usize;
+            while let Some(rel) = line[search_from..].find('§') {
+                let abs = search_from + rel;
+                let mut after = abs + '§'.len_utf8();
+                let digit_start = after;
+                while after < bytes.len() && bytes[after].is_ascii_digit() {
+                    after += 1;
+                }
+                if after > digit_start
+                    && after + 1 < bytes.len()
+                    && bytes[after] == b'.'
+                    && bytes[after + 1].is_ascii_digit()
+                {
+                    hit = true;
+                    break;
+                }
+                search_from = abs + '§'.len_utf8();
+            }
+            hit
+        };
+        if contains_decimal_section_ref
+            && (line.contains("joiner-accounting")
+                || line.contains("audit substrate")
+                || line.contains("audit-substrate")
+                || line.contains("audit infrastructure"))
+        {
+            return true;
         }
         // `Slice <digit>` / `slice <digit>` — project-management
         // vocabulary referring to the Wave/Slice plan vocabulary.
@@ -4029,6 +4080,16 @@ mod foundations_guards {
             "// `find_matching_angle` was deleted in 5g once the dispatch resolver took over.",
             "// `legacy_first_pass` was retired in 11d.",
             "/// phase-1b cutover deleted the declared component-meta query.",
+            // Audit-infrastructure plan archaeology — fixed-needle and
+            // `plan §` matches added when the audit-substrate cutover
+            // landed. The decimal section ref (§1.5) is a focused
+            // discriminator scoped to lines that also mention the
+            // audit-substrate vocabulary.
+            "// joiner-accounting per the audit infrastructure plan §1.5",
+            "/// see audit-infrastructure-plan.md for the contract",
+            "// per plan §3.4 of the audit substrate work",
+            "// Plan §3 Step 4 — joiner-accounting bumps",
+            "// joiner-accounting reference §1.5 lives elsewhere",
         ];
         for line in cases {
             assert!(
@@ -4046,7 +4107,10 @@ mod foundations_guards {
             "/// Returns the projected surface for a given semantic node.",
             "// `find_matching_angle` is no longer required because the dispatch resolver owns it.",
             "// Phase angle in radians for the easing curve.", // legitimate "phase" usage
-            "// Builder Phase C — see plan §3.",               // 'Phase C' is a letter, not a digit
+            "// Builder Phase C owns the second pass.",        // 'Phase C' is a letter, not a digit
+            // Final-state joiner-accounting prose — no plan citation,
+            // no decimal section ref tied to audit vocabulary.
+            "// Joiner-accounting contract: per-request hits/misses attribute exactly.",
         ];
         for line in allowed {
             assert!(

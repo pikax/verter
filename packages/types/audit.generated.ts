@@ -51,7 +51,9 @@ export type BundlerKindTag = "Vite" | "Webpack" | "Rollup" | "Esbuild" | "Rolldo
  * mirrors a host-owned cache; the values are this-request-only
  * deltas snapshotted from the per-request counter array.
  *
- * The §1.5 joiner-accounting contract attributes:
+ * Joiner-accounting contract: when N concurrent requests dedup-join
+ * the same in-flight semantic computation, attribution is exact and
+ * per-request:
  * - The cold winner records `cache: Miss` + `from_cache: false` and
  *   bumps the cache layer's `misses` counter once on its TLS context.
  * - Each joiner records `cache: Hit (joined)` + `from_cache: true`

@@ -170,6 +170,13 @@ pub struct AuditBuilder {
     footprint: Option<RequestFootprintAudit>,
     files: Vec<verter_audit::files::FileAudit>,
     component_meta_payload: ComponentMetaPayload,
+    /// Set by the cold-resolver path when the singleflight identified
+    /// this request as a joiner (Follower) on an in-flight semantic
+    /// computation. Joiner-accounting contract: a joiner records
+    /// `from_cache=true` because semantically it received its result
+    /// from the dedup-join, not by computing cold. Default `false`
+    /// (the cold winner / pre-`mark_joined_inflight` path).
+    from_cache: bool,
 }
 
 impl AuditBuilder {
@@ -193,6 +200,7 @@ impl AuditBuilder {
             footprint: None,
             files: Vec::new(),
             component_meta_payload: ComponentMetaPayload::default(),
+            from_cache: false,
         }
     }
 
@@ -305,6 +313,40 @@ impl AuditBuilder {
         self.files = files;
     }
 
+    /// Mark this request as a joiner on an in-flight semantic
+    /// computation. Joiner-accounting contract: when N concurrent
+    /// requests dedup-join the same compute, the winner records
+    /// `from_cache=false` + cache miss; each joiner records
+    /// `from_cache=true` + cache hit. The cold path discriminates
+    /// the winner from the joiners via the singleflight role. Joiners
+    /// flip the speculative miss recorded by the warm-cache check
+    /// (which observed the empty cache before the winner published)
+    /// into a hit on the active TLS request context — the resulting
+    /// per-request snapshot then attributes exactly one
+    /// `component_meta` hit per joiner and exactly zero misses.
+    pub fn mark_joined_inflight(&mut self) {
+        use std::sync::atomic::Ordering;
+        self.from_cache = true;
+        if let Some(ctx) = crate::request_context::current_request_context() {
+            if ctx.request_id == self.request_id {
+                let layer = &ctx.cache_counters.component_meta;
+                // Undo the speculative miss bumped by the warm-cache
+                // check (`ComponentMetaResultDb::get` returned None
+                // before the winner published). saturating_sub via
+                // compare-exchange-style fetch_update keeps the
+                // counter monotonic even if the speculative miss was
+                // never bumped (defensive — the warm path always
+                // bumps under audit_enabled, but the call is
+                // idempotent under the floor).
+                let prev = layer.misses.load(Ordering::Relaxed);
+                if prev > 0 {
+                    layer.misses.fetch_sub(1, Ordering::Relaxed);
+                }
+                layer.hits.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
     /// Finalize the builder into a [`RequestAuditRecord`] — captures
     /// the request-end RSS, computes the signed delta, fills the
     /// `total_ms` wall-clock, snapshots the per-request cache
@@ -399,7 +441,7 @@ impl AuditBuilder {
             canonical_id: self.canonical_id,
             kind: RequestKind::ComponentMeta,
             parent_request_id,
-            from_cache: false,
+            from_cache: self.from_cache,
             timings: self.timings,
             memory: self.memory,
             store: self.store,
@@ -484,6 +526,14 @@ impl Drop for RequestAuditGuard {
 ///   workspace and executor instrumentation.
 /// - `entry_canonical_id` — the request's primary subject. The matching
 ///   ledger entry is tagged [`verter_audit::files::FileRole::Entry`].
+/// - `direct_import_canonicals` — set of canonical ids that are
+///   first-level imports of the entry. Files reached through these
+///   canonicals are tagged [`verter_audit::files::FileRole::DirectImport`];
+///   anything else (non-Entry, non-IndexedReadyBuild) is tagged
+///   [`verter_audit::files::FileRole::TransitiveImport`]. The set may be
+///   empty when the entry's shallow surface is not yet available — in
+///   that case all non-Entry, non-IndexedReadyBuild files fall back to
+///   `DirectImport`, preserving the legacy attribution.
 /// - `timing_capture_on` — when `true`, per-file `read_ms` / `parse_ms`
 ///   / `lower_ms` are populated from `Instant::now()` measurements.
 ///
@@ -496,6 +546,7 @@ impl Drop for RequestAuditGuard {
 pub fn build_file_audit_vec(
     state: &accumulator::AccumulatorState,
     entry_canonical_id: &str,
+    direct_import_canonicals: &rustc_hash::FxHashSet<String>,
     timing_capture_on: bool,
 ) -> Vec<verter_audit::files::FileAudit> {
     use rustc_hash::{FxHashMap, FxHashSet};
@@ -530,8 +581,16 @@ pub fn build_file_audit_vec(
             FileRole::Entry
         } else if request_triggered {
             FileRole::IndexedReadyBuild
-        } else {
+        } else if direct_import_canonicals.is_empty()
+            || direct_import_canonicals.contains(key.as_str())
+        {
+            // Empty set falls back to DirectImport (legacy
+            // attribution when the entry's shallow surface is
+            // not yet available). Otherwise: distinguish first-
+            // level imports from deeper closure files.
             FileRole::DirectImport
+        } else {
+            FileRole::TransitiveImport
         };
 
         let read_ms = if timing_capture_on && request_triggered {
@@ -572,6 +631,11 @@ pub fn build_file_audit_vec(
             continue;
         }
         order.push(key.clone());
+        // Files that ONLY appear in `indexed_ready_builds` (not in
+        // `file_read_timings`) are by definition triggered by THIS
+        // request — `IndexedReadyBuild` carries the read+parse cost.
+        // The Entry id is short-circuited above so non-Entry files
+        // here are exclusively `IndexedReadyBuild`.
         let role = if key.as_str() == entry_canonical_id {
             FileRole::Entry
         } else {

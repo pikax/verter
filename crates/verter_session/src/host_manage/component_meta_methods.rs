@@ -227,6 +227,23 @@ impl VerterHost {
             workspace_before_bytes,
         )) = audit
         {
+            // Joiner-accounting: when the singleflight identified
+            // this request as a Follower, the request received its
+            // result from the dedup-join (semantically a warm hit on
+            // the in-flight computation, not a cold compute). Flip
+            // the speculative miss bumped by the warm-cache check
+            // into a hit on the active TLS context, and mark
+            // `from_cache=true` so the audit record carries the
+            // contract-correct attribution. The cold winner stays at
+            // the default (`from_cache=false`, miss recorded) and
+            // pays for the cold work it actually performed.
+            if let RequestSource::Flight {
+                role: SingleflightRole::Follower,
+                ..
+            } = result.source
+            {
+                audit_builder.mark_joined_inflight();
+            }
             let (store_audit, cm_counters) = self.component_meta_audit_store_snapshot(None);
             audit_builder.record_store(store_audit);
             let (host_cache_after_bytes, workspace_after_bytes) =
@@ -274,9 +291,27 @@ impl VerterHost {
                 if ctx.footprint_capture {
                     if let Some(acc) = ctx.audit_accumulator.as_ref() {
                         let state = acc.drain();
+                        // Direct imports of the entry: extract from
+                        // the entry's shallow surface so the file-
+                        // role classifier can distinguish first-level
+                        // imports (`DirectImport`) from deeper-closure
+                        // files (`TransitiveImport`). When the shallow
+                        // surface is not yet available (rare cold
+                        // path), the empty set falls back to
+                        // `DirectImport` for every non-Entry file.
+                        let direct_imports: rustc_hash::FxHashSet<String> = self
+                            .shallow_file_state(ctx.canonical_id.as_ref())
+                            .map(|sfs| {
+                                sfs.import_targets
+                                    .values()
+                                    .map(|t| t.canonical_id.clone())
+                                    .collect()
+                            })
+                            .unwrap_or_default();
                         let files = crate::component_meta_audit::build_file_audit_vec(
                             &state,
                             ctx.canonical_id.as_ref(),
+                            &direct_imports,
                             self.config.audit_timing_capture && self.config.audit_enabled,
                         );
                         audit_builder.record_files(files);
