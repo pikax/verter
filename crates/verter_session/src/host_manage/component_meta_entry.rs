@@ -406,8 +406,16 @@ impl VerterHost {
 
         // Synthesize a from_cache audit record so consumers via
         // `take_audit_record(resolution.request_id)` get uniform
-        // observability.
+        // observability. The peak-RSS slot is read from the active
+        // request context — if the sampler thread ticked while the
+        // warm-cache path ran, the peak surfaces here too.
         if self.config.audit_enabled {
+            let mut memory = crate::component_meta_audit::RequestMemoryAudit::default();
+            if let Some(ctx) = crate::request_context::current_request_context() {
+                memory.process_rss_peak_bytes = ctx
+                    .process_rss_peak_bytes
+                    .load(std::sync::atomic::Ordering::Relaxed);
+            }
             let synthesized = crate::component_meta_audit::RequestAuditRecord {
                 request_id,
                 canonical_id: canonical.to_string(),
@@ -415,7 +423,7 @@ impl VerterHost {
                 parent_request_id: None,
                 timings: crate::component_meta_audit::RequestTimingAudit::default(),
                 store: crate::component_meta_audit::RequestStoreAudit::default(),
-                memory: crate::component_meta_audit::RequestMemoryAudit::default(),
+                memory,
                 footprint: None,
                 from_cache: true,
                 kind_payload: crate::component_meta_audit::RequestKindPayload::ComponentMeta(

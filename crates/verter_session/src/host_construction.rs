@@ -125,6 +125,14 @@ impl VerterHost {
         // each surface accumulated its own records.
         let audit_records_init: Arc<crate::component_meta_audit::AuditRecordsStore> =
             Arc::new(crate::component_meta_audit::AuditRecordsStore::default());
+        // Mirror the relevant `HostConfig` flags into the substrate's
+        // `AuditConfig` snapshot. The substrate-side flag is what
+        // `AuditRequestRegistration::new` and the sampler thread read,
+        // so the wire-up MUST happen here at construction time.
+        let audit_config = verter_audit::AuditConfig {
+            audit_timing_capture: config.audit_timing_capture,
+            ..verter_audit::AuditConfig::default()
+        };
         Self {
             instance_id: next_host_instance_id(),
             config,
@@ -143,7 +151,7 @@ impl VerterHost {
             request_id_counter: std::sync::atomic::AtomicU64::new(0),
             audit_records: Arc::clone(&audit_records_init),
             host_audit_runtime: Arc::new(crate::host_audit_runtime::HostAuditRuntime::new(
-                verter_audit::AuditConfig::default(),
+                audit_config,
                 Arc::clone(&audit_records_init),
             )),
             #[cfg(test)]

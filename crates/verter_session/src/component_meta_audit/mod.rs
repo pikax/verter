@@ -258,13 +258,28 @@ impl AuditBuilder {
     }
 
     /// Finalize the builder into a [`RequestAuditRecord`] — captures
-    /// the request-end RSS, computes the signed delta, and fills the
-    /// `total_ms` wall-clock.
+    /// the request-end RSS, computes the signed delta, snapshots the
+    /// per-request peak RSS slot maintained by the host-owned
+    /// sampler thread (or `0` when the sampler never ran), and fills
+    /// the `total_ms` wall-clock.
     pub fn finish(mut self) -> RequestAuditRecord {
         self.timings.total_ms = self.request_start.elapsed().as_secs_f64() * 1000.0;
         self.memory.process_rss_after_bytes = current_process_rss();
         self.memory.process_rss_delta_bytes = self.memory.process_rss_after_bytes as i64
             - self.memory.process_rss_before_bytes as i64;
+        // The host-owned sampler ticks `fetch_max(current_rss)`
+        // into the per-request peak slot on the matching
+        // `RequestContext`. Read it back through TLS — the public
+        // audited entry-point installs the context BEFORE the
+        // request runs and KEEPS it installed until the record is
+        // built. When no context is in scope (the synthetic test
+        // fixture path), the peak stays at 0, matching the WASM /
+        // flag-off contract.
+        if let Some(ctx) = crate::request_context::current_request_context() {
+            self.memory.process_rss_peak_bytes = ctx
+                .process_rss_peak_bytes
+                .load(std::sync::atomic::Ordering::Relaxed);
+        }
 
         RequestAuditRecord {
             request_id: self.request_id,

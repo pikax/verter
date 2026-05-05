@@ -952,6 +952,15 @@ process_rss_after_bytes: string,
  */
 process_rss_delta_bytes: string, 
 /**
+ * Peak process RSS observed by the host-owned sampler thread
+ * across the in-flight window of this request (bytes). Populated
+ * only when `HostConfig::audit_timing_capture` is enabled AND
+ * the target supports the sampler (native; WASM always reports
+ * `0`). Default `0` means either the flag was off, the target
+ * is WASM, or the request was filtered out (Noop registration).
+ */
+process_rss_peak_bytes: string, 
+/**
  * Host cache memory footprint before the request (bytes).
  */
 host_cache_before_bytes: string, 

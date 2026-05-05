@@ -9,8 +9,21 @@
 //! `register_active_request`, `finalize_active_request`, and
 //! `drop_active_request`. Tests observe the runtime via the public
 //! read-only [`HostAuditRuntime::snapshot`] accessor.
+//!
+//! Each runtime owns at most ONE peak-RSS sampler thread on
+//! native targets. The thread spawns lazily on the first
+//! `AuditRequestRegistration::new` call when
+//! `AuditConfig::audit_timing_capture` is enabled, holds a
+//! `Weak<HostAuditRuntime>` to break the runtime↔thread cycle,
+//! ticks every 50 ms, and writes
+//! `fetch_max(current_process_rss())` into each in-flight
+//! request's per-request peak slot. The runtime's `Drop` impl
+//! joins the handle so dropped hosts do not leak threads. WASM
+//! targets are gated off via `#[cfg(not(target_arch = "wasm32"))]`
+//! — `process_rss_peak_bytes` stays at `0` there regardless of
+//! flag state.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
 use parking_lot::RwLock;
@@ -20,7 +33,52 @@ use verter_audit::{AuditConfig, RequestAuditRecord};
 use crate::component_meta_audit::AuditRecordsStore;
 use crate::request_context::RequestContext;
 
-#[derive(Debug)]
+#[cfg(not(target_arch = "wasm32"))]
+use std::thread::JoinHandle;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Duration;
+
+/// Sampler tick interval. 50 ms strikes the plan-§5 balance between
+/// responsiveness (bounded peak under-reporting) and CPU cost
+/// (~0.1% of one core at this rate).
+#[cfg(not(target_arch = "wasm32"))]
+const SAMPLER_TICK: Duration = Duration::from_millis(50);
+
+/// Process-static spawn counter. Bumped exactly once for every
+/// peak-RSS sampler thread the runtime starts, regardless of which
+/// `HostAuditRuntime` instance owns the thread. The companion
+/// counter [`SAMPLER_THREAD_JOIN_COUNT`] tracks successful joins;
+/// the
+/// `tests/sampler_thread_joined_at_host_drop.rs` test asserts the
+/// two stay in lock-step across host drops to discriminate against
+/// a non-joining `Drop` impl.
+#[cfg(not(target_arch = "wasm32"))]
+static SAMPLER_THREAD_SPAWN_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Process-static join counter. See [`SAMPLER_THREAD_SPAWN_COUNT`].
+#[cfg(not(target_arch = "wasm32"))]
+static SAMPLER_THREAD_JOIN_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Test-only accessor — total number of peak-RSS sampler threads
+/// the process has spawned across every `HostAuditRuntime`
+/// instance. Bumped inside [`HostAuditRuntime::ensure_sampler_started`]
+/// after `thread::spawn` returns. Discriminates "sampler did not
+/// spawn" from "sampler spawned but Drop did not join".
+#[cfg(not(target_arch = "wasm32"))]
+#[must_use]
+pub fn sampler_thread_spawn_count() -> u64 {
+    SAMPLER_THREAD_SPAWN_COUNT.load(Ordering::Relaxed)
+}
+
+/// Test-only accessor — total number of peak-RSS sampler threads
+/// the process has joined across every `HostAuditRuntime`
+/// instance. Bumped inside `Drop for HostAuditRuntime` after the
+/// `JoinHandle::join()` call returns.
+#[cfg(not(target_arch = "wasm32"))]
+#[must_use]
+pub fn sampler_thread_join_count() -> u64 {
+    SAMPLER_THREAD_JOIN_COUNT.load(Ordering::Relaxed)
+}
 
 /// Host-owned audit-runtime concrete type. Wraps the records store,
 /// the audit-config snapshot, and the active-request registry.
@@ -31,23 +89,63 @@ use crate::request_context::RequestContext;
 /// strictly behind crate-private surface methods so the
 /// `AuditRequestRegistration` lifecycle remains the single
 /// authority for inserts and removes.
+///
+/// On native targets the runtime also owns the at-most-one
+/// peak-RSS sampler thread. The thread spawns lazily on the
+/// first audit-enabled `AuditRequestRegistration::new` call
+/// while `AuditConfig::audit_timing_capture` is on; the join
+/// handle lives in `sampler_thread` and is taken+joined by the
+/// `Drop` impl. Subsequent `AuditRequestRegistration::new` calls
+/// short-circuit the spawn via the `sampler_started` flag (single
+/// startup transition guarded by `compare_exchange`). On WASM the
+/// sampler does not exist (`#[cfg(not(target_arch = "wasm32"))]`);
+/// `process_rss_peak_bytes` stays at `0` regardless of flag state.
 pub struct HostAuditRuntime {
     config: Arc<AuditConfig>,
     records: Arc<AuditRecordsStore>,
     /// PRIVATE — direct access from outside this module is impossible.
     /// The three crate-private methods below mediate every access.
     active_requests: RwLock<FxHashMap<u64, Weak<RequestContext>>>,
+    /// One-shot start latch for the sampler thread. `false` means
+    /// the runtime has not yet spawned a sampler. The first
+    /// `compare_exchange` to `true` wins the spawn and stores the
+    /// `JoinHandle` in `sampler_thread`.
+    #[cfg(not(target_arch = "wasm32"))]
+    sampler_started: AtomicBool,
+    /// Optional `JoinHandle` for the host-owned sampler thread.
+    /// `Some` after the latch transition succeeds; `None`
+    /// otherwise. The `Drop` impl takes this and calls `join()`.
+    #[cfg(not(target_arch = "wasm32"))]
+    sampler_thread: parking_lot::Mutex<Option<JoinHandle<()>>>,
+}
+
+impl std::fmt::Debug for HostAuditRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostAuditRuntime")
+            .field("config", &self.config)
+            .field("records", &"<AuditRecordsStore>")
+            .field("active_requests_count", &self.active_requests.read().len())
+            .finish()
+    }
 }
 
 impl HostAuditRuntime {
     /// Construct a new runtime. Each `VerterHost` owns one independent
     /// runtime; multiple hosts in one process do NOT share audit state.
+    /// The host-owned sampler thread does NOT spawn here — it spawns
+    /// lazily on the first `AuditRequestRegistration::new` call when
+    /// `audit_timing_capture` is enabled, so a host that never runs an
+    /// audited request never spends a thread.
     #[must_use]
     pub fn new(config: AuditConfig, records: Arc<AuditRecordsStore>) -> Self {
         Self {
             config: Arc::new(config),
             records,
             active_requests: RwLock::new(FxHashMap::default()),
+            #[cfg(not(target_arch = "wasm32"))]
+            sampler_started: AtomicBool::new(false),
+            #[cfg(not(target_arch = "wasm32"))]
+            sampler_thread: parking_lot::Mutex::new(None),
         }
     }
 
@@ -124,6 +222,123 @@ impl HostAuditRuntime {
         let mut map = self.active_requests.write();
         map.remove(&request_id);
     }
+
+    /// Crate-private. Sampler-internal accessor — invokes `f` on
+    /// every live `Arc<RequestContext>` currently in the
+    /// active-request registry. Skips `Weak` slots whose strong
+    /// count has dropped to zero. Used by the host-owned peak-RSS
+    /// sampler thread to advance each in-flight request's
+    /// `process_rss_peak_bytes` slot via `fetch_max`.
+    ///
+    /// The closure runs while a read-lock is held, so it MUST NOT
+    /// re-enter the registry. The sampler intentionally only does
+    /// `fetch_max` on a per-context atomic — that operation is
+    /// lock-free and can never deadlock.
+    pub(crate) fn for_each_active_request<F>(&self, mut f: F)
+    where
+        F: FnMut(&Arc<RequestContext>),
+    {
+        let map = self.active_requests.read();
+        for weak in map.values() {
+            if let Some(ctx) = weak.upgrade() {
+                f(&ctx);
+            }
+        }
+    }
+
+    /// Spawn the host-owned peak-RSS sampler thread (native only).
+    ///
+    /// Called by `AuditRequestRegistration::new` whenever an
+    /// `Active` registration is constructed AND the audit-config
+    /// has `audit_timing_capture = true`. The first call wins the
+    /// `compare_exchange` on `sampler_started`, spawns the
+    /// thread, and stores the `JoinHandle`. Subsequent calls
+    /// short-circuit. The thread holds a `Weak<HostAuditRuntime>`
+    /// so the runtime↔thread cycle is broken — the runtime can
+    /// drop, the next `weak.upgrade()` returns `None`, and the
+    /// thread terminates. The `Drop` impl explicitly joins the
+    /// handle to avoid leaking threads across host drops.
+    ///
+    /// On WASM this method is gated off via
+    /// `#[cfg(not(target_arch = "wasm32"))]`; the WASM target
+    /// has no host-owned sampler.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn ensure_sampler_started(self: &Arc<Self>) {
+        if !self.config.audit_timing_capture {
+            return;
+        }
+        // Single-shot start latch: the first compare_exchange
+        // winner spawns; everyone else short-circuits.
+        if self
+            .sampler_started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
+        let weak: Weak<HostAuditRuntime> = Arc::downgrade(self);
+        let handle = std::thread::Builder::new()
+            .name("verter-audit-rss-sampler".to_string())
+            .spawn(move || sampler_loop(weak))
+            .expect("spawning the verter-audit-rss-sampler thread must succeed");
+        SAMPLER_THREAD_SPAWN_COUNT.fetch_add(1, Ordering::Relaxed);
+        let mut slot = self.sampler_thread.lock();
+        debug_assert!(
+            slot.is_none(),
+            "sampler_started latch must guarantee a single spawn",
+        );
+        *slot = Some(handle);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for HostAuditRuntime {
+    fn drop(&mut self) {
+        // Take the join handle (if any) and explicitly join it. By
+        // the time `Drop` runs, the strong count on `Arc<Self>` is
+        // zero, so the sampler's `Weak::upgrade()` on its next
+        // iteration returns `None` and the thread breaks out of
+        // its loop. The join just waits for that natural
+        // termination.
+        let handle = self.sampler_thread.lock().take();
+        if let Some(handle) = handle {
+            // join() returns Err only if the thread panicked. We
+            // swallow that error here — there is no way to
+            // surface it from Drop, and a panicked sampler does
+            // not threaten the host.
+            let _ = handle.join();
+            SAMPLER_THREAD_JOIN_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn sampler_loop(weak: Weak<HostAuditRuntime>) {
+    // The sampler loop ticks every 50 ms while the runtime is
+    // alive. On each tick it samples `current_process_rss()` once
+    // and writes `fetch_max` into every in-flight request's
+    // per-request peak slot. The sample-once-per-tick discipline
+    // means N in-flight requests share the same value on the
+    // same tick, which matches the contract: each request's
+    // `process_rss_peak_bytes` is the highest sample taken
+    // anywhere in its in-flight window, regardless of which
+    // sibling request was concurrent.
+    loop {
+        let runtime = match weak.upgrade() {
+            Some(r) => r,
+            None => return, // host dropped — exit cleanly.
+        };
+        let now = verter_audit::current_process_rss();
+        runtime.for_each_active_request(|ctx| {
+            ctx.process_rss_peak_bytes.fetch_max(now, Ordering::Relaxed);
+        });
+        // Drop the upgraded `Arc` BEFORE we sleep so the
+        // strong-count lifecycle of the runtime is bounded by
+        // the host. If we held the Arc across the sleep, the
+        // host's drop would block until the next iteration.
+        drop(runtime);
+        std::thread::sleep(SAMPLER_TICK);
+    }
 }
 
 /// Read-only snapshot of in-flight audit state. Returned by
@@ -174,6 +389,10 @@ impl AuditRequestRegistration {
     /// ONCE; if the filter rejects the request's kind, returns the
     /// `Noop` variant without entering the active-request registry.
     /// Otherwise inserts into the registry and returns `Active(...)`.
+    /// On native targets with `audit_timing_capture` enabled, the
+    /// host-owned peak-RSS sampler thread is spawned lazily on the
+    /// first such `Active` registration via
+    /// [`HostAuditRuntime::ensure_sampler_started`].
     pub fn new(host: &crate::VerterHost, ctx: Arc<RequestContext>) -> Self {
         let runtime = host.host_audit_runtime();
         let cfg = runtime.audit_config();
@@ -181,9 +400,19 @@ impl AuditRequestRegistration {
             return Self::Noop;
         }
         runtime.register_active_request(ctx.request_id, &ctx);
+        // Fetch a strong handle to the runtime — both for the
+        // sampler-spawn call below (which needs `Arc<Self>`) and
+        // for the Active registration's owned runtime field.
+        let runtime_arc = host.host_audit_runtime_arc();
+        // Lazy sampler spawn: short-circuits when
+        // audit_timing_capture is off or the latch already won.
+        // WASM targets are gated off — `ensure_sampler_started`
+        // does not exist there.
+        #[cfg(not(target_arch = "wasm32"))]
+        runtime_arc.ensure_sampler_started();
         Self::Active(ActiveRegistration {
             request_id: ctx.request_id,
-            runtime: host.host_audit_runtime_arc(),
+            runtime: runtime_arc,
             finalized: AtomicBool::new(false),
         })
     }
@@ -261,5 +490,22 @@ impl crate::VerterHost {
     #[must_use]
     pub fn host_audit_runtime_arc(&self) -> Arc<HostAuditRuntime> {
         Arc::clone(&self.host_audit_runtime)
+    }
+
+    /// Test-only: swap the runtime's `AuditConfig` snapshot with
+    /// `config`. Used by integration tests that need to drive a
+    /// non-default consumer filter (e.g. deny-all) without
+    /// reaching across the privacy boundary on
+    /// `HostAuditRuntime::active_requests`.
+    ///
+    /// Allocates a fresh `Arc<HostAuditRuntime>` carrying the new
+    /// config and swaps the host's slot. The previous runtime's
+    /// records-store `Arc` is reused so existing records survive
+    /// the swap, but the new runtime starts with an empty
+    /// active-request map — callers MUST call this before driving
+    /// any audited request.
+    pub fn replace_host_audit_runtime_for_test(&mut self, config: AuditConfig) {
+        let store = Arc::clone(self.host_audit_runtime.audit_records_store());
+        self.host_audit_runtime = Arc::new(HostAuditRuntime::new(config, store));
     }
 }
