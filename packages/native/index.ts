@@ -430,6 +430,111 @@ export declare class VerterHost {
    * Returns JSON `{ props, emits, slotBindings, bindings }` or `null`.
    */
   evaluateTypes(canonicalOrAlias: string): string | null;
+
+  // ===========================================================================
+  // Typed audit entry-points (Wave 3 / Slice 3.H)
+  //
+  // Each entry-point wraps a `VerterHost::*_with_audit` Rust producer
+  // and returns the produced `RequestAuditRecord` as a JSON Buffer.
+  // Audit must be enabled on the host config (`auditEnabled: true`)
+  // for these calls to publish a record; otherwise they short-circuit
+  // to `null` (the underlying operation still runs).
+  // ===========================================================================
+
+  /**
+   * Run a single type-resolution query through the shared dispatch
+   * and return the produced `RequestAuditRecord` as a JSON Buffer.
+   * Resolves `declName` in the top-level scope of `canonicalId`.
+   * Returns `null` when audit is disabled.
+   */
+  resolveTypeWithAudit(canonicalId: string, declName: string): Buffer | null;
+
+  /**
+   * Compile `canonicalId` for the requested codegen target and
+   * return the produced `RequestAuditRecord` as a JSON Buffer.
+   * Accepted target names: `"BUNDLER"`, `"IDE"`, `"ANALYSIS"`,
+   * `"META"`, `"TSX"`, `"TSC"`. Returns `null` when audit is
+   * disabled.
+   */
+  compileWithAudit(canonicalId: string, target: string): Buffer | null;
+
+  /**
+   * Materialise the `AnalysisReady` artifact for `canonicalId` under
+   * audit and return the produced `RequestAuditRecord` as a JSON
+   * Buffer. Returns `null` when audit is disabled or the canonical
+   * does not exist.
+   */
+  analyzeWithAudit(canonicalId: string): Buffer | null;
+
+  /**
+   * Drive a workspace operation under audit and return the produced
+   * `RequestAuditRecord` as a JSON Buffer. The `op` argument is
+   * shaped as `{ type: "AuditResolve", specifier, from } | { type:
+   * "DepGraphTraverse", root } | { type: "ResolverWalk", specifier
+   * }`. Always returns a record (the workspace producer drives the
+   * operation regardless of audit configuration).
+   */
+  auditWorkspaceOp(op: WorkspaceOpArgument): Buffer;
+
+  /**
+   * Drain the most-recent `RequestAuditRecord` from the host's audit
+   * store. Returns `null` when the store is empty.
+   *
+   * "Most recent" is defined by insertion order. The returned record
+   * is removed from the store.
+   */
+  getLastAuditRecord(): Buffer | null;
+
+  /**
+   * Non-destructive filtered query over the host's audit store.
+   * Returns a JSON Buffer carrying an array of matching records.
+   *
+   * Filter fields are independent — combining them narrows further:
+   * - `kind`: `"ComponentMeta"`, `"TypeResolution"`,
+   *   `"SemanticAnalysis"`, `"Compile"`, `"Workspace"`, `"Lsp"`,
+   *   `"Mcp"`, `"BundlerBatch"`, `"Custom"`.
+   * - `sinceRequestId`: minimum request id (exclusive). Decimal
+   *   string matching the JSON serialization of `request_id`.
+   * - `limit`: cap the returned record count (oldest-first).
+   */
+  getAuditRecords(filter?: AuditRecordFilter): Buffer;
+
+  /**
+   * Run the bundler-batch aggregator over the host's audit store and
+   * return the produced `BundlerBatchPayload` as a JSON Buffer.
+   *
+   * - `kind`: `"Vite"`, `"Webpack"`, `"Rollup"`, `"Esbuild"`,
+   *   `"Rolldown"`, or any other string for the `Other` variant.
+   *   Defaults to `"Vite"` when absent.
+   * - `sinceRequestId`: optional minimum request id watermark.
+   */
+  getBundlerBatchSummary(args?: BundlerBatchSummaryArgs): Buffer;
+}
+
+/**
+ * Workspace op argument shape for `VerterHost.auditWorkspaceOp`.
+ */
+export type WorkspaceOpArgument =
+  | { type: "AuditResolve"; specifier: string; from: string }
+  | { type: "DepGraphTraverse"; root: string }
+  | { type: "ResolverWalk"; specifier: string };
+
+/**
+ * Filter argument for `VerterHost.getAuditRecords`. All fields are
+ * optional; combining them narrows the result set further.
+ */
+export interface AuditRecordFilter {
+  kind?: string;
+  sinceRequestId?: string;
+  limit?: number;
+}
+
+/**
+ * Args for `VerterHost.getBundlerBatchSummary`.
+ */
+export interface BundlerBatchSummaryArgs {
+  kind?: string;
+  sinceRequestId?: string;
 }
 
 // =============================================================================

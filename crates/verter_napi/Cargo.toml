@@ -16,6 +16,7 @@ default = []
 session_metrics = ["verter_session/session_metrics"]
 
 [dependencies]
+verter_audit = { path = "../verter_audit" }
 verter_compiler = { path = "../verter_compiler", version = "0.0.1-beta.1" }
 verter_session = { path = "../verter_session", version = "0.0.1-beta.1" }
 verter_type_runtime = { path = "../verter_type_runtime", version = "0.0.1-beta.1" }

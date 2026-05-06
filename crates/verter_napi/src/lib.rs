@@ -33,6 +33,7 @@ use verter_ffi::convert::*;
 use verter_ffi::types::*;
 use verter_session as host;
 
+mod audit;
 mod meta;
 
 // Re-imports for code actions and diagnostics (parity with verter_wasm)
@@ -1299,7 +1300,7 @@ impl NapiWorkspace {
 /// virtual outputs that a bundler or LSP can request individually.
 #[napi(js_name = "VerterHost")]
 pub struct NapiVerterHost {
-    inner: host::VerterHost,
+    inner: std::sync::Arc<host::VerterHost>,
 }
 
 #[napi]
@@ -1315,9 +1316,9 @@ impl NapiVerterHost {
     pub fn new(config: Option<NapiHostConfig>) -> Result<Self> {
         let ffi_config: FfiHostConfig = config.unwrap_or_default().into();
         Ok(Self {
-            inner: host::VerterHost::new_standalone(
+            inner: std::sync::Arc::new(host::VerterHost::new_standalone(
                 ffi_config_to_host(ffi_config).map_err(ffi_err)?,
-            ),
+            )),
         })
     }
 
@@ -1334,7 +1335,7 @@ impl NapiVerterHost {
         let ffi_config: FfiHostConfig = config.unwrap_or_default().into();
         let host_config = ffi_config_to_host(ffi_config).map_err(ffi_err)?;
         Ok(Self {
-            inner: host::VerterHost::new(host_config, workspace.inner.clone()),
+            inner: std::sync::Arc::new(host::VerterHost::new(host_config, workspace.inner.clone())),
         })
     }
 
@@ -2087,6 +2088,224 @@ impl NapiVerterHost {
                 cacheHit: e.cache_hit,
             })
             .collect())
+    }
+
+    // =========================================================================
+    // Typed audit entry-points
+    //
+    // Each entry-point wraps a `VerterHost::*_with_audit` Rust producer
+    // and returns the produced `RequestAuditRecord` as a JSON Buffer.
+    // Helper types and parsing free functions live in `crate::audit`.
+    //
+    // The methods MUST live in this `impl NapiVerterHost` block (not a
+    // sibling module) so the napi-derive class registration picks up
+    // the `js_name = "VerterHost"` rename declared on the struct in
+    // this same file.
+    // =========================================================================
+
+    /// Run a single type-resolution query through the shared dispatch
+    /// and return the produced `RequestAuditRecord` as a JSON
+    /// `Buffer`. The query resolves `decl_name` in the top-level
+    /// scope of `canonical_id`. Returns `null` when audit is
+    /// disabled.
+    #[napi(js_name = "resolveTypeWithAudit")]
+    pub fn resolve_type_with_audit(
+        &self,
+        canonical_id: String,
+        decl_name: String,
+    ) -> Result<Option<Buffer>> {
+        use verter_session::semantic_query::{ResolveDeclKey, ScopeId, SemanticQueryKey};
+        let host = std::sync::Arc::clone(&self.inner);
+        catch_panic(std::panic::AssertUnwindSafe(move || {
+            let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+                scope: ScopeId {
+                    canonical_id: std::sync::Arc::<str>::from(canonical_id.as_str()),
+                    local_scope: None,
+                },
+                name: std::sync::Arc::<str>::from(decl_name.as_str()),
+            });
+            let (_resolved, record) = host.resolve_type_with_audit(key, &canonical_id);
+            match record {
+                Some(rec) => audit::encode_record(&rec).map(Some),
+                None => Ok(None),
+            }
+        }))?
+    }
+
+    /// Compile `canonical_id` for the requested codegen target and
+    /// return the produced `RequestAuditRecord` as a JSON `Buffer`.
+    /// Accepted target names: `BUNDLER`, `IDE`, `ANALYSIS`, `META`,
+    /// `TSX`, `TSC`. Returns `null` when audit is disabled.
+    #[napi(js_name = "compileWithAudit")]
+    pub fn compile_with_audit(
+        &self,
+        canonical_id: String,
+        target: String,
+    ) -> Result<Option<Buffer>> {
+        let target = audit::parse_compile_target(&target)?;
+        let host = std::sync::Arc::clone(&self.inner);
+        catch_panic(std::panic::AssertUnwindSafe(move || {
+            let (_result, record) = host.compile_with_audit(&canonical_id, target);
+            match record {
+                Some(rec) => audit::encode_record(&rec).map(Some),
+                None => Ok(None),
+            }
+        }))?
+    }
+
+    /// Materialise the `AnalysisReady` artifact for `canonical_id`
+    /// under audit and return the produced `RequestAuditRecord` as a
+    /// JSON `Buffer`. Returns `null` when audit is disabled or the
+    /// canonical does not exist.
+    #[napi(js_name = "analyzeWithAudit")]
+    pub fn analyze_with_audit(&self, canonical_id: String) -> Result<Option<Buffer>> {
+        let host = std::sync::Arc::clone(&self.inner);
+        catch_panic(std::panic::AssertUnwindSafe(move || {
+            let (_analysis, record) = host.analyze_with_audit(&canonical_id);
+            match record {
+                Some(rec) => audit::encode_record(&rec).map(Some),
+                None => Ok(None),
+            }
+        }))?
+    }
+
+    /// Drive a workspace operation under audit and return the
+    /// produced `RequestAuditRecord` as a JSON `Buffer`. The `op`
+    /// argument is shaped as `{ type: "AuditResolve", specifier, from
+    /// }` / `{ type: "DepGraphTraverse", root }` / `{ type:
+    /// "ResolverWalk", specifier }`. Always returns a record.
+    #[napi(js_name = "auditWorkspaceOp")]
+    pub fn audit_workspace_op(&self, op: audit::NapiWorkspaceOp) -> Result<Buffer> {
+        let arg = op.try_into_workspace_op()?;
+        let host = std::sync::Arc::clone(&self.inner);
+        catch_panic(std::panic::AssertUnwindSafe(move || {
+            let record = host.audit_workspace_op(arg);
+            audit::encode_record(&record)
+        }))?
+    }
+
+    /// Drain the most-recent `RequestAuditRecord` from the host's
+    /// audit store. Returns `null` when the store is empty. Drains
+    /// the entry: a second call after a single insert returns null.
+    #[napi(js_name = "getLastAuditRecord")]
+    pub fn get_last_audit_record(&self) -> Result<Option<Buffer>> {
+        use verter_audit::batch::AuditRecordSource;
+        let host = std::sync::Arc::clone(&self.inner);
+        catch_panic(std::panic::AssertUnwindSafe(move || {
+            let store = host.host_audit_runtime().audit_records_store();
+            let mut latest_id: Option<u64> = None;
+            let mut latest_at: Option<std::time::Instant> = None;
+            store.for_each_record(&mut |inserted_at, record| {
+                let is_newer = match latest_at {
+                    None => true,
+                    Some(prev) => inserted_at > prev,
+                };
+                if is_newer {
+                    latest_at = Some(inserted_at);
+                    latest_id = Some(record.request_id);
+                }
+            });
+            let Some(id) = latest_id else {
+                return Ok(None);
+            };
+            match store.take(id) {
+                Some(rec) => audit::encode_record(&rec).map(Some),
+                None => Ok(None),
+            }
+        }))?
+    }
+
+    /// Non-destructive filtered query over the host's audit store.
+    /// Returns a JSON-serialised array of records (`Buffer`).
+    #[napi(js_name = "getAuditRecords")]
+    pub fn get_audit_records(
+        &self,
+        filter: Option<audit::NapiAuditRecordFilter>,
+    ) -> Result<Buffer> {
+        use verter_audit::batch::AuditRecordSource;
+        let filter = filter.unwrap_or_default();
+        let kind_filter = filter.kind;
+        let since = match filter.since_request_id.as_deref() {
+            Some(s) => Some(audit::parse_request_id_str(s)?),
+            None => None,
+        };
+        let limit = filter.limit.map(|n| n as usize);
+        let host = std::sync::Arc::clone(&self.inner);
+        catch_panic(std::panic::AssertUnwindSafe(move || {
+            let store = host.host_audit_runtime().audit_records_store();
+            let mut collected: Vec<verter_audit::RequestAuditRecord> = Vec::new();
+            store.for_each_record(&mut |_inserted_at, record| {
+                if let Some(filter_kind) = kind_filter.as_deref() {
+                    if !audit::kind_matches(filter_kind, &record.kind) {
+                        return;
+                    }
+                }
+                if let Some(since_id) = since {
+                    if record.request_id <= since_id {
+                        return;
+                    }
+                }
+                collected.push(record.clone());
+            });
+            if let Some(n) = limit {
+                collected.truncate(n);
+            }
+            audit::encode_record_list(&collected)
+        }))?
+    }
+
+    /// Run the bundler-batch aggregator over the host's audit store
+    /// and return the produced `BundlerBatchPayload` as a JSON
+    /// `Buffer`. The summary tags the payload with the requested
+    /// bundler kind (defaults to `Vite`).
+    #[napi(js_name = "getBundlerBatchSummary")]
+    pub fn get_bundler_batch_summary(
+        &self,
+        args: Option<audit::NapiBundlerBatchSummaryArgs>,
+    ) -> Result<Buffer> {
+        use verter_audit::batch::{AuditRecordSource, BatchAuditAggregator};
+        let args = args.unwrap_or_default();
+        let kind = audit::parse_bundler_kind(args.kind.as_deref());
+        let since_id = match args.since_request_id.as_deref() {
+            Some(s) => Some(audit::parse_request_id_str(s)?),
+            None => None,
+        };
+        let host = std::sync::Arc::clone(&self.inner);
+        catch_panic(std::panic::AssertUnwindSafe(move || {
+            let store = host.host_audit_runtime().audit_records_store();
+            // The aggregator keys its `since` filter by `Instant`,
+            // but we accept a request-id watermark from JS callers
+            // (instants do not survive a JSON round-trip). Walk the
+            // store once to find the most-recent `inserted_at` whose
+            // request_id is `<= since_id`; an unmatched watermark
+            // (id newer than anything in the store) yields `None` —
+            // equivalent to "no records pass the filter".
+            let since_instant: Option<std::time::Instant> = match since_id {
+                None => None,
+                Some(target_id) => {
+                    let mut best: Option<std::time::Instant> = None;
+                    store.for_each_record(&mut |inserted_at, record| {
+                        if record.request_id <= target_id {
+                            best = match best {
+                                None => Some(inserted_at),
+                                Some(prev) if inserted_at > prev => Some(inserted_at),
+                                Some(prev) => Some(prev),
+                            };
+                        }
+                    });
+                    best
+                }
+            };
+            let aggregator = BatchAuditAggregator::new(store.as_ref(), kind);
+            let payload = aggregator.summarize(since_instant);
+            let bytes = serde_json::to_vec(&payload).map_err(|e| {
+                Error::new(
+                    Status::GenericFailure,
+                    format!("bundler batch summary serialization error: {e}"),
+                )
+            })?;
+            Ok(Buffer::from(bytes))
+        }))?
     }
 }
 

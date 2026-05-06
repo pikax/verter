@@ -2666,6 +2666,7 @@ mod napi_compiler_emitters {
     /// Pure-data allow-list inside `verter_compiler::compile::*`.
     const COMPILE_ALLOW_LIST: &[&str] = &[
         "CodegenOptions",
+        "CompileTarget",
         "VerterCompileOptions",
         "VerterCompileResult",
         "TypesParserConfig",

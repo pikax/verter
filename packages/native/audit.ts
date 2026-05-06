@@ -6,21 +6,37 @@
  * and the Rust-walker bindings `whyLoadedFromAuditJson` /
  * `whyInstantiatedFromAuditJson`.
  *
- * Plan §3 Commit 8. These helpers are pure formatting / tiny
- * convenience wrappers — they never re-implement the walker. The
- * walk itself lives in Rust; this file only parses JSON round-trip
- * results and renders them for human readers.
+ * The walker itself lives in Rust; this file only parses JSON
+ * round-trip results and renders them for human readers.
+ *
+ * The Wave-3 typed entry-points exposed on `VerterHost`
+ * (`compileWithAudit`, `analyzeWithAudit`, `resolveTypeWithAudit`,
+ * `auditWorkspaceOp`, `getLastAuditRecord`, `getAuditRecords`,
+ * `getBundlerBatchSummary`) return JSON Buffers carrying the full
+ * `RequestAuditRecord` (or a list / `RustBundlerBatchPayload`). The
+ * decoders below read those buffers into the matching types.
  */
 
 import type {
+  BundlerBatchPayload,
   ChainTermination,
   ProvenanceChain,
   ProvenanceStep,
-  RustAuditRecord,
-  RustSemanticFootprintAudit,
+  RequestAuditRecord,
+  RequestFootprintAudit,
 } from "@verter/types/audit.generated";
 
-import type { ComponentMetaSession } from "./index";
+import type { ComponentMetaSession, VerterHost } from "./index";
+
+/**
+ * Backward-compatible aliases for the older `Rust*` names. Earlier
+ * Wave-1 fixtures and downstream consumers used the prefixed names;
+ * the ts-rs–generated bindings emit the unprefixed `RequestAudit*`
+ * shape directly. The aliases keep import paths stable while the
+ * fixtures are migrated.
+ */
+export type RustAuditRecord = RequestAuditRecord;
+export type RustSemanticFootprintAudit = RequestFootprintAudit;
 
 /**
  * JSON-shaped audit bundle returned by
@@ -31,7 +47,7 @@ import type { ComponentMetaSession } from "./index";
 export interface AuditBundle {
   analysis: unknown;
   resolution: unknown;
-  record: RustAuditRecord;
+  record: RequestAuditRecord;
 }
 
 /**
@@ -90,11 +106,11 @@ export function whyInstantiated(
  * scheduler actually read on behalf of this request — equals
  * `expected`. Plan §1.4 + §3.B.
  *
- * Mirrors the Rust-side `RustAuditRecord::assert_loaded_files_exactly`
+ * Mirrors the Rust-side `RequestAuditRecord::assert_loaded_files_exactly`
  * helper; throws with a unified-diff style message on mismatch so the
  * failure renders the symmetric difference clearly.
  */
-export function assertLoadedFilesExactly(record: RustAuditRecord, expected: string[]): void {
+export function assertLoadedFilesExactly(record: RequestAuditRecord, expected: string[]): void {
   const actual = loadedFiles(record.footprint ?? null);
   const missing = expected.filter((f) => !actual.includes(f)).sort();
   const extra = actual.filter((f) => !expected.includes(f)).sort();
@@ -117,7 +133,7 @@ export function assertLoadedFilesExactly(record: RustAuditRecord, expected: stri
  * scheduler".
  */
 export function assertDeclaredDependencyFilesExactly(
-  record: RustAuditRecord,
+  record: RequestAuditRecord,
   expected: string[],
 ): void {
   const actual = declaredDependencyFiles(record.footprint ?? null);
