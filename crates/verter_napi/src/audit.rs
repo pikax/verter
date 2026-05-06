@@ -183,19 +183,12 @@ pub struct NapiBundlerBatchSummaryArgs {
 }
 
 /// Match the textual `kind` filter against a `RequestKind`.
+///
+/// Delegates to [`RequestKind::matches_filter`] so the NAPI surface
+/// stays in lockstep with the shared matcher consumed by the LSP
+/// audit-query methods and the WASM bindings.
 pub(crate) fn kind_matches(filter: &str, kind: &RequestKind) -> bool {
-    matches!(
-        (filter, kind),
-        ("ComponentMeta", RequestKind::ComponentMeta)
-            | ("TypeResolution", RequestKind::TypeResolution)
-            | ("SemanticAnalysis", RequestKind::SemanticAnalysis)
-            | ("Compile", RequestKind::Compile { .. })
-            | ("Workspace", RequestKind::Workspace { .. })
-            | ("Lsp", RequestKind::Lsp { .. })
-            | ("Mcp", RequestKind::Mcp { .. })
-            | ("BundlerBatch", RequestKind::BundlerBatch { .. })
-            | ("Custom", RequestKind::Custom { .. })
-    )
+    kind.matches_filter(filter)
 }
 
 /// Map a textual bundler-kind tag.

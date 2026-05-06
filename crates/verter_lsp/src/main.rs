@@ -147,6 +147,14 @@ async fn main() {
         "$/verter/getComponentMetaTypeExpansion",
         VerterLanguageServer::get_component_meta_type_expansion,
     )
+    .custom_method(
+        "$/verter/audit/getRecord",
+        VerterLanguageServer::get_audit_record,
+    )
+    .custom_method(
+        "$/verter/audit/getRecent",
+        VerterLanguageServer::get_audit_recent,
+    )
     .finish();
 
     Server::new(stdin, stdout, socket).serve(service).await;

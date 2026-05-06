@@ -422,6 +422,35 @@ pub enum TypeHandleErrorPayload {
     Other { message: String },
 }
 
+/// Params for `$/verter/audit/getRecord` request.
+///
+/// `request_id` is encoded as a string because JSON cannot losslessly
+/// round-trip 64-bit integers in JavaScript clients. Producers stringify
+/// the `u64` request id; the handler parses it back via
+/// [`u64::from_str`].
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetAuditRecordParams {
+    /// String-encoded `u64` request id.
+    pub request_id: String,
+}
+
+/// Params for `$/verter/audit/getRecent` request.
+///
+/// Both fields are optional. `kind` filters records by `RequestKind`
+/// variant tag (e.g. `"Lsp"`, `"ComponentMeta"`, `"Compile"`); the
+/// matcher is [`verter_audit::RequestKind::matches_filter`]. `limit`
+/// caps the number of returned records (default 50, capped at 1024
+/// to keep the response payload bounded).
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetAuditRecentParams {
+    /// Optional kind filter — variant-name string match.
+    pub kind: Option<String>,
+    /// Optional cap on returned records.
+    pub limit: Option<u32>,
+}
+
 #[cfg(test)]
 mod component_meta_protocol_tests {
     //! D113 / Tier 5b W7 review: JSON round-trip checks for the three new

@@ -300,6 +300,31 @@ pub enum RequestKind {
     },
 }
 
+impl RequestKind {
+    /// Match a textual kind filter (e.g. from a JSON-RPC parameter or
+    /// a CLI flag) against this `RequestKind`. Returns `true` when
+    /// the variant tag matches the filter regardless of the inner
+    /// fields. The filter strings mirror the variant names exactly.
+    ///
+    /// Consumers (NAPI / WASM / LSP / CLI) share this matcher so that
+    /// the recognised kind set never drifts between transports.
+    #[must_use]
+    pub fn matches_filter(&self, filter: &str) -> bool {
+        matches!(
+            (filter, self),
+            ("ComponentMeta", RequestKind::ComponentMeta)
+                | ("TypeResolution", RequestKind::TypeResolution)
+                | ("SemanticAnalysis", RequestKind::SemanticAnalysis)
+                | ("Compile", RequestKind::Compile { .. })
+                | ("Workspace", RequestKind::Workspace { .. })
+                | ("Lsp", RequestKind::Lsp { .. })
+                | ("Mcp", RequestKind::Mcp { .. })
+                | ("BundlerBatch", RequestKind::BundlerBatch { .. })
+                | ("Custom", RequestKind::Custom { .. })
+        )
+    }
+}
+
 /// Strongly-typed payload paired with [`RequestKind`]. The variant
 /// tag matches the kind discriminant; the special `None` variant is
 /// used when a producer has not populated a typed payload yet (the

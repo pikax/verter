@@ -122,6 +122,10 @@ pub fn server_capabilities(encoding: &PositionEncodingKind) -> ServerCapabilitie
         // budgets and trace-output env-var so clients can opt in to
         // observability tooling. The shape is intentionally narrow;
         // version bumps come with a documented migration path.
+        //
+        // `queryMethods` advertises the read-only audit-query custom
+        // LSP methods clients can call to inspect the host's records
+        // store. They never mutate audit state.
         experimental: Some(json!({
             "verterAudit": {
                 "version": 1,
@@ -140,6 +144,10 @@ pub fn server_capabilities(encoding: &PositionEncodingKind) -> ServerCapabilitie
                 ],
                 "cancellationContract": "finalize-with-marker",
                 "traceOutEnv": "VERTER_LSP_AUDIT_TRACE_OUT",
+                "queryMethods": [
+                    "$/verter/audit/getRecord",
+                    "$/verter/audit/getRecent",
+                ],
             }
         })),
         workspace: Some(WorkspaceServerCapabilities {
