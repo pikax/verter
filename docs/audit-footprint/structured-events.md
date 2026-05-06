@@ -1,45 +1,89 @@
 # Structured events — `StructuredAuditEvent`
 
-The session-side trace macro `component_meta_trace_structured!` is
-the only way to emit a component-meta telemetry event. Every call
+The session-side trace macro `component_meta_trace_structured!`
 expands to a push onto the active request's accumulator — nothing
 writes to stderr, nothing writes to disk (apart from the
 `VERTER_COMPONENT_META_AUDIT_JSON_OUT` dump at request end).
 
-Defined at
-[`crates/verter_session/src/component_meta_audit/structured_event.rs`](../../crates/verter_session/src/component_meta_audit/structured_event.rs).
-TS type: [`StructuredAuditEvent`](../../packages/types/audit.generated.ts).
+The authoritative enum and its variant payload types live in the
+substrate at
+[`crates/verter_audit/src/structured_event.rs`](../../crates/verter_audit/src/structured_event.rs)
+(payloads in `verter_audit::origin_graph`). The session-side module
+[`crates/verter_session/src/component_meta_audit/structured_event.rs`](../../crates/verter_session/src/component_meta_audit/structured_event.rs)
+is a re-export so historic `verter_session::component_meta_audit::structured_event::*`
+imports keep resolving. TS type:
+[`StructuredAuditEvent`](../../packages/types/audit.generated.ts).
+
+The enum is named `StructuredAuditEvent` (the prior
+`StructuredComponentMetaEvent` name is gone — every emit site, every
+TLS sink, and every test fixture key on this name).
 
 ## Variants
 
-| Variant                                    | Fires when                                                     |
-| ------------------------------------------ | -------------------------------------------------------------- |
-| `RequestStart`                             | Component-meta request entry.                                  |
-| `RequestEnd`                               | Component-meta request completion.                             |
-| `IndexedReadyBuilt`                        | Fresh `IndexedReady` insert for a canonical.                   |
-| `VfsRead`                                  | VFS read via the registered sink (overlay/snapshot/disk/etc.). |
-| `SharedLoadReuse`                          | Joiner attaches to a winner's in-flight artifact.              |
-| `DispatchEnter` / `DispatchExit`           | Semantic-query dispatch envelope.                              |
-| `MaterializeMemberRouteStart` / `End`      | `extract_member_route` envelope.                               |
-| `RematerializePublicPropTypeStart` / `End` | `rematerialize_public_prop_type` envelope.                     |
-| `MaterializeDefinePropsMember`             | `defineProps` member materialization.                          |
-| `FallthroughInheritanceComputed`           | Fallthrough inheritance resolver result.                       |
-| `ResolveImportedTypeRoot`                  | Cross-file imported-type root resolution.                      |
-| `CurrentEvalState`                         | Eval-state checkpoint.                                         |
-| `MaterializeStructureEnter`                | Entry envelope for `materialize_component_meta_structure`.     |
-| `MaterializeStructureExit`                 | Exit envelope for `materialize_component_meta_structure`.      |
-| `MaterializeStructurePolicySkip`           | Materialiser policy gate rejected the input pre-dispatch.      |
-| `MaterializeStructureCycleDetected`        | Same-key materialiser re-entry on the in-flight stack.         |
-| `MaterializeStructureDepthFuseTripped`     | Materialiser depth fuse tripped (defensive hard cap).          |
-| `Custom { name, detail }`                  | Escape hatch for ad-hoc events.                                |
+| Variant                                    | Fires when                                                                                       |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------ |
+| `RequestStart`                             | Audited request entry — any `RequestKind`, not just component-meta.                              |
+| `RequestEnd`                               | Audited request completion.                                                                      |
+| `IndexedReadyBuilt`                        | Fresh `IndexedReady` insert for a canonical.                                                     |
+| `VfsRead`                                  | VFS read via the registered sink (overlay/snapshot/disk/etc.).                                   |
+| `SharedLoadReuse`                          | Joiner attaches to a winner's in-flight artifact — captures the winner's request id and audited flag. |
+| `DispatchEnter` / `DispatchExit`           | Semantic-query dispatch envelope. Exit carries `CacheOutcomeKind` + duration.                    |
+| `MaterializeMemberRouteStart` / `End`      | `extract_member_route` envelope.                                                                 |
+| `RematerializePublicPropTypeStart` / `End` | `rematerialize_public_prop_type` envelope.                                                       |
+| `MaterializeDefinePropsMember`             | `defineProps` member materialization.                                                            |
+| `FallthroughInheritanceComputed`           | Fallthrough inheritance resolver result.                                                         |
+| `ResolveImportedTypeRoot`                  | Cross-file imported-type root resolution.                                                        |
+| `CurrentEvalState`                         | Eval-state checkpoint.                                                                           |
+| `MaterializeStructureEnter`                | Entry envelope for `materialize_component_meta_structure`.                                       |
+| `MaterializeStructureExit`                 | Exit envelope for `materialize_component_meta_structure`.                                        |
+| `MaterializeStructurePolicySkip`           | Materialiser policy gate rejected the input pre-dispatch.                                        |
+| `MaterializeStructureCycleDetected`        | Same-key materialiser re-entry on the in-flight stack.                                           |
+| `MaterializeStructureDepthFuseTripped`     | Materialiser depth fuse tripped (defensive hard cap).                                            |
+| `Custom { name, detail }`                  | Escape hatch for ad-hoc events.                                                                  |
 
-## Materialiser-entry events (plan §3.3)
+## Event sites — where structured events fire
+
+The accumulator now captures events from every audited surface, not
+just component-meta:
+
+- **Request lifecycle.** `RequestStart` / `RequestEnd` fire from
+  every `*_with_audit` entry-point on `VerterHost`
+  (`get_component_meta_with_audit`, `resolve_type_with_audit`,
+  `compile_with_audit`, `analyze_with_audit`,
+  `audit_workspace_op`, `lsp_audit_begin`,
+  `audit_mcp_tool_call`).
+- **Scheduler dispatch.** `DispatchEnter` / `DispatchExit` fire at
+  every `ProjectSemanticDispatch::execute` call site — the cache
+  outcome on `Exit` distinguishes warm hits from cold builds and
+  cooperative joins.
+- **Cache layer hit/miss.** `record_cache_event(layer, hit)` on the
+  `AuditObserver` populates `RequestStoreAudit::cache_layers` —
+  every host-owned cache (`IndexedReadyDb`,
+  `ComponentMetaResultDb`, `MaterializeStructureDb`,
+  `RefCycleResultDb`, `OwnerImportSurfaceDb`, `SemanticGraphStore`)
+  routes through this hook.
+- **Lock acquisition.** `record_lock_acquisition(name, wait_ns)`
+  contributes to `WaitAudit::lock_wait_ns` /
+  `lock_acquisitions`. Active when
+  `AuditConfig::audit_timing_capture = true`.
+- **Sampler tick.** The host-owned peak-RSS sampler thread
+  (`SAMPLER_TICK = 50ms` on native, none on WASM) updates
+  `process_rss_peak_bytes` on every active `RequestContext`.
+- **VFS reads.** Every audited workspace read fires `VfsRead` with
+  the canonical id, layer (overlay / snapshot / disk /
+  dir-index-negative / missing), bytes-read, and cache-hit flag.
+- **Shared-load reuse.** When a request joins a peer's in-flight
+  slot, `SharedLoadReuse` records the winner's id and whether the
+  winner itself was audited (drives the walker's terminal
+  attachment).
+
+## Materialiser-entry events
 
 The five `MaterializeStructure*` variants instrument the
 session-layer structural materialiser at
 [`crates/verter_session/src/component_meta_materialize.rs`](../../crates/verter_session/src/component_meta_materialize.rs).
-They are the audit-facing observability surface for plan §1.5 /
-§10's materialiser cutover.
+They are the audit-facing observability surface for the
+component-meta structural materialiser.
 
 ### `MaterializeStructureEnter { base, scope_axis, mode, depth }`
 
@@ -51,7 +95,7 @@ They are the audit-facing observability surface for plan §1.5 /
   function-property policies.
 - `mode: ProjectionModeAudit` — caller-side projection mode the
   materialiser ran with (`Identity` / `Navigate` / `Shallow` /
-  `Expanded`).
+  `Expanded` / `Skeleton`).
 - `depth: u16` — materialiser stack depth post-increment.
 
 Fires on every `materialize_component_meta_structure` call, before
@@ -82,14 +126,15 @@ fraction.
 - `reason: MaterializeSkipReason` — see [api-reference.md](api-reference.md).
 
 Fires when the materialiser's policy table rejects an input
-before dispatch. The five `MaterializeSkipReason` arms map 1:1
-to the materialiser's pre-compute gates:
-`FunctionPropertyAtNested`, `GenericRefWithArgsTopLevel`,
-`PackageRefTopLevel`, `RegistryRouteNotInlineMaterialisable`,
-`NonStructuralTopLevel`. **Audit consumer use case:** verify
-package types stay symbolic (no expansion through `node_modules`
-boundaries) and function-typed properties skip materialisation
-at Nested axis (Vue's keep-function-bodies-symbolic invariant).
+before dispatch. The arms map 1:1 to the materialiser's
+pre-compute gates: `FunctionPropertyAtNested`,
+`GenericRefWithArgsTopLevel`, `PackageRefTopLevel`,
+`RegistryRouteNotInlineMaterialisable`, `NonStructuralTopLevel`,
+`RegistryRouteCycleGuard`, `RecursiveHelperCycleGuard`. **Audit
+consumer use case:** verify package types stay symbolic (no
+expansion through `node_modules` boundaries) and function-typed
+properties skip materialisation at Nested axis (Vue's
+keep-function-bodies-symbolic invariant).
 
 ### `MaterializeStructureCycleDetected { base, scope_axis, mode, depth }`
 
@@ -120,23 +165,23 @@ justification fails CI.
 
 ## `u64` / `i64` fields
 
-Every `u64` field in the structured-event variants (request_id,
-winner_request_id, bytes_read, duration_ns) serializes as a
+Every `u64` field in the structured-event variants (`request_id`,
+`winner_request_id`, `bytes_read`, `duration_ns`) serializes as a
 decimal string and types in TS as `string`. Same rule applies to
-`i64` audit-record fields (plan §3.B Commit 7.A).
+`i64` audit-record fields.
 
-## Retired legacy events
+## TLS accumulator hot path
 
-Plan §3 Commit 5 (F4 squash) deleted:
+Lower crates emit by calling `verter_audit::observer::current_observer()`
+and routing through one of the `record_*` trait methods (or the
+`record_event` counter hook for unstructured events). The session's
+`RequestContext` is the production implementer; absent any installed
+observer (audit disabled or filter-rejected request) the lookup
+returns `None` and emit sites short-circuit without allocating.
 
-- `component_meta_trace_scope!` + `component_meta_trace_event!` macros
-- `component_meta_trace_scope_impl`, `component_meta_trace_write_line`,
-  `component_meta_trace_event_impl` helpers
-- The legacy TLS stack + span-id counter
-- `VERTER_COMPONENT_META_TRACE*` env vars (kept only
-  `VERTER_COMPONENT_META_AUDIT_JSON_OUT`)
-- All `format!("k=v")` detail strings feeding the old macros
-
-Clean-cut verification: `grep -rn -E 'component_meta_trace_scope!
-|component_meta_trace_event!|VERTER_COMPONENT_META_TRACE\b' crates/`
-returns ZERO. Plan §6 item 11.
+`install_observer(...)` returns an RAII `ObserverGuard` that
+restores the prior observer on drop. `RequestContextGuard::install`
+is the session-side wrapper that installs the request's
+`RequestContext` as the observer for the duration of the audited
+operation; sub-requests spawned by the closure inherit the parent's
+observer through the same TLS slot.

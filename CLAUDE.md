@@ -16,6 +16,7 @@ Verter is one shared optimized codebase, not separate semantic implementations p
 - `verter_session` and shared workspace/VFS integration are the authority for host-backed loading, invalidation, dependency tracking, and cache reuse.
 - `verter_semantic` and `verter_compiler` own reusable semantics, lowering, and codegen.
 - `verter_session::resolver_core` owns the host-backed resolver stack and type-resolution orchestration.
+- `verter_audit` is the leaf observability substrate — owns the `RequestAuditRecord` envelope, `RequestKind`/`RequestKindPayload` discriminants, all per-kind payload structs, the `AuditObserver` trait + `AuditEvent` counter hook, the `StructuredAuditEvent` enum, `AuditConfig` + consumer filter, and the trivial `NoOpObserver`. It depends only on `verter_span` and has no back-edge to higher crates; lower crates emit through `current_observer()` (TLS) without knowing whether a `HostAuditRuntime` is installed. The concrete host runtime, records store, registration lifecycle, accumulator, footprint miner, and peak-RSS sampler live in `verter_session`.
 - `verter_protocol` owns transport-facing schema DTOs, while `verter_ffi` remains the thin native/WASM adapter layer.
 - Consumer packages such as `@verter/component-meta`, the LSP, MCP, unplugin, and playground should consume the shared substrate rather than carrying their own semantic forks.
 
@@ -245,13 +246,18 @@ The architecture guard `no_phase_archaeology_in_production_code` enforces this o
 
 See `/testing` skill for full TS/Rust test patterns, sourcemap testing, and server cleanup.
 
-**Component-meta audit** (plan §3 / F1–F10): Rust-first semantic
-footprint observability with deterministic per-request capture.
-Types live in `verter_session::component_meta_audit`; TS bindings
+**Audit infrastructure**: Rust-first deterministic per-request
+observability for every audited `VerterHost` entry-point
+(component-meta, type-resolution, compile, analyze, workspace ops,
+LSP handlers, MCP tools, bundler batches). Substrate DTOs +
+`AuditObserver` trait live in `verter_audit`; the host runtime,
+records store, registration lifecycle, accumulator, footprint
+miner, and peak-RSS sampler live in `verter_session`. TS bindings
 in `packages/types/audit.generated.ts`. Opt-in via
 `HostConfig::audit_enabled + footprint_capture`. See
-[`docs/audit-footprint/`](docs/audit-footprint/) for API reference
-and the debug flow.
+[`docs/audit-footprint/`](docs/audit-footprint/) for the API
+reference and debug flow, and the `/audit-infrastructure` skill
+for the architectural map.
 
 ### VS Code Extension Testing (MANDATORY)
 
@@ -398,16 +404,17 @@ See [docs/contributing/ci-cd.md](docs/contributing/ci-cd.md) for detailed CI/CD 
 
 Detailed reference material is available as on-demand skills (loaded automatically when relevant):
 
-| Skill                  | Use When                                                                                         |
-| ---------------------- | ------------------------------------------------------------------------------------------------ |
-| `/type-resolution`     | Type solver, cross-file types, ShallowFileState, frontier engine, cache rules, macro traversal   |
-| `/component-meta`      | Component metadata extraction, native/compat boundary, fallthrough, root inheritance             |
-| `/compiler-codegen`    | Template codegen (VDOM/IDE), CodeTransform, cached directives, strict slots, style preprocessing |
-| `/host-session`        | TypeProvider (TSGO/tsserver), workspace management, async scheduler, LSP host integration        |
-| `/architecture`        | High-level module map, TS packages, plugin system, CSS analysis, MCP server, analysis types      |
-| `/position-encoding`   | Span types, position encoding, coordinate conversions, path normalization                        |
-| `/build-and-profiling` | Build order, rebuild sequences, profiling, MCP server setup                                      |
-| `/testing`             | Test patterns, TDD workflow, sourcemap testing, server cleanup                                   |
-| `/e2e-vscode-testing`  | VS Code E2E test fixtures, helpers API, adding new tests                                         |
-| `/wsl-e2e-testing`     | WSL E2E tests to reproduce Linux/CI failures, fixture matrix                                     |
-| `/rust-performance`    | Rust optimization patterns, allocation hierarchy, CodeTransform API                              |
+| Skill                    | Use When                                                                                         |
+| ------------------------ | ------------------------------------------------------------------------------------------------ |
+| `/type-resolution`       | Type solver, cross-file types, ShallowFileState, frontier engine, cache rules, macro traversal   |
+| `/component-meta`        | Component metadata extraction, native/compat boundary, fallthrough, root inheritance             |
+| `/compiler-codegen`      | Template codegen (VDOM/IDE), CodeTransform, cached directives, strict slots, style preprocessing |
+| `/host-session`          | TypeProvider (TSGO/tsserver), workspace management, async scheduler, LSP host integration        |
+| `/architecture`          | High-level module map, TS packages, plugin system, CSS analysis, MCP server, analysis types     |
+| `/audit-infrastructure`  | `verter_audit` substrate, `HostAuditRuntime`, `AuditRequestRegistration`, `*_with_audit` API, footprint miner, structured events |
+| `/position-encoding`     | Span types, position encoding, coordinate conversions, path normalization                        |
+| `/build-and-profiling`   | Build order, rebuild sequences, profiling, MCP server setup                                      |
+| `/testing`               | Test patterns, TDD workflow, sourcemap testing, server cleanup                                   |
+| `/e2e-vscode-testing`    | VS Code E2E test fixtures, helpers API, adding new tests                                         |
+| `/wsl-e2e-testing`       | WSL E2E tests to reproduce Linux/CI failures, fixture matrix                                     |
+| `/rust-performance`      | Rust optimization patterns, allocation hierarchy, CodeTransform API                              |
