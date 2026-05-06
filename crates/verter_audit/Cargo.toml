@@ -12,12 +12,17 @@ publish = false
 [features]
 default = []
 
+[[bin]]
+name = "verter-audit-inspect"
+path = "src/bin/verter-audit-inspect/main.rs"
+
 [dependencies]
 verter_span = { path = "../verter_span" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 parking_lot = "0.12"
 ts-rs = "10"
+clap = { version = "4", features = ["derive"] }
 
 # Windows process-RSS reporting in `current_process_rss`. Requires
 # `K32GetProcessMemoryInfo` (kernel32.dll, exposed by
