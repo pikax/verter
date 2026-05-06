@@ -3537,6 +3537,12 @@ mod foundations_guards {
         "pub mod cross_file",
         // tests/host_tests.rs (host_compile module surface)
         "pub mod host_compile",
+        // verter_lsp::server::nav_features_audit drives audited LSP
+        // handlers through `VerterHost::lsp_audit_begin` exposed by
+        // this module. Public because `verter_lsp::audit_harness` and
+        // the `tests/lsp_audit_*.rs` integration tests reach
+        // `LspAuditSession` through the canonical module path.
+        "pub mod host_lsp_audit",
         // tests/host_tests.rs (host_manage::* APIs in integration tests)
         "pub mod host_manage",
         // verter_type_runtime::backend::tests via meta_resolve types,
@@ -4413,6 +4419,10 @@ mod foundations_guards {
     /// code change that routes the I/O through `NativeFs` /
     /// `WorkspaceAccess` (or a deletion of the callsite).
     pub const D14_ALLOW_LIST: &[(&str, &str)] = &[
+        (
+            "crates/verter_lsp/src/audit_harness.rs",
+            "LSP audit telemetry — `VERTER_LSP_AUDIT_TRACE_OUT` JSON-lines drainer. Off by default and gated behind the env var at the call site; mirrors the existing `VERTER_COMPONENT_META_AUDIT_JSON_OUT` drainer in `verter_session::component_meta_audit`.",
+        ),
         (
             "crates/verter_lsp/src/background_init.rs",
             "writes Verter-generated `@verter/types` stub files into `node_modules` for tool setup; reads them back via marker detection. Test fixtures inside `#[cfg(test)] mod tests` use temp-dir scratch space.",

@@ -121,6 +121,7 @@ pub(crate) mod host_executor;
 #[cfg(test)]
 mod host_executor_lowering_tests;
 mod host_lifecycle;
+pub mod host_lsp_audit;
 pub mod host_manage;
 mod host_resolve;
 mod host_semantic;

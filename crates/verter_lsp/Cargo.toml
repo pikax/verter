@@ -15,6 +15,7 @@ hotpath = ["dep:hotpath", "hotpath/hotpath", "verter_session/hotpath", "verter_d
 [dependencies]
 verter_session = { path = "../verter_session", features = ["session_metrics"] }
 hotpath = { version = "0.13", optional = true }
+verter_audit = { path = "../verter_audit" }
 verter_scheduler = { path = "../verter_scheduler" }
 verter_workspace = { path = "../verter_workspace" }
 verter_semantic = { path = "../verter_semantic" }
