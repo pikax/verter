@@ -135,8 +135,11 @@ fn corpus_generator_output_matches_committed_files() {
     // The vendored fixture set under `fixtures/` is the input the
     // generator reads, not output it produces. Filter it out of the
     // structural-drift check so the parity test stays focused on
-    // generator output.
-    let is_generator_output = |rel: &str| !rel.starts_with("fixtures/") && rel != "fixtures";
+    // generator output. `harness.rs` is the hand-written corpus
+    // regression capture harness that lives alongside the generated
+    // per-component tests; it is not generator output.
+    let is_generator_output =
+        |rel: &str| !rel.starts_with("fixtures/") && rel != "fixtures" && rel != "harness.rs";
     let gen_names: std::collections::BTreeSet<_> = generated_files
         .iter()
         .map(|(rel, _)| rel.clone())
@@ -249,7 +252,12 @@ fn corpus_audit_coverage_covers_every_vendored_component() {
                 return None;
             }
             let name = p.file_name()?.to_string_lossy().into_owned();
-            if name == "README.md" || name == "mod.rs" {
+            if name == "README.md" || name == "mod.rs" || name == "harness.rs" {
+                // `harness.rs` hosts the corpus regression capture
+                // harness — it is hand-written, not generated, and
+                // lives alongside the generated per-component tests
+                // so they can `mod harness;` it locally without
+                // pulling in cross-target machinery.
                 return None;
             }
             let slug = name.strip_suffix(".rs")?.to_string();
