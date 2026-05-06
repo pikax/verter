@@ -148,6 +148,7 @@ pub fn snapshot_cache_layers_from_tls() -> verter_audit::store::CacheLayerBreakd
         semantic_graph: snap(&ctx.cache_counters.semantic_graph),
         materialize_structure: snap(&ctx.cache_counters.materialize_structure),
         materialize_memo: snap(&ctx.cache_counters.materialize_memo),
+        member_route_result: snap(&ctx.cache_counters.member_route_result),
         prepared_surface: snap(&ctx.cache_counters.prepared_surface),
         prepared_member: snap(&ctx.cache_counters.prepared_member),
     }

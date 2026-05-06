@@ -1224,6 +1224,12 @@ impl SemanticGraphStore {
         let mut miss_recorded = false;
         let mut retries = 0usize;
 
+        // Loop-5 instrumentation — count every logical entry. The
+        // warm/cold split below records the family-memo disposition
+        // observed BEFORE the in-flight admission tests.
+        crate::loop5_instrumentation::EXECUTE_COOPERATIVE_CALLS
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         // Supplement §5.D.0 r17 — record cold/warm split for
         // the §5.D.1 cache-discipline tests. Done ONCE per logical
         // call (before the retry loop) so retries don't double-count.
@@ -1231,6 +1237,15 @@ impl SemanticGraphStore {
         // with the caller-side pre-canonical key (via raise/trait
         // entry-point recordings) so tests can probe by either form.
         let initial_hit = self.get(&key).is_some();
+        if initial_hit {
+            crate::loop5_instrumentation::FAMILY_MEMO_HITS
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            crate::loop5_instrumentation::EXECUTE_COOPERATIVE_WARM_HITS
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            crate::loop5_instrumentation::FAMILY_MEMO_MISSES
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         #[cfg(test)]
         if initial_hit {
             crate::project_semantic_dispatch::raise::record_dispatch_warm(&key);
@@ -1379,6 +1394,13 @@ impl SemanticGraphStore {
             prov.execute_cooperative_held_ns
                 .fetch_add(build_held_ns, Ordering::Relaxed);
         }
+        // Loop-5 instrumentation — count every cold build that
+        // actually executed the build closure. `build_held_ns` is
+        // accumulated alongside so the report can report mean ns/build.
+        crate::loop5_instrumentation::EXECUTE_COOPERATIVE_COLD_BUILDS
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        crate::loop5_instrumentation::EXECUTE_COOPERATIVE_BUILD_NS_TOTAL
+            .fetch_add(build_held_ns, std::sync::atomic::Ordering::Relaxed);
 
         // 5. Warm-publish only successful values; errors and recursion
         // sentinels never become shared-cache entries ( cache

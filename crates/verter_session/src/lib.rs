@@ -140,6 +140,10 @@ mod host_workspace_audit;
 mod id;
 pub(crate) mod intrinsic_registry;
 pub mod invalidation_domain;
+/// Loop-5 inner-dispatch instrumentation counters. Inert in production —
+/// callers bump atomic counters at named call sites and dump aggregates
+/// via `dump_loop5_instrumentation_counters()`.
+pub mod loop5_instrumentation;
 pub mod meta;
 pub mod meta_resolve;
 pub mod owned_artifacts;

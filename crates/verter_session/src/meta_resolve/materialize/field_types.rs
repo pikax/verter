@@ -131,6 +131,11 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
 
     // Step 3 closure: peek ctx-owned MaterializeMemoDb.
     {
+        // Loop-5 instrumentation — bump peek for every host-memo
+        // read attempt; bump hit only on the cached return path.
+        crate::loop5_instrumentation::MATERIALIZE_MEMO_PEEKS
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         let ctx = query_engine.ctx();
         let arc_key = (
             std::sync::Arc::<str>::from(scope_canonical_id),
@@ -139,6 +144,8 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
         );
         let host_db = ctx.project_type_store().materialize_memo_db();
         if let Some(cached) = host_db.peek(&arc_key, ctx) {
+            crate::loop5_instrumentation::MATERIALIZE_MEMO_HITS
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             query_engine
                 .materialize_memo
                 .borrow_mut()
@@ -198,6 +205,12 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
 
     // Step 3 closure: write-through to ctx-owned MaterializeMemoDb.
     {
+        // Loop-5 instrumentation — count every publish attempt. The
+        // get_or_compute path is a no-op on a concurrent winner but
+        // we count the attempt because the bench is single-threaded.
+        crate::loop5_instrumentation::MATERIALIZE_MEMO_PUBLISHES
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         let arc_key = (
             std::sync::Arc::<str>::from(scope_canonical_id),
             std::sync::Arc::new(expr.clone()),

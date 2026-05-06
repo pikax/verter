@@ -3615,6 +3615,13 @@ mod foundations_guards {
         // ImportedRegistryEntry / ImportedRegistryKey for the §12.A12
         // InvalidationByCanonical perf gate)
         "pub mod component_meta_caches",
+        // crates/verter_bench/examples/audit_real_component_meta.rs
+        // calls `dump_loop5_instrumentation_counters` to record
+        // inner-dispatch counter snapshots alongside the audit JSON.
+        // The module is public because the bench example is an
+        // out-of-crate consumer; production callers route only through
+        // the atomic-counter increments which are inert.
+        "pub mod loop5_instrumentation",
         // ─── B-C5 territory (separate ownership), kept `pub` ────────
         "pub mod component_meta_resolution_policy",
         // ─── crate-private modules (already non-public) ─────────────

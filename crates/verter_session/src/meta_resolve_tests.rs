@@ -8308,7 +8308,6 @@ defineProps<{ ui?: Button['ui'] }>()
     );
 }
 
-
 /// Regression: `MemberRouteResultDb` collapses repeated calls to
 /// `materialize_component_meta_macro_shape_member_type_expr` for the
 /// same `(scope, member_name, lowered, mode)` tuple onto a single cold
@@ -8361,15 +8360,17 @@ defineProps<AssistantProps>()
     // member name through `IndexedAccess { object: lowered, index:
     // member_name }`. The same `lowered` + 4 invocations with the
     // same `member_name` exercises the cache directly.
-    let lowered = verter_semantic::analysis::type_expr_lower::parse_type_annotation(
-        "AssistantProps",
-    );
+    let lowered =
+        verter_semantic::analysis::type_expr_lower::parse_type_annotation("AssistantProps");
     let current = lowered.clone();
     let scope = "/src/App.vue";
     let member = "message";
 
     // Snapshot live entries before any invocation.
-    let db_pre = host.project_type_store().member_route_result_db().live_count();
+    let db_pre = host
+        .project_type_store()
+        .member_route_result_db()
+        .live_count();
 
     // Drive 4 calls with identical arguments. The first publishes
     // (cold build), the remaining 3 hit the peek.
@@ -8404,7 +8405,10 @@ defineProps<AssistantProps>()
     // Discriminator: the `MemberRouteResultDb` live_count rose by
     // exactly one. Pre-fix would publish 0 (no cache exists); post-
     // fix publishes exactly 1 entry shared across all 4 calls.
-    let db_post = host.project_type_store().member_route_result_db().live_count();
+    let db_post = host
+        .project_type_store()
+        .member_route_result_db()
+        .live_count();
     let published = db_post.saturating_sub(db_pre);
     assert_eq!(
         published, 1,

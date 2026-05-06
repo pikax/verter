@@ -766,6 +766,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         mode: ProjectionMode,
         state: &mut ReduceState,
     ) -> SemanticNodeId {
+        // Loop-5 instrumentation — count every iterative-reduction
+        // entry. One `raise_and_reduce` produces exactly one of these.
+        crate::loop5_instrumentation::RAISE_REDUCE_GRAPH_NODE_ITERATIVE_CALLS
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         // Collect every reachable `(node, mode)` pair in topo
         // order with a worklist. `visited` short-circuits cycles —
         // they reach a fixpoint at the first visit and are not re-pushed.
@@ -1042,6 +1047,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         mode: ProjectionMode,
         state: &mut ReduceState,
     ) -> SemanticNodeId {
+        // Loop-5 instrumentation — every operator-node dispatch issues
+        // one `execute_read` (which routes through `execute_cooperative`).
+        crate::loop5_instrumentation::DISPATCH_OPERATOR_WITH_RECURSE_CALLS
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         let read = self.execute_read(key);
         state.merge_dep_signature(&read.dep_signature);
         match read.value {

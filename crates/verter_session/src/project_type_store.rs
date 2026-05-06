@@ -1735,6 +1735,12 @@ pub struct ProjectTypeStore {
     owner_collection_db: OwnerCollectionDb,
     prepared_target_db: PreparedTargetDb,
     materialize_memo_db: MaterializeMemoDb,
+    /// Macro-member walker route-result cache. Keyed on
+    /// `(scope_canonical_id, member_name, lowered, mode)`. Memoizes
+    /// the full `materialize_component_meta_macro_shape_member_type_expr`
+    /// projection so repeated outer walks for the same `(member, lowered)`
+    /// short-circuit before the route-candidate fan-out.
+    member_route_result_db: crate::component_meta_caches::MemberRouteResultDb,
     /// Cache for the structural
     /// materialiser. Sole authoritative host-owned materialiser cache.
     /// The canonical removed-symbol list lives in
@@ -1874,6 +1880,10 @@ impl ProjectTypeStore {
             PreparedTargetDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
         let materialize_memo_db =
             MaterializeMemoDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
+        let member_route_result_db =
+            crate::component_meta_caches::MemberRouteResultDb::with_counter(Arc::clone(
+                &counters.component_meta_cache_live,
+            ));
         let materialize_structure_db =
             crate::component_meta_caches::MaterializeStructureDb::with_counter(Arc::clone(
                 &counters.component_meta_cache_live,
@@ -1911,6 +1921,7 @@ impl ProjectTypeStore {
             owner_collection_db,
             prepared_target_db,
             materialize_memo_db,
+            member_route_result_db,
             materialize_structure_db,
             ref_cycle_db,
             prepared_surface_db,
@@ -2126,7 +2137,6 @@ impl ProjectTypeStore {
         &self.ref_cycle_db
     }
 
-
     /// Accessor for the host-owned macro-member walker route-result
     /// cache consulted by
     /// `meta_resolve::macro_member_walk::materialize_component_meta_macro_shape_member_type_expr`.
@@ -2134,9 +2144,7 @@ impl ProjectTypeStore {
     /// TypeExpr` projection, collapsing per-property route-candidate
     /// fan-out into a single dispatch per member-name per project
     /// generation.
-    pub fn member_route_result_db(
-        &self,
-    ) -> &crate::component_meta_caches::MemberRouteResultDb {
+    pub fn member_route_result_db(&self) -> &crate::component_meta_caches::MemberRouteResultDb {
         &self.member_route_result_db
     }
 

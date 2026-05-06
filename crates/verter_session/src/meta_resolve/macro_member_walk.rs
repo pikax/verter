@@ -807,6 +807,13 @@ pub(crate) fn materialize_component_meta_macro_shape_member_type_expr(
         }
     }
 
+    // Loop-5 instrumentation — bumped for every outer macro-member walk
+    // that misses MemberRouteResultDb. The TypeExpr operator-node count
+    // is sampled here as the lowered surface coming in.
+    crate::loop5_instrumentation::MACRO_MEMBER_WALK_OUTER_CALLS
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    crate::loop5_instrumentation::record_outer_call_type_expr(lowered);
+
     let current_is_route_expr = matches!(
         current,
         verter_semantic::analysis::type_expr::TypeExpr::IndexedAccess { .. }

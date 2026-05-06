@@ -421,6 +421,21 @@ fn run_one(
         .attach_to(Arc::clone(host))
         .resolve_component_meta(&canonical);
     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+    // Loop-5 instrumentation — capture counter values RIGHT AFTER the
+    // resolve_component_meta call returns, so the snapshot reflects the
+    // exact request just observed. Counters are cumulative across
+    // requests; consumers can subtract to get per-request deltas.
+    let loop5_counters_json =
+        verter_session::loop5_instrumentation::dump_loop5_instrumentation_counters();
+    let flat_slug = target.replace(['/', '\\'], "--");
+    let counters_dir = out_dir.join(pass);
+    if let Err(err) = fs::create_dir_all(&counters_dir) {
+        eprintln!("warn: counters dir create failed for {target}: {err}");
+    }
+    let counters_path = counters_dir.join(format!("{flat_slug}.loop5.json"));
+    if let Err(err) = fs::write(&counters_path, &loop5_counters_json) {
+        eprintln!("warn: loop5 counter dump failed for {target}: {err}");
+    }
     match outcome {
         Ok((_, _, record)) => {
             let row = summarize(pass, target, elapsed_ms, &record);
