@@ -18,9 +18,17 @@ import type {
   ChainTermination,
   ProvenanceChain,
   ProvenanceStep,
-  RustAuditRecord,
-  RustSemanticFootprintAudit,
+  RequestAuditRecord,
+  RequestFootprintAudit,
 } from "@verter/types/audit.generated";
+
+/**
+ * Backward-compatible aliases for the Wave-1 `Rust*` names. The
+ * ts-rs–generated bindings emit the unprefixed `RequestAudit*` shape;
+ * these aliases keep older import paths stable.
+ */
+export type RustAuditRecord = RequestAuditRecord;
+export type RustSemanticFootprintAudit = RequestFootprintAudit;
 
 /**
  * Minimal structural type for the wasm-bindgen–generated

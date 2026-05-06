@@ -29,6 +29,13 @@ use verter_session::component_meta_audit::{
 };
 use wasm_bindgen::prelude::*;
 
+mod audit;
+use audit::{
+    audit_record_list_to_json_string, audit_record_to_json_string, kind_matches_wasm,
+    parse_bundler_kind_wasm, parse_compile_target_wasm, parse_request_id_str_wasm,
+    AuditRecordFilterWasm, BundlerBatchSummaryArgsWasm, WorkspaceOpArgWasm,
+};
+
 /// WASM audit bundle — mirror of the NAPI binding's bundle shape.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -243,7 +250,7 @@ fn default_known_dependency_extensions() -> Vec<String> {
 /// Verter playground.
 #[wasm_bindgen(js_name = VerterHost)]
 pub struct WasmVerterHost {
-    inner: host::VerterHost,
+    inner: std::sync::Arc<host::VerterHost>,
 }
 
 #[wasm_bindgen(js_class = VerterHost)]
@@ -264,9 +271,9 @@ impl WasmVerterHost {
             parse_wasm_input::<FfiHostConfig>(config)?
         };
         Ok(Self {
-            inner: host::VerterHost::new_standalone(
+            inner: std::sync::Arc::new(host::VerterHost::new_standalone(
                 ffi_config_to_host(ffi_config).map_err(ffi_err)?,
-            ),
+            )),
         })
     }
 
@@ -713,6 +720,212 @@ impl WasmVerterHost {
         };
 
         to_wasm_value(&results)
+    }
+
+    // =========================================================================
+    // Typed audit entry-points (mirrors the NAPI surface)
+    // =========================================================================
+
+    /// Run a single type-resolution query through the shared dispatch
+    /// and return the produced `RequestAuditRecord` as a JSON string.
+    /// Resolves `decl_name` in the top-level scope of `canonical_id`.
+    /// Returns `null` when audit is disabled.
+    #[wasm_bindgen(js_name = "resolveTypeWithAudit")]
+    pub fn resolve_type_with_audit(
+        &self,
+        canonical_id: &str,
+        decl_name: &str,
+    ) -> Result<JsValue, JsValue> {
+        use verter_session::semantic_query::{ResolveDeclKey, ScopeId, SemanticQueryKey};
+        let host = std::sync::Arc::clone(&self.inner);
+        let canonical_id_owned = canonical_id.to_string();
+        let decl_name_owned = decl_name.to_string();
+        catch_panic(AssertUnwindSafe(move || {
+            let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+                scope: ScopeId {
+                    canonical_id: std::sync::Arc::<str>::from(canonical_id_owned.as_str()),
+                    local_scope: None,
+                },
+                name: std::sync::Arc::<str>::from(decl_name_owned.as_str()),
+            });
+            let (_resolved, record) = host.resolve_type_with_audit(key, &canonical_id_owned);
+            match record {
+                Some(rec) => audit_record_to_json_string(&rec),
+                None => Ok(JsValue::NULL),
+            }
+        }))?
+    }
+
+    /// Compile `canonical_id` for the requested codegen target and
+    /// return the produced `RequestAuditRecord` as a JSON string.
+    /// Accepted target names: `BUNDLER`, `IDE`, `ANALYSIS`, `META`,
+    /// `TSX`, `TSC`. Returns `null` when audit is disabled.
+    #[wasm_bindgen(js_name = "compileWithAudit")]
+    pub fn compile_with_audit(&self, canonical_id: &str, target: &str) -> Result<JsValue, JsValue> {
+        let target_value = parse_compile_target_wasm(target)?;
+        let host = std::sync::Arc::clone(&self.inner);
+        let canonical_id_owned = canonical_id.to_string();
+        catch_panic(AssertUnwindSafe(move || {
+            let (_result, record) = host.compile_with_audit(&canonical_id_owned, target_value);
+            match record {
+                Some(rec) => audit_record_to_json_string(&rec),
+                None => Ok(JsValue::NULL),
+            }
+        }))?
+    }
+
+    /// Materialise the `AnalysisReady` artifact for `canonical_id`
+    /// under audit and return the produced `RequestAuditRecord` as a
+    /// JSON string. Returns `null` when audit is disabled or the
+    /// canonical does not exist.
+    ///
+    /// WASM-only stub: the underlying
+    /// `VerterHost::analyze_with_audit` requires the scheduler-backed
+    /// `IndexedReady` materialisation path which is not built for the
+    /// `wasm32` target. Calling this throws on WASM; consumers should
+    /// drive the analysis through the native `@verter/native` package.
+    #[wasm_bindgen(js_name = "analyzeWithAudit")]
+    pub fn analyze_with_audit(&self, _canonical_id: &str) -> Result<JsValue, JsValue> {
+        Err(JsValue::from_str(
+            "analyzeWithAudit is unavailable in WASM (scheduler-backed analysis not built for wasm32); \
+             use @verter/native for audited analysis requests",
+        ))
+    }
+
+    /// Drive a workspace operation under audit and return the
+    /// produced `RequestAuditRecord` as a JSON string. The `op_json`
+    /// argument is shaped as `{ "type": "AuditResolve", "specifier",
+    /// "from" }` / `{ "type": "DepGraphTraverse", "root" }` / `{
+    /// "type": "ResolverWalk", "specifier" }`.
+    #[wasm_bindgen(js_name = "auditWorkspaceOp")]
+    pub fn audit_workspace_op(&self, op_json: &str) -> Result<JsValue, JsValue> {
+        let arg: WorkspaceOpArgWasm = serde_json::from_str(op_json)
+            .map_err(|e| JsValue::from_str(&format!("invalid workspace op shape: {e}")))?;
+        let host = std::sync::Arc::clone(&self.inner);
+        catch_panic(AssertUnwindSafe(move || {
+            let workspace_op: verter_audit::WorkspaceOp = arg.into();
+            let record = host.audit_workspace_op(workspace_op);
+            audit_record_to_json_string(&record)
+        }))?
+    }
+
+    /// Drain the most-recent `RequestAuditRecord` from the host's
+    /// audit store. Returns `null` when the store is empty. The
+    /// returned record is removed from the store.
+    #[wasm_bindgen(js_name = "getLastAuditRecord")]
+    pub fn get_last_audit_record(&self) -> Result<JsValue, JsValue> {
+        use verter_audit::batch::AuditRecordSource;
+        let host = std::sync::Arc::clone(&self.inner);
+        catch_panic(AssertUnwindSafe(move || {
+            let store = host.host_audit_runtime().audit_records_store();
+            let mut latest_id: Option<u64> = None;
+            let mut latest_at: Option<std::time::Instant> = None;
+            store.for_each_record(&mut |inserted_at, record| {
+                let is_newer = match latest_at {
+                    None => true,
+                    Some(prev) => inserted_at > prev,
+                };
+                if is_newer {
+                    latest_at = Some(inserted_at);
+                    latest_id = Some(record.request_id);
+                }
+            });
+            let Some(id) = latest_id else {
+                return Ok(JsValue::NULL);
+            };
+            match store.take(id) {
+                Some(rec) => audit_record_to_json_string(&rec),
+                None => Ok(JsValue::NULL),
+            }
+        }))?
+    }
+
+    /// Non-destructive filtered query over the host's audit store.
+    /// Returns a JSON-string array of matching records. The
+    /// `filter_json` argument carries `{ kind?, sinceRequestId?,
+    /// limit? }` (any combination — independent narrowing).
+    #[wasm_bindgen(js_name = "getAuditRecords")]
+    pub fn get_audit_records(&self, filter_json: JsValue) -> Result<JsValue, JsValue> {
+        use verter_audit::batch::AuditRecordSource;
+        let filter: AuditRecordFilterWasm = if filter_json.is_undefined() || filter_json.is_null() {
+            AuditRecordFilterWasm::default()
+        } else {
+            parse_wasm_input(filter_json)?
+        };
+        let kind_filter = filter.kind;
+        let since = match filter.since_request_id.as_deref() {
+            Some(s) => Some(parse_request_id_str_wasm(s)?),
+            None => None,
+        };
+        let limit = filter.limit.map(|n| n as usize);
+        let host = std::sync::Arc::clone(&self.inner);
+        catch_panic(AssertUnwindSafe(move || {
+            let store = host.host_audit_runtime().audit_records_store();
+            let mut collected: Vec<verter_audit::RequestAuditRecord> = Vec::new();
+            store.for_each_record(&mut |_inserted_at, record| {
+                if let Some(filter_kind) = kind_filter.as_deref() {
+                    if !kind_matches_wasm(filter_kind, &record.kind) {
+                        return;
+                    }
+                }
+                if let Some(since_id) = since {
+                    if record.request_id <= since_id {
+                        return;
+                    }
+                }
+                collected.push(record.clone());
+            });
+            if let Some(n) = limit {
+                collected.truncate(n);
+            }
+            audit_record_list_to_json_string(&collected)
+        }))?
+    }
+
+    /// Run the bundler-batch aggregator over the host's audit store
+    /// and return the produced `BundlerBatchPayload` as a JSON
+    /// string. The `args_json` argument carries `{ kind?,
+    /// sinceRequestId? }` (defaults: `Vite`, no-watermark).
+    #[wasm_bindgen(js_name = "getBundlerBatchSummary")]
+    pub fn get_bundler_batch_summary(&self, args_json: JsValue) -> Result<JsValue, JsValue> {
+        use verter_audit::batch::{AuditRecordSource, BatchAuditAggregator};
+        let args: BundlerBatchSummaryArgsWasm = if args_json.is_undefined() || args_json.is_null() {
+            BundlerBatchSummaryArgsWasm::default()
+        } else {
+            parse_wasm_input(args_json)?
+        };
+        let kind = parse_bundler_kind_wasm(args.kind.as_deref());
+        let since_id = match args.since_request_id.as_deref() {
+            Some(s) => Some(parse_request_id_str_wasm(s)?),
+            None => None,
+        };
+        let host = std::sync::Arc::clone(&self.inner);
+        catch_panic(AssertUnwindSafe(move || {
+            let store = host.host_audit_runtime().audit_records_store();
+            let since_instant: Option<std::time::Instant> = match since_id {
+                None => None,
+                Some(target_id) => {
+                    let mut best: Option<std::time::Instant> = None;
+                    store.for_each_record(&mut |inserted_at, record| {
+                        if record.request_id <= target_id {
+                            best = match best {
+                                None => Some(inserted_at),
+                                Some(prev) if inserted_at > prev => Some(inserted_at),
+                                Some(prev) => Some(prev),
+                            };
+                        }
+                    });
+                    best
+                }
+            };
+            let aggregator = BatchAuditAggregator::new(store.as_ref(), kind);
+            let payload = aggregator.summarize(since_instant);
+            serde_json::to_string(&payload)
+                .map(|s| JsValue::from_str(&s))
+                .map_err(|e| {
+                    JsValue::from_str(&format!("bundler batch summary serialization error: {e}"))
+                })
+        }))?
     }
 }
 

@@ -591,16 +591,22 @@ describe("VerterHost type declarations in sync with native binary", () => {
     // If a new method is added to the Rust NAPI impl, it must be added here AND
     // to the `export declare class VerterHost` block in index.ts.
     const declaredMethods = [
+      "analyzeWithAudit",
       "applyBlockOverrides",
+      "auditWorkspaceOp",
       "close",
       "collectResolvableModuleReferenceSpecifiers",
       "compileMany",
+      "compileWithAudit",
       "configureProjects",
       "evaluateTypes",
       "getAnalysis",
+      "getAuditRecords",
+      "getBundlerBatchSummary",
       "getCodeActions",
       "getDocumentSymbols",
       "getIde",
+      "getLastAuditRecord",
       "getLintRuleMetadata",
       "getPublicApi",
       "getVirtualFile",
@@ -612,6 +618,7 @@ describe("VerterHost type declarations in sync with native binary", () => {
       "resolveExports",
       "resolveImport",
       "resolveKnownModuleReferenceDependencies",
+      "resolveTypeWithAudit",
       "setImportDependencies",
       "upsert",
     ].sort();
