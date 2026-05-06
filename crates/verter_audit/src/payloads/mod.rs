@@ -18,7 +18,7 @@ pub mod tags;
 pub mod type_resolution;
 pub mod workspace;
 
-pub use bundler::BundlerBatchPayload;
+pub use bundler::{BundlerBatchPayload, SlowRecordSummary};
 pub use compile::CompilePayload;
 pub use component_meta::ComponentMetaPayload;
 pub use lsp::{LspRequestPayload, PositionInfo};

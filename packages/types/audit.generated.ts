@@ -15,29 +15,94 @@ result: NodeId,
 alias_name: string, };
 
 /**
- * Aggregate summary produced by the unplugin's batch run.
+ * Aggregate summary produced by the bundler's batch run.
+ *
+ * One payload covers all records the [`crate::batch::BatchAuditAggregator`]
+ * observed for the configured `kind` (vite, webpack, …) within the
+ * requested window. Per-kind counters partition `total_records`;
+ * `slowest_5` lists the longest-running records descending by
+ * `RequestTimingAudit::total_ms`.
  */
 export type BundlerBatchPayload = { 
 /**
- * Bundler kind (vite, webpack, …).
+ * Bundler kind (vite, webpack, …) the aggregator was tagged
+ * with. Records originate from any audited request flowing
+ * through this host, not only from the bundler — the kind
+ * records WHO requested the summary.
  */
 kind: BundlerKindTag, 
 /**
- * Number of records in the batch.
+ * Total number of records folded into this summary. Equal to
+ * the sum of every per-kind counter below.
  */
-record_count: number, 
+total_records: number, 
 /**
- * Sum of `total_ms` across the batch.
+ * Records with `kind == RequestKind::ComponentMeta`.
  */
-total_ms: number, 
+component_meta_count: number, 
 /**
- * Sum of `bytes_parsed` across the batch.
+ * Records with `kind == RequestKind::Compile { .. }`.
+ */
+compile_count: number, 
+/**
+ * Records with `kind == RequestKind::TypeResolution`.
+ */
+type_resolution_count: number, 
+/**
+ * Records with `kind == RequestKind::SemanticAnalysis`.
+ */
+semantic_analysis_count: number, 
+/**
+ * Records with `kind == RequestKind::Workspace { .. }`.
+ */
+workspace_count: number, 
+/**
+ * Records with `kind == RequestKind::Lsp { .. }`.
+ */
+lsp_count: number, 
+/**
+ * Records with `kind == RequestKind::Mcp { .. }`.
+ */
+mcp_count: number, 
+/**
+ * Records with `kind == RequestKind::BundlerBatch { .. }`
+ * (sub-batches; usually zero in normal operation).
+ */
+bundler_batch_count: number, 
+/**
+ * Records with `kind == RequestKind::Custom { .. }`.
+ */
+custom_count: number, 
+/**
+ * Sum of `RequestTimingAudit::total_ms` across the batch.
+ */
+total_duration_ms: number, 
+/**
+ * Sum of `RequestMemoryAudit::bytes_parsed` across the batch.
+ * Each record's `bytes_parsed` is itself the read-once bytes
+ * the request observed across its `FileAudit` attribution, so
+ * the aggregate reflects raw bytes parsed, not on-disk file
+ * sizes.
  */
 total_bytes_parsed: string, 
 /**
- * Number of records with `from_cache = true`.
+ * Number of records that were satisfied from a warm host cache
+ * (i.e. `RequestAuditRecord::from_cache == true`).
  */
-from_cache_count: number, };
+from_cache_count: number, 
+/**
+ * Cache-hit rate across the batch — `from_cache_count /
+ * total_records` as f32 in `[0.0, 1.0]`. `0.0` for an empty
+ * batch (no division-by-zero).
+ */
+cache_hit_rate: number, 
+/**
+ * Up to five slowest records descending by `total_ms`. Each
+ * summary carries enough identity (`request_id`, `canonical_id`,
+ * `kind`) to pivot back to the full record via
+ * `AuditRecordsStore::take`.
+ */
+slowest_5: Array<SlowRecordSummary>, };
 
 /**
  * Bundler kind — mirror of the unplugin's bundler discriminator.
@@ -1378,6 +1443,34 @@ winner_request_id: string,
  * `true` when the winner's request was itself audited.
  */
 winner_audited: boolean, };
+
+/**
+ * Compact per-record fingerprint used inside
+ * [`BundlerBatchPayload::slowest_5`]. Values are copied by the
+ * aggregator from the underlying `RequestAuditRecord` so the
+ * summary is self-contained and safe to serialise once the source
+ * store is mutated.
+ */
+export type SlowRecordSummary = { 
+/**
+ * Monotonic request id from the original record. Decimal-string
+ * transport — non-zero and unique per audited request.
+ */
+request_id: string, 
+/**
+ * Canonical file id the original request targeted.
+ */
+canonical_id: string, 
+/**
+ * Original `RequestKind` discriminant — preserved verbatim so
+ * callers can tell which surface produced the slow record.
+ */
+kind: RequestKind, 
+/**
+ * Wall-clock duration captured from
+ * `RequestTimingAudit::total_ms` (milliseconds, f64).
+ */
+duration_ms: number, };
 
 /**
  * Typed structured event emitted by an audited request path.

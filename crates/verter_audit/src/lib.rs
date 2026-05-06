@@ -41,7 +41,11 @@
 //! - [`payloads`] — per-`RequestKind` payload data structs.
 //! - [`scheduler`] — [`scheduler::SchedulerAudit`] +
 //!   [`scheduler::WorkerPool`] / [`scheduler::SchedulerDepths`].
+//! - [`batch`] — [`batch::BatchAuditAggregator`] folds an
+//!   [`batch::AuditRecordSource`] into a
+//!   [`payloads::BundlerBatchPayload`].
 
+pub mod batch;
 pub mod config;
 pub mod files;
 pub mod footprint;
@@ -60,6 +64,7 @@ pub mod waits;
 // Common re-exports — keep narrow; consumers `use` the module path
 // for everything else.
 
+pub use batch::{AuditRecordSource, BatchAuditAggregator, SLOWEST_RECORD_LIMIT};
 pub use config::{AuditConfig, AuditConsumerFilter};
 pub use files::{FileAudit, FileRole};
 pub use footprint::{
@@ -80,7 +85,8 @@ pub use payloads::cache_outcomes::CacheOutcomeKind;
 pub use payloads::tags::{BundlerKindTag, CompileTargetTag, LspMethodTag, ProjectionModeTag};
 pub use payloads::{
     BundlerBatchPayload, CompilePayload, ComponentMetaPayload, LspRequestPayload, McpToolPayload,
-    SemanticAnalysisPayload, TypeResolutionPayload, WorkspaceOp, WorkspacePayload,
+    SemanticAnalysisPayload, SlowRecordSummary, TypeResolutionPayload, WorkspaceOp,
+    WorkspacePayload,
 };
 pub use record::{
     Hash16, IncidentalFields, RequestAuditRecord, RequestKind, RequestKindPayload,
