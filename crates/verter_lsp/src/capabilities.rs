@@ -1,3 +1,4 @@
+use serde_json::json;
 use tower_lsp_server::ls_types::*;
 
 /// Build the server capabilities to advertise during initialization.
@@ -117,6 +118,30 @@ pub fn server_capabilities(encoding: &PositionEncodingKind) -> ServerCapabilitie
                 ..Default::default()
             },
         )),
+        // Verter audit producer capability — surfaces the per-method
+        // budgets and trace-output env-var so clients can opt in to
+        // observability tooling. The shape is intentionally narrow;
+        // version bumps come with a documented migration path.
+        experimental: Some(json!({
+            "verterAudit": {
+                "version": 1,
+                "kind": "Lsp",
+                "methods": [
+                    "hover",
+                    "gotoDefinition",
+                    "completion",
+                    "references",
+                    "diagnostics",
+                    "documentSymbols",
+                    "semanticTokens",
+                    "inlayHints",
+                    "codeAction",
+                    "rename",
+                ],
+                "cancellationContract": "finalize-with-marker",
+                "traceOutEnv": "VERTER_LSP_AUDIT_TRACE_OUT",
+            }
+        })),
         workspace: Some(WorkspaceServerCapabilities {
             workspace_folders: Some(WorkspaceFoldersServerCapabilities {
                 supported: Some(true),

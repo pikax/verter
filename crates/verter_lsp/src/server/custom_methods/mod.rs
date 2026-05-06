@@ -333,7 +333,7 @@ impl VerterLanguageServer {
 
         if result {
             // Re-publish diagnostics since analysis has changed
-            self.publish_full_diagnostics(&parsed_uri).await;
+            self.publish_full_diagnostics_with_audit(&parsed_uri).await;
         }
 
         Ok(ApplyStyleOverridesResponse { success: result })

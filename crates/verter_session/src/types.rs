@@ -213,6 +213,16 @@ pub struct HostConfig {
     /// capability for production callers that want to opt in
     /// (out-of-plan-scope per D119).
     pub eviction_policy: EvictionPolicyConfig,
+    /// Per-method timeout budgets for audited LSP handlers. Each
+    /// `*_with_audit` LSP handler wraps its work in a budget
+    /// timeout; on expiry the handler finalises the audit
+    /// registration with `error: Some("cancelled")` so the leak guard
+    /// remains discriminating against superseded requests.
+    ///
+    /// Only consulted when `audit_enabled = true`. Default values
+    /// match LSP-server hover/completion responsiveness expectations
+    /// (see [`LspMethodTimeoutsConfig::default`]).
+    pub lsp_method_timeouts: LspMethodTimeoutsConfig,
 }
 
 /// Eviction policy tunables for the project-global cache cluster.
@@ -250,6 +260,68 @@ pub struct EvictionPolicyConfig {
     /// of [`crate::project_type_store::ProjectTypeStore::evict_unreachable_indexed_ready`].
     /// Default `1024`.
     pub min_floor: usize,
+}
+
+/// Per-method timeout budgets for audited LSP handlers.
+///
+/// Each `*_with_audit` LSP handler wraps its work in a budget
+/// timeout. On expiry (or on receipt of an LSP `$/cancelRequest`
+/// translated to a deadline elapse), the handler finalises the
+/// audit registration with the cancellation marker
+/// `LspRequestPayload { error: Some("cancelled".to_string()), .. }`.
+/// This makes superseded LSP requests observable in the audit
+/// records store rather than leaking entries in the active-request
+/// registry.
+///
+/// All values are durations. `Duration::ZERO` disables the timeout
+/// for that method (the handler runs to completion); production
+/// builds should retain the defaults so the leak guard is exercised
+/// continuously.
+#[derive(Debug, Clone)]
+pub struct LspMethodTimeoutsConfig {
+    /// `textDocument/hover` — fast lookup; typing-driven supersede
+    /// dominates the workload, so the budget is tight.
+    pub hover: std::time::Duration,
+    /// `textDocument/definition` and `textDocument/typeDefinition`.
+    pub goto_definition: std::time::Duration,
+    /// `textDocument/completion` — wider budget because completion
+    /// frequently round-trips through the type provider.
+    pub completion: std::time::Duration,
+    /// `textDocument/references` — workspace-wide search, larger
+    /// budget than the position-bound methods.
+    pub references: std::time::Duration,
+    /// `textDocument/diagnostics` — push-diagnostics path; bounded
+    /// by the debounce upstream but capped here to keep the leak
+    /// guard discriminating.
+    pub diagnostics: std::time::Duration,
+    /// `textDocument/documentSymbol`.
+    pub document_symbols: std::time::Duration,
+    /// `textDocument/semanticTokens` (full).
+    pub semantic_tokens: std::time::Duration,
+    /// `textDocument/inlayHint`.
+    pub inlay_hints: std::time::Duration,
+    /// `textDocument/codeAction`.
+    pub code_action: std::time::Duration,
+    /// `textDocument/rename` — workspace-wide edit; matches the
+    /// references budget.
+    pub rename: std::time::Duration,
+}
+
+impl Default for LspMethodTimeoutsConfig {
+    fn default() -> Self {
+        Self {
+            hover: std::time::Duration::from_millis(500),
+            goto_definition: std::time::Duration::from_millis(500),
+            completion: std::time::Duration::from_millis(1000),
+            references: std::time::Duration::from_millis(2000),
+            diagnostics: std::time::Duration::from_millis(5000),
+            document_symbols: std::time::Duration::from_millis(1000),
+            semantic_tokens: std::time::Duration::from_millis(1000),
+            inlay_hints: std::time::Duration::from_millis(1000),
+            code_action: std::time::Duration::from_millis(500),
+            rename: std::time::Duration::from_millis(5000),
+        }
+    }
 }
 
 impl Default for EvictionPolicyConfig {
@@ -328,6 +400,7 @@ impl Default for HostConfig {
             depth_budget: crate::component_meta_materialize::MAX_DEPTH,
             projection_op_budget: 2000,
             eviction_policy: EvictionPolicyConfig::default(),
+            lsp_method_timeouts: LspMethodTimeoutsConfig::default(),
         }
     }
 }

@@ -1,4 +1,5 @@
 pub mod analysis;
+pub mod audit_harness;
 pub mod capabilities;
 pub mod config;
 pub mod css;

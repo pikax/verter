@@ -3807,6 +3807,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "verter_actions",
+ "verter_audit",
  "verter_diagnostics",
  "verter_ffi",
  "verter_scheduler",

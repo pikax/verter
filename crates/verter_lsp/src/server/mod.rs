@@ -96,6 +96,15 @@ mod aux_features;
 // `append_markdown` hover-suffix utility.
 mod nav_features;
 
+// Audit-aware wrappers for the navigation feature handlers. Each
+// `handle_<method>_with_audit` thunks into the matching plain
+// `handle_<method>` body via `crate::audit_harness::run_with_audit`.
+// The trait impl in this file calls the `*_with_audit` variants so
+// audited LSP requests carry the per-method timeout budget,
+// cancellation marker, and records-store publication on the
+// production code path.
+mod nav_features_audit;
+
 #[path = "../protocol_types.rs"]
 pub(crate) mod protocol_types;
 pub use self::protocol_types::*;
@@ -413,11 +422,11 @@ impl LanguageServer for VerterLanguageServer {
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
-        nav_features::handle_hover(self, params).await
+        nav_features_audit::handle_hover_with_audit(self, params).await
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
-        nav_features::handle_completion(self, params).await
+        nav_features_audit::handle_completion_with_audit(self, params).await
     }
 
     async fn completion_resolve(&self, item: CompletionItem) -> Result<CompletionItem> {
@@ -428,7 +437,7 @@ impl LanguageServer for VerterLanguageServer {
         &self,
         params: GotoDefinitionParams,
     ) -> Result<Option<GotoDefinitionResponse>> {
-        nav_features::handle_goto_definition(self, params).await
+        nav_features_audit::handle_goto_definition_with_audit(self, params).await
     }
 
     async fn goto_type_definition(
@@ -439,7 +448,7 @@ impl LanguageServer for VerterLanguageServer {
     }
 
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
-        nav_features::handle_references(self, params).await
+        nav_features_audit::handle_references_with_audit(self, params).await
     }
 
     async fn prepare_rename(
@@ -450,14 +459,14 @@ impl LanguageServer for VerterLanguageServer {
     }
 
     async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
-        nav_features::handle_rename(self, params).await
+        nav_features_audit::handle_rename_with_audit(self, params).await
     }
 
     async fn document_symbol(
         &self,
         params: DocumentSymbolParams,
     ) -> Result<Option<DocumentSymbolResponse>> {
-        aux_features::handle_document_symbol(self, params).await
+        aux_features::handle_document_symbol_with_audit(self, params).await
     }
 
     async fn folding_range(&self, params: FoldingRangeParams) -> Result<Option<Vec<FoldingRange>>> {
@@ -483,14 +492,14 @@ impl LanguageServer for VerterLanguageServer {
     }
 
     async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
-        aux_features::handle_code_action(self, params).await
+        aux_features::handle_code_action_with_audit(self, params).await
     }
 
     async fn semantic_tokens_full(
         &self,
         params: SemanticTokensParams,
     ) -> Result<Option<SemanticTokensResult>> {
-        aux_features::handle_semantic_tokens_full(self, params).await
+        aux_features::handle_semantic_tokens_full_with_audit(self, params).await
     }
 
     async fn code_lens(&self, params: CodeLensParams) -> Result<Option<Vec<CodeLens>>> {
@@ -498,7 +507,7 @@ impl LanguageServer for VerterLanguageServer {
     }
 
     async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
-        aux_features::handle_inlay_hint(self, params).await
+        aux_features::handle_inlay_hint_with_audit(self, params).await
     }
 
     async fn linked_editing_range(

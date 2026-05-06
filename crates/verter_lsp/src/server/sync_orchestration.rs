@@ -72,6 +72,47 @@ impl VerterLanguageServer {
         self.publish_diagnostics_raw(uri, diagnostics).await;
     }
 
+    /// Audit-aware wrapper for [`Self::publish_full_diagnostics`].
+    ///
+    /// Routes the push-diagnostics path through
+    /// [`crate::audit_harness::run_with_audit`] so the per-method
+    /// timeout budget, cancellation marker, and records-store
+    /// publication apply uniformly with the request-side handlers.
+    /// When `audit_enabled = false` this short-circuits to the raw
+    /// publish path with no observability cost.
+    pub(super) async fn publish_full_diagnostics_with_audit(&self, uri: &Uri) {
+        let host = self.documents.host_arc();
+        if !host.config().audit_enabled {
+            self.publish_full_diagnostics(uri).await;
+            return;
+        }
+        let canonical_id = crate::audit_harness::canonical_id_for_uri(host.as_ref(), uri);
+        let budget = host.config().lsp_method_timeouts.diagnostics;
+        let uri_for_body = uri.clone();
+        let _ = crate::audit_harness::run_with_audit::<usize, _, _>(
+            &host,
+            verter_audit::payloads::tags::LspMethodTag::Diagnostics,
+            canonical_id,
+            None,
+            budget,
+            async move {
+                self.publish_full_diagnostics(&uri_for_body).await;
+                let count = self
+                    .cached_verter_diags
+                    .get(uri_for_body.as_str())
+                    .map(|e| e.value().2.len())
+                    .unwrap_or(0);
+                Ok::<usize, tower_lsp_server::jsonrpc::Error>(count)
+            },
+            |payload, count| {
+                payload.num_diagnostics = Some(u32::try_from(*count).unwrap_or(u32::MAX));
+                payload.response_size_bytes =
+                    u32::try_from(count.saturating_mul(160)).unwrap_or(u32::MAX);
+            },
+        )
+        .await;
+    }
+
     /// Low-level: push pre-computed diagnostics to the client.
     pub(super) async fn publish_diagnostics_raw(&self, uri: &Uri, diagnostics: Vec<Diagnostic>) {
         let _timer = self

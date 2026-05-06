@@ -517,7 +517,7 @@ pub(super) async fn handle_did_open(
     }
 
     if startup_policy.publish_diagnostics {
-        server.publish_full_diagnostics(uri).await;
+        server.publish_full_diagnostics_with_audit(uri).await;
     }
 }
 
