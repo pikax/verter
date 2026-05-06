@@ -568,6 +568,10 @@
         "title": "Verter: Show Processing Statistics"
       },
       {
+        "command": "verter.showRecentAuditRecords",
+        "title": "Verter: Show Recent Audit Records"
+      },
+      {
         "command": "verter.openVirtualFile",
         "title": "Verter: Open in Editor",
         "icon": "$(go-to-file)"

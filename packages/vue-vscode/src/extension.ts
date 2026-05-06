@@ -64,6 +64,7 @@ import { readE2eEnv } from "./e2eEnv";
 import { shouldConfigureBuiltInTypeScriptPlugin } from "./startupOptimizations";
 import { StartupProbe, readStartupProbeConfig, writeTimingMarker } from "./startupProbe";
 import { shouldRestartLanguageServerForConfigurationChange } from "./languageServerConfig";
+import { addShowRecentAuditRecordsCommand } from "./audit";
 
 type GetClient = () => PatchClient<LanguageClient>;
 type ActivationRuntime = Awaited<ReturnType<typeof activateExtension>>;
@@ -325,6 +326,7 @@ async function activateExtension(context: ExtensionContext) {
   addCompilePreviewCommand(context, ensureLanguageServerStarted);
   addWriteVirtualFilesCommand(context, ensureLanguageServerStarted);
   addShowStatisticsCommand(context, log, ensureLanguageServerStarted, getStartedClient);
+  addShowRecentAuditRecordsCommand(context, log, ensureLanguageServerStarted, getStartedClient);
 
   context.subscriptions.push(
     commands.registerCommand("verter.showOutputChannel", () => log.show()),
