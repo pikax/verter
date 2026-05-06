@@ -162,7 +162,7 @@ fn corpus_audit_${slug}_produces_audit_record_or_documents_skip() {
     let src = include_str!("${relToCrateTestDir}");
     let result = AuditedRequest::builder()
         .files([("${canonical}", src)])
-        .resolve("${canonical}");
+        .resolve_component_meta("${canonical}");
 
     match result {
         Ok((_, _, record)) => {
@@ -279,11 +279,7 @@ function main() {
   if (!config.dryRun) {
     try {
       for (const entry of readdirSync(testDir)) {
-        if (
-          entry === OVERRIDES_SUBDIR ||
-          entry === FIXTURES_SUBDIR ||
-          entry === "README.md"
-        ) {
+        if (entry === OVERRIDES_SUBDIR || entry === FIXTURES_SUBDIR || entry === "README.md") {
           continue;
         }
         rmSync(resolve(testDir, entry), { force: true });
