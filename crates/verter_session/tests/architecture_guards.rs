@@ -6886,3 +6886,396 @@ fn audit_no_hot_loop_instrumentation_self_test_rejects_emit_names() {
          `AuditObserver` trait.",
     );
 }
+
+/// Wave 3 close — `audit_observer_single_accessor`.
+///
+/// Lower crates must reach the audit substrate exclusively through
+/// [`verter_audit::current_observer`]. They must NOT reach into
+/// `verter_session::request_context::current_request_context` (which
+/// is a session-internal, typed accessor onto the concrete
+/// `Arc<RequestContext>`). Architectural intent: the substrate's
+/// thin `AuditObserver` trait is the cross-crate API; only the
+/// session crate (which owns `RequestContext`) is permitted to use
+/// the typed accessor.
+///
+/// `verter_session/` and `verter_audit/` are explicitly out of
+/// scope: `verter_session` defines and consumes
+/// `current_request_context`, and `verter_audit` is the substrate.
+/// `verter_scheduler/` is also out of scope: it documents
+/// `current_request_context` in module-level comments but the
+/// scheduler does not call it (the scheduler crate's own TLS
+/// accessor is `verter_scheduler::request_context::current_request_id`).
+///
+/// In-scope crates (the 5 lower-crate consumers of audit):
+///
+///   - `verter_compiler`
+///   - `verter_semantic`
+///   - `verter_workspace`
+///   - `verter_lsp`
+///   - `verter_mcp_server`
+///
+/// Discrimination contract:
+/// - Pre-change tree (5 lower crates currently clean): the guard
+///   passes; no in-scope file references `current_request_context`.
+/// - Regression: any new code in the 5 in-scope crates that adds a
+///   `current_request_context` call appears in `violations` and
+///   fails the assertion. The fix is to migrate the call site to
+///   `verter_audit::current_observer()` (which yields an
+///   `Arc<dyn AuditObserver>`) and emit through the trait.
+/// - Allow-list: legitimate pre-existing call sites are listed in
+///   `ALLOW_LIST` with the rationale. Empty today.
+#[test]
+fn audit_observer_single_accessor() {
+    // Allow-list: `(crate, relative_path_within_crate, rationale)`
+    // tuples for pre-existing legitimate call sites that predate
+    // `verter_audit::current_observer()` and have not yet migrated.
+    // Empty today — the 5 lower crates are all clean.
+    const ALLOW_LIST: &[(&str, &str, &str)] = &[];
+
+    // The 5 in-scope lower crates. Adding a new lower crate that
+    // emits audit events requires extending this list, but the
+    // architectural rule remains: lower crates use
+    // `verter_audit::current_observer()`.
+    const IN_SCOPE_CRATES: &[&str] = &[
+        "verter_compiler",
+        "verter_semantic",
+        "verter_workspace",
+        "verter_lsp",
+        "verter_mcp_server",
+    ];
+
+    // The forbidden pattern. Substring match (the canonical form is
+    // `current_request_context()` — both fully qualified and
+    // bare-imported usages contain this substring).
+    const FORBIDDEN: &str = "current_request_context";
+
+    let mut violations: Vec<String> = Vec::new();
+    let mut allow_list_hits: Vec<(usize, String)> = Vec::new();
+
+    for krate in IN_SCOPE_CRATES {
+        let crate_src = workspace_root().join("crates").join(krate).join("src");
+        if !crate_src.exists() {
+            panic!(
+                "audit_observer_single_accessor: crate `{krate}` listed as in-scope \
+                 but `crates/{krate}/src/` does not exist; the in-scope list is stale."
+            );
+        }
+        walk_dir_collect_rs(&crate_src, &mut |path: &std::path::Path| {
+            let src = std::fs::read_to_string(path).unwrap_or_else(|e| {
+                panic!(
+                    "audit_observer_single_accessor: cannot read `{}`: {e}",
+                    path.display()
+                )
+            });
+            // Compute path relative to the crate's src/ for stable
+            // allow-list keys.
+            let rel = path.strip_prefix(&crate_src).unwrap_or(path);
+            let rel_str = rel.to_string_lossy().replace('\\', "/").to_string();
+            for (line_no, line) in src.lines().enumerate() {
+                // Skip line/block comments — comment-side mentions
+                // (e.g. doc strings cross-referencing the session
+                // accessor) are NOT call-site bypasses.
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("//")
+                    || trimmed.starts_with("///")
+                    || trimmed.starts_with("//!")
+                {
+                    continue;
+                }
+                if !line.contains(FORBIDDEN) {
+                    continue;
+                }
+                // Walk the allow-list for this exact (crate, rel_path).
+                let allow_idx = ALLOW_LIST
+                    .iter()
+                    .position(|(k, p, _r)| *k == *krate && *p == rel_str.as_str());
+                let entry = format!("  - [{krate}] {rel_str}:{}: {}", line_no + 1, line.trim());
+                match allow_idx {
+                    Some(i) => allow_list_hits.push((i, entry)),
+                    None => violations.push(entry),
+                }
+            }
+        });
+    }
+
+    // Stale allow-list detection: every allow-list entry must have
+    // matched at least one line. Otherwise the entry is stale (the
+    // call site was deleted or migrated) and should be removed.
+    let stale: Vec<String> = ALLOW_LIST
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (k, p, r))| {
+            if allow_list_hits.iter().all(|(idx, _)| *idx != i) {
+                Some(format!("  - [{k}] {p} (rationale: {r})"))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    assert!(
+        stale.is_empty(),
+        "audit_observer_single_accessor: the following allow-list entries did NOT \
+         match any line in their crate's source tree. Either the call site was \
+         deleted/migrated (drop the entry) or the path/crate is wrong (fix the entry):\n{}",
+        stale.join("\n"),
+    );
+
+    assert!(
+        violations.is_empty(),
+        "audit_observer_single_accessor: lower crates must reach the audit substrate \
+         through `verter_audit::current_observer()` only. The following call sites \
+         use `current_request_context` (the session-internal typed accessor) instead. \
+         Migrate to `current_observer()` and emit through the `AuditObserver` trait, \
+         OR — if the call site genuinely needs the typed `Arc<RequestContext>` for a \
+         legitimate reason that predates the substrate split — add an allow-list entry \
+         in this guard with the rationale.\n\nViolations:\n{}",
+        violations.join("\n"),
+    );
+}
+
+/// Wave 3 close — `wave_3_entry_points_propagate_tls`.
+///
+/// Every Wave-3-added `*_with_audit` entry-point must have a
+/// corresponding TLS-propagation test that drives it via the
+/// [`verter_session::tests::audit_tls_harness::assert_observer_reaches`]
+/// harness (or — for entry-points where a stricter custom assertion
+/// is more discriminating — drives the entry-point and asserts the
+/// observer reaches the producer crate's instrumentation).
+///
+/// The guard is parameterised by `WAVE_3_ENTRY_POINTS` — a list of
+/// `(entry_point_symbol, paired_test_files)` tuples. For each
+/// entry-point, the guard verifies that at least one of the listed
+/// test files contains BOTH:
+///
+///   1. an invocation of `entry_point_symbol` (the function/method
+///      name appears in the file), AND
+///   2. an `assert_observer_reaches(...)` call (the §4 Wave 1.5
+///      harness's primary verification primitive).
+///
+/// A `MISSING_TLS_TEST` allow-list documents Wave-3 entry-points
+/// that ship without a paired TLS-propagation test. Each entry
+/// carries a rationale and is intended as a temporary marker — the
+/// follow-up fix-pass adds the missing test.
+///
+/// Discrimination contract:
+/// - Pre-change tree (Wave 3 not yet integrated): the entry-point
+///   methods do not exist, so the test files cannot reference them
+///   either; the guard fails with "entry-point method missing".
+/// - Wave-3 entry-point landed without a paired TLS test: appears
+///   in the missing-pair list (and must either get a test added or
+///   an allow-list entry).
+/// - Wave-3 entry-point with a discriminating TLS test: passes.
+#[test]
+fn wave_3_entry_points_propagate_tls() {
+    // `(entry_point_symbol, &[paired_test_file_relative_paths])`
+    //
+    // `entry_point_symbol`: the function/method name producers/tests
+    // invoke. The guard substring-matches this in the paired test
+    // files.
+    //
+    // `paired_test_file_relative_paths`: relative-to-workspace test
+    // file paths. The guard checks that AT LEAST ONE listed file
+    // contains both the entry-point symbol and an
+    // `assert_observer_reaches` call.
+    const WAVE_3_ENTRY_POINTS: &[(&str, &[&str])] = &[
+        // Slice 3.B — Compile producer.
+        // `compile_with_audit` (verter_session) drives the
+        // `RequestKind::Compile` audit producer. The cross-crate
+        // TLS harness exercises this: harness drives
+        // `compile_with_audit`, asserts producer-crate
+        // (`verter_compiler::code_transform`) instrumentation
+        // observed `Some(observer)` via the `code_transform_ops > 0`
+        // discriminator.
+        (
+            "compile_with_audit",
+            &["crates/verter_session/tests/tls_harness_cross_crate.rs"],
+        ),
+        // Slice 3.C — SemanticAnalysis producer.
+        // `analyze_with_audit` (verter_session) drives the
+        // `RequestKind::SemanticAnalysis` audit producer. The
+        // dedicated TLS test asserts the substrate slot is populated
+        // for the audit window and drained on return.
+        (
+            "analyze_with_audit",
+            &["crates/verter_session/tests/semantic_analysis_audit_tls_propagation.rs"],
+        ),
+    ];
+
+    // Wave-3 entry-points that ship WITHOUT a paired TLS test.
+    // Each entry: `(entry_point_symbol, rationale)`.
+    //
+    // Architectural intent: this list shrinks toward zero. The
+    // follow-up fix-pass adds the missing TLS-propagation test for
+    // each entry below, then removes the allow-list entry.
+    //
+    // The guard rejects an allow-list entry whose entry-point
+    // already has a paired TLS test (stale allow-list).
+    const MISSING_TLS_TEST: &[(&str, &str)] = &[
+        // Slice 3.A — TypeResolution producer.
+        // `resolve_type_with_audit` ships with audit-record
+        // characterization tests but no dedicated
+        // `assert_observer_reaches` driver. The producer side
+        // (`SemanticGraphStore::execute_cooperative`) is exercised
+        // by the wider audit-cache-reuse and pathological-recursion
+        // tests, but they verify the record contents rather than
+        // the TLS propagation slot directly.
+        (
+            "resolve_type_with_audit",
+            "Wave 3 Slice 3.A characterization tests verify record contents but not the \
+             substrate-TLS propagation slot. Follow-up fix-pass adds an \
+             assert_observer_reaches harness driver.",
+        ),
+        // Slice 3.D — Workspace producer.
+        // `audit_op` is a trait method on `WorkspaceAccess`; the
+        // discriminating tests (`workspace_audit_resolve.rs`,
+        // `workspace_audit_dep_graph_traverse.rs`) drive it but do
+        // not currently invoke `assert_observer_reaches`.
+        (
+            "audit_op",
+            "Wave 3 Slice 3.D drives audit_op via discriminating record-content tests; \
+             follow-up adds an assert_observer_reaches harness driver to assert the \
+             substrate observer reaches the trait method's body.",
+        ),
+        // Slice 3.E — LSP producer.
+        // `run_with_audit` (verter_lsp::audit_harness) wraps every
+        // LSP `*_with_audit` handler. The cancellation contract
+        // test discriminates the supersede path but does not assert
+        // TLS propagation via the substrate harness.
+        (
+            "run_with_audit",
+            "Wave 3 Slice 3.E LSP cancellation test discriminates supersede behaviour but \
+             does not drive the LSP entry-point through assert_observer_reaches; follow-up \
+             adds a paired TLS-propagation test through the LSP audit harness.",
+        ),
+        // Slice 3.F — Mcp producer.
+        // `audit_mcp_tool_call` is exercised by `mcp_audit_e2e.rs`
+        // but that test verifies record contents, not TLS
+        // propagation slot population.
+        (
+            "audit_mcp_tool_call",
+            "Wave 3 Slice 3.F mcp_audit_e2e verifies record contents (parent_request_id \
+             correlation) but not TLS observer propagation through the wrapper; follow-up \
+             adds an assert_observer_reaches driver.",
+        ),
+    ];
+
+    let workspace = workspace_root();
+
+    // Step 1: every entry-point with a paired test must have at
+    // least one test that references both the entry-point symbol
+    // and `assert_observer_reaches`.
+    let mut missing: Vec<String> = Vec::new();
+    let mut wrong_path: Vec<String> = Vec::new();
+    for (symbol, candidate_files) in WAVE_3_ENTRY_POINTS {
+        let mut any_match = false;
+        for rel in *candidate_files {
+            let abs = workspace.join(rel);
+            if !abs.exists() {
+                wrong_path.push(format!("  - {symbol} → {rel} (file does not exist)"));
+                continue;
+            }
+            let src = std::fs::read_to_string(&abs).unwrap_or_else(|e| {
+                panic!("wave_3_entry_points_propagate_tls: cannot read `{rel}`: {e}")
+            });
+            let drives_entry = src.contains(symbol);
+            let uses_harness = src.contains("assert_observer_reaches");
+            if drives_entry && uses_harness {
+                any_match = true;
+                break;
+            }
+        }
+        if !any_match {
+            missing.push(format!(
+                "  - {symbol}: none of {:?} contains BOTH the entry-point symbol AND \
+                 `assert_observer_reaches(...)`",
+                candidate_files,
+            ));
+        }
+    }
+
+    assert!(
+        wrong_path.is_empty(),
+        "wave_3_entry_points_propagate_tls: paired test files reference paths that \
+         do not exist. The guard's pin list is stale. Update WAVE_3_ENTRY_POINTS in \
+         this test:\n{}",
+        wrong_path.join("\n"),
+    );
+
+    assert!(
+        missing.is_empty(),
+        "wave_3_entry_points_propagate_tls: the following Wave-3 entry-points are \
+         pinned to test files that do NOT both invoke the entry-point AND drive \
+         `assert_observer_reaches(...)`. Either add a TLS-propagation test for the \
+         entry-point, or — if the entry-point cannot yet be tested via the harness \
+         — move the entry to MISSING_TLS_TEST with a rationale.\n{}",
+        missing.join("\n"),
+    );
+
+    // Step 2: every entry in MISSING_TLS_TEST is a temporary
+    // allow-list. If a paired TLS-propagation test now exists, the
+    // entry must be promoted to WAVE_3_ENTRY_POINTS (and removed
+    // from this list). Detect that by scanning all
+    // `crates/*/tests/*tls*propagation*.rs` and
+    // `crates/*/tests/*tls_harness*.rs` plus any test file that
+    // already uses `assert_observer_reaches` for a co-occurrence
+    // with the entry-point symbol.
+    let mut tls_test_files: Vec<std::path::PathBuf> = Vec::new();
+    let crates_dir = workspace.join("crates");
+    let crate_entries = std::fs::read_dir(&crates_dir)
+        .unwrap_or_else(|e| panic!("wave_3_entry_points_propagate_tls: cannot read crates/: {e}"));
+    // Skip the guard file itself — it lists every entry-point
+    // symbol (in WAVE_3_ENTRY_POINTS / MISSING_TLS_TEST) AND the
+    // string `assert_observer_reaches` (in this guard's docs and
+    // matching expressions), so naive co-occurrence would match
+    // every entry against this file and falsely flag every allow-
+    // list entry as stale.
+    let self_file = workspace.join("crates/verter_session/tests/architecture_guards.rs");
+    for crate_entry in crate_entries.flatten() {
+        let tests_dir = crate_entry.path().join("tests");
+        if !tests_dir.is_dir() {
+            continue;
+        }
+        if let Ok(entries) = std::fs::read_dir(&tests_dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.extension().is_some_and(|e| e == "rs") && p != self_file {
+                    tls_test_files.push(p);
+                }
+            }
+        }
+    }
+    let mut stale_missing: Vec<String> = Vec::new();
+    for (symbol, rationale) in MISSING_TLS_TEST {
+        // Reject entries whose symbol is also in WAVE_3_ENTRY_POINTS
+        // (would be a contradiction: pinned + missing).
+        if WAVE_3_ENTRY_POINTS.iter().any(|(s, _)| s == symbol) {
+            stale_missing.push(format!(
+                "  - {symbol}: present in BOTH WAVE_3_ENTRY_POINTS and MISSING_TLS_TEST. \
+                 Remove from one list."
+            ));
+            continue;
+        }
+        for path in &tls_test_files {
+            let src = match std::fs::read_to_string(path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            if src.contains(symbol) && src.contains("assert_observer_reaches") {
+                stale_missing.push(format!(
+                    "  - {symbol}: a TLS-propagation test now exists at {} \
+                     (rationale was: {rationale}). Promote {symbol} to \
+                     WAVE_3_ENTRY_POINTS and drop the MISSING_TLS_TEST entry.",
+                    path.display(),
+                ));
+                break;
+            }
+        }
+    }
+
+    assert!(
+        stale_missing.is_empty(),
+        "wave_3_entry_points_propagate_tls: stale MISSING_TLS_TEST entries:\n{}",
+        stale_missing.join("\n"),
+    );
+}
