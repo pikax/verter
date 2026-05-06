@@ -193,18 +193,20 @@ The audit infrastructure ships with a set of mechanical guards that enforce the 
 
 The general `no_phase_archaeology_in_production_code` and `external_corpus_paths_not_present_outside_gated_tests` guards apply across the workspace, including audit code.
 
-### Known Follow-Ups
+### TLS Propagation Coverage
 
-The Wave 3 close left four `*_with_audit` entry-points pinned to the `MISSING_TLS_TEST` allow-list inside `wave_3_entry_points_propagate_tls`. Each entry has a discriminating record-content characterisation test, but no paired `assert_observer_reaches(...)` driver yet:
+`wave_3_entry_points_propagate_tls` pins one TLS-propagation driver per Wave-3 audited entry-point. Each driver invokes the production entry-point through `assert_observer_reaches(...)` and asserts the substrate observer is reachable inside the audited window AND that the calling thread's harness-installed guard remains visible after the nested entry-point guard drops:
 
-| Entry-point | Existing characterisation tests | Follow-up |
-| --- | --- | --- |
-| `resolve_type_with_audit` | `audit_cache_reuse.rs`, pathological-recursion suites | Add an `assert_observer_reaches` driver that calls the entry-point inside an installed `RequestContextGuard`, and confirms the substrate observer reaches `SemanticGraphStore::execute_cooperative` |
-| `audit_op` (`WorkspaceAccess` trait method) | `workspace_audit_resolve.rs`, `workspace_audit_dep_graph_traverse.rs` | Add a TLS-propagation driver that asserts the observer reaches the trait method's body via `assert_observer_reaches` |
-| `verter_lsp::audit_harness::run_with_audit` | `lsp_audit_harness_cancel.rs` (cancellation contract) | Add a TLS-propagation driver that wraps a synthetic LSP handler future and asserts the observer is visible inside the future |
-| `audit_mcp_tool_call` | `mcp_audit_e2e.rs` | Add a TLS-propagation driver that wraps a synthetic tool callback and asserts the observer is visible inside the closure body |
+| Entry-point | Paired TLS driver |
+| --- | --- |
+| `resolve_type_with_audit` | `crates/verter_session/tests/type_resolution_audit_tls_propagation.rs` |
+| `compile_with_audit` | `crates/verter_session/tests/tls_harness_cross_crate.rs` |
+| `analyze_with_audit` | `crates/verter_session/tests/semantic_analysis_audit_tls_propagation.rs` |
+| `audit_op` (`WorkspaceAccess` trait method, driven via the host wrapper `audit_workspace_op`) | `crates/verter_session/tests/workspace_audit_tls_propagation.rs` |
+| `verter_lsp::audit_harness::run_with_audit` | `crates/verter_lsp/tests/lsp_audit_tls_propagation.rs` |
+| `audit_mcp_tool_call` | `crates/verter_session/tests/mcp_audit_tls_propagation.rs` |
 
-Removing each entry from `MISSING_TLS_TEST` and promoting it to `WAVE_3_ENTRY_POINTS` (with the new test file) is the closure path. The guard's stale-allow-list check rejects an entry whose paired test now exists, so the list shrinks toward zero as follow-ups land.
+The guard's `MISSING_TLS_TEST` allow-list is empty: every Wave-3 entry-point is paired. Adding a new audited entry-point requires landing a paired TLS driver in the same change and pinning the pair into `WAVE_3_ENTRY_POINTS`; the guard's stale-allow-list check rejects an unpaired entry that has a TLS driver already, so the list cannot drift back to a documenting role.
 
 ## NAPI / WASM Bindings
 
