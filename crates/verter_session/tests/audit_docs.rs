@@ -100,17 +100,7 @@ fn audit_doc_snippet_names_resolve_to_exported_symbols() {
     // doctest run ever happens.
     let root = workspace_root();
     let docs_dir = root.join("docs/audit-footprint");
-    let audit_src_dir = root.join("crates/verter_session/src/component_meta_audit");
-    let audit_src_blob = concat_sources(&audit_src_dir);
-
-    // The audit-scope extends beyond component_meta_audit — include
-    // the harness + context sources too.
-    let audit_src_blob = format!(
-        "{}\n{}\n{}",
-        audit_src_blob,
-        fs::read_to_string(root.join("crates/verter_session/src/audited_request.rs")).unwrap(),
-        fs::read_to_string(root.join("crates/verter_session/src/request_context.rs")).unwrap(),
-    );
+    let audit_src_blob = build_audit_source_blob(&root);
 
     let mut checked_files = 0usize;
     for entry in fs::read_dir(&docs_dir).expect("read docs dir") {
@@ -221,9 +211,7 @@ fn readme_code_examples_mirror_rustdoc_doctests() {
     let api_ref_path = root.join("docs/audit-footprint/api-reference.md");
     let api_ref = fs::read_to_string(&api_ref_path).expect("read api-reference");
 
-    let audit_src = concat_sources(&root.join("crates/verter_session/src/component_meta_audit"))
-        + &fs::read_to_string(root.join("crates/verter_session/src/audited_request.rs")).unwrap()
-        + &fs::read_to_string(root.join("crates/verter_session/src/request_context.rs")).unwrap();
+    let audit_src = build_audit_source_blob(&root);
 
     for (file_name, doc) in [("README.md", &readme), ("api-reference.md", &api_ref)] {
         for block in extract_rust_blocks(doc) {
@@ -323,6 +311,85 @@ fn concat_sources(dir: &Path) -> String {
         }
     }
     out
+}
+
+/// Build the audit-source blob the doc-snippet name-resolution
+/// tests check against. Spans both the substrate crate
+/// (`verter_audit/src/`) and the session-side audit owner under
+/// `verter_session/src/` (the `component_meta_audit/` module tree,
+/// the host runtime, the audited-request harness, the per-
+/// `*_with_audit` entry-point modules, and the request-context
+/// module). The substrate / session split (CLAUDE.md `Shared
+/// Optimized Codebase`) means doc snippets reference DTOs from
+/// `verter_audit` AND lifecycle types from `verter_session`; both
+/// crates' source must be considered before declaring a name
+/// "no longer exported".
+fn build_audit_source_blob(root: &Path) -> String {
+    let mut blob = String::new();
+
+    // Session-side audit ownership: component_meta_audit module
+    // tree + the harness + request-context source.
+    blob.push_str(&concat_sources(
+        &root.join("crates/verter_session/src/component_meta_audit"),
+    ));
+    blob.push('\n');
+    blob.push_str(
+        &fs::read_to_string(root.join("crates/verter_session/src/audited_request.rs"))
+            .expect("read audited_request.rs"),
+    );
+    blob.push('\n');
+    blob.push_str(
+        &fs::read_to_string(root.join("crates/verter_session/src/request_context.rs"))
+            .expect("read request_context.rs"),
+    );
+    blob.push('\n');
+    blob.push_str(
+        &fs::read_to_string(root.join("crates/verter_session/src/host_audit_runtime.rs"))
+            .expect("read host_audit_runtime.rs"),
+    );
+    blob.push('\n');
+    // Per-`*_with_audit` host entry-point modules — the docs
+    // describe their public signatures.
+    for entry_point in [
+        "host_compile_audit.rs",
+        "host_analyze_audit.rs",
+        "host_resolve_type_audit.rs",
+        "host_workspace_audit.rs",
+        "host_lsp_audit.rs",
+        "host_mcp_audit.rs",
+    ] {
+        let p = root.join("crates/verter_session/src").join(entry_point);
+        if let Ok(s) = fs::read_to_string(&p) {
+            blob.push_str(&s);
+            blob.push('\n');
+        }
+    }
+
+    // Substrate: every `*.rs` under `verter_audit/src/` (recursive).
+    // The `verter_audit` crate owns `RequestAuditRecord`,
+    // `RequestKind`, `RequestKindPayload`, all per-kind payload
+    // structs, the `AuditObserver` trait and `current_observer()`
+    // accessor, `NoOpObserver`, `AuditConfig` + `AuditConsumerFilter`,
+    // `BatchAuditAggregator` + `AuditRecordSource`, the structured-
+    // event enum, plus the per-record sub-DTOs
+    // (`RequestTimingAudit`, `RequestMemoryAudit`, `WaitAudit`,
+    // `SchedulerAudit`, `RequestStoreAudit`, `FileAudit`, footprint
+    // records, origin graph DTOs).
+    walk_audit_src(&root.join("crates/verter_audit/src"), &mut blob);
+    blob
+}
+
+fn walk_audit_src(dir: &Path, out: &mut String) {
+    for entry in fs::read_dir(dir).expect("read verter_audit src dir") {
+        let entry = entry.expect("dir entry");
+        let path = entry.path();
+        if path.is_dir() {
+            walk_audit_src(&path, out);
+        } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
+            out.push_str(&fs::read_to_string(&path).expect("read verter_audit source"));
+            out.push('\n');
+        }
+    }
 }
 
 /// A conservative allow-list of standard-library / framework type
