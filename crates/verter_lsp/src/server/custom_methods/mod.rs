@@ -730,4 +730,96 @@ impl VerterLanguageServer {
             parents,
         })
     }
+
+    /// Handle `$/verter/audit/getRecord` request.
+    ///
+    /// Read-only query: returns the audit record for `request_id` if it
+    /// is currently published in the host's records store. The record
+    /// is returned as a JSON value (matching the `RequestAuditRecord`
+    /// schema in `audit.generated.ts`). Returns `Ok(None)` when the
+    /// record was never inserted (capture disabled) or already drained
+    /// by an earlier consumer (e.g. `host.take_audit_record`).
+    ///
+    /// This handler does NOT mutate audit state — it consults the
+    /// records store via a non-draining iterator and clones the
+    /// matching record. A subsequent `getRecord` for the same
+    /// `request_id` will return the same payload.
+    pub async fn get_audit_record(
+        &self,
+        params: GetAuditRecordParams,
+    ) -> Result<Option<serde_json::Value>> {
+        use verter_audit::batch::AuditRecordSource;
+        tracing::debug!("$/verter/audit/getRecord: {}", params.request_id);
+
+        let target_id = match params.request_id.parse::<u64>() {
+            Ok(id) => id,
+            Err(_) => return Ok(None),
+        };
+
+        let host = self.documents.host_arc();
+        let store = host.host_audit_runtime().audit_records_store();
+        let mut found: Option<verter_audit::RequestAuditRecord> = None;
+        store.for_each_record(&mut |_inserted_at, record| {
+            if record.request_id == target_id {
+                found = Some(record.clone());
+            }
+        });
+
+        Ok(found.and_then(|record| serde_json::to_value(&record).ok()))
+    }
+
+    /// Handle `$/verter/audit/getRecent` request.
+    ///
+    /// Read-only query: returns recent records from the host's
+    /// `AuditRecordsStore` as a JSON array. Optional `kind` filters by
+    /// `RequestKind` variant tag (matched via
+    /// [`verter_audit::RequestKind::matches_filter`]); optional `limit`
+    /// caps the result size (default 50, hard capped at 1024).
+    ///
+    /// Records are sorted by request id descending so the most recent
+    /// records appear first regardless of the underlying store's
+    /// iteration order. The handler does NOT drain the store.
+    pub async fn get_audit_recent(
+        &self,
+        params: Option<GetAuditRecentParams>,
+    ) -> Result<Vec<serde_json::Value>> {
+        use verter_audit::batch::AuditRecordSource;
+        let params = params.unwrap_or_default();
+        tracing::debug!(
+            "$/verter/audit/getRecent: kind={:?} limit={:?}",
+            params.kind,
+            params.limit
+        );
+
+        const DEFAULT_LIMIT: usize = 50;
+        const MAX_LIMIT: usize = 1024;
+        let limit = params
+            .limit
+            .map(|n| (n as usize).min(MAX_LIMIT))
+            .unwrap_or(DEFAULT_LIMIT);
+        let kind_filter = params.kind;
+
+        let host = self.documents.host_arc();
+        let store = host.host_audit_runtime().audit_records_store();
+        let mut collected: Vec<verter_audit::RequestAuditRecord> = Vec::new();
+        store.for_each_record(&mut |_inserted_at, record| {
+            if let Some(ref filter) = kind_filter {
+                if !record.kind.matches_filter(filter) {
+                    return;
+                }
+            }
+            collected.push(record.clone());
+        });
+
+        // Sort descending by request_id so the newest records lead the
+        // response — the underlying store does not promise iteration
+        // order, so we impose one here for client predictability.
+        collected.sort_by(|a, b| b.request_id.cmp(&a.request_id));
+        collected.truncate(limit);
+
+        Ok(collected
+            .into_iter()
+            .filter_map(|r| serde_json::to_value(&r).ok())
+            .collect())
+    }
 }
