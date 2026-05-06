@@ -7279,3 +7279,432 @@ fn wave_3_entry_points_propagate_tls() {
         stale_missing.join("\n"),
     );
 }
+
+/// Wave 4 close — `every_consumer_has_production_call_site`.
+///
+/// Plan §1.6 row: "For every `RequestKind` variant, at least one
+/// **non-test** source file under `crates/*/src/` populates a record
+/// with that variant."
+///
+/// The guard parses [`verter_audit::RequestKind`] from
+/// `crates/verter_audit/src/record.rs`, walks every `*.rs` file under
+/// each `crates/<crate>/src/` tree, and verifies that each variant
+/// appears as a producer-side **expression** literal — i.e. a
+/// `RequestKind::<Variant>` (or fully-qualified `verter_audit::
+/// RequestKind::<Variant>`) path in non-pattern position. Match-arm
+/// patterns (`RequestKind::Foo { .. } => …`) are CONSUMER sites and
+/// do not count; producer code constructs the variant either as a
+/// struct-literal value or as a unit/tuple expression and passes it
+/// to `RequestContext::with_kind_and_timing` (or assigns it to the
+/// `kind:` field of a `RequestAuditRecord` literal).
+///
+/// `KIND_EXEMPTIONS` enumerates variants that are deliberately not
+/// produced from any in-tree non-test source file, with rationale.
+/// The guard rejects an exemption whose variant *is* produced (stale
+/// allow-list) so the list shrinks toward zero as new producers ship.
+///
+/// Discrimination contract:
+/// - Pre-Wave-3 tree (no `*_with_audit` producers): `ComponentMeta`,
+///   `TypeResolution`, `SemanticAnalysis`, `Compile`, `Workspace`,
+///   `Lsp`, `Mcp` are all unproduced → guard fails with the per-
+///   variant "no producer" diagnostic.
+/// - Wave-4 close (every producer landed): all 7 producer variants
+///   resolve, only the documented exemptions remain (`Custom`,
+///   `BundlerBatch`).
+/// - Future regression (a producer is deleted or its `kind:` field
+///   is rewritten): the variant disappears from the producer set
+///   and the guard fails with the per-variant diagnostic.
+#[test]
+fn every_consumer_has_production_call_site() {
+    use std::collections::BTreeMap;
+    use syn::visit::Visit;
+
+    // Variants deliberately not produced anywhere in `crates/*/src/`.
+    // Each entry: `(variant_name, rationale)`. Stale entries (variant
+    // *is* produced) fail the guard.
+    //
+    // Architectural intent: the list shrinks toward zero. Adding a
+    // producer for a documented variant requires removing its
+    // exemption in the same change.
+    const KIND_EXEMPTIONS: &[(&str, &str)] = &[
+        // Open-ended escape hatch. The plan documents `Custom` as a
+        // free-form name producers may set when their concern does
+        // not warrant a first-class variant. No in-tree `*_with_audit`
+        // producer constructs `Custom { name: ... }`; out-of-tree
+        // plugin authors are the intended emitters.
+        (
+            "Custom",
+            "open-ended escape hatch — out-of-tree plugin authors emit `Custom { name }`; \
+             no in-tree producer constructs this variant. Adding an in-tree producer requires \
+             removing this exemption in the same change.",
+        ),
+        // The `BatchAuditAggregator::summarize` API folds existing
+        // records into a `BundlerBatchPayload` and returns the
+        // payload synchronously to callers (`getBundlerBatchSummary`
+        // on NAPI/WASM). It does NOT publish a record with
+        // `kind: RequestKind::BundlerBatch { ... }` into the
+        // `AuditRecordsStore`; bundler integrations consume the
+        // payload directly. Match arms in `summarize` and the
+        // FFI dispatchers are CONSUMER sites (they reduce records of
+        // OTHER kinds into the bundler payload) and intentionally do
+        // not count.
+        (
+            "BundlerBatch",
+            "produced as a `BundlerBatchPayload` return value from \
+             `BatchAuditAggregator::summarize` (and FFI `getBundlerBatchSummary`); no in-tree \
+             producer publishes a record with `kind: RequestKind::BundlerBatch { .. }` into \
+             `AuditRecordsStore`. Adding an in-tree record producer (for example, a future \
+             host-driven bundler-summary publisher) requires removing this exemption in the \
+             same change.",
+        ),
+    ];
+
+    // Step 1: enumerate every `RequestKind` variant from
+    // `crates/verter_audit/src/record.rs`. Reuses the same parser
+    // shape `request_kind_payload_parity` uses so the two guards
+    // agree on what counts as a variant.
+    let record_src = read_workspace_file("crates/verter_audit/src/record.rs");
+
+    fn enum_variant_names(src: &str, enum_name: &str) -> Vec<String> {
+        let header = format!("pub enum {enum_name}");
+        let start = src
+            .find(&header)
+            .unwrap_or_else(|| panic!("enum {enum_name} not found in record.rs"));
+        let body_start = src[start..]
+            .find('{')
+            .map(|i| start + i + 1)
+            .unwrap_or_else(|| panic!("enum {enum_name} body not found"));
+        let bytes = src.as_bytes();
+        let mut depth = 1usize;
+        let mut idx = body_start;
+        while idx < bytes.len() && depth > 0 {
+            match bytes[idx] {
+                b'{' => depth += 1,
+                b'}' => depth -= 1,
+                _ => {}
+            }
+            idx += 1;
+        }
+        let body_end = idx - 1;
+        let body = &src[body_start..body_end];
+        let mut names = Vec::new();
+        for raw_line in body.lines() {
+            let line = raw_line.trim();
+            if line.is_empty() || line.starts_with("//") || line.starts_with("///") {
+                continue;
+            }
+            let head_end = [line.find('('), line.find('{'), line.find(',')]
+                .into_iter()
+                .flatten()
+                .min()
+                .unwrap_or(line.len());
+            let head: &str = line[..head_end].trim();
+            if head.is_empty() {
+                continue;
+            }
+            if head.starts_with('#') {
+                continue;
+            }
+            let name = head.split_whitespace().next().unwrap_or("");
+            if name.is_empty() {
+                continue;
+            }
+            if name
+                .chars()
+                .all(|c: char| c.is_ascii_alphanumeric() || c == '_')
+            {
+                names.push(name.to_string());
+            }
+        }
+        names
+    }
+
+    let variants = enum_variant_names(&record_src, "RequestKind");
+    assert!(
+        !variants.is_empty(),
+        "every_consumer_has_production_call_site: no `RequestKind` variants discovered — \
+         parser broke or the enum was renamed."
+    );
+
+    // Step 2: walk every `crates/<crate>/src/` tree and visit each
+    // `*.rs` file's AST. Track per-variant production hits.
+    //
+    // Production = `RequestKind::<Variant>` path appears in EXPRESSION
+    // context (struct-literal value, function-call argument, struct
+    // field initialiser). Match-arm patterns (`RequestKind::Foo { .. }
+    // => …`) are CONSUMER sites and skipped — `Visit::visit_pat_*`
+    // hooks are not invoked because the visitor only walks expression
+    // paths.
+    struct ProducerVisitor<'a> {
+        variant_set: &'a std::collections::HashSet<String>,
+        hits: BTreeMap<String, Vec<String>>,
+        rel_path: String,
+        // Depth counter for pattern context. syn 2.x dispatches
+        // `Pat::Path` (unit-variant patterns like
+        // `RequestKind::ComponentMeta` in `match` arms) to
+        // `visit_expr_path` — see `syn::visit::visit_pat` source.
+        // Without this gate, every match arm pattern would falsely
+        // count as a producer site.
+        pat_depth: u32,
+    }
+
+    impl<'a, 'ast> Visit<'ast> for ProducerVisitor<'a> {
+        fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+            // Skip inline `#[cfg(test)]` modules — they live in
+            // production source files but are not production code.
+            if item_is_cfg_test(&item.attrs) {
+                return;
+            }
+            syn::visit::visit_item_mod(self, item);
+        }
+        fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+            // Skip `#[test]` and `#[cfg(test)]`-attributed functions
+            // — they are test code that happens to live alongside
+            // production code in the same file.
+            if item_is_cfg_test(&item.attrs) || item_is_test(&item.attrs) {
+                return;
+            }
+            syn::visit::visit_item_fn(self, item);
+        }
+        fn visit_pat(&mut self, pat: &'ast syn::Pat) {
+            self.pat_depth = self.pat_depth.saturating_add(1);
+            syn::visit::visit_pat(self, pat);
+            self.pat_depth = self.pat_depth.saturating_sub(1);
+        }
+        fn visit_expr_path(&mut self, expr: &'ast syn::ExprPath) {
+            // Skip pattern-context paths — `Pat::Path` dispatches
+            // here via syn's `visit_pat`, but those are CONSUMER-side
+            // match-arm patterns and do not count as producer sites.
+            if self.pat_depth > 0 {
+                syn::visit::visit_expr_path(self, expr);
+                return;
+            }
+            if let Some(variant) = match_request_kind_variant(&expr.path) {
+                if self.variant_set.contains(&variant) {
+                    self.hits
+                        .entry(variant)
+                        .or_default()
+                        .push(self.rel_path.clone());
+                }
+            }
+            syn::visit::visit_expr_path(self, expr);
+        }
+        fn visit_expr_struct(&mut self, expr: &'ast syn::ExprStruct) {
+            if let Some(variant) = match_request_kind_variant(&expr.path) {
+                if self.variant_set.contains(&variant) {
+                    self.hits
+                        .entry(variant)
+                        .or_default()
+                        .push(self.rel_path.clone());
+                }
+            }
+            syn::visit::visit_expr_struct(self, expr);
+        }
+        fn visit_expr_call(&mut self, expr: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(ep) = &*expr.func {
+                if let Some(variant) = match_request_kind_variant(&ep.path) {
+                    if self.variant_set.contains(&variant) {
+                        self.hits
+                            .entry(variant)
+                            .or_default()
+                            .push(self.rel_path.clone());
+                    }
+                }
+            }
+            syn::visit::visit_expr_call(self, expr);
+        }
+    }
+
+    /// Recognise `#[cfg(test)]` (or `#[cfg(any(test, ...))]`) so the
+    /// visitor skips inline test modules that share a source file
+    /// with production code. `Attribute::meta` exposes the parsed
+    /// `Meta` AST directly — using `Meta::List` token-stream
+    /// inspection is simpler and more reliable than nested-meta
+    /// parsers on attributes that may be `cfg(any(unix, test))`.
+    fn item_is_cfg_test(attrs: &[syn::Attribute]) -> bool {
+        attrs.iter().any(|attr| {
+            if !attr.path().is_ident("cfg") {
+                return false;
+            }
+            // Render the meta back to a string and substring-match
+            // for `test`. `cfg(test)` → `cfg(test)`. `cfg(any(unix,
+            // test))` → `cfg(any(unix, test))`. False positives are
+            // theoretically possible (e.g. an identifier literally
+            // called `testing`) but the substring match also requires
+            // word boundaries via the surrounding `(` `,` ` ` `)`
+            // characters.
+            use quote::ToTokens;
+            let rendered = attr.meta.to_token_stream().to_string();
+            // Match `test` as a whole token: delimited by `(`, `)`,
+            // `,`, or whitespace.
+            let needle = "test";
+            let bytes = rendered.as_bytes();
+            let n_bytes = needle.as_bytes();
+            let mut idx = 0usize;
+            while idx + n_bytes.len() <= bytes.len() {
+                if &bytes[idx..idx + n_bytes.len()] == n_bytes {
+                    let before_ok =
+                        idx == 0 || matches!(bytes[idx - 1], b'(' | b',' | b' ' | b'\t' | b'\n');
+                    let after_idx = idx + n_bytes.len();
+                    let after_ok = after_idx == bytes.len()
+                        || matches!(bytes[after_idx], b')' | b',' | b' ' | b'\t' | b'\n');
+                    if before_ok && after_ok {
+                        return true;
+                    }
+                }
+                idx += 1;
+            }
+            false
+        })
+    }
+
+    fn item_is_test(attrs: &[syn::Attribute]) -> bool {
+        attrs.iter().any(|attr| attr.path().is_ident("test"))
+    }
+
+    /// Match `RequestKind::<Variant>` (with optional leading
+    /// `verter_audit::` or `crate::component_meta_audit::`) and
+    /// return the variant name. The path's last segment must be the
+    /// variant; the segment immediately before must be `RequestKind`.
+    fn match_request_kind_variant(path: &syn::Path) -> Option<String> {
+        let segments: Vec<&syn::PathSegment> = path.segments.iter().collect();
+        if segments.len() < 2 {
+            return None;
+        }
+        let last = segments[segments.len() - 1];
+        let parent = segments[segments.len() - 2];
+        if parent.ident != "RequestKind" {
+            return None;
+        }
+        Some(last.ident.to_string())
+    }
+
+    let variant_set: std::collections::HashSet<String> = variants.iter().cloned().collect();
+    let mut hits: BTreeMap<String, Vec<String>> = BTreeMap::new();
+
+    let crates_dir = workspace_root().join("crates");
+    let crate_entries = std::fs::read_dir(&crates_dir).unwrap_or_else(|e| {
+        panic!("every_consumer_has_production_call_site: cannot read crates/: {e}")
+    });
+    for crate_entry in crate_entries.flatten() {
+        let src_dir = crate_entry.path().join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        walk_dir_collect_rs(&src_dir, &mut |path: &std::path::Path| {
+            // Skip files whose path includes a `tests` segment — some
+            // crates put inline integration test modules under
+            // `src/tests/`. Production code lives outside any
+            // `tests` segment.
+            let has_tests_segment = path
+                .components()
+                .any(|c| c.as_os_str().to_string_lossy() == "tests");
+            if has_tests_segment {
+                return;
+            }
+            let src = std::fs::read_to_string(path).unwrap_or_else(|e| {
+                panic!(
+                    "every_consumer_has_production_call_site: cannot read `{}`: {e}",
+                    path.display()
+                )
+            });
+            let parsed = match syn::parse_file(&src) {
+                Ok(p) => p,
+                Err(e) => panic!(
+                    "every_consumer_has_production_call_site: cannot parse `{}`: {e}",
+                    path.display()
+                ),
+            };
+            let rel = path
+                .strip_prefix(workspace_root())
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let mut visitor = ProducerVisitor {
+                variant_set: &variant_set,
+                hits: BTreeMap::new(),
+                rel_path: rel,
+                pat_depth: 0,
+            };
+            visitor.visit_file(&parsed);
+            for (variant, paths) in visitor.hits {
+                hits.entry(variant).or_default().extend(paths);
+            }
+        });
+    }
+
+    // Step 3: every variant must either have a producer call site
+    // OR a documented `KIND_EXEMPTIONS` entry.
+    let exemption_set: std::collections::HashSet<&str> =
+        KIND_EXEMPTIONS.iter().map(|(name, _)| *name).collect();
+
+    let mut missing: Vec<String> = Vec::new();
+    for variant in &variants {
+        if hits.contains_key(variant) {
+            continue;
+        }
+        if exemption_set.contains(variant.as_str()) {
+            continue;
+        }
+        missing.push(format!(
+            "  - {variant}: no `RequestKind::{variant}` expression literal found in any \
+             non-test source file under `crates/*/src/`. Either add a production producer \
+             that constructs this variant, OR document the absence in `KIND_EXEMPTIONS` with \
+             a rationale (and accept that out-of-tree code is the only emitter)."
+        ));
+    }
+
+    assert!(
+        missing.is_empty(),
+        "every_consumer_has_production_call_site: the following `RequestKind` variants have \
+         NO production call site under `crates/*/src/`. Plan §1.6 requires every variant to \
+         either have an in-tree producer OR a documented exemption.\n{}",
+        missing.join("\n"),
+    );
+
+    // Step 4: reject stale exemptions — entries whose variant *is*
+    // now produced from in-tree code. This forces the exemption list
+    // to shrink whenever a producer ships.
+    let mut stale: Vec<String> = Vec::new();
+    for (variant, rationale) in KIND_EXEMPTIONS {
+        if hits.contains_key(*variant) {
+            let producer_files: Vec<String> = hits
+                .get(*variant)
+                .map(|paths| {
+                    let mut deduped: Vec<String> = paths.clone();
+                    deduped.sort();
+                    deduped.dedup();
+                    deduped
+                })
+                .unwrap_or_default();
+            stale.push(format!(
+                "  - {variant}: an in-tree producer now exists at {producer_files:?} \
+                 (rationale was: {rationale}). Remove the exemption from KIND_EXEMPTIONS."
+            ));
+        }
+    }
+    assert!(
+        stale.is_empty(),
+        "every_consumer_has_production_call_site: stale KIND_EXEMPTIONS entries:\n{}",
+        stale.join("\n"),
+    );
+
+    // Step 5: reject an exemption whose variant does not exist on
+    // `RequestKind` at all (the enum was edited and the exemption
+    // wasn't updated). Without this, a renamed variant could silently
+    // pass the guard.
+    let mut unknown: Vec<String> = Vec::new();
+    for (variant, _) in KIND_EXEMPTIONS {
+        if !variant_set.contains(*variant) {
+            unknown.push(format!(
+                "  - {variant}: exemption references a variant that does NOT exist on \
+                 `RequestKind`. Update `KIND_EXEMPTIONS` to match the current enum."
+            ));
+        }
+    }
+    assert!(
+        unknown.is_empty(),
+        "every_consumer_has_production_call_site: KIND_EXEMPTIONS contains unknown variants:\n{}",
+        unknown.join("\n"),
+    );
+}
