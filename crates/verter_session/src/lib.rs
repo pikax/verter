@@ -126,6 +126,7 @@ mod host_executor_lowering_tests;
 mod host_lifecycle;
 pub mod host_lsp_audit;
 pub mod host_manage;
+pub mod host_mcp_audit;
 mod host_resolve;
 pub mod host_resolve_type_audit;
 mod host_semantic;

@@ -3568,6 +3568,13 @@ mod foundations_guards {
         "pub mod host_lsp_audit",
         // tests/host_tests.rs (host_manage::* APIs in integration tests)
         "pub mod host_manage",
+        // Slice 3.F — `audit_mcp_tool_call` entry-point. Public so
+        // verter_mcp tool handlers can route their audited body
+        // through the wrapper and land RequestKind::Mcp records on
+        // the host store. Tests in tests/mcp_audit_e2e.rs and
+        // verter_mcp/tests/mcp_tool_audit_integration.rs exercise
+        // the production wiring.
+        "pub mod host_mcp_audit",
         // verter_type_runtime::backend::tests via meta_resolve types,
         // tests/host_tests.rs
         "pub mod meta_resolve",
