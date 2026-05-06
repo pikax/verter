@@ -2964,3 +2964,124 @@ fn concurrent_stress_16_threads_retry_counters_consistent() {
          against accidental type changes",
     );
 }
+
+/// Loop 6 — `execute_cooperative` warm-hit fast path bypasses the
+/// admission-overhead branches that the cooperative-admission slow
+/// path runs even on warm hits.
+///
+/// **Why this matters.** Loop 5 measured 88 % warm-hit rate at
+/// `execute_cooperative` for ChatMessage cold; the per-warm-hit
+/// admission overhead (two `entries_lock_diagnosed` acquisitions, two
+/// `current_request_context` TLS lookups, capture-token TLS lookups,
+/// `record_cache_event(Hit)`, and `self.stats.hits` increment) was
+/// the dominant cost. The fast path replaces all of that with a
+/// single non-diagnosed `entries.lock()`, one slot read, and one
+/// per-request hit counter bump.
+///
+/// **Discriminator.** A warm hit through `execute_cooperative` must
+/// increment `RequestContext::cache_counters.semantic_graph.hits` by
+/// exactly one. Pre-fix, the slow path called `self.get(&key)` twice
+/// (once for the `initial_hit` observation, once inside the loop's
+/// step-1 warm check) and each call bumped the per-request counter,
+/// producing two increments per warm call. The fast-path takes the
+/// warm hit through a single counter bump.
+///
+/// Cross-check: the `WARM_HIT_FAST_PATH_HITS` instrumentation counter
+/// must increase by at least one — pre-fix the counter does not exist
+/// and post-fix it is bumped on every fast-path return.
+#[test]
+fn execute_cooperative_warm_hit_skips_admission_overhead() {
+    use crate::loop5_instrumentation::WARM_HIT_FAST_PATH_HITS;
+    use crate::request_context::{RequestContext, RequestContextGuard};
+
+    let store = SemanticGraphStore::new();
+    let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        scope: scope("/w/fast_path.ts"),
+        name: Arc::from("Foo"),
+    });
+
+    let ctx = RequestContext::new(7777, Arc::from("/w/fast_path.ts"), false, None);
+    let _g = RequestContextGuard::install(Arc::clone(&ctx));
+
+    // Cold build to populate the warm slot. Records one Miss.
+    let _ = store.execute_cooperative(
+        key.clone(),
+        || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+        || {
+            let id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+            (QueryResult::Value(id), empty_signature())
+        },
+    );
+    let after_cold_hits = ctx
+        .cache_counters
+        .semantic_graph
+        .hits
+        .load(Ordering::Relaxed);
+    let after_cold_misses = ctx
+        .cache_counters
+        .semantic_graph
+        .misses
+        .load(Ordering::Relaxed);
+    // Cold-path slow path records exactly one Miss on the
+    // per-request counter post-fix (the redundant `initial_hit`
+    // observation that bumped misses a second time has been
+    // removed). Pre-fix: cold = 2 misses. Post-fix: cold = 1 miss.
+    assert_eq!(
+        after_cold_misses, 1,
+        "cold build records exactly one Miss on the per-request counter \
+         (got {after_cold_misses}; pre-fix the redundant initial_hit \
+         observation produced 2)",
+    );
+
+    // Snapshot fast-path counter before the warm call so we can
+    // assert the increment is attributable to THIS warm call (the
+    // counter is process-wide and may already carry hits from
+    // earlier tests in the same binary).
+    let fast_path_before = WARM_HIT_FAST_PATH_HITS.load(Ordering::Relaxed);
+
+    // Warm call — must skip the build closure (panic indicates a
+    // miscount) and route through the fast path.
+    let _ = store.execute_cooperative(
+        key.clone(),
+        || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+        || panic!("warm hit must not invoke the build closure"),
+    );
+
+    let after_warm_hits = ctx
+        .cache_counters
+        .semantic_graph
+        .hits
+        .load(Ordering::Relaxed);
+    let after_warm_misses = ctx
+        .cache_counters
+        .semantic_graph
+        .misses
+        .load(Ordering::Relaxed);
+    let warm_delta_hits = after_warm_hits - after_cold_hits;
+    let warm_delta_misses = after_warm_misses - after_cold_misses;
+
+    // Post-fix: warm hit increments per-request hits by exactly 1.
+    // Pre-fix: warm hit incremented per-request hits by 2 (two
+    // separate `self.get(&key)` calls inside `execute_cooperative`).
+    assert_eq!(
+        warm_delta_hits, 1,
+        "warm-hit fast path must increment cache_counters.semantic_graph.hits \
+         by exactly 1 per warm `execute_cooperative` call (got {warm_delta_hits}; \
+         pre-fix slow path produces 2 because `self.get(&key)` is called twice)",
+    );
+    assert_eq!(
+        warm_delta_misses, 0,
+        "warm-hit fast path must not increment any miss counter \
+         (got delta {warm_delta_misses})",
+    );
+
+    // Cross-check on the instrumentation counter.
+    let fast_path_delta = WARM_HIT_FAST_PATH_HITS.load(Ordering::Relaxed) - fast_path_before;
+    assert!(
+        fast_path_delta >= 1,
+        "WARM_HIT_FAST_PATH_HITS must record at least one fast-path \
+         return for the warm call (got delta {fast_path_delta}; \
+         pre-fix the counter does not increment because the fast path \
+         does not exist)",
+    );
+}

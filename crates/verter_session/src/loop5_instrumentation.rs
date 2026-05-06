@@ -47,6 +47,16 @@ pub static EXECUTE_COOPERATIVE_COLD_BUILDS: AtomicU64 = AtomicU64::new(0);
 /// (path 1 in the cooperative semantics — `self.get(&key).is_some()`).
 pub static EXECUTE_COOPERATIVE_WARM_HITS: AtomicU64 = AtomicU64::new(0);
 
+/// Warm-hit returns served by `SemanticGraphStore::execute_cooperative`'s
+/// fast-path (single non-diagnosed `entries.lock()` + slot read, no
+/// inflight-table touch, no capture-token TLS, no second
+/// `entries_lock_diagnosed()` call). Bumped once per fast-path return.
+/// Strictly a subset of `EXECUTE_COOPERATIVE_WARM_HITS`: the two
+/// counters sum to all warm hits, with `WARM_HIT_FAST_PATH_HITS`
+/// counting the cheap branch and any residual on the slow branch
+/// counted only by `EXECUTE_COOPERATIVE_WARM_HITS`.
+pub static WARM_HIT_FAST_PATH_HITS: AtomicU64 = AtomicU64::new(0);
+
 /// Peeks (read attempts) into the host-owned `MaterializeMemoDb`
 /// inside `materialize_component_meta_type_expr_until_stable_full`.
 pub static MATERIALIZE_MEMO_PEEKS: AtomicU64 = AtomicU64::new(0);
@@ -223,6 +233,7 @@ pub fn reset_all() {
     EXECUTE_COOPERATIVE_CALLS.store(0, Ordering::Relaxed);
     EXECUTE_COOPERATIVE_COLD_BUILDS.store(0, Ordering::Relaxed);
     EXECUTE_COOPERATIVE_WARM_HITS.store(0, Ordering::Relaxed);
+    WARM_HIT_FAST_PATH_HITS.store(0, Ordering::Relaxed);
     MATERIALIZE_MEMO_PEEKS.store(0, Ordering::Relaxed);
     MATERIALIZE_MEMO_HITS.store(0, Ordering::Relaxed);
     MATERIALIZE_MEMO_PUBLISHES.store(0, Ordering::Relaxed);
@@ -245,6 +256,7 @@ pub fn dump_loop5_instrumentation_counters() -> String {
     let execute_cooperative_calls = EXECUTE_COOPERATIVE_CALLS.load(Ordering::Relaxed);
     let execute_cooperative_cold_builds = EXECUTE_COOPERATIVE_COLD_BUILDS.load(Ordering::Relaxed);
     let execute_cooperative_warm_hits = EXECUTE_COOPERATIVE_WARM_HITS.load(Ordering::Relaxed);
+    let warm_hit_fast_path_hits = WARM_HIT_FAST_PATH_HITS.load(Ordering::Relaxed);
     let materialize_memo_peeks = MATERIALIZE_MEMO_PEEKS.load(Ordering::Relaxed);
     let materialize_memo_hits = MATERIALIZE_MEMO_HITS.load(Ordering::Relaxed);
     let materialize_memo_publishes = MATERIALIZE_MEMO_PUBLISHES.load(Ordering::Relaxed);
@@ -264,6 +276,7 @@ pub fn dump_loop5_instrumentation_counters() -> String {
          \"EXECUTE_COOPERATIVE_CALLS\": {execute_cooperative_calls},\n  \
          \"EXECUTE_COOPERATIVE_COLD_BUILDS\": {execute_cooperative_cold_builds},\n  \
          \"EXECUTE_COOPERATIVE_WARM_HITS\": {execute_cooperative_warm_hits},\n  \
+         \"WARM_HIT_FAST_PATH_HITS\": {warm_hit_fast_path_hits},\n  \
          \"MATERIALIZE_MEMO_PEEKS\": {materialize_memo_peeks},\n  \
          \"MATERIALIZE_MEMO_HITS\": {materialize_memo_hits},\n  \
          \"MATERIALIZE_MEMO_PUBLISHES\": {materialize_memo_publishes},\n  \
@@ -290,6 +303,7 @@ mod tests {
             "EXECUTE_COOPERATIVE_CALLS",
             "EXECUTE_COOPERATIVE_COLD_BUILDS",
             "EXECUTE_COOPERATIVE_WARM_HITS",
+            "WARM_HIT_FAST_PATH_HITS",
             "MATERIALIZE_MEMO_PEEKS",
             "MATERIALIZE_MEMO_HITS",
             "MATERIALIZE_MEMO_PUBLISHES",

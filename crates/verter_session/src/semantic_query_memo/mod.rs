@@ -1210,8 +1210,179 @@ impl SemanticGraphStore {
     ///
     /// `recursion_sentinel` produces a fallback [`SemanticNodeId`] when
     /// same-path recursion is detected.
+    ///
+    /// ## Warm-hit fast path
+    ///
+    /// Step 1 is implemented as a non-allocating fast path
+    /// ([`Self::try_warm_hit_fast_path`]): a single non-diagnosed
+    /// `entries.lock()` + slot read. On hit the fast path returns
+    /// immediately, bumping a single per-request hit counter, the
+    /// `WARM_HIT_FAST_PATH_HITS` instrumentation counter, and the
+    /// production capture-token / test-only dispatch recorders. The
+    /// fast path bypasses the cooperative-admission flow (no
+    /// in-flight table touch, no `entries_lock_diagnosed` timing
+    /// wrappers, no second `self.get(&key)` invocation). On a miss
+    /// the fast path drops the entries lock and falls through to the
+    /// cooperative slow path.
+    ///
+    /// ## Soundness
+    ///
+    /// The fast path returns a clone of the cached `MemoEntry`'s
+    /// `(result, dep_signature)`. The dep signature flows back to the
+    /// caller's `CompletionFence` exactly as the slow path's warm-hit
+    /// branch does, so warm-cache reuse stays bounded by dep-signature
+    /// validation at the outer caller's fence-revalidation point.
+    /// Same-path recursion detection is unaffected: the cold winner
+    /// publishes the warm slot AFTER the build closure returns, so a
+    /// populated slot cannot represent a cycle currently being built
+    /// — the only path that needs same-path recursion detection is
+    /// the slow path's loop, which still runs on cache miss. Joiner
+    /// waits and abort-driven retries are unaffected: a populated
+    /// warm slot means no joiner participation is needed.
     #[must_use = "the CacheRead carries both the resolved node id and the dep signature callers must merge into their active CompletionFence"]
     pub fn execute_cooperative<F, R>(
+        &self,
+        key: SemanticQueryKey,
+        recursion_sentinel: R,
+        build: F,
+    ) -> CacheRead<QueryResult<SemanticNodeId>>
+    where
+        F: FnOnce() -> (QueryResult<SemanticNodeId>, DepSignature),
+        R: FnOnce() -> SemanticNodeId,
+    {
+        // Loop-5 instrumentation — count every logical entry. Logged
+        // unconditionally so call counts include both fast-path and
+        // slow-path entries.
+        crate::loop5_instrumentation::EXECUTE_COOPERATIVE_CALLS
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        // Warm-hit fast path. A single non-diagnosed `entries.lock()`
+        // acquisition checks the slot; on hit it returns immediately
+        // bypassing the slow path's `entries_lock_diagnosed`
+        // `Instant::now`/capture-token wait+hold timing, the
+        // in-flight table mutex, the second `self.get(&key)`
+        // invocation inside the loop's step 1, the same-path
+        // recursion test, and the joiner-condvar admission entry
+        // path. On miss the lock is released and execution falls
+        // through to the cooperative slow path that owns same-path
+        // recursion, in-flight admission, and cold-build publish.
+        if let Some(hit) = self.try_warm_hit_fast_path(&key) {
+            return hit;
+        }
+
+        // Slow path — cooperative-admission flow. Handles same-path
+        // recursion, joiner-condvar waits, cold-build publish.
+        self.execute_cooperative_slow(key, recursion_sentinel, build)
+    }
+
+    /// Warm-hit fast path for [`Self::execute_cooperative`]. Returns
+    /// `Some(CacheRead)` when the slot for `key` is already populated
+    /// in the family memo, `None` otherwise.
+    ///
+    /// On hit, bumps:
+    /// - `cache_counters.semantic_graph.hits` (per-request,
+    ///   audit-truthful, single bump per warm call)
+    /// - `record_cache_event(Hit)` on the active `RequestContext` (if
+    ///   any) so audit accounting matches the slow path's warm
+    ///   semantics
+    /// - `self.stats.hits` (lock-free atomic — same as slow path)
+    /// - `WARM_HIT_FAST_PATH_HITS` (instrumentation, attribution to
+    ///   the fast branch)
+    /// - `EXECUTE_COOPERATIVE_WARM_HITS` and `FAMILY_MEMO_HITS`
+    ///   (instrumentation; consistent with slow-path semantics)
+    /// - `record_dispatch_warm` (cfg-test) and
+    ///   `with_active_capture(record_dispatch)` (production
+    ///   capture-token TLS hook)
+    ///
+    /// On miss returns `None` without touching any counter. The
+    /// caller's slow path observes the miss exactly once when its
+    /// step 1 `self.get(&key)` returns `None`, preserving slow-path
+    /// counter discipline.
+    ///
+    /// **Lock discipline.** Acquires `self.entries` directly (no
+    /// `entries_lock_diagnosed` Instant::now/capture-token wrapping).
+    /// Holds the lock only for the slot read + clone, drops before
+    /// instrumentation. parking_lot::Mutex is uncontended on the
+    /// warm-read hot path.
+    #[inline]
+    fn try_warm_hit_fast_path(
+        &self,
+        key: &SemanticQueryKey,
+    ) -> Option<CacheRead<QueryResult<SemanticNodeId>>> {
+        let (family, slot) = family_and_slot(key);
+        let hit = {
+            // Single non-diagnosed lock acquisition. The
+            // `entries_lock_diagnosed` wrapper that adds Instant::now
+            // wait+hold timing under capture-token is intentionally
+            // bypassed here because the warm-hit hot path runs
+            // hundreds of thousands of times per request and the
+            // wrapper's per-acquisition cost dominates the warm-hit
+            // wall-clock.
+            let entries = self.entries.lock();
+            entries.get(&family).and_then(|slots| {
+                slots.slot(slot).cloned().map(|entry| CacheRead {
+                    value: entry.result,
+                    dep_signature: entry.dep_signature,
+                })
+            })
+        };
+
+        let hit = hit?;
+
+        // Instrumentation — fast-path attribution.
+        crate::loop5_instrumentation::WARM_HIT_FAST_PATH_HITS
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        crate::loop5_instrumentation::EXECUTE_COOPERATIVE_WARM_HITS
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        crate::loop5_instrumentation::FAMILY_MEMO_HITS
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        // Production stats (lock-free atomic — same as slow path's
+        // warm-hit branch at step 1).
+        self.stats.hits.fetch_add(1, Ordering::Relaxed);
+
+        // Per-request audit hit attribution. Bumped exactly once per
+        // warm call (the slow path's old `let initial_hit = self.get(&key)`
+        // observation plus the loop's step-1 `self.get(&key)` call
+        // bumped this counter twice; the fast path bumps it once).
+        if let Some(rctx) = crate::request_context::current_request_context() {
+            rctx.cache_counters
+                .semantic_graph
+                .hits
+                .fetch_add(1, Ordering::Relaxed);
+        }
+
+        // Per-context cache-event attribution (Hit). Same as the slow
+        // path's step-1 warm branch, single TLS lookup.
+        if let Some(ctx) = verter_scheduler::request_context::current_context() {
+            ctx.0
+                .record_cache_event(verter_scheduler::request_context::CacheEventKind::Hit);
+        }
+
+        // cfg-test dispatch recording (warm). Same as the slow path's
+        // pre-loop `initial_hit` observation.
+        #[cfg(test)]
+        crate::project_semantic_dispatch::raise::record_dispatch_warm(key);
+
+        // Production capture-token dispatch recording (warm). Same as
+        // the slow path's pre-loop observation.
+        crate::capture_token::with_active_capture(|t| t.record_dispatch(key, /* hit */ true));
+
+        Some(hit)
+    }
+
+    /// Cooperative-admission slow path for
+    /// [`Self::execute_cooperative`]. Reached only when
+    /// [`Self::try_warm_hit_fast_path`] reported a miss. Owns
+    /// same-path recursion detection, in-flight admission, joiner
+    /// waits, abort-driven retries, cold-build execution, and warm
+    /// publish.
+    ///
+    /// All instrumentation atomics + capture-token + cfg-test
+    /// dispatch recording for the COLD/MISS / JOINER paths live here.
+    /// The warm-hit branch is intentionally absent — the fast path
+    /// handles every warm hit before this function is called.
+    fn execute_cooperative_slow<F, R>(
         &self,
         key: SemanticQueryKey,
         recursion_sentinel: R,
@@ -1224,48 +1395,33 @@ impl SemanticGraphStore {
         let mut miss_recorded = false;
         let mut retries = 0usize;
 
-        // Loop-5 instrumentation — count every logical entry. The
-        // warm/cold split below records the family-memo disposition
-        // observed BEFORE the in-flight admission tests.
-        crate::loop5_instrumentation::EXECUTE_COOPERATIVE_CALLS
+        // Cold/miss instrumentation — count one logical miss per
+        // call. The fast path already filtered every warm hit, so
+        // any entry to this function is by definition a miss
+        // (modulo a rare race where another thread publishes
+        // between our fast-path check and the loop's step 1
+        // re-check; that race is benign — the loop returns the
+        // freshly-published value through its step-1 warm branch,
+        // and we credit it as a hit there).
+        crate::loop5_instrumentation::FAMILY_MEMO_MISSES
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        // Supplement §5.D.0 r17 — record cold/warm split for
-        // the §5.D.1 cache-discipline tests. Done ONCE per logical
-        // call (before the retry loop) so retries don't double-count.
-        // Recorded with the canonical key the warm cache stores, AND
-        // with the caller-side pre-canonical key (via raise/trait
-        // entry-point recordings) so tests can probe by either form.
-        let initial_hit = self.get(&key).is_some();
-        if initial_hit {
-            crate::loop5_instrumentation::FAMILY_MEMO_HITS
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            crate::loop5_instrumentation::EXECUTE_COOPERATIVE_WARM_HITS
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        } else {
-            crate::loop5_instrumentation::FAMILY_MEMO_MISSES
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
+        // cfg-test dispatch recording (cold). Same as the
+        // pre-refactor pre-loop observation.
         #[cfg(test)]
-        if initial_hit {
-            crate::project_semantic_dispatch::raise::record_dispatch_warm(&key);
-        } else {
-            crate::project_semantic_dispatch::raise::record_dispatch_cold(&key);
-        }
-        // Issue #11 / propagate the warm/cold observation to
-        // the per-request `CaptureToken` so `dispatch_count` and
-        // `dispatch_misses` assertions can discriminate by family.
-        // Recorded once per logical call (before the retry loop), like
-        // the cfg(test) split above. The hook is a no-op when no token
-        // is bound on the current thread (zero-overhead production path).
-        crate::capture_token::with_active_capture(|t| t.record_dispatch(&key, initial_hit));
+        crate::project_semantic_dispatch::raise::record_dispatch_cold(&key);
+
+        // Production capture-token dispatch recording (cold).
+        crate::capture_token::with_active_capture(|t| {
+            t.record_dispatch(&key, /* hit */ false)
+        });
 
         let (inflight, key) = loop {
-            // 1. Warm memo hit.
+            // 1. Warm memo hit. Reaches here only on the rare race
+            //    where another thread published between our fast-path
+            //    check and now (or on retry after an abort sweep).
             if let Some(hit) = self.get(&key) {
                 self.stats.hits.fetch_add(1, Ordering::Relaxed);
-                // Per-context counter — the active request (if any)
-                // observes this hit as its own.
                 if let Some(ctx) = verter_scheduler::request_context::current_context() {
                     ctx.0
                         .record_cache_event(verter_scheduler::request_context::CacheEventKind::Hit);
