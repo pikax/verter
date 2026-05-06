@@ -5,32 +5,72 @@ description: "Component metadata: native vs compat boundary, fallthrough/root in
 
 # Component Meta
 
-## Audit & footprint (plan F1–F10)
+## Audit & footprint
 
-Per-request semantic footprint observability lives in
-`verter_session::component_meta_audit`. Opt-in via
-`HostConfig::audit_enabled + footprint_capture`. `RustAuditRecord`
-captures timings, solver/store/memory counters, and a deterministic
-derivation subgraph. `RustSemanticFootprintAudit::loaded_files()`
-is the exact-read answer (plan §1.4); `declared_dependency_files()`
-is the broader dependency-closure answer (plan §3.B Commit 7.B).
-NAPI + WASM + LSP consumers route through the shared session-layer materialiser at
+Per-request semantic footprint observability is split across two
+crates:
+
+- **`verter_audit`** (substrate) — owns the `RequestAuditRecord`
+  envelope, `RequestKind` / `RequestKindPayload` discriminants, all
+  per-kind payload structs (`ComponentMetaPayload`,
+  `TypeResolutionPayload`, `SemanticAnalysisPayload`,
+  `CompilePayload`, `WorkspacePayload`, `LspRequestPayload`,
+  `McpToolPayload`, `BundlerBatchPayload`), the producer-side
+  `AuditObserver` trait + `AuditEvent` counter hook, the
+  `StructuredAuditEvent` enum + variant payloads (in
+  `verter_audit::origin_graph`), `AuditConfig` +
+  `AuditConsumerFilter`, and the trivial `NoOpObserver`.
+- **`verter_session`** — owns the concrete `HostAuditRuntime`,
+  `AuditRecordsStore`, the `AuditRequestRegistration` lifecycle
+  (Active / Noop arms with RAII drop), the per-request
+  `RequestContext` + TLS observer guard, the accumulator, the
+  footprint miner, the host-owned peak-RSS sampler thread (native
+  only), structured-trace macros, and the `AuditedRequest` test
+  harness.
+
+Opt-in via `HostConfig::audit_enabled + footprint_capture` (and
+`audit_timing_capture` for the timing surface).
+
+The component-meta-specific store counters and solver counters live
+on `ComponentMetaPayload` (paired with `RequestKind::ComponentMeta`).
+`RequestFootprintAudit::loaded_files()` is the exact-read answer;
+`declared_dependency_files()` is the broader dependency-closure
+answer. Audit endpoints (`why_loaded` / `why_instantiated`) read
+from the audit accumulator; TS helpers only render JSON.
+
+NAPI + WASM + LSP consumers route through the shared session-layer
+materialiser at
 `crates/verter_session/src/component_meta_materialize.rs`
-(`materialize_component_meta_structure` entry), backed by graph-native
-policy predicates in `meta_resolve.rs`
+(`materialize_component_meta_structure` entry), backed by
+graph-native policy predicates in `meta_resolve.rs`
 (`extract_route_root_identity_node`,
 `ref_root_reaches_transitive_cycle_node`,
 `component_meta_ref_resolves_to_package_node`,
-`canonical_resolves_to_package`). Audit endpoints
-(`why_loaded` / `why_instantiated`) read from the audit accumulator;
-TS helpers only render JSON.
-Benchmark correctness is validated by
-`packages/benchmark/src/audit-validator.ts` against
-`packages/benchmark/audit-specs/component-meta/*.json`; the legacy
-regex validator + trace-specs are retired.
+`canonical_resolves_to_package`). Benchmark correctness is
+validated by `packages/benchmark/src/audit-validator.ts` against
+`packages/benchmark/audit-specs/component-meta/*.json`.
+
+### Audited entry-points on `VerterHost`
+
+Component-meta consumers should always go through one of the
+audited entry-points so the `RequestAuditRecord` is published into
+the host's records store:
+
+| Method                                              | When to use                                                                            |
+| --------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| `get_component_meta_with_audit(canonical_id)`       | Audited `getComponentMeta`. Drives the cold/warm cache flow and publishes a record.    |
+| `get_component_meta_with_resolution(canonical_id)`  | Same producer used by the test harness; returns `(analysis, resolution, record)`.      |
+| `take_audit_record(request_id)`                     | Drain a published record by id.                                                        |
+
+Sibling audited entry-points (`resolve_type_with_audit`,
+`compile_with_audit`, `analyze_with_audit`, `audit_workspace_op`,
+`lsp_audit_begin`, `audit_mcp_tool_call`) follow the same pattern
+when the component-meta layer is being driven from another surface
+(LSP, MCP, bundler, workspace ops).
 
 For full architecture, API reference, and debug workflows see
-[`docs/audit-footprint/`](../../docs/audit-footprint/).
+[`docs/audit-footprint/`](../../docs/audit-footprint/) and the
+`/audit-infrastructure` skill.
 
 ## Final-Result Cache (post-rewrite)
 

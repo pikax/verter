@@ -1,15 +1,18 @@
-# Component-Meta Audit Footprint
+# Audit Footprint
 
-Deterministic, request-scoped observability for
-`VerterHost::get_component_meta`. Exposes exactly what a single
-component-meta request loaded, instantiated, projected, and
-materialized — plus the per-context cache counters that explain
-whether the request was served cold, warm, or by joining an
-in-flight peer.
+Deterministic, request-scoped observability for every audited
+`VerterHost` entry-point — `get_component_meta`, `resolve_type`,
+`compile`, `analyze`, workspace ops, LSP handlers, MCP tools, and
+bundler batches. Exposes exactly what a single request loaded,
+instantiated, projected, and materialized — plus the per-context
+cache counters that explain whether the request was served cold,
+warm, or by joining an in-flight peer.
 
-The audit record is the sole observability authority for
-component-meta correctness. Legacy file-trace + regex-validator
-pipelines have been retired (plan F4 + F8).
+The audit record is the sole observability authority for the
+audited surfaces. The audit substrate (`verter_audit`) holds the
+DTOs and the producer-side `AuditObserver` trait; the session layer
+(`verter_session`) owns the host runtime, records store,
+registration lifecycle, and footprint miner.
 
 ## Concepts
 
@@ -29,9 +32,8 @@ that carries:
 
 The context propagates through `verter_scheduler::OpaqueRequestContext`
 into worker threads. Auto-ingested dependency Source jobs inherit
-their parent request's context (plan §3.B Commit 7.B capture-site
-fix), so VFS reads for dependency loads land in the audit record
-alongside the request that caused them.
+their parent request's context, so VFS reads for dependency loads
+land in the audit record alongside the request that caused them.
 
 ### Hermetic vs `attach_to`
 
@@ -51,10 +53,10 @@ Two distinct contracts on `RequestFootprintAudit`:
 
 - `loaded_files()` — exactly the canonical IDs the scheduler
   actually read on behalf of this request. Union of `vfs_reads`
-  and `shared_load_reuses`, sorted + deduplicated. Plan §1.4.
+  and `shared_load_reuses`, sorted + deduplicated.
 - `declared_dependency_files()` — broader set that also includes
   fresh `IndexedReady` builds. Useful for dependency-graph
-  rendering; **not** an exact-read contract. Plan §3.B Commit 7.B.
+  rendering; **not** an exact-read contract.
 
 Assertion helpers mirror both:
 `RequestAuditRecord::assert_loaded_files_exactly` and
@@ -139,7 +141,7 @@ Inspect with any JSON tool:
 - **VS Code**: open the file; built-in JSON preview + outline.
 - **Python cross-platform**: `python -m json.tool /tmp/audit.json`.
 
-## u64 / i64 transport (plan §1.4 + §3.B Commit 7.A)
+## u64 / i64 transport
 
 Every audit integer field larger than 32 bits — signed or
 unsigned — transports as a decimal string. `RequestAuditRecord`'s
@@ -159,10 +161,10 @@ u32 and smaller remain JS `number`.
   requests can displace older records. Drain records with
   `take_audit_record` shortly after resolution.
 - **Empty `vfs_reads` on a real request** — typically a capture-site
-  TLS propagation gap. Plan §3.B Commit 7.B fixed this for
-  auto-ingested dep Source jobs by threading the parent's context
-  onto the `QueueEntry`; other gaps may surface as new features
-  land. File a bug with the specific request + expected read set.
+  TLS propagation gap. Auto-ingested dep Source jobs thread the
+  parent's context onto the `QueueEntry`; other gaps may surface
+  as new features land. File a bug with the specific request +
+  expected read set.
 - **`has_orphan_edges: true` in the footprint** — the miner
   truncated the derivation subgraph at
   `HostConfig::max_derivation_edges` (default 10 000). Raise the
@@ -172,4 +174,9 @@ u32 and smaller remain JS `number`.
 
 - [API reference](./api-reference.md)
 - [Structured events](./structured-events.md)
-- Plan: `C:\Users\david\.claude\plans\in-component-meta-i-want-iridescent-spring.md`
+- Audit substrate crate:
+  [`crates/verter_audit`](../../crates/verter_audit/src/lib.rs)
+- Host runtime:
+  [`crates/verter_session/src/host_audit_runtime.rs`](../../crates/verter_session/src/host_audit_runtime.rs)
+- Architecture skill: `/audit-infrastructure`
+- Component-meta consumer skill: `/component-meta`
