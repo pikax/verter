@@ -3689,6 +3689,7 @@ dependencies = [
 name = "verter_audit"
 version = "0.0.1-beta.1"
 dependencies = [
+ "clap",
  "parking_lot",
  "serde",
  "serde_json",
