@@ -7079,6 +7079,18 @@ fn wave_3_entry_points_propagate_tls() {
     // contains both the entry-point symbol and an
     // `assert_observer_reaches` call.
     const WAVE_3_ENTRY_POINTS: &[(&str, &[&str])] = &[
+        // Slice 3.A — TypeResolution producer.
+        // `resolve_type_with_audit` (verter_session) drives the
+        // `RequestKind::TypeResolution` audit producer. The TLS
+        // driver asserts the dispatcher's hop accounting increments
+        // (proving `current_observer()` was reachable on the
+        // dispatch path) and that the harness's outer guard remains
+        // visible on the calling thread after the entry-point's
+        // nested guard drops.
+        (
+            "resolve_type_with_audit",
+            &["crates/verter_session/tests/type_resolution_audit_tls_propagation.rs"],
+        ),
         // Slice 3.B — Compile producer.
         // `compile_with_audit` (verter_session) drives the
         // `RequestKind::Compile` audit producer. The cross-crate
@@ -7100,6 +7112,47 @@ fn wave_3_entry_points_propagate_tls() {
             "analyze_with_audit",
             &["crates/verter_session/tests/semantic_analysis_audit_tls_propagation.rs"],
         ),
+        // Slice 3.D — Workspace producer.
+        // `audit_op` is a trait method on `WorkspaceAccess`; the
+        // session-level wrapper `audit_workspace_op` installs the
+        // `RequestContextGuard` BEFORE the workspace traversal so
+        // the trait body sees `current_observer() == Some(_)`. The
+        // TLS driver drives the wrapper through the harness and
+        // asserts the trait body reaches the resolver and stamps a
+        // non-zero request id (proving the TLS slot was visible).
+        // Test placement is verter_session/tests/ rather than
+        // verter_workspace/tests/ because the harness lives in
+        // verter_session and adding a dev-dep on verter_session
+        // from verter_workspace would form a circular test-target
+        // cycle; the existing slice
+        // `workspace_audit_production_callsite.rs` resolves the
+        // same constraint by living here too.
+        (
+            "audit_op",
+            &["crates/verter_session/tests/workspace_audit_tls_propagation.rs"],
+        ),
+        // Slice 3.E — LSP producer.
+        // `run_with_audit` (verter_lsp::audit_harness) wraps every
+        // LSP `*_with_audit` handler. The TLS driver wraps a
+        // synthetic handler future and asserts the substrate
+        // observer is visible inside the future when audit is
+        // enabled, and absent when audit is disabled
+        // (short-circuit path).
+        (
+            "run_with_audit",
+            &["crates/verter_lsp/tests/lsp_audit_tls_propagation.rs"],
+        ),
+        // Slice 3.F — Mcp producer.
+        // `audit_mcp_tool_call` (verter_session) wraps a synthetic
+        // tool-callback closure with the standard registration /
+        // RequestContextGuard / finalize lifecycle. The TLS driver
+        // wraps a synthetic closure and asserts the substrate
+        // observer is visible inside the closure body when audit is
+        // enabled, and absent when audit is disabled (Noop arm).
+        (
+            "audit_mcp_tool_call",
+            &["crates/verter_session/tests/mcp_audit_tls_propagation.rs"],
+        ),
     ];
 
     // Wave-3 entry-points that ship WITHOUT a paired TLS test.
@@ -7111,54 +7164,7 @@ fn wave_3_entry_points_propagate_tls() {
     //
     // The guard rejects an allow-list entry whose entry-point
     // already has a paired TLS test (stale allow-list).
-    const MISSING_TLS_TEST: &[(&str, &str)] = &[
-        // Slice 3.A — TypeResolution producer.
-        // `resolve_type_with_audit` ships with audit-record
-        // characterization tests but no dedicated
-        // `assert_observer_reaches` driver. The producer side
-        // (`SemanticGraphStore::execute_cooperative`) is exercised
-        // by the wider audit-cache-reuse and pathological-recursion
-        // tests, but they verify the record contents rather than
-        // the TLS propagation slot directly.
-        (
-            "resolve_type_with_audit",
-            "Wave 3 Slice 3.A characterization tests verify record contents but not the \
-             substrate-TLS propagation slot. Follow-up fix-pass adds an \
-             assert_observer_reaches harness driver.",
-        ),
-        // Slice 3.D — Workspace producer.
-        // `audit_op` is a trait method on `WorkspaceAccess`; the
-        // discriminating tests (`workspace_audit_resolve.rs`,
-        // `workspace_audit_dep_graph_traverse.rs`) drive it but do
-        // not currently invoke `assert_observer_reaches`.
-        (
-            "audit_op",
-            "Wave 3 Slice 3.D drives audit_op via discriminating record-content tests; \
-             follow-up adds an assert_observer_reaches harness driver to assert the \
-             substrate observer reaches the trait method's body.",
-        ),
-        // Slice 3.E — LSP producer.
-        // `run_with_audit` (verter_lsp::audit_harness) wraps every
-        // LSP `*_with_audit` handler. The cancellation contract
-        // test discriminates the supersede path but does not assert
-        // TLS propagation via the substrate harness.
-        (
-            "run_with_audit",
-            "Wave 3 Slice 3.E LSP cancellation test discriminates supersede behaviour but \
-             does not drive the LSP entry-point through assert_observer_reaches; follow-up \
-             adds a paired TLS-propagation test through the LSP audit harness.",
-        ),
-        // Slice 3.F — Mcp producer.
-        // `audit_mcp_tool_call` is exercised by `mcp_audit_e2e.rs`
-        // but that test verifies record contents, not TLS
-        // propagation slot population.
-        (
-            "audit_mcp_tool_call",
-            "Wave 3 Slice 3.F mcp_audit_e2e verifies record contents (parent_request_id \
-             correlation) but not TLS observer propagation through the wrapper; follow-up \
-             adds an assert_observer_reaches driver.",
-        ),
-    ];
+    const MISSING_TLS_TEST: &[(&str, &str)] = &[];
 
     let workspace = workspace_root();
 
