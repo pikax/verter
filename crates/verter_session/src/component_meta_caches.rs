@@ -2018,3 +2018,629 @@ where
         },
     )
 }
+
+
+// ===========================================================================
+// MemberRouteResultDb — caches the result of
+// `materialize_component_meta_macro_shape_member_type_expr`. Keyed on
+// `(scope_canonical_id, member_name, lowered, mode)`. Sits below the
+// cycle / package guards inside the macro-member walker so the
+// candidate-builder cost (project_expr_class_a_via_dispatch +
+// project_expr_class_a_via_dispatch_threaded × scopes) and the per-
+// candidate `materialize_component_meta_type_expr_until_stable`
+// recursion run exactly once per `(scope, member, lowered, mode)`
+// combination per project generation.
+// ===========================================================================
+
+/// Final-result cache key for the macro-member walker. Identifies a
+/// `(scope, member_name, lowered, mode)` tuple. The `lowered` field is
+/// the same `Arc<TypeExpr>` shape used by [`MaterializeMemoDb`] —
+/// structural equality across requests gives stable keying.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MemberRouteResultCacheKey {
+    /// Owner scope — the canonical id the macro-member walker was
+    /// dispatched in.
+    pub scope_canonical_id: Arc<str>,
+    /// Member name being projected.
+    pub member_name: Arc<str>,
+    /// The lowered `TypeExpr` (the macro's type-argument shape) the
+    /// route projection is rooted on.
+    pub lowered: Arc<TypeExpr>,
+    /// Caller-side projection mode. Today the macro-member walker
+    /// always invokes the materialiser at `Expanded`, but the mode is
+    /// part of the key for forward-compatibility and to mirror the
+    /// `MaterializeMemoDb` shape.
+    pub mode: ProjectionMode,
+}
+
+/// Entry stored in [`MemberRouteResultDb`]. Carries the resulting
+/// `TypeExpr` (the `best` value selected by the walker) plus the
+/// `dep_signature` that produced it.
+#[derive(Clone)]
+pub struct MemberRouteResultEntry {
+    /// The cached macro-member walker output.
+    pub result: TypeExpr,
+    /// `dep_signature` observed during the cold build. Used by
+    /// `peek` and the cooperative-admission post-publish revalidation
+    /// to detect stale entries after canonical invalidation.
+    pub dep_signature: DepSignature,
+}
+
+/// Final-result cache for the macro-member walker route projection.
+/// Mirrors [`MaterializeStructureDb`]'s cooperative-admission +
+/// reverse-index pattern.
+pub struct MemberRouteResultDb {
+    entries: DashMap<MemberRouteResultCacheKey, Arc<MemberRouteResultEntry>>,
+    inflight: InflightTable<MemberRouteResultCacheKey>,
+    /// Per-canonical reverse index: maps each canonical id to the set
+    /// of cache keys whose `dep_signature` references it, paired with
+    /// the registered `dep_signature` `Arc`. `invalidate_for_canonical`
+    /// drains this map and uses `Arc::ptr_eq` to discriminate stale
+    /// entries from fresh post-publish writes.
+    canonical_to_keys: DashMap<
+        Arc<str>,
+        parking_lot::Mutex<rustc_hash::FxHashMap<MemberRouteResultCacheKey, DepSignature>>,
+    >,
+    live_counter: Arc<AtomicU64>,
+}
+
+impl MemberRouteResultDb {
+    /// Construct a fresh cache with an unshared `live_counter`. Tests-only.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::with_counter(Arc::new(AtomicU64::new(0)))
+    }
+
+    /// Construct with a shared `live_counter` borrowed from
+    /// `ProjectTypeStoreCounters::component_meta_cache_live`.
+    pub(crate) fn with_counter(live_counter: Arc<AtomicU64>) -> Self {
+        Self {
+            entries: DashMap::new(),
+            inflight: InflightTable::new(),
+            canonical_to_keys: DashMap::new(),
+            live_counter,
+        }
+    }
+
+    /// Read-only test accessor for the shared `live_counter`.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn live_counter_for_test(&self) -> u64 {
+        self.live_counter.load(Ordering::Relaxed)
+    }
+
+    /// Read-only peek with proactive stale-entry removal. Records a
+    /// `cache_counters.member_route_result.{hits,misses}` event on the
+    /// active request context.
+    pub(crate) fn peek(
+        &self,
+        key: &MemberRouteResultCacheKey,
+        ctx: &dyn ResolverContext,
+    ) -> Option<crate::semantic_query::CacheRead<TypeExpr>> {
+        let result = (|| -> Option<crate::semantic_query::CacheRead<TypeExpr>> {
+            let entry_arc = self.entries.get(key).map(|e| e.clone())?;
+            if !ctx.validate_dep_signature(&entry_arc.dep_signature) {
+                let removed = self
+                    .entries
+                    .remove_if(key, |_, e| Arc::ptr_eq(e, &entry_arc));
+                if removed.is_some() {
+                    self.live_counter.fetch_sub(1, Ordering::Relaxed);
+                }
+                return None;
+            }
+            Some(crate::semantic_query::CacheRead {
+                value: entry_arc.result.clone(),
+                dep_signature: entry_arc.dep_signature.clone(),
+            })
+        })();
+        if let Some(rctx) = crate::request_context::current_request_context() {
+            if result.is_some() {
+                rctx.cache_counters
+                    .member_route_result
+                    .hits
+                    .fetch_add(1, Ordering::Relaxed);
+            } else {
+                rctx.cache_counters
+                    .member_route_result
+                    .misses
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        result
+    }
+
+    /// Drop every cache entry whose `dep_signature` references
+    /// `canonical_id`. Mirrors [`MaterializeStructureDb::invalidate_for_canonical`].
+    pub fn invalidate_for_canonical(&self, canonical_id: &str) {
+        let drained: Vec<(MemberRouteResultCacheKey, DepSignature)> =
+            match self.canonical_to_keys.remove(canonical_id) {
+                Some((_, mutex)) => mutex.lock().drain().collect(),
+                None => return,
+            };
+        for (key, registered_sig) in &drained {
+            let registered = Arc::clone(registered_sig);
+            let removed = self.entries.remove_if(key, move |_, entry_arc| {
+                Arc::ptr_eq(&entry_arc.dep_signature, &registered)
+            });
+            if removed.is_some() {
+                self.live_counter.fetch_sub(1, Ordering::Relaxed);
+                for (other_canonical, _) in registered_sig.iter() {
+                    if other_canonical.as_ref() == canonical_id {
+                        continue;
+                    }
+                    if let Some(shard) = self.canonical_to_keys.get(other_canonical) {
+                        let mut map = shard.lock();
+                        if let Some(existing_sig) = map.get(key) {
+                            if Arc::ptr_eq(existing_sig, registered_sig) {
+                                map.remove(key);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Drop every cache entry. Used on project-generation bumps.
+    pub fn invalidate_all(&self) {
+        let n = self.entries.len() as u64;
+        self.entries.clear();
+        self.canonical_to_keys.clear();
+        self.live_counter.fetch_sub(
+            n.min(self.live_counter.load(Ordering::Relaxed)),
+            Ordering::Relaxed,
+        );
+    }
+
+    /// Number of warm entries.
+    #[must_use]
+    pub fn live_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Internal — register a `(key, dep_signature)` pair under every
+    /// canonical in the dep_signature. Called from the walker's
+    /// `post_publish` callback.
+    pub(crate) fn register_post_publish(
+        &self,
+        key: MemberRouteResultCacheKey,
+        dep_signature: DepSignature,
+    ) {
+        let timing_on = verter_scheduler::request_context::current_timing_enabled();
+        for (canonical, _) in dep_signature.iter() {
+            let shard = self
+                .canonical_to_keys
+                .entry(Arc::clone(canonical))
+                .or_insert_with(|| parking_lot::Mutex::new(rustc_hash::FxHashMap::default()));
+            let lock_start = if timing_on {
+                Some(std::time::Instant::now())
+            } else {
+                None
+            };
+            let mut map = shard.value().lock();
+            let lock_wait = lock_start
+                .map(|t| t.elapsed())
+                .unwrap_or(std::time::Duration::ZERO);
+            crate::host_manage::record_family_map_lock_acquisition(lock_wait);
+            map.insert(key.clone(), Arc::clone(&dep_signature));
+        }
+    }
+
+    /// Internal — get the inflight table.
+    pub(crate) fn inflight(&self) -> &InflightTable<MemberRouteResultCacheKey> {
+        &self.inflight
+    }
+
+    /// Internal — get the entries map.
+    pub(crate) fn entries(
+        &self,
+    ) -> &DashMap<MemberRouteResultCacheKey, Arc<MemberRouteResultEntry>> {
+        &self.entries
+    }
+
+    /// Internal — bump the live counter.
+    pub(crate) fn bump_live_counter(&self) {
+        self.live_counter.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+impl Default for MemberRouteResultDb {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl crate::invalidation_domain::ParticipatesInInvalidation for MemberRouteResultDb {
+    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        &[FileContent, ComponentMeta, ProjectGeneration]
+    }
+    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        if matches!(domain, ProjectGeneration) {
+            self.invalidate_all();
+        }
+    }
+}
+
+impl crate::invalidation_domain::InvalidationByCanonical for MemberRouteResultDb {
+    fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
+        let before = self.live_count();
+        self.invalidate_for_canonical(canonical_id);
+        let after = self.live_count();
+        before.saturating_sub(after)
+    }
+}
+
+/// Cooperative-admission wrapper invoked by the macro-member walker on
+/// the cold path. The `compute` closure runs synchronously on the
+/// caller's thread (per cooperative_admission's synchronous-compute
+/// contract), so capturing `&dyn ResolverContext` in the inner compute
+/// is safe.
+///
+/// On cooperative-admission success: bumps `live_counter`, registers
+/// the reverse-index, and returns `Some(CacheRead)`. On revalidation
+/// failure or compute returning `None`: returns `None` and the caller
+/// falls back to an uncached recompute.
+pub(crate) fn member_route_result_db_get_or_compute<C>(
+    db: &MemberRouteResultDb,
+    key: MemberRouteResultCacheKey,
+    ctx: &dyn ResolverContext,
+    compute_walker: C,
+) -> Option<crate::semantic_query::CacheRead<TypeExpr>>
+where
+    C: FnOnce(&mut Vec<(Arc<str>, crate::semantic_query::DepVersion)>) -> TypeExpr,
+{
+    let key_for_register = key.clone();
+    cooperative_get_or_insert_with_post_publish(
+        db.entries(),
+        db.inflight(),
+        key,
+        |entry: &MemberRouteResultEntry| {
+            if ctx.validate_dep_signature(&entry.dep_signature) {
+                Some(crate::semantic_query::CacheRead {
+                    value: entry.result.clone(),
+                    dep_signature: Arc::clone(&entry.dep_signature),
+                })
+            } else {
+                None
+            }
+        },
+        || -> Option<MemberRouteResultEntry> {
+            let mut compute_fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
+            let result = compute_walker(&mut compute_fence);
+            // Seed the fence with the scope's whole_hash so cache reuse
+            // is bounded by the scope's content generation. The walker
+            // captures additional dep facts via dispatch sub-calls.
+            Some(MemberRouteResultEntry {
+                result,
+                dep_signature: Arc::from(compute_fence.into_boxed_slice()),
+            })
+        },
+        |entry: &MemberRouteResultEntry| crate::semantic_query::CacheRead {
+            value: entry.result.clone(),
+            dep_signature: Arc::clone(&entry.dep_signature),
+        },
+        |entry: &MemberRouteResultEntry| ctx.validate_dep_signature(&entry.dep_signature),
+        move |entry_arc: &Arc<MemberRouteResultEntry>, _k: &MemberRouteResultCacheKey| {
+            db.bump_live_counter();
+            db.register_post_publish(
+                key_for_register.clone(),
+                Arc::clone(&entry_arc.dep_signature),
+            );
+        },
+    )
+}
+
+
+// ===========================================================================
+// MemberRouteResultDb — caches the result of
+// `materialize_component_meta_macro_shape_member_type_expr`. Keyed on
+// `(scope_canonical_id, member_name, lowered, mode)`. Sits below the
+// cycle / package guards inside the macro-member walker so the
+// candidate-builder cost (project_expr_class_a_via_dispatch +
+// project_expr_class_a_via_dispatch_threaded × scopes) and the per-
+// candidate `materialize_component_meta_type_expr_until_stable`
+// recursion run exactly once per `(scope, member, lowered, mode)`
+// combination per project generation.
+// ===========================================================================
+
+/// Final-result cache key for the macro-member walker. Identifies a
+/// `(scope, member_name, lowered, mode)` tuple. The `lowered` field is
+/// the same `Arc<TypeExpr>` shape used by [`MaterializeMemoDb`] —
+/// structural equality across requests gives stable keying.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MemberRouteResultCacheKey {
+    /// Owner scope — the canonical id the macro-member walker was
+    /// dispatched in.
+    pub scope_canonical_id: Arc<str>,
+    /// Member name being projected.
+    pub member_name: Arc<str>,
+    /// The lowered `TypeExpr` (the macro's type-argument shape) the
+    /// route projection is rooted on.
+    pub lowered: Arc<TypeExpr>,
+    /// Caller-side projection mode. Today the macro-member walker
+    /// always invokes the materialiser at `Expanded`, but the mode is
+    /// part of the key for forward-compatibility and to mirror the
+    /// `MaterializeMemoDb` shape.
+    pub mode: ProjectionMode,
+}
+
+/// Entry stored in [`MemberRouteResultDb`]. Carries the resulting
+/// `TypeExpr` (the `best` value selected by the walker) plus the
+/// `dep_signature` that produced it.
+#[derive(Clone)]
+pub struct MemberRouteResultEntry {
+    /// The cached macro-member walker output.
+    pub result: TypeExpr,
+    /// `dep_signature` observed during the cold build. Used by
+    /// `peek` and the cooperative-admission post-publish revalidation
+    /// to detect stale entries after canonical invalidation.
+    pub dep_signature: DepSignature,
+}
+
+/// Final-result cache for the macro-member walker route projection.
+/// Mirrors [`MaterializeStructureDb`]'s cooperative-admission +
+/// reverse-index pattern.
+pub struct MemberRouteResultDb {
+    entries: DashMap<MemberRouteResultCacheKey, Arc<MemberRouteResultEntry>>,
+    inflight: InflightTable<MemberRouteResultCacheKey>,
+    /// Per-canonical reverse index: maps each canonical id to the set
+    /// of cache keys whose `dep_signature` references it, paired with
+    /// the registered `dep_signature` `Arc`. `invalidate_for_canonical`
+    /// drains this map and uses `Arc::ptr_eq` to discriminate stale
+    /// entries from fresh post-publish writes.
+    canonical_to_keys: DashMap<
+        Arc<str>,
+        parking_lot::Mutex<rustc_hash::FxHashMap<MemberRouteResultCacheKey, DepSignature>>,
+    >,
+    live_counter: Arc<AtomicU64>,
+}
+
+impl MemberRouteResultDb {
+    /// Construct a fresh cache with an unshared `live_counter`. Tests-only.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::with_counter(Arc::new(AtomicU64::new(0)))
+    }
+
+    /// Construct with a shared `live_counter` borrowed from
+    /// `ProjectTypeStoreCounters::component_meta_cache_live`.
+    pub(crate) fn with_counter(live_counter: Arc<AtomicU64>) -> Self {
+        Self {
+            entries: DashMap::new(),
+            inflight: InflightTable::new(),
+            canonical_to_keys: DashMap::new(),
+            live_counter,
+        }
+    }
+
+    /// Read-only test accessor for the shared `live_counter`.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn live_counter_for_test(&self) -> u64 {
+        self.live_counter.load(Ordering::Relaxed)
+    }
+
+    /// Read-only peek with proactive stale-entry removal. Records a
+    /// `cache_counters.member_route_result.{hits,misses}` event on the
+    /// active request context.
+    pub(crate) fn peek(
+        &self,
+        key: &MemberRouteResultCacheKey,
+        ctx: &dyn ResolverContext,
+    ) -> Option<crate::semantic_query::CacheRead<TypeExpr>> {
+        let result = (|| -> Option<crate::semantic_query::CacheRead<TypeExpr>> {
+            let entry_arc = self.entries.get(key).map(|e| e.clone())?;
+            if !ctx.validate_dep_signature(&entry_arc.dep_signature) {
+                let removed = self
+                    .entries
+                    .remove_if(key, |_, e| Arc::ptr_eq(e, &entry_arc));
+                if removed.is_some() {
+                    self.live_counter.fetch_sub(1, Ordering::Relaxed);
+                }
+                return None;
+            }
+            Some(crate::semantic_query::CacheRead {
+                value: entry_arc.result.clone(),
+                dep_signature: entry_arc.dep_signature.clone(),
+            })
+        })();
+        if let Some(rctx) = crate::request_context::current_request_context() {
+            if result.is_some() {
+                rctx.cache_counters
+                    .member_route_result
+                    .hits
+                    .fetch_add(1, Ordering::Relaxed);
+            } else {
+                rctx.cache_counters
+                    .member_route_result
+                    .misses
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        result
+    }
+
+    /// Drop every cache entry whose `dep_signature` references
+    /// `canonical_id`. Mirrors [`MaterializeStructureDb::invalidate_for_canonical`].
+    pub fn invalidate_for_canonical(&self, canonical_id: &str) {
+        let drained: Vec<(MemberRouteResultCacheKey, DepSignature)> =
+            match self.canonical_to_keys.remove(canonical_id) {
+                Some((_, mutex)) => mutex.lock().drain().collect(),
+                None => return,
+            };
+        for (key, registered_sig) in &drained {
+            let registered = Arc::clone(registered_sig);
+            let removed = self.entries.remove_if(key, move |_, entry_arc| {
+                Arc::ptr_eq(&entry_arc.dep_signature, &registered)
+            });
+            if removed.is_some() {
+                self.live_counter.fetch_sub(1, Ordering::Relaxed);
+                for (other_canonical, _) in registered_sig.iter() {
+                    if other_canonical.as_ref() == canonical_id {
+                        continue;
+                    }
+                    if let Some(shard) = self.canonical_to_keys.get(other_canonical) {
+                        let mut map = shard.lock();
+                        if let Some(existing_sig) = map.get(key) {
+                            if Arc::ptr_eq(existing_sig, registered_sig) {
+                                map.remove(key);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Drop every cache entry. Used on project-generation bumps.
+    pub fn invalidate_all(&self) {
+        let n = self.entries.len() as u64;
+        self.entries.clear();
+        self.canonical_to_keys.clear();
+        self.live_counter.fetch_sub(
+            n.min(self.live_counter.load(Ordering::Relaxed)),
+            Ordering::Relaxed,
+        );
+    }
+
+    /// Number of warm entries.
+    #[must_use]
+    pub fn live_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Internal — register a `(key, dep_signature)` pair under every
+    /// canonical in the dep_signature. Called from the walker's
+    /// `post_publish` callback.
+    pub(crate) fn register_post_publish(
+        &self,
+        key: MemberRouteResultCacheKey,
+        dep_signature: DepSignature,
+    ) {
+        let timing_on = verter_scheduler::request_context::current_timing_enabled();
+        for (canonical, _) in dep_signature.iter() {
+            let shard = self
+                .canonical_to_keys
+                .entry(Arc::clone(canonical))
+                .or_insert_with(|| parking_lot::Mutex::new(rustc_hash::FxHashMap::default()));
+            let lock_start = if timing_on {
+                Some(std::time::Instant::now())
+            } else {
+                None
+            };
+            let mut map = shard.value().lock();
+            let lock_wait = lock_start
+                .map(|t| t.elapsed())
+                .unwrap_or(std::time::Duration::ZERO);
+            crate::host_manage::record_family_map_lock_acquisition(lock_wait);
+            map.insert(key.clone(), Arc::clone(&dep_signature));
+        }
+    }
+
+    /// Internal — get the inflight table.
+    pub(crate) fn inflight(&self) -> &InflightTable<MemberRouteResultCacheKey> {
+        &self.inflight
+    }
+
+    /// Internal — get the entries map.
+    pub(crate) fn entries(
+        &self,
+    ) -> &DashMap<MemberRouteResultCacheKey, Arc<MemberRouteResultEntry>> {
+        &self.entries
+    }
+
+    /// Internal — bump the live counter.
+    pub(crate) fn bump_live_counter(&self) {
+        self.live_counter.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+impl Default for MemberRouteResultDb {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl crate::invalidation_domain::ParticipatesInInvalidation for MemberRouteResultDb {
+    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        &[FileContent, ComponentMeta, ProjectGeneration]
+    }
+    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
+        use crate::invalidation_domain::InvalidationDomain::*;
+        if matches!(domain, ProjectGeneration) {
+            self.invalidate_all();
+        }
+    }
+}
+
+impl crate::invalidation_domain::InvalidationByCanonical for MemberRouteResultDb {
+    fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
+        let before = self.live_count();
+        self.invalidate_for_canonical(canonical_id);
+        let after = self.live_count();
+        before.saturating_sub(after)
+    }
+}
+
+/// Cooperative-admission wrapper invoked by the macro-member walker on
+/// the cold path. The `compute` closure runs synchronously on the
+/// caller's thread (per cooperative_admission's synchronous-compute
+/// contract), so capturing `&dyn ResolverContext` in the inner compute
+/// is safe.
+///
+/// On cooperative-admission success: bumps `live_counter`, registers
+/// the reverse-index, and returns `Some(CacheRead)`. On revalidation
+/// failure or compute returning `None`: returns `None` and the caller
+/// falls back to an uncached recompute.
+pub(crate) fn member_route_result_db_get_or_compute<C>(
+    db: &MemberRouteResultDb,
+    key: MemberRouteResultCacheKey,
+    ctx: &dyn ResolverContext,
+    compute_walker: C,
+) -> Option<crate::semantic_query::CacheRead<TypeExpr>>
+where
+    C: FnOnce(&mut Vec<(Arc<str>, crate::semantic_query::DepVersion)>) -> TypeExpr,
+{
+    let key_for_register = key.clone();
+    cooperative_get_or_insert_with_post_publish(
+        db.entries(),
+        db.inflight(),
+        key,
+        |entry: &MemberRouteResultEntry| {
+            if ctx.validate_dep_signature(&entry.dep_signature) {
+                Some(crate::semantic_query::CacheRead {
+                    value: entry.result.clone(),
+                    dep_signature: Arc::clone(&entry.dep_signature),
+                })
+            } else {
+                None
+            }
+        },
+        || -> Option<MemberRouteResultEntry> {
+            let mut compute_fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
+            let result = compute_walker(&mut compute_fence);
+            // Seed the fence with the scope's whole_hash so cache reuse
+            // is bounded by the scope's content generation. The walker
+            // captures additional dep facts via dispatch sub-calls.
+            Some(MemberRouteResultEntry {
+                result,
+                dep_signature: Arc::from(compute_fence.into_boxed_slice()),
+            })
+        },
+        |entry: &MemberRouteResultEntry| crate::semantic_query::CacheRead {
+            value: entry.result.clone(),
+            dep_signature: Arc::clone(&entry.dep_signature),
+        },
+        |entry: &MemberRouteResultEntry| ctx.validate_dep_signature(&entry.dep_signature),
+        move |entry_arc: &Arc<MemberRouteResultEntry>, _k: &MemberRouteResultCacheKey| {
+            db.bump_live_counter();
+            db.register_post_publish(
+                key_for_register.clone(),
+                Arc::clone(&entry_arc.dep_signature),
+            );
+        },
+    )
+}

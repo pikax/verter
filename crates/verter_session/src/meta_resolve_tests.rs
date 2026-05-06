@@ -8308,6 +8308,111 @@ defineProps<{ ui?: Button['ui'] }>()
     );
 }
 
+
+/// Regression: `MemberRouteResultDb` collapses repeated calls to
+/// `materialize_component_meta_macro_shape_member_type_expr` for the
+/// same `(scope, member_name, lowered, mode)` tuple onto a single cold
+/// build. The orchestrator's loop-1 materializer-explorer attribution
+/// identified the macro-member walker's route-candidate fan-out as
+/// the central bottleneck on ChatMessage cold-path; this test pins
+/// the host-owned cache contract that fixes it.
+///
+/// **Discriminator:** the live entry count on the host-owned
+/// `MemberRouteResultDb` after 4 invocations of the walker with
+/// identical arguments. Pre-fix (no cache): every call computes
+/// independently, so the DB stays empty (no entries published).
+/// Post-fix: the first call publishes one entry, calls 2-4 hit the
+/// peek and return the cached `TypeExpr` without re-invoking the
+/// route-candidate builder.
+#[test]
+fn member_route_result_db_caches_repeated_route_resolution() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"
+export interface PropsBase<T> {
+  message: T,
+  user: string,
+  count: number
+}
+
+export type AssistantProps = PropsBase<{ role: 'assistant'; tool: string }>
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { AssistantProps } from './types'
+defineProps<AssistantProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let host = project.host();
+    let _store_view = host.resolver_store_view();
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
+
+    // Build a TypeExpr that exercises the route-candidate path: a
+    // generic type ref where the macro-member walker projects each
+    // member name through `IndexedAccess { object: lowered, index:
+    // member_name }`. The same `lowered` + 4 invocations with the
+    // same `member_name` exercises the cache directly.
+    let lowered = verter_semantic::analysis::type_expr_lower::parse_type_annotation(
+        "AssistantProps",
+    );
+    let current = lowered.clone();
+    let scope = "/src/App.vue";
+    let member = "message";
+
+    // Snapshot live entries before any invocation.
+    let db_pre = host.project_type_store().member_route_result_db().live_count();
+
+    // Drive 4 calls with identical arguments. The first publishes
+    // (cold build), the remaining 3 hit the peek.
+    let r1 = crate::meta_resolve::macro_member_walk::materialize_component_meta_macro_shape_member_type_expr(
+        &lowered, member, &current, scope, &mut query_engine,
+    );
+    let r2 = crate::meta_resolve::macro_member_walk::materialize_component_meta_macro_shape_member_type_expr(
+        &lowered, member, &current, scope, &mut query_engine,
+    );
+    let r3 = crate::meta_resolve::macro_member_walk::materialize_component_meta_macro_shape_member_type_expr(
+        &lowered, member, &current, scope, &mut query_engine,
+    );
+    let r4 = crate::meta_resolve::macro_member_walk::materialize_component_meta_macro_shape_member_type_expr(
+        &lowered, member, &current, scope, &mut query_engine,
+    );
+
+    // All four calls must return the same TypeExpr — cache reuse is
+    // structure-preserving.
+    assert_eq!(
+        r1, r2,
+        "second invocation must return the same TypeExpr as the first",
+    );
+    assert_eq!(
+        r2, r3,
+        "third invocation must return the same TypeExpr as the second",
+    );
+    assert_eq!(
+        r3, r4,
+        "fourth invocation must return the same TypeExpr as the third",
+    );
+
+    // Discriminator: the `MemberRouteResultDb` live_count rose by
+    // exactly one. Pre-fix would publish 0 (no cache exists); post-
+    // fix publishes exactly 1 entry shared across all 4 calls.
+    let db_post = host.project_type_store().member_route_result_db().live_count();
+    let published = db_post.saturating_sub(db_pre);
+    assert_eq!(
+        published, 1,
+        "exactly one MemberRouteResultDb entry must be published across 4 identical \
+         macro-member walker invocations (got {published} entries; pre={db_pre}, post={db_post})",
+    );
+}
+
 #[test]
 fn define_props_member_rescue_skips_symbolic_imported_union_field_routes() {
     let project = make_project();

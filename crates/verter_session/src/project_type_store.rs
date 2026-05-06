@@ -2126,6 +2126,20 @@ impl ProjectTypeStore {
         &self.ref_cycle_db
     }
 
+
+    /// Accessor for the host-owned macro-member walker route-result
+    /// cache consulted by
+    /// `meta_resolve::macro_member_walk::materialize_component_meta_macro_shape_member_type_expr`.
+    /// The cache memoizes the full `(scope, member, lowered, mode) →
+    /// TypeExpr` projection, collapsing per-property route-candidate
+    /// fan-out into a single dispatch per member-name per project
+    /// generation.
+    pub fn member_route_result_db(
+        &self,
+    ) -> &crate::component_meta_caches::MemberRouteResultDb {
+        &self.member_route_result_db
+    }
+
     pub fn prepared_surface_db(&self) -> &PreparedSurfaceDb {
         &self.prepared_surface_db
     }
@@ -2385,12 +2399,6 @@ impl Default for ProjectTypeStore {
 // the guard.
 // ──────────────────────────────────────────────────────────────────────────
 
-/// Inventory of every DB-typed field on [`ProjectTypeStore`] that
-/// participates in the typed cache invalidation domain cascade.
-///
-/// Declares this inventory as the single source of truth
-/// for cascade coverage. The architecture guard walks the struct and
-/// asserts every DB-typed field name appears here.
 pub const PROJECT_TYPE_STORE_DB_INVENTORY: &[&str] = &[
     "indexed",
     "analysis",
@@ -2408,6 +2416,7 @@ pub const PROJECT_TYPE_STORE_DB_INVENTORY: &[&str] = &[
     "materialize_memo_db",
     "materialize_structure_db",
     "ref_cycle_db",
+    "member_route_result_db",
     "prepared_surface_db",
     "prepared_member_db",
     "routed_expr_surface_db",
@@ -2433,18 +2442,6 @@ pub const PROJECT_TYPE_STORE_DB_INVENTORY: &[&str] = &[
 ];
 
 impl ProjectTypeStore {
-    /// Return one
-    /// [`ParticipatesInInvalidation`](crate::invalidation_domain::ParticipatesInInvalidation)
-    /// reference per registered DB.
-    ///
-    /// Used by [`Self::invalidate_canonical_across_all_dbs`] (the
-    /// macro-equivalent monomorphic cascade) and by the coverage guard
-    /// `every_db_in_project_type_store_participates_in_invalidation`
-    /// in `tests/invalidation_coverage.rs`.
-    ///
-    /// Order matches [`PROJECT_TYPE_STORE_DB_INVENTORY`] exactly. Any
-    /// new DB MUST add an entry here AND in the inventory; the
-    /// coverage guard length-asserts both lists.
     pub fn all_dbs_for_invalidation(
         &self,
     ) -> Vec<&dyn crate::invalidation_domain::ParticipatesInInvalidation> {
@@ -2465,6 +2462,7 @@ impl ProjectTypeStore {
             &self.materialize_memo_db,
             &self.materialize_structure_db,
             &self.ref_cycle_db,
+            &self.member_route_result_db,
             &self.prepared_surface_db,
             &self.prepared_member_db,
             &self.routed_expr_surface_db,

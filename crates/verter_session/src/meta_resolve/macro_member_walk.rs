@@ -660,6 +660,49 @@ pub(crate) fn walk_component_meta_macro_shape_member_types(
     }
 }
 
+/// Publish a successful macro-member walker result into
+/// `MemberRouteResultDb`. Called at every return site that produced a
+/// `Value` outcome (the route-candidate fast-path return, the
+/// `candidate_is_good_enough(&best)` short-circuit, and the slow-path
+/// loop's terminal return). The publish path uses
+/// cooperative-admission `post_publish` so concurrent cold builds for
+/// the same `(scope, member, lowered, mode)` collapse onto one entry,
+/// and the reverse-index registration on every canonical in the
+/// dep_signature wires per-canonical eviction symmetric to
+/// `MaterializeStructureDb`.
+fn publish_member_route_result(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    cache_key: &crate::component_meta_caches::MemberRouteResultCacheKey,
+    result: &verter_semantic::analysis::type_expr::TypeExpr,
+) {
+    let db = ctx.project_type_store().member_route_result_db();
+    let captured_canonical = cache_key.scope_canonical_id.clone();
+    let captured_result = result.clone();
+    let _ = crate::component_meta_caches::member_route_result_db_get_or_compute(
+        db,
+        cache_key.clone(),
+        ctx,
+        move |compute_fence| {
+            // Seed the dep_signature with the scope's whole_hash so a
+            // file-content edit on the owner invalidates this entry.
+            // The walker's downstream calls into
+            // `materialize_component_meta_type_expr_until_stable`
+            // accumulate dispatch dep facts via
+            // `accumulate_dispatch_dep_signature` into the per-request
+            // thread-local, but those don't propagate into THIS entry's
+            // signature directly — the scope whole_hash is the
+            // load-bearing fact for invalidation correctness.
+            if let Some(state) = ctx.shallow_file_state(captured_canonical.as_ref()) {
+                compute_fence.push((
+                    std::sync::Arc::clone(&captured_canonical),
+                    crate::semantic_query::DepVersion::WholeHash(state.whole_hash),
+                ));
+            }
+            captured_result
+        },
+    );
+}
+
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub(crate) fn materialize_component_meta_macro_shape_member_type_expr(
     lowered: &verter_semantic::analysis::type_expr::TypeExpr,
@@ -737,6 +780,31 @@ pub(crate) fn materialize_component_meta_macro_shape_member_type_expr(
         }
 
         inner(expr)
+    }
+
+    // Final-result cache peek BEFORE the route_candidates Vec
+    // builder. The cache key is `(scope, member_name, lowered, mode)`;
+    // `current` is the per-property surface that varies between
+    // sibling properties of the same `lowered` and is NOT part of
+    // the key — `wrapped_member_leaf` reproduces the per-property
+    // adjustment when needed below. Sits below the cycle / package
+    // guards because those are encoded in the dep_signature path
+    // through `materialize_component_meta_type_expr_until_stable`'s
+    // dispatch fence accumulation. The stored result is the `best`
+    // value the slow path would have selected for this `(scope,
+    // member, lowered, mode)` tuple.
+    let cache_key = crate::component_meta_caches::MemberRouteResultCacheKey {
+        scope_canonical_id: std::sync::Arc::<str>::from(scope_canonical_id),
+        member_name: std::sync::Arc::<str>::from(member_name),
+        lowered: std::sync::Arc::new(lowered.clone()),
+        mode: crate::semantic_query::ProjectionMode::Expanded,
+    };
+    {
+        let ctx = query_engine.ctx;
+        let db = ctx.project_type_store().member_route_result_db();
+        if let Some(cached) = db.peek(&cache_key, ctx) {
+            return cached.value;
+        }
     }
 
     let current_is_route_expr = matches!(
@@ -896,7 +964,9 @@ pub(crate) fn materialize_component_meta_macro_shape_member_type_expr(
         if candidate_is_good_enough(candidate) {
             #[cfg(test)]
             MEMBER_ROUTE_FAST_PATH_HITS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            return candidate.clone();
+            let result = candidate.clone();
+            publish_member_route_result(query_engine.ctx, &cache_key, &result);
+            return result;
         }
     }
 
@@ -935,6 +1005,7 @@ pub(crate) fn materialize_component_meta_macro_shape_member_type_expr(
         }
     }
     if candidate_is_good_enough(&best) {
+        publish_member_route_result(query_engine.ctx, &cache_key, &best);
         return best;
     }
     // The materialiser's registry-route branch
@@ -974,5 +1045,6 @@ pub(crate) fn materialize_component_meta_macro_shape_member_type_expr(
         }
     }
 
+    publish_member_route_result(query_engine.ctx, &cache_key, &best);
     best
 }

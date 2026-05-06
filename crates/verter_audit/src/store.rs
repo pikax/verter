@@ -28,21 +28,6 @@ pub struct CacheLayerHitMiss {
     pub misses: u64,
 }
 
-/// Per-cache hit/miss breakdown for the cache layers participating
-/// in the request's per-cache observability surface. Each field
-/// mirrors a host-owned cache; the values are this-request-only
-/// deltas snapshotted from the per-request counter array.
-///
-/// Joiner-accounting contract: when N concurrent requests dedup-join
-/// the same in-flight semantic computation, attribution is exact and
-/// per-request:
-/// - The cold winner records `cache: Miss` + `from_cache: false` and
-///   bumps the cache layer's `misses` counter once on its TLS context.
-/// - Each joiner records `cache: Hit (joined)` + `from_cache: true`
-///   and bumps the cache layer's `hits` counter once on its TLS
-///   context.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
 pub struct CacheLayerBreakdown {
     /// `IndexedReadyDb` — canonical post-parse artifact cache.
     pub indexed: CacheLayerHitMiss,
@@ -67,6 +52,11 @@ pub struct CacheLayerBreakdown {
     pub materialize_structure: CacheLayerHitMiss,
     /// `MaterializeMemoDb` — materialiser memo cache.
     pub materialize_memo: CacheLayerHitMiss,
+    /// `MemberRouteResultDb` — macro-member walker route-result cache
+    /// keyed on `(scope, member_name, lowered, mode)`. Hits indicate
+    /// the route-candidate builder + per-candidate `until_stable`
+    /// recursion was short-circuited inside the macro-member walker.
+    pub member_route_result: CacheLayerHitMiss,
     /// `PreparedSurfaceDb` — prepared-surface cache.
     pub prepared_surface: CacheLayerHitMiss,
     /// `PreparedMemberDb` — prepared-member cache.

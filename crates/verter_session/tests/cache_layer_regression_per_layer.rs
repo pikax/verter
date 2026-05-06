@@ -162,29 +162,12 @@ fn layer_route_owned_shallow_get_misses_increment_per_request_counter() {
     assert_eq!(ctx.cache_counters.indexed.misses.load(Ordering::Relaxed), 0);
 }
 
-/// `component_meta`, `route_db`, `ref_cycle`, `intrinsic_registry`,
-/// `materialize_structure`, `materialize_memo`, `prepared_surface`,
-/// `prepared_member` are exercised through the audited entry point
-/// in `cache_layer_per_request_attribution.rs` and
-/// `cache_layer_concurrent_attribution.rs`. Their pub(crate)
-/// constructors are not reachable from integration tests; the bump
-/// sites are validated end-to-end via the audited resolver.
-///
-/// `semantic_graph` and `route_db` are similarly not directly
-/// constructible from integration tests because their public APIs
-/// require host-internal scaffolding (resolver context, store view).
-/// However, the bump-site code path is identical for every
-/// `if let Some(rctx) = current_request_context()` branch — the
-/// regression test below verifies this branching contract holds for
-/// all 13 layers structurally: each layer's `HitMiss` field must
-/// be addressable on `cache_counters`, and each must default to
-/// (0, 0). A change that drops a layer would fail to compile.
 #[test]
 fn all_thirteen_cache_layers_present_and_default_to_zero() {
     let ctx = make_ctx();
     // Structural regression: each named layer must compile-time
     // exist. Reading the field forces the compiler to verify it.
-    let pairs: [(u64, u64); 13] = [
+    let pairs: [(u64, u64); 14] = [
         ctx.cache_counters.indexed.snapshot(),
         ctx.cache_counters.analysis.snapshot(),
         ctx.cache_counters.owner_import.snapshot(),
@@ -196,6 +179,7 @@ fn all_thirteen_cache_layers_present_and_default_to_zero() {
         ctx.cache_counters.semantic_graph.snapshot(),
         ctx.cache_counters.materialize_structure.snapshot(),
         ctx.cache_counters.materialize_memo.snapshot(),
+        ctx.cache_counters.member_route_result.snapshot(),
         ctx.cache_counters.prepared_surface.snapshot(),
         ctx.cache_counters.prepared_member.snapshot(),
     ];
