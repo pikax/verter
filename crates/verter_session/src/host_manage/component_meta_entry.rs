@@ -513,11 +513,19 @@ impl VerterHost {
     /// on the active [`crate::request_context::RequestContext`]. The
     /// registration removes the in-flight slot from the host's
     /// active-request registry and inserts the record into the
-    /// records store. When no registration is installed (an audit
-    /// record produced by code paths outside the public audited
-    /// entry-point) the record is inserted directly so the
-    /// host-wide store stays consistent — this branch is rare and
-    /// covers the synthetic test fixture path.
+    /// records store.
+    ///
+    /// When no registration is installed (the active context predates
+    /// the audited entry-point or no context is in scope at all), the
+    /// record is inserted directly so the host-wide store stays
+    /// consistent. This branch covers code paths that bypass the
+    /// public audited entry-point — e.g. tests that drive
+    /// `resolve_component_meta` without first installing a
+    /// registration, or callers that go through the lower-level
+    /// `ComponentMetaSession::get_component_meta` API on an
+    /// audit-enabled host. The fallback never touches the
+    /// active-request registry; only the records store is
+    /// populated.
     pub fn finalize_request_audit_record(
         &self,
         record: crate::component_meta_audit::RequestAuditRecord,
@@ -528,12 +536,6 @@ impl VerterHost {
                 return;
             }
         }
-        // Fallback: direct insert when no registration is in scope.
-        // The synthetic test fixture path lands here because it
-        // never enters the public audited entry-point. The fallback
-        // is intentionally narrow — production traffic always enters
-        // through `get_component_meta_with_resolution`, which
-        // installs a registration.
         self.audit_records.insert(record);
     }
 
