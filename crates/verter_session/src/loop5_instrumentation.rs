@@ -359,6 +359,17 @@ pub static APPEND_REGISTRY_ENTRIES_NS: AtomicU64 = AtomicU64::new(0);
 pub static MATERIALIZE_FIELD_TYPES_CALLS: AtomicU64 = AtomicU64::new(0);
 pub static MATERIALIZE_FIELD_TYPES_NS: AtomicU64 = AtomicU64::new(0);
 
+/// Every call to `lowered_root_reaches_transitive_cycle` that takes
+/// the TypeExpr-walk fast path (no dispatch lowering). The deep-lower
+/// path was only useful for `Ref` / `RecursiveRef` shapes that
+/// directly carried a route-root identity in their lowered form;
+/// `IndexedAccess` shapes always fell through the post-lowering match
+/// to `_ => return false` after paying for the lowering recursion.
+/// The walk path constructs a `DeclIdentity` from the outermost
+/// `Ref`/`RecursiveRef` of the TypeExpr structure without triggering
+/// any third-party shallow-file loads. Inert in production.
+pub static LOWERED_ROOT_CYCLE_FAST_PATH_HITS: AtomicU64 = AtomicU64::new(0);
+
 // ===== Loop 9 — inner-block sub-timers =====
 //
 // Loop 8 confirmed 99.98% of materialize_ms lives in two function

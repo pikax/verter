@@ -589,69 +589,70 @@ pub(crate) fn select_imported_materialization_scope(
     (!final_scope.is_empty() && final_scope != owner_canonical).then_some(final_scope)
 }
 
-/// Migration helper. Lowers `expr` via Navigate to a
-/// `SemanticNodeId`, extracts the root identity (DeclRef or
-/// InstantiationRef base), and delegates to the canonical graph-native
-/// [`crate::meta_resolve::ref_root_reaches_transitive_cycle_node`]
-/// predicate. The cycle-BFS dep-signature facts are accumulated into
-/// the per-request thread-local dispatch accumulator so completion
-/// fences stay complete.
-///
-/// Returns `false` when (a) lowering fails or (b) the lowered node is
-/// neither a `DeclRef` nor an `InstantiationRef` — neither shape carries
-/// a route root identity and the legacy adapter behaved the same way.
 pub(crate) fn lowered_root_reaches_transitive_cycle(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     scope_canonical_id: &str,
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
 ) -> bool {
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::{ProjectionMode, SemanticNodeData};
     use verter_semantic::analysis::type_expr::TypeExpr;
 
-    // Pre-filter to top-level shapes that can carry a route root
-    // identity. The post-lowering match below early-returns `false`
-    // for any node whose `SemanticNodeData` is neither `DeclRef` nor
-    // `InstantiationRef`. Lowering is recursive over the entire
-    // TypeExpr subtree; calling it on a Function / Intersection /
-    // Object / Union deeply lowers all children only to discard the
-    // result. ChatMessage's slot member types are Functions whose
-    // parameter types are deeply-generic intersections from
-    // third-party packages (`UIMessage<TMetadata, TDataParts, TTools> &
-    // {...}`); deep lowering of those intersections per slot member
-    // produced minutes of wasted work before the early-return fired.
-    fn shape_carries_route_root_identity(expr: &TypeExpr) -> bool {
+    // Extract the root identity carried by the TypeExpr structure
+    // WITHOUT lowering. Lowering is recursive over the entire subtree
+    // (including generic args' constraints/defaults that may load
+    // third-party `.d.ts` files); calling it on a deeply-generic
+    // `IndexedAccess { Ref<X<TMetadata, TDataParts, TTools>>, "k" }`
+    // expression deeply lowers all children only to discard the result
+    // (the post-lowering identity match accepts only `DeclRef` and
+    // `InstantiationRef`, never `IndexedAccess`). For ChatMessage's
+    // `leading.avatar` slot binding this lowering ate 213 seconds per
+    // call on the cold path. Walk the TypeExpr surface here and use
+    // the cached `resolve_type_declaration` to produce a
+    // `DeclIdentity` directly — no eager lowering, no third-party
+    // file loads triggered by constraint resolution.
+    fn root_decl_identity(
+        expr: &TypeExpr,
+        owner_canonical: &str,
+        query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    ) -> Option<crate::semantic_query::DeclIdentity> {
         match expr {
-            TypeExpr::Parenthesized(inner) => shape_carries_route_root_identity(inner),
-            TypeExpr::Ref { .. }
-            | TypeExpr::RecursiveRef { .. }
-            | TypeExpr::IndexedAccess { .. } => true,
-            _ => false,
+            TypeExpr::Parenthesized(inner) => {
+                root_decl_identity(inner, owner_canonical, query_engine)
+            }
+            TypeExpr::IndexedAccess { object, .. } => {
+                root_decl_identity(object, owner_canonical, query_engine)
+            }
+            TypeExpr::Ref { name, .. } | TypeExpr::RecursiveRef { name, .. } => {
+                let declaration = query_engine.resolve_type_declaration(owner_canonical, name);
+                let resolved_canonical = if declaration.canonical_source.is_empty() {
+                    Arc::<str>::from(owner_canonical)
+                } else {
+                    Arc::<str>::from(declaration.canonical_source.as_str())
+                };
+                let resolved_name = if declaration.resolved_name.is_empty() {
+                    Arc::<str>::from(name.as_ref())
+                } else {
+                    Arc::<str>::from(declaration.resolved_name.as_str())
+                };
+                let whole_hash = query_engine
+                    .ctx
+                    .shallow_file_state(resolved_canonical.as_ref())
+                    .map(|state| state.whole_hash)
+                    .unwrap_or_default();
+                Some(crate::semantic_query::DeclIdentity {
+                    canonical_id: resolved_canonical,
+                    whole_hash,
+                    decl_name: resolved_name,
+                })
+            }
+            _ => None,
         }
     }
-    if !shape_carries_route_root_identity(expr) {
-        return false;
-    }
 
-    let dispatch = ProjectSemanticDispatch::new(query_engine.ctx);
-    let Some(node_id) = dispatch.lower_type_expr_in_scope_with_mode(
-        scope_canonical_id,
-        expr,
-        ProjectionMode::Navigate,
-    ) else {
+    let Some(identity) = root_decl_identity(expr, scope_canonical_id, query_engine) else {
         return false;
     };
-    let identity = match query_engine
-        .ctx
-        .project_type_store()
-        .semantic_graph()
-        .node_data(node_id)
-        .as_deref()
-    {
-        Some(SemanticNodeData::DeclRef { identity }) => identity.clone(),
-        Some(SemanticNodeData::InstantiationRef { base, .. }) => base.clone(),
-        _ => return false,
-    };
+    crate::loop5_instrumentation::LOWERED_ROOT_CYCLE_FAST_PATH_HITS
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
     let result =
         super::ref_root_reaches_transitive_cycle_node(&identity, query_engine.ctx, &mut fence);
