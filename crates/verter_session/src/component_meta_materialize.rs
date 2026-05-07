@@ -362,6 +362,10 @@ pub(crate) fn materialize_component_meta_structure(
     ctx: &dyn ResolverContext,
     key: MaterializeStructureCacheKey,
 ) -> crate::semantic_query::CacheRead<MaterializeOutcome> {
+    let _loop8_timer = crate::loop5_instrumentation::TimerGuard::new(
+        &crate::loop5_instrumentation::MATERIALIZE_STRUCTURE_CALLS,
+        &crate::loop5_instrumentation::MATERIALIZE_STRUCTURE_NS,
+    );
     crate::host_manage::record_materialize_structure_call();
 
     let db = ctx.project_type_store().materialize_structure_db();

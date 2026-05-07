@@ -739,6 +739,10 @@ impl VerterHost {
         tracked_dependencies: &mut BTreeSet<String>,
         query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     ) {
+        let _loop8_timer = crate::loop5_instrumentation::TimerGuard::new(
+            &crate::loop5_instrumentation::APPEND_REGISTRY_ENTRIES_CALLS,
+            &crate::loop5_instrumentation::APPEND_REGISTRY_ENTRIES_NS,
+        );
         fn track_component_meta_dependency(
             tracked_dependencies: &mut BTreeSet<String>,
             owner_canonical: &str,

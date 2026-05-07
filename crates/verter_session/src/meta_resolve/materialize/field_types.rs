@@ -857,6 +857,10 @@ pub(crate) fn materialize_component_meta_field_types(
     evaluated_types: &mut verter_semantic::analysis::type_expand::ExpandedComponentTypes,
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
 ) {
+    let _loop8_timer = crate::loop5_instrumentation::TimerGuard::new(
+        &crate::loop5_instrumentation::MATERIALIZE_FIELD_TYPES_CALLS,
+        &crate::loop5_instrumentation::MATERIALIZE_FIELD_TYPES_NS,
+    );
     /// `rescue_field` mutates field type via
     /// `MacroFieldGraphState::set_current_type` rather than direct
     /// `field.r#type = X` assignment. The `field` reference is read-only
@@ -1593,6 +1597,10 @@ pub(crate) fn materialize_component_meta_field_types(
         .then_some(replacement)
     }
 
+    let _loop9_routes_build = crate::loop5_instrumentation::TimerGuard::new(
+        &crate::loop5_instrumentation::FIELD_PROP_ROUTES_BUILD_CALLS,
+        &crate::loop5_instrumentation::FIELD_PROP_ROUTES_BUILD_NS,
+    );
     let params =
         verter_semantic::analysis::type_eval_build::collect_define_macro_type_params(eval_source);
     let mut prop_member_routes = rustc_hash::FxHashMap::<
@@ -1652,224 +1660,243 @@ pub(crate) fn materialize_component_meta_field_types(
             _ => {}
         }
     }
+    drop(_loop9_routes_build);
 
     for field in &mut evaluated_types.props {
-        let preserve_raw = field_should_preserve_shallow_symbolic_raw_type(
-            scope_canonical_id,
-            field,
-            query_engine,
-        );
-        if crate::host_manage::component_meta_debug_enabled() {
-            crate::host_manage::component_meta_debug(format!(
-                "FIELD_MATERIALIZE owner={} field={} raw={:?} current={:?} preserve_raw={}",
-                scope_canonical_id, field.name, field.raw_type, field.r#type, preserve_raw,
-            ));
-        }
-        if preserve_raw {
+        // Loop-9 block 2: preserve_raw + early-out predicates.
+        // Returns `true` to signal "skip the rest of this iteration"
+        // (the legacy `continue` semantics). The TimerGuard captures
+        // wall-clock for predicate evaluation regardless of which
+        // branch fires.
+        let early_out = {
+            let _t = crate::loop5_instrumentation::TimerGuard::new(
+                &crate::loop5_instrumentation::FIELD_PROPS_PRESERVE_AND_EARLY_OUTS_CALLS,
+                &crate::loop5_instrumentation::FIELD_PROPS_PRESERVE_AND_EARLY_OUTS_NS,
+            );
+            let preserve_raw = field_should_preserve_shallow_symbolic_raw_type(
+                scope_canonical_id,
+                field,
+                query_engine,
+            );
+            if crate::host_manage::component_meta_debug_enabled() {
+                crate::host_manage::component_meta_debug(format!(
+                    "FIELD_MATERIALIZE owner={} field={} raw={:?} current={:?} preserve_raw={}",
+                    scope_canonical_id, field.name, field.raw_type, field.r#type, preserve_raw,
+                ));
+            }
+            if preserve_raw {
+                true
+            } else if let Some(raw) = parsed_field_raw_type(field).as_ref() {
+                // Issue #5 / early-out (PRE-rescue): indexed-access
+                // route + terminal-scalar surface skips the rescue.
+                if type_expr_is_indexed_access_route(raw)
+                    && type_expr_is_terminal_scalar_surface(&field.r#type)
+                    && raw_indexed_access_root_is_workspace_owned(
+                        raw,
+                        scope_canonical_id,
+                        query_engine,
+                    )
+                {
+                    if crate::host_manage::component_meta_debug_enabled() {
+                        crate::host_manage::component_meta_debug(format!(
+                            "FIELD_MATERIALIZE_INDEXED_TERMINAL_EARLY_OUT owner={} field={} raw={:?} published={:?}",
+                            scope_canonical_id, field.name, raw, field.r#type,
+                        ));
+                    }
+                    true
+                } else if let super::component_config_fast_path::FastPathOutcome::Hit(candidate) =
+                    super::component_config_fast_path::component_config_theme_variant_fast_path(
+                        raw,
+                        scope_canonical_id,
+                        query_engine.ctx,
+                    )
+                {
+                    // Issue #6 / ComponentConfig theme variant fast
+                    // path: publish the projected value and skip.
+                    field.r#type = candidate;
+                    crate::capture_token::with_active_capture(|t| {
+                        t.record_counter(
+                            super::component_config_fast_path::COMPONENT_CONFIG_FAST_PATH_HITS_COUNTER,
+                            1,
+                        )
+                    });
+                    if crate::host_manage::component_meta_debug_enabled() {
+                        crate::host_manage::component_meta_debug(format!(
+                            "FIELD_MATERIALIZE_COMPONENT_CONFIG_FAST_PATH_HIT owner={} field={} raw={:?} published={:?}",
+                            scope_canonical_id, field.name, raw, field.r#type,
+                        ));
+                    }
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+        if early_out {
             continue;
         }
 
-        // Issue #5 / early-out (PRE-rescue): when the parsed raw
-        // type is an indexed-access route and the field's published
-        // surface is already a terminal scalar (single primitive,
-        // literal, literal-string union, or `any | scalars`), the
-        // member-route projection cannot improve the result — it would
-        // re-derive the same surface through the registry. Publish the
-        // already-terminal surface and skip the rescue + member-route
-        // pipeline. The route root is required to be workspace-owned so
-        // the early-out does not mask a package-backed indexed root
-        // whose surface still needs the project_type_store rescue.
-        if let Some(raw) = parsed_field_raw_type(field).as_ref() {
-            if type_expr_is_indexed_access_route(raw)
-                && type_expr_is_terminal_scalar_surface(&field.r#type)
-                && raw_indexed_access_root_is_workspace_owned(raw, scope_canonical_id, query_engine)
-            {
-                if crate::host_manage::component_meta_debug_enabled() {
-                    crate::host_manage::component_meta_debug(format!(
-                        "FIELD_MATERIALIZE_INDEXED_TERMINAL_EARLY_OUT owner={} field={} raw={:?} published={:?}",
-                        scope_canonical_id, field.name, raw, field.r#type,
-                    ));
-                }
-                continue;
-            }
-        }
-
-        // Issue #6 / ComponentConfig theme variant fast path.
-        // Fires only when the strict-legality predicate matches (see
-        // `component_config_fast_path.rs::component_config_theme_variant_fast_path`):
-        // alias body is `ComponentConfig<typeof theme, AppConfig, key>`,
-        // the AppConfig argument is `Record<...>` (Path A) or proven
-        // by the `AppConfigNoOverrideProof` cache (Path B — deferred),
-        // and the indexed path is `['variants', literal_name]` or
-        // `['slots']`. On hit we publish the projected value and skip
-        // the rescue + member-route pipeline.
-        if let Some(raw) = parsed_field_raw_type(field).as_ref() {
-            if let super::component_config_fast_path::FastPathOutcome::Hit(candidate) =
-                super::component_config_fast_path::component_config_theme_variant_fast_path(
-                    raw,
-                    scope_canonical_id,
-                    query_engine.ctx,
-                )
-            {
-                field.r#type = candidate;
-                crate::capture_token::with_active_capture(|t| {
-                    t.record_counter(
-                        super::component_config_fast_path::COMPONENT_CONFIG_FAST_PATH_HITS_COUNTER,
-                        1,
-                    )
-                });
-                if crate::host_manage::component_meta_debug_enabled() {
-                    crate::host_manage::component_meta_debug(format!(
-                        "FIELD_MATERIALIZE_COMPONENT_CONFIG_FAST_PATH_HIT owner={} field={} raw={:?} published={:?}",
-                        scope_canonical_id, field.name, raw, field.r#type,
-                    ));
-                }
-                continue;
-            }
-        }
-
-        // Wrap `field.r#type` in a `MacroFieldGraphState`
-        // for the duration of this iteration. Direct `field.r#type = X`
-        // mutations are routed through `field_state.set_current_type(X)`;
-        // graph-native rewrites (K2) will route through
-        // `set_current_node_rewrite`. Final write-back via `publish()`
-        // at iteration exit.
+        // Loop-9 block 3: MacroFieldGraphState wrap + define_props
+        // candidate scan + rescue_field. No early-outs: timer is a
+        // straightforward scope guard.
         let ctx = query_engine.ctx;
         let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         let mut field_state =
             MacroFieldGraphState::new(field.r#type.clone(), scope_canonical_id, &dispatch);
-        if let Some(candidate) = evaluated_types
-            .define_props
-            .iter()
-            .flat_map(|define_props| define_props.result.value.properties.iter())
-            .find(|property| property.name == field.name)
-            .map(|property| property.ty.clone())
         {
-            if compare_type_expr_improvement(&candidate, field_state.published_type())
-                && !expr_needs_projection_rescue(query_engine, scope_canonical_id, &candidate)
+            let _t = crate::loop5_instrumentation::TimerGuard::new(
+                &crate::loop5_instrumentation::FIELD_PROPS_RESCUE_FIELD_CALLS,
+                &crate::loop5_instrumentation::FIELD_PROPS_RESCUE_FIELD_NS,
+            );
+            if let Some(candidate) = evaluated_types
+                .define_props
+                .iter()
+                .flat_map(|define_props| define_props.result.value.properties.iter())
+                .find(|property| property.name == field.name)
+                .map(|property| property.ty.clone())
             {
-                field_state.set_current_type(candidate);
+                if compare_type_expr_improvement(&candidate, field_state.published_type())
+                    && !expr_needs_projection_rescue(query_engine, scope_canonical_id, &candidate)
+                {
+                    field_state.set_current_type(candidate);
+                }
             }
+            rescue_field(scope_canonical_id, field, &mut field_state, query_engine);
         }
-        rescue_field(scope_canonical_id, field, &mut field_state, query_engine);
-        // Migrate predicate to graph-native J1 _node
-        // version via field_state.raw_node().
-        let raw_needs_member_route = parsed_field_raw_type(field).as_ref().is_some_and(|raw| {
-            raw_needs_member_route_materialization(ctx, &mut field_state, raw)
-                || component_meta_registry_public_utility_route(raw).is_some()
-        });
-        let raw_is_unpreserved_top_level_ref =
-            parsed_field_raw_type(field).as_ref().is_some_and(|raw| {
-                matches!(
-                    raw,
-                    verter_semantic::analysis::type_expr::TypeExpr::Ref { type_arguments, .. }
-                        if type_arguments.is_empty()
-                )
+
+        // Loop-9 block 4: needs_member_route predicate checks +
+        // post-rescue early-out path. Computes the early-out flag
+        // inside a timed scope, then performs the publish/continue
+        // OUTSIDE the timer (since `publish()` consumes the
+        // field_state and we want the scope to drop the timer
+        // first). Returns `(early_out, raw_needs_member_route)`.
+        let (early_out_kind, raw_needs_member_route) = {
+            let _t = crate::loop5_instrumentation::TimerGuard::new(
+                &crate::loop5_instrumentation::FIELD_PROPS_NEEDS_MEMBER_ROUTE_CALLS,
+                &crate::loop5_instrumentation::FIELD_PROPS_NEEDS_MEMBER_ROUTE_NS,
+            );
+            // Migrate predicate to graph-native J1 _node
+            // version via field_state.raw_node().
+            let raw_needs_member_route = parsed_field_raw_type(field).as_ref().is_some_and(|raw| {
+                raw_needs_member_route_materialization(ctx, &mut field_state, raw)
+                    || component_meta_registry_public_utility_route(raw).is_some()
             });
-        if crate::host_manage::component_meta_debug_enabled() {
-            // Debug log uses the J1 _node predicate
-            // through field_state.current_node().
-            let current_needs = current_needs_member_route_materialization(ctx, &mut field_state);
-            crate::host_manage::component_meta_debug(format!(
-                "FIELD_MATERIALIZE_POST_RESCUE owner={} field={} current={:?} raw_needs_member_route={} raw_is_unpreserved_top_level_ref={} current_needs_member_route={}",
-                scope_canonical_id,
-                field.name,
-                field_state.published_type(),
-                raw_needs_member_route,
-                raw_is_unpreserved_top_level_ref,
-                current_needs,
-            ));
-        }
-        // Migrate predicate to graph-native J1 _node
-        // version via field_state.current_node().
-        if !(raw_needs_member_route
-            || raw_is_unpreserved_top_level_ref
-            || current_needs_member_route_materialization(ctx, &mut field_state))
-        {
+            let raw_is_unpreserved_top_level_ref =
+                parsed_field_raw_type(field).as_ref().is_some_and(|raw| {
+                    matches!(
+                        raw,
+                        verter_semantic::analysis::type_expr::TypeExpr::Ref { type_arguments, .. }
+                            if type_arguments.is_empty()
+                    )
+                });
+            if crate::host_manage::component_meta_debug_enabled() {
+                let current_needs =
+                    current_needs_member_route_materialization(ctx, &mut field_state);
+                crate::host_manage::component_meta_debug(format!(
+                    "FIELD_MATERIALIZE_POST_RESCUE owner={} field={} current={:?} raw_needs_member_route={} raw_is_unpreserved_top_level_ref={} current_needs_member_route={}",
+                    scope_canonical_id,
+                    field.name,
+                    field_state.published_type(),
+                    raw_needs_member_route,
+                    raw_is_unpreserved_top_level_ref,
+                    current_needs,
+                ));
+            }
+            // 0 = no early-out; 1 = first early-out; 2 = slots-route.
+            let early_out_kind: u8 = if !(raw_needs_member_route
+                || raw_is_unpreserved_top_level_ref
+                || current_needs_member_route_materialization(ctx, &mut field_state))
+            {
+                1
+            } else if let Some(raw) = parsed_field_raw_type(field).as_ref() {
+                if type_expr_is_slots_member_route(raw)
+                    && type_expr_is_non_empty_object_surface(field_state.published_type())
+                    && raw_indexed_access_root_is_workspace_owned(
+                        raw,
+                        scope_canonical_id,
+                        query_engine,
+                    )
+                {
+                    if crate::host_manage::component_meta_debug_enabled() {
+                        crate::host_manage::component_meta_debug(format!(
+                            "FIELD_MATERIALIZE_SLOTS_OBJECT_EARLY_OUT owner={} field={} raw={:?} published={:?}",
+                            scope_canonical_id, field.name, raw, field_state.published_type(),
+                        ));
+                    }
+                    2
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
+            (early_out_kind, raw_needs_member_route)
+        };
+        if early_out_kind != 0 {
             field.r#type = field_state.publish();
             continue;
         }
 
-        // Issue #5 / second early-out (POST-rescue): when the
-        // raw type is a `slots`-route (`X['slots']`) AND the published
-        // surface is already a non-empty object surface, the
-        // member-route projection cannot improve the result. Publish
-        // the post-rescue surface and skip the member-route pipeline.
-        // The route root must be workspace-owned (per
-        // `WorkspaceRead::is_workspace_owned`) so package-backed
-        // `Foo['slots']` shapes still flow through the existing
-        // routed-surface path.
-        if let Some(raw) = parsed_field_raw_type(field).as_ref() {
-            if type_expr_is_slots_member_route(raw)
-                && type_expr_is_non_empty_object_surface(field_state.published_type())
-                && raw_indexed_access_root_is_workspace_owned(raw, scope_canonical_id, query_engine)
-            {
-                if crate::host_manage::component_meta_debug_enabled() {
-                    crate::host_manage::component_meta_debug(format!(
-                        "FIELD_MATERIALIZE_SLOTS_OBJECT_EARLY_OUT owner={} field={} raw={:?} published={:?}",
-                        scope_canonical_id, field.name, raw, field_state.published_type(),
-                    ));
-                }
-                field.r#type = field_state.publish();
-                continue;
-            }
-        }
-
-        if let Some(routes) = prop_member_routes.get(&field.name).cloned() {
-            // Issue #5 / the member-route projection is about
-            // to fire. Record the capture-token counter so positive
-            // tests can assert `member_route_calls == 0` (early-out
-            // succeeded) and counterfixtures (conditional / mapped /
-            // recursive / Record-K-never) can assert > 0.
-            crate::capture_token::with_active_capture(|t| {
-                t.record_counter(MEMBER_ROUTE_CALLS_COUNTER, 1)
-            });
-            for lowered in routes {
-                let rescued = materialize_component_meta_macro_shape_member_type_expr(
-                    &lowered,
-                    field.name.as_str(),
-                    field_state.published_type(),
-                    scope_canonical_id,
-                    query_engine,
-                );
-                if compare_type_expr_improvement(&rescued, field_state.published_type()) {
-                    field_state.set_current_type(rescued);
+        // Loop-9 block 5: the per-field member-route loop calling
+        // `materialize_component_meta_macro_shape_member_type_expr`.
+        {
+            let _t = crate::loop5_instrumentation::TimerGuard::new(
+                &crate::loop5_instrumentation::FIELD_PROPS_MEMBER_ROUTE_LOOP_CALLS,
+                &crate::loop5_instrumentation::FIELD_PROPS_MEMBER_ROUTE_LOOP_NS,
+            );
+            if let Some(routes) = prop_member_routes.get(&field.name).cloned() {
+                crate::capture_token::with_active_capture(|t| {
+                    t.record_counter(MEMBER_ROUTE_CALLS_COUNTER, 1)
+                });
+                for lowered in routes {
+                    let rescued = materialize_component_meta_macro_shape_member_type_expr(
+                        &lowered,
+                        field.name.as_str(),
+                        field_state.published_type(),
+                        scope_canonical_id,
+                        query_engine,
+                    );
+                    if compare_type_expr_improvement(&rescued, field_state.published_type()) {
+                        field_state.set_current_type(rescued);
+                    }
                 }
             }
         }
-        let materialize_scope_canonical_id = select_imported_materialization_scope(
-            field_state.published_type(),
-            scope_canonical_id,
-            query_engine,
-        )
-        .or_else(|| {
-            parsed_field_raw_type(field).as_ref().and_then(|raw| {
-                select_imported_materialization_scope(raw, scope_canonical_id, query_engine)
+        // Loop-9 block 6: scope selection + 3-way routed-surface
+        // candidate scan (`materialize_member_surface_expr` x3 +
+        // `project_expr_class_a_via_dispatch` x2). Always increments
+        // CALLS once; only does work when raw_needs_member_route
+        // && !raw_route_root_is_package_backed.
+        let materialize_scope_canonical_id = {
+            let _t = crate::loop5_instrumentation::TimerGuard::new(
+                &crate::loop5_instrumentation::FIELD_PROPS_ROUTED_SURFACE_CALLS,
+                &crate::loop5_instrumentation::FIELD_PROPS_ROUTED_SURFACE_NS,
+            );
+            let materialize_scope_canonical_id = select_imported_materialization_scope(
+                field_state.published_type(),
+                scope_canonical_id,
+                query_engine,
+            )
+            .or_else(|| {
+                parsed_field_raw_type(field).as_ref().and_then(|raw| {
+                    select_imported_materialization_scope(raw, scope_canonical_id, query_engine)
+                })
             })
-        })
-        .unwrap_or_else(|| scope_canonical_id.to_string());
-        let raw_route_root_is_package_backed =
-            parsed_field_raw_type(field).as_ref().is_some_and(|raw| {
-                type_expr_has_package_backed_object_like_root(raw, scope_canonical_id, query_engine)
-            });
-        if raw_needs_member_route && !raw_route_root_is_package_backed {
-            // The alias-body rescue chain was retired
-            // in commit E. B1's materialiser registry-route branch
-            // already handles `Pick<Foo, ...>`, `Omit<Foo, ...>`, and
-            // `Foo['a']['b']…` shapes through dispatch's canonical
-            // projection. The direct
-            // `query_engine.materialize_member_surface_expr` call now
-            // applies the same projection in the materialiser's
-            // policy-gated form.
-            //
-            // Issue #5 / register the routed-surface
-            // member-route entry under the same counter as the
-            // `prop_member_routes` loop so positive tests can assert
-            // `member_route_calls == 0` covers BOTH route branches.
-            crate::capture_token::with_active_capture(|t| {
-                t.record_counter(MEMBER_ROUTE_CALLS_COUNTER, 1)
-            });
-            {
+            .unwrap_or_else(|| scope_canonical_id.to_string());
+            let raw_route_root_is_package_backed =
+                parsed_field_raw_type(field).as_ref().is_some_and(|raw| {
+                    type_expr_has_package_backed_object_like_root(
+                        raw,
+                        scope_canonical_id,
+                        query_engine,
+                    )
+                });
+            if raw_needs_member_route && !raw_route_root_is_package_backed {
+                crate::capture_token::with_active_capture(|t| {
+                    t.record_counter(MEMBER_ROUTE_CALLS_COUNTER, 1)
+                });
                 let routed_surface = query_engine.materialize_member_surface_expr(
                     materialize_scope_canonical_id.as_str(),
                     field_state.published_type(),
@@ -1923,7 +1950,19 @@ pub(crate) fn materialize_component_meta_field_types(
                     }
                 }
             }
-        }
+            materialize_scope_canonical_id
+        };
+
+        // Loop-9 block 7: the big match on
+        // `field_state.published_type()` — bare-Ref → declaration
+        // body lookup + bridge helper, OR
+        // `materialize_component_meta_type_expr_until_stable`. This
+        // is one of the most likely hot blocks; counter increments
+        // once per iteration regardless of which arm fires.
+        let _loop9_ref_rescue_timer = crate::loop5_instrumentation::TimerGuard::new(
+            &crate::loop5_instrumentation::FIELD_PROPS_REF_RESCUE_MATCH_CALLS,
+            &crate::loop5_instrumentation::FIELD_PROPS_REF_RESCUE_MATCH_NS,
+        );
         let rescued = match field_state.published_type() {
             verter_semantic::analysis::type_expr::TypeExpr::Ref {
                 name,
@@ -2001,6 +2040,14 @@ pub(crate) fn materialize_component_meta_field_types(
         if compare_type_expr_improvement(&rescued, field_state.published_type()) {
             field_state.set_current_type(rescued);
         }
+        drop(_loop9_ref_rescue_timer);
+
+        // Loop-9 block 8: raw-ref body lookup + recursive-ref
+        // expansion + `indexed_access_alias_body_transport`.
+        let _loop9_raw_ref_transport_timer = crate::loop5_instrumentation::TimerGuard::new(
+            &crate::loop5_instrumentation::FIELD_PROPS_RAW_REF_TRANSPORT_CALLS,
+            &crate::loop5_instrumentation::FIELD_PROPS_RAW_REF_TRANSPORT_NS,
+        );
         // Track whether the raw-ref branch handled the field (legacy
         // `continue` semantics). Set TRUE when the legacy code would
         // have `continue`d before the final indexed-access transport
@@ -2148,6 +2195,14 @@ pub(crate) fn materialize_component_meta_field_types(
             ));
         }
     }
+    // Loop-9 block 9: define_props sync + emits + slot_bindings +
+    // bindings final loops. Combined into a single timer because
+    // each tail loop is small relative to the per-prop main loop;
+    // CALLS increments once per request.
+    let _loop9_tail_loops = crate::loop5_instrumentation::TimerGuard::new(
+        &crate::loop5_instrumentation::FIELD_TAIL_LOOPS_CALLS,
+        &crate::loop5_instrumentation::FIELD_TAIL_LOOPS_NS,
+    );
     let finalized_prop_types = evaluated_types
         .props
         .iter()

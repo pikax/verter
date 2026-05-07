@@ -112,7 +112,23 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         scope_canonical_id: &str,
         expr: &TypeExpr,
     ) -> bool {
-        let mut active_exprs = rustc_hash::FxHashSet::<TypeExpr>::default();
+        // Cycle-detection set keyed on the borrowed address of each
+        // `TypeExpr` rather than a deep value clone. `TypeExpr` is an
+        // enum whose `clone()` recursively duplicates the entire
+        // subtree; storing each visited expression as a value made
+        // every recursion node's insert O(subtree-size) and combined
+        // with the recursion turned the predicate into O(N^2) on tree
+        // size. ChatMessage's `UIMessage<TMetadata, TDataParts, TTools>`
+        // surface produces deep enough trees that the quadratic blew
+        // up to >1 minute per field. Address-based dedup is O(1) per
+        // node and preserves the original cycle-break contract: the
+        // recursion only re-enters a node if the SAME borrow (same
+        // address) is reached, which is what value-equality was
+        // approximating. A different `TypeExpr` value at a different
+        // address still recurses normally — there is no cross-call
+        // reuse expectation since each call originates from a unique
+        // root.
+        let mut active_exprs = rustc_hash::FxHashSet::<usize>::default();
         let mut active_refs = rustc_hash::FxHashSet::<String>::default();
         self.should_preserve_shallow_field_expr_inner(
             scope_canonical_id,
@@ -126,12 +142,13 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         &mut self,
         scope_canonical_id: &str,
         expr: &TypeExpr,
-        active_exprs: &mut rustc_hash::FxHashSet<TypeExpr>,
+        active_exprs: &mut rustc_hash::FxHashSet<usize>,
         active_refs: &mut rustc_hash::FxHashSet<String>,
     ) -> bool {
         use verter_semantic::analysis::type_expr::ObjectMember;
 
-        if !active_exprs.insert(expr.clone()) {
+        let expr_addr = expr as *const TypeExpr as usize;
+        if !active_exprs.insert(expr_addr) {
             return false;
         }
         let preserve = if self.should_preserve_imported_bare_ref(scope_canonical_id, expr)
@@ -290,7 +307,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 _ => false,
             }
         };
-        active_exprs.remove(expr);
+        active_exprs.remove(&expr_addr);
         preserve
     }
 
@@ -466,7 +483,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         &mut self,
         scope_canonical_id: &str,
         name: &str,
-        active_exprs: &mut rustc_hash::FxHashSet<TypeExpr>,
+        active_exprs: &mut rustc_hash::FxHashSet<usize>,
         active_refs: &mut rustc_hash::FxHashSet<String>,
     ) -> bool {
         let Some(root_identity) = self.root_identity_in_scope(scope_canonical_id, name) else {

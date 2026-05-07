@@ -607,6 +607,32 @@ pub(crate) fn lowered_root_reaches_transitive_cycle(
 ) -> bool {
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::semantic_query::{ProjectionMode, SemanticNodeData};
+    use verter_semantic::analysis::type_expr::TypeExpr;
+
+    // Pre-filter to top-level shapes that can carry a route root
+    // identity. The post-lowering match below early-returns `false`
+    // for any node whose `SemanticNodeData` is neither `DeclRef` nor
+    // `InstantiationRef`. Lowering is recursive over the entire
+    // TypeExpr subtree; calling it on a Function / Intersection /
+    // Object / Union deeply lowers all children only to discard the
+    // result. ChatMessage's slot member types are Functions whose
+    // parameter types are deeply-generic intersections from
+    // third-party packages (`UIMessage<TMetadata, TDataParts, TTools> &
+    // {...}`); deep lowering of those intersections per slot member
+    // produced minutes of wasted work before the early-return fired.
+    fn shape_carries_route_root_identity(expr: &TypeExpr) -> bool {
+        match expr {
+            TypeExpr::Parenthesized(inner) => shape_carries_route_root_identity(inner),
+            TypeExpr::Ref { .. }
+            | TypeExpr::RecursiveRef { .. }
+            | TypeExpr::IndexedAccess { .. } => true,
+            _ => false,
+        }
+    }
+    if !shape_carries_route_root_identity(expr) {
+        return false;
+    }
+
     let dispatch = ProjectSemanticDispatch::new(query_engine.ctx);
     let Some(node_id) = dispatch.lower_type_expr_in_scope_with_mode(
         scope_canonical_id,

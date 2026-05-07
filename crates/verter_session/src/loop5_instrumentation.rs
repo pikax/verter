@@ -314,6 +314,179 @@ pub static DISPATCH_OPERATOR_KIND_NS: [AtomicU64; DISPATCH_OPERATOR_KIND_COUNT] 
 /// Sanity check against the per-kind sum.
 pub static DISPATCH_OPERATOR_TOTAL_NS: AtomicU64 = AtomicU64::new(0);
 
+// ===== Loop 8 — broadened materialize_ms instrumentation =====
+//
+// Call-count + wall-clock-ns pairs for the 10 top-level functions
+// inside `materialize_ms`. Loop 7 falsified the
+// `dispatch_operator_with_recurse` hypothesis (37 ms total of a
+// 25.6-min request); the unaccounted 99.7% lives in these bodies.
+//
+// All timers are INCLUSIVE — a parent's NS includes any children's
+// NS. Subtraction yields the exclusive cost.
+//
+// The `TimerGuard` RAII helper used to wrap each function body
+// increments the calls counter on `new` and adds the elapsed ns
+// on `Drop`. Multiple early-return sites are handled implicitly.
+
+pub static MATERIALIZE_MACRO_SHAPE_MEMBER_TYPE_EXPR_CALLS: AtomicU64 = AtomicU64::new(0);
+pub static MATERIALIZE_MACRO_SHAPE_MEMBER_TYPE_EXPR_NS: AtomicU64 = AtomicU64::new(0);
+
+pub static MATERIALIZE_TYPE_EXPR_UNTIL_STABLE_CALLS: AtomicU64 = AtomicU64::new(0);
+pub static MATERIALIZE_TYPE_EXPR_UNTIL_STABLE_NS: AtomicU64 = AtomicU64::new(0);
+
+pub static MATERIALIZE_STRUCTURE_CALLS: AtomicU64 = AtomicU64::new(0);
+pub static MATERIALIZE_STRUCTURE_NS: AtomicU64 = AtomicU64::new(0);
+
+pub static RAISE_AND_REDUCE_CALLS: AtomicU64 = AtomicU64::new(0);
+pub static RAISE_AND_REDUCE_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Calls counter for `reduce_graph_node_iterative` already exists
+/// as `RAISE_REDUCE_GRAPH_NODE_ITERATIVE_CALLS` (Loop 5).
+pub static REDUCE_GRAPH_NODE_ITERATIVE_NS: AtomicU64 = AtomicU64::new(0);
+
+pub static RAISE_NODE_TO_TYPE_EXPR_CALLS: AtomicU64 = AtomicU64::new(0);
+pub static RAISE_NODE_TO_TYPE_EXPR_NS: AtomicU64 = AtomicU64::new(0);
+
+pub static PRODUCE_MACRO_OBJECT_SHAPES_CALLS: AtomicU64 = AtomicU64::new(0);
+pub static PRODUCE_MACRO_OBJECT_SHAPES_NS: AtomicU64 = AtomicU64::new(0);
+
+pub static WALK_MACRO_MEMBER_TYPES_CALLS: AtomicU64 = AtomicU64::new(0);
+pub static WALK_MACRO_MEMBER_TYPES_NS: AtomicU64 = AtomicU64::new(0);
+
+pub static APPEND_REGISTRY_ENTRIES_CALLS: AtomicU64 = AtomicU64::new(0);
+pub static APPEND_REGISTRY_ENTRIES_NS: AtomicU64 = AtomicU64::new(0);
+
+pub static MATERIALIZE_FIELD_TYPES_CALLS: AtomicU64 = AtomicU64::new(0);
+pub static MATERIALIZE_FIELD_TYPES_NS: AtomicU64 = AtomicU64::new(0);
+
+// ===== Loop 9 — inner-block sub-timers =====
+//
+// Loop 8 confirmed 99.98% of materialize_ms lives in two function
+// bodies — `materialize_component_meta_field_types` (20 min) and
+// `walk_component_meta_macro_shape_member_types` (12.5 min). Loop 9
+// drills INSIDE these functions to identify the dominant sub-block.
+//
+// Field-types sub-blocks (per-iteration counters accumulate across
+// the outer `for field in &mut evaluated_types.props` loop, so
+// `_NS` is the total wall-clock and `_CALLS` is the iteration count
+// reaching that block):
+
+/// Block 1: build `prop_member_routes` + `slot_binding_scope_hints`
+/// from `snapshot.macros` (one-shot before the props loop).
+pub static FIELD_PROP_ROUTES_BUILD_CALLS: AtomicU64 = AtomicU64::new(0);
+pub static FIELD_PROP_ROUTES_BUILD_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Block 2: per-iteration preserve_raw check + indexed-access /
+/// terminal-scalar early-out + ComponentConfig theme variant fast
+/// path. Increments once per loop iteration.
+pub static FIELD_PROPS_PRESERVE_AND_EARLY_OUTS_CALLS: AtomicU64 = AtomicU64::new(0);
+pub static FIELD_PROPS_PRESERVE_AND_EARLY_OUTS_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Block 3: MacroFieldGraphState wrap + define_props candidate scan +
+/// `rescue_field`.
+pub static FIELD_PROPS_RESCUE_FIELD_CALLS: AtomicU64 = AtomicU64::new(0);
+pub static FIELD_PROPS_RESCUE_FIELD_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Block 4: raw_needs_member_route + current_needs_member_route
+/// predicate calls + slots-route early-out.
+pub static FIELD_PROPS_NEEDS_MEMBER_ROUTE_CALLS: AtomicU64 = AtomicU64::new(0);
+pub static FIELD_PROPS_NEEDS_MEMBER_ROUTE_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Block 5: per-field `for lowered in routes` loop calling
+/// `materialize_component_meta_macro_shape_member_type_expr`.
+pub static FIELD_PROPS_MEMBER_ROUTE_LOOP_CALLS: AtomicU64 = AtomicU64::new(0);
+pub static FIELD_PROPS_MEMBER_ROUTE_LOOP_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Block 6: select_imported_materialization_scope + raw_route_root
+/// check + 3-way `materialize_member_surface_expr` candidate scan
+/// (the routed-surface block).
+pub static FIELD_PROPS_ROUTED_SURFACE_CALLS: AtomicU64 = AtomicU64::new(0);
+pub static FIELD_PROPS_ROUTED_SURFACE_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Block 7: the big match on `field_state.published_type()` — bare
+/// Ref → declaration body lookup + bridge OR
+/// `materialize_component_meta_type_expr_until_stable`.
+pub static FIELD_PROPS_REF_RESCUE_MATCH_CALLS: AtomicU64 = AtomicU64::new(0);
+pub static FIELD_PROPS_REF_RESCUE_MATCH_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Block 8: raw-ref body lookup + recursive-ref expansion +
+/// `indexed_access_alias_body_transport`.
+pub static FIELD_PROPS_RAW_REF_TRANSPORT_CALLS: AtomicU64 = AtomicU64::new(0);
+pub static FIELD_PROPS_RAW_REF_TRANSPORT_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Block 9: define_props sync + emits + slot_bindings + bindings
+/// final loops (combined since each is small/cheap individually).
+pub static FIELD_TAIL_LOOPS_CALLS: AtomicU64 = AtomicU64::new(0);
+pub static FIELD_TAIL_LOOPS_NS: AtomicU64 = AtomicU64::new(0);
+
+// Walk-macro-member-types sub-blocks: per-iteration counters across
+// the outer `for (macro_index, mac) in snapshot.macros.iter()` loop.
+
+/// DefineProps arm — entry checks (`shape_needs_member_rescue` +
+/// `expr_needs_projection_rescue` shape probe).
+pub static WALK_DEFINE_PROPS_CHECKS_CALLS: AtomicU64 = AtomicU64::new(0);
+pub static WALK_DEFINE_PROPS_CHECKS_NS: AtomicU64 = AtomicU64::new(0);
+
+/// DefineProps arm — projection block (only fires when
+/// `lowered_needs_projection_rescue && properties.is_empty()`).
+pub static WALK_DEFINE_PROPS_PROJECTION_CALLS: AtomicU64 = AtomicU64::new(0);
+pub static WALK_DEFINE_PROPS_PROJECTION_NS: AtomicU64 = AtomicU64::new(0);
+
+/// DefineProps arm — per-property `for property in &mut
+/// define_props.result.value.properties` loop calling
+/// `materialize_component_meta_macro_shape_member_type_expr`.
+pub static WALK_DEFINE_PROPS_PROPERTY_LOOP_CALLS: AtomicU64 = AtomicU64::new(0);
+pub static WALK_DEFINE_PROPS_PROPERTY_LOOP_NS: AtomicU64 = AtomicU64::new(0);
+
+/// DefineEmits arm whole (small fan-out; counter increments once
+/// per macro iter that lands in this arm).
+pub static WALK_DEFINE_EMITS_ARM_CALLS: AtomicU64 = AtomicU64::new(0);
+pub static WALK_DEFINE_EMITS_ARM_NS: AtomicU64 = AtomicU64::new(0);
+
+/// DefineSlots arm whole (includes slot_member_needs_binding_rescue
+/// scan + projection + per-property loop).
+pub static WALK_DEFINE_SLOTS_ARM_CALLS: AtomicU64 = AtomicU64::new(0);
+pub static WALK_DEFINE_SLOTS_ARM_NS: AtomicU64 = AtomicU64::new(0);
+
+/// RAII timer that bumps a `calls` counter on construction and adds
+/// elapsed nanoseconds to an `ns` counter on drop. Designed for
+/// bodies with multiple early-return sites where wrapping every
+/// `return` would be tedious. The two atomics must outlive the
+/// guard (typically `&'static AtomicU64` from this module).
+pub struct TimerGuard {
+    started: std::time::Instant,
+    ns_counter: &'static AtomicU64,
+}
+
+impl TimerGuard {
+    /// Increment `calls` immediately and capture the start time;
+    /// on drop, add `elapsed_ns` to `ns_counter`.
+    pub fn new(calls_counter: &'static AtomicU64, ns_counter: &'static AtomicU64) -> Self {
+        calls_counter.fetch_add(1, Ordering::Relaxed);
+        Self {
+            started: std::time::Instant::now(),
+            ns_counter,
+        }
+    }
+
+    /// Variant that does NOT bump a calls counter — used for
+    /// `reduce_graph_node_iterative` where the calls counter is
+    /// already incremented elsewhere by Loop 5.
+    pub fn new_ns_only(ns_counter: &'static AtomicU64) -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            ns_counter,
+        }
+    }
+}
+
+impl Drop for TimerGuard {
+    fn drop(&mut self) {
+        let elapsed_ns = self.started.elapsed().as_nanos() as u64;
+        self.ns_counter.fetch_add(elapsed_ns, Ordering::Relaxed);
+    }
+}
+
 /// Map a `SemanticQueryKey` to its kind index. Kept in lockstep with
 /// `DISPATCH_OPERATOR_KIND_LABELS` — adding a new variant requires
 /// extending `DISPATCH_OPERATOR_KIND_COUNT`, the labels array, both
@@ -364,6 +537,55 @@ pub fn reset_all() {
     for slot in DISPATCH_OPERATOR_KIND_NS.iter() {
         slot.store(0, Ordering::Relaxed);
     }
+    // Loop 8 — broadened materialize_ms counters.
+    MATERIALIZE_MACRO_SHAPE_MEMBER_TYPE_EXPR_CALLS.store(0, Ordering::Relaxed);
+    MATERIALIZE_MACRO_SHAPE_MEMBER_TYPE_EXPR_NS.store(0, Ordering::Relaxed);
+    MATERIALIZE_TYPE_EXPR_UNTIL_STABLE_CALLS.store(0, Ordering::Relaxed);
+    MATERIALIZE_TYPE_EXPR_UNTIL_STABLE_NS.store(0, Ordering::Relaxed);
+    MATERIALIZE_STRUCTURE_CALLS.store(0, Ordering::Relaxed);
+    MATERIALIZE_STRUCTURE_NS.store(0, Ordering::Relaxed);
+    RAISE_AND_REDUCE_CALLS.store(0, Ordering::Relaxed);
+    RAISE_AND_REDUCE_NS.store(0, Ordering::Relaxed);
+    REDUCE_GRAPH_NODE_ITERATIVE_NS.store(0, Ordering::Relaxed);
+    RAISE_NODE_TO_TYPE_EXPR_CALLS.store(0, Ordering::Relaxed);
+    RAISE_NODE_TO_TYPE_EXPR_NS.store(0, Ordering::Relaxed);
+    PRODUCE_MACRO_OBJECT_SHAPES_CALLS.store(0, Ordering::Relaxed);
+    PRODUCE_MACRO_OBJECT_SHAPES_NS.store(0, Ordering::Relaxed);
+    WALK_MACRO_MEMBER_TYPES_CALLS.store(0, Ordering::Relaxed);
+    WALK_MACRO_MEMBER_TYPES_NS.store(0, Ordering::Relaxed);
+    APPEND_REGISTRY_ENTRIES_CALLS.store(0, Ordering::Relaxed);
+    APPEND_REGISTRY_ENTRIES_NS.store(0, Ordering::Relaxed);
+    MATERIALIZE_FIELD_TYPES_CALLS.store(0, Ordering::Relaxed);
+    MATERIALIZE_FIELD_TYPES_NS.store(0, Ordering::Relaxed);
+    // Loop 9 — inner-block sub-timers.
+    FIELD_PROP_ROUTES_BUILD_CALLS.store(0, Ordering::Relaxed);
+    FIELD_PROP_ROUTES_BUILD_NS.store(0, Ordering::Relaxed);
+    FIELD_PROPS_PRESERVE_AND_EARLY_OUTS_CALLS.store(0, Ordering::Relaxed);
+    FIELD_PROPS_PRESERVE_AND_EARLY_OUTS_NS.store(0, Ordering::Relaxed);
+    FIELD_PROPS_RESCUE_FIELD_CALLS.store(0, Ordering::Relaxed);
+    FIELD_PROPS_RESCUE_FIELD_NS.store(0, Ordering::Relaxed);
+    FIELD_PROPS_NEEDS_MEMBER_ROUTE_CALLS.store(0, Ordering::Relaxed);
+    FIELD_PROPS_NEEDS_MEMBER_ROUTE_NS.store(0, Ordering::Relaxed);
+    FIELD_PROPS_MEMBER_ROUTE_LOOP_CALLS.store(0, Ordering::Relaxed);
+    FIELD_PROPS_MEMBER_ROUTE_LOOP_NS.store(0, Ordering::Relaxed);
+    FIELD_PROPS_ROUTED_SURFACE_CALLS.store(0, Ordering::Relaxed);
+    FIELD_PROPS_ROUTED_SURFACE_NS.store(0, Ordering::Relaxed);
+    FIELD_PROPS_REF_RESCUE_MATCH_CALLS.store(0, Ordering::Relaxed);
+    FIELD_PROPS_REF_RESCUE_MATCH_NS.store(0, Ordering::Relaxed);
+    FIELD_PROPS_RAW_REF_TRANSPORT_CALLS.store(0, Ordering::Relaxed);
+    FIELD_PROPS_RAW_REF_TRANSPORT_NS.store(0, Ordering::Relaxed);
+    FIELD_TAIL_LOOPS_CALLS.store(0, Ordering::Relaxed);
+    FIELD_TAIL_LOOPS_NS.store(0, Ordering::Relaxed);
+    WALK_DEFINE_PROPS_CHECKS_CALLS.store(0, Ordering::Relaxed);
+    WALK_DEFINE_PROPS_CHECKS_NS.store(0, Ordering::Relaxed);
+    WALK_DEFINE_PROPS_PROJECTION_CALLS.store(0, Ordering::Relaxed);
+    WALK_DEFINE_PROPS_PROJECTION_NS.store(0, Ordering::Relaxed);
+    WALK_DEFINE_PROPS_PROPERTY_LOOP_CALLS.store(0, Ordering::Relaxed);
+    WALK_DEFINE_PROPS_PROPERTY_LOOP_NS.store(0, Ordering::Relaxed);
+    WALK_DEFINE_EMITS_ARM_CALLS.store(0, Ordering::Relaxed);
+    WALK_DEFINE_EMITS_ARM_NS.store(0, Ordering::Relaxed);
+    WALK_DEFINE_SLOTS_ARM_CALLS.store(0, Ordering::Relaxed);
+    WALK_DEFINE_SLOTS_ARM_NS.store(0, Ordering::Relaxed);
 }
 
 /// Snapshot of every loop-5 counter at the moment of the call. Returned
@@ -391,6 +613,72 @@ pub fn dump_loop5_instrumentation_counters() -> String {
     let execute_cooperative_build_ns_total =
         EXECUTE_COOPERATIVE_BUILD_NS_TOTAL.load(Ordering::Relaxed);
     let dispatch_operator_total_ns = DISPATCH_OPERATOR_TOTAL_NS.load(Ordering::Relaxed);
+
+    // Loop 8 — broadened materialize_ms counters.
+    let materialize_macro_shape_member_type_expr_calls =
+        MATERIALIZE_MACRO_SHAPE_MEMBER_TYPE_EXPR_CALLS.load(Ordering::Relaxed);
+    let materialize_macro_shape_member_type_expr_ns =
+        MATERIALIZE_MACRO_SHAPE_MEMBER_TYPE_EXPR_NS.load(Ordering::Relaxed);
+    let materialize_type_expr_until_stable_calls =
+        MATERIALIZE_TYPE_EXPR_UNTIL_STABLE_CALLS.load(Ordering::Relaxed);
+    let materialize_type_expr_until_stable_ns =
+        MATERIALIZE_TYPE_EXPR_UNTIL_STABLE_NS.load(Ordering::Relaxed);
+    let materialize_structure_calls = MATERIALIZE_STRUCTURE_CALLS.load(Ordering::Relaxed);
+    let materialize_structure_ns = MATERIALIZE_STRUCTURE_NS.load(Ordering::Relaxed);
+    let raise_and_reduce_calls = RAISE_AND_REDUCE_CALLS.load(Ordering::Relaxed);
+    let raise_and_reduce_ns = RAISE_AND_REDUCE_NS.load(Ordering::Relaxed);
+    let reduce_graph_node_iterative_ns = REDUCE_GRAPH_NODE_ITERATIVE_NS.load(Ordering::Relaxed);
+    let raise_node_to_type_expr_calls = RAISE_NODE_TO_TYPE_EXPR_CALLS.load(Ordering::Relaxed);
+    let raise_node_to_type_expr_ns = RAISE_NODE_TO_TYPE_EXPR_NS.load(Ordering::Relaxed);
+    let produce_macro_object_shapes_calls =
+        PRODUCE_MACRO_OBJECT_SHAPES_CALLS.load(Ordering::Relaxed);
+    let produce_macro_object_shapes_ns = PRODUCE_MACRO_OBJECT_SHAPES_NS.load(Ordering::Relaxed);
+    let walk_macro_member_types_calls = WALK_MACRO_MEMBER_TYPES_CALLS.load(Ordering::Relaxed);
+    let walk_macro_member_types_ns = WALK_MACRO_MEMBER_TYPES_NS.load(Ordering::Relaxed);
+    let append_registry_entries_calls = APPEND_REGISTRY_ENTRIES_CALLS.load(Ordering::Relaxed);
+    let append_registry_entries_ns = APPEND_REGISTRY_ENTRIES_NS.load(Ordering::Relaxed);
+    let materialize_field_types_calls = MATERIALIZE_FIELD_TYPES_CALLS.load(Ordering::Relaxed);
+    let materialize_field_types_ns = MATERIALIZE_FIELD_TYPES_NS.load(Ordering::Relaxed);
+
+    // Loop 9 — inner-block sub-timers.
+    let field_prop_routes_build_calls = FIELD_PROP_ROUTES_BUILD_CALLS.load(Ordering::Relaxed);
+    let field_prop_routes_build_ns = FIELD_PROP_ROUTES_BUILD_NS.load(Ordering::Relaxed);
+    let field_props_preserve_and_early_outs_calls =
+        FIELD_PROPS_PRESERVE_AND_EARLY_OUTS_CALLS.load(Ordering::Relaxed);
+    let field_props_preserve_and_early_outs_ns =
+        FIELD_PROPS_PRESERVE_AND_EARLY_OUTS_NS.load(Ordering::Relaxed);
+    let field_props_rescue_field_calls = FIELD_PROPS_RESCUE_FIELD_CALLS.load(Ordering::Relaxed);
+    let field_props_rescue_field_ns = FIELD_PROPS_RESCUE_FIELD_NS.load(Ordering::Relaxed);
+    let field_props_needs_member_route_calls =
+        FIELD_PROPS_NEEDS_MEMBER_ROUTE_CALLS.load(Ordering::Relaxed);
+    let field_props_needs_member_route_ns =
+        FIELD_PROPS_NEEDS_MEMBER_ROUTE_NS.load(Ordering::Relaxed);
+    let field_props_member_route_loop_calls =
+        FIELD_PROPS_MEMBER_ROUTE_LOOP_CALLS.load(Ordering::Relaxed);
+    let field_props_member_route_loop_ns = FIELD_PROPS_MEMBER_ROUTE_LOOP_NS.load(Ordering::Relaxed);
+    let field_props_routed_surface_calls = FIELD_PROPS_ROUTED_SURFACE_CALLS.load(Ordering::Relaxed);
+    let field_props_routed_surface_ns = FIELD_PROPS_ROUTED_SURFACE_NS.load(Ordering::Relaxed);
+    let field_props_ref_rescue_match_calls =
+        FIELD_PROPS_REF_RESCUE_MATCH_CALLS.load(Ordering::Relaxed);
+    let field_props_ref_rescue_match_ns = FIELD_PROPS_REF_RESCUE_MATCH_NS.load(Ordering::Relaxed);
+    let field_props_raw_ref_transport_calls =
+        FIELD_PROPS_RAW_REF_TRANSPORT_CALLS.load(Ordering::Relaxed);
+    let field_props_raw_ref_transport_ns = FIELD_PROPS_RAW_REF_TRANSPORT_NS.load(Ordering::Relaxed);
+    let field_tail_loops_calls = FIELD_TAIL_LOOPS_CALLS.load(Ordering::Relaxed);
+    let field_tail_loops_ns = FIELD_TAIL_LOOPS_NS.load(Ordering::Relaxed);
+    let walk_define_props_checks_calls = WALK_DEFINE_PROPS_CHECKS_CALLS.load(Ordering::Relaxed);
+    let walk_define_props_checks_ns = WALK_DEFINE_PROPS_CHECKS_NS.load(Ordering::Relaxed);
+    let walk_define_props_projection_calls =
+        WALK_DEFINE_PROPS_PROJECTION_CALLS.load(Ordering::Relaxed);
+    let walk_define_props_projection_ns = WALK_DEFINE_PROPS_PROJECTION_NS.load(Ordering::Relaxed);
+    let walk_define_props_property_loop_calls =
+        WALK_DEFINE_PROPS_PROPERTY_LOOP_CALLS.load(Ordering::Relaxed);
+    let walk_define_props_property_loop_ns =
+        WALK_DEFINE_PROPS_PROPERTY_LOOP_NS.load(Ordering::Relaxed);
+    let walk_define_emits_arm_calls = WALK_DEFINE_EMITS_ARM_CALLS.load(Ordering::Relaxed);
+    let walk_define_emits_arm_ns = WALK_DEFINE_EMITS_ARM_NS.load(Ordering::Relaxed);
+    let walk_define_slots_arm_calls = WALK_DEFINE_SLOTS_ARM_CALLS.load(Ordering::Relaxed);
+    let walk_define_slots_arm_ns = WALK_DEFINE_SLOTS_ARM_NS.load(Ordering::Relaxed);
 
     let mut per_kind_calls = String::new();
     let mut per_kind_ns = String::new();
@@ -425,6 +713,53 @@ pub fn dump_loop5_instrumentation_counters() -> String {
          \"TYPE_EXPR_OPERATOR_NODE_COUNT_SUM\": {type_expr_operator_node_count_sum},\n  \
          \"EXECUTE_COOPERATIVE_BUILD_NS_TOTAL\": {execute_cooperative_build_ns_total},\n  \
          \"DISPATCH_OPERATOR_TOTAL_NS\": {dispatch_operator_total_ns},\n  \
+         \"MATERIALIZE_MACRO_SHAPE_MEMBER_TYPE_EXPR_CALLS\": {materialize_macro_shape_member_type_expr_calls},\n  \
+         \"MATERIALIZE_MACRO_SHAPE_MEMBER_TYPE_EXPR_NS\": {materialize_macro_shape_member_type_expr_ns},\n  \
+         \"MATERIALIZE_TYPE_EXPR_UNTIL_STABLE_CALLS\": {materialize_type_expr_until_stable_calls},\n  \
+         \"MATERIALIZE_TYPE_EXPR_UNTIL_STABLE_NS\": {materialize_type_expr_until_stable_ns},\n  \
+         \"MATERIALIZE_STRUCTURE_CALLS\": {materialize_structure_calls},\n  \
+         \"MATERIALIZE_STRUCTURE_NS\": {materialize_structure_ns},\n  \
+         \"RAISE_AND_REDUCE_CALLS\": {raise_and_reduce_calls},\n  \
+         \"RAISE_AND_REDUCE_NS\": {raise_and_reduce_ns},\n  \
+         \"REDUCE_GRAPH_NODE_ITERATIVE_NS\": {reduce_graph_node_iterative_ns},\n  \
+         \"RAISE_NODE_TO_TYPE_EXPR_CALLS\": {raise_node_to_type_expr_calls},\n  \
+         \"RAISE_NODE_TO_TYPE_EXPR_NS\": {raise_node_to_type_expr_ns},\n  \
+         \"PRODUCE_MACRO_OBJECT_SHAPES_CALLS\": {produce_macro_object_shapes_calls},\n  \
+         \"PRODUCE_MACRO_OBJECT_SHAPES_NS\": {produce_macro_object_shapes_ns},\n  \
+         \"WALK_MACRO_MEMBER_TYPES_CALLS\": {walk_macro_member_types_calls},\n  \
+         \"WALK_MACRO_MEMBER_TYPES_NS\": {walk_macro_member_types_ns},\n  \
+         \"APPEND_REGISTRY_ENTRIES_CALLS\": {append_registry_entries_calls},\n  \
+         \"APPEND_REGISTRY_ENTRIES_NS\": {append_registry_entries_ns},\n  \
+         \"MATERIALIZE_FIELD_TYPES_CALLS\": {materialize_field_types_calls},\n  \
+         \"MATERIALIZE_FIELD_TYPES_NS\": {materialize_field_types_ns},\n  \
+         \"FIELD_PROP_ROUTES_BUILD_CALLS\": {field_prop_routes_build_calls},\n  \
+         \"FIELD_PROP_ROUTES_BUILD_NS\": {field_prop_routes_build_ns},\n  \
+         \"FIELD_PROPS_PRESERVE_AND_EARLY_OUTS_CALLS\": {field_props_preserve_and_early_outs_calls},\n  \
+         \"FIELD_PROPS_PRESERVE_AND_EARLY_OUTS_NS\": {field_props_preserve_and_early_outs_ns},\n  \
+         \"FIELD_PROPS_RESCUE_FIELD_CALLS\": {field_props_rescue_field_calls},\n  \
+         \"FIELD_PROPS_RESCUE_FIELD_NS\": {field_props_rescue_field_ns},\n  \
+         \"FIELD_PROPS_NEEDS_MEMBER_ROUTE_CALLS\": {field_props_needs_member_route_calls},\n  \
+         \"FIELD_PROPS_NEEDS_MEMBER_ROUTE_NS\": {field_props_needs_member_route_ns},\n  \
+         \"FIELD_PROPS_MEMBER_ROUTE_LOOP_CALLS\": {field_props_member_route_loop_calls},\n  \
+         \"FIELD_PROPS_MEMBER_ROUTE_LOOP_NS\": {field_props_member_route_loop_ns},\n  \
+         \"FIELD_PROPS_ROUTED_SURFACE_CALLS\": {field_props_routed_surface_calls},\n  \
+         \"FIELD_PROPS_ROUTED_SURFACE_NS\": {field_props_routed_surface_ns},\n  \
+         \"FIELD_PROPS_REF_RESCUE_MATCH_CALLS\": {field_props_ref_rescue_match_calls},\n  \
+         \"FIELD_PROPS_REF_RESCUE_MATCH_NS\": {field_props_ref_rescue_match_ns},\n  \
+         \"FIELD_PROPS_RAW_REF_TRANSPORT_CALLS\": {field_props_raw_ref_transport_calls},\n  \
+         \"FIELD_PROPS_RAW_REF_TRANSPORT_NS\": {field_props_raw_ref_transport_ns},\n  \
+         \"FIELD_TAIL_LOOPS_CALLS\": {field_tail_loops_calls},\n  \
+         \"FIELD_TAIL_LOOPS_NS\": {field_tail_loops_ns},\n  \
+         \"WALK_DEFINE_PROPS_CHECKS_CALLS\": {walk_define_props_checks_calls},\n  \
+         \"WALK_DEFINE_PROPS_CHECKS_NS\": {walk_define_props_checks_ns},\n  \
+         \"WALK_DEFINE_PROPS_PROJECTION_CALLS\": {walk_define_props_projection_calls},\n  \
+         \"WALK_DEFINE_PROPS_PROJECTION_NS\": {walk_define_props_projection_ns},\n  \
+         \"WALK_DEFINE_PROPS_PROPERTY_LOOP_CALLS\": {walk_define_props_property_loop_calls},\n  \
+         \"WALK_DEFINE_PROPS_PROPERTY_LOOP_NS\": {walk_define_props_property_loop_ns},\n  \
+         \"WALK_DEFINE_EMITS_ARM_CALLS\": {walk_define_emits_arm_calls},\n  \
+         \"WALK_DEFINE_EMITS_ARM_NS\": {walk_define_emits_arm_ns},\n  \
+         \"WALK_DEFINE_SLOTS_ARM_CALLS\": {walk_define_slots_arm_calls},\n  \
+         \"WALK_DEFINE_SLOTS_ARM_NS\": {walk_define_slots_arm_ns},\n  \
          \"DISPATCH_OPERATOR_KIND_CALLS\": {{{per_kind_calls}\n  }},\n  \
          \"DISPATCH_OPERATOR_KIND_NS\": {{{per_kind_ns}\n  }}\n}}"
     )
@@ -457,6 +792,53 @@ mod tests {
             "DISPATCH_OPERATOR_TOTAL_NS",
             "DISPATCH_OPERATOR_KIND_CALLS",
             "DISPATCH_OPERATOR_KIND_NS",
+            "MATERIALIZE_MACRO_SHAPE_MEMBER_TYPE_EXPR_CALLS",
+            "MATERIALIZE_MACRO_SHAPE_MEMBER_TYPE_EXPR_NS",
+            "MATERIALIZE_TYPE_EXPR_UNTIL_STABLE_CALLS",
+            "MATERIALIZE_TYPE_EXPR_UNTIL_STABLE_NS",
+            "MATERIALIZE_STRUCTURE_CALLS",
+            "MATERIALIZE_STRUCTURE_NS",
+            "RAISE_AND_REDUCE_CALLS",
+            "RAISE_AND_REDUCE_NS",
+            "REDUCE_GRAPH_NODE_ITERATIVE_NS",
+            "RAISE_NODE_TO_TYPE_EXPR_CALLS",
+            "RAISE_NODE_TO_TYPE_EXPR_NS",
+            "PRODUCE_MACRO_OBJECT_SHAPES_CALLS",
+            "PRODUCE_MACRO_OBJECT_SHAPES_NS",
+            "WALK_MACRO_MEMBER_TYPES_CALLS",
+            "WALK_MACRO_MEMBER_TYPES_NS",
+            "APPEND_REGISTRY_ENTRIES_CALLS",
+            "APPEND_REGISTRY_ENTRIES_NS",
+            "MATERIALIZE_FIELD_TYPES_CALLS",
+            "MATERIALIZE_FIELD_TYPES_NS",
+            "FIELD_PROP_ROUTES_BUILD_CALLS",
+            "FIELD_PROP_ROUTES_BUILD_NS",
+            "FIELD_PROPS_PRESERVE_AND_EARLY_OUTS_CALLS",
+            "FIELD_PROPS_PRESERVE_AND_EARLY_OUTS_NS",
+            "FIELD_PROPS_RESCUE_FIELD_CALLS",
+            "FIELD_PROPS_RESCUE_FIELD_NS",
+            "FIELD_PROPS_NEEDS_MEMBER_ROUTE_CALLS",
+            "FIELD_PROPS_NEEDS_MEMBER_ROUTE_NS",
+            "FIELD_PROPS_MEMBER_ROUTE_LOOP_CALLS",
+            "FIELD_PROPS_MEMBER_ROUTE_LOOP_NS",
+            "FIELD_PROPS_ROUTED_SURFACE_CALLS",
+            "FIELD_PROPS_ROUTED_SURFACE_NS",
+            "FIELD_PROPS_REF_RESCUE_MATCH_CALLS",
+            "FIELD_PROPS_REF_RESCUE_MATCH_NS",
+            "FIELD_PROPS_RAW_REF_TRANSPORT_CALLS",
+            "FIELD_PROPS_RAW_REF_TRANSPORT_NS",
+            "FIELD_TAIL_LOOPS_CALLS",
+            "FIELD_TAIL_LOOPS_NS",
+            "WALK_DEFINE_PROPS_CHECKS_CALLS",
+            "WALK_DEFINE_PROPS_CHECKS_NS",
+            "WALK_DEFINE_PROPS_PROJECTION_CALLS",
+            "WALK_DEFINE_PROPS_PROJECTION_NS",
+            "WALK_DEFINE_PROPS_PROPERTY_LOOP_CALLS",
+            "WALK_DEFINE_PROPS_PROPERTY_LOOP_NS",
+            "WALK_DEFINE_EMITS_ARM_CALLS",
+            "WALK_DEFINE_EMITS_ARM_NS",
+            "WALK_DEFINE_SLOTS_ARM_CALLS",
+            "WALK_DEFINE_SLOTS_ARM_NS",
         ] {
             assert!(
                 json.contains(key),
@@ -584,5 +966,76 @@ mod tests {
             index: Arc::new(make_ref("B")),
         };
         assert_eq!(count_operator_nodes(&expr), 3);
+    }
+
+    #[test]
+    fn timer_guard_increments_calls_immediately_and_records_ns_on_drop() {
+        // Discriminating: a brand-new TimerGuard must bump `calls` by
+        // exactly 1 on `new`, leave `ns` at 0 until drop, and add a
+        // strictly-positive `ns` on drop. Verifies the guard's
+        // contract — without this, the guard could trivially "pass"
+        // by being a no-op.
+        static CALLS: AtomicU64 = AtomicU64::new(0);
+        static NS: AtomicU64 = AtomicU64::new(0);
+        CALLS.store(0, Ordering::Relaxed);
+        NS.store(0, Ordering::Relaxed);
+
+        let calls_before = CALLS.load(Ordering::Relaxed);
+        let ns_before = NS.load(Ordering::Relaxed);
+        {
+            let _guard = TimerGuard::new(&CALLS, &NS);
+            // Inside the guard's scope: calls already incremented,
+            // ns still untouched (on-drop semantics).
+            assert_eq!(CALLS.load(Ordering::Relaxed), calls_before + 1);
+            assert_eq!(NS.load(Ordering::Relaxed), ns_before);
+            // Burn a few microseconds so the elapsed window is
+            // measurable. `Instant::elapsed` in CI can be 0 ns for
+            // tight no-ops on Windows; spinning on a small atomic
+            // arithmetic guarantees strictly-positive ns.
+            let mut sink: u64 = 1;
+            for i in 0..10_000u64 {
+                sink = sink.wrapping_add(i ^ 0x5555);
+            }
+            // Force the optimizer to keep the loop.
+            std::hint::black_box(sink);
+        }
+        // After drop: ns must be strictly larger than before.
+        let ns_after = NS.load(Ordering::Relaxed);
+        assert!(
+            ns_after > ns_before,
+            "TimerGuard::drop must record positive ns; ns_before={ns_before} ns_after={ns_after}"
+        );
+    }
+
+    #[test]
+    fn timer_guard_ns_only_does_not_bump_calls() {
+        // `new_ns_only` is for `reduce_graph_node_iterative` which
+        // already increments its calls counter elsewhere (Loop 5).
+        // Discriminating: the variant must record ns on drop but NOT
+        // touch `calls` — if it accidentally touched a calls counter
+        // we'd double-count.
+        static SHOULD_NOT_TOUCH: AtomicU64 = AtomicU64::new(0);
+        static NS: AtomicU64 = AtomicU64::new(0);
+        SHOULD_NOT_TOUCH.store(7, Ordering::Relaxed);
+        NS.store(0, Ordering::Relaxed);
+
+        {
+            let _guard = TimerGuard::new_ns_only(&NS);
+            let mut sink: u64 = 1;
+            for i in 0..10_000u64 {
+                sink = sink.wrapping_add(i ^ 0xaaaa);
+            }
+            std::hint::black_box(sink);
+        }
+
+        assert_eq!(
+            SHOULD_NOT_TOUCH.load(Ordering::Relaxed),
+            7,
+            "TimerGuard::new_ns_only must NOT touch any calls counter"
+        );
+        assert!(
+            NS.load(Ordering::Relaxed) > 0,
+            "TimerGuard::new_ns_only must still record ns on drop"
+        );
     }
 }

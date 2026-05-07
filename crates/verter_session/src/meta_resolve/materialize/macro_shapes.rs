@@ -84,6 +84,10 @@ pub(crate) fn produce_macro_object_shapes_for_purpose(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     purpose: crate::resolver_core::ComponentMetaResolutionPurpose,
 ) {
+    let _loop8_timer = crate::loop5_instrumentation::TimerGuard::new(
+        &crate::loop5_instrumentation::PRODUCE_MACRO_OBJECT_SHAPES_CALLS,
+        &crate::loop5_instrumentation::PRODUCE_MACRO_OBJECT_SHAPES_NS,
+    );
     let params =
         verter_semantic::analysis::type_eval_build::collect_define_macro_type_params(eval_source);
     let mut define_props_index = 0usize;

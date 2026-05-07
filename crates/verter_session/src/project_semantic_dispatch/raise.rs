@@ -771,6 +771,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         crate::loop5_instrumentation::RAISE_REDUCE_GRAPH_NODE_ITERATIVE_CALLS
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
+        // Loop-8 instrumentation — wall-clock attribution for the
+        // iterative-reduction body. Calls counter already bumped
+        // above (Loop 5); this guard adds NS-only on drop.
+        let _loop8_timer = crate::loop5_instrumentation::TimerGuard::new_ns_only(
+            &crate::loop5_instrumentation::REDUCE_GRAPH_NODE_ITERATIVE_NS,
+        );
+
         // Collect every reachable `(node, mode)` pair in topo
         // order with a worklist. `visited` short-circuits cycles —
         // they reach a fixpoint at the first visit and are not re-pushed.

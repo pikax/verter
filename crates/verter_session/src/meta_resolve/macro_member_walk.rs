@@ -199,6 +199,10 @@ pub(crate) fn walk_component_meta_macro_shape_member_types(
     evaluated_types: &mut verter_semantic::analysis::type_expand::ExpandedComponentTypes,
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
 ) {
+    let _loop8_timer = crate::loop5_instrumentation::TimerGuard::new(
+        &crate::loop5_instrumentation::WALK_MACRO_MEMBER_TYPES_CALLS,
+        &crate::loop5_instrumentation::WALK_MACRO_MEMBER_TYPES_NS,
+    );
     fn slot_member_needs_binding_rescue(
         ty: &verter_semantic::analysis::type_expr::TypeExpr,
     ) -> bool {
@@ -376,53 +380,74 @@ pub(crate) fn walk_component_meta_macro_shape_member_types(
                         .iter_mut()
                         .find(|entry| entry.macro_index == macro_index)
                     {
-                        // Gate the lowered-rescue probe behind
-                        // `properties.is_empty()` — when the shape has
-                        // properties, the per-property loop covers
-                        // member-rescue work and the cheap shape-level
-                        // member-rescue scan provides the entry signal.
-                        // The lowered probe is only needed to seed the
-                        // empty-shape path via projection.
-                        let shape_member_rescue_v = shape_needs_member_rescue(
-                            scope_canonical_id,
-                            &define_props.result.value,
-                            query_engine,
-                        );
-                        let properties_empty = define_props.result.value.properties.is_empty();
-                        let lowered_needs_projection_rescue = if properties_empty {
-                            crate::capture_token::with_active_capture(|t| {
-                                t.record_counter("expr_needs_projection_rescue_calls", 1)
-                            });
-                            expr_needs_projection_rescue(query_engine, scope_canonical_id, lowered)
-                        } else {
-                            false
+                        // Loop-9 walk block A: entry checks.
+                        let (needs_projection_rescue, lowered_needs_projection_rescue) = {
+                            let _t = crate::loop5_instrumentation::TimerGuard::new(
+                                &crate::loop5_instrumentation::WALK_DEFINE_PROPS_CHECKS_CALLS,
+                                &crate::loop5_instrumentation::WALK_DEFINE_PROPS_CHECKS_NS,
+                            );
+                            let shape_member_rescue_v = shape_needs_member_rescue(
+                                scope_canonical_id,
+                                &define_props.result.value,
+                                query_engine,
+                            );
+                            let properties_empty = define_props.result.value.properties.is_empty();
+                            let lowered_needs_projection_rescue = if properties_empty {
+                                crate::capture_token::with_active_capture(|t| {
+                                    t.record_counter("expr_needs_projection_rescue_calls", 1)
+                                });
+                                expr_needs_projection_rescue(
+                                    query_engine,
+                                    scope_canonical_id,
+                                    lowered,
+                                )
+                            } else {
+                                false
+                            };
+                            (
+                                lowered_needs_projection_rescue || shape_member_rescue_v,
+                                lowered_needs_projection_rescue,
+                            )
                         };
-                        let needs_projection_rescue =
-                            lowered_needs_projection_rescue || shape_member_rescue_v;
                         if needs_projection_rescue {
-                            if lowered_needs_projection_rescue
-                                && define_props.result.value.properties.is_empty()
+                            // Loop-9 walk block B: empty-shape
+                            // projection (only fires when both gates
+                            // match).
                             {
-                                if let Some(projected_shape) =
-                                    project_expr_class_a_shape_via_dispatch(
-                                        query_engine.ctx,
-                                        scope_canonical_id,
-                                        lowered,
-                                    )
-                                    .filter(has_prop_shape_surface)
+                                let _t = crate::loop5_instrumentation::TimerGuard::new(
+                                    &crate::loop5_instrumentation::WALK_DEFINE_PROPS_PROJECTION_CALLS,
+                                    &crate::loop5_instrumentation::WALK_DEFINE_PROPS_PROJECTION_NS,
+                                );
+                                if lowered_needs_projection_rescue
+                                    && define_props.result.value.properties.is_empty()
                                 {
-                                    let projected_result =
-                                        verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(
-                                            projected_shape,
-                                        );
-                                    if projection_result_beats_solver_shape(
-                                        &projected_result,
-                                        &define_props.result,
-                                    ) {
-                                        define_props.result = projected_result;
+                                    if let Some(projected_shape) =
+                                        project_expr_class_a_shape_via_dispatch(
+                                            query_engine.ctx,
+                                            scope_canonical_id,
+                                            lowered,
+                                        )
+                                        .filter(has_prop_shape_surface)
+                                    {
+                                        let projected_result =
+                                            verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(
+                                                projected_shape,
+                                            );
+                                        if projection_result_beats_solver_shape(
+                                            &projected_result,
+                                            &define_props.result,
+                                        ) {
+                                            define_props.result = projected_result;
+                                        }
                                     }
                                 }
                             }
+                            // Loop-9 walk block C: per-property loop
+                            // calling materialize_component_meta_*.
+                            let _t = crate::loop5_instrumentation::TimerGuard::new(
+                                &crate::loop5_instrumentation::WALK_DEFINE_PROPS_PROPERTY_LOOP_CALLS,
+                                &crate::loop5_instrumentation::WALK_DEFINE_PROPS_PROPERTY_LOOP_NS,
+                            );
                             for property in &mut define_props.result.value.properties {
                                 if type_expr_is_slots_member_route(&property.ty) {
                                     continue;
@@ -484,6 +509,11 @@ pub(crate) fn walk_component_meta_macro_shape_member_types(
                 define_props_index += 1;
             }
             verter_semantic::analysis::AnalyzedMacroKind::DefineEmits => {
+                // Loop-9 walk block D: full DefineEmits arm.
+                let _t = crate::loop5_instrumentation::TimerGuard::new(
+                    &crate::loop5_instrumentation::WALK_DEFINE_EMITS_ARM_CALLS,
+                    &crate::loop5_instrumentation::WALK_DEFINE_EMITS_ARM_NS,
+                );
                 if let Some(lowered) = params.define_emits.get(define_emits_index) {
                     if let Some(define_emits) = evaluated_types
                         .define_emits
@@ -561,6 +591,11 @@ pub(crate) fn walk_component_meta_macro_shape_member_types(
                 define_emits_index += 1;
             }
             verter_semantic::analysis::AnalyzedMacroKind::DefineSlots => {
+                // Loop-9 walk block E: full DefineSlots arm.
+                let _t = crate::loop5_instrumentation::TimerGuard::new(
+                    &crate::loop5_instrumentation::WALK_DEFINE_SLOTS_ARM_CALLS,
+                    &crate::loop5_instrumentation::WALK_DEFINE_SLOTS_ARM_NS,
+                );
                 if let Some(lowered) = params.define_slots.get(define_slots_index) {
                     if let Some(define_slots) = evaluated_types
                         .define_slots
@@ -711,6 +746,10 @@ pub(crate) fn materialize_component_meta_macro_shape_member_type_expr(
     scope_canonical_id: &str,
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
 ) -> verter_semantic::analysis::type_expr::TypeExpr {
+    let _loop8_timer = crate::loop5_instrumentation::TimerGuard::new(
+        &crate::loop5_instrumentation::MATERIALIZE_MACRO_SHAPE_MEMBER_TYPE_EXPR_CALLS,
+        &crate::loop5_instrumentation::MATERIALIZE_MACRO_SHAPE_MEMBER_TYPE_EXPR_NS,
+    );
     fn wrapped_member_leaf(
         expr: &verter_semantic::analysis::type_expr::TypeExpr,
         member_name: &str,
