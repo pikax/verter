@@ -588,6 +588,65 @@ fn default_out_dir() -> PathBuf {
 }
 
 fn main() -> io::Result<()> {
+    // Watchdog spawn — opt-in via `VERTER_WATCHDOG_STALL_MS` (default
+    // disabled). When set, spawn the verter_session watchdog thread
+    // before driving the workload. The thread polls
+    // `WATCHDOG_PROGRESS_BEAT` every `VERTER_WATCHDOG_INTERVAL_MS`
+    // (default 1000ms) and emits a `[WATCHDOG_STALL]` line + flips
+    // `WATCHDOG_DUMP_BACKTRACE_NOW` whenever the beat counter has not
+    // advanced for `stall_ms` milliseconds. The next call into
+    // `shallow_lower_type_expr` then dumps a self-backtrace tagged
+    // `[WATCHDOG_DUMP]`. This is the in-process replacement for an
+    // external sampling debugger on platforms where samply / cdb /
+    // procdump are unavailable.
+    // Watchdog modes:
+    //   stall  — dump after `VERTER_WATCHDOG_STALL_MS` of no
+    //            `watchdog_beat` advance. Use for true hangs.
+    //   sample — dump every `VERTER_WATCHDOG_INTERVAL_MS`. Use for
+    //            slow recursive work that advances beat rapidly but
+    //            is stuck in deep recursion.
+    let watchdog_mode = std::env::var("VERTER_WATCHDOG_MODE")
+        .ok()
+        .map(|s| s.to_lowercase());
+    let watchdog_interval_ms = std::env::var("VERTER_WATCHDOG_INTERVAL_MS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .unwrap_or(1000);
+    match watchdog_mode.as_deref() {
+        Some("sample") => {
+            eprintln!(
+                "[WATCHDOG] spawn mode=sample interval_ms={}",
+                watchdog_interval_ms
+            );
+            verter_session::loop5_instrumentation::spawn_watchdog_with_mode(
+                verter_session::loop5_instrumentation::WatchdogMode::Sample,
+                0,
+                watchdog_interval_ms,
+            );
+        }
+        Some("stall") | None => {
+            if let Ok(stall_raw) = std::env::var("VERTER_WATCHDOG_STALL_MS") {
+                if let Ok(stall_ms) = stall_raw.parse::<u64>() {
+                    eprintln!(
+                        "[WATCHDOG] spawn mode=stall stall_ms={} interval_ms={}",
+                        stall_ms, watchdog_interval_ms
+                    );
+                    verter_session::loop5_instrumentation::spawn_watchdog_with_mode(
+                        verter_session::loop5_instrumentation::WatchdogMode::Stall,
+                        stall_ms,
+                        watchdog_interval_ms,
+                    );
+                }
+            }
+        }
+        Some(other) => {
+            eprintln!(
+                "[WATCHDOG] unknown mode '{}', expected 'stall' or 'sample'",
+                other
+            );
+        }
+    }
+
     let project_root = std::env::var("VERTER_AUDIT_PROJECT_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|_| default_project_root());

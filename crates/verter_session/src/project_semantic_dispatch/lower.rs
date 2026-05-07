@@ -77,6 +77,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         mode: ProjectionMode,
     ) -> SemanticNodeId {
+        // Watchdog hooks for hang investigation. Both calls are inert
+        // when the watchdog has not been spawned (single relaxed atomic
+        // load + early return). When active, they advance a heartbeat
+        // counter and respond to the watchdog's stall signal by
+        // printing a self-backtrace from inside this recursion.
+        // See `loop5_instrumentation.rs` watchdog module.
+        crate::loop5_instrumentation::watchdog_beat();
+        crate::loop5_instrumentation::watchdog_check_and_dump("shallow_lower_type_expr");
         // Step 0 spike #2 hook: marks that dispatch lowering has been
         // entered on this thread. Reads recorded *before* this call
         // are PRE_LOWER (MIGRATE candidates); reads after are POST_LOWER.

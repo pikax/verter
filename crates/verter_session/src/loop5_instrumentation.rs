@@ -21,7 +21,7 @@
 //!   the warm-fraction; if the hit rate is high but total time stays
 //!   high, admission overhead dominates.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Outer entries to `materialize_component_meta_macro_shape_member_type_expr`.
 /// One increment per request × per macro member walked.
@@ -763,6 +763,189 @@ pub fn dump_loop5_instrumentation_counters() -> String {
          \"DISPATCH_OPERATOR_KIND_CALLS\": {{{per_kind_calls}\n  }},\n  \
          \"DISPATCH_OPERATOR_KIND_NS\": {{{per_kind_ns}\n  }}\n}}"
     )
+}
+
+// =====================================================================
+// Watchdog backtrace dumper
+// =====================================================================
+//
+// Hang-detection infrastructure for the cold-path investigation. The
+// bench harness (or any caller) spawns a background watchdog thread
+// that samples a "progress beat" counter at a regular interval. If the
+// counter has not advanced past a threshold of stalls, the watchdog
+// flips `WATCHDOG_DUMP_BACKTRACE_NOW` to true. The next call into a
+// hot-path function that has been wired with `watchdog_check_and_dump`
+// captures `std::backtrace::Backtrace::force_capture()` and prints it
+// to stderr — i.e., a self-backtrace from inside the hung recursion.
+//
+// This is an in-process replacement for an external sampling
+// debugger (`cdb` / `windbg` / `samply --record` are all unavailable
+// on the dev Windows host the bench is currently run on).
+//
+// Wiring contract:
+//
+// 1. Hot-path functions (e.g. `shallow_lower_type_expr`) call
+//    [`watchdog_beat`] on every entry to advance
+//    `WATCHDOG_PROGRESS_BEAT`. They also call
+//    [`watchdog_check_and_dump`] which checks the
+//    `WATCHDOG_DUMP_BACKTRACE_NOW` flag and emits a self-backtrace
+//    if set. Both functions are inert (single relaxed atomic load,
+//    no allocation, no syscall) when the watchdog is not active —
+//    i.e., the wiring has zero hot-path cost in production builds
+//    that never start the watchdog thread.
+//
+// 2. The bench harness (or test) calls
+//    [`spawn_watchdog`] before driving the workload. Pass the stall
+//    threshold (seconds with no `watchdog_beat`) and the sample
+//    interval (poll period of the watchdog thread).
+//
+// 3. On hang detection the watchdog sets
+//    `WATCHDOG_DUMP_BACKTRACE_NOW`. The next hot-path entry sees the
+//    flag and dumps. After a successful dump the flag is reset, but
+//    the stall counter is NOT reset — i.e. on a sustained hang the
+//    watchdog keeps re-arming and we get periodic stack samples.
+
+/// Per-call progress counter. `watchdog_beat()` increments this
+/// atomically (relaxed) on every hot-path entry. The watchdog thread
+/// reads it on each tick to detect hang (no advancement between
+/// ticks).
+pub static WATCHDOG_PROGRESS_BEAT: AtomicU64 = AtomicU64::new(0);
+
+/// Set true by the watchdog thread when it detects a stall. Read +
+/// cleared by `watchdog_check_and_dump()` on the next hot-path entry.
+pub static WATCHDOG_DUMP_BACKTRACE_NOW: AtomicBool = AtomicBool::new(false);
+
+/// Serial number used by the watchdog thread to label dump windows
+/// for cross-referencing the resulting `[WATCHDOG_DUMP]` lines.
+pub static WATCHDOG_DUMP_SERIAL: AtomicU64 = AtomicU64::new(0);
+
+/// Whether the watchdog has been spawned for this process. Used by
+/// `watchdog_beat()` to avoid touching the atomic counter when no
+/// watchdog is listening.
+pub static WATCHDOG_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Hot-path entry helper. Bumps the progress counter when the
+/// watchdog is active; otherwise no-op. Inline + `#[cold]` on the
+/// load path keeps the inert cost to a single relaxed load.
+#[inline]
+pub fn watchdog_beat() {
+    if WATCHDOG_ACTIVE.load(Ordering::Relaxed) {
+        WATCHDOG_PROGRESS_BEAT.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Hot-path checkpoint. If the watchdog signalled a stall, capture
+/// `std::backtrace::Backtrace::force_capture()` and emit it to stderr
+/// tagged with `label`. The `force_capture` call ignores
+/// `RUST_BACKTRACE` and always produces a stack — necessary because
+/// release builds default to no backtrace.
+#[inline]
+pub fn watchdog_check_and_dump(label: &'static str) {
+    if WATCHDOG_DUMP_BACKTRACE_NOW.load(Ordering::Relaxed)
+        && WATCHDOG_DUMP_BACKTRACE_NOW
+            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+    {
+        watchdog_capture_and_emit(label);
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn watchdog_capture_and_emit(label: &'static str) {
+    let serial = WATCHDOG_DUMP_SERIAL.load(Ordering::Relaxed);
+    let bt = std::backtrace::Backtrace::force_capture();
+    eprintln!(
+        "[WATCHDOG_DUMP] serial={} label={} backtrace=\n{}",
+        serial, label, bt
+    );
+}
+
+/// Watchdog mode — controls when the watchdog requests a backtrace
+/// dump.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WatchdogMode {
+    /// Stall mode — request a dump only when `WATCHDOG_PROGRESS_BEAT`
+    /// has not advanced for the threshold window. Useful for true
+    /// hangs where the beat counter goes silent.
+    Stall,
+    /// Sample mode — request a dump every `sample_interval_ms`,
+    /// regardless of beat progress. Useful for slow recursive work
+    /// where the beat counter advances rapidly but the call is
+    /// stuck inside a single deep recursion. Each dump shows the
+    /// CURRENT recursion path so consecutive samples reveal the
+    /// hot path.
+    Sample,
+}
+
+/// Spawn the watchdog thread. Returns a handle the caller can drop
+/// to detach (the thread keeps running until the process exits). Idempotent —
+/// calling twice replaces the active state but does not stop the
+/// prior thread (the prior thread keeps polling but the new thread
+/// drives the new thresholds).
+///
+/// `stall_threshold_ms` — number of milliseconds with no
+/// `watchdog_beat()` advance before a dump is requested (Stall mode
+/// only).
+/// `sample_interval_ms` — how often the watchdog wakes. In Sample
+/// mode each tick triggers a dump request; in Stall mode each tick
+/// checks the beat counter against the threshold.
+pub fn spawn_watchdog_with_mode(
+    mode: WatchdogMode,
+    stall_threshold_ms: u64,
+    sample_interval_ms: u64,
+) {
+    WATCHDOG_ACTIVE.store(true, Ordering::Relaxed);
+    let stall_threshold = std::time::Duration::from_millis(stall_threshold_ms);
+    let sample_interval = std::time::Duration::from_millis(sample_interval_ms);
+    std::thread::Builder::new()
+        .name("verter-watchdog".to_string())
+        .spawn(move || match mode {
+            WatchdogMode::Stall => watchdog_stall_loop(stall_threshold, sample_interval),
+            WatchdogMode::Sample => watchdog_sample_loop(sample_interval),
+        })
+        .expect("spawn watchdog thread");
+}
+
+/// Backwards-compatible alias for [`spawn_watchdog_with_mode`] in
+/// `Stall` mode. New callers should pick the explicit mode.
+pub fn spawn_watchdog(stall_threshold_ms: u64, sample_interval_ms: u64) {
+    spawn_watchdog_with_mode(WatchdogMode::Stall, stall_threshold_ms, sample_interval_ms);
+}
+
+fn watchdog_stall_loop(stall_threshold: std::time::Duration, sample_interval: std::time::Duration) {
+    let mut last_beat = WATCHDOG_PROGRESS_BEAT.load(Ordering::Relaxed);
+    let mut last_advance = std::time::Instant::now();
+    loop {
+        std::thread::sleep(sample_interval);
+        let current_beat = WATCHDOG_PROGRESS_BEAT.load(Ordering::Relaxed);
+        if current_beat != last_beat {
+            last_beat = current_beat;
+            last_advance = std::time::Instant::now();
+            continue;
+        }
+        if last_advance.elapsed() >= stall_threshold {
+            let serial = WATCHDOG_DUMP_SERIAL.fetch_add(1, Ordering::Relaxed) + 1;
+            eprintln!(
+                "[WATCHDOG_STALL] serial={} stalled_for_ms={:.0} beat={}",
+                serial,
+                last_advance.elapsed().as_secs_f64() * 1000.0,
+                current_beat,
+            );
+            WATCHDOG_DUMP_BACKTRACE_NOW.store(true, Ordering::Relaxed);
+            last_advance = std::time::Instant::now();
+        }
+    }
+}
+
+fn watchdog_sample_loop(sample_interval: std::time::Duration) {
+    loop {
+        std::thread::sleep(sample_interval);
+        let serial = WATCHDOG_DUMP_SERIAL.fetch_add(1, Ordering::Relaxed) + 1;
+        let beat = WATCHDOG_PROGRESS_BEAT.load(Ordering::Relaxed);
+        eprintln!("[WATCHDOG_SAMPLE] serial={} beat={}", serial, beat);
+        WATCHDOG_DUMP_BACKTRACE_NOW.store(true, Ordering::Relaxed);
+    }
 }
 
 #[cfg(test)]

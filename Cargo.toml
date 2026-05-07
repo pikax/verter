@@ -34,5 +34,18 @@ opt-level = 3
 lto = true
 codegen-units = 1
 
+# Debuggable release profile. Same optimisation level as release but
+# with line-table debug info so LLDB can resolve frames in attached
+# stacks. Use via:
+#   cargo build --profile=release-dbg --example audit_real_component_meta -p verter_bench
+# Output lands in target/release-dbg/. Used by the `tools/debug/`
+# helpers when the bench needs to be inspected with a debugger
+# attaching to a running process. Keeps the regular `release` profile
+# small and frame-pointer-omitted for production benchmarks.
+[profile.release-dbg]
+inherits = "release"
+debug = "line-tables-only"
+strip = "none"
+
 [profile.dev]
 opt-level = 0
