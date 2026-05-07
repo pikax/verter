@@ -1052,9 +1052,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
         crate::loop5_instrumentation::DISPATCH_OPERATOR_WITH_RECURSE_CALLS
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
+        // Loop-7 instrumentation — per-`SemanticQueryKey`-variant
+        // wall-clock attribution. The kind index is captured BEFORE
+        // `execute_read` consumes the key. The wall-clock window
+        // covers `execute_read` (warm-hit fast-path AND cold-build
+        // close-down) AND any recursive `reduce_one` follow-up the
+        // dispatch triggers — i.e. the entire wall-clock cost
+        // attributable to this single operator-node dispatch.
+        let kind_idx = crate::loop5_instrumentation::kind_index_for_key(&key);
+        crate::loop5_instrumentation::DISPATCH_OPERATOR_KIND_CALLS[kind_idx]
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dispatch_started = std::time::Instant::now();
+
         let read = self.execute_read(key);
         state.merge_dep_signature(&read.dep_signature);
-        match read.value {
+        let result = match read.value {
             QueryResult::Value(result) => {
                 if result == node {
                     node
@@ -1075,7 +1087,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             QueryResult::Recursive(_id) => node,
             QueryResult::Error(_) => node,
-        }
+        };
+
+        let elapsed_ns = dispatch_started.elapsed().as_nanos() as u64;
+        crate::loop5_instrumentation::DISPATCH_OPERATOR_KIND_NS[kind_idx]
+            .fetch_add(elapsed_ns, std::sync::atomic::Ordering::Relaxed);
+        crate::loop5_instrumentation::DISPATCH_OPERATOR_TOTAL_NS
+            .fetch_add(elapsed_ns, std::sync::atomic::Ordering::Relaxed);
+        result
     }
 
     /// Helper: convert a reducer-driven hard-stop into an

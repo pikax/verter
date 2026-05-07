@@ -223,6 +223,121 @@ pub fn record_outer_call_type_expr(expr: &verter_semantic::analysis::type_expr::
     MAX_TYPE_EXPR_OPERATOR_NODE_COUNT.fetch_max(n, Ordering::Relaxed);
 }
 
+/// Per-`SemanticQueryKey`-variant timing for
+/// `dispatch_operator_with_recurse` — loop 7. Each call to
+/// `dispatch_operator_with_recurse` is wrapped in a wall-clock timer
+/// keyed on the variant of the dispatched `SemanticQueryKey`. The
+/// counters together account for the entire inner-dispatch wall-clock
+/// time on the hot path and let us answer "which operator kind is
+/// the dominant cost?" for ChatMessage's 31-min cold path.
+///
+/// Index mapping (kept in sync with `kind_index_for_key`):
+///   0 = ResolveDecl
+///   1 = Instantiate
+///   2 = ProjectMember
+///   3 = IndexedAccess
+///   4 = KeyOf
+///   5 = MappedType
+///   6 = Conditional
+///   7 = TypeOf
+///   8 = NormalizeUnion
+///   9 = NormalizeIntersection
+///  10 = ProjectPath
+///  11 = ResolvedNamedType
+///  12 = Relate
+///  13 = ResolveMacroPayload
+pub const DISPATCH_OPERATOR_KIND_COUNT: usize = 14;
+
+/// Human-readable labels for each operator-kind index. Kept in sync
+/// with the comment on `DISPATCH_OPERATOR_KIND_COUNT` and with the
+/// `kind_index_for_key` helper so dump JSON keys are obvious.
+pub const DISPATCH_OPERATOR_KIND_LABELS: [&str; DISPATCH_OPERATOR_KIND_COUNT] = [
+    "ResolveDecl",
+    "Instantiate",
+    "ProjectMember",
+    "IndexedAccess",
+    "KeyOf",
+    "MappedType",
+    "Conditional",
+    "TypeOf",
+    "NormalizeUnion",
+    "NormalizeIntersection",
+    "ProjectPath",
+    "ResolvedNamedType",
+    "Relate",
+    "ResolveMacroPayload",
+];
+
+/// Per-kind call counts. `dispatch_operator_with_recurse` increments
+/// the matching index on entry. Sum across all indices equals
+/// `DISPATCH_OPERATOR_WITH_RECURSE_CALLS`.
+pub static DISPATCH_OPERATOR_KIND_CALLS: [AtomicU64; DISPATCH_OPERATOR_KIND_COUNT] = [
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+];
+
+/// Per-kind nanoseconds spent inside `dispatch_operator_with_recurse`
+/// (including the body's `execute_read` call AND any recursive
+/// `reduce_one` follow-up reductions). Wall-clock measured at the
+/// function entry / exit. Sum across all indices is approximately
+/// `DISPATCH_OPERATOR_TOTAL_NS`.
+pub static DISPATCH_OPERATOR_KIND_NS: [AtomicU64; DISPATCH_OPERATOR_KIND_COUNT] = [
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+];
+
+/// Total nanoseconds spent inside `dispatch_operator_with_recurse`.
+/// Sanity check against the per-kind sum.
+pub static DISPATCH_OPERATOR_TOTAL_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Map a `SemanticQueryKey` to its kind index. Kept in lockstep with
+/// `DISPATCH_OPERATOR_KIND_LABELS` — adding a new variant requires
+/// extending `DISPATCH_OPERATOR_KIND_COUNT`, the labels array, both
+/// counter arrays, this match, and the test below.
+pub fn kind_index_for_key(key: &crate::semantic_query::SemanticQueryKey) -> usize {
+    use crate::semantic_query::SemanticQueryKey;
+    match key {
+        SemanticQueryKey::ResolveDecl(_) => 0,
+        SemanticQueryKey::Instantiate { .. } => 1,
+        SemanticQueryKey::ProjectMember { .. } => 2,
+        SemanticQueryKey::IndexedAccess { .. } => 3,
+        SemanticQueryKey::KeyOf { .. } => 4,
+        SemanticQueryKey::MappedType { .. } => 5,
+        SemanticQueryKey::Conditional { .. } => 6,
+        SemanticQueryKey::TypeOf { .. } => 7,
+        SemanticQueryKey::NormalizeUnion { .. } => 8,
+        SemanticQueryKey::NormalizeIntersection { .. } => 9,
+        SemanticQueryKey::ProjectPath { .. } => 10,
+        SemanticQueryKey::ResolvedNamedType { .. } => 11,
+        SemanticQueryKey::Relate { .. } => 12,
+        SemanticQueryKey::ResolveMacroPayload { .. } => 13,
+    }
+}
+
 /// Reset every counter to zero. Used between bench passes if the caller
 /// wants per-pass attribution. Not invoked by default; the bench dumps
 /// cumulative values.
@@ -242,6 +357,13 @@ pub fn reset_all() {
     MAX_TYPE_EXPR_OPERATOR_NODE_COUNT.store(0, Ordering::Relaxed);
     TYPE_EXPR_OPERATOR_NODE_COUNT_SUM.store(0, Ordering::Relaxed);
     EXECUTE_COOPERATIVE_BUILD_NS_TOTAL.store(0, Ordering::Relaxed);
+    DISPATCH_OPERATOR_TOTAL_NS.store(0, Ordering::Relaxed);
+    for slot in DISPATCH_OPERATOR_KIND_CALLS.iter() {
+        slot.store(0, Ordering::Relaxed);
+    }
+    for slot in DISPATCH_OPERATOR_KIND_NS.iter() {
+        slot.store(0, Ordering::Relaxed);
+    }
 }
 
 /// Snapshot of every loop-5 counter at the moment of the call. Returned
@@ -268,6 +390,23 @@ pub fn dump_loop5_instrumentation_counters() -> String {
         TYPE_EXPR_OPERATOR_NODE_COUNT_SUM.load(Ordering::Relaxed);
     let execute_cooperative_build_ns_total =
         EXECUTE_COOPERATIVE_BUILD_NS_TOTAL.load(Ordering::Relaxed);
+    let dispatch_operator_total_ns = DISPATCH_OPERATOR_TOTAL_NS.load(Ordering::Relaxed);
+
+    let mut per_kind_calls = String::new();
+    let mut per_kind_ns = String::new();
+    for (idx, label) in DISPATCH_OPERATOR_KIND_LABELS.iter().enumerate() {
+        let calls = DISPATCH_OPERATOR_KIND_CALLS[idx].load(Ordering::Relaxed);
+        let ns = DISPATCH_OPERATOR_KIND_NS[idx].load(Ordering::Relaxed);
+        if idx > 0 {
+            per_kind_calls.push_str(",\n    ");
+            per_kind_ns.push_str(",\n    ");
+        } else {
+            per_kind_calls.push_str("\n    ");
+            per_kind_ns.push_str("\n    ");
+        }
+        per_kind_calls.push_str(&format!("\"{label}\": {calls}"));
+        per_kind_ns.push_str(&format!("\"{label}\": {ns}"));
+    }
 
     format!(
         "{{\n  \"MACRO_MEMBER_WALK_OUTER_CALLS\": {macro_member_walk_outer_calls},\n  \
@@ -284,7 +423,10 @@ pub fn dump_loop5_instrumentation_counters() -> String {
          \"FAMILY_MEMO_MISSES\": {family_memo_misses},\n  \
          \"MAX_TYPE_EXPR_OPERATOR_NODE_COUNT\": {max_type_expr_operator_node_count},\n  \
          \"TYPE_EXPR_OPERATOR_NODE_COUNT_SUM\": {type_expr_operator_node_count_sum},\n  \
-         \"EXECUTE_COOPERATIVE_BUILD_NS_TOTAL\": {execute_cooperative_build_ns_total}\n}}"
+         \"EXECUTE_COOPERATIVE_BUILD_NS_TOTAL\": {execute_cooperative_build_ns_total},\n  \
+         \"DISPATCH_OPERATOR_TOTAL_NS\": {dispatch_operator_total_ns},\n  \
+         \"DISPATCH_OPERATOR_KIND_CALLS\": {{{per_kind_calls}\n  }},\n  \
+         \"DISPATCH_OPERATOR_KIND_NS\": {{{per_kind_ns}\n  }}\n}}"
     )
 }
 
@@ -312,12 +454,114 @@ mod tests {
             "MAX_TYPE_EXPR_OPERATOR_NODE_COUNT",
             "TYPE_EXPR_OPERATOR_NODE_COUNT_SUM",
             "EXECUTE_COOPERATIVE_BUILD_NS_TOTAL",
+            "DISPATCH_OPERATOR_TOTAL_NS",
+            "DISPATCH_OPERATOR_KIND_CALLS",
+            "DISPATCH_OPERATOR_KIND_NS",
         ] {
             assert!(
                 json.contains(key),
                 "dump_loop5_instrumentation_counters missing key {key}: {json}"
             );
         }
+        for label in DISPATCH_OPERATOR_KIND_LABELS {
+            assert!(
+                json.contains(&format!("\"{label}\":")),
+                "dump_loop5_instrumentation_counters missing operator-kind label {label}: {json}"
+            );
+        }
+    }
+
+    #[test]
+    fn kind_index_for_key_distinct_for_each_variant() {
+        use crate::semantic_query::{
+            DeclIdentity, IndexKey, ResolveDeclKey, ScopeId, SemanticQueryKey,
+        };
+        use crate::ProjectionMode;
+
+        let dummy_id: Arc<str> = Arc::from("/x");
+        let scope = ScopeId {
+            canonical_id: Arc::clone(&dummy_id),
+            local_scope: None,
+        };
+        let identity = DeclIdentity {
+            canonical_id: Arc::clone(&dummy_id),
+            whole_hash: [0u8; 16],
+            decl_name: Arc::from("X"),
+        };
+        let dummy_node = crate::semantic_query::SemanticNodeId(1);
+
+        let resolve_decl = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+            scope: scope.clone(),
+            name: Arc::from("X"),
+        });
+        let instantiate = SemanticQueryKey::Instantiate {
+            base: identity.clone(),
+            args: Arc::from(Vec::new().into_boxed_slice()),
+            body_mode: ProjectionMode::Skeleton,
+        };
+        let project_member = SemanticQueryKey::ProjectMember {
+            base: dummy_node,
+            member: Arc::from("p"),
+            mode: ProjectionMode::Navigate,
+        };
+        let indexed_access = SemanticQueryKey::IndexedAccess {
+            base: dummy_node,
+            index: IndexKey::String(Arc::from("k")),
+            mode: ProjectionMode::Navigate,
+        };
+        let key_of = SemanticQueryKey::KeyOf { base: dummy_node };
+        let conditional = SemanticQueryKey::Conditional {
+            check: dummy_node,
+            extends: dummy_node,
+            true_branch: dummy_node,
+            false_branch: dummy_node,
+            distributive: false,
+        };
+        let normalize_union = SemanticQueryKey::NormalizeUnion {
+            members: Arc::from(Vec::new().into_boxed_slice()),
+        };
+        let normalize_intersection = SemanticQueryKey::NormalizeIntersection {
+            members: Arc::from(Vec::new().into_boxed_slice()),
+        };
+        let project_path = SemanticQueryKey::ProjectPath {
+            base: dummy_node,
+            path: Arc::from(Vec::new().into_boxed_slice()),
+            mode: ProjectionMode::Navigate,
+        };
+        let relate = SemanticQueryKey::Relate {
+            source: dummy_node,
+            target: dummy_node,
+        };
+
+        // Discriminating: each of these MUST hit a distinct index in
+        // the kind table; if any two collide the test fails.
+        let observed = [
+            kind_index_for_key(&resolve_decl),
+            kind_index_for_key(&instantiate),
+            kind_index_for_key(&project_member),
+            kind_index_for_key(&indexed_access),
+            kind_index_for_key(&key_of),
+            kind_index_for_key(&conditional),
+            kind_index_for_key(&normalize_union),
+            kind_index_for_key(&normalize_intersection),
+            kind_index_for_key(&project_path),
+            kind_index_for_key(&relate),
+        ];
+        let expected = [0usize, 1, 2, 3, 4, 6, 8, 9, 10, 12];
+        assert_eq!(observed, expected);
+        // No off-by-one in the static label table:
+        assert_eq!(
+            DISPATCH_OPERATOR_KIND_LABELS.len(),
+            DISPATCH_OPERATOR_KIND_COUNT
+        );
+        assert_eq!(
+            DISPATCH_OPERATOR_KIND_CALLS.len(),
+            DISPATCH_OPERATOR_KIND_COUNT
+        );
+        assert_eq!(
+            DISPATCH_OPERATOR_KIND_NS.len(),
+            DISPATCH_OPERATOR_KIND_COUNT
+        );
     }
 
     #[test]
