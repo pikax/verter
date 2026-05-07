@@ -178,6 +178,14 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
     let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
         scope_payload.as_deref(),
     );
+    let _us_trace = std::env::var("VERTER_PROGRESS_STREAM").is_ok();
+    if _us_trace {
+        eprintln!(
+            "[US_LOWER_START] scope={} mode={:?}",
+            scope_canonical_id, mode
+        );
+    }
+    let _us_lower_t0 = std::time::Instant::now();
     let lowered = dispatch.shallow_lower_type_expr(
         expr,
         &env,
@@ -188,7 +196,22 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
         &mut substitutions,
         mode,
     );
+    let _us_lower_ms = _us_lower_t0.elapsed().as_secs_f64() * 1000.0;
+    if _us_trace {
+        eprintln!(
+            "[US_LOWER_END] scope={} mode={:?} lower_ms={:.1}",
+            scope_canonical_id, mode, _us_lower_ms
+        );
+    }
+    let _us_rr_t0 = std::time::Instant::now();
     let dispatch_materialized = dispatch.raise_and_reduce(lowered, mode);
+    let _us_rr_ms = _us_rr_t0.elapsed().as_secs_f64() * 1000.0;
+    if _us_trace {
+        eprintln!(
+            "[US_RAISE_END] scope={} mode={:?} raise_reduce_ms={:.1}",
+            scope_canonical_id, mode, _us_rr_ms
+        );
+    }
 
     // Step 6.6.A: accumulate dispatch's dep_signature into the
     // per-request thread-local so compute_component_meta_state_inner
@@ -861,25 +884,44 @@ pub(crate) fn materialize_component_meta_field_types(
         &crate::loop5_instrumentation::MATERIALIZE_FIELD_TYPES_CALLS,
         &crate::loop5_instrumentation::MATERIALIZE_FIELD_TYPES_NS,
     );
-    /// `rescue_field` mutates field type via
-    /// `MacroFieldGraphState::set_current_type` rather than direct
-    /// `field.r#type = X` assignment. The `field` reference is read-only
-    /// here (used only for raw_type access via `parsed_field_raw_type`);
-    /// type mutations route through `field_state`.
+    let _ft_t0 = std::time::Instant::now();
+    if std::env::var("VERTER_PROGRESS_STREAM").is_ok() {
+        eprintln!(
+            "[FIELD_TYPES_ENTER] owner={} props={} slots={} bindings={}",
+            scope_canonical_id,
+            evaluated_types.props.len(),
+            evaluated_types.slot_bindings.len(),
+            evaluated_types.bindings.len()
+        );
+    }
     fn rescue_field(
         scope_canonical_id: &str,
         field: &verter_semantic::analysis::type_expand::ExpandedField,
         field_state: &mut MacroFieldGraphState<'_>,
         query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+        mode: crate::semantic_query::ProjectionMode,
     ) {
-        if !expr_needs_projection_rescue(
+        let trace = std::env::var("VERTER_PROGRESS_STREAM").is_ok();
+        let t0 = std::time::Instant::now();
+        let needs_rescue = expr_needs_projection_rescue(
             query_engine,
             scope_canonical_id,
             field_state.published_type(),
-        ) {
+        );
+        if trace {
+            eprintln!(
+                "[RF_NEEDS_RESCUE] field={} mode={:?} needs={} ms={:.1}",
+                field.name,
+                mode,
+                needs_rescue,
+                t0.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        if !needs_rescue {
             return;
         }
 
+        let t_scope = std::time::Instant::now();
         let materialize_scope_canonical_id = select_imported_materialization_scope(
             field_state.published_type(),
             scope_canonical_id,
@@ -891,12 +933,30 @@ pub(crate) fn materialize_component_meta_field_types(
             })
         })
         .unwrap_or_else(|| scope_canonical_id.to_string());
+        if trace {
+            eprintln!(
+                "[RF_SCOPE_SELECT] field={} scope_picked={} ms={:.1}",
+                field.name,
+                materialize_scope_canonical_id,
+                t_scope.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+
+        let t_us = std::time::Instant::now();
         let rescued = materialize_component_meta_type_expr_until_stable(
             field_state.published_type(),
             materialize_scope_canonical_id.as_str(),
-            crate::semantic_query::ProjectionMode::Expanded,
+            mode,
             query_engine,
         );
+        if trace {
+            eprintln!(
+                "[RF_UNTIL_STABLE] field={} mode={:?} ms={:.1}",
+                field.name,
+                mode,
+                t_us.elapsed().as_secs_f64() * 1000.0
+            );
+        }
         if rescued != *field_state.published_type() {
             field_state.set_current_type(rescued);
         }
@@ -1763,7 +1823,13 @@ pub(crate) fn materialize_component_meta_field_types(
                     field_state.set_current_type(candidate);
                 }
             }
-            rescue_field(scope_canonical_id, field, &mut field_state, query_engine);
+            rescue_field(
+                scope_canonical_id,
+                field,
+                &mut field_state,
+                query_engine,
+                crate::semantic_query::ProjectionMode::Expanded,
+            );
         }
 
         // Loop-9 block 4: needs_member_route predicate checks +
@@ -2228,22 +2294,94 @@ pub(crate) fn materialize_component_meta_field_types(
             ));
         }
     }
+    if std::env::var("VERTER_PROGRESS_STREAM").is_ok() {
+        eprintln!(
+            "[PROPS_DONE] owner={} elapsed_ms_total={:.1}",
+            scope_canonical_id,
+            _ft_t0.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+    if std::env::var("VERTER_PROGRESS_STREAM").is_ok() {
+        eprintln!(
+            "[EMITS_ENTER] owner={} count={}",
+            scope_canonical_id,
+            evaluated_types.emits.len()
+        );
+    }
     for field in &mut evaluated_types.emits {
         // Wrap field.r#type in MacroFieldGraphState.
         let ctx = query_engine.ctx;
         let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         let mut field_state =
             MacroFieldGraphState::new(field.r#type.clone(), scope_canonical_id, &dispatch);
-        rescue_field(scope_canonical_id, field, &mut field_state, query_engine);
+        rescue_field(
+            scope_canonical_id,
+            field,
+            &mut field_state,
+            query_engine,
+            crate::semantic_query::ProjectionMode::Expanded,
+        );
         field.r#type = field_state.publish();
     }
-    for field in &mut evaluated_types.slot_bindings {
+    let _slot_bindings_t0 = std::time::Instant::now();
+    let _trace_sb = std::env::var("VERTER_PROGRESS_STREAM").is_ok();
+    if _trace_sb {
+        eprintln!(
+            "[SLOTS_ENTER] owner={} count={}",
+            scope_canonical_id,
+            evaluated_types.slot_bindings.len()
+        );
+    }
+    for (_sb_idx, field) in evaluated_types.slot_bindings.iter_mut().enumerate() {
+        if _trace_sb {
+            eprintln!(
+                "[SB_OUTER_START] idx={} name={} elapsed_ms={:.1}",
+                _sb_idx,
+                field.name,
+                _slot_bindings_t0.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        let _sb_outer_t0 = std::time::Instant::now();
         // Wrap field.r#type in MacroFieldGraphState.
         let ctx = query_engine.ctx;
         let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         let mut field_state =
             MacroFieldGraphState::new(field.r#type.clone(), scope_canonical_id, &dispatch);
-        rescue_field(scope_canonical_id, field, &mut field_state, query_engine);
+        if _trace_sb {
+            let preview = format!("{:?}", field.r#type);
+            let preview = if preview.len() > 600 {
+                format!("{}... [{} chars total]", &preview[..600], preview.len())
+            } else {
+                preview
+            };
+            eprintln!(
+                "[SB_RESCUE_START] idx={} name={} mode=Navigate type={}",
+                _sb_idx, field.name, preview
+            );
+        }
+        let _rescue_t0 = std::time::Instant::now();
+        // Slot-binding rescue uses Navigate mode (path-precise) per
+        // CLAUDE.md macro-traversal rule. The published_type for a
+        // slot_binding is typically `IndexedAccess { Ref<X<...>>, k }` —
+        // the IndexedAccess `[k]` IS the terminal projection. Expanded
+        // mode would walk the entire generic instantiation including
+        // third-party heritage (e.g., `extends UIMessage<...>` from the
+        // `ai` package), producing minutes of fan-out per binding.
+        rescue_field(
+            scope_canonical_id,
+            field,
+            &mut field_state,
+            query_engine,
+            crate::semantic_query::ProjectionMode::Navigate,
+        );
+        if _trace_sb {
+            eprintln!(
+                "[SB_RESCUE_END] idx={} name={} rescue_ms={:.1}",
+                _sb_idx,
+                field.name,
+                _rescue_t0.elapsed().as_secs_f64() * 1000.0
+            );
+        }
         let Some(scope_hints) = slot_binding_scope_hints.get(&field.name) else {
             field.r#type = field_state.publish();
             continue;
@@ -2253,7 +2391,7 @@ pub(crate) fn materialize_component_meta_field_types(
                 .raw_type
                 .as_deref()
                 .map(verter_semantic::analysis::type_expr_lower::parse_type_annotation);
-            for candidate in [
+            for (cand_idx, candidate) in [
                 Some(field_state.published_type().clone()),
                 parsed_raw.clone(),
                 parsed_raw.as_ref().and_then(|raw| {
@@ -2267,24 +2405,73 @@ pub(crate) fn materialize_component_meta_field_types(
             ]
             .into_iter()
             .flatten()
+            .enumerate()
             {
+                let trace = std::env::var("VERTER_PROGRESS_STREAM").is_ok();
+                if trace {
+                    eprintln!(
+                        "[SB_START] field={} scope={} cand={} START until_stable",
+                        field.name, scope_hint, cand_idx
+                    );
+                }
+                let t0 = std::time::Instant::now();
                 let rescued = materialize_component_meta_type_expr_until_stable(
                     &candidate,
                     scope_hint,
-                    crate::semantic_query::ProjectionMode::Expanded,
+                    crate::semantic_query::ProjectionMode::Navigate,
                     query_engine,
                 );
+                if trace {
+                    eprintln!(
+                        "[SB_END] field={} scope={} cand={} until_stable_ms={:.1}",
+                        field.name,
+                        scope_hint,
+                        cand_idx,
+                        t0.elapsed().as_secs_f64() * 1000.0
+                    );
+                }
                 if compare_type_expr_improvement(&rescued, field_state.published_type()) {
                     field_state.set_current_type(rescued);
                 }
+                if trace {
+                    eprintln!(
+                        "[SB_START] field={} scope={} cand={} START member_surface",
+                        field.name, scope_hint, cand_idx
+                    );
+                }
+                let t1 = std::time::Instant::now();
                 let surface =
                     query_engine.materialize_member_surface_expr(scope_hint, &candidate, false);
+                if trace {
+                    eprintln!(
+                        "[SB_END] field={} scope={} cand={} member_surface_ms={:.1}",
+                        field.name,
+                        scope_hint,
+                        cand_idx,
+                        t1.elapsed().as_secs_f64() * 1000.0
+                    );
+                }
                 if compare_type_expr_improvement(&surface, field_state.published_type()) {
                     field_state.set_current_type(surface);
                 }
             }
         }
         field.r#type = field_state.publish();
+        if _trace_sb {
+            eprintln!(
+                "[SB_OUTER_END] idx={} name={} outer_ms={:.1}",
+                _sb_idx,
+                field.name,
+                _sb_outer_t0.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+    }
+    if _trace_sb {
+        eprintln!(
+            "[SLOTS_EXIT] owner={} total_ms={:.1}",
+            scope_canonical_id,
+            _slot_bindings_t0.elapsed().as_secs_f64() * 1000.0
+        );
     }
     for field in &mut evaluated_types.bindings {
         // Wrap field.r#type in MacroFieldGraphState.
@@ -2292,7 +2479,13 @@ pub(crate) fn materialize_component_meta_field_types(
         let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         let mut field_state =
             MacroFieldGraphState::new(field.r#type.clone(), scope_canonical_id, &dispatch);
-        rescue_field(scope_canonical_id, field, &mut field_state, query_engine);
+        rescue_field(
+            scope_canonical_id,
+            field,
+            &mut field_state,
+            query_engine,
+            crate::semantic_query::ProjectionMode::Expanded,
+        );
         field.r#type = field_state.publish();
     }
 }
