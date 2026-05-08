@@ -433,6 +433,28 @@ importers:
         specifier: ^4.1.0
         version: 4.1.0(@types/node@25.4.0)(happy-dom@20.8.3)(vite@8.0.0(@types/node@25.4.0)(esbuild@0.27.3)(jiti@2.6.1)(less@4.6.2)(sass-embedded@1.98.0)(sass@1.98.0)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2))
 
+  packages/typeinfo:
+    dependencies:
+      '@verter/native':
+        specifier: workspace:^
+        version: link:../native
+      '@verter/type-ir':
+        specifier: workspace:^
+        version: link:../type-ir
+    devDependencies:
+      '@types/node':
+        specifier: ^25.4.0
+        version: 25.4.0
+      glob:
+        specifier: ^11.0.3
+        version: 11.1.0
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: ^4.1.0
+        version: 4.1.0(@types/node@25.4.0)(happy-dom@20.8.3)(vite@8.0.0(@types/node@25.4.0)(esbuild@0.27.3)(jiti@2.6.1)(less@4.6.2)(sass-embedded@1.98.0)(sass@1.98.0)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2))
+
   packages/types:
     devDependencies:
       typescript:

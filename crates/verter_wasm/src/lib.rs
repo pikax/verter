@@ -30,6 +30,7 @@ use verter_session::component_meta_audit::{
 use wasm_bindgen::prelude::*;
 
 mod audit;
+mod typeinfo;
 use audit::{
     audit_record_list_to_json_string, audit_record_to_json_string, kind_matches_wasm,
     parse_bundler_kind_wasm, parse_compile_target_wasm, parse_request_id_str_wasm,
@@ -925,6 +926,111 @@ impl WasmVerterHost {
                 .map_err(|e| {
                     JsValue::from_str(&format!("bundler batch summary serialization error: {e}"))
                 })
+        }))?
+    }
+
+    // =========================================================================
+    // Typeinfo entry-points (Phase 4 / typeinfo plan §6.1) — WASM
+    //
+    // Mirror the NAPI surface (`NapiVerterHost::list_symbols`,
+    // `resolveSymbolWithAudit`, `evaluateTypeExpressionWithAudit`).
+    // The encoding shape is JSON strings rather than `Buffer` blobs to
+    // match the existing WASM convention; the wire schema is identical.
+    // =========================================================================
+
+    /// Return the top-level symbol inventory for `canonical_id` as a
+    /// JSON string carrying a `Vec<FfiSymbolEntry>`.
+    #[wasm_bindgen(js_name = "listSymbols")]
+    pub fn list_symbols(&self, canonical_id: &str) -> Result<String, JsValue> {
+        let host = std::sync::Arc::clone(&self.inner);
+        let canonical_id_owned = canonical_id.to_string();
+        catch_panic(AssertUnwindSafe(move || {
+            let entries = host.list_file_symbols(&canonical_id_owned);
+            let ffi: Vec<verter_protocol::typeinfo::FfiSymbolEntry> = entries
+                .into_iter()
+                .map(verter_ffi::convert::host_to_ffi_symbol_entry)
+                .collect();
+            crate::typeinfo::encode_symbol_list(&ffi)
+        }))?
+    }
+
+    /// Resolve `name` in `canonical_id`'s scope. Returns a JSON string
+    /// carrying `{ typeExpr, auditRecord }` per the plan §6.1 contract.
+    ///
+    /// `type_args_json` is an optional JSON string carrying an array of
+    /// `TypeExpr` values. `mode` is one of the projection-mode tags or
+    /// `null` for the host default.
+    #[wasm_bindgen(js_name = "resolveSymbolWithAudit")]
+    pub fn resolve_symbol_with_audit(
+        &self,
+        canonical_id: &str,
+        name: &str,
+        type_args_json: Option<String>,
+        mode: Option<String>,
+    ) -> Result<JsValue, JsValue> {
+        let exprs = crate::typeinfo::decode_type_expr_list(type_args_json)?;
+        let resolve_mode = crate::typeinfo::parse_resolve_mode(mode)?;
+        let host = std::sync::Arc::clone(&self.inner);
+        let canonical_id_owned = canonical_id.to_string();
+        let name_owned = name.to_string();
+        catch_panic(AssertUnwindSafe(move || {
+            let arc_args: Vec<std::sync::Arc<verter_semantic::analysis::type_expr::TypeExpr>> =
+                exprs.into_iter().map(std::sync::Arc::new).collect();
+            let (resolved, record) = host.resolve_named_symbol_with_audit(
+                &canonical_id_owned,
+                &name_owned,
+                &arc_args,
+                resolve_mode,
+            );
+            let type_expr_json = match resolved {
+                Some(node_id) => host
+                    .project_node_to_type_expr(node_id)
+                    .map(|expr| crate::typeinfo::encode_type_expr(&expr))
+                    .transpose()?,
+                None => None,
+            };
+            let audit_json = match record {
+                Some(rec) => Some(crate::typeinfo::encode_audit_record(&rec)?),
+                None => None,
+            };
+            let result = crate::typeinfo::WasmTypeInfoResolveResult {
+                type_expr: type_expr_json,
+                audit_record: audit_json,
+            };
+            to_wasm_value(&result)
+        }))?
+    }
+
+    /// Evaluate a synthetic type expression in a file scope. Returns
+    /// `{ typeExpr, auditRecord }` per the plan §6.1 contract.
+    ///
+    /// `request_json` is a JSON string carrying a
+    /// `verter_protocol::typeinfo::FfiEvaluateTypeExpressionRequest`.
+    #[wasm_bindgen(js_name = "evaluateTypeExpressionWithAudit")]
+    pub fn evaluate_type_expression_with_audit(
+        &self,
+        request_json: &str,
+    ) -> Result<JsValue, JsValue> {
+        let req = crate::typeinfo::decode_evaluate_request(request_json)?;
+        let host = std::sync::Arc::clone(&self.inner);
+        catch_panic(AssertUnwindSafe(move || {
+            let (resolved, record) = host.evaluate_type_expression_with_audit(req);
+            let type_expr_json = match resolved {
+                Some(node_id) => host
+                    .project_node_to_type_expr(node_id)
+                    .map(|expr| crate::typeinfo::encode_type_expr(&expr))
+                    .transpose()?,
+                None => None,
+            };
+            let audit_json = match record {
+                Some(rec) => Some(crate::typeinfo::encode_audit_record(&rec)?),
+                None => None,
+            };
+            let result = crate::typeinfo::WasmTypeInfoResolveResult {
+                type_expr: type_expr_json,
+                audit_record: audit_json,
+            };
+            to_wasm_value(&result)
         }))?
     }
 }

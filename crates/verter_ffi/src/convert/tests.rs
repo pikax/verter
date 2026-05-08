@@ -503,6 +503,7 @@ fn config_all_fields() {
         analysis_level: Some("essential".to_string()),
         audit_enabled: None,
         footprint_capture: None,
+        typeinfo_scratch_cache_capacity: None,
     };
     let result = ffi_config_to_host(config).unwrap();
     assert!(!result.dev_mode);

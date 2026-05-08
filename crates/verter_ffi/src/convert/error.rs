@@ -20,6 +20,10 @@ pub enum FfiConversionError {
     InvalidNodeKind(String),
     /// Invalid `target` string.
     InvalidTarget(String),
+    /// Invalid projection-mode tag.
+    InvalidProjectionMode(String),
+    /// Invalid named-import variant tag.
+    InvalidNamedImportKind(String),
 }
 
 impl std::fmt::Display for FfiConversionError {
@@ -51,6 +55,15 @@ impl std::fmt::Display for FfiConversionError {
             Self::InvalidTarget(v) => write!(
                 f,
                 "invalid target '{v}' (expected 'bundler', 'ide', 'analysis', or 'full')"
+            ),
+            Self::InvalidProjectionMode(v) => write!(
+                f,
+                "invalid projection mode '{v}' (expected 'identity', 'navigate', 'shallow', \
+                 'expanded', or 'skeleton')"
+            ),
+            Self::InvalidNamedImportKind(v) => write!(
+                f,
+                "invalid named-import kind '{v}' (expected 'default', 'named', or 'namespace')"
             ),
         }
     }

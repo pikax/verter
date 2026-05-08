@@ -31,10 +31,12 @@ use napi::{Error, Status};
 use napi_derive::napi;
 use verter_ffi::convert::*;
 use verter_ffi::types::*;
+use verter_semantic::analysis::type_expr::TypeExpr;
 use verter_session as host;
 
 mod audit;
 mod meta;
+mod typeinfo;
 
 // Re-imports for code actions and diagnostics (parity with verter_wasm)
 use verter_actions::{ActionContext, ActionEngine};
@@ -198,6 +200,11 @@ pub struct NapiHostConfig {
     /// `auditEnabled = true` — necessary for
     /// `getComponentMetaWithAudit` to return a populated bundle.
     pub footprintCapture: Option<bool>,
+    /// Capacity of the host-owned typeinfo scratch cache used by
+    /// `evaluateTypeExpressionWithAudit`. `None` (default) selects
+    /// 64 entries; `Some(0)` disables the cache; other values cap
+    /// the LRU at the chosen size.
+    pub typeinfoScratchCacheCapacity: Option<u32>,
 }
 
 impl From<NapiHostConfig> for FfiHostConfig {
@@ -211,6 +218,7 @@ impl From<NapiHostConfig> for FfiHostConfig {
             analysis_level: n.analysisLevel,
             audit_enabled: n.auditEnabled,
             footprint_capture: n.footprintCapture,
+            typeinfo_scratch_cache_capacity: n.typeinfoScratchCacheCapacity,
         }
     }
 }
@@ -2305,6 +2313,131 @@ impl NapiVerterHost {
                 )
             })?;
             Ok(Buffer::from(bytes))
+        }))?
+    }
+
+    // =========================================================================
+    // Typeinfo entry-points (Phase 4 / typeinfo plan §6.1)
+    //
+    // Wrap the Phase 3 host substrate methods
+    // (`list_file_symbols`, `resolve_named_symbol_with_audit`,
+    // `evaluate_type_expression_with_audit`) and project the host
+    // outputs back across the FFI boundary.
+    //
+    // - `listSymbols` returns a JSON Buffer carrying a `Vec<FfiSymbolEntry>`.
+    // - `resolveSymbolWithAudit` and `evaluateTypeExpressionWithAudit`
+    //   return a `NapiTypeInfoResolveResult { typeExpr, auditRecord }`
+    //   — both are JSON Buffers; consumers decode whichever they need.
+    //
+    // Audit emission follows the Phase 3 contract: when
+    // `auditEnabled = true` the underlying host method publishes
+    // exactly one `RequestAuditRecord` to the host's audit store and
+    // also returns the cloned record on the call stack. The
+    // `auditRecord` field on `NapiTypeInfoResolveResult` carries that
+    // record without polling the audit store; the store-based
+    // `getLastAuditRecord` continues to work too.
+    // =========================================================================
+
+    /// Return the top-level symbol inventory for `canonical_id`.
+    ///
+    /// JSON Buffer carrying a `Vec<FfiSymbolEntry>` per the FFI mirror
+    /// in `verter_protocol::typeinfo`. The call is bounded by the
+    /// shallow-state size and does not emit an audit record (per §17
+    /// "no audit; pure shallow read").
+    #[napi(js_name = "listSymbols")]
+    pub fn list_symbols(&self, canonical_id: String) -> Result<Buffer> {
+        let host = std::sync::Arc::clone(&self.inner);
+        catch_panic(std::panic::AssertUnwindSafe(move || {
+            let entries = host.list_file_symbols(&canonical_id);
+            let ffi: Vec<verter_protocol::typeinfo::FfiSymbolEntry> = entries
+                .into_iter()
+                .map(verter_ffi::convert::host_to_ffi_symbol_entry)
+                .collect();
+            typeinfo::encode_symbol_list(&ffi)
+        }))?
+    }
+
+    /// Resolve `name` in `canonical_id`'s top-level scope and return
+    /// the raised `TypeExpr` plus the produced `RequestAuditRecord`.
+    ///
+    /// `type_args` is an optional JSON Buffer carrying an array of
+    /// `TypeExpr` values (the wire form of `TypeExprList`). Empty /
+    /// missing means "no generic instantiation".
+    ///
+    /// `mode` is one of the canonical projection-mode tags
+    /// (`"identity" | "navigate" | "shallow" | "expanded" |
+    /// "skeleton"`). Pass `null` to take the host's default per §5.2.
+    ///
+    /// `typeExpr` is `null` when the symbol could not be resolved
+    /// (unknown decl, lowering miss, suppressed by host policy).
+    /// `auditRecord` is `null` when `auditEnabled = false`.
+    #[napi(js_name = "resolveSymbolWithAudit")]
+    pub fn resolve_symbol_with_audit(
+        &self,
+        canonical_id: String,
+        name: String,
+        type_args: Option<Buffer>,
+        mode: Option<String>,
+    ) -> Result<typeinfo::NapiTypeInfoResolveResult> {
+        let exprs = typeinfo::decode_type_expr_list(type_args)?;
+        let resolve_mode = typeinfo::parse_resolve_mode(mode)?;
+        let host = std::sync::Arc::clone(&self.inner);
+        catch_panic(std::panic::AssertUnwindSafe(move || {
+            let arc_args: Vec<std::sync::Arc<TypeExpr>> =
+                exprs.into_iter().map(std::sync::Arc::new).collect();
+            let (resolved, record) =
+                host.resolve_named_symbol_with_audit(&canonical_id, &name, &arc_args, resolve_mode);
+            let type_expr_buf = match resolved {
+                Some(node_id) => host
+                    .project_node_to_type_expr(node_id)
+                    .map(|expr| typeinfo::encode_type_expr(&expr))
+                    .transpose()?,
+                None => None,
+            };
+            let audit_buf = match record {
+                Some(rec) => Some(typeinfo::encode_audit_record(&rec)?),
+                None => None,
+            };
+            Ok(typeinfo::NapiTypeInfoResolveResult {
+                typeExpr: type_expr_buf,
+                auditRecord: audit_buf,
+            })
+        }))?
+    }
+
+    /// Evaluate a synthetic type expression in a file scope and return
+    /// the raised `TypeExpr` plus the produced `RequestAuditRecord`.
+    ///
+    /// `request` is a JSON Buffer carrying a
+    /// `verter_protocol::typeinfo::FfiEvaluateTypeExpressionRequest`.
+    /// See `EvaluateTypeExpressionRequest` for the host shape.
+    ///
+    /// `typeExpr` is `null` when the expression could not be resolved.
+    /// `auditRecord` is `null` when audit is disabled.
+    #[napi(js_name = "evaluateTypeExpressionWithAudit")]
+    pub fn evaluate_type_expression_with_audit(
+        &self,
+        request: Buffer,
+    ) -> Result<typeinfo::NapiTypeInfoResolveResult> {
+        let req = typeinfo::decode_evaluate_request(request)?;
+        let host = std::sync::Arc::clone(&self.inner);
+        catch_panic(std::panic::AssertUnwindSafe(move || {
+            let (resolved, record) = host.evaluate_type_expression_with_audit(req);
+            let type_expr_buf = match resolved {
+                Some(node_id) => host
+                    .project_node_to_type_expr(node_id)
+                    .map(|expr| typeinfo::encode_type_expr(&expr))
+                    .transpose()?,
+                None => None,
+            };
+            let audit_buf = match record {
+                Some(rec) => Some(typeinfo::encode_audit_record(&rec)?),
+                None => None,
+            };
+            Ok(typeinfo::NapiTypeInfoResolveResult {
+                typeExpr: type_expr_buf,
+                auditRecord: audit_buf,
+            })
         }))?
     }
 }

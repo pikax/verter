@@ -28,6 +28,7 @@ mod offset;
 mod output;
 mod sfc_blocks;
 mod string_helpers;
+mod typeinfo;
 
 #[cfg(test)]
 mod tests;
@@ -39,3 +40,4 @@ pub use input::*;
 pub use lint::*;
 pub use offset::*;
 pub use output::*;
+pub use typeinfo::*;

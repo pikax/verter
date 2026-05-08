@@ -16,6 +16,26 @@ export interface HostConfig {
   resolveExtensions?: string[];
   /** Controls static analysis level during upsert(). Default: "full". */
   analysisLevel?: "full" | "essential" | "none";
+  /**
+   * Enable Rust-first native audit for component-meta requests.
+   * When true, timing/memory/store data is captured per request.
+   * Default: false.
+   */
+  auditEnabled?: boolean;
+  /**
+   * Enable per-request semantic footprint capture. Requires
+   * `auditEnabled: true`.
+   * Default: false.
+   */
+  footprintCapture?: boolean;
+  /**
+   * Capacity of the host-owned typeinfo scratch cache used by
+   * `evaluateTypeExpressionWithAudit`. `undefined` (default) selects
+   * 64 entries; `0` disables the cache; other values cap the LRU at
+   * the chosen size — used by the `@verter/typeinfo` LRU eviction
+   * tests.
+   */
+  typeinfoScratchCacheCapacity?: number;
 }
 
 export interface HostCompileProfile {

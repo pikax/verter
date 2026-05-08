@@ -26,6 +26,7 @@
 //! - [`scratch_cache`] — host-owned LRU for typeinfo scratch URIs.
 
 pub mod evaluate_type_expression;
+pub mod raise;
 pub mod resolve_named_symbol;
 pub(crate) mod scratch_cache;
 pub mod symbol_inventory;

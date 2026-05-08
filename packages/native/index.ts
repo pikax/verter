@@ -509,6 +509,57 @@ export declare class VerterHost {
    * - `sinceRequestId`: optional minimum request id watermark.
    */
   getBundlerBatchSummary(args?: BundlerBatchSummaryArgs): Buffer;
+
+  // ===========================================================================
+  // Typeinfo entry-points (Phase 4 / typeinfo plan §6.1)
+  //
+  // Wrap the Rust host typeinfo substrate. Used by `@verter/typeinfo`
+  // for `TypeInfoSession`'s public API.
+  // ===========================================================================
+
+  /**
+   * Return the top-level symbol inventory for `canonicalId`.
+   *
+   * JSON Buffer carrying a `Vec<FfiSymbolEntry>` (camelCase shape).
+   * The call is bounded by the shallow-state size and does NOT emit
+   * an audit record.
+   */
+  listSymbols(canonicalId: string): Buffer;
+
+  /**
+   * Resolve `name` in `canonicalId`'s top-level scope and return the
+   * raised `TypeExpr` plus the per-request audit record.
+   *
+   * `typeArgs` is a JSON Buffer carrying an array of native
+   * `TypeExpr` values; pass `null` for "no generic instantiation".
+   * `mode` is one of `"identity" | "navigate" | "shallow" |
+   * "expanded" | "skeleton"`; pass `null` to take the host's default
+   * (Navigate for generic carriers, Expanded otherwise).
+   *
+   * `typeExpr` is `null` when the symbol could not be resolved.
+   * `auditRecord` is `null` when audit is disabled.
+   */
+  resolveSymbolWithAudit(
+    canonicalId: string,
+    name: string,
+    typeArgs: Buffer | null,
+    mode: string | null,
+  ): { typeExpr: Buffer | null; auditRecord: Buffer | null };
+
+  /**
+   * Evaluate a synthetic type expression in a file scope and return
+   * the raised `TypeExpr` plus the per-request audit record.
+   *
+   * `request` is a JSON Buffer carrying a
+   * `verter_protocol::typeinfo::FfiEvaluateTypeExpressionRequest`.
+   *
+   * `typeExpr` is `null` when the expression could not be resolved.
+   * `auditRecord` is `null` when audit is disabled.
+   */
+  evaluateTypeExpressionWithAudit(request: Buffer): {
+    typeExpr: Buffer | null;
+    auditRecord: Buffer | null;
+  };
 }
 
 /**

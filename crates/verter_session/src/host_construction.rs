@@ -133,6 +133,7 @@ impl VerterHost {
             audit_timing_capture: config.audit_timing_capture,
             ..verter_audit::AuditConfig::default()
         };
+        let scratch_cache_capacity = config.typeinfo_scratch_cache_capacity;
         Self {
             instance_id: next_host_instance_id(),
             config,
@@ -160,9 +161,10 @@ impl VerterHost {
             last_upsert_priority: parking_lot::Mutex::new(None),
             #[cfg(test)]
             compile_one_call_count: std::sync::atomic::AtomicUsize::new(0),
-            typeinfo_scratch_cache: parking_lot::Mutex::new(
-                crate::typeinfo::scratch_cache::ScratchCache::with_default_capacity(),
-            ),
+            typeinfo_scratch_cache: parking_lot::Mutex::new(match scratch_cache_capacity {
+                Some(cap) => crate::typeinfo::scratch_cache::ScratchCache::with_capacity(cap),
+                None => crate::typeinfo::scratch_cache::ScratchCache::with_default_capacity(),
+            }),
         }
     }
 

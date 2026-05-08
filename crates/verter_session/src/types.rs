@@ -227,6 +227,16 @@ pub struct HostConfig {
     /// the synthesis path into deliberate budget breaches without
     /// mutating the global default budget.
     pub recursion_budget_overrides: RecursionBudgetOverrides,
+    /// Capacity of the host-owned typeinfo scratch cache used by
+    /// [`crate::VerterHost::evaluate_type_expression_with_audit`].
+    ///
+    /// `None` selects the default capacity (64 per
+    /// `crate::typeinfo::scratch_cache::DEFAULT_CAPACITY`).
+    /// `Some(0)` disables the cache (every cacheable request
+    /// becomes a one-shot synthesis). Other values cap the LRU at
+    /// the chosen size — used by the `@verter/typeinfo` LRU
+    /// eviction tests.
+    pub typeinfo_scratch_cache_capacity: Option<usize>,
 }
 
 /// Test / advanced-tuning hooks for resolver budgets. Each field is
@@ -432,6 +442,7 @@ impl Default for HostConfig {
             eviction_policy: EvictionPolicyConfig::default(),
             lsp_method_timeouts: LspMethodTimeoutsConfig::default(),
             recursion_budget_overrides: RecursionBudgetOverrides::default(),
+            typeinfo_scratch_cache_capacity: None,
         }
     }
 }
