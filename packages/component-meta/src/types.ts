@@ -2,7 +2,7 @@
  * Component metadata types extracted from Vue SFCs.
  */
 
-import type { TypeDescriptor } from "./type-ir.js";
+import type { TypeDescriptor } from "@verter/type-ir";
 import type { NativeOriginGraph } from "./native-component-meta.js";
 
 /** Structured metadata extracted from a Vue Single File Component. */

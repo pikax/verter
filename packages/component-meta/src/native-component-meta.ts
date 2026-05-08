@@ -18,7 +18,7 @@ import type {
   FallthroughBranch,
   TypeExpansionMeta,
 } from "./types.js";
-import type { TypeDescriptor } from "./type-ir.js";
+import type { TypeDescriptor } from "@verter/type-ir";
 import type { NativeTypeExprLike } from "./type-expr-bridge.js";
 
 export interface NativeJsdocTag {

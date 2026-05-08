@@ -2,7 +2,7 @@
  * JSON Schema adapter — converts TypeDescriptor trees to JSON Schema (draft-07).
  */
 
-import type { TypeDescriptor } from "../type-ir.js";
+import type { TypeDescriptor } from "@verter/type-ir";
 import type { ComponentMeta } from "../types.js";
 
 export interface JSONSchema {

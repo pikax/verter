@@ -1,4 +1,4 @@
-import type { TypeDescriptor } from "./type-ir.js";
+import type { TypeDescriptor } from "@verter/type-ir";
 
 export const GRAPH_FORMAT_VERSION = 1;
 

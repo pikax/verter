@@ -12,7 +12,7 @@ import {
   ref,
   unknown,
   recursiveRef,
-} from "../type-ir.js";
+} from "@verter/type-ir";
 import type { PropertyMetaSchema } from "./types.js";
 
 describe("typeDescriptorToString", () => {

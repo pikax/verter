@@ -3,7 +3,7 @@
  */
 
 import type { ComponentMeta, PropMeta } from "../types.js";
-import type { TypeDescriptor } from "../type-ir.js";
+import type { TypeDescriptor } from "@verter/type-ir";
 
 export interface HistoireStoryConfig {
   title: string;

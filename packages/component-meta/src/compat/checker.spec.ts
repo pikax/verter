@@ -19,7 +19,17 @@ import {
   shutdownMetaRuntime,
 } from "../runtime/index.js";
 import { resolvePath } from "../runtime/engine-key.js";
-import { array, func, literal, object, primitive, ref, tuple, union, unknown } from "../type-ir.js";
+import {
+  array,
+  func,
+  literal,
+  object,
+  primitive,
+  ref,
+  tuple,
+  union,
+  unknown,
+} from "@verter/type-ir";
 import type { PropMeta, EventMeta, SlotMeta, ExposedMeta } from "../types.js";
 
 let nextProjectRootId = 1;

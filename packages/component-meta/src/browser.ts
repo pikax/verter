@@ -26,7 +26,7 @@ export type {
   ComponentFlags,
 } from "./types.js";
 
-// Type IR
+// Type IR — re-exported from @verter/type-ir for public-API stability.
 export type {
   TypeDescriptor,
   PrimitiveName,
@@ -48,7 +48,7 @@ export type {
   RecursiveRefType,
   RecursiveRefConditionalFrame,
   UnknownType,
-} from "./type-ir.js";
+} from "@verter/type-ir";
 
 export {
   primitive,
@@ -63,7 +63,7 @@ export {
   ref,
   recursiveRef,
   unknown,
-} from "./type-ir.js";
+} from "@verter/type-ir";
 
 // Native type evaluation bridge
 export { typeExprToDescriptor, buildEvaluatedTypeMap } from "./type-expr-bridge.js";

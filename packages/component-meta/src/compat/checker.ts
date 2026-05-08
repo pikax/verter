@@ -17,7 +17,7 @@ import {
   nativeTypeRegistryToMap,
 } from "../native-component-meta.js";
 import { projectDeclaredOnlyNativeResult } from "./native-projection.js";
-import type { TypeDescriptor } from "../type-ir.js";
+import type { TypeDescriptor } from "@verter/type-ir";
 import type { VerterHostAdapter } from "../host-adapter.js";
 import type {
   ComponentMeta,

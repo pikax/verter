@@ -5,7 +5,7 @@
  * evaluator into the public TypeDescriptor format used by adapters and consumers.
  */
 
-import type { TypeDescriptor } from "./type-ir.js";
+import type { TypeDescriptor } from "@verter/type-ir";
 import {
   primitive,
   literal,
@@ -19,7 +19,7 @@ import {
   ref as typeRef,
   recursiveRef,
   unknown,
-} from "./type-ir.js";
+} from "@verter/type-ir";
 import {
   createGraphTypeExprRef,
   DecodedTypeGraph,

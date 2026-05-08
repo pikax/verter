@@ -9,7 +9,7 @@ import { createRequire } from "node:module";
  *   (requires `zod` as a peer dependency)
  */
 
-import type { TypeDescriptor } from "../type-ir.js";
+import type { TypeDescriptor } from "@verter/type-ir";
 import type { ComponentMeta } from "../types.js";
 
 // ── Codegen mode ─────────────────────────────────────────────────

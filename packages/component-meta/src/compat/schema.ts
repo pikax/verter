@@ -4,7 +4,7 @@
  * Maps Verter's Type IR to Volar's `PropertyMetaSchema` shape.
  */
 
-import type { TypeDescriptor } from "../type-ir.js";
+import type { TypeDescriptor } from "@verter/type-ir";
 import type { PropertyMetaSchema, MetaCheckerOptions } from "./types.js";
 
 const MAX_SCHEMA_REGISTRY_RESOLUTION_DEPTH = 1;

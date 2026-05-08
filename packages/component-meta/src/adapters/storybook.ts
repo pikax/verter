@@ -3,7 +3,7 @@
  */
 
 import type { ComponentMeta, PropMeta, EventMeta } from "../types.js";
-import type { TypeDescriptor } from "../type-ir.js";
+import type { TypeDescriptor } from "@verter/type-ir";
 
 export interface StorybookArgType {
   name?: string;
