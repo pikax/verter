@@ -1,9 +1,190 @@
 //! Path-walking helper for [`ProjectSemanticDispatch::build_project_path`]
-//! Extracted from the monolithic `project_semantic_dispatch`
-//! module in Phase D §5.2 WIP-Split. No semantic changes.
+//! plus the iterative shallow-mode terminal-surface synthesiser used by
+//! `Instantiate { body_mode: ProjectionMode::Shallow }` and by empty-path
+//! `ProjectPath` projections in `Shallow` mode. The synthesiser is
+//! deliberately non-recursive — it drives a heap-backed worklist so
+//! 100-arm intersections / unions cannot overflow the Rust call stack.
+
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
-use crate::semantic_query::{DeclIdentity, QueryError, SemanticQueryApi};
+use crate::semantic_query::{DeclIdentity, QueryError, SemanticQueryApi, SurfaceMember};
+
+/// Per-walk maximum frame-stack depth observed by
+/// [`expand_empty_path_shallow_terminal_surface`]. Used by
+/// [`probe_max_walker_frame_depth`] for the
+/// `shallow_walker_stack_depth_bounded_for_100_intersection`
+/// regression test that asserts the iterative-worklist invariant
+/// (≤ 10 frames for a 100-arm input).
+static LAST_SHALLOW_WALKER_MAX_FRAMES: AtomicUsize = AtomicUsize::new(0);
+
+/// Probe the maximum frame-stack depth observed by the most recent
+/// shallow-mode terminal-surface walker invocation triggered by
+/// dispatching `key`. Drives a fresh dispatch (so the assertion stands
+/// regardless of warm-cache state) and returns the depth observed.
+///
+/// Test-only entry point — the implementation is path-precise:
+/// dispatching the same `key` re-runs the walker (subject to memo
+/// admission), and the depth atomic is reset per walker invocation
+/// before the worklist starts. Concurrent uses of this probe are not
+/// thread-safe; call sites are unit tests on a single thread.
+#[cfg(test)]
+#[doc(hidden)]
+#[must_use]
+pub fn probe_max_walker_frame_depth(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    key: &SemanticQueryKey,
+) -> usize {
+    LAST_SHALLOW_WALKER_MAX_FRAMES.store(0, Ordering::Relaxed);
+    let _ = dispatch.execute(key.clone());
+    LAST_SHALLOW_WALKER_MAX_FRAMES.load(Ordering::Relaxed)
+}
+
+/// Diagnostic emitted by the shallow-mode terminal-surface walker. The
+/// memo replays diagnostics on warm reads via `CacheRead.walker_diagnostics`.
+/// Variants describe non-fatal observations (cycle short-circuits, open
+/// conditionals, pathological-input cap) so consumers can render
+/// human-readable messages without re-walking the graph.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ShallowDiagnostic {
+    /// `T & T` — duplicate intersection arm short-circuited so the
+    /// walker does not re-enter an arm that contributes nothing new.
+    DuplicateArmShortCircuited { node: SemanticNodeId },
+    /// True graph cycle detected during shallow-mode walk; the walker
+    /// terminates the offending arm without contribution.
+    CycleShortCircuited { node: SemanticNodeId },
+    /// `Instantiate { ..., body_mode: Navigate }` returned `Recursive`
+    /// — the declaration referenced itself transitively. Carries the
+    /// declaration identity for diagnostic context.
+    CyclicInstantiation { decl: DeclIdentity },
+    /// `Instantiate` returned an `Error(QueryError)` with a fatal
+    /// query-level failure during shallow-mode synthesis. Carries the
+    /// declaration identity and the underlying error so consumers can
+    /// distinguish missing declarations from budget exhaustion.
+    InstantiationError {
+        decl: DeclIdentity,
+        error: QueryError,
+    },
+    /// Open conditional encountered at empty-path Shallow terminal —
+    /// no branch was selected, so the walker yields the empty surface
+    /// for the conditional's contribution.
+    OpenConditional { node: SemanticNodeId },
+    /// Pathological input — the walker's visited set exceeded the
+    /// 10_000-node cap. `cache_suppress` is set so the result is not
+    /// promoted to the memo.
+    PathologicalInput { root: SemanticNodeId },
+    /// One arm of a Union evaluated to a non-Object surface; the
+    /// merged surface drops members for that arm per the union rule
+    /// (member surface = members in ALL arms).
+    UnionArmEmpty {
+        union_node: SemanticNodeId,
+        arm_index: usize,
+    },
+}
+
+/// Build output threaded through `build_project_path` so the dispatch
+/// build-closure layer can observe walker diagnostics + the
+/// `cache_suppress` aggregation produced by the shallow-mode terminal-
+/// surface synthesiser. For non-walker builds (`ResolveDecl`,
+/// `Instantiate`, `KeyOf`, etc.), the existing `(QueryResult, DepSignature)`
+/// shape coerces via `From` — those builds preserve their tuple
+/// signature unchanged.
+#[derive(Debug)]
+pub struct QueryBuildOutput {
+    pub result: QueryResult<SemanticNodeId>,
+    pub dep_signature: DepSignature,
+    pub walker_diagnostics: Vec<ShallowDiagnostic>,
+    pub cache_suppress: bool,
+}
+
+impl QueryBuildOutput {
+    /// Append walker diagnostics emitted by a nested terminal-surface
+    /// synthesiser run.
+    #[inline]
+    pub fn merge_walker_diagnostics<I>(&mut self, diags: I)
+    where
+        I: IntoIterator<Item = ShallowDiagnostic>,
+    {
+        self.walker_diagnostics.extend(diags);
+    }
+}
+
+impl From<(QueryResult<SemanticNodeId>, DepSignature)> for QueryBuildOutput {
+    #[inline]
+    fn from((result, dep_signature): (QueryResult<SemanticNodeId>, DepSignature)) -> Self {
+        Self {
+            result,
+            dep_signature,
+            walker_diagnostics: Vec::new(),
+            cache_suppress: false,
+        }
+    }
+}
+
+/// Transient walker-internal surface representation. Not interned in the
+/// semantic graph — only the final merged surface is interned via
+/// `SemanticNodeData::Object` once synthesis completes.
+#[derive(Debug, Clone, Default)]
+pub struct ShallowSurface {
+    pub members: Vec<ShallowSurfaceMember>,
+}
+
+/// One member contribution while the walker is merging arms. Carries the
+/// surface-level optionality / readonly bits so intersection/union merges
+/// can implement the TS rules (intersection: required-wins +
+/// readonly-OR; union: members in all arms).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShallowSurfaceMember {
+    pub name: Arc<str>,
+    pub value: SemanticNodeId,
+    pub optional: bool,
+    pub readonly: bool,
+    pub is_method: bool,
+}
+
+impl ShallowSurface {
+    /// Empty surface contribution — used when an arm cannot yield any
+    /// members (open conditional, non-Object terminal, instantiation
+    /// recursion).
+    #[inline]
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            members: Vec::new(),
+        }
+    }
+
+    /// Build a `ShallowSurface` from a `SurfaceView`. The members are
+    /// cloned shallowly — `value` is a `SemanticNodeId` (Copy), so the
+    /// clone cost is one Arc bump for `name`.
+    #[must_use]
+    pub fn from_object(view: &SurfaceView) -> Self {
+        Self {
+            members: view
+                .members
+                .iter()
+                .map(|m| ShallowSurfaceMember {
+                    name: Arc::clone(&m.name),
+                    value: m.value,
+                    optional: m.optional,
+                    readonly: m.readonly,
+                    is_method: m.is_method,
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Returns `true` for `QueryError` variants that must propagate through
+/// `cache_suppress` so the memo refuses insertion (a pathological input
+/// or a budget breach must not warm the shared cache).
+#[inline]
+fn is_fatal_query_error(err: &QueryError) -> bool {
+    matches!(
+        err,
+        QueryError::BudgetExceeded(_) | QueryError::UnstableState { .. }
+    )
+}
 
 /// Alias-cycle tracking identity. `(canonical_id, name)`.
 type AliasCycleIdentity = (Arc<str>, Arc<str>);
@@ -60,6 +241,15 @@ pub(super) struct PathWalker<'a, 'b> {
     /// skips those positions because the per-arm result is not the
     /// canonical answer for `(base, path[..k], mode)`.
     pub(super) intermediate_nodes: Vec<Option<SemanticNodeId>>,
+    /// Diagnostics produced by the shallow-mode terminal-surface
+    /// synthesiser. Empty for `Identity` / `Navigate` / `Expanded` /
+    /// `Skeleton` walks. Drained by `build_project_path` into the
+    /// [`QueryBuildOutput`] when the walker finishes.
+    pub(super) walker_diagnostics: Vec<ShallowDiagnostic>,
+    /// `true` when the walker hit the pathological-input cap or a
+    /// nested Instantiate dispatch produced a fatal `QueryError`. The
+    /// memo refuses insertion when this is true.
+    pub(super) cache_suppress: bool,
 }
 
 impl<'a, 'b> PathWalker<'a, 'b> {
@@ -75,6 +265,8 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             visited_aliases: smallvec::SmallVec::new(),
             visited_nodes: rustc_hash::FxHashSet::default(),
             intermediate_nodes: Vec::new(),
+            walker_diagnostics: Vec::new(),
+            cache_suppress: false,
         }
     }
 
@@ -625,17 +817,25 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 }
             }
         }
-        // For `mode: Expanded` with empty path, expand
-        // terminal `DeclAnchor` nodes via `Instantiate(anchor, [])` and
-        // recurse through Intersection/Union arms so nested
-        // `extends`/union-arm refs also surface their body. The
-        // pre-§5.8 solver's `solve()` fixed-point iteration expanded
-        // non-generic aliases across nested shapes; empty-path
-        // projection mirrors that for dispatch-only callers. Shallow
-        // and Identity modes retain bare-anchor shapes since their
-        // contract promises non-expansion.
+        // For `mode: Expanded` with empty path, expand terminal
+        // declaration placeholders via `Instantiate(decl, [])` and
+        // recurse through Intersection / Union arms so nested
+        // `extends` / union-arm refs surface their body.
+        //
+        // For `mode: Shallow` with empty path, synthesise a one-level
+        // merged Object surface from the structural carriers. The
+        // walker iterates a heap-backed worklist (no recursion), merges
+        // per-arm contributions under TS rules (intersection: union of
+        // members + required-wins + readonly-OR; union: intersection of
+        // members), and emits diagnostics for cycles / open
+        // conditionals / pathological inputs.
+        //
+        // Identity / Navigate / Skeleton retain their bare carriers —
+        // those modes' contracts promise no terminal-surface synthesis.
         if matches!(self.mode, ProjectionMode::Expanded) {
             current = self.expand_empty_path_terminal(current);
+        } else if matches!(self.mode, ProjectionMode::Shallow) {
+            current = self.expand_empty_path_shallow_terminal_surface(current);
         }
         results.push(current);
     }
@@ -957,6 +1157,976 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             )),
         };
         results.push(rebuilt);
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    //  Shallow-mode terminal-surface synthesis (iterative).
+    //
+    //  Drives a heap-backed worklist that walks Object / Intersection /
+    //  Union / InstantiationRef / Conditional / Mapped / Alias arms and
+    //  emits one merged `SemanticNodeData::Object` surface per request.
+    //  The synthesiser is intentionally non-recursive: stack depth is
+    //  O(1) for inputs of any width because the worklist lives on the
+    //  heap. The 100-arm intersection invariant is enforced by
+    //  `shallow_walker_stack_depth_bounded_for_100_intersection`.
+    //
+    //  Pathological-input cap: the walker tracks a `visited` set keyed
+    //  by `(node, target_marker)`. When the cap (10_000 entries) fires,
+    //  the walker emits `ShallowDiagnostic::PathologicalInput`, sets
+    //  `cache_suppress = true`, and stops the worklist. The dispatch
+    //  layer threads `cache_suppress` into `QueryBuildOutput` so the
+    //  memo refuses warm publish.
+    // ──────────────────────────────────────────────────────────────────
+
+    /// Iterative shallow-mode terminal-surface synthesis. Returns the
+    /// interned `SemanticNodeData::Object` id whose surface holds the
+    /// merged members per the per-arm semantics described above.
+    fn expand_empty_path_shallow_terminal_surface(
+        &mut self,
+        node: SemanticNodeId,
+    ) -> SemanticNodeId {
+        let span = tracing::debug_span!(
+            target: "verter::dispatch::walk",
+            "walk_shallow_surface",
+            root = ?node,
+            mode = "Shallow"
+        );
+        let _enter = span.enter();
+
+        // Production default. Tests may opt in to a smaller cap via
+        // `HostConfig::recursion_budget_overrides.walker_pathological_cap`
+        // so the cap-fire path is reachable on hermetic fixtures
+        // without requiring a 10_000-node corpus.
+        const PATHOLOGICAL_CAP_DEFAULT: usize = 10_000;
+        let pathological_cap: usize = self
+            .dispatch
+            .ctx
+            .config()
+            .recursion_budget_overrides
+            .walker_pathological_cap
+            .unwrap_or(PATHOLOGICAL_CAP_DEFAULT);
+
+        // Per-arm buffers: each Intersection / Union allocates a fresh
+        // buffer id; arm Visit frames push their result into the
+        // corresponding slot via `contribute_surface`. The Flush*
+        // frames consume the buffer and push the merged surface up to
+        // the parent target.
+        let mut intersection_buffers: rustc_hash::FxHashMap<usize, Vec<Option<ShallowSurface>>> =
+            rustc_hash::FxHashMap::default();
+        let mut union_buffers: rustc_hash::FxHashMap<usize, Vec<Option<ShallowSurface>>> =
+            rustc_hash::FxHashMap::default();
+        let mut next_buffer_id: usize = 0;
+
+        // Root contribution slot. Holds the synthesised surface once
+        // the worklist drains. None until the walker assigns to it.
+        let mut root_contribution: Option<ShallowSurface> = None;
+
+        // Cycle / idempotency detection: keyed by the visited node id
+        // and the target slot it would contribute to. Repeating the
+        // same `(node, target)` pair indicates either a true graph
+        // cycle (Foo<T> = { self: Foo<T> }) or an idempotent arm
+        // (T & T contributes once). We short-circuit either case with
+        // a diagnostic and an empty contribution.
+        let mut visited: rustc_hash::FxHashSet<(SemanticNodeId, BufferTarget)> =
+            rustc_hash::FxHashSet::default();
+
+        // Frame-depth high-water mark for the probe used by
+        // `shallow_walker_stack_depth_bounded_for_100_intersection`.
+        // Reset to 0 each call so concurrent-safe single-threaded use
+        // observes only the current walk's depth.
+        let mut max_depth: usize = 0;
+        LAST_SHALLOW_WALKER_MAX_FRAMES.store(0, Ordering::Relaxed);
+
+        // Worklist seeded with a Visit on the input node, contributing
+        // to the root slot.
+        let mut work: Vec<Frame> = Vec::with_capacity(8);
+        work.push(Frame::Visit {
+            node,
+            target: BufferTarget::Root,
+        });
+
+        while let Some(frame) = work.pop() {
+            if work.len() + 1 > max_depth {
+                max_depth = work.len() + 1;
+            }
+            // Pathological-input guard.
+            if visited.len() >= pathological_cap {
+                tracing::warn!(
+                    target: "verter::dispatch::walk",
+                    root = ?node,
+                    visited_count = visited.len(),
+                    cap = pathological_cap,
+                    "walker_pathological_input_cap"
+                );
+                self.walker_diagnostics
+                    .push(ShallowDiagnostic::PathologicalInput { root: node });
+                self.cache_suppress = true;
+                break;
+            }
+            match frame {
+                Frame::Visit { node: cur, target } => {
+                    tracing::trace!(
+                        target: "verter::dispatch::walk",
+                        node = ?cur,
+                        target = ?target,
+                        "walker_visit"
+                    );
+                    if !visited.insert((cur, target)) {
+                        // Same `(node, target)` already visited — a
+                        // duplicate arm or a graph cycle. Contribute
+                        // empty so the merge does not stall on a self-
+                        // reference, and emit a structured diagnostic.
+                        let diag = ShallowDiagnostic::DuplicateArmShortCircuited { node: cur };
+                        self.walker_diagnostics.push(diag);
+                        self.contribute_surface(
+                            target,
+                            &mut root_contribution,
+                            &mut intersection_buffers,
+                            &mut union_buffers,
+                            None,
+                        );
+                        continue;
+                    }
+                    self.visit_shallow_node(
+                        cur,
+                        target,
+                        &mut work,
+                        &mut intersection_buffers,
+                        &mut union_buffers,
+                        &mut next_buffer_id,
+                        &mut root_contribution,
+                    );
+                }
+                Frame::VisitArmAt {
+                    arms,
+                    arm_index,
+                    buffer_id,
+                    kind,
+                } => {
+                    if arm_index >= arms.len() {
+                        // No more arms — the queued FlushIntersection /
+                        // FlushUnion (sitting under this frame in the
+                        // worklist) drains the buffer.
+                        continue;
+                    }
+                    let target = match kind {
+                        ArmKind::Intersection => BufferTarget::Intersection {
+                            buffer_id,
+                            arm_index,
+                        },
+                        ArmKind::Union => BufferTarget::Union {
+                            buffer_id,
+                            arm_index,
+                        },
+                    };
+                    let arm = arms[arm_index];
+                    // Re-queue the iterator for the next arm BEFORE
+                    // pushing the Visit so LIFO pop order processes
+                    // the current arm first; the next-arm iterator
+                    // sits beneath it on the worklist.
+                    if arm_index + 1 < arms.len() {
+                        work.push(Frame::VisitArmAt {
+                            arms,
+                            arm_index: arm_index + 1,
+                            buffer_id,
+                            kind,
+                        });
+                    }
+                    work.push(Frame::Visit { node: arm, target });
+                }
+                Frame::FlushIntersection {
+                    buffer_id,
+                    parent_target,
+                } => {
+                    let arm_surfaces = intersection_buffers.remove(&buffer_id).unwrap_or_default();
+                    let merged =
+                        merge_intersection_surfaces_with_graph(self.graph(), &arm_surfaces);
+                    self.contribute_surface(
+                        parent_target,
+                        &mut root_contribution,
+                        &mut intersection_buffers,
+                        &mut union_buffers,
+                        merged,
+                    );
+                }
+                Frame::FlushUnion {
+                    buffer_id,
+                    parent_target,
+                    union_node,
+                } => {
+                    let arm_surfaces = union_buffers.remove(&buffer_id).unwrap_or_default();
+                    // Emit a UnionArmEmpty diagnostic per arm that
+                    // produced no contribution — informs consumers that
+                    // a non-Object arm was encountered.
+                    for (arm_index, surf) in arm_surfaces.iter().enumerate() {
+                        if surf.is_none() {
+                            self.walker_diagnostics
+                                .push(ShallowDiagnostic::UnionArmEmpty {
+                                    union_node,
+                                    arm_index,
+                                });
+                        }
+                    }
+                    let merged = merge_union_surfaces(&arm_surfaces);
+                    self.contribute_surface(
+                        parent_target,
+                        &mut root_contribution,
+                        &mut intersection_buffers,
+                        &mut union_buffers,
+                        merged,
+                    );
+                }
+            }
+        }
+
+        LAST_SHALLOW_WALKER_MAX_FRAMES.store(max_depth, Ordering::Relaxed);
+
+        // Materialise the root contribution into a SurfaceView and
+        // intern it. Empty contribution → empty Object surface.
+        let surface_view = match root_contribution {
+            Some(surface) => surface_view_from_shallow(&surface),
+            None => empty_surface_view(),
+        };
+        self.graph()
+            .intern_node(SemanticNodeData::Object(surface_view))
+    }
+
+    /// Visit one node in the shallow-mode worklist. Branches per node
+    /// shape and either contributes a surface immediately (Object,
+    /// Function, Primitive, Literal, TypeParam, Infer, etc.) or pushes
+    /// child Visits + a flush frame onto the worklist (Intersection,
+    /// Union, Mapped, InstantiationRef, Conditional, Alias).
+    #[allow(clippy::too_many_arguments)]
+    fn visit_shallow_node(
+        &mut self,
+        cur: SemanticNodeId,
+        target: BufferTarget,
+        work: &mut Vec<Frame>,
+        intersection_buffers: &mut rustc_hash::FxHashMap<usize, Vec<Option<ShallowSurface>>>,
+        union_buffers: &mut rustc_hash::FxHashMap<usize, Vec<Option<ShallowSurface>>>,
+        next_buffer_id: &mut usize,
+        root_contribution: &mut Option<ShallowSurface>,
+    ) {
+        let data = match self.graph().node_data(cur) {
+            Some(d) => d,
+            None => {
+                self.contribute_surface(
+                    target,
+                    root_contribution,
+                    intersection_buffers,
+                    union_buffers,
+                    None,
+                );
+                return;
+            }
+        };
+        match &*data {
+            SemanticNodeData::Object(view) => {
+                let surface = ShallowSurface::from_object(view);
+                drop(data);
+                self.contribute_surface(
+                    target,
+                    root_contribution,
+                    intersection_buffers,
+                    union_buffers,
+                    Some(surface),
+                );
+            }
+            SemanticNodeData::Intersection(arms) => {
+                let arms = Arc::clone(arms);
+                drop(data);
+                let buffer_id = *next_buffer_id;
+                *next_buffer_id += 1;
+                intersection_buffers.insert(buffer_id, vec![None; arms.len()]);
+                // Push the flush frame BEFORE the iterator frame so
+                // LIFO pop order executes the flush after every arm
+                // has contributed.
+                work.push(Frame::FlushIntersection {
+                    buffer_id,
+                    parent_target: target,
+                });
+                if !arms.is_empty() {
+                    work.push(Frame::VisitArmAt {
+                        arms,
+                        arm_index: 0,
+                        buffer_id,
+                        kind: ArmKind::Intersection,
+                    });
+                }
+            }
+            SemanticNodeData::Union(arms) => {
+                let arms = Arc::clone(arms);
+                drop(data);
+                let buffer_id = *next_buffer_id;
+                *next_buffer_id += 1;
+                union_buffers.insert(buffer_id, vec![None; arms.len()]);
+                work.push(Frame::FlushUnion {
+                    buffer_id,
+                    parent_target: target,
+                    union_node: cur,
+                });
+                if !arms.is_empty() {
+                    work.push(Frame::VisitArmAt {
+                        arms,
+                        arm_index: 0,
+                        buffer_id,
+                        kind: ArmKind::Union,
+                    });
+                }
+            }
+            SemanticNodeData::InstantiationRef { base, args } => {
+                let identity = base.clone();
+                let args_clone = Arc::clone(args);
+                drop(data);
+                // Skeleton mode: unbound TypeParam arguments stay
+                // symbolic so Conditional branches don't collapse to
+                // `never`. The plan §3.1.3 step 2 mandates Skeleton
+                // dispatch with empty args for shallow-surface
+                // synthesis to keep generic helpers' Conditional-arm
+                // distribution intact.
+                match self.dispatch.execute(SemanticQueryKey::Instantiate {
+                    base: identity.clone(),
+                    args: args_clone,
+                    body_mode: ProjectionMode::Navigate,
+                }) {
+                    QueryResult::Value(body) => {
+                        // Continue the walk into the materialised body.
+                        work.push(Frame::Visit { node: body, target });
+                    }
+                    QueryResult::Recursive(_) => {
+                        self.walker_diagnostics
+                            .push(ShallowDiagnostic::CyclicInstantiation { decl: identity });
+                        self.contribute_surface(
+                            target,
+                            root_contribution,
+                            intersection_buffers,
+                            union_buffers,
+                            None,
+                        );
+                    }
+                    QueryResult::Error(error) => {
+                        if is_fatal_query_error(&error) {
+                            self.cache_suppress = true;
+                        }
+                        self.walker_diagnostics
+                            .push(ShallowDiagnostic::InstantiationError {
+                                decl: identity,
+                                error,
+                            });
+                        self.contribute_surface(
+                            target,
+                            root_contribution,
+                            intersection_buffers,
+                            union_buffers,
+                            None,
+                        );
+                    }
+                }
+            }
+            SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
+                canonical_id,
+                name,
+                whole_hash,
+            }) => {
+                let identity = DeclIdentity {
+                    canonical_id: Arc::clone(canonical_id),
+                    whole_hash: *whole_hash,
+                    decl_name: Arc::clone(name),
+                };
+                drop(data);
+                match self.dispatch.execute(SemanticQueryKey::Instantiate {
+                    base: identity.clone(),
+                    args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                    body_mode: ProjectionMode::Navigate,
+                }) {
+                    QueryResult::Value(body) => {
+                        work.push(Frame::Visit { node: body, target });
+                    }
+                    QueryResult::Recursive(_) => {
+                        self.walker_diagnostics
+                            .push(ShallowDiagnostic::CyclicInstantiation { decl: identity });
+                        self.contribute_surface(
+                            target,
+                            root_contribution,
+                            intersection_buffers,
+                            union_buffers,
+                            None,
+                        );
+                    }
+                    QueryResult::Error(error) => {
+                        if is_fatal_query_error(&error) {
+                            self.cache_suppress = true;
+                        }
+                        self.walker_diagnostics
+                            .push(ShallowDiagnostic::InstantiationError {
+                                decl: identity,
+                                error,
+                            });
+                        self.contribute_surface(
+                            target,
+                            root_contribution,
+                            intersection_buffers,
+                            union_buffers,
+                            None,
+                        );
+                    }
+                }
+            }
+            SemanticNodeData::Conditional {
+                check,
+                true_branch_ref,
+                false_branch_ref,
+                ..
+            } => {
+                // Open conditional: check is unbound (TypeParam / Infer).
+                // The empty-path Shallow contract for an open conditional
+                // is an empty surface — branch selection is impossible
+                // until the check resolves.
+                //
+                // Closed conditional: the check is concrete; ask the
+                // relation engine for the branch and walk that. This
+                // mirrors the `Conditional` arm handling in the
+                // pre-§3.1.3 expand_terminal_step but stays inside the
+                // shallow synthesis worklist instead of recursing.
+                let check_id = *check;
+                let true_branch = *true_branch_ref;
+                let false_branch = *false_branch_ref;
+                drop(data);
+                let check_data = self.graph().node_data(check_id);
+                let is_open = matches!(
+                    check_data.as_deref(),
+                    Some(SemanticNodeData::TypeParam { .. } | SemanticNodeData::Infer { .. })
+                );
+                drop(check_data);
+                if is_open {
+                    self.walker_diagnostics
+                        .push(ShallowDiagnostic::OpenConditional { node: cur });
+                    self.contribute_surface(
+                        target,
+                        root_contribution,
+                        intersection_buffers,
+                        union_buffers,
+                        Some(ShallowSurface::empty()),
+                    );
+                } else {
+                    // Closed conditional reduces immediately; the
+                    // pre-distribution build_conditional already
+                    // returned the selected branch as the result, so
+                    // hitting a Conditional shell here means the check
+                    // is concrete but the relation engine returned
+                    // Unknown. Distribute into both branches via Union
+                    // using the iterator-frame discipline.
+                    let buffer_id = *next_buffer_id;
+                    *next_buffer_id += 1;
+                    union_buffers.insert(buffer_id, vec![None; 2]);
+                    work.push(Frame::FlushUnion {
+                        buffer_id,
+                        parent_target: target,
+                        union_node: cur,
+                    });
+                    let arms: Arc<[SemanticNodeId]> =
+                        Arc::from(vec![true_branch, false_branch].into_boxed_slice());
+                    work.push(Frame::VisitArmAt {
+                        arms,
+                        arm_index: 0,
+                        buffer_id,
+                        kind: ArmKind::Union,
+                    });
+                }
+            }
+            SemanticNodeData::Mapped { source, mapper } => {
+                let source = *source;
+                let value_expr = mapper.value_expr;
+                let optionality = mapper.optionality;
+                let readonly_mod = mapper.readonly;
+                let key_space = mapper.key_space;
+                drop(data);
+                // Resolve the mapped key-space via dispatch's KeyOf
+                // shell (or directly if the key_space is a Union/Literal
+                // already). Enumerate string-literal keys; for each,
+                // contribute a member to the surface with the mapped
+                // value's id. Non-literal keyspace contributes nothing.
+                let surface = self.synthesise_mapped_surface(
+                    source,
+                    key_space,
+                    value_expr,
+                    optionality,
+                    readonly_mod,
+                );
+                self.contribute_surface(
+                    target,
+                    root_contribution,
+                    intersection_buffers,
+                    union_buffers,
+                    surface,
+                );
+            }
+            SemanticNodeData::Alias(alias_target) => {
+                let target_id = *alias_target;
+                drop(data);
+                work.push(Frame::Visit {
+                    node: target_id,
+                    target,
+                });
+            }
+            SemanticNodeData::DeclRef { identity } => {
+                let scope = ScopeId {
+                    canonical_id: Arc::clone(&identity.canonical_id),
+                    local_scope: None,
+                };
+                let name = Arc::clone(&identity.decl_name);
+                drop(data);
+                match self
+                    .dispatch
+                    .execute(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+                        scope,
+                        name,
+                    })) {
+                    QueryResult::Value(resolved) => {
+                        if resolved == cur {
+                            self.contribute_surface(
+                                target,
+                                root_contribution,
+                                intersection_buffers,
+                                union_buffers,
+                                None,
+                            );
+                        } else {
+                            work.push(Frame::Visit {
+                                node: resolved,
+                                target,
+                            });
+                        }
+                    }
+                    QueryResult::Recursive(_) | QueryResult::Error(_) => {
+                        self.contribute_surface(
+                            target,
+                            root_contribution,
+                            intersection_buffers,
+                            union_buffers,
+                            None,
+                        );
+                    }
+                }
+            }
+            // Non-Object terminals contribute nothing to the merged
+            // surface — under TS rules a primitive arm in an
+            // intersection drops out (the contributor rule), and a
+            // primitive arm in a union becomes a `UnionArmEmpty`
+            // diagnostic at flush time.
+            SemanticNodeData::Primitive(_)
+            | SemanticNodeData::Literal(_)
+            | SemanticNodeData::Opaque(_)
+            | SemanticNodeData::VueMacroElements(_)
+            | SemanticNodeData::Array { .. }
+            | SemanticNodeData::Tuple { .. }
+            | SemanticNodeData::TemplateLiteral { .. }
+            | SemanticNodeData::TypeParam { .. }
+            | SemanticNodeData::Infer { .. }
+            | SemanticNodeData::Function { .. }
+            | SemanticNodeData::KeyOf { .. }
+            | SemanticNodeData::IndexedAccess { .. }
+            | SemanticNodeData::TypeOf { .. } => {
+                drop(data);
+                self.contribute_surface(
+                    target,
+                    root_contribution,
+                    intersection_buffers,
+                    union_buffers,
+                    None,
+                );
+            }
+        }
+    }
+
+    /// Route a contribution to the appropriate slot. Root contributions
+    /// merge with the existing root surface (intersection-style merge);
+    /// arm contributions land in the per-buffer arm slot.
+    fn contribute_surface(
+        &mut self,
+        target: BufferTarget,
+        root_contribution: &mut Option<ShallowSurface>,
+        intersection_buffers: &mut rustc_hash::FxHashMap<usize, Vec<Option<ShallowSurface>>>,
+        union_buffers: &mut rustc_hash::FxHashMap<usize, Vec<Option<ShallowSurface>>>,
+        contribution: Option<ShallowSurface>,
+    ) {
+        match target {
+            BufferTarget::Root => {
+                if let Some(surface) = contribution {
+                    *root_contribution = Some(surface);
+                }
+                // None contribution at root with no prior — leave None;
+                // the final surface will be empty Object.
+            }
+            BufferTarget::Intersection {
+                buffer_id,
+                arm_index,
+            } => {
+                if let Some(buf) = intersection_buffers.get_mut(&buffer_id) {
+                    if arm_index < buf.len() {
+                        buf[arm_index] = contribution;
+                    }
+                }
+            }
+            BufferTarget::Union {
+                buffer_id,
+                arm_index,
+            } => {
+                if let Some(buf) = union_buffers.get_mut(&buffer_id) {
+                    if arm_index < buf.len() {
+                        buf[arm_index] = contribution;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Synthesise a Mapped-shape surface from the dispatched key-space.
+    /// For each string-literal key that the dispatched `KeyOf(source)`
+    /// or the direct `key_space` exposes, emit a surface member whose
+    /// `value` is the mapped `value_expr` id. Returns `None` when the
+    /// key-space cannot be enumerated (open generic, infinite, etc.).
+    fn synthesise_mapped_surface(
+        &mut self,
+        source: SemanticNodeId,
+        key_space: SemanticNodeId,
+        value_expr: SemanticNodeId,
+        optionality: crate::semantic_query::OptionalityMod,
+        readonly_mod: crate::semantic_query::ReadonlyMod,
+    ) -> Option<ShallowSurface> {
+        // Prefer the explicit key_space; fall back to dispatching KeyOf
+        // on the source if the key_space itself is opaque.
+        let mut keys: Vec<Arc<str>> = Vec::new();
+        let collected = collect_literal_keys(self.graph(), key_space, &mut keys);
+        if !collected {
+            // Try dispatching KeyOf on the source.
+            let keyof_id = match self
+                .dispatch
+                .execute(SemanticQueryKey::KeyOf { base: source })
+            {
+                QueryResult::Value(id) => id,
+                _ => return None,
+            };
+            keys.clear();
+            if !collect_literal_keys(self.graph(), keyof_id, &mut keys) {
+                return None;
+            }
+        }
+        if keys.is_empty() {
+            return None;
+        }
+        let optional = matches!(optionality, crate::semantic_query::OptionalityMod::Add);
+        let readonly = matches!(readonly_mod, crate::semantic_query::ReadonlyMod::Add);
+        let members = keys
+            .into_iter()
+            .map(|name| ShallowSurfaceMember {
+                name,
+                value: value_expr,
+                optional,
+                readonly,
+                is_method: false,
+            })
+            .collect();
+        Some(ShallowSurface { members })
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Shallow-mode terminal-surface synthesiser support types.
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Where one Visit's contribution lands. Encodes the surface-merge
+/// position so the worklist can route arm results without recursion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum BufferTarget {
+    /// Root slot — assigned to `root_contribution`.
+    Root,
+    /// One arm of an Intersection — `intersection_buffers[buffer_id][arm_index]`.
+    Intersection { buffer_id: usize, arm_index: usize },
+    /// One arm of a Union — `union_buffers[buffer_id][arm_index]`.
+    Union { buffer_id: usize, arm_index: usize },
+}
+
+/// Worklist frame for the iterative shallow-mode terminal-surface
+/// synthesiser.
+///
+/// Stack-depth invariant: an N-arm intersection / union pushes
+/// **exactly two** frames at the entry hop (`VisitArmAt` + `Flush*`)
+/// and the per-arm iteration replaces the `VisitArmAt` frame with the
+/// next-arm `VisitArmAt` plus a single `Visit` for the current arm.
+/// Stack depth therefore stays O(nesting), not O(arm_count). Nesting
+/// itself is bounded by the graph topology; the
+/// pathological-input cap (10_000 visited entries) is the safety rail.
+#[derive(Debug)]
+enum Frame {
+    Visit {
+        node: SemanticNodeId,
+        target: BufferTarget,
+    },
+    /// Iterator frame for an Intersection / Union arm list. Pops at
+    /// each step, pushes a `Visit` for the current arm and a fresh
+    /// `VisitArmAt` for `arm_index + 1` (or returns to the queued
+    /// `Flush*` frame when `arm_index == arm_count`).
+    VisitArmAt {
+        arms: Arc<[SemanticNodeId]>,
+        arm_index: usize,
+        buffer_id: usize,
+        kind: ArmKind,
+    },
+    FlushIntersection {
+        buffer_id: usize,
+        parent_target: BufferTarget,
+    },
+    FlushUnion {
+        buffer_id: usize,
+        parent_target: BufferTarget,
+        union_node: SemanticNodeId,
+    },
+}
+
+/// Discriminant for `VisitArmAt`'s parent kind. Selects which buffer
+/// (intersection / union) the arm contribution lands in.
+#[derive(Debug, Clone, Copy)]
+enum ArmKind {
+    Intersection,
+    Union,
+}
+
+/// Merge per-arm intersection surfaces under TS rules:
+/// - members: union across arms; same-named members merge per-rule.
+/// - optional: required wins (any required → required).
+/// - readonly: OR-merge (any readonly → readonly).
+/// - value: when distinct, intern a recursive merged Object surface
+///   built from the contributing arms' values (one level deep).
+///
+/// Empty-arm surfaces are dropped (intersection contributor rule).
+/// Returns `None` only when ALL arms are None — caller then treats
+/// the result as a deferred / non-Object input.
+fn merge_intersection_surfaces_with_graph(
+    graph: &SemanticGraphStore,
+    arm_surfaces: &[Option<ShallowSurface>],
+) -> Option<ShallowSurface> {
+    let live: Vec<&ShallowSurface> = arm_surfaces.iter().filter_map(|s| s.as_ref()).collect();
+    if live.is_empty() {
+        return None;
+    }
+    if live.len() == 1 {
+        return Some(live[0].clone());
+    }
+    // Aggregate members by name. Track all distinct value ids per
+    // member so a later pass can merge them into an Intersection
+    // node when they diverge.
+    let mut by_name: indexmap::IndexMap<Arc<str>, MergedMember> = indexmap::IndexMap::new();
+    for surface in &live {
+        for member in &surface.members {
+            match by_name.get_mut(&member.name) {
+                Some(existing) => {
+                    existing.optional = existing.optional && member.optional;
+                    existing.readonly = existing.readonly || member.readonly;
+                    existing.is_method = existing.is_method || member.is_method;
+                    if !existing.values.contains(&member.value) {
+                        existing.values.push(member.value);
+                    }
+                }
+                None => {
+                    by_name.insert(
+                        Arc::clone(&member.name),
+                        MergedMember {
+                            name: Arc::clone(&member.name),
+                            values: vec![member.value],
+                            optional: member.optional,
+                            readonly: member.readonly,
+                            is_method: member.is_method,
+                        },
+                    );
+                }
+            }
+        }
+    }
+    let members: Vec<ShallowSurfaceMember> = by_name
+        .into_values()
+        .map(|m| {
+            let value = if m.values.len() == 1 {
+                m.values[0]
+            } else {
+                merge_value_nodes_recursive(graph, &m.values)
+            };
+            ShallowSurfaceMember {
+                name: m.name,
+                value,
+                optional: m.optional,
+                readonly: m.readonly,
+                is_method: m.is_method,
+            }
+        })
+        .collect();
+    Some(ShallowSurface { members })
+}
+
+/// Working aggregation for one merged member during intersection
+/// surface synthesis. Tracks all contributing value ids so a follow-up
+/// pass can merge them when they diverge across arms.
+struct MergedMember {
+    name: Arc<str>,
+    values: Vec<SemanticNodeId>,
+    optional: bool,
+    readonly: bool,
+    is_method: bool,
+}
+
+/// Merge the contributing value ids into a single semantic node. When
+/// the values are distinct Object surfaces, build a one-level merged
+/// Object surface (analogous to TS `{x: string} & {y: number}` →
+/// `{x: string, y: number}`); otherwise intern an Intersection.
+fn merge_value_nodes_recursive(
+    graph: &SemanticGraphStore,
+    values: &[SemanticNodeId],
+) -> SemanticNodeId {
+    debug_assert!(values.len() >= 2);
+    // If every contributing value is an `Object` surface, produce a
+    // merged Object directly (one-level deep) so the consumer-visible
+    // shape is a unified surface, not an `Intersection` carrier.
+    let mut shallow_surfaces: Vec<ShallowSurface> = Vec::with_capacity(values.len());
+    let mut all_objects = true;
+    for v in values {
+        match graph.node_data(*v) {
+            Some(data) => match &*data {
+                SemanticNodeData::Object(view) => {
+                    shallow_surfaces.push(ShallowSurface::from_object(view));
+                }
+                _ => {
+                    all_objects = false;
+                    break;
+                }
+            },
+            None => {
+                all_objects = false;
+                break;
+            }
+        }
+    }
+    if all_objects {
+        let opt_surfaces: Vec<Option<ShallowSurface>> =
+            shallow_surfaces.into_iter().map(Some).collect();
+        if let Some(merged) = merge_intersection_surfaces_with_graph(graph, &opt_surfaces) {
+            return graph.intern_node(SemanticNodeData::Object(surface_view_from_shallow(&merged)));
+        }
+    }
+    // Fall back: intern an Intersection node so the structural meaning
+    // is preserved without forcing the values into an Object shape.
+    graph.intern_node(SemanticNodeData::Intersection(Arc::from(
+        values.to_vec().into_boxed_slice(),
+    )))
+}
+
+/// Merge per-arm union surfaces: a member survives iff present in EVERY
+/// arm. The merged member's value is the union of the arms' values.
+/// Returns the merged surface when at least one member survives;
+/// returns `Some(empty)` when no common members exist; returns None
+/// only when the arm surfaces vector is empty (defensive).
+fn merge_union_surfaces(arm_surfaces: &[Option<ShallowSurface>]) -> Option<ShallowSurface> {
+    if arm_surfaces.is_empty() {
+        return None;
+    }
+    // Any None arm means the union has a non-Object arm — there are
+    // no common Object members, so the merged surface is empty.
+    if arm_surfaces.iter().any(|s| s.is_none()) {
+        return Some(ShallowSurface::empty());
+    }
+    let live: Vec<&ShallowSurface> = arm_surfaces.iter().filter_map(|s| s.as_ref()).collect();
+    if live.is_empty() {
+        return Some(ShallowSurface::empty());
+    }
+    let mut common: indexmap::IndexMap<Arc<str>, ShallowSurfaceMember> = indexmap::IndexMap::new();
+    for member in &live[0].members {
+        let mut present_in_all = true;
+        for other in live.iter().skip(1) {
+            if !other.members.iter().any(|m| m.name == member.name) {
+                present_in_all = false;
+                break;
+            }
+        }
+        if present_in_all {
+            common.insert(Arc::clone(&member.name), member.clone());
+        }
+    }
+    Some(ShallowSurface {
+        members: common.into_values().collect(),
+    })
+}
+
+/// Lift a `ShallowSurface` into a `SurfaceView` for interning into
+/// `SemanticNodeData::Object`. `keyspace` and signatures are empty —
+/// the synthesiser produces a one-level merged surface only.
+fn surface_view_from_shallow(surface: &ShallowSurface) -> SurfaceView {
+    let members: Vec<SurfaceMember> = surface
+        .members
+        .iter()
+        .map(|m| SurfaceMember {
+            name: Arc::clone(&m.name),
+            value: m.value,
+            optional: m.optional,
+            readonly: m.readonly,
+            is_method: m.is_method,
+        })
+        .collect();
+    SurfaceView {
+        members: Arc::from(members.into_boxed_slice()),
+        call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        index_signatures: Arc::from(
+            Vec::<crate::semantic_query::IndexSignature>::new().into_boxed_slice(),
+        ),
+        keyspace: None,
+        has_index_signature: false,
+    }
+}
+
+/// Empty `SurfaceView` used when the synthesiser has nothing to
+/// contribute (e.g., open conditional with no branch chosen).
+fn empty_surface_view() -> SurfaceView {
+    SurfaceView {
+        members: Arc::from(Vec::<SurfaceMember>::new().into_boxed_slice()),
+        call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        index_signatures: Arc::from(
+            Vec::<crate::semantic_query::IndexSignature>::new().into_boxed_slice(),
+        ),
+        keyspace: None,
+        has_index_signature: false,
+    }
+}
+
+/// Walk a key-space node tree and append every reachable string-literal
+/// name into `out`. Returns true if every leaf was a string literal,
+/// false if any leaf was non-literal (so the caller knows the keyspace
+/// can't be enumerated). Recursive descent into Union arms; flat list
+/// for Literal carriers.
+fn collect_literal_keys(
+    graph: &SemanticGraphStore,
+    node: SemanticNodeId,
+    out: &mut Vec<Arc<str>>,
+) -> bool {
+    let data = match graph.node_data(node) {
+        Some(d) => d,
+        None => return false,
+    };
+    match &*data {
+        SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(s)) => {
+            out.push(Arc::from(s.as_str()));
+            true
+        }
+        SemanticNodeData::Union(arms) => {
+            let arms = Arc::clone(arms);
+            drop(data);
+            for arm in arms.iter() {
+                if !collect_literal_keys(graph, *arm, out) {
+                    return false;
+                }
+            }
+            true
+        }
+        _ => false,
     }
 }
 

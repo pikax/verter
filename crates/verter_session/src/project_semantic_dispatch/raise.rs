@@ -650,58 +650,64 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         };
         let key_for_build = key.clone();
-        let build = move || match &key_for_build {
-            SemanticQueryKey::ResolveDecl(decl_key) => self.build_resolve_decl(decl_key),
-            SemanticQueryKey::TypeOf { value_root } => self.build_typeof(value_root),
-            SemanticQueryKey::Instantiate {
-                base,
-                args,
-                body_mode,
-            } => self.build_instantiate(base, args, *body_mode),
-            SemanticQueryKey::ProjectMember { base, member, mode } => {
-                let path: Arc<[PathSegment]> =
-                    Arc::from(vec![PathSegment::Member(Arc::clone(member))].into_boxed_slice());
-                self.build_project_path(*base, &path, *mode)
-            }
-            SemanticQueryKey::IndexedAccess { base, index, mode } => {
-                let path: Arc<[PathSegment]> =
-                    Arc::from(vec![PathSegment::Index(index.clone())].into_boxed_slice());
-                self.build_project_path(*base, &path, *mode)
-            }
-            SemanticQueryKey::ProjectPath { base, path, mode } => {
-                self.build_project_path(*base, path, *mode)
-            }
-            SemanticQueryKey::KeyOf { base } => self.build_key_of(*base),
-            SemanticQueryKey::MappedType { source, mapper } => {
-                self.build_mapped_type(*source, mapper)
-            }
-            SemanticQueryKey::Conditional {
-                check,
-                extends,
-                true_branch,
-                false_branch,
-                distributive,
-            } => {
-                self.build_conditional(*check, *extends, *true_branch, *false_branch, *distributive)
-            }
-            SemanticQueryKey::NormalizeUnion { members } => self.build_normalize_union(members),
-            SemanticQueryKey::NormalizeIntersection { members } => {
-                self.build_normalize_intersection(members)
-            }
-            SemanticQueryKey::ResolvedNamedType { key } => self.build_resolved_named_type(key),
-            SemanticQueryKey::Relate { .. } => {
-                let fence = self.project_generation_signature();
-                (QueryResult::Error(QueryError::Miss), fence)
-            }
-            // Binding amendment — `ResolveMacroPayload`.
-            SemanticQueryKey::ResolveMacroPayload {
-                owner,
-                macro_index,
-                macro_kind,
-                type_args,
-                mode,
-            } => {
-                self.build_resolve_macro_payload(owner, *macro_index, *macro_kind, type_args, *mode)
+        let build = move || -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+            match &key_for_build {
+                SemanticQueryKey::ResolveDecl(decl_key) => self.build_resolve_decl(decl_key).into(),
+                SemanticQueryKey::TypeOf { value_root } => self.build_typeof(value_root).into(),
+                SemanticQueryKey::Instantiate {
+                    base,
+                    args,
+                    body_mode,
+                } => self.build_instantiate(base, args, *body_mode).into(),
+                SemanticQueryKey::ProjectMember { base, member, mode } => {
+                    let path: Arc<[PathSegment]> =
+                        Arc::from(vec![PathSegment::Member(Arc::clone(member))].into_boxed_slice());
+                    self.build_project_path(*base, &path, *mode)
+                }
+                SemanticQueryKey::IndexedAccess { base, index, mode } => {
+                    let path: Arc<[PathSegment]> =
+                        Arc::from(vec![PathSegment::Index(index.clone())].into_boxed_slice());
+                    self.build_project_path(*base, &path, *mode)
+                }
+                SemanticQueryKey::ProjectPath { base, path, mode } => {
+                    self.build_project_path(*base, path, *mode)
+                }
+                SemanticQueryKey::KeyOf { base } => self.build_key_of(*base).into(),
+                SemanticQueryKey::MappedType { source, mapper } => {
+                    self.build_mapped_type(*source, mapper).into()
+                }
+                SemanticQueryKey::Conditional {
+                    check,
+                    extends,
+                    true_branch,
+                    false_branch,
+                    distributive,
+                } => self
+                    .build_conditional(*check, *extends, *true_branch, *false_branch, *distributive)
+                    .into(),
+                SemanticQueryKey::NormalizeUnion { members } => {
+                    self.build_normalize_union(members).into()
+                }
+                SemanticQueryKey::NormalizeIntersection { members } => {
+                    self.build_normalize_intersection(members).into()
+                }
+                SemanticQueryKey::ResolvedNamedType { key } => {
+                    self.build_resolved_named_type(key).into()
+                }
+                SemanticQueryKey::Relate { .. } => {
+                    let fence = self.project_generation_signature();
+                    (QueryResult::Error(QueryError::Miss), fence).into()
+                }
+                // Binding amendment — `ResolveMacroPayload`.
+                SemanticQueryKey::ResolveMacroPayload {
+                    owner,
+                    macro_index,
+                    macro_kind,
+                    type_args,
+                    mode,
+                } => self
+                    .build_resolve_macro_payload(owner, *macro_index, *macro_kind, type_args, *mode)
+                    .into(),
             }
         };
         graph.execute_cooperative(key, sentinel, build)

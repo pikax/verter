@@ -223,6 +223,36 @@ pub struct HostConfig {
     /// match LSP-server hover/completion responsiveness expectations
     /// (see [`LspMethodTimeoutsConfig::default`]).
     pub lsp_method_timeouts: LspMethodTimeoutsConfig,
+    /// Override hooks for resolver budgets. Used by tests to drive
+    /// the synthesis path into deliberate budget breaches without
+    /// mutating the global default budget.
+    pub recursion_budget_overrides: RecursionBudgetOverrides,
+}
+
+/// Test / advanced-tuning hooks for resolver budgets. Each field is
+/// `Option<u32>` and overrides the default budget when `Some`. The
+/// default `RecursionBudgetOverrides::default()` leaves every budget
+/// at its production default.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecursionBudgetOverrides {
+    /// Override for the per-request synthesis recursion budget.
+    /// Used by the slot-binding regression
+    /// `slot_bindings_skip_cache_on_budget_exceeded` to drive
+    /// `ComponentMetaResultDb` publication into the suppression
+    /// path. Production code leaves this `None` so the resolver
+    /// runs with its normal projection budget.
+    pub synthesis_steps: Option<u32>,
+    /// Override for the shallow walker's pathological-input cap
+    /// (`PATHOLOGICAL_CAP` in `project_semantic_dispatch::walk`).
+    /// When `Some(n)`, the walker emits a
+    /// `walker_pathological_input_cap` warn event and sets
+    /// `cache_suppress = true` once `visited.len() >= n`.
+    ///
+    /// Production code leaves this `None` so the walker runs at the
+    /// 10_000-node default. Tests use a small override (e.g. `50`)
+    /// to drive the cap-fire path on a hermetic fixture without
+    /// requiring a 10_000-node corpus.
+    pub walker_pathological_cap: Option<usize>,
 }
 
 /// Eviction policy tunables for the project-global cache cluster.
@@ -401,6 +431,7 @@ impl Default for HostConfig {
             projection_op_budget: 2000,
             eviction_policy: EvictionPolicyConfig::default(),
             lsp_method_timeouts: LspMethodTimeoutsConfig::default(),
+            recursion_budget_overrides: RecursionBudgetOverrides::default(),
         }
     }
 }

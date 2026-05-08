@@ -31,7 +31,9 @@ pub(crate) const STORE_VIEW_STABILITY_MAX_ATTEMPTS: usize = 3;
 // The shell re-exports the moved `pub(crate)` surface so existing
 // `crate::meta_resolve::*` paths keep working without callsite churn.
 mod dep_signature;
+pub(crate) mod diagnostic_convert;
 mod dispatch_helpers;
+pub(crate) mod exactness;
 mod field_state;
 mod graph_predicates;
 mod macro_member_walk;
@@ -40,6 +42,9 @@ mod origin_graph;
 mod registry_materialize;
 mod resolved_state;
 mod scoring;
+pub(crate) mod slot_binding_graph;
+#[cfg(test)]
+mod slot_binding_graph_tests;
 pub(crate) use dep_signature::{
     accumulate_dispatch_dep_signature, drain_dispatch_dep_signature_accumulator,
     reset_dispatch_dep_signature_accumulator,
@@ -153,7 +158,7 @@ pub use crate::host_manage::component_meta_request_impl::{
     ResolvedTypeDeclaration, ResolvedTypeRegistryMeta, SessionRequestHost,
 };
 pub(crate) use resolved_state::{
-    component_meta_owner_local_shallow_substituted_alias_body, enrich_missing_slot_bindings,
+    component_meta_owner_local_shallow_substituted_alias_body,
     select_imported_materialization_scope, RegistryMaterialization,
 };
 pub use resolved_state::{ResolvedComponentMetaState, SurfaceNodeIdentities};

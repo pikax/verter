@@ -17,6 +17,10 @@ use crate::semantic_query::{
 pub(super) struct MemoEntry {
     pub(super) result: QueryResult<SemanticNodeId>,
     pub(super) dep_signature: DepSignature,
+    /// Walker diagnostics observed during the cold build that produced
+    /// this entry. Replayed on warm hits via `CacheRead.walker_diagnostics`.
+    /// Empty for non-walker queries.
+    pub(super) walker_diagnostics: Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
 }
 
 /// Mode-erased identity for one [`SemanticQueryKey`] family.

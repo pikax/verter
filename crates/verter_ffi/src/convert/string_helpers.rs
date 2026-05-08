@@ -103,6 +103,21 @@ pub(super) fn expansion_stop_reason_to_string(
         verter_semantic::analysis::type_expand::ExpansionStopReason::ConditionalContextTruncated => {
             "conditionalContextTruncated".to_string()
         }
+        verter_semantic::analysis::type_expand::ExpansionStopReason::IdempotentArm => {
+            "idempotentArm".to_string()
+        }
+        verter_semantic::analysis::type_expand::ExpansionStopReason::CyclicReference => {
+            "cyclicReference".to_string()
+        }
+        verter_semantic::analysis::type_expand::ExpansionStopReason::CyclicInstantiation => {
+            "cyclicInstantiation".to_string()
+        }
+        verter_semantic::analysis::type_expand::ExpansionStopReason::InstantiationError => {
+            "instantiationError".to_string()
+        }
+        verter_semantic::analysis::type_expand::ExpansionStopReason::EmptyUnionArm => {
+            "emptyUnionArm".to_string()
+        }
     }
 }
 pub(super) fn accepted_prop_to_ffi(

@@ -53,6 +53,8 @@ mod app_config_proof_db;
 #[cfg(test)]
 mod audit_warm_cache_tests;
 pub mod audited_request;
+#[cfg(test)]
+mod audited_request_tests;
 mod cache;
 mod compile;
 pub(crate) mod completion_fence;
@@ -115,6 +117,7 @@ pub mod component_meta_payload;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod host_analyze_audit;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod host_audit_bridge;
 pub mod host_compile;
 pub mod host_compile_audit;
 #[cfg(all(test, not(target_arch = "wasm32")))]

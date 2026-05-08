@@ -3554,6 +3554,13 @@ mod foundations_guards {
         // requests. Producer side of the
         // `RequestKind::SemanticAnalysis` audit kind.
         "pub mod host_analyze_audit",
+        // verter_session::host_audit_bridge — owns the
+        // `MacroExpansionDiagnostics → AuditDiagnosticEntry` projection
+        // consumed by the audited component-meta entry-point. Public
+        // so the in-process bridge tests + the audited consumer
+        // wiring (component_meta_audit producer) can pick the helper
+        // up by canonical path.
+        "pub mod host_audit_bridge",
         // tests/host_tests.rs (host_compile module surface)
         "pub mod host_compile",
         // `compile_with_audit` entry-point. Public because
@@ -7701,5 +7708,142 @@ fn every_consumer_has_production_call_site() {
         unknown.is_empty(),
         "every_consumer_has_production_call_site: KIND_EXEMPTIONS contains unknown variants:\n{}",
         unknown.join("\n"),
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Slot-binding-graph synthesis architecture guards.
+//
+// These guards enforce the §3.12 + §17.6 + §10 R12b invariants for the
+// graph-native slot-binding synthesis introduced alongside
+// `slot_binding_graph.rs`:
+//
+//   - §3.12: the synthesis must drive the carrier walk in
+//     `ProjectionMode::Navigate`; an `Expanded` projection re-introduces
+//     the giant-tree pathology that motivated the rewrite.
+//   - §3.12 (no phase archaeology): the synthesis source must read as
+//     final-state — no plan-phase / cutover / agent-id vocabulary.
+//   - §10 R12b: the synthesis must merge dep-signatures via
+//     `dispatch.execute_read(..)` rather than the bare `dispatch.execute(..)`.
+//     `execute` discards the `dep_signature` half so callers that go
+//     through it cannot maintain the warm-cache fence.
+//   - §17.6: the synthesis must emit a `synthesize_slot_bindings` and
+//     per-macro `synthesize_macro` tracing span; the `walker_pathological_input_cap`
+//     warn event must be wired in the walker; the audit substrate's
+//     `ComponentMetaPayload` must carry diagnostics + suppression
+//     facts.
+// ──────────────────────────────────────────────────────────────────────
+
+#[test]
+fn slot_binding_graph_uses_navigate_not_expanded() {
+    let src = read_workspace_file("crates/verter_session/src/meta_resolve/slot_binding_graph.rs");
+    assert!(
+        !src.contains("ProjectionMode::Expanded"),
+        "slot_binding_graph.rs must drive synthesis in Navigate mode; \
+         an Expanded projection re-introduces the giant-tree pathology \
+         that motivated the rewrite. Found `ProjectionMode::Expanded` \
+         in the synthesis source.",
+    );
+}
+
+#[test]
+fn slot_binding_graph_no_phase_archaeology() {
+    let src = read_workspace_file("crates/verter_session/src/meta_resolve/slot_binding_graph.rs");
+    let lower = src.to_lowercase();
+    let needles = [
+        "phase 1",
+        "phase-1",
+        "phase 2",
+        "phase-2",
+        "cutover",
+        "post-cutover",
+        "pre-phase",
+        "sa-1.b-impl",
+        "sa-1.b-tests",
+        "sa-1.c",
+        "scratch branch",
+        "v8",
+        "v9",
+        "v10",
+    ];
+    for needle in needles {
+        assert!(
+            !lower.contains(needle),
+            "slot_binding_graph.rs must read as final-state — found plan archaeology: {:?}",
+            needle,
+        );
+    }
+}
+
+#[test]
+fn slot_binding_graph_uses_execute_read_only() {
+    let src = read_workspace_file("crates/verter_session/src/meta_resolve/slot_binding_graph.rs");
+    let mut violations = Vec::new();
+    for (line_no, line) in src.lines().enumerate() {
+        if line.contains("dispatch.execute(") && !line.contains("dispatch.execute_read(") {
+            violations.push(format!("  line {}: {}", line_no + 1, line.trim()));
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "slot_binding_graph.rs must merge dep-signatures via \
+         `dispatch.execute_read(..)`; bare `dispatch.execute(..)` discards \
+         the dep_signature half and breaks the warm-cache fence. \
+         Found:\n{}",
+        violations.join("\n"),
+    );
+}
+
+#[test]
+fn slot_binding_graph_emits_synthesis_spans() {
+    let src = read_workspace_file("crates/verter_session/src/meta_resolve/slot_binding_graph.rs");
+    assert!(
+        src.contains("synthesize_slot_bindings"),
+        "slot_binding_graph.rs must emit a `synthesize_slot_bindings` \
+         tracing span at the synthesis entry point so log captures can \
+         attribute work to the synthesis pass.",
+    );
+    assert!(
+        src.contains("synthesize_macro"),
+        "slot_binding_graph.rs must emit a per-macro `synthesize_macro` \
+         tracing span so log captures can attribute work to a specific \
+         macro invocation within the synthesis pass.",
+    );
+}
+
+#[test]
+fn walker_emits_tracing_events() {
+    let src = read_workspace_file("crates/verter_session/src/project_semantic_dispatch/walk.rs");
+    assert!(
+        src.contains("debug_span!(\n            target: \"verter::dispatch::walk\",\n            \"walk_shallow_surface\"")
+            || src.contains("debug_span!(\"walk_shallow_surface\"")
+            || src.contains("\"walk_shallow_surface\""),
+        "walk.rs must open a `walk_shallow_surface` debug span at the \
+         iterative walker entry-point so log captures can attribute \
+         shallow-surface walks to the dispatch layer.",
+    );
+    assert!(
+        src.contains("walker_pathological_input_cap"),
+        "walk.rs must emit a `walker_pathological_input_cap` warn \
+         event when the pathological-input cap fires so log captures \
+         can correlate the event with the matching audit diagnostic.",
+    );
+}
+
+#[test]
+fn component_meta_payload_carries_walker_diagnostics() {
+    let src = read_workspace_file("crates/verter_audit/src/payloads/component_meta.rs");
+    assert!(
+        src.contains("pub diagnostics: Vec<AuditDiagnosticEntry>"),
+        "verter_audit::payloads::ComponentMetaPayload must carry a \
+         `diagnostics: Vec<AuditDiagnosticEntry>` field so the audit \
+         substrate exposes macro-expansion diagnostics surfaced \
+         during the request.",
+    );
+    assert!(
+        src.contains("pub should_suppress: bool"),
+        "verter_audit::payloads::ComponentMetaPayload must carry a \
+         `should_suppress: bool` field so consumers observe whether \
+         a fatal QueryError suppressed cache promotion.",
     );
 }

@@ -51,7 +51,12 @@ export interface TestExpansionDiagnostic {
     | "indeterminateConditional"
     | "infiniteKeySpace"
     | "unsupportedOperator"
-    | "conditionalContextTruncated";
+    | "conditionalContextTruncated"
+    | "idempotentArm"
+    | "cyclicReference"
+    | "cyclicInstantiation"
+    | "instantiationError"
+    | "emptyUnionArm";
   context: string;
   propertyName?: string;
 }
@@ -120,6 +125,11 @@ const EXPANSION_REASON_INDETERMINATE_CONDITIONAL = 4;
 const EXPANSION_REASON_INFINITE_KEY_SPACE = 5;
 const EXPANSION_REASON_UNSUPPORTED_OPERATOR = 6;
 const EXPANSION_REASON_CONDITIONAL_CONTEXT_TRUNCATED = 7;
+const EXPANSION_REASON_IDEMPOTENT_ARM = 8;
+const EXPANSION_REASON_CYCLIC_REFERENCE = 9;
+const EXPANSION_REASON_CYCLIC_INSTANTIATION = 10;
+const EXPANSION_REASON_INSTANTIATION_ERROR = 11;
+const EXPANSION_REASON_EMPTY_UNION_ARM = 12;
 
 type TypeNodeInit = NonNullable<
   NonNullable<ComponentMetaPayloadInit["typeGraph"]>["nodes"]
@@ -406,5 +416,15 @@ function encodeExpansionReason(value: TestExpansionDiagnostic["reason"]): number
       return EXPANSION_REASON_UNSUPPORTED_OPERATOR;
     case "conditionalContextTruncated":
       return EXPANSION_REASON_CONDITIONAL_CONTEXT_TRUNCATED;
+    case "idempotentArm":
+      return EXPANSION_REASON_IDEMPOTENT_ARM;
+    case "cyclicReference":
+      return EXPANSION_REASON_CYCLIC_REFERENCE;
+    case "cyclicInstantiation":
+      return EXPANSION_REASON_CYCLIC_INSTANTIATION;
+    case "instantiationError":
+      return EXPANSION_REASON_INSTANTIATION_ERROR;
+    case "emptyUnionArm":
+      return EXPANSION_REASON_EMPTY_UNION_ARM;
   }
 }

@@ -1360,6 +1360,11 @@ fn expansion_reason_to_proto(value: &str) -> proto::ExpansionStopReason {
         "infiniteKeySpace" => proto::ExpansionStopReason::InfiniteKeySpace,
         "unsupportedOperator" => proto::ExpansionStopReason::UnsupportedOperator,
         "conditionalContextTruncated" => proto::ExpansionStopReason::ConditionalContextTruncated,
+        "idempotentArm" => proto::ExpansionStopReason::IdempotentArm,
+        "cyclicReference" => proto::ExpansionStopReason::CyclicReference,
+        "cyclicInstantiation" => proto::ExpansionStopReason::CyclicInstantiation,
+        "instantiationError" => proto::ExpansionStopReason::InstantiationError,
+        "emptyUnionArm" => proto::ExpansionStopReason::EmptyUnionArm,
         other => panic!("unknown expansion reason {other}"),
     }
 }

@@ -121,6 +121,7 @@ fn synthesize_record() -> RequestAuditRecord {
             solve_count: 1,
             ..Default::default()
         }),
+        trace_id: String::new(),
     }
 }
 

@@ -166,6 +166,11 @@ impl ResolutionTemplate {
             surface_identities: self.surface_identities.clone(),
             origin_graph: self.origin_graph.clone(),
             request_id,
+            // Rehydrated state was synthesised cold; suppression decisions
+            // already applied at publish time. Synthesis diagnostics live
+            // on the cached `ComponentMetaAnalysis.macro_expansion_diagnostics`.
+            synthesis_diagnostics: Vec::new(),
+            synthesis_should_suppress: false,
         })
     }
 }
@@ -330,6 +335,58 @@ impl<P> ComponentMetaResultDb<P> {
             .iter()
             .map(|entry| entry.key().clone())
             .collect()
+    }
+}
+
+impl ComponentMetaResultDb<CachedComponentMetaResult> {
+    /// Test-only accessor returning the merged carrier dep_signature
+    /// canonicals for an owner. Used by the slot-binding regression
+    /// `slot_bindings_dep_signature_merges_carrier_deps` to inspect
+    /// the dep-signature carriers stored alongside the cached entry.
+    /// Returns an empty vec when the owner has no cached entry.
+    #[cfg(test)]
+    pub fn dep_signature_for_owner_in_test(
+        host: &crate::VerterHost,
+        owner_canonical: &str,
+    ) -> Vec<std::sync::Arc<str>> {
+        let store = host.project_type_store();
+        let whole_hash = host
+            .ensure_indexed_ready(owner_canonical)
+            .map(|ir| ir.whole_hash)
+            .unwrap_or_default();
+        let key = ComponentMetaResultKey {
+            owner_canonical: std::sync::Arc::from(owner_canonical),
+            owner_whole_hash: whole_hash,
+            options_fingerprint: ComponentMetaOptionsFingerprint::default(),
+        };
+        let backing = store.component_meta_results();
+        match backing.get(&key) {
+            Some(entry) => entry
+                .dep_signature
+                .iter()
+                .map(|(canonical, _)| std::sync::Arc::clone(canonical))
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Test-only accessor returning whether the owner has a cached
+    /// entry. Used by the slot-binding regression
+    /// `slot_bindings_skip_cache_on_budget_exceeded` to assert that
+    /// fatal-suppression synthesis runs do not warm the cache.
+    #[cfg(test)]
+    pub fn has_owner_entry_in_test(host: &crate::VerterHost, owner_canonical: &str) -> bool {
+        let store = host.project_type_store();
+        let whole_hash = host
+            .ensure_indexed_ready(owner_canonical)
+            .map(|ir| ir.whole_hash)
+            .unwrap_or_default();
+        let key = ComponentMetaResultKey {
+            owner_canonical: std::sync::Arc::from(owner_canonical),
+            owner_whole_hash: whole_hash,
+            options_fingerprint: ComponentMetaOptionsFingerprint::default(),
+        };
+        store.component_meta_results().get(&key).is_some()
     }
 }
 

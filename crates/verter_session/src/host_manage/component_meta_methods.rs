@@ -41,11 +41,12 @@ use web_time::Instant;
 // re-exported `pub(crate)` surface).
 use crate::meta_resolve::compare_type_expr_improvement;
 use crate::meta_resolve::component_meta_registry_prefers_structural_materialization;
+use crate::meta_resolve::slot_binding_graph;
 use crate::meta_resolve::STORE_VIEW_STABILITY_MAX_ATTEMPTS;
 use crate::meta_resolve::{
     collect_define_props_root_names, component_meta_owner_local_shallow_substituted_alias_body,
-    enrich_missing_slot_bindings, select_imported_materialization_scope,
-    slot_binding_targets_define_props_root, RegistryMaterialization, ResolvedComponentMetaState,
+    select_imported_materialization_scope, slot_binding_targets_define_props_root,
+    RegistryMaterialization, ResolvedComponentMetaState,
 };
 use crate::meta_resolve::{
     collect_type_expr_ref_names, lowered_preserve_package_backed_symbolic_refs,
@@ -281,6 +282,19 @@ impl VerterHost {
                 cm_counters.dep_signature_merges,
                 cm_counters.dep_signature_intern_hits,
             );
+            // Project graph-native slot-binding synthesis state onto the
+            // audit substrate. `diagnostics` projects via the
+            // `host_audit_bridge` so consumers see one canonical
+            // `AuditDiagnosticEntry` stream regardless of producer;
+            // `should_suppress` mirrors the cache-write gate so audit
+            // consumers can see why a request did not warm the cache.
+            if let Some(resolved) = result.value.as_ref() {
+                let payload = audit_builder.component_meta_payload_mut();
+                payload.diagnostics = crate::host_audit_bridge::macro_expansion_to_audit_entries(
+                    &resolved.synthesis_diagnostics,
+                );
+                payload.should_suppress = resolved.synthesis_should_suppress;
+            }
             // Mine the semantic footprint when the active request is
             // capturing. Drains the per-request accumulator, builds the
             // per-file attribution vector, then feeds the rest through
@@ -474,8 +488,28 @@ impl VerterHost {
             audit_timings.solver_ms = started.elapsed().as_secs_f64() * 1000.0;
         }
         let mut parts = parts;
+        // Graph-native slot-binding synthesis accumulators. Both
+        // call sites OR-fold their `SynthesisResult` into
+        // `synthesis_should_suppress` and append diagnostics into
+        // `synthesis_diagnostics`; the merged result is propagated
+        // through `ResolvedComponentMetaState` so the cache-write
+        // gate (`!synthesis_should_suppress`) and audit-payload
+        // emission both observe the same state.
+        let mut synthesis_diagnostics: Vec<
+            verter_semantic::analysis::component_meta::MacroExpansionDiagnostics,
+        > = Vec::new();
+        let mut synthesis_should_suppress = false;
         if let Some(evaluated_types) = parts.evaluated_types.as_mut() {
-            enrich_missing_slot_bindings(&parts.resolved_macros, evaluated_types);
+            let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(self);
+            let result = slot_binding_graph::resolve_slot_bindings_graph_native(
+                &mut query_engine,
+                canonical,
+                &snapshot,
+                &parts.resolved_macros,
+                evaluated_types,
+                &mut synthesis_diagnostics,
+            );
+            synthesis_should_suppress |= result.should_suppress;
         }
         let registry_before = parts.resolved_type_registry.len();
         let append_start = Instant::now();
@@ -563,7 +597,15 @@ impl VerterHost {
                         );
                     }
                     if !evaluated_types.is_empty() {
-                        enrich_missing_slot_bindings(&parts.resolved_macros, &mut evaluated_types);
+                        let result = slot_binding_graph::resolve_slot_bindings_graph_native(
+                            &mut query_engine,
+                            canonical,
+                            &snapshot,
+                            &parts.resolved_macros,
+                            &mut evaluated_types,
+                            &mut synthesis_diagnostics,
+                        );
+                        synthesis_should_suppress |= result.should_suppress;
                         {
                             component_meta_trace_custom!(
                                 "materialize_component_meta_field_types",
@@ -700,6 +742,8 @@ impl VerterHost {
             evaluated_types: parts.evaluated_types,
             fact_versions: merged_fact_versions,
             surface_identities,
+            synthesis_diagnostics,
+            synthesis_should_suppress,
             compute_audit: audit_enabled.then_some(ResolvedComponentMetaComputeAudit {
                 timings: audit_timings,
                 solver: solver_audit,

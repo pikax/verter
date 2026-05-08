@@ -590,6 +590,7 @@ pub trait WorkspaceAccess: WorkspaceRead {
             files,
             waits: None,
             kind_payload: RequestKindPayload::Workspace(payload),
+            trace_id: String::new(),
         }
     }
 }

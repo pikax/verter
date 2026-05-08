@@ -228,6 +228,7 @@ mod tests {
                 }
                 _ => RequestKindPayload::None,
             },
+            trace_id: String::new(),
         };
         rec.timings.total_ms = total_ms;
         rec

@@ -211,6 +211,7 @@ impl VerterHost {
             files: Vec::new(),
             waits: None,
             kind_payload: RequestKindPayload::Compile(payload),
+            trace_id: String::new(),
         };
 
         // 9. Finalise the record. `finalize` returns `false` on a

@@ -217,7 +217,7 @@ fn same_path_recursion_returns_sentinel_not_deadlock() {
             let inner = store_ref.execute_cooperative(
                 key_ref.clone(),
                 || store_ref.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
-                || {
+                || -> (QueryResult<SemanticNodeId>, DepSignature) {
                     panic!("inner build must not run during same-path recursion");
                 },
             );
@@ -317,7 +317,7 @@ fn panic_in_cold_build_does_not_deadlock_future_callers() {
         store.execute_cooperative(
             key.clone(),
             || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
-            || {
+            || -> (QueryResult<SemanticNodeId>, DepSignature) {
                 panic!("simulated build panic");
             },
         )
@@ -598,7 +598,16 @@ fn warm_publish_one_inserts_warm_map_and_registers_reverse_index() {
     );
 
     // Direct invocation of the extracted helper.
-    store.warm_publish_one(&key, &QueryResult::Value(value), &dep_sig, &inflight);
+    let walker_diagnostics: std::sync::Arc<
+        [crate::project_semantic_dispatch::walk::ShallowDiagnostic],
+    > = std::sync::Arc::from([]);
+    store.warm_publish_one(
+        &key,
+        &QueryResult::Value(value),
+        &dep_sig,
+        &walker_diagnostics,
+        &inflight,
+    );
 
     // Post-condition 1: warm map contains the slot.
     let hit = store
@@ -1435,7 +1444,7 @@ fn cross_thread_joiner_waits_on_winner_publish() {
             store.execute_cooperative(
                 key,
                 || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
-                || {
+                || -> (QueryResult<SemanticNodeId>, DepSignature) {
                     panic!("joiner must never run the cold build");
                 },
             )
@@ -2018,7 +2027,9 @@ fn stats_counters_increment_on_hit_and_miss() {
     let _ = store.execute_cooperative(
         key.clone(),
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
-        || panic!("warm hit must skip the build closure"),
+        || -> (QueryResult<SemanticNodeId>, DepSignature) {
+            panic!("warm hit must skip the build closure")
+        },
     );
     let stats2 = store.stats_snapshot();
     assert_eq!(stats2.misses, 1);
@@ -2361,7 +2372,7 @@ fn panic_in_cold_build_does_not_leak_in_flight_stats_counter() {
         store.execute_cooperative(
             key.clone(),
             || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
-            || {
+            || -> (QueryResult<SemanticNodeId>, DepSignature) {
                 panic!("simulated build panic");
             },
         )
@@ -2643,7 +2654,9 @@ fn semantic_graph_stats_joined_waits_increments_on_cooperative_join() {
         joiner_store.execute_cooperative(
             joiner_key,
             || joiner_store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
-            || panic!("joiner build must not run — winner already claimed inflight"),
+            || -> (QueryResult<SemanticNodeId>, DepSignature) {
+                panic!("joiner build must not run — winner already claimed inflight")
+            },
         )
     });
 
@@ -3044,7 +3057,9 @@ fn execute_cooperative_warm_hit_skips_admission_overhead() {
     let _ = store.execute_cooperative(
         key.clone(),
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
-        || panic!("warm hit must not invoke the build closure"),
+        || -> (QueryResult<SemanticNodeId>, DepSignature) {
+            panic!("warm hit must not invoke the build closure")
+        },
     );
 
     let after_warm_hits = ctx

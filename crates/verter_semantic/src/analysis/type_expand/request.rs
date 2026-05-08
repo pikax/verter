@@ -104,6 +104,29 @@ pub enum ExpansionStopReason {
     /// available than the capture limit. This is a non-semantic observability
     /// diagnostic — it does not affect exactness.
     ConditionalContextTruncated,
+    /// `T & T` — duplicate intersection arm short-circuited. The walker
+    /// terminates the offending arm without contribution because it
+    /// would not add new members.
+    IdempotentArm,
+    /// True graph cycle detected during the synthesis walk; the walker
+    /// terminates the offending alias / heritage chain without
+    /// contribution. The owning declaration name (when known) is
+    /// surfaced through `ExpansionDiagnostic.context`.
+    CyclicReference,
+    /// `Instantiate` returned `Recursive` — a declaration referenced
+    /// itself transitively during synthesis. The owning declaration
+    /// identity is surfaced through `ExpansionDiagnostic.context`.
+    CyclicInstantiation,
+    /// `Instantiate` returned an `Error(QueryError)` — a fatal
+    /// query-level failure during synthesis. The declaration identity
+    /// and the underlying error are surfaced through
+    /// `ExpansionDiagnostic.context`.
+    InstantiationError,
+    /// One arm of a Union evaluated to a non-Object surface; the
+    /// merged surface drops members for that arm per the union rule
+    /// (member surface = members in ALL arms). The arm index is
+    /// surfaced through `ExpansionDiagnostic.context`.
+    EmptyUnionArm,
 }
 
 impl ExpandedObjectShape {

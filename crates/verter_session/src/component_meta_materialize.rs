@@ -383,6 +383,8 @@ pub(crate) fn materialize_component_meta_structure(
         return crate::semantic_query::CacheRead {
             value: MaterializeOutcome::Recursive(opaque),
             dep_signature: empty_signature(),
+            walker_diagnostics: Arc::from([]),
+            cache_suppress: false,
         };
     }
 
@@ -391,6 +393,8 @@ pub(crate) fn materialize_component_meta_structure(
         return crate::semantic_query::CacheRead {
             value: MaterializeOutcome::Tainted(key.base),
             dep_signature: empty_signature(),
+            walker_diagnostics: Arc::from([]),
+            cache_suppress: false,
         };
     }
 
@@ -412,6 +416,8 @@ pub(crate) fn materialize_component_meta_structure(
         return crate::semantic_query::CacheRead {
             value: MaterializeOutcome::Value(key.base),
             dep_signature: empty_signature(),
+            walker_diagnostics: Arc::from([]),
+            cache_suppress: false,
         };
     }
 
@@ -435,6 +441,8 @@ pub(crate) fn materialize_component_meta_structure(
                 return crate::semantic_query::CacheRead {
                     value: MaterializeOutcome::Value(key.base),
                     dep_signature: empty_signature(),
+                    walker_diagnostics: Arc::from([]),
+                    cache_suppress: false,
                 };
             }
         }
@@ -810,6 +818,8 @@ pub(crate) fn materialize_component_meta_structure(
                 Some(crate::semantic_query::CacheRead {
                     value: entry.outcome.clone(),
                     dep_signature: entry.dep_signature.clone(),
+                    walker_diagnostics: Arc::from([]),
+                    cache_suppress: false,
                 })
             } else {
                 None
@@ -819,6 +829,8 @@ pub(crate) fn materialize_component_meta_structure(
         |entry: &MaterializeStructureEntry| crate::semantic_query::CacheRead {
             value: entry.outcome.clone(),
             dep_signature: entry.dep_signature.clone(),
+            walker_diagnostics: Arc::from([]),
+            cache_suppress: false,
         },
         // Race-closer — post-compute revalidation.
         |entry: &MaterializeStructureEntry| ctx.validate_dep_signature(&entry.dep_signature),
@@ -846,6 +858,8 @@ pub(crate) fn materialize_component_meta_structure(
                 return crate::semantic_query::CacheRead {
                     value: outcome,
                     dep_signature: empty_signature(),
+                    walker_diagnostics: Arc::from([]),
+                    cache_suppress: false,
                 };
             }
             // Revalidation failed (no compute outcome stashed).
@@ -855,6 +869,8 @@ pub(crate) fn materialize_component_meta_structure(
             crate::semantic_query::CacheRead {
                 value: MaterializeOutcome::Tainted(key.base),
                 dep_signature: empty_signature(),
+                walker_diagnostics: Arc::from([]),
+                cache_suppress: false,
             }
         }
     }
@@ -1102,6 +1118,8 @@ mod tests {
         let read = CacheRead {
             value: QueryResult::Recursive(dummy_node(123)),
             dep_signature: dummy_dep_signature(),
+            walker_diagnostics: Arc::from([]),
+            cache_suppress: false,
         };
         let outcome = convert_dispatch_result(read, dummy_node(7), &mut fence);
         match outcome {
@@ -1121,6 +1139,8 @@ mod tests {
         let read = CacheRead {
             value: QueryResult::Value(dummy_node(42)),
             dep_signature: dummy_dep_signature(),
+            walker_diagnostics: Arc::from([]),
+            cache_suppress: false,
         };
         match convert_dispatch_result(read, dummy_node(7), &mut fence) {
             MaterializeOutcome::Value(id) => assert_eq!(id, dummy_node(42)),
@@ -1134,6 +1154,8 @@ mod tests {
         let read = CacheRead {
             value: QueryResult::Error(QueryError::Miss),
             dep_signature: dummy_dep_signature(),
+            walker_diagnostics: Arc::from([]),
+            cache_suppress: false,
         };
         match convert_dispatch_result(read, dummy_node(7), &mut fence) {
             MaterializeOutcome::Error(QueryError::Miss) => {}

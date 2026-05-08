@@ -610,6 +610,34 @@ pub(crate) fn slot_binding_param_can_stay_symbolic_node(
         SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => members
             .iter()
             .all(|&m| slot_binding_param_can_stay_symbolic_node(ctx, m, depth + 1)),
+        // An `Object` slot-binding parameter (e.g. `props: { ui:
+        // Button['ui'] }`) is directly enumerable by the
+        // graph-native synthesizer and stays symbolic when every
+        // property/method/signature value is itself stay-symbolic OR
+        // a concrete shape that gains nothing from member-route
+        // materialisation. Without this arm, an Object containing an
+        // imported helper-route member (`IndexedAccess`, `Mapped`,
+        // etc.) would trigger a materialisation pass that expands
+        // the helper away (`Button['ui']` → `Object<base, label>`)
+        // and erases the source-text identity downstream consumers
+        // re-resolve through dispatch.
+        SemanticNodeData::Object(view) => {
+            view.members
+                .iter()
+                .all(|m| node_value_is_concrete_or_symbolic(ctx, m.value, depth + 1))
+                && view
+                    .call_signatures
+                    .iter()
+                    .all(|&sig_id| node_value_is_concrete_or_symbolic(ctx, sig_id, depth + 1))
+                && view
+                    .construct_signatures
+                    .iter()
+                    .all(|&sig_id| node_value_is_concrete_or_symbolic(ctx, sig_id, depth + 1))
+                && view
+                    .index_signatures
+                    .iter()
+                    .all(|sig| node_value_is_concrete_or_symbolic(ctx, sig.value_type, depth + 1))
+        }
         // Lowered `Ref { name, type_arguments: [non-empty] }` —
         // mirrors the legacy TypeExpr `Ref { name, type_arguments }` arm
         // with the `!type_arguments.is_empty() && !package_backed` guard.
@@ -637,6 +665,71 @@ pub(crate) fn slot_binding_param_can_stay_symbolic_node(
             node_has_non_object_top_level_surface(ctx, body_id, depth + 1)
         }
         _ => false,
+    }
+}
+
+/// Returns `true` when `node`'s value is either a concrete shape
+/// that does not benefit from member-route materialisation
+/// (`Primitive`, `Literal`, `Function`, `Array`, `Tuple`,
+/// `Opaque`/`VueMacroElements` carriers) OR a shape that the
+/// slot-binding contract has classified as stay-symbolic via
+/// [`slot_binding_param_can_stay_symbolic_node`] (Conditional /
+/// IndexedAccess / Mapped / etc.).
+///
+/// Used by the [`SemanticNodeData::Object`] arm of
+/// [`slot_binding_param_can_stay_symbolic_node`] to decide whether
+/// a property value warrants a materialisation pass. Mirrors the
+/// invariant that the synthesizer enumerates Object members directly
+/// and the rescue pass should not eagerly expand member values that
+/// the consumer can re-resolve from their symbolic form.
+///
+/// Depth-fused at 256 like the parent predicate.
+fn node_value_is_concrete_or_symbolic(
+    ctx: &dyn ResolverContext,
+    node: crate::semantic_query::SemanticNodeId,
+    depth: u32,
+) -> bool {
+    use crate::semantic_query::SemanticNodeData;
+
+    if depth > 256 {
+        return false;
+    }
+    let graph = ctx.project_type_store().semantic_graph();
+    let Some(data) = graph.node_data(node) else {
+        return false;
+    };
+    match data.as_ref() {
+        // Concrete shapes — nothing to materialise.
+        SemanticNodeData::Primitive(_)
+        | SemanticNodeData::Literal(_)
+        | SemanticNodeData::Function { .. }
+        | SemanticNodeData::Array { .. }
+        | SemanticNodeData::Tuple { .. }
+        | SemanticNodeData::Opaque(_)
+        | SemanticNodeData::VueMacroElements(_) => true,
+        SemanticNodeData::Alias(inner) => {
+            node_value_is_concrete_or_symbolic(ctx, *inner, depth + 1)
+        }
+        // Recursive: a property whose value is itself an Object
+        // follows the same contract — its members must all be
+        // concrete-or-symbolic. Routes through the parent predicate
+        // so the package-backed / body-shape guards stay centralized.
+        SemanticNodeData::Object(_) | SemanticNodeData::InstantiationRef { .. } => {
+            slot_binding_param_can_stay_symbolic_node(ctx, node, depth + 1)
+        }
+        // Symbolic carriers — preserved by the slot-binding contract.
+        SemanticNodeData::Conditional { .. }
+        | SemanticNodeData::Mapped { .. }
+        | SemanticNodeData::IndexedAccess { .. }
+        | SemanticNodeData::TypeOf { .. }
+        | SemanticNodeData::TypeParam { .. }
+        | SemanticNodeData::Infer { .. }
+        | SemanticNodeData::KeyOf { .. }
+        | SemanticNodeData::TemplateLiteral { .. }
+        | SemanticNodeData::DeclRef { .. } => true,
+        SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => members
+            .iter()
+            .all(|&m| node_value_is_concrete_or_symbolic(ctx, m, depth + 1)),
     }
 }
 

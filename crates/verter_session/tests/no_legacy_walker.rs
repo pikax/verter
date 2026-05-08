@@ -109,6 +109,18 @@ const RETIRED_SYMBOLS: &[&str] = &[
     // The graph-native primitive `ref_root_reaches_transitive_cycle_node`
     // is the canonical cycle-detection authority.
     "typeexpr_root_reaches_transitive_cycle",
+    // SA-1.D (plan §3.8) — legacy parser-side slot-binding enrichment
+    // helpers superseded by graph-native synthesis
+    // (`slot_binding_graph::resolve_slot_bindings_graph_native`).
+    // All five had zero production callers after SA-1.C removed the
+    // two `enrich_missing_slot_bindings` call sites from
+    // `compute_component_meta_state_inner`. Re-introducing any of these
+    // at a production call site would re-wire the retired parser path.
+    "enrich_missing_slot_bindings",
+    "collect_expanded_slot_binding_param_types",
+    "decide_typeexpr_conditional_with_function_extends",
+    "substitute_infer_in_typeexpr",
+    "collect_expanded_slot_bindings_from_object_type",
 ];
 
 const SCAN_DIRS: &[&str] = &["crates", ".claude/skills", "docs"];

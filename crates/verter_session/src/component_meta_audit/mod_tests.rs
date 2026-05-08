@@ -209,6 +209,7 @@ fn component_meta_payload_accessor_returns_none_for_other_kinds() {
         files: Vec::new(),
         waits: None,
         kind_payload: RequestKindPayload::TypeResolution(Default::default()),
+        trace_id: String::new(),
     };
     assert!(record.component_meta_payload().is_none());
     assert!(record.type_resolution_payload().is_some());

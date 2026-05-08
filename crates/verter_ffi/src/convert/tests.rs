@@ -188,6 +188,8 @@ fn component_meta_type_registry_keeps_expanded_and_pre_expansion_type_informatio
         origin_graph: None,
         request_id: 0,
         surface_identities: None,
+        synthesis_diagnostics: Vec::new(),
+        synthesis_should_suppress: false,
     };
 
     let ffi = component_meta_analysis_to_ffi_with_resolution(analysis, Some(&resolved_state));
@@ -302,6 +304,8 @@ fn component_meta_type_registry_prefers_resolved_registry_type_expr_when_availab
         origin_graph: None,
         request_id: 0,
         surface_identities: None,
+        synthesis_diagnostics: Vec::new(),
+        synthesis_should_suppress: false,
     };
 
     let ffi = component_meta_analysis_to_ffi_with_resolution(analysis, Some(&resolved_state));
@@ -1647,6 +1651,8 @@ fn ffi_payload_contains_origin_field_when_resolved_state_has_origin_graph() {
         }),
         request_id: 0,
         surface_identities: None,
+        synthesis_diagnostics: Vec::new(),
+        synthesis_should_suppress: false,
     };
 
     let ffi =
@@ -1674,6 +1680,8 @@ fn ffi_origin_subgraph_is_empty_when_resolved_state_has_no_origin_graph() {
         origin_graph: None,
         request_id: 0,
         surface_identities: None,
+        synthesis_diagnostics: Vec::new(),
+        synthesis_should_suppress: false,
     };
 
     let ffi =
@@ -1729,6 +1737,8 @@ fn ffi_edge_meta_strings_deduplicated() {
         }),
         request_id: 0,
         surface_identities: None,
+        synthesis_diagnostics: Vec::new(),
+        synthesis_should_suppress: false,
     };
 
     let ffi =
@@ -1760,6 +1770,8 @@ fn ffi_projection_mode_wire_format() {
         origin_graph: None,
         request_id: 0,
         surface_identities: None,
+        synthesis_diagnostics: Vec::new(),
+        synthesis_should_suppress: false,
     };
 
     let ffi = resolved_component_meta_to_ffi(&resolved_state);
@@ -1819,6 +1831,8 @@ fn ffi_payload_contains_instantiate_edge_for_generic_component() {
         }),
         request_id: 0,
         surface_identities: None,
+        synthesis_diagnostics: Vec::new(),
+        synthesis_should_suppress: false,
     };
 
     let ffi =

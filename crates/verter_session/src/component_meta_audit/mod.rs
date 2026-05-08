@@ -379,11 +379,30 @@ impl AuditBuilder {
         // built. When no context is in scope (the synthetic test
         // fixture path), the peak stays at 0, matching the WASM /
         // flag-off contract.
-        let (parent_request_id, scheduler, waits) =
+        let (parent_request_id, scheduler, waits, trace_id) =
             match crate::request_context::current_request_context() {
                 Some(ctx) if ctx.request_id == self.request_id => {
                     self.memory.process_rss_peak_bytes = ctx
                         .process_rss_peak_bytes
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    // Snapshot the per-request slot-binding-attribution
+                    // counters into the component-meta payload. The
+                    // host-global counters (process-wide
+                    // `SLOT_BINDING_EXPANDED_INSTANTIATE_CALLS` and the
+                    // `SemanticGraphStore::memo_size_in_test` delta)
+                    // remain the canonical signals; the per-request
+                    // mirrors here let attribution tests assert
+                    // "synthesis-attributable count == 0 for this
+                    // request" without false positives from peer
+                    // dispatches in workspace-parallel runs.
+                    self.component_meta_payload.expanded_instantiate_calls = ctx
+                        .expanded_instantiate_calls
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    self.component_meta_payload.memo_insertions = ctx
+                        .memo_insertions
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    self.component_meta_payload.memo_publish_suppressed = ctx
+                        .memo_publish_suppressed
                         .load(std::sync::atomic::Ordering::Relaxed);
                     // `waits` is populated only when the host's
                     // `audit_timing_capture` flag is on. The flag is
@@ -410,9 +429,10 @@ impl AuditBuilder {
                         ctx.parent_request_id.map(|id| id.to_string()),
                         ctx.scheduler_audit.lock().clone(),
                         waits,
+                        ctx.trace_id.clone(),
                     )
                 }
-                _ => (None, None, None),
+                _ => (None, None, None, String::new()),
             };
 
         // bytes_parsed (always-on under audit_enabled): sum of bytes_read
@@ -451,6 +471,7 @@ impl AuditBuilder {
             files: self.files,
             waits,
             kind_payload: RequestKindPayload::ComponentMeta(self.component_meta_payload),
+            trace_id,
         }
     }
 }

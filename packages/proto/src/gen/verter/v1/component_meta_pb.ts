@@ -3543,6 +3543,31 @@ export enum ExpansionStopReason {
    * @generated from enum value: EXPANSION_STOP_REASON_CONDITIONAL_CONTEXT_TRUNCATED = 7;
    */
   CONDITIONAL_CONTEXT_TRUNCATED = 7,
+
+  /**
+   * @generated from enum value: EXPANSION_STOP_REASON_IDEMPOTENT_ARM = 8;
+   */
+  IDEMPOTENT_ARM = 8,
+
+  /**
+   * @generated from enum value: EXPANSION_STOP_REASON_CYCLIC_REFERENCE = 9;
+   */
+  CYCLIC_REFERENCE = 9,
+
+  /**
+   * @generated from enum value: EXPANSION_STOP_REASON_CYCLIC_INSTANTIATION = 10;
+   */
+  CYCLIC_INSTANTIATION = 10,
+
+  /**
+   * @generated from enum value: EXPANSION_STOP_REASON_INSTANTIATION_ERROR = 11;
+   */
+  INSTANTIATION_ERROR = 11,
+
+  /**
+   * @generated from enum value: EXPANSION_STOP_REASON_EMPTY_UNION_ARM = 12;
+   */
+  EMPTY_UNION_ARM = 12,
 }
 
 /**

@@ -166,6 +166,7 @@ fn active_request_registration_survives_worker_tls_install_drop_churn() {
         files: Vec::new(),
         waits: None,
         kind_payload: RequestKindPayload::ComponentMeta(ComponentMetaPayload::default()),
+        trace_id: String::new(),
     };
     assert!(
         registration.finalize(synthetic_record),

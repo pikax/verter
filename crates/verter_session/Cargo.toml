@@ -61,6 +61,7 @@ oxc_span = { workspace = true }
 rustc-hash = { workspace = true }
 self_cell = { workspace = true }
 smallvec = "1.13"
+uuid = { version = "1", features = ["v4"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 serde = { workspace = true }
 tracing = "0.1"
@@ -120,6 +121,7 @@ regex = "1"
 # that `VerterHost::workspace()` is gated behind `pub(crate)` and is not
 # callable from external compilation units.
 trybuild = "1"
+tracing-test = "0.2"
 # Phase 8 — `no_off_store_host_caches` static guard parses
 # `crates/verter_session/src/lib.rs` via syn::parse_file to enumerate
 # `VerterHost` fields and assert each cache-shaped field is either

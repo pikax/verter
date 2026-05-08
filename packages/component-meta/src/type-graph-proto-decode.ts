@@ -104,6 +104,11 @@ const EXPANSION_REASON_INDETERMINATE_CONDITIONAL = 4;
 const EXPANSION_REASON_INFINITE_KEY_SPACE = 5;
 const EXPANSION_REASON_UNSUPPORTED_OPERATOR = 6;
 const EXPANSION_REASON_CONDITIONAL_CONTEXT_TRUNCATED = 7;
+const EXPANSION_REASON_IDEMPOTENT_ARM = 8;
+const EXPANSION_REASON_CYCLIC_REFERENCE = 9;
+const EXPANSION_REASON_CYCLIC_INSTANTIATION = 10;
+const EXPANSION_REASON_INSTANTIATION_ERROR = 11;
+const EXPANSION_REASON_EMPTY_UNION_ARM = 12;
 
 const ACCEPTED_SURFACE_COMPLETENESS_EXACT = 1;
 const ACCEPTED_SURFACE_COMPLETENESS_LOWER_BOUND = 2;
@@ -1624,7 +1629,12 @@ function decodeExpansionStopReason(
   | "indeterminateConditional"
   | "infiniteKeySpace"
   | "unsupportedOperator"
-  | "conditionalContextTruncated" {
+  | "conditionalContextTruncated"
+  | "idempotentArm"
+  | "cyclicReference"
+  | "cyclicInstantiation"
+  | "instantiationError"
+  | "emptyUnionArm" {
   switch (value) {
     case EXPANSION_REASON_BUDGET_EXCEEDED:
       return "budgetExceeded";
@@ -1640,6 +1650,16 @@ function decodeExpansionStopReason(
       return "unsupportedOperator";
     case EXPANSION_REASON_CONDITIONAL_CONTEXT_TRUNCATED:
       return "conditionalContextTruncated";
+    case EXPANSION_REASON_IDEMPOTENT_ARM:
+      return "idempotentArm";
+    case EXPANSION_REASON_CYCLIC_REFERENCE:
+      return "cyclicReference";
+    case EXPANSION_REASON_CYCLIC_INSTANTIATION:
+      return "cyclicInstantiation";
+    case EXPANSION_REASON_INSTANTIATION_ERROR:
+      return "instantiationError";
+    case EXPANSION_REASON_EMPTY_UNION_ARM:
+      return "emptyUnionArm";
     default:
       throw graphError(`component-meta graph payload has unknown expansion stop reason ${value}`);
   }

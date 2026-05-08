@@ -78,6 +78,7 @@ fn build_record(
         files: Vec::new(),
         waits: None,
         kind_payload,
+        trace_id: String::new(),
     };
     record.timings.total_ms = total_ms;
     record.memory.bytes_parsed = 1024;

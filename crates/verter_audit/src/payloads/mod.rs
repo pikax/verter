@@ -20,7 +20,7 @@ pub mod workspace;
 
 pub use bundler::{BundlerBatchPayload, SlowRecordSummary};
 pub use compile::CompilePayload;
-pub use component_meta::ComponentMetaPayload;
+pub use component_meta::{AuditDiagnosticEntry, AuditDiagnosticKind, ComponentMetaPayload};
 pub use lsp::{LspRequestPayload, PositionInfo};
 pub use mcp::McpToolPayload;
 pub use semantic::SemanticAnalysisPayload;

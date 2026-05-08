@@ -34,6 +34,12 @@ pub(super) struct InflightState {
     pub(super) completed: Option<QueryResult<SemanticNodeId>>,
     /// Dep signature the winner observed.
     pub(super) dep_signature: Option<DepSignature>,
+    /// Walker diagnostics observed during the winner's cold build.
+    /// Joiners read this alongside `completed` so warm-replay parity is
+    /// preserved across cooperative-admission joins. Empty for non-
+    /// walker queries.
+    pub(super) walker_diagnostics:
+        Option<std::sync::Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>>,
     /// `true` once some thread owns the build. Subsequent threads wait on
     /// `ready` rather than trying to own it themselves.
     pub(super) claimed: bool,

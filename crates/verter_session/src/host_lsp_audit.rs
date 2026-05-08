@@ -186,6 +186,7 @@ fn build_record(
         files: Vec::new(),
         waits: None,
         kind_payload: RequestKindPayload::Lsp(payload),
+        trace_id: String::new(),
     }
 }
 

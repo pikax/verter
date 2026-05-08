@@ -244,6 +244,7 @@ fn audit_record_u64_fields_serialize_as_json_strings_not_numbers() {
             solve_count: 3,
             ..Default::default()
         }),
+        trace_id: String::new(),
     };
 
     let value = serde_json::to_value(&record).expect("serialize");
@@ -388,6 +389,7 @@ fn rust_memory_audit_process_rss_delta_bytes_serializes_as_json_string() {
             files: Vec::new(),
             waits: None,
             kind_payload: RequestKindPayload::ComponentMeta(ComponentMetaPayload::default()),
+            trace_id: String::new(),
         };
         let value = serde_json::to_value(&record).expect("serialize");
         assert!(
@@ -628,6 +630,7 @@ fn json_emission_round_trips_structurally_equivalent_to_rust() {
             solve_count: 7,
             ..Default::default()
         }),
+        trace_id: String::new(),
     };
 
     // (1) Rust-side emission: the JSON string an @verter/native or

@@ -1300,6 +1300,8 @@ impl MaterializeStructureDb {
             Some(crate::semantic_query::CacheRead {
                 value: entry_arc.outcome.clone(),
                 dep_signature: entry_arc.dep_signature.clone(),
+                walker_diagnostics: std::sync::Arc::from([]),
+                cache_suppress: false,
             })
         })();
         if let Some(rctx) = crate::request_context::current_request_context() {
@@ -1594,6 +1596,8 @@ impl RefCycleResultDb {
                 return Some(crate::semantic_query::CacheRead {
                     value: entry_arc.result,
                     dep_signature: Arc::clone(&entry_arc.dep_signature),
+                    walker_diagnostics: Arc::from([]),
+                    cache_suppress: false,
                 });
             }
             if !ctx.validate_dep_signature(&entry_arc.dep_signature) {
@@ -1613,6 +1617,8 @@ impl RefCycleResultDb {
             Some(crate::semantic_query::CacheRead {
                 value: entry_arc.result,
                 dep_signature: Arc::clone(&entry_arc.dep_signature),
+                walker_diagnostics: Arc::from([]),
+                cache_suppress: false,
             })
         })();
         if let Some(rctx) = crate::request_context::current_request_context() {
@@ -1986,6 +1992,8 @@ where
                 Some(crate::semantic_query::CacheRead {
                     value: entry.result,
                     dep_signature: Arc::clone(&entry.dep_signature),
+                    walker_diagnostics: Arc::from([]),
+                    cache_suppress: false,
                 })
             } else {
                 None
@@ -2005,6 +2013,8 @@ where
         |entry: &RefCycleEntry| crate::semantic_query::CacheRead {
             value: entry.result,
             dep_signature: Arc::clone(&entry.dep_signature),
+            walker_diagnostics: Arc::from([]),
+            cache_suppress: false,
         },
         // revalidate_after_compute(&Entry) -> bool
         |entry: &RefCycleEntry| ctx.validate_dep_signature(&entry.dep_signature),
@@ -2130,6 +2140,8 @@ impl MemberRouteResultDb {
             Some(crate::semantic_query::CacheRead {
                 value: entry_arc.result.clone(),
                 dep_signature: entry_arc.dep_signature.clone(),
+                walker_diagnostics: Arc::from([]),
+                cache_suppress: false,
             })
         })();
         if let Some(rctx) = crate::request_context::current_request_context() {
@@ -2300,6 +2312,8 @@ where
                 Some(crate::semantic_query::CacheRead {
                     value: entry.result.clone(),
                     dep_signature: Arc::clone(&entry.dep_signature),
+                    walker_diagnostics: Arc::from([]),
+                    cache_suppress: false,
                 })
             } else {
                 None
@@ -2319,6 +2333,8 @@ where
         |entry: &MemberRouteResultEntry| crate::semantic_query::CacheRead {
             value: entry.result.clone(),
             dep_signature: Arc::clone(&entry.dep_signature),
+            walker_diagnostics: Arc::from([]),
+            cache_suppress: false,
         },
         |entry: &MemberRouteResultEntry| ctx.validate_dep_signature(&entry.dep_signature),
         move |entry_arc: &Arc<MemberRouteResultEntry>, _k: &MemberRouteResultCacheKey| {

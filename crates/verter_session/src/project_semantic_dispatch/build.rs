@@ -292,6 +292,29 @@ impl<'a> ProjectSemanticDispatch<'a> {
         args: &Arc<[SemanticNodeId]>,
         body_mode: crate::semantic_query::ProjectionMode,
     ) -> (QueryResult<SemanticNodeId>, DepSignature) {
+        // Count Instantiate dispatches that ask for the Expanded body
+        // mode. Used by the slot-binding regression `enrich_does_not_eagerly_instantiate_carrier`
+        // to enforce that synthesis stays in Navigate mode and never
+        // re-enters the giant-tree pathology through the carrier walk.
+        //
+        // Two counters are bumped: the process-global
+        // `SLOT_BINDING_EXPANDED_INSTANTIATE_CALLS` (preserves existing
+        // semantics for warm-pass tests that read it without an active
+        // RequestContext) AND the active request's per-request mirror
+        // when a context is installed in TLS. The per-request mirror
+        // surfaces on the audit payload so attribution tests can assert
+        // "no synthesis-attributable Instantiate{Expanded} fired during
+        // this request" without false positives from peer dispatches in
+        // workspace-parallel runs.
+        if matches!(body_mode, crate::semantic_query::ProjectionMode::Expanded) {
+            crate::loop5_instrumentation::SLOT_BINDING_EXPANDED_INSTANTIATE_CALLS
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if let Some(ctx) = crate::request_context::current_request_context() {
+                ctx.expanded_instantiate_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+
         let decl_canonical = &identity.canonical_id;
         let decl_name = &identity.decl_name;
         let decl_whole_hash = identity.whole_hash;
@@ -1205,7 +1228,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         base: SemanticNodeId,
         path: &Arc<[PathSegment]>,
         mode: ProjectionMode,
-    ) -> (QueryResult<SemanticNodeId>, DepSignature) {
+    ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         let fence = self.project_generation_signature();
         self.graph().record_path_length(path.len() as u32);
         // Longest-prefix-first peek. Skip when path.len() < 2.
@@ -1224,6 +1247,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         let mut walker = PathWalker::new(self, mode, &fence);
         let result = walker.walk(start_base, walker_path.as_ref());
+        // Drain the walker's diagnostics + cache_suppress flag so the
+        // memo no-poison contract sees them at admission time.
+        let walker_diagnostics: Vec<crate::project_semantic_dispatch::walk::ShallowDiagnostic> =
+            std::mem::take(&mut walker.walker_diagnostics);
+        let cache_suppress = walker.cache_suppress;
         // Supplement §5.D.0 r17 — surface a budget-exceeded
         // sentinel as `QueryResult::Recursive` so §5.D.4
         // `no_cache_promotion_for_budget_exceeded_*` callers can
@@ -1237,7 +1265,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             crate::semantic_query::QueryError::RecursiveRef { .. },
         )) = self.graph().node_data(result).as_deref()
         {
-            return (QueryResult::Recursive(result), fence);
+            return crate::project_semantic_dispatch::walk::QueryBuildOutput {
+                result: QueryResult::Recursive(result),
+                dep_signature: fence,
+                walker_diagnostics,
+                cache_suppress,
+            };
         }
         // Emit a whole-path `ProjectPath` edge on the result so consumers
         // can recover the entry path without rebuilding it from per-hop
@@ -1265,7 +1298,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             &walker.intermediate_nodes,
             &fence,
         );
-        (QueryResult::Value(result), fence)
+        crate::project_semantic_dispatch::walk::QueryBuildOutput {
+            result: QueryResult::Value(result),
+            dep_signature: fence,
+            walker_diagnostics,
+            cache_suppress,
+        }
     }
 
     /// `keyof` projection. For an `Object` surface, materializes a union of

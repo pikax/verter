@@ -143,12 +143,29 @@ impl VerterHost {
     /// revalidates the full signature against the live host so an edit to
     /// *any* file the resolver touched invalidates the cached payload — not
     /// just edits to the owner itself.
+    ///
+    /// **Suppression gate.** When graph-native slot-binding synthesis
+    /// observed a fatal `QueryError` (`BudgetExceeded`,
+    /// `UnstableState`, walker `cache_suppress`),
+    /// `resolved.synthesis_should_suppress` is `true` and the
+    /// final-result cache write is skipped. Subsequent requests
+    /// cold-recompute. The synthesis output remains available to the
+    /// caller so partial diagnostics still surface — only the cache
+    /// promotion is gated.
     fn publish_component_meta_cache_entry(
         &self,
         canonical: &str,
         resolved: &crate::meta_resolve::ResolvedComponentMetaState,
         meta: verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
     ) {
+        if resolved.synthesis_should_suppress {
+            tracing::debug!(
+                target: "verter::audit::record",
+                file = %canonical,
+                "skipping component-meta cache promotion: synthesis_should_suppress=true",
+            );
+            return;
+        }
         let Some(shallow) = self.shallow_file_state(canonical) else {
             return;
         };
@@ -341,6 +358,27 @@ impl VerterHost {
         let mut resolved = self
             .resolve_component_meta(canonical.as_str(), crate::types::ProjectionMode::Expanded)?;
         resolved.request_id = request_id;
+        // Open the publication-boundary tracing span. Carries the
+        // per-request `trace_id` (from `RequestContext`) so audit
+        // consumers can join `RequestAuditRecord.trace_id` to
+        // captured tracing logs by string match. The
+        // `suppress` field surfaces the synthesis suppression
+        // decision in spans for the same reason.
+        let publish_trace_id = crate::request_context::current_request_context()
+            .map(|ctx| ctx.trace_id.clone())
+            .unwrap_or_default();
+        let publish_span = tracing::info_span!(
+            "publish_component_meta",
+            file = %canonical,
+            trace_id = %publish_trace_id,
+            suppress = resolved.synthesis_should_suppress,
+        );
+        let _publish_enter = publish_span.enter();
+        tracing::info!(
+            trace_id = %publish_trace_id,
+            suppress = resolved.synthesis_should_suppress,
+            "publish_component_meta",
+        );
         // Always include fallthrough — the solver path does not use walker
         // overflow as a gating signal.
         let analysis = extract_component_meta_from_resolved(
@@ -352,6 +390,8 @@ impl VerterHost {
 
         // Cache-write so subsequent identical calls
         // short-circuit through `try_with_resolution_cache_hit`.
+        // Suppression is enforced inside `publish_component_meta_cache_entry`
+        // via `resolved.synthesis_should_suppress`.
         self.publish_component_meta_cache_entry(canonical.as_str(), &resolved, analysis.clone());
 
         Some((analysis, resolved))
@@ -430,7 +470,7 @@ impl VerterHost {
             // a few lines above this branch). The same context lookup
             // also surfaces the per-request peak-RSS slot.
             let mut memory = crate::component_meta_audit::RequestMemoryAudit::default();
-            let (parent_request_id, scheduler_audit, waits) =
+            let (parent_request_id, scheduler_audit, waits, trace_id) =
                 match crate::request_context::current_request_context() {
                     Some(ctx) if ctx.request_id == request_id => {
                         memory.process_rss_peak_bytes = ctx
@@ -462,9 +502,10 @@ impl VerterHost {
                             ctx.parent_request_id.map(|id| id.to_string()),
                             ctx.scheduler_audit.lock().clone(),
                             waits,
+                            ctx.trace_id.clone(),
                         )
                     }
-                    _ => (None, None, None),
+                    _ => (None, None, None, String::new()),
                 };
             let synthesized = crate::component_meta_audit::RequestAuditRecord {
                 request_id,
@@ -482,6 +523,7 @@ impl VerterHost {
                 kind_payload: crate::component_meta_audit::RequestKindPayload::ComponentMeta(
                     crate::component_meta_audit::ComponentMetaPayload::default(),
                 ),
+                trace_id,
             };
             debug_assert_eq!(synthesized.request_id, resolution.request_id);
             self.finalize_request_audit_record(synthesized);

@@ -210,6 +210,7 @@ impl VerterHost {
             files: Vec::new(),
             waits,
             kind_payload: RequestKindPayload::SemanticAnalysis(payload),
+            trace_id: String::new(),
         };
 
         let cloned = record.clone();

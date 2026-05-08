@@ -380,6 +380,18 @@ impl SemanticGraphStore {
             .sum()
     }
 
+    /// Test-only accessor returning the memo's populated-slot count
+    /// for a given host. Used by the slot-binding regression
+    /// `cache_suppress_true_skips_memo_insertion` to inspect memo
+    /// growth before and after a synthesis call. Equivalent to
+    /// `host.project_type_store().semantic_graph().memo_entry_count()`.
+    #[cfg(test)]
+    pub fn memo_size_in_test(host: &crate::VerterHost) -> usize {
+        host.project_type_store()
+            .semantic_graph()
+            .memo_entry_count()
+    }
+
     /// Audit-only dump of the warm memo entries, keyed by the
     /// debug-formatted [`FamilyKey`]. Returns one row per populated slot
     /// (a single family with N slot variants populated yields N rows).
@@ -1139,6 +1151,8 @@ impl SemanticGraphStore {
             slots.slot(slot).cloned().map(|entry| CacheRead {
                 value: entry.result,
                 dep_signature: entry.dep_signature,
+                walker_diagnostics: entry.walker_diagnostics,
+                cache_suppress: false,
             })
         });
         if let Some(rctx) = crate::request_context::current_request_context() {
@@ -1240,14 +1254,15 @@ impl SemanticGraphStore {
     /// waits and abort-driven retries are unaffected: a populated
     /// warm slot means no joiner participation is needed.
     #[must_use = "the CacheRead carries both the resolved node id and the dep signature callers must merge into their active CompletionFence"]
-    pub fn execute_cooperative<F, R>(
+    pub fn execute_cooperative<F, R, O>(
         &self,
         key: SemanticQueryKey,
         recursion_sentinel: R,
         build: F,
     ) -> CacheRead<QueryResult<SemanticNodeId>>
     where
-        F: FnOnce() -> (QueryResult<SemanticNodeId>, DepSignature),
+        F: FnOnce() -> O,
+        O: Into<crate::project_semantic_dispatch::walk::QueryBuildOutput>,
         R: FnOnce() -> SemanticNodeId,
     {
         // Loop-5 instrumentation — count every logical entry. Logged
@@ -1323,6 +1338,8 @@ impl SemanticGraphStore {
                 slots.slot(slot).cloned().map(|entry| CacheRead {
                     value: entry.result,
                     dep_signature: entry.dep_signature,
+                    walker_diagnostics: entry.walker_diagnostics,
+                    cache_suppress: false,
                 })
             })
         };
@@ -1368,6 +1385,12 @@ impl SemanticGraphStore {
         // the slow path's pre-loop observation.
         crate::capture_token::with_active_capture(|t| t.record_dispatch(key, /* hit */ true));
 
+        tracing::debug!(
+            target: "verter::memo::hit",
+            ?key,
+            "memo_hit"
+        );
+
         Some(hit)
     }
 
@@ -1382,14 +1405,15 @@ impl SemanticGraphStore {
     /// dispatch recording for the COLD/MISS / JOINER paths live here.
     /// The warm-hit branch is intentionally absent — the fast path
     /// handles every warm hit before this function is called.
-    fn execute_cooperative_slow<F, R>(
+    fn execute_cooperative_slow<F, R, O>(
         &self,
         key: SemanticQueryKey,
         recursion_sentinel: R,
         build: F,
     ) -> CacheRead<QueryResult<SemanticNodeId>>
     where
-        F: FnOnce() -> (QueryResult<SemanticNodeId>, DepSignature),
+        F: FnOnce() -> O,
+        O: Into<crate::project_semantic_dispatch::walk::QueryBuildOutput>,
         R: FnOnce() -> SemanticNodeId,
     {
         let mut miss_recorded = false;
@@ -1415,6 +1439,12 @@ impl SemanticGraphStore {
         crate::capture_token::with_active_capture(|t| {
             t.record_dispatch(&key, /* hit */ false)
         });
+
+        tracing::debug!(
+            target: "verter::memo::miss",
+            ?key,
+            "memo_miss"
+        );
 
         let (inflight, key) = loop {
             // 1. Warm memo hit. Reaches here only on the rare race
@@ -1455,6 +1485,8 @@ impl SemanticGraphStore {
                 return CacheRead {
                     value: QueryResult::Recursive(recursion_sentinel()),
                     dep_signature: empty_signature(),
+                    walker_diagnostics: std::sync::Arc::from([]),
+                    cache_suppress: false,
                 };
             }
 
@@ -1510,6 +1542,10 @@ impl SemanticGraphStore {
                     )))
                 });
                 let dep_signature = state.dep_signature.clone().unwrap_or_else(empty_signature);
+                let walker_diagnostics = state
+                    .walker_diagnostics
+                    .clone()
+                    .unwrap_or_else(|| std::sync::Arc::from([]));
                 if let Some(prov) = self.provenance.as_ref() {
                     prov.execute_cooperative_joiner_path
                         .fetch_add(1, Ordering::Relaxed);
@@ -1517,6 +1553,8 @@ impl SemanticGraphStore {
                 return CacheRead {
                     value: result,
                     dep_signature,
+                    walker_diagnostics,
+                    cache_suppress: false,
                 };
             }
             state.claimed = true;
@@ -1541,8 +1579,17 @@ impl SemanticGraphStore {
         let mut panic_guard =
             InflightPanicGuard::new(Arc::clone(&inflight), &self.inflight, key.clone());
         let build_start = Instant::now();
-        let (result, dep_signature) = build();
+        let build_output: crate::project_semantic_dispatch::walk::QueryBuildOutput = build().into();
         let build_held_ns = build_start.elapsed().as_nanos() as u64;
+        let crate::project_semantic_dispatch::walk::QueryBuildOutput {
+            result,
+            dep_signature,
+            walker_diagnostics,
+            cache_suppress,
+        } = build_output;
+        let walker_diagnostics: std::sync::Arc<
+            [crate::project_semantic_dispatch::walk::ShallowDiagnostic],
+        > = std::sync::Arc::from(walker_diagnostics.into_boxed_slice());
         panic_guard.mark_finished();
         drop(panic_guard);
         drop(_recursion_guard);
@@ -1598,7 +1645,36 @@ impl SemanticGraphStore {
         // duplicating the publish primitives. Pure refactor — TOCTOU
         // semantics, ResolvedNamedType bypass, and reverse-index
         // semantics all live inside the helper.
-        self.warm_publish_one(&key, &result, &dep_signature, &inflight);
+        // Memo no-poison contract: refuse insertion when the build's
+        // `cache_suppress` flag is set (pathological-input cap fired,
+        // or a transitive query produced a fatal `QueryError`). The
+        // result still flows back to the caller, but the next request
+        // re-runs cold so the suppression decision applies under the
+        // current state of the world rather than being fossilised.
+        if !cache_suppress {
+            self.warm_publish_one(
+                &key,
+                &result,
+                &dep_signature,
+                &walker_diagnostics,
+                &inflight,
+            );
+        } else {
+            tracing::debug!(
+                target: "verter::memo::suppress",
+                key = ?key,
+                "cache_suppress=true; refusing memo insertion (build-output suppression)"
+            );
+            // Per-request attribution of the no-poison gate. Bumped
+            // when an in-flight build landed with `cache_suppress=true`
+            // and we declined to publish at this gate. Surfaces on the
+            // audit payload as `memo_publish_suppressed` so attribution
+            // tests can assert "the cache_suppress gate fired during
+            // this request" without inspecting host-global state.
+            if let Some(ctx) = crate::request_context::current_request_context() {
+                ctx.memo_publish_suppressed.fetch_add(1, Ordering::Relaxed);
+            }
+        }
 
         // 6. Finalize in-flight and wake joiners. The completed flag
         //    guarantees any thread that acquired the flight before step 7
@@ -1613,6 +1689,7 @@ impl SemanticGraphStore {
             if !state.aborted {
                 state.completed = Some(result.clone());
                 state.dep_signature = Some(dep_signature.clone());
+                state.walker_diagnostics = Some(std::sync::Arc::clone(&walker_diagnostics));
             }
         }
         inflight.ready.notify_all();
@@ -1634,6 +1711,8 @@ impl SemanticGraphStore {
         CacheRead {
             value: result,
             dep_signature,
+            walker_diagnostics,
+            cache_suppress,
         }
     }
 
@@ -1661,6 +1740,7 @@ impl SemanticGraphStore {
         key: &SemanticQueryKey,
         result: &QueryResult<SemanticNodeId>,
         dep_signature: &DepSignature,
+        walker_diagnostics: &Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
         inflight: &Arc<InflightEntry>,
     ) {
         let publishable = matches!(result, QueryResult::Value(_));
@@ -1676,6 +1756,7 @@ impl SemanticGraphStore {
         let entry = MemoEntry {
             result: result.clone(),
             dep_signature: dep_signature.clone(),
+            walker_diagnostics: Arc::clone(walker_diagnostics),
         };
         let mut entries = self.entries_lock_diagnosed();
         // Test forcing: simulate a concurrent sweep that aborted
@@ -1703,6 +1784,20 @@ impl SemanticGraphStore {
             .entry(family.clone())
             .or_default()
             .publish(slot, entry);
+        // Per-request memo-insertion attribution. Each populated slot
+        // (primary plus any backfilled narrower slots) counts as one
+        // insertion under the active request's audit. The host-global
+        // memo size remains the canonical signal for warm-cache state;
+        // the per-request mirror lets attribution tests assert
+        // "no synthesis-attributable insertions during this request"
+        // without false positives from peer dispatches in
+        // workspace-parallel runs.
+        if !populated_slots.is_empty() {
+            if let Some(ctx) = crate::request_context::current_request_context() {
+                ctx.memo_insertions
+                    .fetch_add(populated_slots.len() as u64, Ordering::Relaxed);
+            }
+        }
         // Γ.B reverse-index registration. For each populated
         // slot (the primary plus any backfilled narrower slots),
         // register the (family, slot) → dep_signature mapping under
@@ -1762,12 +1857,23 @@ impl SemanticGraphStore {
         let entry = MemoEntry {
             result,
             dep_signature: dep_signature.clone(),
+            walker_diagnostics: Arc::from([]),
         };
         let mut entries = self.entries_lock_diagnosed();
         let populated_slots = entries
             .entry(family.clone())
             .or_default()
             .publish(slot, entry);
+        // Per-request memo-insertion attribution — see
+        // `warm_publish_one` for the full rationale; the prefix-backfill
+        // path bumps the same per-request counter so attribution
+        // tests cover both publish sites.
+        if !populated_slots.is_empty() {
+            if let Some(ctx) = crate::request_context::current_request_context() {
+                ctx.memo_insertions
+                    .fetch_add(populated_slots.len() as u64, Ordering::Relaxed);
+            }
+        }
         drop(entries);
         Self::register_reverse_index(
             &self.canonical_to_entries,

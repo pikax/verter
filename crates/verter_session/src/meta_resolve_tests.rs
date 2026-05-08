@@ -11554,14 +11554,54 @@ defineProps<{ value: Foo }>()
              returns false (the no-package branch never fires)"
         );
 
-        // Object — falls through to `_ => false`.
-        let obj = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![])));
+        // Object — stays symbolic when all property/method/signature
+        // values are concrete or stay-symbolic. An empty Object
+        // trivially satisfies the contract (there is nothing to
+        // materialise).
+        let obj_empty = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![])));
         assert!(
-            !slot_binding_param_can_stay_symbolic_node(host, obj, 0),
-            "Object shape cannot stay symbolic — fails the deferred-shape allow-list"
+            slot_binding_param_can_stay_symbolic_node(host, obj_empty, 0),
+            "Empty Object stays symbolic — no members to materialise"
         );
 
-        // Primitive — false.
+        // Object with one IndexedAccess property — the slot-binding
+        // contract preserves symbolic helper-route members; the
+        // synthesizer enumerates the surface directly.
+        let obj_with_indexed = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            SurfaceMember {
+                name: StdArc::from("ui"),
+                value: indexed,
+                optional: false,
+                readonly: false,
+                is_method: false,
+            },
+        ])));
+        assert!(
+            slot_binding_param_can_stay_symbolic_node(host, obj_with_indexed, 0),
+            "Object whose property is `IndexedAccess` stays symbolic — the synthesizer \
+             enumerates the surface and downstream consumers re-resolve the helper route"
+        );
+
+        // Object with one concrete primitive property — also stays
+        // symbolic (Primitive members are concrete so do not require
+        // materialisation).
+        let obj_with_prim = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            SurfaceMember {
+                name: StdArc::from("name"),
+                value: prim_string,
+                optional: false,
+                readonly: false,
+                is_method: false,
+            },
+        ])));
+        assert!(
+            slot_binding_param_can_stay_symbolic_node(host, obj_with_prim, 0),
+            "Object with primitive property values stays symbolic"
+        );
+
+        // Primitive — false (top-level Primitive is not a slot-binding
+        // parameter shape; the synthesizer's empty-path Shallow walk
+        // would produce no enumerable surface).
         assert!(
             !slot_binding_param_can_stay_symbolic_node(host, prim_string, 0),
             "Primitive cannot stay symbolic"

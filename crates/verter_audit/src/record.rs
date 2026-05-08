@@ -168,6 +168,15 @@ pub struct RequestAuditRecord {
     /// Per-`RequestKind` strongly-typed payload. The variant tag
     /// MUST match [`Self::kind`].
     pub kind_payload: RequestKindPayload,
+    /// Per-request correlation id for tracing-span association.
+    /// Populated by the audited entry-point when an audit
+    /// registration is installed; the matching tracing span emits
+    /// the same value as a span field so consumers can join audit
+    /// records to log captures by `trace_id`.
+    /// Serde-default empty string for back-compat with payloads
+    /// emitted before this field landed.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub trace_id: String,
 }
 
 impl RequestAuditRecord {

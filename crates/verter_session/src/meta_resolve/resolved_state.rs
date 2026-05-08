@@ -85,70 +85,26 @@ pub struct ResolvedComponentMetaState {
     /// Zero is reserved for "not populated" — emitted by internal
     /// tests / FFI fixtures that do not stamp a real request id.
     pub request_id: u64,
+    /// Macro-expansion diagnostics produced by graph-native slot-binding
+    /// synthesis. Merged into
+    /// [`ComponentMetaAnalysis::macro_expansion_diagnostics`] by
+    /// [`crate::host_manage::component_meta_extract::extract_component_meta_from_resolved`]
+    /// and projected onto the audit substrate via
+    /// [`crate::host_audit_bridge::macro_expansion_to_audit_entries`].
+    pub synthesis_diagnostics:
+        Vec<verter_semantic::analysis::component_meta::MacroExpansionDiagnostics>,
+    /// `true` when graph-native slot-binding synthesis observed a fatal
+    /// `QueryError` (`BudgetExceeded`, `UnstableState`, walker
+    /// `cache_suppress`) during the cold compute. Gates
+    /// `ComponentMetaResultDb` publication so partially-populated
+    /// results never warm the shared final-result cache.
+    pub synthesis_should_suppress: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RegistryMaterialization {
     Full,
     SkipAppend,
-}
-
-pub(crate) fn collect_expanded_slot_binding_param_types<'a>(
-    ty: &'a verter_semantic::analysis::type_expr::TypeExpr,
-    out: &mut Vec<&'a verter_semantic::analysis::type_expr::TypeExpr>,
-) {
-    match ty {
-        verter_semantic::analysis::type_expr::TypeExpr::Parenthesized(inner) => {
-            collect_expanded_slot_binding_param_types(inner, out);
-        }
-        verter_semantic::analysis::type_expr::TypeExpr::Intersection(types)
-        | verter_semantic::analysis::type_expr::TypeExpr::Union(types) => {
-            for inner in types.iter() {
-                collect_expanded_slot_binding_param_types(inner, out);
-            }
-        }
-        verter_semantic::analysis::type_expr::TypeExpr::Function(func) => {
-            if let Some(first) = func.parameters.first() {
-                out.push(&first.ty);
-            }
-        }
-        // Path C C11-residual-A: deferred Conditional whose extends has
-        // `infer X` in a Function position represents a TS conditional
-        // that the dispatch couldn't decide (typically due to an
-        // in-flight sentinel during the upstream evaluation context).
-        // For slot-binding extraction we use the conventional
-        // TS-truthy semantics: walk the true_type as the slot-shape
-        // contributor. The infer bindings extracted from the check's
-        // matching Function position are folded into the true_type via
-        // `decide_typeexpr_conditional_with_function_extends`, which
-        // the caller (`enrich_missing_slot_bindings`) invokes before
-        // collection.
-        verter_semantic::analysis::type_expr::TypeExpr::Conditional { true_type, .. } => {
-            collect_expanded_slot_binding_param_types(true_type, out);
-        }
-        verter_semantic::analysis::type_expr::TypeExpr::Object(obj) => {
-            for member in &obj.properties {
-                match member {
-                    verter_semantic::analysis::type_expr::ObjectMember::CallSignature(function)
-                    | verter_semantic::analysis::type_expr::ObjectMember::ConstructSignature(
-                        function,
-                    ) => {
-                        if let Some(first) = function.parameters.first() {
-                            out.push(&first.ty);
-                        }
-                    }
-                    verter_semantic::analysis::type_expr::ObjectMember::Method(method) => {
-                        if let Some(first) = method.function.parameters.first() {
-                            out.push(&first.ty);
-                        }
-                    }
-                    verter_semantic::analysis::type_expr::ObjectMember::Property(_)
-                    | verter_semantic::analysis::type_expr::ObjectMember::IndexSignature(_) => {}
-                }
-            }
-        }
-        _ => {}
-    }
 }
 
 /// Path C C11-residual-B: shallow substitution for owner-local generic
@@ -343,216 +299,6 @@ pub(crate) fn component_meta_substitute_typeexpr(
         } if type_arguments.is_empty() => substitutions.get(name.as_ref()).cloned(),
         _ => None,
     })
-}
-
-/// TypeExpr-level conditional decision (Path C C11-residual-A workaround).
-///
-/// When the dispatch fails to decide a `T extends (props: infer P) => any
-/// ? F<P, ...> : ...` pattern at evaluation time (typically because a
-/// same-path sentinel suppressed the cross-file `T[K]` evaluation), the
-/// resulting `slot.ty` is left as a deferred `TypeExpr::Conditional`.
-/// This helper applies the same nested-Function-Infer reduction that
-/// `build_conditional`'s C11a path performs, but at the `TypeExpr`
-/// level so slot-binding extraction can proceed without re-running the
-/// dispatch.
-///
-/// Returns:
-/// - `Some(decided_true_type_with_infer_substituted)` when the
-///   conditional has a concrete Function check, a Function extends with
-///   at least one `infer X` position, and the corresponding check
-///   parameter types can be bound to those infer names.
-/// - `None` when the conditional cannot be decided at this layer (no
-///   infer-bearing Function extends, no Function check, or empty
-///   bindings).
-pub(crate) fn decide_typeexpr_conditional_with_function_extends(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
-) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
-    use verter_semantic::analysis::type_expr::TypeExpr;
-    let TypeExpr::Conditional {
-        check,
-        extends,
-        true_type,
-        ..
-    } = expr
-    else {
-        return None;
-    };
-    let TypeExpr::Function(check_fn) = check.as_ref() else {
-        return None;
-    };
-    let TypeExpr::Function(extends_fn) = extends.as_ref() else {
-        return None;
-    };
-    let mut bindings: rustc_hash::FxHashMap<String, TypeExpr> = rustc_hash::FxHashMap::default();
-    for (e_param, c_param) in extends_fn.parameters.iter().zip(check_fn.parameters.iter()) {
-        if let TypeExpr::Infer { name } = &e_param.ty {
-            bindings.insert(name.clone(), c_param.ty.clone());
-        }
-    }
-    if let (Some(TypeExpr::Infer { name }), Some(check_ret)) = (
-        extends_fn.return_type.as_deref(),
-        check_fn.return_type.as_deref(),
-    ) {
-        bindings.insert(name.clone(), check_ret.clone());
-    }
-    if bindings.is_empty() {
-        return None;
-    }
-    Some(substitute_infer_in_typeexpr(true_type, &bindings))
-}
-
-pub(crate) fn substitute_infer_in_typeexpr(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
-    bindings: &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
-) -> verter_semantic::analysis::type_expr::TypeExpr {
-    use verter_semantic::analysis::type_expr::TypeExpr;
-    walk_substitute_typeexpr(expr, &|e| match e {
-        TypeExpr::Infer { name } => bindings.get(name).cloned(),
-        // Replace `semanticMiss` sentinel with the unique bound infer
-        // when there is exactly one — recovers an inferred prop whose
-        // SemanticNode-level position was lost during dispatch.
-        TypeExpr::Unknown { raw }
-            if raw == crate::resolver_core::component_meta_query_engine::SEMANTIC_MISS
-                && bindings.len() == 1 =>
-        {
-            bindings.values().next().cloned()
-        }
-        _ => None,
-    })
-}
-
-pub(crate) fn collect_expanded_slot_bindings_from_object_type(
-    ty: &verter_semantic::analysis::type_expr::TypeExpr,
-    seen: &mut rustc_hash::FxHashSet<String>,
-    out: &mut Vec<(String, verter_semantic::analysis::type_expr::TypeExpr, bool)>,
-) {
-    match ty {
-        verter_semantic::analysis::type_expr::TypeExpr::Parenthesized(inner) => {
-            collect_expanded_slot_bindings_from_object_type(inner, seen, out);
-        }
-        verter_semantic::analysis::type_expr::TypeExpr::Intersection(types)
-        | verter_semantic::analysis::type_expr::TypeExpr::Union(types) => {
-            for inner in types.iter() {
-                collect_expanded_slot_bindings_from_object_type(inner, seen, out);
-            }
-        }
-        verter_semantic::analysis::type_expr::TypeExpr::Object(obj) => {
-            for member in &obj.properties {
-                let verter_semantic::analysis::type_expr::ObjectMember::Property(prop) = member
-                else {
-                    continue;
-                };
-                if !seen.insert(prop.name.clone()) {
-                    continue;
-                }
-                out.push((prop.name.clone(), prop.ty.clone(), prop.optional));
-            }
-        }
-        _ => {}
-    }
-}
-
-pub(crate) fn enrich_missing_slot_bindings(
-    resolved_macros: &[ResolvedMacroMeta],
-    evaluated_types: &mut verter_semantic::analysis::type_expand::ExpandedComponentTypes,
-) {
-    let mut seen_names: rustc_hash::FxHashSet<String> = evaluated_types
-        .slot_bindings
-        .iter()
-        .map(|binding| binding.name.clone())
-        .collect();
-
-    for entry in &evaluated_types.define_slots {
-        for slot in &entry.result.value.properties {
-            // Path C C11-residual-A: normalize a deferred Conditional
-            // slot.ty by performing TS truthy-branch reduction at the
-            // TypeExpr level before extracting binding params. The
-            // dispatch may have left a deferred Conditional in the
-            // slot value when an upstream sentinel suppressed
-            // evaluation; recovering the true_type here lets the
-            // caller's `collect_expanded_slot_bindings_from_object_type`
-            // reach into the Function param and surface the binding
-            // names.
-            let normalized_ty;
-            let slot_ty_for_collect = if let Some(decided) =
-                decide_typeexpr_conditional_with_function_extends(&slot.ty)
-            {
-                normalized_ty = decided;
-                &normalized_ty
-            } else {
-                &slot.ty
-            };
-            let mut binding_param_types = Vec::new();
-            collect_expanded_slot_binding_param_types(
-                slot_ty_for_collect,
-                &mut binding_param_types,
-            );
-            if binding_param_types.is_empty() {
-                continue;
-            }
-
-            let mut seen_bindings = rustc_hash::FxHashSet::default();
-            let mut bindings = Vec::new();
-            for binding_param_ty in binding_param_types {
-                collect_expanded_slot_bindings_from_object_type(
-                    binding_param_ty,
-                    &mut seen_bindings,
-                    &mut bindings,
-                );
-            }
-
-            for (binding_name, binding_type, optional) in bindings {
-                let field_name = format!("{}.{}", slot.name, binding_name);
-                if !seen_names.insert(field_name.clone()) {
-                    continue;
-                }
-                evaluated_types.slot_bindings.push(
-                    verter_semantic::analysis::type_expand::ExpandedField {
-                        name: field_name,
-                        r#type: binding_type,
-                        raw_type: None,
-                        optional,
-                        exactness: entry.result.exactness,
-                        execution_status: entry.result.execution_status,
-                        diagnostics: Vec::new(),
-                    },
-                );
-            }
-        }
-    }
-
-    for resolved in resolved_macros.iter().filter(|resolved| {
-        resolved.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineSlots
-    }) {
-        for slot in &resolved.slots {
-            for binding in &slot.bindings {
-                let field_name = format!("{}.{}", slot.name, binding.name);
-                if !seen_names.insert(field_name.clone()) {
-                    continue;
-                }
-                let raw_type = binding.type_annotation.clone();
-                let parsed_type = raw_type
-                    .as_deref()
-                    .map(verter_semantic::analysis::type_expr_lower::parse_type_annotation)
-                    .unwrap_or_else(|| verter_semantic::analysis::type_expr::TypeExpr::Unknown {
-                        raw: "unknown".to_string(),
-                    });
-                evaluated_types
-                    .slot_bindings
-                    .push(verter_semantic::analysis::type_expand::ExpandedField {
-                    name: field_name,
-                    r#type: parsed_type,
-                    raw_type,
-                    optional: false,
-                    exactness:
-                        verter_semantic::analysis::type_expand::ExpansionExactness::ExactConcrete,
-                    execution_status:
-                        verter_semantic::analysis::type_expand::ExpansionExecutionStatus::Completed,
-                    diagnostics: Vec::new(),
-                });
-            }
-        }
-    }
 }
 
 pub(crate) fn select_imported_materialization_scope(

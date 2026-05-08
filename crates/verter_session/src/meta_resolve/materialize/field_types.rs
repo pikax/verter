@@ -2367,13 +2367,59 @@ pub(crate) fn materialize_component_meta_field_types(
         // mode would walk the entire generic instantiation including
         // third-party heritage (e.g., `extends UIMessage<...>` from the
         // `ai` package), producing minutes of fan-out per binding.
-        rescue_field(
-            scope_canonical_id,
-            field,
-            &mut field_state,
-            query_engine,
-            crate::semantic_query::ProjectionMode::Navigate,
+        //
+        // Skip rescue when this slot binding originated from an
+        // imported helper type body (a `defineSlots<X>()` whose `X`
+        // is declared in a different file than the owner SFC) and
+        // the graph-native synthesis already published an
+        // exact-symbolic form. The synthesizer is the authority for
+        // symbolic shapes that cross the import boundary
+        // (`Button['ui']` from `ButtonSlots` imported from
+        // `./button-types`, `Conditional` / `Mapped` on imported
+        // helpers); the rescue path would re-expand these through
+        // `project_expr_surface_expr` and erase the source-text
+        // identity downstream consumers re-resolve from. Per the
+        // slot-binding contract: imported helper member-paths stay
+        // lazy; consumers navigate them via dispatch when they need
+        // the resolved members.
+        //
+        // The `slot_binding_scope_hints` map carries
+        // `(slot.binding) -> declaration scope` pairs populated
+        // upstream from `resolved.declaration.canonical_source` for
+        // every cross-file `defineSlots` / `defineEmits` macro
+        // binding. A non-empty hint set whose entries all differ
+        // from the owner canonical means "this binding originated
+        // from an imported type body".
+        //
+        // Local helpers (test
+        // `public_component_meta_materializes_local_component_config_*`)
+        // have either no scope hints (the slot type is declared in
+        // the owner SFC's own `<script>` block) or hints that point
+        // back to the owner's own canonical id, so they still route
+        // through the rescue path and materialise into concrete
+        // object surfaces.
+        let synthesis_published_symbolic = matches!(
+            field.exactness,
+            verter_semantic::analysis::type_expand::ExpansionExactness::ExactSymbolic,
         );
+        let root_is_imported_helper = synthesis_published_symbolic
+            && slot_binding_scope_hints
+                .get(&field.name)
+                .is_some_and(|hints| {
+                    !hints.is_empty()
+                        && hints
+                            .iter()
+                            .all(|scope| scope.as_str() != scope_canonical_id)
+                });
+        if !root_is_imported_helper {
+            rescue_field(
+                scope_canonical_id,
+                field,
+                &mut field_state,
+                query_engine,
+                crate::semantic_query::ProjectionMode::Navigate,
+            );
+        }
         if _trace_sb {
             eprintln!(
                 "[SB_RESCUE_END] idx={} name={} rescue_ms={:.1}",
@@ -2381,6 +2427,19 @@ pub(crate) fn materialize_component_meta_field_types(
                 field.name,
                 _rescue_t0.elapsed().as_secs_f64() * 1000.0
             );
+        }
+        // Imported-helper symbolic shapes skip the scope-hint
+        // materialisation loop. The graph-native synthesizer is the
+        // authority for symbolic forms that cross the import boundary
+        // (Conditional / IndexedAccess / Mapped on imported helper
+        // routes); the scope-hint loop would route the symbolic shape
+        // through `materialize_component_meta_type_expr_until_stable`
+        // and re-materialise the helper away. Local helpers still
+        // route through the loop so their bindings materialise into
+        // concrete object surfaces.
+        if root_is_imported_helper {
+            field.r#type = field_state.publish();
+            continue;
         }
         let Some(scope_hints) = slot_binding_scope_hints.get(&field.name) else {
             field.r#type = field_state.publish();

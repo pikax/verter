@@ -91,6 +91,25 @@ pub static TYPE_EXPR_OPERATOR_NODE_COUNT_SUM: AtomicU64 = AtomicU64::new(0);
 /// `EXECUTE_COOPERATIVE_COLD_BUILDS` gives the mean ns per cold build.
 pub static EXECUTE_COOPERATIVE_BUILD_NS_TOTAL: AtomicU64 = AtomicU64::new(0);
 
+/// Outer-call counter for `Instantiate { body_mode: Expanded }`
+/// dispatch.
+///
+/// Incremented at the entry of
+/// `ProjectSemanticDispatch::build_instantiate` whenever the requested
+/// `body_mode` is `Expanded`. Cold dispatches bump the counter; warm
+/// cache hits skip the build path entirely and leave the counter
+/// unchanged.
+///
+/// The slot-binding regression
+/// `shallow_instantiation_ref_warm_pass_o1` reads this counter to
+/// assert that warm second-pass empty-path Shallow queries do not
+/// re-issue an `Expanded` Instantiate. The component-meta regression
+/// `enrich_does_not_eagerly_instantiate_carrier` asserts the
+/// graph-native slot-binding synthesis walk stays in `Navigate` mode
+/// and never dispatches an `Expanded` Instantiate over the
+/// slot-binding carrier. Default: 0.
+pub static SLOT_BINDING_EXPANDED_INSTANTIATE_CALLS: AtomicU64 = AtomicU64::new(0);
+
 /// Count "operator-bearing" nodes inside a TypeExpr. Operator-bearing
 /// shapes are the ones that turn into a `dispatch_operator_with_recurse`
 /// call after lowering: `Ref`, `IndexedAccess`, `Conditional`, `Mapped`,

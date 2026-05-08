@@ -94,6 +94,7 @@ fn filtered_kind_registration_is_noop_and_invisible_to_sampler() {
         files: Vec::new(),
         waits: None,
         kind_payload: RequestKindPayload::ComponentMeta(ComponentMetaPayload::default()),
+        trace_id: String::new(),
     };
     assert!(
         !registration.finalize(bogus_record),

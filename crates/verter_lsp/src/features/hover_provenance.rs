@@ -351,6 +351,7 @@ mod tests {
             waits: None,
             from_cache: false,
             kind_payload: RequestKindPayload::ComponentMeta(ComponentMetaPayload::default()),
+            trace_id: String::new(),
         };
 
         // Missing footprint → the renderer surfaces a clear hint

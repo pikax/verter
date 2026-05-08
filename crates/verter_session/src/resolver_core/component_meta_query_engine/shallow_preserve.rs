@@ -912,9 +912,25 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
 
         if let Some(expanded) = self.try_fast_expand_shallow_alias_body(scope_canonical_id, expr) {
+            // Classify the unwrapped alias body via the shared
+            // [`crate::meta_resolve::exactness::classify_type_expr`]
+            // predicate. `type MyStr = string` then publishes
+            // `Concrete` instead of `Symbolic`; nested or open shapes
+            // (Ref, IndexedAccess, KeyOf, Conditional, TypeParameter,
+            // Mapped, …) stay symbolic. The slot-binding synthesis
+            // path uses the graph-native sibling
+            // [`crate::meta_resolve::exactness::classify_node`] so
+            // both surfaces share identical alias-unwrap + closed-object
+            // semantics.
+            let exactness = match crate::meta_resolve::exactness::classify_type_expr(&expanded) {
+                verter_semantic::analysis::type_expand::ExpansionExactness::ExactConcrete => {
+                    FastShallowFieldExprExactness::Concrete
+                }
+                _ => FastShallowFieldExprExactness::Symbolic,
+            };
             return Some(FastShallowFieldExpr {
                 expr: expanded,
-                exactness: FastShallowFieldExprExactness::Symbolic,
+                exactness,
             });
         }
 
@@ -1259,8 +1275,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             // `defineSlots<TabsSlots<T>>` patterns with
             // `{ leading?, content? } & DynamicSlots<...>` bodies still
             // resolve their explicit Object arm's `SlotProps<T>` members
-            // into Function signatures, which `enrich_missing_slot_bindings`
-            // consumes for slot-binding extraction.
+            // into Function signatures for slot-binding extraction.
             TypeExpr::Parenthesized(inner) => TypeExpr::Parenthesized(std::sync::Arc::new(
                 self.deep_resolve_slot_function_refs(scope_canonical_id, inner),
             )),
@@ -1311,28 +1326,23 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     .map(|p| self.deep_resolve_type_refs(scope_canonical_id, p))
                     .collect::<Vec<_>>(),
             )),
-            // Path C C11-residual-A: try a strict projection on
-            // deferred shells that may have been left in a mapped-slot
-            // value when the upstream dispatch's same-path sentinel
-            // suppressed a sub-evaluation. The strict projection only
-            // returns when the full surface materialises (Object /
-            // Function / Primitive); otherwise the deferred shell is
-            // preserved so the TypeExpr-level slot-binding extractor
-            // (`enrich_missing_slot_bindings`) can apply its
-            // `decide_typeexpr_conditional_with_function_extends`
-            // workaround.
+            // Operator shells preserve their symbolic identity
+            // through deep-resolve. Per the type-resolution
+            // architecture rule "type navigation must stay narrower
+            // than expansion": projecting an `IndexedAccess` /
+            // `Conditional` / `Mapped` / `KeyOf` / `TypeOf` at a
+            // slot-binding boundary materialises the helper away
+            // (e.g. `Button['ui']` -> `Object<base, label>`) and
+            // erases the source-text shape downstream consumers
+            // re-resolve from. The graph-native synthesizer handles
+            // these shapes via empty-path Shallow + the standard
+            // Conditional / IndexedAccess / Mapped dispatch arms;
+            // deep-resolve does not need to pre-materialise them.
             TypeExpr::Conditional { .. }
             | TypeExpr::IndexedAccess { .. }
             | TypeExpr::Mapped { .. }
             | TypeExpr::KeyOf(_)
-            | TypeExpr::TypeOf(_) => {
-                crate::meta_resolve::project_expr_surface_expr_via_host_threaded(
-                    self,
-                    scope_canonical_id,
-                    expr,
-                )
-                .unwrap_or_else(|| expr.clone())
-            }
+            | TypeExpr::TypeOf(_) => expr.clone(),
             _ => expr.clone(),
         }
     }

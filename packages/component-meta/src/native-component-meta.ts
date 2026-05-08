@@ -34,7 +34,12 @@ export interface NativeExpansionDiagnostic {
     | "indeterminateConditional"
     | "infiniteKeySpace"
     | "unsupportedOperator"
-    | "conditionalContextTruncated";
+    | "conditionalContextTruncated"
+    | "idempotentArm"
+    | "cyclicReference"
+    | "cyclicInstantiation"
+    | "instantiationError"
+    | "emptyUnionArm";
   context: string;
   propertyName?: string;
 }

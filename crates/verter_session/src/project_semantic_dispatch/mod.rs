@@ -520,76 +520,93 @@ impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {
             }
         };
         let key_for_build = key.clone();
-        let build = move || match &key_for_build {
-            SemanticQueryKey::ResolveDecl(decl_key) => self.build_resolve_decl(decl_key),
-            SemanticQueryKey::TypeOf { value_root } => self.build_typeof(value_root),
-            SemanticQueryKey::Instantiate {
-                base,
-                args,
-                body_mode,
-            } => self.build_instantiate(base, args, *body_mode),
-            // C4: `ProjectMember` / `IndexedAccess` are API sugar
-            // that admission-time canonicalisation rewrites to
-            // `ProjectPath` above. The build closure never observes
-            // these variants on the rewritten key; the arms below are
-            // pure exhaustiveness: they forward to `build_project_path`
-            // with a length-1 path so any future refactor that skips
-            // admission canonicalisation still gets the correct
-            // path-precise semantics.
-            SemanticQueryKey::ProjectMember { base, member, mode } => {
-                let path: Arc<[PathSegment]> =
-                    Arc::from(vec![PathSegment::Member(Arc::clone(member))].into_boxed_slice());
-                self.build_project_path(*base, &path, *mode)
-            }
-            SemanticQueryKey::IndexedAccess { base, index, mode } => {
-                let path: Arc<[PathSegment]> =
-                    Arc::from(vec![PathSegment::Index(index.clone())].into_boxed_slice());
-                self.build_project_path(*base, &path, *mode)
-            }
-            SemanticQueryKey::ProjectPath { base, path, mode } => {
-                self.build_project_path(*base, path, *mode)
-            }
-            SemanticQueryKey::KeyOf { base } => self.build_key_of(*base),
-            SemanticQueryKey::MappedType { source, mapper } => {
-                self.build_mapped_type(*source, mapper)
-            }
-            SemanticQueryKey::Conditional {
-                check,
-                extends,
-                true_branch,
-                false_branch,
-                distributive,
-            } => {
-                self.build_conditional(*check, *extends, *true_branch, *false_branch, *distributive)
-            }
-            SemanticQueryKey::NormalizeUnion { members } => self.build_normalize_union(members),
-            SemanticQueryKey::NormalizeIntersection { members } => {
-                self.build_normalize_intersection(members)
-            }
-            SemanticQueryKey::ResolvedNamedType { key } => self.build_resolved_named_type(key),
-            // Phase D §5.4 WIP-S: the relation engine routes through its own
-            // `SemanticGraphStore::relation_memo` DashMap rather than the
-            // family memo. Executing `Relate` through the family path is a
-            // degenerate build that always produces an `Opaque(Miss)` node
-            // — callers use `ProjectSemanticDispatch::relate_nodes` directly
-            // (see `relation.rs`) which consults the pairwise memo.
-            SemanticQueryKey::Relate { .. } => {
-                let fence = self.project_generation_signature();
-                (QueryResult::Error(QueryError::Miss), fence)
-            }
-            // Binding amendment — `ResolveMacroPayload`.
-            SemanticQueryKey::ResolveMacroPayload {
-                owner,
-                macro_index,
-                macro_kind,
-                type_args,
-                mode,
-            } => {
-                self.build_resolve_macro_payload(owner, *macro_index, *macro_kind, type_args, *mode)
+        let build = move || -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+            match &key_for_build {
+                SemanticQueryKey::ResolveDecl(decl_key) => self.build_resolve_decl(decl_key).into(),
+                SemanticQueryKey::TypeOf { value_root } => self.build_typeof(value_root).into(),
+                SemanticQueryKey::Instantiate {
+                    base,
+                    args,
+                    body_mode,
+                } => self.build_instantiate(base, args, *body_mode).into(),
+                // C4: `ProjectMember` / `IndexedAccess` are API sugar
+                // that admission-time canonicalisation rewrites to
+                // `ProjectPath` above. The build closure never observes
+                // these variants on the rewritten key; the arms below are
+                // pure exhaustiveness: they forward to `build_project_path`
+                // with a length-1 path so any future refactor that skips
+                // admission canonicalisation still gets the correct
+                // path-precise semantics.
+                SemanticQueryKey::ProjectMember { base, member, mode } => {
+                    let path: Arc<[PathSegment]> =
+                        Arc::from(vec![PathSegment::Member(Arc::clone(member))].into_boxed_slice());
+                    self.build_project_path(*base, &path, *mode)
+                }
+                SemanticQueryKey::IndexedAccess { base, index, mode } => {
+                    let path: Arc<[PathSegment]> =
+                        Arc::from(vec![PathSegment::Index(index.clone())].into_boxed_slice());
+                    self.build_project_path(*base, &path, *mode)
+                }
+                SemanticQueryKey::ProjectPath { base, path, mode } => {
+                    self.build_project_path(*base, path, *mode)
+                }
+                SemanticQueryKey::KeyOf { base } => self.build_key_of(*base).into(),
+                SemanticQueryKey::MappedType { source, mapper } => {
+                    self.build_mapped_type(*source, mapper).into()
+                }
+                SemanticQueryKey::Conditional {
+                    check,
+                    extends,
+                    true_branch,
+                    false_branch,
+                    distributive,
+                } => self
+                    .build_conditional(*check, *extends, *true_branch, *false_branch, *distributive)
+                    .into(),
+                SemanticQueryKey::NormalizeUnion { members } => {
+                    self.build_normalize_union(members).into()
+                }
+                SemanticQueryKey::NormalizeIntersection { members } => {
+                    self.build_normalize_intersection(members).into()
+                }
+                SemanticQueryKey::ResolvedNamedType { key } => {
+                    self.build_resolved_named_type(key).into()
+                }
+                // Phase D §5.4 WIP-S: the relation engine routes through its own
+                // `SemanticGraphStore::relation_memo` DashMap rather than the
+                // family memo. Executing `Relate` through the family path is a
+                // degenerate build that always produces an `Opaque(Miss)` node
+                // — callers use `ProjectSemanticDispatch::relate_nodes` directly
+                // (see `relation.rs`) which consults the pairwise memo.
+                SemanticQueryKey::Relate { .. } => {
+                    let fence = self.project_generation_signature();
+                    (QueryResult::Error(QueryError::Miss), fence).into()
+                }
+                // Binding amendment — `ResolveMacroPayload`.
+                SemanticQueryKey::ResolveMacroPayload {
+                    owner,
+                    macro_index,
+                    macro_kind,
+                    type_args,
+                    mode,
+                } => self
+                    .build_resolve_macro_payload(owner, *macro_index, *macro_kind, type_args, *mode)
+                    .into(),
             }
         };
-        let CacheRead { value, .. } = graph.execute_cooperative(key, sentinel, build);
-        value
+        let cache_read = graph.execute_cooperative(key.clone(), sentinel, build);
+        // Dispatch-layer event — emitted once per `execute()` call.
+        // The memo's per-call hit/miss/suppress events fire from
+        // inside `execute_cooperative` and are independent. This
+        // event captures the caller's view: the key, whether the
+        // result is suppressed, and the kind of result observed.
+        tracing::debug!(
+            target: "verter::dispatch::execute_read",
+            ?key,
+            suppress = cache_read.cache_suppress,
+            "execute_read"
+        );
+        cache_read.value
     }
 }
 
@@ -786,6 +803,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         CacheRead {
             value: typed_value,
             dep_signature: read.dep_signature,
+            walker_diagnostics: read.walker_diagnostics,
+            cache_suppress: read.cache_suppress,
         }
     }
 
@@ -860,12 +879,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 return CacheRead {
                     value: QueryResult::Recursive(id),
                     dep_signature: slot_read.dep_signature,
+                    walker_diagnostics: slot_read.walker_diagnostics,
+                    cache_suppress: slot_read.cache_suppress,
                 };
             }
             QueryResult::Error(e) => {
                 return CacheRead {
                     value: QueryResult::Error(e),
                     dep_signature: slot_read.dep_signature,
+                    walker_diagnostics: slot_read.walker_diagnostics,
+                    cache_suppress: slot_read.cache_suppress,
                 };
             }
         };
@@ -881,6 +904,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     return CacheRead {
                         value: QueryResult::Error(QueryError::Miss),
                         dep_signature: slot_read.dep_signature,
+                        walker_diagnostics: slot_read.walker_diagnostics,
+                        cache_suppress: slot_read.cache_suppress,
                     };
                 }
             },
@@ -888,6 +913,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 return CacheRead {
                     value: QueryResult::Error(QueryError::Miss),
                     dep_signature: slot_read.dep_signature,
+                    walker_diagnostics: slot_read.walker_diagnostics,
+                    cache_suppress: slot_read.cache_suppress,
                 };
             }
         };
@@ -914,6 +941,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         CacheRead {
             value: binding_read.value,
             dep_signature: Arc::from(merged.into_boxed_slice()),
+            walker_diagnostics: binding_read.walker_diagnostics,
+            cache_suppress: binding_read.cache_suppress,
         }
     }
 

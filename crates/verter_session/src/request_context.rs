@@ -239,6 +239,12 @@ pub struct PerRequestCacheCounters {
 pub struct RequestContext {
     /// Monotonic request id. Non-zero by construction.
     pub request_id: u64,
+    /// Per-request trace identifier — a stable string token that
+    /// propagates through tracing spans the request opens. Wired into
+    /// the tracing instrumentation so log scrapers can correlate
+    /// dispatch / memo / walker events under one request. Generated
+    /// fresh per construction.
+    pub trace_id: String,
     /// Canonical id the request resolves for.
     pub canonical_id: Arc<str>,
     /// Audit-side request kind. Defaults to
@@ -427,6 +433,46 @@ pub struct RequestContext {
     /// observed during the compile request. Bumped from
     /// [`verter_audit::AuditEvent::CompileCodeTransformOp`].
     pub compile_code_transform_ops: AtomicU64,
+
+    // ─────── Slot-binding-synthesis attribution counters ───────
+    //
+    // Per-request partitioning of two host-global counters that
+    // would otherwise leak across dispatch sites under
+    // workspace-parallel test execution. The host-global atomics
+    // (`SLOT_BINDING_EXPANDED_INSTANTIATE_CALLS` in
+    // `loop5_instrumentation`, the `SemanticGraphStore` memo size
+    // accessed via `memo_size_in_test`) keep their existing
+    // semantics; the per-request mirrors below allow attribution
+    // tests to assert "no synthesis-attributable
+    // Instantiate{Expanded}/memo-insertion fired during this
+    // request" without false positives from peer dispatches.
+    /// Per-context counter — number of `Instantiate { body_mode:
+    /// Expanded }` dispatches observed against the active request.
+    /// Bumped at the same site that bumps the host-global
+    /// [`crate::loop5_instrumentation::SLOT_BINDING_EXPANDED_INSTANTIATE_CALLS`].
+    /// Surfaces on
+    /// [`verter_audit::ComponentMetaPayload::expanded_instantiate_calls`]
+    /// at request finalisation.
+    pub expanded_instantiate_calls: AtomicU64,
+    /// Per-context counter — number of `MemoEntry` insertions
+    /// published into the `SemanticGraphStore` warm map during
+    /// this request. Bumped at the
+    /// [`crate::semantic_query_memo::SemanticGraphStore::warm_publish_one`]
+    /// publish site. Surfaces on
+    /// [`verter_audit::ComponentMetaPayload::memo_insertions`] at
+    /// request finalisation.
+    pub memo_insertions: AtomicU64,
+    /// Per-context counter — number of `cooperative_admission` builds
+    /// that landed with `cache_suppress=true` and consequently had
+    /// their warm-publish skipped at the
+    /// [`crate::semantic_query_memo::SemanticGraphStore::execute_cooperative`]
+    /// publish gate. Surfaces on
+    /// [`verter_audit::ComponentMetaPayload::memo_publish_suppressed`]
+    /// at request finalisation. Discriminating signal for the
+    /// `cache_suppress_true_skips_memo_insertion` regression: a
+    /// non-zero value pins that the no-poison gate fired during the
+    /// request.
+    pub memo_publish_suppressed: AtomicU64,
 }
 
 impl RequestContext {
@@ -492,8 +538,15 @@ impl RequestContext {
         // surfaces parent / child correlation. `None` when no
         // enclosing context is installed.
         let parent_request_id = verter_scheduler::request_context::current_request_id();
+        // Per-request trace_id — uuid v4 string, generated once per
+        // request. Propagates through tracing spans the request opens
+        // so structured-event consumers (the dispatch / memo / walker
+        // instrumentation in this crate) can correlate emitted events
+        // back to the originating request.
+        let trace_id = uuid::Uuid::new_v4().to_string();
         Arc::new(Self {
             request_id,
+            trace_id,
             canonical_id,
             kind,
             footprint_capture,
@@ -533,6 +586,9 @@ impl RequestContext {
             compile_css_analysis_us: AtomicU64::new(0),
             compile_sourcemap_us: AtomicU64::new(0),
             compile_code_transform_ops: AtomicU64::new(0),
+            expanded_instantiate_calls: AtomicU64::new(0),
+            memo_insertions: AtomicU64::new(0),
+            memo_publish_suppressed: AtomicU64::new(0),
         })
     }
 

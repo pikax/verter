@@ -1038,6 +1038,13 @@ pub(crate) fn extract_component_meta_from_resolved(
         host,
         canonical.as_str(),
     );
+    // Merge graph-native slot-binding synthesis diagnostics into the
+    // analysis-wide envelope so consumers see one canonical
+    // diagnostic stream regardless of which subsystem produced it.
+    if !resolved.synthesis_diagnostics.is_empty() {
+        meta.macro_expansion_diagnostics
+            .extend(resolved.synthesis_diagnostics.iter().cloned());
+    }
     meta
 }
 

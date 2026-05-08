@@ -27,6 +27,7 @@ fn empty_envelope(kind: RequestKind, kind_payload: RequestKindPayload) -> Reques
         files: Vec::new(),
         waits: None,
         kind_payload,
+        trace_id: String::new(),
     }
 }
 

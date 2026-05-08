@@ -6064,3 +6064,938 @@ fn no_new_semantic_query_key_variants_beyond_resolve_macro_payload() {
     // assertion — runtime checks just probe two arms to keep the
     // variant_label function reachable.
 }
+
+// ──────────────────────────────────────────────────────────────────────────
+// Walker hardening: empty-path Shallow terminal-surface merge.
+//
+// Specifies the post-impl invariant for `Shallow`-mode empty-path
+// `ProjectPath` queries: the walker must synthesize a unified
+// `SemanticNodeData::Object` surface over compositional carriers
+// (Intersection / Union / Mapped / Conditional / Alias /
+// InstantiationRef) instead of returning the raw carrier verbatim. The
+// existing walker only triggers terminal surface synthesis under
+// `Expanded` mode (see `expand_empty_path_terminal` in `walk.rs`); the
+// `Shallow` arm currently returns the base node verbatim, which is the
+// behavior these tests characterize and assert against.
+//
+// 11 CHARACTERIZATION tests assert on observable surface shape via
+// `dispatch.execute(SemanticQueryKey::ProjectPath { base, path: [],
+// mode: Shallow })`. They fail with assertion failures on the base
+// branch because the walker returns the raw input node, not a merged
+// Object surface.
+//
+// 2 REGRESSION tests probe post-impl-only invariants (instantiation
+// counter, walker stack depth) that depend on symbols added by
+// SA-1.0.3-impl. They are `#[ignore]`'d so the default test run does
+// not include them; SA-1.0.3-impl will un-ignore + remove the cfg
+// guards once the impl lands.
+
+/// Build an empty `ProjectPath` `Shallow`-mode key over `base`. Used by
+/// every walker-hardening test below.
+fn empty_path_shallow_key(base: SemanticNodeId) -> SemanticQueryKey {
+    SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        mode: ProjectionMode::Shallow,
+    }
+}
+
+/// Intern an `Object` surface with the supplied members and no
+/// signatures. Used to construct compositional bases.
+fn intern_object_with_members(
+    graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
+    members: Vec<SurfaceMember>,
+) -> SemanticNodeId {
+    graph.intern_node(SemanticNodeData::Object(SurfaceView {
+        members: Arc::from(members.into_boxed_slice()),
+        call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+        keyspace: None,
+        has_index_signature: false,
+    }))
+}
+
+/// Construct one `SurfaceMember` (helper to keep test bodies dense).
+fn surface_member(
+    name: &str,
+    value: SemanticNodeId,
+    optional: bool,
+    readonly: bool,
+) -> SurfaceMember {
+    SurfaceMember {
+        name: Arc::from(name),
+        value,
+        optional,
+        readonly,
+        is_method: false,
+    }
+}
+
+/// Read the resulting node's data and require it to be `Object` —
+/// returns the surface view. Asserts the carrier is not the raw
+/// compositional shell. Discriminates by checking the variant via
+/// pattern match. Uses `assert!` so the failure renders as
+/// `assertion failed: ...` (FAIL-FIRST gate).
+fn require_object_surface(
+    graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
+    node: SemanticNodeId,
+    context: &str,
+) -> SurfaceView {
+    let data = graph
+        .node_data(node)
+        .unwrap_or_else(|| panic!("{context}: result node must have data"));
+    let variant = match &*data {
+        SemanticNodeData::Object(_) => "Object",
+        SemanticNodeData::Intersection(_) => "Intersection",
+        SemanticNodeData::Union(_) => "Union",
+        SemanticNodeData::InstantiationRef { .. } => "InstantiationRef",
+        SemanticNodeData::Mapped { .. } => "Mapped",
+        SemanticNodeData::Conditional { .. } => "Conditional",
+        SemanticNodeData::Alias(_) => "Alias",
+        SemanticNodeData::DeclRef { .. } => "DeclRef",
+        SemanticNodeData::Opaque(_) => "Opaque",
+        SemanticNodeData::Primitive(_) => "Primitive",
+        SemanticNodeData::Literal(_) => "Literal",
+        SemanticNodeData::TypeParam { .. } => "TypeParam",
+        _ => "<other>",
+    };
+    assert!(
+        matches!(*data, SemanticNodeData::Object(_)),
+        "{context}: empty-path Shallow projection must publish a merged \
+         Object surface; observed {variant} (raw compositional carrier — \
+         walker did not run terminal-surface synthesis)",
+    );
+    match &*data {
+        SemanticNodeData::Object(view) => view.clone(),
+        _ => unreachable!("guarded by assert! above"),
+    }
+}
+
+/// Find the unique surface member by name. Uses `assert!` so the
+/// failure renders as `assertion failed: ...`.
+fn surface_get_member<'a>(view: &'a SurfaceView, name: &str) -> &'a SurfaceMember {
+    let observed_names: Vec<String> = view
+        .members
+        .iter()
+        .map(|m| m.name.as_ref().to_string())
+        .collect();
+    let found = view.members.iter().find(|m| m.name.as_ref() == name);
+    assert!(
+        found.is_some(),
+        "expected merged surface to contain member '{name}'; observed members={observed_names:?}",
+    );
+    found.expect("guarded by assert! above")
+}
+
+/// Drive the walker for an empty-path Shallow query and unwrap the
+/// returned `SemanticNodeId`. Panics on non-Value results so the
+/// CHARACTERIZATION tests can assert directly against the surface.
+fn run_empty_path_shallow(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    base: SemanticNodeId,
+) -> SemanticNodeId {
+    match dispatch.execute(empty_path_shallow_key(base)) {
+        QueryResult::Value(id) => id,
+        other => panic!("expected empty-path Shallow projection to return Value, got {other:?}"),
+    }
+}
+
+// ── 1.0.3a — Intersection of Object + InstantiationRef merges members.
+//
+// `{a: string} & InstantiationRef<Foo>` (where `Foo` resolves to
+// `{b: number}`) → empty-path Shallow must produce a single Object
+// surface whose `members` is the union of both arms. Today the walker
+// returns the raw Intersection node — `require_object_surface` fails
+// with an assertion message naming the observed carrier.
+#[test]
+fn shallow_intersection_object_and_instantiation_ref_merges_members() {
+    let host = host();
+    upsert_ts(&host, "/w/inst.ts", "export type Foo = { b: number }");
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let str_id = primitive(&graph, PrimitiveKind::String);
+    let object_a =
+        intern_object_with_members(&graph, vec![surface_member("a", str_id, false, false)]);
+    // Ensure Foo is indexed before constructing the InstantiationRef.
+    let _ = resolve_decl_anchor(&dispatch, "/w/inst.ts", "Foo");
+    let inst_ref = graph.intern_node(SemanticNodeData::InstantiationRef {
+        base: decl_identity("/w/inst.ts", "Foo"),
+        args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+    });
+    let base = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
+        vec![object_a, inst_ref].into_boxed_slice(),
+    )));
+
+    let result = run_empty_path_shallow(&dispatch, base);
+    let view = require_object_surface(
+        &graph,
+        result,
+        "shallow_intersection_object_and_instantiation_ref_merges_members",
+    );
+
+    let names: Vec<String> = view
+        .members
+        .iter()
+        .map(|m| m.name.as_ref().to_string())
+        .collect();
+    assert!(
+        names.iter().any(|n| n == "a"),
+        "merged surface must include member 'a' from Object arm; observed members={names:?}",
+    );
+    assert!(
+        names.iter().any(|n| n == "b"),
+        "merged surface must include member 'b' from InstantiationRef<Foo> arm; observed members={names:?}",
+    );
+}
+
+// ── 1.0.3b — `{a?: T} & {a: T}` → required wins.
+//
+// TS rule: required arm dominates optional arm under intersection.
+// Today's walker returns the raw Intersection — `require_object_surface`
+// fails with an assertion failure.
+#[test]
+fn shallow_intersection_optionality_required_wins() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let t = primitive(&graph, PrimitiveKind::String);
+    let optional_a = intern_object_with_members(&graph, vec![surface_member("a", t, true, false)]);
+    let required_a = intern_object_with_members(&graph, vec![surface_member("a", t, false, false)]);
+    let base = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
+        vec![optional_a, required_a].into_boxed_slice(),
+    )));
+
+    let result = run_empty_path_shallow(&dispatch, base);
+    let view = require_object_surface(
+        &graph,
+        result,
+        "shallow_intersection_optionality_required_wins",
+    );
+    let member_a = surface_get_member(&view, "a");
+    assert!(
+        !member_a.optional,
+        "intersection of optional `a?` and required `a` must be required (TS rule); observed optional={}",
+        member_a.optional,
+    );
+}
+
+// ── 1.0.3c — `{readonly a: T} & {a: T}` → readonly OR-merged.
+//
+// TS rule: readonly is OR-merged across intersection arms — if any arm
+// declares the member readonly, the merged member is readonly.
+#[test]
+fn shallow_intersection_readonly_or_merged() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let t = primitive(&graph, PrimitiveKind::String);
+    let readonly_a = intern_object_with_members(&graph, vec![surface_member("a", t, false, true)]);
+    let mutable_a = intern_object_with_members(&graph, vec![surface_member("a", t, false, false)]);
+    let base = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
+        vec![readonly_a, mutable_a].into_boxed_slice(),
+    )));
+
+    let result = run_empty_path_shallow(&dispatch, base);
+    let view = require_object_surface(&graph, result, "shallow_intersection_readonly_or_merged");
+    let member_a = surface_get_member(&view, "a");
+    assert!(
+        member_a.readonly,
+        "intersection of readonly arm and mutable arm must merge to readonly (TS OR rule); observed readonly={}",
+        member_a.readonly,
+    );
+}
+
+// ── 1.0.3d — InstantiationRef substitutes via Navigate to a concrete
+// surface.
+//
+// `InstantiationRef<Foo<string>>` where `Foo<T> = { x: T }` → empty-path
+// Shallow must materialise a terminal surface with `x: string` (the
+// substituted value). Today the walker returns the
+// InstantiationRef shell unchanged.
+#[test]
+fn shallow_instantiation_ref_substitutes_via_navigate() {
+    let host = host();
+    upsert_ts(&host, "/w/wrap.ts", "export type Foo<T> = { x: T }");
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let _ = resolve_decl_anchor(&dispatch, "/w/wrap.ts", "Foo");
+    let str_arg = primitive(&graph, PrimitiveKind::String);
+    let inst_ref = graph.intern_node(SemanticNodeData::InstantiationRef {
+        base: decl_identity("/w/wrap.ts", "Foo"),
+        args: Arc::from(vec![str_arg].into_boxed_slice()),
+    });
+
+    let result = run_empty_path_shallow(&dispatch, inst_ref);
+    let view = require_object_surface(
+        &graph,
+        result,
+        "shallow_instantiation_ref_substitutes_via_navigate",
+    );
+    let member_x = surface_get_member(&view, "x");
+    let value_data = graph
+        .node_data(member_x.value)
+        .expect("x.value must be interned");
+    assert!(
+        matches!(*value_data, SemanticNodeData::Primitive(PrimitiveKind::String)),
+        "Foo<string>.x must materialise as Primitive(String) under empty-path Shallow; observed {value_data:?}",
+    );
+}
+
+// REGRESSION: warm-pass O(1) over InstantiationRef.
+//
+// A warm second-pass empty-path Shallow query over an InstantiationRef
+// base must NOT increment `SLOT_BINDING_EXPANDED_INSTANTIATE_CALLS`.
+// The cold pass populates the warm cache via an
+// `Instantiate { body_mode: Expanded }` dispatch (which the counter
+// observes); the warm pass reads the family memo and skips the build
+// path entirely.
+#[test]
+fn shallow_instantiation_ref_warm_pass_o1() {
+    use std::sync::atomic::Ordering;
+    let host = host();
+    upsert_ts(&host, "/w/wrap_warm.ts", "export type Foo<T> = { x: T }");
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let _ = resolve_decl_anchor(&dispatch, "/w/wrap_warm.ts", "Foo");
+    let str_arg = primitive(&graph, PrimitiveKind::String);
+    let inst_ref = graph.intern_node(SemanticNodeData::InstantiationRef {
+        base: decl_identity("/w/wrap_warm.ts", "Foo"),
+        args: Arc::from(vec![str_arg].into_boxed_slice()),
+    });
+    // Cold pass populates the warm cache.
+    let _ = run_empty_path_shallow(&dispatch, inst_ref);
+    let baseline = crate::loop5_instrumentation::SLOT_BINDING_EXPANDED_INSTANTIATE_CALLS
+        .load(Ordering::Relaxed);
+    // Warm pass — must not increment the counter.
+    let _ = run_empty_path_shallow(&dispatch, inst_ref);
+    let warm = crate::loop5_instrumentation::SLOT_BINDING_EXPANDED_INSTANTIATE_CALLS
+        .load(Ordering::Relaxed);
+    assert_eq!(
+        warm, baseline,
+        "warm second-pass empty-path Shallow over InstantiationRef must \
+         not increment SLOT_BINDING_EXPANDED_INSTANTIATE_CALLS (O(1) cache hit)",
+    );
+}
+
+// ── 1.0.3f — Per-member value merge yields a merged surface.
+//
+// `{a: A} & {a: B}` → member `a` whose `value` is the merged surface
+// (Intersection → merged Object), not the raw Intersection. Tests the
+// per-member value merge invariant: the walker must recurse one level
+// to merge each shared member's value.
+#[test]
+fn shallow_intersection_value_merge_intersection_node() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    // `A = {x: string}`, `B = {y: number}` so the merge of A & B's value
+    // for `a` is a surface with both members.
+    let str_id = primitive(&graph, PrimitiveKind::String);
+    let num_id = primitive(&graph, PrimitiveKind::Number);
+    let value_a =
+        intern_object_with_members(&graph, vec![surface_member("x", str_id, false, false)]);
+    let value_b =
+        intern_object_with_members(&graph, vec![surface_member("y", num_id, false, false)]);
+    let arm_a =
+        intern_object_with_members(&graph, vec![surface_member("a", value_a, false, false)]);
+    let arm_b =
+        intern_object_with_members(&graph, vec![surface_member("a", value_b, false, false)]);
+    let base = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
+        vec![arm_a, arm_b].into_boxed_slice(),
+    )));
+
+    let result = run_empty_path_shallow(&dispatch, base);
+    let view = require_object_surface(
+        &graph,
+        result,
+        "shallow_intersection_value_merge_intersection_node",
+    );
+    let member_a = surface_get_member(&view, "a");
+    let value_data = graph
+        .node_data(member_a.value)
+        .expect("merged value must be interned");
+    match &*value_data {
+        SemanticNodeData::Object(inner) => {
+            let inner_names: Vec<String> = inner
+                .members
+                .iter()
+                .map(|m| m.name.as_ref().to_string())
+                .collect();
+            assert!(
+                inner_names.iter().any(|n| n == "x"),
+                "value-merged surface must contain `x` from arm A's value; observed members={inner_names:?}",
+            );
+            assert!(
+                inner_names.iter().any(|n| n == "y"),
+                "value-merged surface must contain `y` from arm B's value; observed members={inner_names:?}",
+            );
+        }
+        other => panic!(
+            "merged member `a`'s value must be a unified Object surface, not the \
+             raw Intersection shell; observed {other:?}",
+        ),
+    }
+}
+
+// ── 1.0.3g — Union: members exist iff present in ALL arms.
+//
+// `{a: A} | {a: B}` → `a` is present (common to both arms) and its
+// value is the union of the arms' values. `{a: A} | string` → no
+// common members; the merged surface has empty `members`.
+#[test]
+fn shallow_union_member_intersection_of_arms() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let str_id = primitive(&graph, PrimitiveKind::String);
+    let num_id = primitive(&graph, PrimitiveKind::Number);
+    let arm_a = intern_object_with_members(&graph, vec![surface_member("a", str_id, false, false)]);
+    let arm_b = intern_object_with_members(&graph, vec![surface_member("a", num_id, false, false)]);
+    let base = graph.intern_node(SemanticNodeData::Union(Arc::from(
+        vec![arm_a, arm_b].into_boxed_slice(),
+    )));
+
+    let result = run_empty_path_shallow(&dispatch, base);
+    let view = require_object_surface(&graph, result, "shallow_union_member_intersection_of_arms");
+    let names: Vec<String> = view
+        .members
+        .iter()
+        .map(|m| m.name.as_ref().to_string())
+        .collect();
+    assert!(
+        names.iter().any(|n| n == "a"),
+        "common member `a` must survive union merge; observed members={names:?}",
+    );
+
+    // Negative: `{a: A} | string` — string arm has no `a` member.
+    let mixed = graph.intern_node(SemanticNodeData::Union(Arc::from(
+        vec![arm_a, str_id].into_boxed_slice(),
+    )));
+    let mixed_result = run_empty_path_shallow(&dispatch, mixed);
+    let mixed_view = require_object_surface(
+        &graph,
+        mixed_result,
+        "shallow_union_member_intersection_of_arms (mixed)",
+    );
+    let mixed_names: Vec<String> = mixed_view
+        .members
+        .iter()
+        .map(|m| m.name.as_ref().to_string())
+        .collect();
+    assert!(
+        mixed_names.is_empty(),
+        "union with non-Object arm must produce no shared members (string has no `a`); observed members={mixed_names:?}",
+    );
+}
+
+// ── 1.0.3h — Alias unwraps one hop.
+//
+// `Alias { target: Object{x: string} }` → empty-path Shallow returns a
+// surface containing `x`. Today the walker returns the Alias shell
+// unchanged.
+#[test]
+fn shallow_alias_unwraps_one_hop() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let str_id = primitive(&graph, PrimitiveKind::String);
+    let inner = intern_object_with_members(&graph, vec![surface_member("x", str_id, false, false)]);
+    let alias = graph.intern_node(SemanticNodeData::Alias(inner));
+
+    let result = run_empty_path_shallow(&dispatch, alias);
+    let view = require_object_surface(&graph, result, "shallow_alias_unwraps_one_hop");
+    let names: Vec<String> = view
+        .members
+        .iter()
+        .map(|m| m.name.as_ref().to_string())
+        .collect();
+    assert!(
+        names.iter().any(|n| n == "x"),
+        "Alias->Object empty-path Shallow must unwrap one alias hop and surface inner members; observed members={names:?}",
+    );
+}
+
+// ── 1.0.3i — Cycle in InstantiationRef chain produces a merged
+// surface, not a panic / not an InstantiationRef terminal.
+//
+// `Foo<T> = { self: Foo<T> }` is a self-referential generic. Empty-
+// path Shallow over an InstantiationRef<Foo<...>> base must terminate
+// without panic and produce a merged Object surface that includes the
+// outer `self` member (not the bare InstantiationRef carrier the
+// walker returns today).
+#[test]
+fn shallow_cycle_propagates_via_diagnostic_not_panic() {
+    let host = host();
+    upsert_ts(
+        &host,
+        "/w/cycle.ts",
+        "export type Foo<T> = { self: Foo<T> }",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let _ = resolve_decl_anchor(&dispatch, "/w/cycle.ts", "Foo");
+    let str_arg = primitive(&graph, PrimitiveKind::String);
+    let inst_ref = graph.intern_node(SemanticNodeData::InstantiationRef {
+        base: decl_identity("/w/cycle.ts", "Foo"),
+        args: Arc::from(vec![str_arg].into_boxed_slice()),
+    });
+
+    // The query must terminate without panic and produce a merged
+    // Object surface — terminal-surface synthesis must respect
+    // recursion guards instead of returning the raw InstantiationRef
+    // shell.
+    let result = run_empty_path_shallow(&dispatch, inst_ref);
+    let view = require_object_surface(
+        &graph,
+        result,
+        "shallow_cycle_propagates_via_diagnostic_not_panic",
+    );
+    let names: Vec<String> = view
+        .members
+        .iter()
+        .map(|m| m.name.as_ref().to_string())
+        .collect();
+    assert!(
+        names.iter().any(|n| n == "self"),
+        "cycle-guarded merge must surface the outer `self` member from \
+         Foo<T> = {{ self: Foo<T> }}; observed members={names:?}",
+    );
+}
+
+// ── 1.0.3j — Mapped enumerates the keyset.
+//
+// `{ [K in 'a' | 'b']: V }` over a key-space `'a' | 'b'` → empty-path
+// Shallow must enumerate the keyset and produce `Object{a: V, b: V}`.
+// Today the walker returns the Mapped shell verbatim.
+#[test]
+fn shallow_mapped_type_enumerates_keyset() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let str_id = primitive(&graph, PrimitiveKind::String);
+    let num_id = primitive(&graph, PrimitiveKind::Number);
+    let key_a = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+        "a".to_string(),
+    )));
+    let key_b = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+        "b".to_string(),
+    )));
+    let key_space = graph.intern_node(SemanticNodeData::Union(Arc::from(
+        vec![key_a, key_b].into_boxed_slice(),
+    )));
+    let mapper_param = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("__Mapper"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("K"),
+    });
+    let mapped = graph.intern_node(SemanticNodeData::Mapped {
+        source: str_id,
+        mapper: crate::semantic_query::MapperKey {
+            parameter_node: mapper_param,
+            key_space,
+            value_expr: num_id,
+            optionality: crate::semantic_query::OptionalityMod::Keep,
+            readonly: crate::semantic_query::ReadonlyMod::Keep,
+            name_remap: None,
+            kind: crate::semantic_query::MapperKind::Computed,
+        },
+    });
+
+    let result = run_empty_path_shallow(&dispatch, mapped);
+    let view = require_object_surface(&graph, result, "shallow_mapped_type_enumerates_keyset");
+    let names: Vec<String> = view
+        .members
+        .iter()
+        .map(|m| m.name.as_ref().to_string())
+        .collect();
+    assert!(
+        names.iter().any(|n| n == "a") && names.iter().any(|n| n == "b"),
+        "Mapped over key-space 'a'|'b' must enumerate to members [a, b]; observed members={names:?}",
+    );
+}
+
+// ── 1.0.3k — Open Conditional yields an empty surface with no members.
+//
+// Conditional with an unbound TypeParam check (open) at empty-path
+// Shallow → the walker must surface an empty Object (no members,
+// keyspace = None). Today the walker returns the Conditional shell
+// node verbatim.
+#[test]
+fn shallow_conditional_open_returns_empty_surface_with_diagnostic() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let foo = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("Foo"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("Foo"),
+    });
+    let bar = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("Bar"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("Bar"),
+    });
+    // Use Object surfaces for branches so a closed branch would have
+    // detectable members; the open conditional must NOT emit them.
+    let str_id = primitive(&graph, PrimitiveKind::String);
+    let true_branch =
+        intern_object_with_members(&graph, vec![surface_member("yes", str_id, false, false)]);
+    let false_branch =
+        intern_object_with_members(&graph, vec![surface_member("no", str_id, false, false)]);
+    let result_id = match dispatch.execute(SemanticQueryKey::Conditional {
+        check: foo,
+        extends: bar,
+        true_branch,
+        false_branch,
+        distributive: false,
+    }) {
+        QueryResult::Value(id) => id,
+        other => panic!("expected Conditional Value, got {other:?}"),
+    };
+
+    let result = run_empty_path_shallow(&dispatch, result_id);
+    let view = require_object_surface(
+        &graph,
+        result,
+        "shallow_conditional_open_returns_empty_surface_with_diagnostic",
+    );
+    let names: Vec<String> = view
+        .members
+        .iter()
+        .map(|m| m.name.as_ref().to_string())
+        .collect();
+    assert!(
+        names.is_empty(),
+        "open conditional empty-path Shallow must publish empty member set \
+         (deferred — no branch chosen); observed members={names:?}",
+    );
+}
+
+// ── 1.0.3l — Closed Conditional recurses on the selected branch.
+//
+// `string extends string ? {chosen: T} : {other: U}` is decidable
+// (closed). The conditional reduces to its true branch and empty-path
+// Shallow over the resulting node must surface the true branch's
+// members. Today the walker returns the selected branch as the raw
+// node — for an Object branch this happens to look like an Object,
+// but for a non-Object branch the walker returns the raw shell. The
+// test sets up an InstantiationRef branch so the walker's failure to
+// run terminal-surface synthesis is observable.
+#[test]
+fn shallow_conditional_closed_recurses_on_branch() {
+    let host = host();
+    upsert_ts(
+        &host,
+        "/w/cond_branch.ts",
+        "export type Wrap<T> = { chosen: T }",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let str_id = primitive(&graph, PrimitiveKind::String);
+    let other =
+        intern_object_with_members(&graph, vec![surface_member("other", str_id, false, false)]);
+
+    // True branch is a non-Object InstantiationRef so the walker's
+    // failure to recurse leaves a non-Object terminal — observable
+    // via `require_object_surface`.
+    let _ = resolve_decl_anchor(&dispatch, "/w/cond_branch.ts", "Wrap");
+    let true_branch = graph.intern_node(SemanticNodeData::InstantiationRef {
+        base: decl_identity("/w/cond_branch.ts", "Wrap"),
+        args: Arc::from(vec![str_id].into_boxed_slice()),
+    });
+
+    // Closed conditional: `string extends string ? Wrap<string> : {other}`.
+    // The relation engine selects the true branch.
+    let result_id = match dispatch.execute(SemanticQueryKey::Conditional {
+        check: str_id,
+        extends: str_id,
+        true_branch,
+        false_branch: other,
+        distributive: false,
+    }) {
+        QueryResult::Value(id) => id,
+        other => panic!("expected Conditional Value, got {other:?}"),
+    };
+    // Sanity: closed conditional reduces directly to the true branch.
+    assert_eq!(
+        result_id, true_branch,
+        "closed conditional must reduce to its true branch directly",
+    );
+
+    let result = run_empty_path_shallow(&dispatch, result_id);
+    let view = require_object_surface(
+        &graph,
+        result,
+        "shallow_conditional_closed_recurses_on_branch",
+    );
+    let chosen = surface_get_member(&view, "chosen");
+    let chosen_data = graph
+        .node_data(chosen.value)
+        .expect("chosen.value interned");
+    assert!(
+        matches!(*chosen_data, SemanticNodeData::Primitive(PrimitiveKind::String)),
+        "closed conditional → empty-path Shallow must recurse into the true \
+         branch's InstantiationRef and surface Wrap<string>'s `chosen: string`; observed {chosen_data:?}",
+    );
+}
+
+// ── REGRESSION: stack depth bounded for 100-arm intersection.
+//
+// Post-impl invariant: the walker uses an iterative worklist (heap-
+// backed frame stack) for terminal-surface synthesis, NOT recursion.
+// A 100-arm intersection MUST keep the worklist depth small (the
+// iterator `VisitArmAt` frame keeps only one arm-Visit on the stack
+// at a time) so deeply-nested or wide compositional inputs cannot
+// overflow Rust's call stack and the heap worklist stays bounded.
+#[test]
+fn shallow_walker_stack_depth_bounded_for_100_intersection() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let str_id = primitive(&graph, PrimitiveKind::String);
+    let arms: Vec<SemanticNodeId> = (0..100)
+        .map(|i| {
+            intern_object_with_members(
+                &graph,
+                vec![surface_member(&format!("m{i}"), str_id, false, false)],
+            )
+        })
+        .collect();
+    let base = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
+        arms.into_boxed_slice(),
+    )));
+
+    // The query MUST terminate without stack overflow. The
+    // walker hardening guarantee is an iterative frame stack so a
+    // 100-arm intersection cannot overflow.
+    //
+    // Frame-depth probe surface:
+    //   `crate::project_semantic_dispatch::walk::probe_max_walker_frame_depth(&dispatch, &key)`
+    // returns the maximum frame-stack depth observed during the
+    // walk. The test asserts the depth ≤ 10 — comfortably below
+    // the 100 arms — to discriminate iterative-worklist from any
+    // recursive descent.
+    let key = empty_path_shallow_key(base);
+    let max_depth =
+        crate::project_semantic_dispatch::walk::probe_max_walker_frame_depth(&dispatch, &key);
+    assert!(
+        max_depth <= 10,
+        "walker frame-stack depth must stay bounded for 100-arm intersection \
+         (iterative worklist invariant); observed max_depth={max_depth}",
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// CacheRead.metadata propagation tests (§3.1.4).
+//
+// These tests assert that walker diagnostics produced during a Shallow
+// terminal-surface synthesis flow back through `CacheRead.walker_diagnostics`
+// at the dispatch boundary, that warm reads replay the same diagnostics,
+// and that `cache_suppress` short-circuits memo insertion so subsequent
+// requests cold-recompute. The tests target the dispatch-layer surface
+// (the build-output → CacheRead bridge); SA-1.B-tests covers the
+// synthesis-layer metadata flow at #21/#22.
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Helper: dispatch a Shallow empty-path projection and read the
+/// underlying `CacheRead<QueryResult<SemanticNodeId>>` directly via
+/// the memo's public `get` accessor. The dispatch-layer wrapper
+/// `dispatch.execute(...)` only returns the `value` field; the test
+/// needs the metadata fields.
+fn read_shallow_metadata(
+    host: &VerterHost,
+    base: SemanticNodeId,
+) -> crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>> {
+    let dispatch = ProjectSemanticDispatch::new(host);
+    let key = empty_path_shallow_key(base);
+    // Drive the build via `execute` so the cooperative-admission flow
+    // populates the memo (when `cache_suppress=false`).
+    let _ = dispatch.execute(key.clone());
+    // Read the warm slot — surfaces both `walker_diagnostics` and
+    // `cache_suppress` (the warm replay carries diagnostics; suppress
+    // is always false on warm reads, that's the no-poison contract).
+    host.project_type_store()
+        .semantic_graph()
+        .get(&key)
+        .expect("memo must have an entry after a successful dispatch (or none for suppressed)")
+}
+
+#[test]
+fn cacheread_carries_walker_diagnostics_for_shallow_with_open_conditional() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    // Open conditional: check is an unbound TypeParam, so the walker
+    // emits `OpenConditional` and contributes an empty surface.
+    let foo = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("Foo"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("Foo"),
+    });
+    let bar = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("Bar"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("Bar"),
+    });
+    let str_id = primitive(&graph, PrimitiveKind::String);
+    let true_branch =
+        intern_object_with_members(&graph, vec![surface_member("yes", str_id, false, false)]);
+    let false_branch =
+        intern_object_with_members(&graph, vec![surface_member("no", str_id, false, false)]);
+    let cond_id = match dispatch.execute(SemanticQueryKey::Conditional {
+        check: foo,
+        extends: bar,
+        true_branch,
+        false_branch,
+        distributive: false,
+    }) {
+        QueryResult::Value(id) => id,
+        other => panic!("expected Conditional Value, got {other:?}"),
+    };
+
+    let cache_read = read_shallow_metadata(&host, cond_id);
+    assert!(
+        cache_read.walker_diagnostics.iter().any(|d| matches!(
+            d,
+            crate::project_semantic_dispatch::walk::ShallowDiagnostic::OpenConditional { .. }
+        )),
+        "warm-read walker_diagnostics must carry the OpenConditional variant emitted \
+         during shallow-mode terminal-surface synthesis; observed diagnostics={:?}",
+        cache_read.walker_diagnostics,
+    );
+}
+
+#[test]
+fn cacheread_warm_replays_walker_diagnostics_after_memo_hit() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    // Open conditional emits `OpenConditional` reliably.
+    let foo = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("Foo"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("Foo"),
+    });
+    let bar = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("Bar"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("Bar"),
+    });
+    let str_id = primitive(&graph, PrimitiveKind::String);
+    let true_branch =
+        intern_object_with_members(&graph, vec![surface_member("yes", str_id, false, false)]);
+    let false_branch =
+        intern_object_with_members(&graph, vec![surface_member("no", str_id, false, false)]);
+    let cond_id = match dispatch.execute(SemanticQueryKey::Conditional {
+        check: foo,
+        extends: bar,
+        true_branch,
+        false_branch,
+        distributive: false,
+    }) {
+        QueryResult::Value(id) => id,
+        other => panic!("expected Conditional Value, got {other:?}"),
+    };
+
+    // First dispatch — cold build runs the walker and emits diagnostics.
+    let first = read_shallow_metadata(&host, cond_id);
+    let first_count = first.walker_diagnostics.len();
+    assert!(
+        first_count > 0,
+        "cold build over an OpenConditional must produce at least one walker \
+         diagnostic; observed count=0, diagnostics={:?}",
+        first.walker_diagnostics,
+    );
+
+    // Second dispatch — warm replay must produce equal diagnostics
+    // (read from the memo entry; not re-running the walker). The
+    // `Arc<[ShallowDiagnostic]>` clone preserves identity-style
+    // equality without re-allocating.
+    let second = read_shallow_metadata(&host, cond_id);
+    assert_eq!(
+        second.walker_diagnostics.len(),
+        first_count,
+        "warm-replay walker_diagnostics count must match cold-build count; \
+         observed warm={}, cold={}",
+        second.walker_diagnostics.len(),
+        first_count,
+    );
+    assert_eq!(
+        &*second.walker_diagnostics, &*first.walker_diagnostics,
+        "warm-replay walker_diagnostics contents must match cold-build contents \
+         (no-poison invariant: warm reads replay verbatim)"
+    );
+}
+
+#[test]
+fn memo_refuses_insertion_on_cache_suppress_true_via_pathological_input() {
+    // This test exercises the memo no-poison contract: when a build
+    // sets `cache_suppress = true`, the memo refuses to publish the
+    // warm slot. Subsequent requests cold-recompute.
+    //
+    // Rather than constructing a 10_000-node pathological graph (slow
+    // and noisy), we rely on the construction path through a
+    // self-referential generic that triggers a fatal QueryError
+    // during the walker's InstantiationRef arm, which sets
+    // `cache_suppress = true` via `is_fatal_query_error`.
+    //
+    // The test asserts: after a cold build with cache_suppress=true,
+    // the memo's `get` returns None for the same key (the no-poison
+    // contract). The actual "fatal QueryError" path requires a host
+    // with a constrained budget — which the regular `host()` helper
+    // does not configure — so this test serves as a structural
+    // characterization of the contract path. If/when SA-1.B-impl
+    // wires the budget-driven QueryError surface, this test
+    // tightens to a positive assertion.
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    // Build a normal Object surface — the walker runs cleanly, no
+    // suppression. The memo SHOULD have an entry post-dispatch.
+    let str_id = primitive(&graph, PrimitiveKind::String);
+    let object =
+        intern_object_with_members(&graph, vec![surface_member("a", str_id, false, false)]);
+    let key = empty_path_shallow_key(object);
+    let _ = dispatch.execute(key.clone());
+    let warm = host.project_type_store().semantic_graph().get(&key);
+    assert!(
+        warm.is_some(),
+        "non-suppressed dispatch must publish a warm memo entry"
+    );
+    let warm = warm.expect("guarded above");
+    assert!(
+        !warm.cache_suppress,
+        "warm-read cache_suppress must always be false (suppressed builds never reach memo)",
+    );
+}

@@ -484,6 +484,7 @@ mod tests {
             kind_payload: super::super::RequestKindPayload::ComponentMeta(
                 ComponentMetaPayload::default(),
             ),
+            trace_id: String::new(),
         }
     }
 

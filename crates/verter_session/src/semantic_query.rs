@@ -467,10 +467,44 @@ pub type DepSignature = Arc<[(Arc<str>, DepVersion)]>;
 
 /// Returned by cache reads so callers can merge transitive dep facts into the
 /// active [`CompletionFence`](crate::completion_fence::CompletionFence).
+///
+/// Carries `walker_diagnostics` produced during the query's computation
+/// (empty for queries that do not run the shallow-mode terminal-surface
+/// walker) and a `cache_suppress` flag the memo consults to refuse
+/// insertion when the build hit a pathological-input cap or a fatal
+/// `QueryError`. Warm reads replay both fields transparently.
 #[derive(Debug, Clone)]
 pub struct CacheRead<T> {
     pub value: T,
     pub dep_signature: DepSignature,
+    /// Walker diagnostics produced during this query's computation.
+    /// Stored on the memo entry; warm reads replay transparently. Empty
+    /// for queries that don't run the walker.
+    pub walker_diagnostics: Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
+    /// True if this query's computation (or any nested query) hit a
+    /// fatal `QueryError` (BudgetExceeded / UnstableState) or the
+    /// pathological-input cap. Aggregates via OR through nested queries'
+    /// `cache_suppress`. The memo refuses insertion when this is true
+    /// so the caller observes the suppressed result and subsequent
+    /// requests cold-recompute.
+    pub cache_suppress: bool,
+}
+
+impl<T> CacheRead<T> {
+    /// Convert a `(value, dep_signature)` pair into a `CacheRead` with
+    /// no walker diagnostics and `cache_suppress = false`. Used by
+    /// build closures for queries that do not run the shallow-mode
+    /// terminal-surface walker.
+    #[inline]
+    #[must_use]
+    pub fn from_value_and_signature(value: T, dep_signature: DepSignature) -> Self {
+        Self {
+            value,
+            dep_signature,
+            walker_diagnostics: Arc::from([]),
+            cache_suppress: false,
+        }
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────

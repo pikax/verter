@@ -84,9 +84,9 @@ pub use origin_graph::{
 pub use payloads::cache_outcomes::CacheOutcomeKind;
 pub use payloads::tags::{BundlerKindTag, CompileTargetTag, LspMethodTag, ProjectionModeTag};
 pub use payloads::{
-    BundlerBatchPayload, CompilePayload, ComponentMetaPayload, LspRequestPayload, McpToolPayload,
-    SemanticAnalysisPayload, SlowRecordSummary, TypeResolutionPayload, WorkspaceOp,
-    WorkspacePayload,
+    AuditDiagnosticEntry, AuditDiagnosticKind, BundlerBatchPayload, CompilePayload,
+    ComponentMetaPayload, LspRequestPayload, McpToolPayload, SemanticAnalysisPayload,
+    SlowRecordSummary, TypeResolutionPayload, WorkspaceOp, WorkspacePayload,
 };
 pub use record::{
     Hash16, IncidentalFields, RequestAuditRecord, RequestKind, RequestKindPayload,

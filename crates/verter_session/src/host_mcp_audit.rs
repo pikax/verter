@@ -206,6 +206,7 @@ impl VerterHost {
             files: Vec::new(),
             waits,
             kind_payload: RequestKindPayload::Mcp(payload),
+            trace_id: String::new(),
         };
 
         let cloned = record.clone();

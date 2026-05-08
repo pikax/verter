@@ -71,6 +71,7 @@ fn publish_component_meta_record(host: &Arc<VerterHost>, canonical: &str) -> u64
         files: Vec::new(),
         waits: None,
         kind_payload: RequestKindPayload::ComponentMeta(ComponentMetaPayload::default()),
+        trace_id: String::new(),
     };
     host.host_audit_runtime()
         .audit_records_store()

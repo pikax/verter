@@ -107,6 +107,7 @@ fn finalize_then_drop_does_not_publish_a_second_record() {
             files: Vec::new(),
             waits: None,
             kind_payload: RequestKindPayload::ComponentMeta(ComponentMetaPayload::default()),
+            trace_id: String::new(),
         };
         assert!(
             registration.finalize(record),
