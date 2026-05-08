@@ -808,6 +808,11 @@ pub(crate) fn lowered_preserve_package_backed_symbolic_refs(
         .unwrap_or_else(|| materialized.clone())
 }
 
+// Currently orphaned — the only production call site lived inside
+// the legacy `walk_component_meta_macro_shape_member_types` walker
+// that the §7.1 per-macro projector cutover replaced. Retained
+// because the helper is exercised by integration-test fixtures.
+#[allow(dead_code)]
 pub(crate) fn define_props_member_can_stay_symbolic_without_rescue(
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
     scope_canonical_id: &str,

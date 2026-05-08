@@ -1,0 +1,80 @@
+//! `defineEmits<T>()` projector.
+//!
+//! Mirrors [`super::props::project_props`] but for emit fields. The
+//! parser-side `AnalyzedEmitField.payload_type` provides the raw_type
+//! when available.
+
+use verter_semantic::analysis::component_meta::{MacroExpansionDiagnostics, MacroExpansionKind};
+use verter_semantic::analysis::type_expand::ExpandedField;
+use verter_semantic::analysis::{AnalyzedMacro, AnalyzedMacroKind};
+
+use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+use crate::resolver_core::ResolverContext;
+use crate::semantic_query::DeclIdentity;
+use crate::types::FileAnalysisSnapshot;
+
+use super::{
+    read_surface_members, resolve_macro_payload, resolve_payload_surface,
+    surface_member_to_expanded_field,
+};
+
+/// Project a `defineEmits<T>()` macro to a `Vec<ExpandedField>` for
+/// publication into `evaluated_types.emits`.
+///
+/// See [`super::props::project_props`] for the per-field semantics
+/// — the only differences are:
+/// - the macro kind passed to `ResolveMacroPayload` is `DefineEmits`
+/// - the diagnostic envelope's `MacroExpansionKind` is `DefineEmits`
+/// - the raw_type comes from `mac.emit_fields[i].payload_type`
+pub(crate) fn project_emits(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    ctx: &dyn ResolverContext,
+    owner: &DeclIdentity,
+    file: &str,
+    macro_index: usize,
+    mac: &AnalyzedMacro,
+    _snapshot: &FileAnalysisSnapshot,
+    diag_sink: &mut Vec<MacroExpansionDiagnostics>,
+) -> Vec<ExpandedField> {
+    if !mac.is_type_based {
+        return Vec::new();
+    }
+
+    let payload_node = match resolve_macro_payload(
+        dispatch,
+        owner,
+        file,
+        macro_index,
+        mac,
+        AnalyzedMacroKind::DefineEmits,
+        MacroExpansionKind::DefineEmits,
+        diag_sink,
+    ) {
+        Some(node) => node,
+        None => return Vec::new(),
+    };
+
+    let surface_node = match resolve_payload_surface(
+        dispatch,
+        payload_node,
+        macro_index,
+        MacroExpansionKind::DefineEmits,
+        diag_sink,
+    ) {
+        Some(node) => node,
+        None => return Vec::new(),
+    };
+
+    let members = read_surface_members(ctx, surface_node);
+    members
+        .iter()
+        .map(|member| {
+            let raw_type = mac
+                .emit_fields
+                .iter()
+                .find(|e| e.name == member.name.as_ref())
+                .and_then(|e| e.payload_type.clone());
+            surface_member_to_expanded_field(dispatch, member, raw_type)
+        })
+        .collect()
+}

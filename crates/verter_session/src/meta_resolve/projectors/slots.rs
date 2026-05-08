@@ -1,0 +1,83 @@
+//! `defineSlots<T>()` projector — slot-shape level only.
+//!
+//! Resolves the slot surface (the slot names and their function-shape
+//! signatures) through `ResolveMacroPayload` + empty-path Shallow
+//! `ProjectPath`. Each surface member is one slot, with its TypeExpr
+//! preserving the function signature (which downstream consumers
+//! introspect for `bindings`).
+//!
+//! Slot bindings (the `defineSlots<{ name(props: { item: string }): VNode[] }>`
+//! parameter introspection) live in
+//! [`crate::meta_resolve::slot_binding_graph`]; this projector
+//! intentionally stops at the slot-shape level so the
+//! cooperative-admission caches behind both projectors and
+//! `resolve_slot_bindings_graph_native` populate the same dispatch
+//! family memo.
+
+use verter_semantic::analysis::component_meta::{MacroExpansionDiagnostics, MacroExpansionKind};
+use verter_semantic::analysis::type_expand::ExpandedField;
+use verter_semantic::analysis::{AnalyzedMacro, AnalyzedMacroKind};
+
+use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+use crate::resolver_core::ResolverContext;
+use crate::semantic_query::DeclIdentity;
+use crate::types::FileAnalysisSnapshot;
+
+use super::{
+    read_surface_members, resolve_macro_payload, resolve_payload_surface,
+    surface_member_to_expanded_field,
+};
+
+/// Project a `defineSlots<T>()` macro to a `Vec<ExpandedField>` for
+/// publication into the slot-shape surface. One field per slot name;
+/// the field's `r#type` carries the slot function's signature.
+pub(crate) fn project_slots(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    ctx: &dyn ResolverContext,
+    owner: &DeclIdentity,
+    file: &str,
+    macro_index: usize,
+    mac: &AnalyzedMacro,
+    _snapshot: &FileAnalysisSnapshot,
+    diag_sink: &mut Vec<MacroExpansionDiagnostics>,
+) -> Vec<ExpandedField> {
+    if !mac.is_type_based {
+        return Vec::new();
+    }
+
+    let payload_node = match resolve_macro_payload(
+        dispatch,
+        owner,
+        file,
+        macro_index,
+        mac,
+        AnalyzedMacroKind::DefineSlots,
+        MacroExpansionKind::DefineSlots,
+        diag_sink,
+    ) {
+        Some(node) => node,
+        None => return Vec::new(),
+    };
+
+    let surface_node = match resolve_payload_surface(
+        dispatch,
+        payload_node,
+        macro_index,
+        MacroExpansionKind::DefineSlots,
+        diag_sink,
+    ) {
+        Some(node) => node,
+        None => return Vec::new(),
+    };
+
+    let members = read_surface_members(ctx, surface_node);
+    // Slot fields don't carry a payload-style raw_type per member;
+    // their parser-side annotation lives on bindings. The slot
+    // surface itself is left without raw_type so the merge layer
+    // (parser-side `extract_component_meta`) can populate the slot
+    // structure via its own slot_fields traversal.
+    members
+        .iter()
+        .map(|member| surface_member_to_expanded_field(dispatch, member, None))
+        .collect()
+}

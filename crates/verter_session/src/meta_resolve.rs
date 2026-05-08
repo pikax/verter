@@ -39,6 +39,10 @@ mod graph_predicates;
 mod macro_member_walk;
 pub(crate) mod materialize;
 mod origin_graph;
+pub(crate) mod projectors;
+#[cfg(test)]
+#[path = "meta_resolve/projectors_silent_miss_tests.rs"]
+mod projectors_silent_miss_tests;
 mod registry_materialize;
 mod resolved_state;
 mod scoring;

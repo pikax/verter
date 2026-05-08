@@ -7847,3 +7847,68 @@ fn component_meta_payload_carries_walker_diagnostics() {
          a fatal QueryError suppressed cache promotion.",
     );
 }
+
+#[test]
+fn getcomponentmeta_uses_per_macro_projectors() {
+    // Production `get_component_meta` / `compute_component_meta_state_inner`
+    // must dispatch through the per-macro projector module
+    // (`meta_resolve::projectors::project_evaluated_types` or its
+    // siblings). Discriminates against any drift commit that re-routes
+    // production back through the legacy walker outer driver.
+    let src =
+        read_workspace_file("crates/verter_session/src/host_manage/component_meta_methods.rs");
+    assert!(
+        src.contains("project_evaluated_types"),
+        "host_manage/component_meta_methods.rs must dispatch through \
+         `crate::meta_resolve::projectors::project_evaluated_types` — \
+         a re-routed production path that bypasses the per-macro \
+         projector module would be invisible without this guard."
+    );
+}
+
+#[test]
+fn no_legacy_walker_in_production_code() {
+    // Static-grep gate: `walk_component_meta_macro_shape_member_types`
+    // must NOT appear in production source under
+    // `crates/verter_session/src/` outside the legacy walker module
+    // itself (`meta_resolve/macro_member_walk.rs`) and the dead-code
+    // re-exports in `meta_resolve.rs` and
+    // `host_manage/component_meta_methods.rs` (kept only for the
+    // `meta_resolve_tests.rs` test references). Production code must
+    // route through the per-macro projector module.
+    let walker_ident = "walk_component_meta_macro_shape_member_types";
+    let production_root = workspace_path("crates/verter_session/src/host_manage");
+    let mut violations = Vec::new();
+    walk_dir_collect_rs(&production_root, &mut |path| {
+        // The `host_manage/component_meta_methods.rs` re-export is
+        // gated under `#[allow(unused_imports)]` and only there to
+        // keep the symbol reachable for legacy `meta_resolve_tests.rs`
+        // call sites. Skip that file.
+        if path.ends_with("host_manage/component_meta_methods.rs")
+            || path.ends_with(r"host_manage\component_meta_methods.rs")
+        {
+            return;
+        }
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return;
+        };
+        for (line_no, line) in text.lines().enumerate() {
+            if line.contains(walker_ident) {
+                violations.push(format!(
+                    "  {}:{}: {}",
+                    path.display(),
+                    line_no + 1,
+                    line.trim()
+                ));
+            }
+        }
+    });
+    assert!(
+        violations.is_empty(),
+        "`{walker_ident}` must NOT appear in production code under \
+         crates/verter_session/src/host_manage/. Production must route \
+         through `meta_resolve::projectors::project_evaluated_types`. \
+         Violations:\n{}",
+        violations.join("\n")
+    );
+}

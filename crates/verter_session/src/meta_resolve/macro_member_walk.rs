@@ -192,6 +192,11 @@ pub(crate) fn slot_binding_targets_define_props_root(
 // now use `ComponentMetaQueryEngine::materialize_member_surface_expr`
 // directly.
 
+// Production callers route the macro-shape projection through
+// `meta_resolve::projectors::project_evaluated_types` (per the §7.1
+// per-macro projector decomposition). The walker remains
+// `pub(crate)` because `meta_resolve_tests.rs` still references it.
+#[allow(dead_code)]
 pub(crate) fn walk_component_meta_macro_shape_member_types(
     scope_canonical_id: &str,
     snapshot: &FileAnalysisSnapshot,

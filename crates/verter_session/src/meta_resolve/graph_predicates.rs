@@ -684,6 +684,12 @@ pub(crate) fn slot_binding_param_can_stay_symbolic_node(
 /// the consumer can re-resolve from their symbolic form.
 ///
 /// Depth-fused at 256 like the parent predicate.
+///
+/// Currently orphaned — the only production call site lived inside
+/// the legacy `walk_component_meta_macro_shape_member_types` walker
+/// that the §7.1 per-macro projector cutover replaced. Retained
+/// because the helper is exercised by integration-test fixtures.
+#[allow(dead_code)]
 fn node_value_is_concrete_or_symbolic(
     ctx: &dyn ResolverContext,
     node: crate::semantic_query::SemanticNodeId,

@@ -75,6 +75,11 @@ use crate::meta_resolve::{
 // in `host_manage/jsdoc_resolve.rs` (host-impl tier).
 use crate::host_manage::jsdoc_resolve::HostComponentMetaResolver;
 use crate::meta_resolve::build_origin_graph;
+// `walk_component_meta_macro_shape_member_types` retained as a
+// `pub(crate)` symbol while still referenced by `meta_resolve_tests`;
+// the §7.1 cutover routes the production path through
+// `meta_resolve::projectors::project_evaluated_types` instead.
+#[allow(unused_imports)]
 use crate::meta_resolve::walk_component_meta_macro_shape_member_types;
 use crate::meta_resolve::{
     component_meta_registry_prefers_structural_materialization_node,
@@ -578,7 +583,7 @@ impl VerterHost {
                     }
                     {
                         component_meta_trace_custom!(
-                            "walk_component_meta_macro_shape_member_types",
+                            "project_evaluated_types",
                             format!(
                                 "owner={} props={} slot_bindings={} define_props={} define_slots={}",
                                 canonical,
@@ -588,12 +593,26 @@ impl VerterHost {
                                 evaluated_types.define_slots.len(),
                             ),
                         );
-                        walk_component_meta_macro_shape_member_types(
+                        // §7.1 cutover: per-macro projectors replace
+                        // `walk_component_meta_macro_shape_member_types`.
+                        // Each projector dispatches `ResolveMacroPayload`
+                        // + empty-path Shallow `ProjectPath` and writes
+                        // `Vec<ExpandedField>` into `evaluated_types`.
+                        // Errors / cycles emit diagnostics into
+                        // `synthesis_diagnostics` per §7.5 silent-miss
+                        // prevention (treated as macro-expansion
+                        // diagnostics on the published analysis).
+                        let dispatch =
+                            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(
+                                query_engine.ctx,
+                            );
+                        crate::meta_resolve::projectors::project_evaluated_types(
+                            &dispatch,
+                            query_engine.ctx,
                             canonical,
                             &snapshot,
-                            &eval_source,
                             &mut evaluated_types,
-                            &mut query_engine,
+                            &mut synthesis_diagnostics,
                         );
                     }
                     if !evaluated_types.is_empty() {
