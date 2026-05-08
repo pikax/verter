@@ -171,6 +171,7 @@ pub(crate) mod source_map_remap;
 #[cfg(test)]
 pub(crate) mod spike_instrumentation;
 pub(crate) mod template_convert;
+pub mod typeinfo;
 mod types;
 mod upsert;
 
@@ -480,6 +481,13 @@ pub struct VerterHost {
     /// **Compiled out in production builds.**
     #[cfg(test)]
     pub(crate) compile_one_call_count: std::sync::atomic::AtomicUsize,
+    /// Host-owned LRU cache for the typeinfo `evaluate_type_expression`
+    /// scratch URIs. See `typeinfo::scratch_cache` for the LRU policy
+    /// and §5.3 of the typeinfo plan for the deterministic-URI
+    /// derivation. Capacity defaults to
+    /// `typeinfo::scratch_cache::DEFAULT_CAPACITY` (64).
+    pub(crate) typeinfo_scratch_cache:
+        parking_lot::Mutex<crate::typeinfo::scratch_cache::ScratchCache>,
 }
 
 // Manual Debug impl because Arc<dyn WorkspaceAccess> doesn't implement Debug.

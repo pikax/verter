@@ -175,6 +175,8 @@ impl VerterHost {
             recursion_limit_reached: ctx
                 .type_resolution_recursion_limit_reached
                 .load(Ordering::Relaxed),
+            walker_diagnostics: Vec::new(),
+            cache_suppress: false,
         };
 
         let timings = RequestTimingAudit {
@@ -214,7 +216,7 @@ impl VerterHost {
             files: Vec::new(),
             waits,
             kind_payload: RequestKindPayload::TypeResolution(payload),
-            trace_id: String::new(),
+            trace_id: ctx.trace_id.clone(),
         };
 
         let cloned = record.clone();

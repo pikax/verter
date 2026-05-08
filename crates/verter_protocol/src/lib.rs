@@ -4,6 +4,7 @@ pub mod types;
 
 pub mod component_meta;
 pub mod schema;
+pub mod typeinfo;
 
 pub mod verter {
     pub mod v1 {

@@ -12,6 +12,7 @@ fn main() {
             &[
                 "proto/verter/v1/component_meta.proto",
                 "proto/verter/v1/selective_component_meta.proto",
+                "proto/verter/v1/typeinfo.proto",
             ],
             &["proto"],
         )

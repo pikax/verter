@@ -4008,6 +4008,7 @@ dependencies = [
  "self_cell",
  "serde",
  "serde_json",
+ "sha2",
  "similar",
  "smallvec",
  "sourcemap",

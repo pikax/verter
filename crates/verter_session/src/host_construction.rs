@@ -160,6 +160,9 @@ impl VerterHost {
             last_upsert_priority: parking_lot::Mutex::new(None),
             #[cfg(test)]
             compile_one_call_count: std::sync::atomic::AtomicUsize::new(0),
+            typeinfo_scratch_cache: parking_lot::Mutex::new(
+                crate::typeinfo::scratch_cache::ScratchCache::with_default_capacity(),
+            ),
         }
     }
 
@@ -300,6 +303,17 @@ impl VerterHost {
     /// taking the host lock.
     pub fn project_type_store(&self) -> &Arc<crate::project_type_store::ProjectTypeStore> {
         &self.project_type_store
+    }
+
+    /// Host-owned scratch cache for the typeinfo
+    /// `evaluate_type_expression` entry-point. Used internally by
+    /// [`Self::evaluate_type_expression_with_audit`] to memoise the
+    /// `(scratch_uri → SemanticNodeId)` mapping for cacheable
+    /// requests.
+    pub(crate) fn scratch_cache(
+        &self,
+    ) -> &parking_lot::Mutex<crate::typeinfo::scratch_cache::ScratchCache> {
+        &self.typeinfo_scratch_cache
     }
 
     // ──────────────────────────────────────────────────────────────────

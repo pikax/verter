@@ -1,0 +1,94 @@
+syntax = "proto3";
+
+package verter.v1;
+
+// EvaluateTypeExpressionRequestDto — wire-form mirror of
+// `verter_session::typeinfo::types::EvaluateTypeExpressionRequest`.
+//
+// Field number reservations (additive in v10):
+// - 1: scope_canonical
+// - 2: expression
+// - 3: extra_imports (repeated)
+// - 4: mode (string tag — Identity / Navigate / Shallow / Expanded / Skeleton)
+// - 5: cacheable
+//
+// Existing audit / type-resolution corpus consumers can decode this
+// message without breakage — the proto3 default behaviour zeroes
+// missing fields and `repeated` fields default to empty.
+message EvaluateTypeExpressionRequestDto {
+  string scope_canonical = 1;
+  string expression = 2;
+  repeated ImportSpecDto extra_imports = 3;
+  // Stringly-tagged projection mode for forwards compatibility —
+  // adding a new mode does not require renumbering. Producers and
+  // consumers compare against the canonical enum values:
+  // "identity", "navigate", "shallow", "expanded", "skeleton".
+  string mode = 4;
+  bool cacheable = 5;
+}
+
+// ImportSpecDto — wire-form mirror of
+// `verter_session::typeinfo::types::ImportSpec`.
+message ImportSpecDto {
+  string specifier = 1;
+  repeated NamedImportDto bindings = 2;
+}
+
+// NamedImportDto — wire-form mirror of
+// `verter_session::typeinfo::types::NamedImport`. The oneof carries
+// the variant payload; consumers branch on the kind field discriminant.
+message NamedImportDto {
+  oneof kind {
+    DefaultImportDto default_import = 1;
+    NamedBindingDto named = 2;
+    NamespaceImportDto namespace_import = 3;
+  }
+}
+
+// `import <local_name> from "<specifier>"`
+message DefaultImportDto {
+  string local_name = 1;
+}
+
+// `import { <exported_name> [as <local_alias>] } from "<specifier>"`
+// — `type_only` indicates a `type`-qualified binding.
+message NamedBindingDto {
+  string exported_name = 1;
+  // Optional rename. Empty string means "no alias" — proto3 cannot
+  // distinguish "" from "absent" without a wrapper, so consumers
+  // treat empty as None.
+  string local_alias = 2;
+  bool type_only = 3;
+}
+
+// `import * as <local_name> from "<specifier>"`
+message NamespaceImportDto {
+  string local_name = 1;
+}
+
+// SymbolEntryDto — wire-form mirror of
+// `verter_session::typeinfo::types::SymbolEntry`. Returned by
+// `list_file_symbols` over the FFI boundary.
+message SymbolEntryDto {
+  string name = 1;
+  // Stringly-tagged kind. Canonical values:
+  // "type_alias", "interface", "class", "const", "let", "var",
+  // "function", "async_function", "class_value", "enum".
+  string kind = 2;
+  // SFC-absolute span. Encoded as `(start, end)`; absent when the
+  // host had no analysis-snapshot span for this symbol.
+  uint32 span_start = 3;
+  uint32 span_end = 4;
+  // Discriminator for the optional span — a separate field instead
+  // of an `optional` modifier so the proto3 wire form stays at the
+  // base level and consumers can distinguish "has_span: true,
+  // start: 0, end: 0" from "has_span: false".
+  bool has_span = 5;
+  bool is_exported = 6;
+}
+
+// SymbolEntryListDto — repeated wrapper used by FFI consumers that
+// want a single message at the boundary.
+message SymbolEntryListDto {
+  repeated SymbolEntryDto entries = 1;
+}

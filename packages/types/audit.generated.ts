@@ -412,7 +412,7 @@ diagnostics: Array<AuditDiagnosticEntry>,
  * this flag — partially-populated results never warm the shared
  * final-result cache.
  */
-should_suppress: boolean,
+should_suppress: boolean, 
 /**
  * Per-request count of `Instantiate { body_mode: Expanded }`
  * dispatches observed against this request. Mirror of the
@@ -428,7 +428,7 @@ should_suppress: boolean,
  * audit JSON without this field (older record snapshots, hand-
  * authored test fixtures) deserialize cleanly.
  */
-expanded_instantiate_calls: string,
+expanded_instantiate_calls: string, 
 /**
  * Per-request count of `MemoEntry` insertions published into
  * the `SemanticGraphStore` warm map during this request.
@@ -444,7 +444,7 @@ expanded_instantiate_calls: string,
  * audit JSON without this field (older record snapshots, hand-
  * authored test fixtures) deserialize cleanly.
  */
-memo_insertions: string,
+memo_insertions: string, 
 /**
  * Per-request count of `cooperative_admission` builds whose
  * warm-publish was skipped because the build landed with
@@ -1824,6 +1824,13 @@ substituted_with: NodeId, };
  * Type-resolution request payload. Producers in
  * `verter_session::resolver_core` populate the counters once the
  * resolver entry-point emits through the audit substrate.
+ *
+ * `walker_diagnostics` and `cache_suppress` mirror the parallel fields
+ * on [`crate::payloads::component_meta::ComponentMetaPayload`] so
+ * observers can correlate suppressed type-resolution publications with
+ * the same diagnostic vocabulary they consume on the component-meta
+ * side. Producers populate them at the typeinfo audit-emission
+ * boundary in `verter_session`.
  */
 export type TypeResolutionPayload = { 
 /**
@@ -1861,7 +1868,28 @@ depth_high_water: number,
 /**
  * `true` when the depth budget was exceeded.
  */
-recursion_limit_reached: boolean, };
+recursion_limit_reached: boolean, 
+/**
+ * Walker / synthesis diagnostics surfaced by the resolver. Empty
+ * for clean resolutions; populated only when a producer routes
+ * structured diagnostics through the audit-emission boundary.
+ *
+ * Marked `#[serde(default)]` so existing audit corpus consumers
+ * that emit records without this field deserialize cleanly into
+ * an empty vec.
+ */
+walker_diagnostics: Array<AuditDiagnosticEntry>, 
+/**
+ * `true` when the request was driven through a synthesis path that
+ * landed with `cache_suppress=true` and therefore made no
+ * synthesis-attributable warm-cache insertions. Mirror of the
+ * component-meta `cache_suppress` signal so observers can correlate
+ * suppressed type-resolution publications.
+ *
+ * Marked `#[serde(default)]` for the same compatibility reason as
+ * `walker_diagnostics`.
+ */
+cache_suppress: boolean, };
 
 /**
  * Which VFS layer served the read — mirrored from the workspace's

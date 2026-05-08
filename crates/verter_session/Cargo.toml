@@ -62,6 +62,7 @@ rustc-hash = { workspace = true }
 self_cell = { workspace = true }
 smallvec = "1.13"
 uuid = { version = "1", features = ["v4"] }
+sha2 = { workspace = true }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 serde = { workspace = true }
 tracing = "0.1"
