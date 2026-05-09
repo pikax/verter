@@ -490,6 +490,131 @@ fn policy_active_refs_distinguishes_pick_with_different_type_args() {
     );
 }
 
+/// `(DeclIdentity, NormalizedTypeArgs)` cycle-guard key identity for
+/// distinct declaration-typed type-args. Per Invariant #20 the cycle
+/// guard discriminates `Foo<A>` from `Foo<B>` via positional Decl
+/// hashing — bare-name keying or any normalization that collapses
+/// `Ref` arguments to a constant would make `Foo<A>` and `Foo<B>`
+/// produce the same active-ref key, breaking the contract documented
+/// on `rewrite_ref` ("Generic substitutions are part of identity —
+/// `Foo<A>` and `Foo<B>` are distinct guard keys").
+///
+/// The existing `recursive_alias_via_typeof` correctness fixture and
+/// `recursive_pick_local_alias_terminates_via_semantic_miss` cycle
+/// test only exercise SAME-instantiation back-edges, so a regression
+/// in `NormalizedTypeArg::Decl` keying would not surface. This test
+/// constructs the four `NormalizedTypeArg` variants directly and
+/// verifies the identity contract that the cycle guard relies on:
+///
+/// 1. `[Decl(A)]` ≠ `[Decl(B)]` for distinct DeclIdentities
+/// 2. `[Decl(A), Decl(B)]` ≠ `[Decl(B), Decl(A)]` (positional)
+/// 3. `[Decl(A)]` ≠ `[Literal(h)]` ≠ `[AnonymousShape(h)]` ≠ `[None]`
+///    (variant-level discrimination)
+/// 4. `Decl(A)` and `Decl(A')` where `A'` shares name but differs in
+///    `canonical_id` produce distinct keys (cross-file discrimination)
+///
+/// All four properties are load-bearing: any breakage would surface
+/// here as an equality / hash collision, where it would NOT surface
+/// in the policy walker tests above (the walker resolves type-args to
+/// concrete bodies before the cycle guard sees them, masking
+/// identity-level bugs in `NormalizedTypeArg`).
+#[test]
+fn normalized_type_args_distinguishes_distinct_decl_instantiations() {
+    use crate::component_meta_resolution_policy::cycle_guard::{
+        NormalizedTypeArg, NormalizedTypeArgs,
+    };
+    use crate::semantic_query::DeclIdentity;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    fn decl(canonical_id: &str, decl_name: &str) -> DeclIdentity {
+        DeclIdentity {
+            canonical_id: Arc::from(canonical_id),
+            whole_hash: Default::default(),
+            decl_name: Arc::from(decl_name),
+        }
+    }
+
+    fn hash<T: Hash>(value: &T) -> u64 {
+        let mut h = DefaultHasher::new();
+        value.hash(&mut h);
+        h.finish()
+    }
+
+    let id_a = decl("/workspace/a.ts", "A");
+    let id_b = decl("/workspace/b.ts", "B");
+    let id_a_other_file = decl("/workspace/other.ts", "A");
+
+    // Property 1: `[Decl(A)]` ≠ `[Decl(B)]` — distinct generic
+    // instantiations of the same parameterized declaration produce
+    // distinct cycle-guard keys.
+    let foo_of_a = NormalizedTypeArgs::from_normalized([NormalizedTypeArg::Decl(id_a.clone())]);
+    let foo_of_b = NormalizedTypeArgs::from_normalized([NormalizedTypeArg::Decl(id_b.clone())]);
+    assert_ne!(
+        foo_of_a, foo_of_b,
+        "Foo<A> and Foo<B> MUST produce distinct cycle-guard keys — \
+         a regression that normalized Ref args to a constant key \
+         would collapse them and fire the back-edge prematurely"
+    );
+    assert_ne!(
+        hash(&foo_of_a),
+        hash(&foo_of_b),
+        "Foo<A> and Foo<B> must hash distinctly (FxHashSet identity)"
+    );
+
+    // Property 2: positional ordering — `[Decl(A), Decl(B)]` ≠
+    // `[Decl(B), Decl(A)]`.
+    let pair_ab = NormalizedTypeArgs::from_normalized([
+        NormalizedTypeArg::Decl(id_a.clone()),
+        NormalizedTypeArg::Decl(id_b.clone()),
+    ]);
+    let pair_ba = NormalizedTypeArgs::from_normalized([
+        NormalizedTypeArg::Decl(id_b.clone()),
+        NormalizedTypeArg::Decl(id_a.clone()),
+    ]);
+    assert_ne!(
+        pair_ab, pair_ba,
+        "Cell<A, B> and Cell<B, A> MUST produce distinct cycle-guard \
+         keys — argument ORDER is part of identity per the docstring \
+         on NormalizedTypeArgs"
+    );
+
+    // Property 3: variant-level discrimination — Decl, Literal,
+    // AnonymousShape, and None must never collide on identity even
+    // when their underlying hashes happen to match. The discriminator
+    // tag inside the enum is what guarantees this.
+    let h0: u64 = 0;
+    let decl_only = NormalizedTypeArgs::from_normalized([NormalizedTypeArg::Decl(id_a.clone())]);
+    let literal_only = NormalizedTypeArgs::from_normalized([NormalizedTypeArg::Literal(h0)]);
+    let anon_only = NormalizedTypeArgs::from_normalized([NormalizedTypeArg::AnonymousShape(h0)]);
+    let none_only = NormalizedTypeArgs::from_normalized([NormalizedTypeArg::None]);
+    assert_ne!(decl_only, literal_only);
+    assert_ne!(decl_only, anon_only);
+    assert_ne!(decl_only, none_only);
+    assert_ne!(literal_only, anon_only);
+    assert_ne!(literal_only, none_only);
+    assert_ne!(anon_only, none_only);
+
+    // Property 4: cross-file discrimination — two `A` declarations in
+    // different files produce distinct DeclIdentities and therefore
+    // distinct NormalizedTypeArgs.
+    let same_name_diff_file =
+        NormalizedTypeArgs::from_normalized([NormalizedTypeArg::Decl(id_a_other_file)]);
+    assert_ne!(
+        decl_only, same_name_diff_file,
+        "Two `A` declarations in different files MUST not collide \
+         under bare-name keying — DeclIdentity carries canonical_id \
+         to keep them distinct"
+    );
+
+    // Sanity: identical arg lists produce identical keys (the cycle
+    // guard's positive case — re-entering Foo<A> with Foo<A> already
+    // on the active set fires the back-edge).
+    let foo_of_a_again = NormalizedTypeArgs::from_normalized([NormalizedTypeArg::Decl(id_a)]);
+    assert_eq!(foo_of_a, foo_of_a_again);
+    assert_eq!(hash(&foo_of_a), hash(&foo_of_a_again));
+}
+
 // ---------------------------------------------------------------------------
 // Concurrency cycle-guard: no self-await deadlock
 // ---------------------------------------------------------------------------

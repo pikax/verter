@@ -117,9 +117,11 @@ fn merge_projected_fields_by_name(
 ///    on the parser side; their projector results are only inspected
 ///    for diagnostic sink contributions.
 ///
-/// Per §7.5 silent-miss prevention, every `Recursive` / `Error`
-/// branch the projectors hit is appended to `diag_sink`, which the
-/// caller merges into `analysis.macro_expansion_diagnostics`.
+/// Silent-miss prevention: every `Recursive` / `Error` branch the
+/// projectors hit is appended to `diag_sink`, which the caller merges
+/// into `analysis.macro_expansion_diagnostics`. A projector must never
+/// silently return an empty surface on `QueryResult::Error` — that
+/// would be indistinguishable from a successful empty result.
 pub(crate) fn project_evaluated_types(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     file: &str,

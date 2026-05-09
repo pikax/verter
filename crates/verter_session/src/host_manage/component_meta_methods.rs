@@ -586,21 +586,20 @@ impl VerterHost {
                                 evaluated_types.define_slots.len(),
                             ),
                         );
-                        // §7.1 cutover: per-macro projectors are the
-                        // sole component-meta resolution path. Each
-                        // projector dispatches `ResolveMacroPayload`
-                        // + empty-path Shallow `ProjectPath`, raises
-                        // surface members, runs the bounded
-                        // fixed-point reducer
+                        // Per-macro projectors are the sole component-meta
+                        // resolution path. Each projector dispatches
+                        // `ResolveMacroPayload` + empty-path Shallow
+                        // `ProjectPath`, raises surface members, runs the
+                        // bounded fixed-point reducer
                         // (`materialize_component_meta_type_expr_until_stable`)
-                        // so nested operator chains collapse to
-                        // concrete leaves before publication, and
-                        // writes `Vec<ExpandedField>` into
-                        // `evaluated_types`. Errors / cycles emit
-                        // diagnostics into `synthesis_diagnostics`
-                        // per §7.5 silent-miss prevention (treated as
-                        // macro-expansion diagnostics on the
-                        // published analysis).
+                        // so nested operator chains collapse to concrete
+                        // leaves before publication, and writes
+                        // `Vec<ExpandedField>` into `evaluated_types`.
+                        // Recursive / Error branches emit diagnostics into
+                        // `synthesis_diagnostics` (silent-miss prevention:
+                        // they surface as macro-expansion diagnostics on
+                        // the published analysis rather than collapsing
+                        // to an empty success).
                         crate::meta_resolve::projectors::project_evaluated_types(
                             &mut query_engine,
                             canonical,
@@ -634,7 +633,6 @@ impl VerterHost {
                             materialize_component_meta_field_types(
                                 canonical,
                                 &snapshot,
-                                &eval_source,
                                 &parts.resolved_macros,
                                 &mut evaluated_types,
                                 &mut query_engine,

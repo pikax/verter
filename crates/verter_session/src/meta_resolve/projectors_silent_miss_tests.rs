@@ -1,4 +1,4 @@
-//! §7.5 silent-miss prevention tests for the per-macro projectors.
+//! Silent-miss prevention tests for the per-macro projectors.
 //!
 //! Each projector that resolves a macro payload through dispatch
 //! must publish a `MacroExpansionDiagnostics` envelope when

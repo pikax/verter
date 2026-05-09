@@ -400,11 +400,6 @@ pub static LOWERED_ROOT_CYCLE_FAST_PATH_HITS: AtomicU64 = AtomicU64::new(0);
 // `_NS` is the total wall-clock and `_CALLS` is the iteration count
 // reaching that block):
 
-/// Block 1: build `prop_member_routes` + `slot_binding_scope_hints`
-/// from `snapshot.macros` (one-shot before the props loop).
-pub static FIELD_PROP_ROUTES_BUILD_CALLS: AtomicU64 = AtomicU64::new(0);
-pub static FIELD_PROP_ROUTES_BUILD_NS: AtomicU64 = AtomicU64::new(0);
-
 /// Block 2: per-iteration preserve_raw check + indexed-access /
 /// terminal-scalar early-out + ComponentConfig theme variant fast
 /// path. Increments once per loop iteration.
@@ -580,8 +575,6 @@ pub fn reset_all() {
     MATERIALIZE_FIELD_TYPES_CALLS.store(0, Ordering::Relaxed);
     MATERIALIZE_FIELD_TYPES_NS.store(0, Ordering::Relaxed);
     // Loop 9 — inner-block sub-timers.
-    FIELD_PROP_ROUTES_BUILD_CALLS.store(0, Ordering::Relaxed);
-    FIELD_PROP_ROUTES_BUILD_NS.store(0, Ordering::Relaxed);
     FIELD_PROPS_PRESERVE_AND_EARLY_OUTS_CALLS.store(0, Ordering::Relaxed);
     FIELD_PROPS_PRESERVE_AND_EARLY_OUTS_NS.store(0, Ordering::Relaxed);
     FIELD_PROPS_RESCUE_FIELD_CALLS.store(0, Ordering::Relaxed);
@@ -657,8 +650,6 @@ pub fn dump_loop5_instrumentation_counters() -> String {
     let materialize_field_types_ns = MATERIALIZE_FIELD_TYPES_NS.load(Ordering::Relaxed);
 
     // Loop 9 — inner-block sub-timers.
-    let field_prop_routes_build_calls = FIELD_PROP_ROUTES_BUILD_CALLS.load(Ordering::Relaxed);
-    let field_prop_routes_build_ns = FIELD_PROP_ROUTES_BUILD_NS.load(Ordering::Relaxed);
     let field_props_preserve_and_early_outs_calls =
         FIELD_PROPS_PRESERVE_AND_EARLY_OUTS_CALLS.load(Ordering::Relaxed);
     let field_props_preserve_and_early_outs_ns =
@@ -743,8 +734,6 @@ pub fn dump_loop5_instrumentation_counters() -> String {
          \"APPEND_REGISTRY_ENTRIES_NS\": {append_registry_entries_ns},\n  \
          \"MATERIALIZE_FIELD_TYPES_CALLS\": {materialize_field_types_calls},\n  \
          \"MATERIALIZE_FIELD_TYPES_NS\": {materialize_field_types_ns},\n  \
-         \"FIELD_PROP_ROUTES_BUILD_CALLS\": {field_prop_routes_build_calls},\n  \
-         \"FIELD_PROP_ROUTES_BUILD_NS\": {field_prop_routes_build_ns},\n  \
          \"FIELD_PROPS_PRESERVE_AND_EARLY_OUTS_CALLS\": {field_props_preserve_and_early_outs_calls},\n  \
          \"FIELD_PROPS_PRESERVE_AND_EARLY_OUTS_NS\": {field_props_preserve_and_early_outs_ns},\n  \
          \"FIELD_PROPS_RESCUE_FIELD_CALLS\": {field_props_rescue_field_calls},\n  \
@@ -1001,8 +990,6 @@ mod tests {
             "APPEND_REGISTRY_ENTRIES_NS",
             "MATERIALIZE_FIELD_TYPES_CALLS",
             "MATERIALIZE_FIELD_TYPES_NS",
-            "FIELD_PROP_ROUTES_BUILD_CALLS",
-            "FIELD_PROP_ROUTES_BUILD_NS",
             "FIELD_PROPS_PRESERVE_AND_EARLY_OUTS_CALLS",
             "FIELD_PROPS_PRESERVE_AND_EARLY_OUTS_NS",
             "FIELD_PROPS_RESCUE_FIELD_CALLS",

@@ -810,7 +810,6 @@ pub(crate) fn lowered_preserve_package_backed_symbolic_refs(
 pub(crate) fn materialize_component_meta_field_types(
     scope_canonical_id: &str,
     snapshot: &FileAnalysisSnapshot,
-    eval_source: &str,
     resolved_macros: &[ResolvedMacroMeta],
     evaluated_types: &mut verter_semantic::analysis::type_expand::ExpandedComponentTypes,
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
@@ -1592,70 +1591,39 @@ pub(crate) fn materialize_component_meta_field_types(
         .then_some(replacement)
     }
 
-    let _loop9_routes_build = crate::loop5_instrumentation::TimerGuard::new(
-        &crate::loop5_instrumentation::FIELD_PROP_ROUTES_BUILD_CALLS,
-        &crate::loop5_instrumentation::FIELD_PROP_ROUTES_BUILD_NS,
-    );
-    let params =
-        verter_semantic::analysis::type_eval_build::collect_define_macro_type_params(eval_source);
-    let mut prop_member_routes = rustc_hash::FxHashMap::<
-        String,
-        Vec<verter_semantic::analysis::type_expr::TypeExpr>,
-    >::default();
+    // `slot_binding_scope_hints` carries `(slot.binding) -> declaration scope`
+    // pairs populated from `resolved.declaration.canonical_source` for
+    // every cross-file `defineSlots` macro binding. Read by the slot-binding
+    // rescue loop below to skip rescue when the binding originated from an
+    // imported helper type body.
     let mut slot_binding_scope_hints = rustc_hash::FxHashMap::<String, Vec<String>>::default();
-    let mut define_props_index = 0usize;
     for (macro_index, mac) in snapshot.macros.iter().enumerate() {
         if !mac.is_type_based {
             continue;
         }
-
-        match mac.kind {
-            verter_semantic::analysis::AnalyzedMacroKind::DefineProps => {
-                if let Some(lowered) = params.define_props.get(define_props_index) {
-                    let mut prop_names = rustc_hash::FxHashSet::<String>::default();
-                    prop_names.extend(mac.prop_fields.iter().map(|field| field.name.clone()));
-                    for resolved in resolved_macros.iter().filter(|resolved| {
-                        resolved.macro_index == macro_index
-                            && resolved.macro_kind
-                                == verter_semantic::analysis::AnalyzedMacroKind::DefineProps
-                    }) {
-                        prop_names.extend(resolved.props.iter().map(|field| field.name.clone()));
-                    }
-                    for prop_name in prop_names {
-                        prop_member_routes
-                            .entry(prop_name)
-                            .or_default()
-                            .push(lowered.clone());
-                    }
-                }
-                define_props_index += 1;
+        if mac.kind != verter_semantic::analysis::AnalyzedMacroKind::DefineSlots {
+            continue;
+        }
+        for resolved in resolved_macros.iter().filter(|resolved| {
+            resolved.macro_index == macro_index
+                && resolved.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineSlots
+        }) {
+            let declaration_scope = resolved.declaration.canonical_source.as_str();
+            if declaration_scope.is_empty() {
+                continue;
             }
-            verter_semantic::analysis::AnalyzedMacroKind::DefineSlots => {
-                for resolved in resolved_macros.iter().filter(|resolved| {
-                    resolved.macro_index == macro_index
-                        && resolved.macro_kind
-                            == verter_semantic::analysis::AnalyzedMacroKind::DefineSlots
-                }) {
-                    let declaration_scope = resolved.declaration.canonical_source.as_str();
-                    if declaration_scope.is_empty() {
-                        continue;
-                    }
-                    for slot in &resolved.slots {
-                        for binding in &slot.bindings {
-                            let entry = slot_binding_scope_hints
-                                .entry(format!("{}.{}", slot.name, binding.name))
-                                .or_default();
-                            if !entry.iter().any(|scope| scope == declaration_scope) {
-                                entry.push(declaration_scope.to_string());
-                            }
-                        }
+            for slot in &resolved.slots {
+                for binding in &slot.bindings {
+                    let entry = slot_binding_scope_hints
+                        .entry(format!("{}.{}", slot.name, binding.name))
+                        .or_default();
+                    if !entry.iter().any(|scope| scope == declaration_scope) {
+                        entry.push(declaration_scope.to_string());
                     }
                 }
             }
-            _ => {}
         }
     }
-    drop(_loop9_routes_build);
 
     for field in &mut evaluated_types.props {
         // Loop-9 block 2: preserve_raw + early-out predicates.

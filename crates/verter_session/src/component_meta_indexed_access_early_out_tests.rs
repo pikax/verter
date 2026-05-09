@@ -4,9 +4,10 @@
 //! whose raw type is an `IndexedAccess` route AND whose published
 //! surface is already terminal (a scalar / literal-union / `any |
 //! scalars`, or a non-empty object surface for `slots`-routes), the
-//! member-route projection cannot improve the result. The Phase 6
-//! early-out short-circuits the field loop in those cases, skipping
-//! both the `prop_member_routes` loop and the routed-surface block.
+//! member-route projection cannot improve the result. The early-out
+//! short-circuits the field loop in those cases, skipping the
+//! routed-surface block (which would otherwise increment
+//! `MEMBER_ROUTE_CALLS_COUNTER`).
 //!
 //! These tests use the per-request `CaptureToken` to discriminate
 //! between the early-out firing (positive case, counter == 0) and the
