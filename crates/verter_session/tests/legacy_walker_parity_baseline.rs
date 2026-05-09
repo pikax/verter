@@ -144,11 +144,6 @@ enum ResolvedValueKind<'a> {
     SymbolicRef {
         name: &'a str,
     },
-    /// TS mapped-type result (`Partial<T>`, `Required<T>`, etc.) —
-    /// post-§7.3 cutover the dispatch path resolves these utility
-    /// types into their `TypeExpr::Mapped` form rather than leaving
-    /// them as a symbolic outer Ref.
-    Mapped,
     /// Resolution did not produce a concrete value type — typically
     /// because the fixture exercises a code path that needs
     /// session-side resolver state not present in the hermetic
@@ -491,15 +486,6 @@ fn assert_parity(resolution: &ResolvedComponentMetaState, assertion: ParityAsser
                 "{}: Ref name mismatch",
                 assertion.fixture
             );
-        }
-        ResolvedValueKind::Mapped => {
-            if !matches!(value_ty, TypeExpr::Mapped { .. }) {
-                panic!(
-                    "{}: expected Mapped; got kind={}",
-                    assertion.fixture,
-                    typeexpr_kind(value_ty)
-                );
-            }
         }
     }
 }
@@ -952,10 +938,13 @@ fn expected_assertions_per_fixture() -> Vec<ParityAssertion<'static>> {
         },
         // 09: Bar resolves as Unknown(semanticMiss) under hermetic
         // AuditedRequest — the import-target lookup doesn't kick in
-        // without full session-side state.
+        // without full session-side state. Architectural contract:
+        // imported alias names stay shallow at the published surface.
+        // The published prop type carries the bare `Ref { name: "Bar" }`
+        // and consumers re-resolve through the registry.
         ParityAssertion {
             fixture: "09_decl_ref_to_local_alias",
-            expected_value_kind: ResolvedValueKind::Unresolved,
+            expected_value_kind: ResolvedValueKind::SymbolicRef { name: "Bar" },
         },
         // 10: Pick<Foo, 'a'> -> Object {a: String} only.
         // Discriminator: must_not_contain b, c; exactly 1 named member.
@@ -1012,17 +1001,45 @@ fn expected_assertions_per_fixture() -> Vec<ParityAssertion<'static>> {
             fixture: "13_indexed_access_string_literal",
             expected_value_kind: ResolvedValueKind::Primitive("String"),
         },
-        // 14: Partial<Foo> — post-§7.3 cutover the dispatch path
-        // resolves the TS mapped type, producing a `TypeExpr::Mapped`
-        // shape rather than the legacy walker's symbolic `Ref(Partial)`.
+        // 14: Partial<Foo> — projector path enumerates Foo's keys and
+        // publishes them as an Object surface. In the hermetic
+        // AuditedRequest env the per-key value resolution does not
+        // route through the full session-side resolver state, so
+        // each member's value-type stays `Unknown` (the dispatch sees
+        // the Mapped's `Foo[K]` step but cannot expand Foo without the
+        // session's prepared declaration cache). The Object-level
+        // optional/required structure IS authoritative — Partial
+        // marks every key optional.
         ParityAssertion {
             fixture: "14_partial_t_makes_all_members_optional",
-            expected_value_kind: ResolvedValueKind::Mapped,
+            expected_value_kind: ResolvedValueKind::Object {
+                must_contain: &["a", "b"],
+                must_not_contain: &[],
+                member_kinds: &[("a", "Unknown"), ("b", "Unknown")],
+                optional_members: &["a", "b"],
+                required_members: &[],
+                expected_named_member_count: 2,
+                expected_call_signature_count: 0,
+                expected_construct_signature_count: 0,
+                expected_index_signature_count: 0,
+            },
         },
-        // 15: Required<Foo> — same post-cutover resolution to Mapped.
+        // 15: Required<Foo> — same per-key materialisation; every
+        // member becomes required (Required's contract). The
+        // member-value resolution stays Unknown in the hermetic env.
         ParityAssertion {
             fixture: "15_required_t_makes_all_members_required",
-            expected_value_kind: ResolvedValueKind::Mapped,
+            expected_value_kind: ResolvedValueKind::Object {
+                must_contain: &["a", "b"],
+                must_not_contain: &[],
+                member_kinds: &[("a", "Unknown"), ("b", "Unknown")],
+                optional_members: &[],
+                required_members: &["a", "b"],
+                expected_named_member_count: 2,
+                expected_call_signature_count: 0,
+                expected_construct_signature_count: 0,
+                expected_index_signature_count: 0,
+            },
         },
         // 16: typeof exotic — produces no evaluated_types in hermetic
         // env.

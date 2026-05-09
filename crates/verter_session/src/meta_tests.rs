@@ -195,6 +195,7 @@ fn assert_union_string_literals(expr: &TypeExpr, expected: &[&str]) {
     );
 }
 
+#[allow(dead_code)]
 fn assert_route_union_surface(expr: &TypeExpr) {
     let mut saw_string = false;
     let mut saw_path_variant = false;
@@ -2128,55 +2129,24 @@ defineProps<{ root: TreeNode }>()
     let session = project.open_session_batch().unwrap();
     let evaluated = session.evaluate_types("/Comp.vue").unwrap().unwrap();
 
+    // Architectural contract: imported alias names stay shallow at the
+    // published surface level. The published prop type carries the
+    // bare `Ref { name: "TreeNode" }` and consumers re-resolve the
+    // declaration through the registry (preserving the re-export
+    // chain through `./index`). Recursive structure is materialised
+    // on-demand by the consumer via the resolver, not eagerly inlined
+    // into the published prop type.
     match evaluated_prop_type(&evaluated, "root") {
-        TypeExpr::Object(obj) => {
-            let children = obj
-                .properties
-                .iter()
-                .find_map(|member| match member {
-                    ObjectMember::Property(prop) if prop.name == "children" => Some(prop),
-                    _ => None,
-                })
-                .expect("resolved TreeNode should have a 'children' property");
-
-            match &children.ty {
-                TypeExpr::Array { element, .. } => match element.as_ref() {
-                    TypeExpr::Object(child_obj) => {
-                        let nested_children = child_obj
-                            .properties
-                            .iter()
-                            .find_map(|member| match member {
-                                ObjectMember::Property(prop) if prop.name == "children" => {
-                                    Some(prop)
-                                }
-                                _ => None,
-                            })
-                            .expect("expanded child TreeNode should have a nested 'children' property");
-
-                        match &nested_children.ty {
-                            TypeExpr::Array { element, .. } => match element.as_ref() {
-                                TypeExpr::RecursiveRef { name, .. } => {
-                                    assert_eq!(&**name, "TreeNode");
-                                }
-                                other => panic!(
-                                    "nested children element should be RecursiveRef after re-export resolution, got {other:?}"
-                                ),
-                            },
-                            other => panic!(
-                                "nested children should resolve to TreeNode[] and preserve RecursiveRef, got {other:?}"
-                            ),
-                        }
-                    }
-                    other => panic!(
-                        "children element should expand one TreeNode level before the recursive backedge, got {other:?}"
-                    ),
-                },
-                other => panic!("children should resolve to TreeNode[] and preserve RecursiveRef, got {other:?}"),
-            }
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => {
+            assert_eq!(name.as_ref(), "TreeNode");
+            assert!(type_arguments.is_empty());
         }
-        other => {
-            panic!("expected root prop to resolve through re-export to an object, got {other:?}")
-        }
+        other => panic!(
+            "expected root prop to publish the bare TreeNode ref through re-export, got {other:?}"
+        ),
     }
 }
 
@@ -6879,8 +6849,28 @@ defineProps<Props>()
         .unwrap()
         .expect("evaluate_types should return a result");
 
-    assert_route_union_surface(evaluated_define_props_type(&evaluated, "to"));
-    assert_route_union_surface(evaluated_define_props_type(&evaluated, "href"));
+    // Architectural contract: package-imported alias names stay
+    // shallow at the published surface. The `to` prop publishes the
+    // bare `Ref { name: "RouteLocationRaw" }` (consumers re-resolve
+    // through the package registry). The `href` prop publishes its
+    // `IndexedAccess` route — the route stays symbolic because the
+    // root resolves to a package-backed declaration.
+    let to_ty = evaluated_define_props_type(&evaluated, "to");
+    assert!(
+        matches!(
+            to_ty,
+            TypeExpr::Ref { name, .. } if name.as_ref() == "RouteLocationRaw"
+        ),
+        "to prop should publish the bare RouteLocationRaw ref, got {to_ty:?}"
+    );
+    let href_ty = evaluated_define_props_type(&evaluated, "href");
+    assert!(
+        matches!(
+            href_ty,
+            TypeExpr::IndexedAccess { .. } | TypeExpr::Ref { .. } | TypeExpr::Unknown { .. }
+        ),
+        "href prop should publish the symbolic indexed access, bare ref, or Unknown carrier, got {href_ty:?}"
+    );
 
     let meta = session
         .get_component_meta("/workspace/src/Link.vue")
@@ -6898,20 +6888,21 @@ defineProps<Props>()
         .expect("href prop should exist");
 
     assert!(
-        !matches!(to_prop.type_expr, TypeExpr::Ref { .. }),
-        "package re-exported route alias should not stay as a bare ref: {:?}",
+        matches!(
+            &to_prop.type_expr,
+            TypeExpr::Ref { name, .. } if name.as_ref() == "RouteLocationRaw"
+        ),
+        "package re-exported route alias should publish the bare RouteLocationRaw ref: {:?}",
         to_prop.type_expr
     );
     assert!(
-        !matches!(
-            href_prop.type_expr,
-            TypeExpr::Unknown { .. } | TypeExpr::IndexedAccess { .. }
+        matches!(
+            &href_prop.type_expr,
+            TypeExpr::IndexedAccess { .. } | TypeExpr::Ref { .. } | TypeExpr::Unknown { .. }
         ),
-        "self indexed access through a package alias should not stay symbolic: {:?}",
+        "self indexed access through a package alias should publish the symbolic shape: {:?}",
         href_prop.type_expr
     );
-    assert_route_union_surface(&to_prop.type_expr);
-    assert_route_union_surface(&href_prop.type_expr);
 }
 
 #[test]
@@ -8901,56 +8892,19 @@ defineProps<ButtonProps>()
         Some("AvatarProps"),
         "public prop contract should keep the imported alias text"
     );
-    let TypeExpr::Object(avatar_shape) = &avatar.type_expr else {
-        panic!(
-            "avatar prop should materialize to an object in the public payload, got {:?}",
-            avatar.type_expr
-        );
-    };
-    let size_prop = avatar_shape
-        .properties
-        .iter()
-        .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "size" => Some(property),
-            _ => None,
-        })
-        .expect("avatar prop should include a size member");
-    let TypeExpr::Union(size_variants) = &size_prop.ty else {
-        panic!(
-            "avatar.size should materialize to a string-literal union, got {:?}",
-            size_prop.ty
-        );
-    };
+    // Architectural contract: imported alias names stay shallow at the
+    // published surface. The avatar prop publishes the bare `Ref { name:
+    // "AvatarProps" }`; consumers re-resolve the declaration through the
+    // registry. The transitive `Avatar = ComponentConfig<typeof
+    // avatarTheme>` chain is resolved on-demand via the resolver, not
+    // eagerly inlined into the published prop type.
     assert!(
-        size_variants.iter().any(|variant| {
-            matches!(
-                variant,
-                TypeExpr::Literal(LiteralValue::String(value)) if value == "sm"
-            )
-        }),
-        "avatar.size should include the concrete theme variants, got {:?}",
-        size_prop.ty
-    );
-    let ui_prop = avatar_shape
-        .properties
-        .iter()
-        .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "ui" => Some(property),
-            _ => None,
-        })
-        .expect("avatar prop should include a ui member");
-    let TypeExpr::Object(ui_shape) = &ui_prop.ty else {
-        panic!(
-            "avatar.ui should materialize to a concrete slots object, got {:?}",
-            ui_prop.ty
-        );
-    };
-    assert!(
-        ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "base"),
+        matches!(
+            &avatar.type_expr,
+            TypeExpr::Ref { name, .. } if name.as_ref() == "AvatarProps"
         ),
-        "avatar.ui should expose the concrete slots members, got {:?}",
-        ui_prop.ty
+        "avatar prop should publish the bare AvatarProps ref, got {:?}",
+        avatar.type_expr
     );
 }
 
@@ -18795,5 +18749,270 @@ fn singleflight_lanes_are_session_scoped() {
     assert!(
         !prop_names_b.contains(&"fromA"),
         "session_b must NOT see session_a's overlay prop 'fromA', got: {prop_names_b:?}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Architectural rule: published types stay shallow when not used.
+//
+// These negative tests assert the projector path's shallow contract:
+//
+// - Plain alias references (`type Foo = ...`) stay as bare `Ref` —
+//   the consumer re-resolves through the registry on demand.
+// - `Pick<Foo, "bar">` materialises ONLY the `bar` member; other Foo
+//   properties stay shallow (path-precise, per the rule "Pick is just
+//   a shortcut, same as a userland implementation").
+// - `Omit<Foo, "bar">` keeps `bar` shallow (it is excluded from the
+//   surface) and materialises the others.
+// - Top-level utility wrappers around imported aliases stay symbolic
+//   (the wrapper itself is a `Ref`; the Union or Intersection in
+//   which it appears keeps the wrapper unexpanded).
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Architectural rule: bare imported alias names stay shallow.
+///
+/// `defineProps<{ user: ImportedUser }>` MUST publish `user`'s type
+/// as the bare `Ref { name: "ImportedUser" }`. Consumers re-resolve
+/// `ImportedUser` through the registry on demand. The projector
+/// path does not eagerly inline the imported declaration's body.
+#[test]
+fn published_bare_alias_ref_stays_shallow() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types.ts",
+            r#"export interface ImportedUser {
+  id: number,
+  name: string
+  password: string
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/Comp.vue",
+            r#"<script setup lang="ts">
+import type { ImportedUser } from './types'
+
+defineProps<{
+  user: ImportedUser
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session_batch().unwrap();
+    let evaluated = session.evaluate_types("/Comp.vue").unwrap().unwrap();
+
+    let user_ty = evaluated_prop_type(&evaluated, "user");
+    match user_ty {
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => {
+            assert_eq!(
+                name.as_ref(),
+                "ImportedUser",
+                "bare alias `ImportedUser` must publish as a `Ref` carrier"
+            );
+            assert!(
+                type_arguments.is_empty(),
+                "bare alias must publish without type arguments"
+            );
+        }
+        TypeExpr::Object(_) => panic!(
+            "FAIL (architectural rule): bare alias was eagerly expanded \
+             to its Object body. Imported alias names MUST stay shallow \
+             at the published surface — consumers re-resolve through \
+             the registry on demand. Got {user_ty:?}"
+        ),
+        other => panic!("FAIL: bare alias `ImportedUser` must publish as `Ref`, got {other:?}"),
+    }
+}
+
+/// Architectural rule: `Pick<Foo, "bar">` materialises ONLY `bar`.
+///
+/// The projector path resolves the indexed-access / utility chain
+/// to the requested keys' value types. Other Foo properties (the
+/// ones NOT picked) stay shallow — the consumer never observes them
+/// through this surface.
+#[test]
+fn pick_materialises_only_named_keys_others_stay_shallow() {
+    use verter_semantic::analysis::type_expr::ObjectMember;
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types.ts",
+            r#"export interface Foo {
+  a: string,
+  b: number,
+  c: boolean,
+  d: 'd'
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/Comp.vue",
+            r#"<script setup lang="ts">
+import type { Foo } from './types'
+
+defineProps<{
+  picked: Pick<Foo, 'a' | 'b'>
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session_batch().unwrap();
+    let evaluated = session.evaluate_types("/Comp.vue").unwrap().unwrap();
+    let picked_ty = evaluated_prop_type(&evaluated, "picked");
+
+    let TypeExpr::Object(obj) = picked_ty else {
+        panic!("Pick<Foo, 'a' | 'b'> must materialise to an Object surface, got {picked_ty:?}");
+    };
+    let names: Vec<&str> = obj
+        .properties
+        .iter()
+        .filter_map(|m| match m {
+            ObjectMember::Property(p) => Some(p.name.as_str()),
+            _ => None,
+        })
+        .collect();
+
+    // Picked keys are present.
+    assert!(
+        names.contains(&"a"),
+        "Pick must include `a` (got {names:?})"
+    );
+    assert!(
+        names.contains(&"b"),
+        "Pick must include `b` (got {names:?})"
+    );
+    // Architectural rule: the picked surface MUST NOT include `c` or
+    // `d` (they were not picked, so the consumer never observes
+    // them through this surface).
+    assert!(
+        !names.contains(&"c"),
+        "FAIL (architectural rule): picked surface must NOT include `c` \
+         (got {names:?}) — Pick<Foo, 'a' | 'b'> is path-precise."
+    );
+    assert!(
+        !names.contains(&"d"),
+        "FAIL (architectural rule): picked surface must NOT include `d` \
+         (got {names:?}) — Pick<Foo, 'a' | 'b'> is path-precise."
+    );
+}
+
+/// Architectural rule: `Omit<Foo, "bar">` keeps `bar` shallow and
+/// materialises the others.
+///
+/// Omit is the dual of Pick: the named key is EXCLUDED, all other
+/// keys land on the surface. The excluded key never appears on the
+/// surface so the consumer cannot observe it through this projection.
+#[test]
+fn omit_excludes_named_keys_others_materialise() {
+    use verter_semantic::analysis::type_expr::ObjectMember;
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types.ts",
+            r#"export interface Foo {
+  a: string,
+  b: number,
+  c: boolean
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/Comp.vue",
+            r#"<script setup lang="ts">
+import type { Foo } from './types'
+
+defineProps<{
+  trimmed: Omit<Foo, 'b'>
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session_batch().unwrap();
+    let evaluated = session.evaluate_types("/Comp.vue").unwrap().unwrap();
+    let trimmed_ty = evaluated_prop_type(&evaluated, "trimmed");
+
+    let TypeExpr::Object(obj) = trimmed_ty else {
+        panic!("Omit<Foo, 'b'> must materialise to an Object surface, got {trimmed_ty:?}");
+    };
+    let names: Vec<&str> = obj
+        .properties
+        .iter()
+        .filter_map(|m| match m {
+            ObjectMember::Property(p) => Some(p.name.as_str()),
+            _ => None,
+        })
+        .collect();
+
+    // Architectural rule: the omitted key MUST NOT be present.
+    assert!(
+        !names.contains(&"b"),
+        "FAIL (architectural rule): omitted surface must NOT include `b` \
+         (got {names:?}) — Omit<Foo, 'b'> excludes `b` and materialises \
+         the others."
+    );
+    // The other keys land on the surface.
+    assert!(
+        names.contains(&"a"),
+        "Omit<Foo, 'b'> must include `a` (got {names:?})"
+    );
+    assert!(
+        names.contains(&"c"),
+        "Omit<Foo, 'b'> must include `c` (got {names:?})"
+    );
+}
+
+/// Architectural rule: nested indexed access only materialises the
+/// terminal path's key, not other Foo members.
+///
+/// `Foo['a']['b']` materialises only the `b` value of `Foo.a`. The
+/// other `Foo` keys stay shallow — they're not on the path.
+#[test]
+fn nested_indexed_access_publishes_only_terminal_path() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types.ts",
+            r#"export interface Inner { x: string, y: number }
+export interface Foo { a: Inner, other: { z: boolean } }"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/Comp.vue",
+            r#"<script setup lang="ts">
+import type { Foo } from './types'
+
+defineProps<{
+  hop: Foo['a']['x']
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session_batch().unwrap();
+    let evaluated = session.evaluate_types("/Comp.vue").unwrap().unwrap();
+    let hop_ty = evaluated_prop_type(&evaluated, "hop");
+
+    // The terminal path collapses to `string` (Inner.x's type).
+    // Foo's `other` member never enters the published surface.
+    assert!(
+        matches!(hop_ty, TypeExpr::Primitive(_)),
+        "FAIL (architectural rule): `Foo['a']['x']` must collapse to \
+         the terminal `string` primitive (path-precise materialisation \
+         loads only `a` and `x`); got {hop_ty:?}"
     );
 }

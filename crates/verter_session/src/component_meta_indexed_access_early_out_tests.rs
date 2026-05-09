@@ -1,36 +1,34 @@
-//! Indexed-access early-out tests (Issue #5).
+//! Indexed-access early-out characterisation tests.
 //!
-//! When `materialize_component_meta_field_types` evaluates a field
-//! whose raw type is an `IndexedAccess` route AND whose published
-//! surface is already terminal (a scalar / literal-union / `any |
-//! scalars`, or a non-empty object surface for `slots`-routes), the
-//! member-route projection cannot improve the result. The early-out
-//! short-circuits the field loop in those cases, skipping the
-//! routed-surface block (which would otherwise increment
-//! `MEMBER_ROUTE_CALLS_COUNTER`).
+//! Architectural contract (post-rescue cutover): published prop types
+//! stay shallow when not used. The projector path publishes the
+//! symbolic carrier (bare `Ref`, `IndexedAccess` chain, or terminal
+//! scalar) without running the eager member-route projection that
+//! the rescue cascade previously drove. These tests characterise the
+//! shallow contract for indexed-access shapes:
 //!
-//! These tests use the per-request `CaptureToken` to discriminate
-//! between the early-out firing (positive case, counter == 0) and the
-//! slow path running (counterfixtures, counter > 0). Per the
-//! sidecar's §6.3 predicate contract:
+//! - Terminal scalar surfaces (`IconProps['name']` where
+//!   `name?: string`) publish the scalar directly, so the projector
+//!   reduction has nothing to expand and the published prop carries
+//!   the terminal `string | undefined` (or the symbolic carrier the
+//!   projector picks under the symbolic-route preservation contract).
 //!
-//! - Positive cases:
-//!   - `IconProps['name']` where `name?: string` → terminal scalar
-//!   - `Button['slots']` where `slots` is a non-empty object surface
-//!     (members.len() >= 1, no never-only) → non-empty object surface
+//! - Non-empty object-surface routes (`Button['slots']` where
+//!   `slots: ButtonSlots`) publish the symbolic indexed-access; the
+//!   slots-route preservation rule keeps the carrier visible for
+//!   downstream consumers.
 //!
-//! - Counterfixtures (slow path runs, counter > 0):
-//!   - Conditional indexed root
-//!   - Recursive indexed access
-//!   - Mapped indexed root
-//!   - `Record<K, never>` non-object-surface published shape
+//! - Counterfixtures exercise shapes where reduction may or may not
+//!   produce structural improvement (conditional roots, recursive
+//!   indexed access through Tree-shaped carriers, mapped indexed
+//!   roots, `Record<K, never>` slots) — these characterise the
+//!   resolver's behaviour without panicking and without depending on
+//!   counters that the rescue cascade owned.
 
 use std::sync::Arc;
 
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
-use crate::capture_token::CaptureToken;
-use crate::meta_resolve::MEMBER_ROUTE_CALLS_COUNTER;
 use crate::types::{HostConfig, ProjectionMode};
 use crate::VerterHost;
 
@@ -76,17 +74,14 @@ fn make_project_config(root: &str) -> verter_workspace::VfsProjectConfig {
     }
 }
 
-/// Drive the component-meta resolution path that exercises
-/// `materialize_component_meta_field_types`, returning the number of
-/// times the member-route projection actually fired during this
-/// resolution. Captured via a per-request `CaptureToken` so parallel
-/// tests cannot pollute each other.
-fn member_route_calls_for(host: &Arc<VerterHost>, canonical: &str) -> u64 {
-    let guard = CaptureToken::start_for_query("indexed_access_early_out");
+/// Drive the component-meta resolution path and return successfully —
+/// asserting nothing crashes and the request can be re-issued in
+/// `Expanded` mode. The structural assertions live in the per-fixture
+/// tests below and inspect the published `props[..].type_expr`
+/// directly.
+fn drive_resolution(host: &Arc<VerterHost>, canonical: &str) {
     let _ = host.get_component_meta(canonical);
     let _ = host.resolve_component_meta(canonical, ProjectionMode::Expanded);
-    let snapshot = guard.end();
-    snapshot.counter(MEMBER_ROUTE_CALLS_COUNTER)
 }
 
 // ── Positive #1: IconProps['name'] terminal-scalar early-out ──
@@ -108,11 +103,10 @@ defineProps<{
 /// Positive case: `IconProps['name']` where `name?: string`. The
 /// published surface evaluates to `string | undefined` (terminal
 /// scalar). The projector publishes the terminal scalar through
-/// `dispatch.execute_read`, with the rescue path
-/// (materialize_component_meta_field_types) running as a secondary
-/// pass. The semantic invariant is that the published prop is
-/// correctly identified as `IconProps['name']` (the prop is produced
-/// even though raw_type is an indexed access).
+/// `dispatch.execute_read`. The semantic invariant is that the
+/// published prop is correctly identified as `IconProps['name']`
+/// (the prop is produced even though raw_type is an indexed
+/// access).
 #[test]
 fn concrete_scalar_props_skip_raw_indexed_access_materialization() {
     let host = build_workspace_host(&[
@@ -154,24 +148,57 @@ defineProps<{
 "#;
 
 /// Positive case: `Button['slots']` where `slots: ButtonSlots` is a
-/// non-empty object surface (`{ default?: ..., prepend?: ... }`). The
-/// early-out MUST fire — the member route would re-derive the same
-/// object surface through the registry.
+/// non-empty object surface (`{ default?: ..., prepend?: ... }`).
+///
+/// Architectural contract: path-precise materialisation. Indexed
+/// access through a workspace-owned alias loads ONLY the indexed
+/// path's terminal value (`Button.slots` here, expanded to its
+/// `ButtonSlots` object). Other members of `Button` stay shallow —
+/// the consumer never observes them through this surface.
 #[test]
 fn concrete_slots_object_props_skip_define_props_member_route_projection() {
+    use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+
     let host = build_workspace_host(&[
         ("/workspace/src/button-types.ts", POSITIVE_BUTTON_TS),
         ("/workspace/src/Button.vue", POSITIVE_BUTTON_VUE),
     ]);
 
-    let calls = member_route_calls_for(&host, "/workspace/src/Button.vue");
+    let meta = host
+        .get_component_meta("/workspace/src/Button.vue")
+        .expect("getComponentMeta must succeed for Button");
+    let ui_prop = meta
+        .props
+        .iter()
+        .find(|p| p.name == "ui")
+        .expect("Button's defineProps publishes the `ui` prop");
 
-    assert_eq!(
-        calls, 0,
-        "Issue #5: when raw is `Button['slots']` and the published \
-         surface is already a non-empty object surface (members.len() \
-         >= 1, no never-only), the slots-route early-out MUST fire — \
-         `member_route_calls` must be 0; got {calls}",
+    // The indexed path Button['slots'] resolves to the ButtonSlots
+    // object surface (default + prepend members).
+    let TypeExpr::Object(slots_obj) = &ui_prop.type_expr else {
+        panic!(
+            "ui prop's published type should be an object surface from \
+             `Button['slots']`, got {:?}",
+            ui_prop.type_expr
+        );
+    };
+    let slot_names: Vec<&str> = slots_obj
+        .properties
+        .iter()
+        .filter_map(|m| match m {
+            ObjectMember::Property(p) => Some(p.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        slot_names.contains(&"default"),
+        "Button['slots'] should expose the `default` slot member \
+         (got {slot_names:?})"
+    );
+    assert!(
+        slot_names.contains(&"prepend"),
+        "Button['slots'] should expose the `prepend` slot member \
+         (got {slot_names:?})"
     );
 }
 
@@ -205,7 +232,7 @@ fn conditional_indexed_root_takes_slow_path() {
     // produce the result through a different branch — but the
     // early-out MUST NOT have fired. Since the published surface is
     // not terminal scalar (it's an indexed-access through a conditional
-    // root), the predicate's `type_expr_is_terminal_scalar_surface`
+    // root), the predicate's `terminal-scalar-surface predicate`
     // returns false and the early-out is bypassed.
     //
     // We verify by negative: the test simply confirms the resolution
@@ -213,7 +240,7 @@ fn conditional_indexed_root_takes_slow_path() {
     // conditional roots as terminal would silently lose the conditional
     // distribution — covered by the absence of an early-out check on
     // conditional shapes.
-    let _ = member_route_calls_for(&host, "/workspace/src/Cond.vue");
+    drive_resolution(&host, "/workspace/src/Cond.vue");
 }
 
 // ── Counterfixture #2: recursive indexed access takes slow path ──
@@ -235,7 +262,7 @@ defineProps<{
 
 /// Counterfixture: `Tree['child']['leaf']` where `child: Tree` is a
 /// recursive ref. The early-out predicate's
-/// `type_expr_is_terminal_scalar_surface` matches `string` (the
+/// `terminal-scalar-surface predicate` matches `string` (the
 /// terminal projection), but the indexed-access route walks through a
 /// recursive intermediate. The cycle-guard inside dispatch prevents
 /// runaway recursion; the test asserts the resolution terminates
@@ -247,7 +274,7 @@ fn recursive_indexed_access_takes_slow_path() {
         ("/workspace/src/Branch.vue", CF_RECURSIVE_VUE),
     ]);
 
-    let _ = member_route_calls_for(&host, "/workspace/src/Branch.vue");
+    drive_resolution(&host, "/workspace/src/Branch.vue");
 }
 
 // ── Counterfixture #3: mapped indexed root takes slow path ──
@@ -279,7 +306,7 @@ fn mapped_indexed_root_takes_slow_path() {
         ("/workspace/src/Map.vue", CF_MAPPED_VUE),
     ]);
 
-    let _ = member_route_calls_for(&host, "/workspace/src/Map.vue");
+    drive_resolution(&host, "/workspace/src/Map.vue");
 }
 
 // ── Counterfixture #4: Record<K, never> non-object-surface ──
@@ -310,7 +337,7 @@ fn record_k_never_slots_takes_slow_path() {
         ("/workspace/src/Empty.vue", CF_RECORD_NEVER_VUE),
     ]);
 
-    let _ = member_route_calls_for(&host, "/workspace/src/Empty.vue");
+    drive_resolution(&host, "/workspace/src/Empty.vue");
 }
 
 // ── Invalidation: editing the indexed-access root re-runs the rescue ──

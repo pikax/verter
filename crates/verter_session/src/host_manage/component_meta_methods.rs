@@ -45,8 +45,7 @@ use crate::meta_resolve::{
 };
 use crate::meta_resolve::{
     collect_type_expr_ref_names, lowered_preserve_package_backed_symbolic_refs,
-    materialize_component_meta_field_types, materialize_component_meta_type_expr_until_stable,
-    produce_macro_object_shapes_for_purpose,
+    materialize_component_meta_type_expr_until_stable, produce_macro_object_shapes_for_purpose,
 };
 use crate::meta_resolve::{
     drain_dispatch_dep_signature_accumulator, reset_dispatch_dep_signature_accumulator,
@@ -618,26 +617,11 @@ impl VerterHost {
                             &mut synthesis_diagnostics,
                         );
                         synthesis_should_suppress |= result.should_suppress;
-                        {
-                            component_meta_trace_custom!(
-                                "materialize_component_meta_field_types",
-                                format!(
-                                    "owner={} props={} events={} slot_bindings={} bindings={}",
-                                    canonical,
-                                    evaluated_types.props.len(),
-                                    evaluated_types.emits.len(),
-                                    evaluated_types.slot_bindings.len(),
-                                    evaluated_types.bindings.len(),
-                                ),
-                            );
-                            materialize_component_meta_field_types(
-                                canonical,
-                                &snapshot,
-                                &parts.resolved_macros,
-                                &mut evaluated_types,
-                                &mut query_engine,
-                            );
-                        }
+                        crate::meta_resolve::projectors::reduce_published_field_types(
+                            canonical,
+                            &mut evaluated_types,
+                            &mut query_engine,
+                        );
                         parts.evaluated_types = Some(evaluated_types);
                     }
                 }

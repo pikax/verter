@@ -18,7 +18,7 @@
 | `choose_less_symbolic_component_meta_type_expr` | 251 | 142.16 ms | 209.45 ms | 35.68 s | 65.37% |
 | `compute_component_meta_state_inner` | 7 | 2.60 s | 8.46 s | 18.20 s | 33.34% |
 | the legacy per-member materialiser | 123 | 112.03 ms | 149.29 ms | 13.78 s | 25.24% |
-| `materialize_component_meta_field_types` | 7 | 286.14 ms | 961.54 ms | 2.00 s | 3.66% |
+| the per-field rescue cascade driver (since retired) | 7 | 286.14 ms | 961.54 ms | 2.00 s | 3.66% |
 | `produce_macro_object_shapes_for_purpose` | 7 | 158.87 ms | 442.50 ms | 1.11 s | 2.03% |
 | `append_component_meta_registry_entries` | 6 | 144.21 ms | 251.13 ms | 865 ms | 1.58% |
 

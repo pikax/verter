@@ -123,6 +123,23 @@ Key rules: `inheritAttrs: false` → no inherited surface. Single native root �
 
 See `/component-meta` skill for the full semantic rules, public contract, authority chain, and key files.
 
+### Component-Meta Shallow-By-Default Rule (CRITICAL)
+
+Types and properties are ALWAYS published shallow at the projector surface UNLESS the consumer explicitly walks the path. This is the single architectural invariant the projector pipeline (`meta_resolve::projectors::reduce_published_field_types` + `reduce_field_type_expr`) enforces.
+
+Concrete contract:
+
+- Plain alias references (`type Foo = ...`) — the published prop type stays as `TypeExpr::Ref { name: "Foo" }`. Consumers re-resolve `Foo` through the registry on demand. The projector does NOT eagerly inline the alias body.
+- `Pick<Foo, "bar">` — materialises ONLY the `bar` member of Foo. Other Foo properties stay shallow (path-precise). Built-in utility types (`Pick`, `Omit`, `Required`, `Partial`) behave identically to a userland implementation that referenced the same keys.
+- `Omit<Foo, "bar">` — keeps `bar` shallow (it is excluded from the surface) and materialises the others.
+- `Foo['a']['b']` — path-precise: only the `a` and `b` hops are loaded; other Foo keys never enter the published surface.
+- True recursive types (`type Self = Pick<Self>`) — NOT supported. The published surface stays as the bare `Ref { name: "Self" }`.
+- Imported alias names (workspace-owned OR package-backed) — stay shallow regardless of where they live.
+
+The legacy per-field rescue cascade used to drive eager materialisation; that surface is gone. The projector pipeline is the sole post-projection authority.
+
+See `/component-meta` skill for the full rule set and the locked-down negative tests in `crates/verter_session/src/meta_tests.rs`.
+
 ### Component-Meta Native Vs Compat (CRITICAL)
 
 The native component-meta payload is the semantic authority. `@verter/component-meta/compat` is a projection layer for `vue-component-meta` interoperability, not a second semantic pipeline.

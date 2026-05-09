@@ -86,9 +86,9 @@ defineProps<CompProps>()
 /// independently would be acceptable for correctness (still
 /// converges) but observable through dispatch counters; that
 /// behaviour assertion is reserved for the per-bundle counter
-/// gates (e.g., `materialize_component_meta_field_types_calls`)
-/// when the host exposes per-thread captures (CaptureToken is
-/// per-request, not aggregable across threads).
+/// gates (e.g., the projector pipeline's per-request audit
+/// counters) when the host exposes per-thread captures
+/// (CaptureToken is per-request, not aggregable across threads).
 #[test]
 fn concurrent_cold_query_returns_same_metadata_to_both_threads() {
     let host = build_host(&[

@@ -70,23 +70,49 @@ pub(crate) use slots::project_slots;
 /// `Vec<ExpandedField>` on `evaluated_types`.
 ///
 /// For each projector field, looks up the target by `name`:
-/// - If a matching name exists, the projector field REPLACES the
-///   existing entry. The projector is the §7.1 authoritative source
-///   for type-based macro surfaces — its dispatch-resolved type +
-///   exactness supersedes the parser-side per-field annotation that
-///   `expand_macro_types` published.
+/// - If a matching name exists, the projector publishes the
+///   dispatch-resolved surface; the parser-side entry was populated
+///   by `evaluate_types` before the projector ran. When the
+///   projector's surface is the same shape or a strict improvement
+///   (more structural detail / fewer symbolic carriers), the
+///   projector wins. When the parser-side entry is strictly more
+///   concrete (e.g. it already resolved a recursive alias body that
+///   the dispatch path returned as a bare `Ref` because of cycle
+///   truncation), the parser-side shape stays and only the metadata
+///   fields the projector owns (`raw_type`, `optional`, `exactness`,
+///   execution status, diagnostics) merge in.
 /// - If no matching name exists, the projector field is appended.
 ///
 /// This keeps any parser-side fields the projector did NOT produce
 /// (e.g., entries from prop annotations that the dispatch path did
-/// not surface).
+/// not surface) AND prevents projector regressions for shapes the
+/// parser-side path resolved more concretely (recursive alias bodies,
+/// re-export chains preserved by the parser-side resolver, etc.).
 fn merge_projected_fields_by_name(
     target: &mut Vec<verter_semantic::analysis::type_expand::ExpandedField>,
     projected: Vec<verter_semantic::analysis::type_expand::ExpandedField>,
 ) {
+    use crate::meta_resolve::compare_type_expr_improvement;
+
     for field in projected {
         if let Some(existing) = target.iter_mut().find(|t| t.name == field.name) {
-            *existing = field;
+            if std::env::var("VERTER_PROJECTOR_MERGE_TRACE").is_ok() {
+                eprintln!(
+                    "[MERGE] name={} existing={:?} projected={:?}",
+                    field.name, existing.r#type, field.r#type
+                );
+            }
+            if compare_type_expr_improvement(&field.r#type, &existing.r#type) {
+                *existing = field;
+            } else if compare_type_expr_improvement(&existing.r#type, &field.r#type) {
+                existing.raw_type = field.raw_type;
+                existing.optional = field.optional;
+                existing.exactness = field.exactness;
+                existing.execution_status = field.execution_status;
+                existing.diagnostics = field.diagnostics;
+            } else {
+                *existing = field;
+            }
         } else {
             target.push(field);
         }
@@ -97,10 +123,8 @@ fn merge_projected_fields_by_name(
 /// snapshot through its per-kind projector and writes the resulting
 /// fields into `evaluated_types`.
 ///
-/// This is the §7.1 replacement for the legacy
-/// the legacy macro-shape walker + per-field
-/// `materialize_component_meta_field_types` enrichment pipeline. The
-/// driver:
+/// This is the replacement for the legacy macro-shape walker + per-
+/// field rescue cascade enrichment pipeline. The driver:
 ///
 /// 1. For each `defineProps<T>`, calls [`project_props`] and extends
 ///    `evaluated_types.props` with the resulting fields.
@@ -498,31 +522,7 @@ pub(crate) fn surface_member_to_expanded_field(
         let exactness = classify_node(&dispatch, resolved_value);
         (raised, exactness)
     };
-    // Run the bounded fixed-point reducer only when the raised
-    // surface contains an operator shape that benefits from
-    // reduction (`IndexedAccess` / `KeyOf` / `TypeOf` / `Conditional`
-    // / `Mapped`) AND the route's root is workspace-owned. Symbolic
-    // Refs to parameterised aliases (`TableColumn<T>`) and
-    // package-backed indexed accesses (`CoreOptions<RowState>['state']`
-    // declared in `node_modules`) stay un-reduced — matches the
-    // symbolic-route preservation contract every other surface
-    // point honours.
-    let needs_reduction = type_expr_contains_reducible_operator(&raised)
-        && !super::materialize::type_expr_has_package_backed_object_like_root(
-            &raised,
-            scope_canonical_id,
-            query_engine,
-        );
-    let r#type = if needs_reduction {
-        super::materialize::materialize_component_meta_type_expr_until_stable(
-            &raised,
-            scope_canonical_id,
-            ProjectionMode::Expanded,
-            query_engine,
-        )
-    } else {
-        raised
-    };
+    let r#type = reduce_field_type_expr(query_engine, scope_canonical_id, raised);
     ExpandedField {
         name: member.name.as_ref().to_string(),
         r#type,
@@ -531,6 +531,194 @@ pub(crate) fn surface_member_to_expanded_field(
         exactness,
         execution_status: ExpansionExecutionStatus::Completed,
         diagnostics: Vec::new(),
+    }
+}
+
+/// Drive the shared field-type reduction used by every projector and
+/// by [`reduce_published_field_types`] on slot bindings, model bindings,
+/// and any leftover parser-side fields.
+///
+/// The reduction has two stages:
+///
+/// 1. **Operator collapse** — when `expr` contains any
+///    `IndexedAccess` / `KeyOf` / `TypeOf` / `Conditional` /
+///    `Mapped` / `Infer` shape AND the route's root is not a
+///    package-backed object surface, the bounded fixed-point reducer
+///    [`materialize_component_meta_type_expr_until_stable`] runs in
+///    `Expanded` mode. Nested chains
+///    (`Pick<Foo,'outer'>['outer']['inner']`) collapse to concrete
+///    leaves; symbolic Refs to parameterised aliases stay symbolic;
+///    package-backed indexed accesses stay symbolic per the route-
+///    preservation contract.
+/// 2. **Symbolic-Ref body lookup** — when the reduction yields a bare
+///    `Ref { name, type_arguments }` whose declaration body is itself
+///    not a non-object surface (i.e. an alias to a primitive / object
+///    / function shape) AND the body would benefit from projection,
+///    the reducer is rerun against an `IndexedAccess`-on-Ref shell
+///    (matching the rescue's "imported alias body" recovery).
+///    Otherwise the bare Ref is the final shape (consumers re-resolve
+///    by name through the registry).
+///
+/// Generic substitutions, dep-signature accumulation, fence-validated
+/// publication, and dispatch fence diagnostics all flow through
+/// `materialize_component_meta_type_expr_until_stable` — there is no
+/// separate cache, scope, or budget here.
+pub(crate) fn reduce_field_type_expr(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    scope_canonical_id: &str,
+    expr: TypeExpr,
+) -> TypeExpr {
+    use crate::meta_resolve::expr_needs_projection_rescue;
+    use crate::meta_resolve::select_imported_materialization_scope;
+
+    let route_is_package_backed = super::materialize::type_expr_has_package_backed_object_like_root(
+        &expr,
+        scope_canonical_id,
+        query_engine,
+    );
+    if route_is_package_backed {
+        return expr;
+    }
+
+    // Reduction triggers when (a) the expression carries an
+    // operator-shape node (`IndexedAccess`/`KeyOf`/`TypeOf`/
+    // `Conditional`/`Mapped`/`Infer`), or (b) the expression's root
+    // is a bare `Ref` whose declaration body would benefit from
+    // expansion (utility instantiations like `Pick<X,K>`, aliases
+    // resolving to non-object surfaces, etc). The latter is
+    // detected by `expr_needs_projection_rescue` which inspects the
+    // declaration body via the dispatch primitives — its cycle
+    // guard prevents runaway recursion on recursive aliases like
+    // `TreeNode`. We restrict (b) to bare-`Ref` roots so a Union
+    // whose individual branches happen to be utility wrappers
+    // (`boolean | Omit<X, K>`) keeps the wrapper symbolic — only
+    // the Union root's own non-object surface check is consulted,
+    // not each branch's body shape.
+    let needs_reduction = type_expr_contains_reducible_operator(&expr)
+        || (matches!(&expr, TypeExpr::Ref { .. })
+            && expr_needs_projection_rescue(query_engine, scope_canonical_id, &expr));
+
+    if !needs_reduction {
+        return expr;
+    }
+
+    // Run the bounded fixed-point reducer from the consumer's scope.
+    // The dispatch's lower → raise_and_reduce pipeline carries
+    // imported declarations through their prepared bodies via the
+    // shared resolver caches, so the consumer scope is sufficient
+    // for cross-file alias resolution.
+    let stable = super::materialize::materialize_component_meta_type_expr_until_stable(
+        &expr,
+        scope_canonical_id,
+        ProjectionMode::Expanded,
+        query_engine,
+    );
+
+    // Cross-scope retry: if the consumer-scope reduction didn't
+    // produce an improvement, try the imported declaration's scope.
+    // This matches the rescue's `select_imported_materialization_scope`
+    // fallback for routes whose root lives in another file (e.g.
+    // imported alias bodies that reference symbols defined alongside
+    // the alias).
+    if !crate::meta_resolve::compare_type_expr_improvement(&stable, &expr) {
+        if let Some(imported_scope) =
+            select_imported_materialization_scope(&expr, scope_canonical_id, query_engine)
+        {
+            let cross_scope = super::materialize::materialize_component_meta_type_expr_until_stable(
+                &expr,
+                imported_scope.as_str(),
+                ProjectionMode::Expanded,
+                query_engine,
+            );
+            if crate::meta_resolve::compare_type_expr_improvement(&cross_scope, &expr) {
+                return cross_scope;
+            }
+        }
+    }
+
+    stable
+}
+
+/// Run the shared field-type reducer over every published surface in
+/// `evaluated_types` so consumers see the same finalised shapes the
+/// per-macro projectors already publish for `props` / `emits`.
+///
+/// The slot-binding graph and the parser-side `bindings` synthesis
+/// publish `ExpandedField`s whose `r#type` is the raised raw surface —
+/// they do not run reduction inline because the slot binding graph's
+/// dispatch only enumerates surface members. This pipeline step
+/// finalises those rows by routing each through
+/// [`reduce_field_type_expr`], which is the same primitive
+/// [`surface_member_to_expanded_field`] uses inside the projectors.
+///
+/// This is the single post-projection authority for finalising
+/// `evaluated_types` field shapes; there is no second resolver, no
+/// member-route surface synthesis, and no separate cache. All
+/// reduction work flows through
+/// `materialize_component_meta_type_expr_until_stable` and the
+/// dispatch-owned semantic memos it consults.
+pub(crate) fn reduce_published_field_types(
+    scope_canonical_id: &str,
+    evaluated_types: &mut verter_semantic::analysis::type_expand::ExpandedComponentTypes,
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+) {
+    use crate::meta_resolve::compare_type_expr_improvement;
+    use rustc_hash::FxHashMap;
+
+    let mut finalized_prop_types: FxHashMap<String, TypeExpr> = FxHashMap::default();
+    for field in evaluated_types.props.iter_mut() {
+        let raised = std::mem::replace(&mut field.r#type, TypeExpr::Unknown { raw: String::new() });
+        let mut reduced = reduce_field_type_expr(query_engine, scope_canonical_id, raised.clone());
+
+        // Raw-annotation fallback: when the published surface is the
+        // raised value-node form and that form is strictly worse than
+        // the parser-side `raw_type` annotation (e.g. an unresolved
+        // `Mapped { source: Unknown }` shell from a Partial/Required
+        // expansion), parse the annotation and prefer it. The
+        // annotation text is the authoritative per-prop string the
+        // analyzer surfaced through the macro-shape path.
+        if let Some(raw_text) = field.raw_type.as_deref() {
+            let raw_parsed =
+                verter_semantic::analysis::type_expr_lower::parse_type_annotation(raw_text);
+            if !matches!(raw_parsed, TypeExpr::Unknown { .. })
+                && compare_type_expr_improvement(&raw_parsed, &reduced)
+            {
+                let raw_reduced =
+                    reduce_field_type_expr(query_engine, scope_canonical_id, raw_parsed);
+                if compare_type_expr_improvement(&raw_reduced, &reduced) {
+                    reduced = raw_reduced;
+                }
+            }
+        }
+
+        finalized_prop_types.insert(field.name.clone(), reduced.clone());
+        field.r#type = reduced;
+    }
+    // Back-sync the finalised prop type into the macro-shape mirror
+    // on `evaluated_types.define_props`. Producers
+    // (`produce_one_macro_object_shape`) populate define_props with
+    // the pre-reduction shape; consumers reading the macro shapes
+    // (e.g. `evaluated.define_props[..].result.value.properties[..]`)
+    // expect the same finalised type the published `props` field
+    // carries.
+    for define_props in evaluated_types.define_props.iter_mut() {
+        for property in define_props.result.value.properties.iter_mut() {
+            if let Some(finalised) = finalized_prop_types.get(property.name.as_str()) {
+                property.ty = finalised.clone();
+            }
+        }
+    }
+    for field in evaluated_types.emits.iter_mut() {
+        let raised = std::mem::replace(&mut field.r#type, TypeExpr::Unknown { raw: String::new() });
+        field.r#type = reduce_field_type_expr(query_engine, scope_canonical_id, raised);
+    }
+    for field in evaluated_types.slot_bindings.iter_mut() {
+        let raised = std::mem::replace(&mut field.r#type, TypeExpr::Unknown { raw: String::new() });
+        field.r#type = reduce_field_type_expr(query_engine, scope_canonical_id, raised);
+    }
+    for field in evaluated_types.bindings.iter_mut() {
+        let raised = std::mem::replace(&mut field.r#type, TypeExpr::Unknown { raw: String::new() });
+        field.r#type = reduce_field_type_expr(query_engine, scope_canonical_id, raised);
     }
 }
 

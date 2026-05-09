@@ -103,7 +103,7 @@ A typical dump looks like:
   ...
   35: until_stable_full         at field_types.rs:189
   36: until_stable              at field_types.rs:61
-  37: rescue_field              at field_types.rs:946
+  37: (the per-field rescue cascade, since retired)
   ... [up to bench main]
 ```
 

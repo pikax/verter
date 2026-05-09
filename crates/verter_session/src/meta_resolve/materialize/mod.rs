@@ -1,46 +1,38 @@
 //! Materialization core: TypeExpr stabilizer + macro-shape producers.
 //!
-//! domain 7 — split into two children to keep each below the
-//! 4,000-line `god_module_size_budget`:
+//! Module split:
 //!
-//! - [`field_types`] — stabilizer
-//!   (`materialize_component_meta_type_expr_until_stable` and `_full`),
-//!   the `materialize_component_meta_field_types` driver, and the
-//!   field-rescue / shallow-symbolic / package-backed predicates that
-//!   gate it. Lines 99-1827 of the pre-split `meta_resolve.rs`.
+//! - [`field_types`] — bounded fixed-point reducer
+//!   (`materialize_component_meta_type_expr_until_stable` and `_full`)
+//!   + package-backed-root predicate that gates reduction.
 //!
 //! - [`macro_shapes`] — `produce_macro_object_shapes` + `_for_purpose`,
 //!   `MacroShapeSource`, and the macro-shape synthesis / projection /
 //!   penalty helpers that produce `define_props` / `define_emits` /
-//!   `define_slots` shapes for `ExpandedComponentTypes`. Lines 1828-4102
-//!   of the pre-split `meta_resolve.rs`.
+//!   `define_slots` shapes for `ExpandedComponentTypes`.
 //!
 //! Both children are private modules; this submodule re-exports their
 //! `pub(crate)` surface to the parent so existing `crate::meta_resolve::*`
 //! callsites keep working without churn.
 
-mod component_config_fast_path;
 mod field_types;
 mod macro_shapes;
 pub(crate) mod utility_types;
 
-#[cfg(test)]
-pub(crate) use component_config_fast_path::COMPONENT_CONFIG_FAST_PATH_HITS_COUNTER;
-#[cfg(test)]
-pub(crate) use field_types::MEMBER_ROUTE_CALLS_COUNTER;
 pub(crate) use field_types::{
-    lowered_preserve_package_backed_symbolic_refs, materialize_component_meta_field_types,
+    lowered_preserve_package_backed_symbolic_refs,
     materialize_component_meta_type_expr_until_stable,
     type_expr_has_package_backed_object_like_root,
 };
 
+pub(crate) use macro_shapes::expr_needs_projection_rescue;
 pub(crate) use macro_shapes::{
     collect_type_expr_ref_names, produce_macro_object_shapes_for_purpose,
 };
 // Test-only re-exports consumed by `meta_resolve_tests.rs` via the
 // `meta_resolve.rs` shell's `#[cfg(test)] pub(crate) use materialize::{…}` block.
 #[cfg(test)]
-pub(crate) use macro_shapes::{expr_needs_projection_rescue, has_prop_shape_surface};
+pub(crate) use macro_shapes::has_prop_shape_surface;
 // Test-only macro-shape re-exports — exercised via the `meta_resolve.rs`
 // shell's `#[cfg(test)] pub(crate) use materialize::{…}` block by
 // `meta_resolve_tests.rs` (bare-name `super::*` glob).

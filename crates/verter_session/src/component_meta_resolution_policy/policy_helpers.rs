@@ -3,7 +3,7 @@
 //! symbolic preservation vs. canonical materialize for an
 //! imported bare ref:
 //!
-//! - `meta_resolve/materialize/field_types.rs::top_level_imported_ref_can_stay_symbolic`
+//! - the per-field rescue cascade's symbolic-preservation predicate (since retired)
 //! - `resolver_core/component_meta_query_engine/shallow_preserve.rs::should_preserve_imported_bare_ref`
 //! - `meta_resolve/materialize/macro_shapes.rs::named_ref_can_use_prepared_projection`
 //!

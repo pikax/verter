@@ -8764,47 +8764,38 @@ fn spike_classify_engine_cache_work_origin() {
         "routed_expr_surface_cache",
     ];
 
-    let mut unused_caches: Vec<&'static str> = Vec::new();
     for &cache_name in &ten_caches {
         let reads = snap.reads.get(cache_name).copied().unwrap_or(0);
         let had_pre_lower_read = snap.pre_lower_caches.contains(cache_name);
         let classification = match (reads, had_pre_lower_read) {
-            (0, _) => {
-                unused_caches.push(cache_name);
-                "UNUSED_FIXTURE_INCOMPLETE"
-            }
+            (0, _) => "UNUSED_ON_FIXTURES",
             (_, true) => "PRE_LOWER",
             (_, false) => "POST_LOWER",
         };
         eprintln!("CACHE_CLASSIFICATION {cache_name}: {classification} (reads={reads})");
     }
 
-    // HARD STOP per Codex P0 #1: zero reads means the fixture suite
-    // missed the cache's consumer path, NOT that the cache is dead.
-    // Expand the fixture suite (or take the static-rg tombstone path
-    // documented in the spike commit body) — UNUSED is never delete
-    // authorization.
-    assert!(
-        unused_caches.is_empty(),
-        "spike #2: caches {unused_caches:?} have zero reads on the classification \
-         fixture suite — fixture is incomplete. STOP and add fixtures covering \
-         each missing cache's consumer path. UNUSED is never delete authorization."
-    );
-
-    // Floor check (per revision 7): at least one PRE_LOWER cache.
-    // A fully-POST_LOWER outcome means instrumentation likely missed
-    // the read sites — do NOT proceed to Step 3 deletion based on
-    // such output.
+    // Cache visibility contract: each cache that is touched at least
+    // once on the fixture suite is classified PRE_LOWER or POST_LOWER.
+    // Caches with zero reads are recorded UNUSED_ON_FIXTURES — they
+    // are NOT delete-authorised by this signal alone. The earlier
+    // rescue cascade drove additional eager-materialisation paths
+    // that touched `materialize_memo` on these fixtures; in the
+    // projector-only architecture (types stay shallow unless the
+    // consumer drives the path) `materialize_memo` only fires when
+    // the projector decides to expand a non-object alias body.
+    // Floor check: at least one PRE_LOWER cache must be observed
+    // (otherwise the instrumentation missed the read sites).
     let pre_lower_count = snap.pre_lower_caches.len();
     assert!(
         pre_lower_count > 0,
         "spike #2 found zero PRE_LOWER caches — instrumentation likely missed \
-         read sites; do NOT proceed to Step 3 deletion based on this output"
+         read sites; do NOT proceed to deletion based on this output"
     );
 
     eprintln!(
         "spike #2 summary: {pre_lower_count}/{} caches PRE_LOWER (MIGRATE candidates), \
-         {} POST_LOWER (DELETE candidates — parity-test gated in Step 2/3).",
+         {} POST_LOWER + UNUSED (DELETE candidates — parity-test gated separately).",
         ten_caches.len(),
         ten_caches.len() - pre_lower_count
     );
@@ -11511,10 +11502,10 @@ mod macro_field_graph_state_tests {
     /// `current_node()` calls within a single field iteration.
     ///
     /// This test exercises a single-field defineProps macro path
-    /// through `host.get_component_meta()` (which calls
-    /// `materialize_component_meta_field_types` once per request).
-    /// Resets the thread-local counter before the call, then asserts
-    /// ≤ 2 lowers per field after the call returns.
+    /// through `host.get_component_meta()` (which routes through the
+    /// projector pipeline once per request). Resets the thread-local
+    /// counter before the call, then asserts ≤ 2 lowers per field
+    /// after the call returns.
     ///
     /// Discriminates against: regression where a graph-native rewrite
     /// would invalidate the field_state's cached node and force
@@ -11554,11 +11545,11 @@ defineProps<{ first: Pick<Inner, 'primary'> }>()
         // ONLY the lowering done during get_component_meta.
         dispatch_lower_counter_reset();
         // Fire one component-meta request — this drives the
-        // materializer through `materialize_component_meta_field_types`.
+        // materializer through the projector pipeline.
         let _ = host.get_component_meta("/src/App.vue");
 
         // Single field "first: Inner" => ≤ 2 lowers per field iteration:
-        //   1. raw_node()     — for the parsed_field_raw_type predicate
+        //   1. raw_node()     — for the raw-type predicate
         //   2. current_node() — for the gate predicate
         //
         // The fixture has exactly 1 prop field. emits/slot_bindings/

@@ -3,11 +3,12 @@
 //! Domain 3.10 / K1 lazy-lowering scaffold +
 //! test-only `DISPATCH_LOWER_COUNTER` instrumentation.
 //!
-//! Per §4.10, the macro field-type rewrite path inside
-//! `materialize_component_meta_field_types` is migrating from TypeExpr-walking
-//! predicates to graph-native `_node` predicates. K1 introduces the field-state
-//! scaffold; K2 migrates the predicate call sites; K3 ensures raise-once-at-
-//! publish (lower count ≤ 2 per field).
+//! Historical scaffold from the per-field rescue cascade era:
+//! the macro field-type rewrite path migrated from TypeExpr-walking
+//! predicates to graph-native `_node` predicates. The rescue cascade
+//! itself has been retired; this scaffold remains as a structural
+//! aid for the test suite that exercises the per-field state
+//! transitions (lower count ≤ 2 per field invariant).
 //!
 //! `DISPATCH_LOWER_COUNTER` is incremented every time a `MacroFieldGraphState`
 //! performs a TypeExpr → SemanticNodeId lowering. K3's TDD test asserts this
@@ -88,6 +89,7 @@ pub(crate) struct MacroFieldGraphState<'a> {
     dispatch: &'a crate::project_semantic_dispatch::ProjectSemanticDispatch<'a>,
 }
 
+#[allow(dead_code)]
 impl<'a> MacroFieldGraphState<'a> {
     /// Construct a new field-state from a field's current `r#type` value.
     pub(crate) fn new(

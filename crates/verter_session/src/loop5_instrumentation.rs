@@ -374,9 +374,6 @@ pub static WALK_MACRO_MEMBER_TYPES_NS: AtomicU64 = AtomicU64::new(0);
 pub static APPEND_REGISTRY_ENTRIES_CALLS: AtomicU64 = AtomicU64::new(0);
 pub static APPEND_REGISTRY_ENTRIES_NS: AtomicU64 = AtomicU64::new(0);
 
-pub static MATERIALIZE_FIELD_TYPES_CALLS: AtomicU64 = AtomicU64::new(0);
-pub static MATERIALIZE_FIELD_TYPES_NS: AtomicU64 = AtomicU64::new(0);
-
 /// Every call to `lowered_root_reaches_transitive_cycle` that takes
 /// the TypeExpr-walk fast path (no dispatch lowering). The deep-lower
 /// path was only useful for `Ref` / `RecursiveRef` shapes that
@@ -387,56 +384,6 @@ pub static MATERIALIZE_FIELD_TYPES_NS: AtomicU64 = AtomicU64::new(0);
 /// `Ref`/`RecursiveRef` of the TypeExpr structure without triggering
 /// any third-party shallow-file loads. Inert in production.
 pub static LOWERED_ROOT_CYCLE_FAST_PATH_HITS: AtomicU64 = AtomicU64::new(0);
-
-// ===== Loop 9 — inner-block sub-timers =====
-//
-// Loop 8 confirmed 99.98% of materialize_ms lives in two function
-// bodies — `materialize_component_meta_field_types` (20 min) and
-// the legacy macro-shape walker (12.5 min). Loop 9
-// drills INSIDE these functions to identify the dominant sub-block.
-//
-// Field-types sub-blocks (per-iteration counters accumulate across
-// the outer `for field in &mut evaluated_types.props` loop, so
-// `_NS` is the total wall-clock and `_CALLS` is the iteration count
-// reaching that block):
-
-/// Block 2: per-iteration preserve_raw check + indexed-access /
-/// terminal-scalar early-out + ComponentConfig theme variant fast
-/// path. Increments once per loop iteration.
-pub static FIELD_PROPS_PRESERVE_AND_EARLY_OUTS_CALLS: AtomicU64 = AtomicU64::new(0);
-pub static FIELD_PROPS_PRESERVE_AND_EARLY_OUTS_NS: AtomicU64 = AtomicU64::new(0);
-
-/// Block 3: MacroFieldGraphState wrap + define_props candidate scan +
-/// `rescue_field`.
-pub static FIELD_PROPS_RESCUE_FIELD_CALLS: AtomicU64 = AtomicU64::new(0);
-pub static FIELD_PROPS_RESCUE_FIELD_NS: AtomicU64 = AtomicU64::new(0);
-
-/// Block 4: raw_needs_member_route + current_needs_member_route
-/// predicate calls + slots-route early-out.
-pub static FIELD_PROPS_NEEDS_MEMBER_ROUTE_CALLS: AtomicU64 = AtomicU64::new(0);
-pub static FIELD_PROPS_NEEDS_MEMBER_ROUTE_NS: AtomicU64 = AtomicU64::new(0);
-
-/// Block 6: select_imported_materialization_scope + raw_route_root
-/// check + 3-way `materialize_member_surface_expr` candidate scan
-/// (the routed-surface block).
-pub static FIELD_PROPS_ROUTED_SURFACE_CALLS: AtomicU64 = AtomicU64::new(0);
-pub static FIELD_PROPS_ROUTED_SURFACE_NS: AtomicU64 = AtomicU64::new(0);
-
-/// Block 7: the big match on `field_state.published_type()` — bare
-/// Ref → declaration body lookup + bridge OR
-/// `materialize_component_meta_type_expr_until_stable`.
-pub static FIELD_PROPS_REF_RESCUE_MATCH_CALLS: AtomicU64 = AtomicU64::new(0);
-pub static FIELD_PROPS_REF_RESCUE_MATCH_NS: AtomicU64 = AtomicU64::new(0);
-
-/// Block 8: raw-ref body lookup + recursive-ref expansion +
-/// `indexed_access_alias_body_transport`.
-pub static FIELD_PROPS_RAW_REF_TRANSPORT_CALLS: AtomicU64 = AtomicU64::new(0);
-pub static FIELD_PROPS_RAW_REF_TRANSPORT_NS: AtomicU64 = AtomicU64::new(0);
-
-/// Block 9: define_props sync + emits + slot_bindings + bindings
-/// final loops (combined since each is small/cheap individually).
-pub static FIELD_TAIL_LOOPS_CALLS: AtomicU64 = AtomicU64::new(0);
-pub static FIELD_TAIL_LOOPS_NS: AtomicU64 = AtomicU64::new(0);
 
 // Walk-macro-member-types sub-blocks: per-iteration counters across
 // the outer `for (macro_index, mac) in snapshot.macros.iter()` loop.
@@ -572,23 +519,6 @@ pub fn reset_all() {
     WALK_MACRO_MEMBER_TYPES_NS.store(0, Ordering::Relaxed);
     APPEND_REGISTRY_ENTRIES_CALLS.store(0, Ordering::Relaxed);
     APPEND_REGISTRY_ENTRIES_NS.store(0, Ordering::Relaxed);
-    MATERIALIZE_FIELD_TYPES_CALLS.store(0, Ordering::Relaxed);
-    MATERIALIZE_FIELD_TYPES_NS.store(0, Ordering::Relaxed);
-    // Loop 9 — inner-block sub-timers.
-    FIELD_PROPS_PRESERVE_AND_EARLY_OUTS_CALLS.store(0, Ordering::Relaxed);
-    FIELD_PROPS_PRESERVE_AND_EARLY_OUTS_NS.store(0, Ordering::Relaxed);
-    FIELD_PROPS_RESCUE_FIELD_CALLS.store(0, Ordering::Relaxed);
-    FIELD_PROPS_RESCUE_FIELD_NS.store(0, Ordering::Relaxed);
-    FIELD_PROPS_NEEDS_MEMBER_ROUTE_CALLS.store(0, Ordering::Relaxed);
-    FIELD_PROPS_NEEDS_MEMBER_ROUTE_NS.store(0, Ordering::Relaxed);
-    FIELD_PROPS_ROUTED_SURFACE_CALLS.store(0, Ordering::Relaxed);
-    FIELD_PROPS_ROUTED_SURFACE_NS.store(0, Ordering::Relaxed);
-    FIELD_PROPS_REF_RESCUE_MATCH_CALLS.store(0, Ordering::Relaxed);
-    FIELD_PROPS_REF_RESCUE_MATCH_NS.store(0, Ordering::Relaxed);
-    FIELD_PROPS_RAW_REF_TRANSPORT_CALLS.store(0, Ordering::Relaxed);
-    FIELD_PROPS_RAW_REF_TRANSPORT_NS.store(0, Ordering::Relaxed);
-    FIELD_TAIL_LOOPS_CALLS.store(0, Ordering::Relaxed);
-    FIELD_TAIL_LOOPS_NS.store(0, Ordering::Relaxed);
     WALK_DEFINE_PROPS_CHECKS_CALLS.store(0, Ordering::Relaxed);
     WALK_DEFINE_PROPS_CHECKS_NS.store(0, Ordering::Relaxed);
     WALK_DEFINE_PROPS_PROJECTION_CALLS.store(0, Ordering::Relaxed);
@@ -646,30 +576,7 @@ pub fn dump_loop5_instrumentation_counters() -> String {
     let walk_macro_member_types_ns = WALK_MACRO_MEMBER_TYPES_NS.load(Ordering::Relaxed);
     let append_registry_entries_calls = APPEND_REGISTRY_ENTRIES_CALLS.load(Ordering::Relaxed);
     let append_registry_entries_ns = APPEND_REGISTRY_ENTRIES_NS.load(Ordering::Relaxed);
-    let materialize_field_types_calls = MATERIALIZE_FIELD_TYPES_CALLS.load(Ordering::Relaxed);
-    let materialize_field_types_ns = MATERIALIZE_FIELD_TYPES_NS.load(Ordering::Relaxed);
 
-    // Loop 9 — inner-block sub-timers.
-    let field_props_preserve_and_early_outs_calls =
-        FIELD_PROPS_PRESERVE_AND_EARLY_OUTS_CALLS.load(Ordering::Relaxed);
-    let field_props_preserve_and_early_outs_ns =
-        FIELD_PROPS_PRESERVE_AND_EARLY_OUTS_NS.load(Ordering::Relaxed);
-    let field_props_rescue_field_calls = FIELD_PROPS_RESCUE_FIELD_CALLS.load(Ordering::Relaxed);
-    let field_props_rescue_field_ns = FIELD_PROPS_RESCUE_FIELD_NS.load(Ordering::Relaxed);
-    let field_props_needs_member_route_calls =
-        FIELD_PROPS_NEEDS_MEMBER_ROUTE_CALLS.load(Ordering::Relaxed);
-    let field_props_needs_member_route_ns =
-        FIELD_PROPS_NEEDS_MEMBER_ROUTE_NS.load(Ordering::Relaxed);
-    let field_props_routed_surface_calls = FIELD_PROPS_ROUTED_SURFACE_CALLS.load(Ordering::Relaxed);
-    let field_props_routed_surface_ns = FIELD_PROPS_ROUTED_SURFACE_NS.load(Ordering::Relaxed);
-    let field_props_ref_rescue_match_calls =
-        FIELD_PROPS_REF_RESCUE_MATCH_CALLS.load(Ordering::Relaxed);
-    let field_props_ref_rescue_match_ns = FIELD_PROPS_REF_RESCUE_MATCH_NS.load(Ordering::Relaxed);
-    let field_props_raw_ref_transport_calls =
-        FIELD_PROPS_RAW_REF_TRANSPORT_CALLS.load(Ordering::Relaxed);
-    let field_props_raw_ref_transport_ns = FIELD_PROPS_RAW_REF_TRANSPORT_NS.load(Ordering::Relaxed);
-    let field_tail_loops_calls = FIELD_TAIL_LOOPS_CALLS.load(Ordering::Relaxed);
-    let field_tail_loops_ns = FIELD_TAIL_LOOPS_NS.load(Ordering::Relaxed);
     let walk_define_props_checks_calls = WALK_DEFINE_PROPS_CHECKS_CALLS.load(Ordering::Relaxed);
     let walk_define_props_checks_ns = WALK_DEFINE_PROPS_CHECKS_NS.load(Ordering::Relaxed);
     let walk_define_props_projection_calls =
@@ -732,22 +639,6 @@ pub fn dump_loop5_instrumentation_counters() -> String {
          \"WALK_MACRO_MEMBER_TYPES_NS\": {walk_macro_member_types_ns},\n  \
          \"APPEND_REGISTRY_ENTRIES_CALLS\": {append_registry_entries_calls},\n  \
          \"APPEND_REGISTRY_ENTRIES_NS\": {append_registry_entries_ns},\n  \
-         \"MATERIALIZE_FIELD_TYPES_CALLS\": {materialize_field_types_calls},\n  \
-         \"MATERIALIZE_FIELD_TYPES_NS\": {materialize_field_types_ns},\n  \
-         \"FIELD_PROPS_PRESERVE_AND_EARLY_OUTS_CALLS\": {field_props_preserve_and_early_outs_calls},\n  \
-         \"FIELD_PROPS_PRESERVE_AND_EARLY_OUTS_NS\": {field_props_preserve_and_early_outs_ns},\n  \
-         \"FIELD_PROPS_RESCUE_FIELD_CALLS\": {field_props_rescue_field_calls},\n  \
-         \"FIELD_PROPS_RESCUE_FIELD_NS\": {field_props_rescue_field_ns},\n  \
-         \"FIELD_PROPS_NEEDS_MEMBER_ROUTE_CALLS\": {field_props_needs_member_route_calls},\n  \
-         \"FIELD_PROPS_NEEDS_MEMBER_ROUTE_NS\": {field_props_needs_member_route_ns},\n  \
-         \"FIELD_PROPS_ROUTED_SURFACE_CALLS\": {field_props_routed_surface_calls},\n  \
-         \"FIELD_PROPS_ROUTED_SURFACE_NS\": {field_props_routed_surface_ns},\n  \
-         \"FIELD_PROPS_REF_RESCUE_MATCH_CALLS\": {field_props_ref_rescue_match_calls},\n  \
-         \"FIELD_PROPS_REF_RESCUE_MATCH_NS\": {field_props_ref_rescue_match_ns},\n  \
-         \"FIELD_PROPS_RAW_REF_TRANSPORT_CALLS\": {field_props_raw_ref_transport_calls},\n  \
-         \"FIELD_PROPS_RAW_REF_TRANSPORT_NS\": {field_props_raw_ref_transport_ns},\n  \
-         \"FIELD_TAIL_LOOPS_CALLS\": {field_tail_loops_calls},\n  \
-         \"FIELD_TAIL_LOOPS_NS\": {field_tail_loops_ns},\n  \
          \"WALK_DEFINE_PROPS_CHECKS_CALLS\": {walk_define_props_checks_calls},\n  \
          \"WALK_DEFINE_PROPS_CHECKS_NS\": {walk_define_props_checks_ns},\n  \
          \"WALK_DEFINE_PROPS_PROJECTION_CALLS\": {walk_define_props_projection_calls},\n  \
@@ -988,22 +879,6 @@ mod tests {
             "WALK_MACRO_MEMBER_TYPES_NS",
             "APPEND_REGISTRY_ENTRIES_CALLS",
             "APPEND_REGISTRY_ENTRIES_NS",
-            "MATERIALIZE_FIELD_TYPES_CALLS",
-            "MATERIALIZE_FIELD_TYPES_NS",
-            "FIELD_PROPS_PRESERVE_AND_EARLY_OUTS_CALLS",
-            "FIELD_PROPS_PRESERVE_AND_EARLY_OUTS_NS",
-            "FIELD_PROPS_RESCUE_FIELD_CALLS",
-            "FIELD_PROPS_RESCUE_FIELD_NS",
-            "FIELD_PROPS_NEEDS_MEMBER_ROUTE_CALLS",
-            "FIELD_PROPS_NEEDS_MEMBER_ROUTE_NS",
-            "FIELD_PROPS_ROUTED_SURFACE_CALLS",
-            "FIELD_PROPS_ROUTED_SURFACE_NS",
-            "FIELD_PROPS_REF_RESCUE_MATCH_CALLS",
-            "FIELD_PROPS_REF_RESCUE_MATCH_NS",
-            "FIELD_PROPS_RAW_REF_TRANSPORT_CALLS",
-            "FIELD_PROPS_RAW_REF_TRANSPORT_NS",
-            "FIELD_TAIL_LOOPS_CALLS",
-            "FIELD_TAIL_LOOPS_NS",
             "WALK_DEFINE_PROPS_CHECKS_CALLS",
             "WALK_DEFINE_PROPS_CHECKS_NS",
             "WALK_DEFINE_PROPS_PROJECTION_CALLS",

@@ -6,10 +6,9 @@
 //! tests.
 //!
 //! Each invariant test characterises a property the cache must
-//! preserve. The dispatch-path refinement
-//! (`materialize_component_meta_field_types`) exercises this cache
-//! on the production `getComponentMeta` flow, so the invariants must
-//! hold against that path.
+//! preserve. The dispatch-path refinement (the projector pipeline)
+//! exercises this cache on the production `getComponentMeta` flow,
+//! so the invariants must hold against that path.
 //!
 //! ## Invariant catalogue
 //!

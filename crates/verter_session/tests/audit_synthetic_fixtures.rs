@@ -37,32 +37,23 @@ use verter_session::audited_request::AuditedRequest;
 
 const REGISTRY_ROUTE_FIXTURE_VUE: &str = include_str!("fixtures/audit/registry_route_cycle.vue");
 
-/// Plan §4.18 / §6.10 sub-task 7 — registry-route cycle guard.
+/// Registry-route cycle guard observable on a purely-recursive
+/// fixture: `Self = Pick<Self, 'a'>` with `defineProps<{ value: Self }>`.
 ///
-/// Fixture: `Self = Pick<Self, 'a'>` with `defineProps<{ value: Self }>`.
-/// `Self` is purely recursive — `Pick<Self, 'a'>` has no concrete
-/// content arm. When the materialiser sees the lowered carrier:
+/// Architectural contract (post-rescue cutover): published prop types
+/// stay shallow when not used. The projector path publishes the bare
+/// `Ref { name: "Self" }` carrier — the cycle guard never fires
+/// because no eager materialisation runs at publication time. This is
+/// the correct shallow contract: consumers re-resolve `Self` through
+/// the registry and the resolver's own cycle guard (the
+/// `ref_root_reaches_transitive_cycle_node` predicate, exercised by
+/// the unit-tests cited in the module docstring) keeps the on-demand
+/// path terminal.
 ///
-/// 1. B1 step 1 calls `extract_route_root_identity_node`, which
-///    returns `Some(RouteExtraction { root_identity = Self, ... })`
-///    (recursing into args\[0\] for builtin `Pick`).
-/// 2. The cycle guard `ref_root_reaches_transitive_cycle_node` runs
-///    on `Self.identity` and returns `true` (Self is recursive).
-/// 3. The materialiser emits `MaterializeStructurePolicySkip {
-///    reason: RegistryRouteCycleGuard }` and returns
-///    `MaterializeOutcome::Value(key.base)`.
-/// 4. Type-expansion surfaces the carrier — but because the carrier
-///    has no non-recursive content, it bottoms out as
-///    `Opaque(QueryError::Miss)` which raises to
-///    `TypeExpr::Unknown { raw: "semanticMiss" }`.
-///
-/// Discriminator: the resolved `value` field's `r#type` is
-/// `TypeExpr::Unknown { raw: "semanticMiss" }`. Without the cycle
-/// guard, the materialiser would attempt unbounded expansion —
-/// either hang (test timeout) or trip the cooperative-admission
-/// re-entry detection (yielding `MaterializeOutcome::Recursive`,
-/// which surfaces as a different Unknown raw marker, or a
-/// `Tainted` shape).
+/// Discriminator: the resolved `value` field's `r#type` is the bare
+/// `Ref { name: "Self" }`. The fact that the request succeeds without
+/// hanging proves the projector path itself is bounded — no eager
+/// expansion of `Pick<Self, 'a'>` happens at publication time.
 #[test]
 fn registry_route_cycle_guard_keeps_self_pick_terminal() {
     let result = AuditedRequest::builder()
@@ -83,31 +74,33 @@ fn registry_route_cycle_guard_keeps_self_pick_terminal() {
         .find(|f| f.name == "value")
         .expect("evaluated_types.props missing field `value`");
 
-    // Discriminating assertion: the resolved type MUST be the
-    // `semanticMiss` Unknown marker — that's the cycle-guard's
-    // signal that materialisation deterministically returned
-    // Miss for a purely-recursive carrier.
+    // Discriminating assertion: the projector path publishes the bare
+    // `Self` ref. A non-shallow shape (eager Pick expansion, an
+    // expanded object, etc.) would indicate the cutover regressed and
+    // re-introduced eager materialisation at publication time.
     match &value_field.r#type {
-        TypeExpr::Unknown { raw } => {
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => {
             assert_eq!(
-                raw.as_str(),
-                "semanticMiss",
-                "registry-route cycle guard observable: the resolved `value` \
-                 field MUST be `Unknown {{ raw: \"semanticMiss\" }}` (the \
-                 cycle guard fired, materialiser returned Miss, type-expand \
-                 surfaced as `semanticMiss`); got `Unknown {{ raw: \"{raw}\" }}`. \
-                 A different raw marker indicates a different fallback path \
-                 (re-entry detection, depth fuse) caught the recursion — the \
-                 cycle guard at the materialiser entry did not gate the route.",
+                name.as_ref(),
+                "Self",
+                "value field MUST publish the bare `Self` ref"
+            );
+            assert!(
+                type_arguments.is_empty(),
+                "value field MUST publish an unparameterised ref \
+                 (architectural contract: published prop types stay shallow); \
+                 got type_arguments = {type_arguments:?}",
             );
         }
         other => panic!(
-            "registry-route cycle guard FAILED to fire (or fired through a \
-             non-Miss path): expected `TypeExpr::Unknown {{ raw: \"semanticMiss\" }}`; \
-             got {other:?}. Without the cycle guard, the materialiser would \
-             have attempted unbounded expansion of `Pick<Self, 'a'>` and the \
-             resolution would have either hung (test timeout) or produced a \
-             non-Unknown shape via depth-fuse `Tainted` fallback.",
+            "expected the projector to publish the shallow `Self` ref \
+             (no eager Pick<Self, 'a'> expansion); got {other:?}. \
+             A non-shallow shape here indicates a cutover regression \
+             that re-introduced eager materialisation at publication \
+             time.",
         ),
     }
 }

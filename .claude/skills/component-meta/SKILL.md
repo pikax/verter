@@ -157,6 +157,29 @@ The shared Rust pipeline owns all fallthrough and root inheritance semantics. `v
 | `crates/verter_ffi/src/convert.rs` | Adapter conversion |
 | `packages/component-meta/src/types.ts` | TS types |
 
+## Shallow-By-Default Rule (CRITICAL)
+
+**Architectural rule:** types and properties are ALWAYS published shallow at the projector surface UNLESS the consumer explicitly walks the path. This is the single architectural invariant the projector pipeline (`meta_resolve::projectors::reduce_published_field_types` + `reduce_field_type_expr`) enforces.
+
+Concrete contract:
+
+- Plain alias references (`type Foo = ...`) — the published prop type stays as `TypeExpr::Ref { name: "Foo", type_arguments: [] }`. Consumers re-resolve `Foo` through the registry on demand. **The projector does not eagerly inline the alias body.**
+- `Pick<Foo, "bar">` — materialises ONLY the `bar` member of Foo. Other Foo properties stay shallow (path-precise). Built-in utility types (`Pick`, `Omit`, `Required`, `Partial`) are recognised as shortcuts and behave identically to a userland implementation that referenced the same keys.
+- `Omit<Foo, "bar">` — keeps `bar` shallow (it is excluded from the surface) and materialises the others.
+- `Foo['a']['b']` — path-precise: only the `a` and `b` hops are loaded. Other Foo keys never enter the published surface.
+- Recursive aliases (`type Self = Pick<Self>`) — TRUE recursive types are NOT supported. The published surface stays as the bare `Ref { name: "Self" }`; the resolver does not attempt unbounded expansion.
+- Imported alias names (workspace-owned OR package-backed) — stay shallow regardless of where they live. The rule is the same for `node_modules`-imported aliases as for project-local aliases: the consumer drives any expansion through subsequent lookups.
+
+The projector's reduction step fires only when the input expression carries an operator-shape node (`IndexedAccess`, `KeyOf`, `TypeOf`, `Conditional`, `Mapped`, `Infer`) OR is a bare `Ref` whose declaration body would carry a non-object top-level surface. This is the discriminating boundary between "shallow publication" and "operator collapse"; bare `Ref` to an object alias stays shallow even when the body is fully known.
+
+The retired per-field rescue cascade (the legacy field-type driver, the per-field rescue helper, the ComponentConfig fast path, the indexed-access early-out counter, the per-block instrumentation timers) used to drive eager materialisation across every field; that surface is gone. The projector pipeline is the sole post-projection authority for finalising published field types.
+
+**Negative tests** that lock the contract live in `crates/verter_session/src/meta_tests.rs`:
+- `published_bare_alias_ref_stays_shallow`
+- `pick_materialises_only_named_keys_others_stay_shallow`
+- `omit_excludes_named_keys_others_materialise`
+- `nested_indexed_access_publishes_only_terminal_path`
+
 ## Component-Meta Resolver Rules
 
 These are the canonical component-meta resolver rules. They govern how the shared cross-file resolver operates when serving component-meta queries.

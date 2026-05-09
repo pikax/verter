@@ -151,6 +151,39 @@ const RETIRED_SYMBOLS: &[&str] = &[
     "FIELD_PROPS_MEMBER_ROUTE_LOOP_CALLS",
     "FIELD_PROPS_MEMBER_ROUTE_LOOP_NS",
     "define_props_member_can_stay_symbolic_without_rescue",
+    // Retired in this commit: the per-field rescue cascade driver and
+    // its helpers, the ComponentConfig fast-path, and the test-only
+    // counters that observed them. The projector path
+    // (`reduce_published_field_types` + `reduce_field_type_expr`) is
+    // the sole post-projection authority for finalising published
+    // field types — re-introducing any of these symbols would resurrect
+    // the dual-path rescue architecture this cutover deletes.
+    "materialize_component_meta_field_types",
+    "rescue_field",
+    "MEMBER_ROUTE_CALLS_COUNTER",
+    "COMPONENT_CONFIG_FAST_PATH_HITS_COUNTER",
+    "component_config_theme_variant_fast_path",
+    "component_config_alias_classification",
+    "collect_component_config_indexed_path",
+    "FastPathOutcome",
+    "field_should_preserve_shallow_symbolic_raw_type",
+    "lowered_needs_member_route_materialization",
+    "type_expr_is_slots_member_route",
+    "type_expr_is_terminal_scalar_surface",
+    "type_expr_is_indexed_access_route",
+    "type_expr_is_non_empty_object_surface",
+    "raw_indexed_access_root_is_workspace_owned",
+    "interface_body_has_members_needing_materialization",
+    "top_level_imported_ref_can_stay_symbolic",
+    "parsed_field_raw_type",
+    "FIELD_PROPS_RESCUE_FIELD_CALLS",
+    "FIELD_PROPS_RESCUE_FIELD_NS",
+    "FIELD_PROPS_NEEDS_MEMBER_ROUTE_CALLS",
+    "FIELD_PROPS_NEEDS_MEMBER_ROUTE_NS",
+    "FIELD_PROPS_ROUTED_SURFACE_CALLS",
+    "FIELD_PROPS_ROUTED_SURFACE_NS",
+    "MATERIALIZE_FIELD_TYPES_CALLS",
+    "MATERIALIZE_FIELD_TYPES_NS",
 ];
 
 const SCAN_DIRS: &[&str] = &["crates", ".claude/skills", "docs"];

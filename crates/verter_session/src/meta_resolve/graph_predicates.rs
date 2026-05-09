@@ -375,6 +375,7 @@ pub(crate) fn component_meta_ref_resolves_to_package_node(
 /// `depth` is fused at 256 to bound runtime on pathological chains
 /// Fuse returns `false` to match the conservative legacy
 /// behaviour.
+#[allow(dead_code)]
 pub(crate) fn type_node_needs_member_route_materialization(
     ctx: &dyn ResolverContext,
     node: crate::semantic_query::SemanticNodeId,
@@ -768,6 +769,7 @@ fn node_value_is_concrete_or_symbolic(
 /// behaviour: a runaway recursion is treated as "not package-backed"
 /// so the caller does NOT short-circuit through the package-backed
 /// branch.
+#[allow(dead_code)]
 pub(crate) fn type_node_has_package_backed_root(
     graph: &crate::semantic_query_memo::SemanticGraphStore,
     node: crate::semantic_query::SemanticNodeId,
