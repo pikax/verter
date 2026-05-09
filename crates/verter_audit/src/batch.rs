@@ -20,8 +20,7 @@
 //! - Callback ordering is implementation-defined; the aggregator
 //!   does not rely on it.
 
-use std::time::Instant;
-
+use crate::instant::Instant;
 use crate::payloads::bundler::{BundlerBatchPayload, SlowRecordSummary};
 use crate::payloads::tags::BundlerKindTag;
 use crate::record::{RequestAuditRecord, RequestKind};

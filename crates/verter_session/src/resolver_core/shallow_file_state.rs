@@ -618,6 +618,31 @@ impl ShallowFileState {
         self.value_symbols.get(name)
     }
 
+    /// Inject a synthesised value symbol that the file's eval-env
+    /// path did not produce, plus the matching `ExportTarget::Local`
+    /// entry so `default`-style routes resolve identically to
+    /// userland-declared symbols.
+    ///
+    /// Used by [`super::vue_default_synth`] to publish the implicit
+    /// SFC default-export instance shape without modifying the
+    /// `verter_semantic` analysis pipeline (which sees only the raw
+    /// `<script setup>` content and therefore cannot observe the
+    /// compiler-driven default export).
+    ///
+    /// No-op when a value symbol with the given name already exists
+    /// — userland declarations always win over synthesised ones.
+    pub fn insert_synthesised_value_symbol(&mut self, name: &str, symbol: ShallowValueSymbol) {
+        if self.value_symbols.contains_key(name) {
+            return;
+        }
+        self.value_symbols.insert(name.to_string(), symbol);
+        self.exports
+            .entry(name.to_string())
+            .or_insert_with(|| ExportTarget::Local {
+                symbol_name: name.to_string(),
+            });
+    }
+
     /// Check if a name is an import-local binding.
     pub fn is_import_local(&self, name: &str) -> bool {
         self.import_locals.contains(name)

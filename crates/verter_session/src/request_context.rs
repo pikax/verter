@@ -222,9 +222,6 @@ pub struct PerRequestCacheCounters {
     pub materialize_structure: HitMiss,
     /// `MaterializeMemoDb` — materialiser memo cache.
     pub materialize_memo: HitMiss,
-    /// `MemberRouteResultDb` — macro-member walker route-result cache
-    /// keyed on `(scope, member_name, lowered, mode)`.
-    pub member_route_result: HitMiss,
     /// `PreparedSurfaceDb` — prepared-surface cache.
     pub prepared_surface: HitMiss,
     /// `PreparedMemberDb` — prepared-member cache.

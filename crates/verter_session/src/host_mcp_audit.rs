@@ -26,7 +26,6 @@
 //! tool's work always runs.
 
 use std::sync::Arc;
-use std::time::Instant;
 
 use verter_audit::{
     McpToolPayload, RequestAuditRecord, RequestKind, RequestKindPayload, RequestMemoryAudit,
@@ -34,6 +33,7 @@ use verter_audit::{
 };
 
 use crate::host_audit_runtime::AuditRequestRegistration;
+use crate::instant::Instant;
 use crate::request_context::{RequestContext, RequestContextGuard};
 use crate::VerterHost;
 

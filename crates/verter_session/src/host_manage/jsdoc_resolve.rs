@@ -24,10 +24,7 @@ use crate::resolver_core::ComponentMetaEvalOutputs;
 use crate::types::{FileAnalysisSnapshot, ProjectionMode};
 use crate::VerterHost;
 
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::Instant;
-#[cfg(target_arch = "wasm32")]
-use web_time::Instant;
+use crate::instant::Instant;
 
 // file moved from `meta_resolve/jsdoc_resolve.rs` to
 // `host_manage/jsdoc_resolve.rs`. The original `super::dispatch_helpers`

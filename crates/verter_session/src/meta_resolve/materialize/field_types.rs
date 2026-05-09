@@ -16,6 +16,7 @@
 //! the parent shell still calls (matches the foundation
 //! extractions: `dispatch_helpers.rs`, `resolved_state.rs`, etc.).
 
+use crate::instant::Instant;
 use crate::resolver_core::component_meta_registry::{
     component_meta_registry_public_indexed_access_route,
     component_meta_registry_public_utility_route,
@@ -37,15 +38,12 @@ use super::super::scoring::compare_type_expr_improvement;
 use super::macro_shapes::expr_needs_projection_rescue;
 use crate::host_manage::component_meta_request_impl::ResolvedMacroMeta;
 
-// `materialize_component_meta_macro_shape_member_type_expr` lives in the
-// `macro_member_walk` sibling;
 // `component_meta_registry_should_keep_raw_symbolic_non_object_alias`
 // and `preserve_package_backed_symbolic_refs_node` live in the
 // `registry_materialize` sibling;
 // `type_node_needs_member_route_materialization` lives in the
 // `graph_predicates` sibling.
 use super::super::graph_predicates::type_node_needs_member_route_materialization;
-use super::super::macro_member_walk::materialize_component_meta_macro_shape_member_type_expr;
 use super::super::registry_materialize::{
     component_meta_registry_should_keep_raw_symbolic_non_object_alias,
     preserve_package_backed_symbolic_refs_node,
@@ -185,7 +183,7 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
             scope_canonical_id, mode
         );
     }
-    let _us_lower_t0 = std::time::Instant::now();
+    let _us_lower_t0 = Instant::now();
     let lowered = dispatch.shallow_lower_type_expr(
         expr,
         &env,
@@ -203,7 +201,7 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
             scope_canonical_id, mode, _us_lower_ms
         );
     }
-    let _us_rr_t0 = std::time::Instant::now();
+    let _us_rr_t0 = Instant::now();
     let dispatch_materialized = dispatch.raise_and_reduce(lowered, mode);
     let _us_rr_ms = _us_rr_t0.elapsed().as_secs_f64() * 1000.0;
     if _us_trace {
@@ -808,74 +806,6 @@ pub(crate) fn lowered_preserve_package_backed_symbolic_refs(
         .unwrap_or_else(|| materialized.clone())
 }
 
-// Currently orphaned — the only production call site lived inside
-// the legacy outer walker
-// that the §7.1 per-macro projector cutover replaced. Retained
-// because the helper is exercised by integration-test fixtures.
-#[allow(dead_code)]
-pub(crate) fn define_props_member_can_stay_symbolic_without_rescue(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
-    scope_canonical_id: &str,
-    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-) -> bool {
-    use verter_semantic::analysis::type_expr::TypeExpr;
-
-    match expr {
-        TypeExpr::Parenthesized(inner)
-        | TypeExpr::Array { element: inner, .. }
-        | TypeExpr::KeyOf(inner)
-        | TypeExpr::Rest(inner) => define_props_member_can_stay_symbolic_without_rescue(
-            inner,
-            scope_canonical_id,
-            query_engine,
-        ),
-        TypeExpr::Tuple { elements, .. } => elements.iter().all(|element| {
-            define_props_member_can_stay_symbolic_without_rescue(
-                &element.ty,
-                scope_canonical_id,
-                query_engine,
-            )
-        }),
-        TypeExpr::Union(types) => types.iter().all(|ty| {
-            define_props_member_can_stay_symbolic_without_rescue(
-                ty,
-                scope_canonical_id,
-                query_engine,
-            )
-        }),
-        TypeExpr::Ref {
-            name,
-            type_arguments,
-        } if type_arguments.is_empty() => {
-            let declaration = query_engine.resolve_type_declaration(scope_canonical_id, name);
-            let declaration_scope = if declaration.canonical_source.is_empty() {
-                scope_canonical_id
-            } else {
-                declaration.canonical_source.as_str()
-            };
-            let resolved_name = if declaration.resolved_name.is_empty() {
-                name.as_ref()
-            } else {
-                declaration.resolved_name.as_str()
-            };
-            query_engine
-                .named_decl_body(declaration_scope, resolved_name)
-                .is_none()
-                || (declaration_scope != scope_canonical_id
-                    && top_level_imported_ref_can_stay_symbolic(
-                        scope_canonical_id,
-                        name.as_ref(),
-                        query_engine,
-                    ))
-        }
-        TypeExpr::Primitive(_)
-        | TypeExpr::Literal(_)
-        | TypeExpr::Unknown { .. }
-        | TypeExpr::Function(_) => true,
-        _ => false,
-    }
-}
-
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub(crate) fn materialize_component_meta_field_types(
     scope_canonical_id: &str,
@@ -889,7 +819,7 @@ pub(crate) fn materialize_component_meta_field_types(
         &crate::loop5_instrumentation::MATERIALIZE_FIELD_TYPES_CALLS,
         &crate::loop5_instrumentation::MATERIALIZE_FIELD_TYPES_NS,
     );
-    let _ft_t0 = std::time::Instant::now();
+    let _ft_t0 = Instant::now();
     if std::env::var("VERTER_PROGRESS_STREAM").is_ok() {
         eprintln!(
             "[FIELD_TYPES_ENTER] owner={} props={} slots={} bindings={}",
@@ -907,7 +837,7 @@ pub(crate) fn materialize_component_meta_field_types(
         mode: crate::semantic_query::ProjectionMode,
     ) {
         let trace = std::env::var("VERTER_PROGRESS_STREAM").is_ok();
-        let t0 = std::time::Instant::now();
+        let t0 = Instant::now();
         let needs_rescue = expr_needs_projection_rescue(
             query_engine,
             scope_canonical_id,
@@ -926,7 +856,7 @@ pub(crate) fn materialize_component_meta_field_types(
             return;
         }
 
-        let t_scope = std::time::Instant::now();
+        let t_scope = Instant::now();
         let materialize_scope_canonical_id = select_imported_materialization_scope(
             field_state.published_type(),
             scope_canonical_id,
@@ -947,7 +877,7 @@ pub(crate) fn materialize_component_meta_field_types(
             );
         }
 
-        let t_us = std::time::Instant::now();
+        let t_us = Instant::now();
         let rescued = materialize_component_meta_type_expr_until_stable(
             field_state.published_type(),
             materialize_scope_canonical_id.as_str(),
@@ -1910,31 +1840,6 @@ pub(crate) fn materialize_component_meta_field_types(
             continue;
         }
 
-        // Loop-9 block 5: the per-field member-route loop calling
-        // `materialize_component_meta_macro_shape_member_type_expr`.
-        {
-            let _t = crate::loop5_instrumentation::TimerGuard::new(
-                &crate::loop5_instrumentation::FIELD_PROPS_MEMBER_ROUTE_LOOP_CALLS,
-                &crate::loop5_instrumentation::FIELD_PROPS_MEMBER_ROUTE_LOOP_NS,
-            );
-            if let Some(routes) = prop_member_routes.get(&field.name).cloned() {
-                crate::capture_token::with_active_capture(|t| {
-                    t.record_counter(MEMBER_ROUTE_CALLS_COUNTER, 1)
-                });
-                for lowered in routes {
-                    let rescued = materialize_component_meta_macro_shape_member_type_expr(
-                        &lowered,
-                        field.name.as_str(),
-                        field_state.published_type(),
-                        scope_canonical_id,
-                        query_engine,
-                    );
-                    if compare_type_expr_improvement(&rescued, field_state.published_type()) {
-                        field_state.set_current_type(rescued);
-                    }
-                }
-            }
-        }
         // Loop-9 block 6: scope selection + 3-way routed-surface
         // candidate scan (`materialize_member_surface_expr` x3 +
         // `project_expr_class_a_via_dispatch` x2). Always increments
@@ -2328,7 +2233,7 @@ pub(crate) fn materialize_component_meta_field_types(
         );
         field.r#type = field_state.publish();
     }
-    let _slot_bindings_t0 = std::time::Instant::now();
+    let _slot_bindings_t0 = Instant::now();
     let _trace_sb = std::env::var("VERTER_PROGRESS_STREAM").is_ok();
     if _trace_sb {
         eprintln!(
@@ -2346,7 +2251,7 @@ pub(crate) fn materialize_component_meta_field_types(
                 _slot_bindings_t0.elapsed().as_secs_f64() * 1000.0
             );
         }
-        let _sb_outer_t0 = std::time::Instant::now();
+        let _sb_outer_t0 = Instant::now();
         // Wrap field.r#type in MacroFieldGraphState.
         let ctx = query_engine.ctx;
         let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
@@ -2364,7 +2269,7 @@ pub(crate) fn materialize_component_meta_field_types(
                 _sb_idx, field.name, preview
             );
         }
-        let _rescue_t0 = std::time::Instant::now();
+        let _rescue_t0 = Instant::now();
         // Slot-binding rescue uses Navigate mode (path-precise) per
         // CLAUDE.md macro-traversal rule. The published_type for a
         // slot_binding is typically `IndexedAccess { Ref<X<...>>, k }` —
@@ -2478,7 +2383,7 @@ pub(crate) fn materialize_component_meta_field_types(
                         field.name, scope_hint, cand_idx
                     );
                 }
-                let t0 = std::time::Instant::now();
+                let t0 = Instant::now();
                 let rescued = materialize_component_meta_type_expr_until_stable(
                     &candidate,
                     scope_hint,
@@ -2503,7 +2408,7 @@ pub(crate) fn materialize_component_meta_field_types(
                         field.name, scope_hint, cand_idx
                     );
                 }
-                let t1 = std::time::Instant::now();
+                let t1 = Instant::now();
                 let surface =
                     query_engine.materialize_member_surface_expr(scope_hint, &candidate, false);
                 if trace {
@@ -2553,14 +2458,10 @@ pub(crate) fn materialize_component_meta_field_types(
         field.r#type = field_state.publish();
     }
 }
-/// Test-only call counter for `materialize_component_meta_type_expr_until_stable`
-/// Incremented at function entry — memo hits and
-/// cold builds both count, since the counter discriminates the *entry*
-/// invariant: did the caller route through whole-expression materialization
-/// at all? The Step 6.2 FAIL-FIRST test asserts that route/project
-/// candidates evaluated by `materialize_component_meta_macro_shape_member_type_expr`
-/// satisfy the request without falling through to this entry, so the
-/// counter stays at 0 in the success case.
+/// Test-only call counter for `materialize_component_meta_type_expr_until_stable`.
+/// Incremented at function entry — memo hits and cold builds both
+/// count, since the counter discriminates the *entry* invariant: did
+/// the caller route through whole-expression materialization at all?
 #[cfg(test)]
 pub(crate) static MTL_CALL_COUNT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);

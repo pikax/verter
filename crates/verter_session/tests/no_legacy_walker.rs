@@ -122,15 +122,35 @@ const RETIRED_SYMBOLS: &[&str] = &[
     "substitute_infer_in_typeexpr",
     "collect_expanded_slot_bindings_from_object_type",
     // §7.3 cutover — the legacy outer macro-shape walker driver is
-    // retired. The per-member rescue helper
-    // `materialize_component_meta_macro_shape_member_type_expr` is
-    // KEPT as the dispatch-path refinement's deep-resolution rescue
-    // (load-bearing for cross-file recursive-alias preservation,
-    // e.g. `Tree = { children?: Tree[] }`). Production routes
-    // through `meta_resolve::projectors::project_evaluated_types`
-    // first; the per-member rescue runs only for fields the
-    // projector path leaves as unresolved IndexedAccess terminals.
+    // retired. Production routes through
+    // `meta_resolve::projectors::project_evaluated_types`.
     "walk_component_meta_macro_shape_member_types",
+    // §7.3 follow-up cutover — the per-member rescue cascade is
+    // DELETED. The projector self-reduces nested `IndexedAccess` /
+    // `KeyOf` / `TypeOf` / `Conditional` / `Mapped` / `Infer` chains
+    // via `materialize_component_meta_type_expr_until_stable` on the
+    // raised member surface (see `meta_resolve::projectors`). The
+    // recursive-alias preservation case (e.g.
+    // `Tree = { children?: Tree[] }`) is now handled by the
+    // publication policy's `RecursiveRef` back-edge in
+    // `component_meta_resolution_policy::core::rewrite_ref` —
+    // there is no per-member rescue helper behind the projector.
+    //
+    // Re-introducing any of these symbols at a production call site
+    // would re-wire the retired dual-path rescue cascade.
+    "materialize_component_meta_macro_shape_member_type_expr",
+    "publish_member_route_result",
+    "MemberRouteResultDb",
+    "MemberRouteResultEntry",
+    "MemberRouteResultCacheKey",
+    "member_route_result_db_get_or_compute",
+    "member_route_result_db",
+    "MEMBER_ROUTE_FAST_PATH_HITS",
+    "MATERIALIZE_MACRO_SHAPE_MEMBER_TYPE_EXPR_CALLS",
+    "MATERIALIZE_MACRO_SHAPE_MEMBER_TYPE_EXPR_NS",
+    "FIELD_PROPS_MEMBER_ROUTE_LOOP_CALLS",
+    "FIELD_PROPS_MEMBER_ROUTE_LOOP_NS",
+    "define_props_member_can_stay_symbolic_without_rescue",
 ];
 
 const SCAN_DIRS: &[&str] = &["crates", ".claude/skills", "docs"];

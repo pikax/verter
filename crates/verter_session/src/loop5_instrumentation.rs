@@ -23,6 +23,8 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use crate::instant::Instant;
+
 /// Outer entries to the legacy per-member materialiser.
 /// One increment per request × per macro member walked.
 pub static MACRO_MEMBER_WALK_OUTER_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -347,9 +349,6 @@ pub static DISPATCH_OPERATOR_TOTAL_NS: AtomicU64 = AtomicU64::new(0);
 // increments the calls counter on `new` and adds the elapsed ns
 // on `Drop`. Multiple early-return sites are handled implicitly.
 
-pub static MATERIALIZE_MACRO_SHAPE_MEMBER_TYPE_EXPR_CALLS: AtomicU64 = AtomicU64::new(0);
-pub static MATERIALIZE_MACRO_SHAPE_MEMBER_TYPE_EXPR_NS: AtomicU64 = AtomicU64::new(0);
-
 pub static MATERIALIZE_TYPE_EXPR_UNTIL_STABLE_CALLS: AtomicU64 = AtomicU64::new(0);
 pub static MATERIALIZE_TYPE_EXPR_UNTIL_STABLE_NS: AtomicU64 = AtomicU64::new(0);
 
@@ -422,11 +421,6 @@ pub static FIELD_PROPS_RESCUE_FIELD_NS: AtomicU64 = AtomicU64::new(0);
 pub static FIELD_PROPS_NEEDS_MEMBER_ROUTE_CALLS: AtomicU64 = AtomicU64::new(0);
 pub static FIELD_PROPS_NEEDS_MEMBER_ROUTE_NS: AtomicU64 = AtomicU64::new(0);
 
-/// Block 5: per-field `for lowered in routes` loop calling
-/// the legacy per-member materialiser.
-pub static FIELD_PROPS_MEMBER_ROUTE_LOOP_CALLS: AtomicU64 = AtomicU64::new(0);
-pub static FIELD_PROPS_MEMBER_ROUTE_LOOP_NS: AtomicU64 = AtomicU64::new(0);
-
 /// Block 6: select_imported_materialization_scope + raw_route_root
 /// check + 3-way `materialize_member_surface_expr` candidate scan
 /// (the routed-surface block).
@@ -484,7 +478,7 @@ pub static WALK_DEFINE_SLOTS_ARM_NS: AtomicU64 = AtomicU64::new(0);
 /// `return` would be tedious. The two atomics must outlive the
 /// guard (typically `&'static AtomicU64` from this module).
 pub struct TimerGuard {
-    started: std::time::Instant,
+    started: Instant,
     ns_counter: &'static AtomicU64,
 }
 
@@ -494,7 +488,7 @@ impl TimerGuard {
     pub fn new(calls_counter: &'static AtomicU64, ns_counter: &'static AtomicU64) -> Self {
         calls_counter.fetch_add(1, Ordering::Relaxed);
         Self {
-            started: std::time::Instant::now(),
+            started: Instant::now(),
             ns_counter,
         }
     }
@@ -504,7 +498,7 @@ impl TimerGuard {
     /// already incremented elsewhere by Loop 5.
     pub fn new_ns_only(ns_counter: &'static AtomicU64) -> Self {
         Self {
-            started: std::time::Instant::now(),
+            started: Instant::now(),
             ns_counter,
         }
     }
@@ -568,8 +562,6 @@ pub fn reset_all() {
         slot.store(0, Ordering::Relaxed);
     }
     // Loop 8 — broadened materialize_ms counters.
-    MATERIALIZE_MACRO_SHAPE_MEMBER_TYPE_EXPR_CALLS.store(0, Ordering::Relaxed);
-    MATERIALIZE_MACRO_SHAPE_MEMBER_TYPE_EXPR_NS.store(0, Ordering::Relaxed);
     MATERIALIZE_TYPE_EXPR_UNTIL_STABLE_CALLS.store(0, Ordering::Relaxed);
     MATERIALIZE_TYPE_EXPR_UNTIL_STABLE_NS.store(0, Ordering::Relaxed);
     MATERIALIZE_STRUCTURE_CALLS.store(0, Ordering::Relaxed);
@@ -596,8 +588,6 @@ pub fn reset_all() {
     FIELD_PROPS_RESCUE_FIELD_NS.store(0, Ordering::Relaxed);
     FIELD_PROPS_NEEDS_MEMBER_ROUTE_CALLS.store(0, Ordering::Relaxed);
     FIELD_PROPS_NEEDS_MEMBER_ROUTE_NS.store(0, Ordering::Relaxed);
-    FIELD_PROPS_MEMBER_ROUTE_LOOP_CALLS.store(0, Ordering::Relaxed);
-    FIELD_PROPS_MEMBER_ROUTE_LOOP_NS.store(0, Ordering::Relaxed);
     FIELD_PROPS_ROUTED_SURFACE_CALLS.store(0, Ordering::Relaxed);
     FIELD_PROPS_ROUTED_SURFACE_NS.store(0, Ordering::Relaxed);
     FIELD_PROPS_REF_RESCUE_MATCH_CALLS.store(0, Ordering::Relaxed);
@@ -645,10 +635,6 @@ pub fn dump_loop5_instrumentation_counters() -> String {
     let dispatch_operator_total_ns = DISPATCH_OPERATOR_TOTAL_NS.load(Ordering::Relaxed);
 
     // Loop 8 — broadened materialize_ms counters.
-    let materialize_macro_shape_member_type_expr_calls =
-        MATERIALIZE_MACRO_SHAPE_MEMBER_TYPE_EXPR_CALLS.load(Ordering::Relaxed);
-    let materialize_macro_shape_member_type_expr_ns =
-        MATERIALIZE_MACRO_SHAPE_MEMBER_TYPE_EXPR_NS.load(Ordering::Relaxed);
     let materialize_type_expr_until_stable_calls =
         MATERIALIZE_TYPE_EXPR_UNTIL_STABLE_CALLS.load(Ordering::Relaxed);
     let materialize_type_expr_until_stable_ns =
@@ -683,9 +669,6 @@ pub fn dump_loop5_instrumentation_counters() -> String {
         FIELD_PROPS_NEEDS_MEMBER_ROUTE_CALLS.load(Ordering::Relaxed);
     let field_props_needs_member_route_ns =
         FIELD_PROPS_NEEDS_MEMBER_ROUTE_NS.load(Ordering::Relaxed);
-    let field_props_member_route_loop_calls =
-        FIELD_PROPS_MEMBER_ROUTE_LOOP_CALLS.load(Ordering::Relaxed);
-    let field_props_member_route_loop_ns = FIELD_PROPS_MEMBER_ROUTE_LOOP_NS.load(Ordering::Relaxed);
     let field_props_routed_surface_calls = FIELD_PROPS_ROUTED_SURFACE_CALLS.load(Ordering::Relaxed);
     let field_props_routed_surface_ns = FIELD_PROPS_ROUTED_SURFACE_NS.load(Ordering::Relaxed);
     let field_props_ref_rescue_match_calls =
@@ -743,8 +726,6 @@ pub fn dump_loop5_instrumentation_counters() -> String {
          \"TYPE_EXPR_OPERATOR_NODE_COUNT_SUM\": {type_expr_operator_node_count_sum},\n  \
          \"EXECUTE_COOPERATIVE_BUILD_NS_TOTAL\": {execute_cooperative_build_ns_total},\n  \
          \"DISPATCH_OPERATOR_TOTAL_NS\": {dispatch_operator_total_ns},\n  \
-         \"MATERIALIZE_MACRO_SHAPE_MEMBER_TYPE_EXPR_CALLS\": {materialize_macro_shape_member_type_expr_calls},\n  \
-         \"MATERIALIZE_MACRO_SHAPE_MEMBER_TYPE_EXPR_NS\": {materialize_macro_shape_member_type_expr_ns},\n  \
          \"MATERIALIZE_TYPE_EXPR_UNTIL_STABLE_CALLS\": {materialize_type_expr_until_stable_calls},\n  \
          \"MATERIALIZE_TYPE_EXPR_UNTIL_STABLE_NS\": {materialize_type_expr_until_stable_ns},\n  \
          \"MATERIALIZE_STRUCTURE_CALLS\": {materialize_structure_calls},\n  \
@@ -770,8 +751,6 @@ pub fn dump_loop5_instrumentation_counters() -> String {
          \"FIELD_PROPS_RESCUE_FIELD_NS\": {field_props_rescue_field_ns},\n  \
          \"FIELD_PROPS_NEEDS_MEMBER_ROUTE_CALLS\": {field_props_needs_member_route_calls},\n  \
          \"FIELD_PROPS_NEEDS_MEMBER_ROUTE_NS\": {field_props_needs_member_route_ns},\n  \
-         \"FIELD_PROPS_MEMBER_ROUTE_LOOP_CALLS\": {field_props_member_route_loop_calls},\n  \
-         \"FIELD_PROPS_MEMBER_ROUTE_LOOP_NS\": {field_props_member_route_loop_ns},\n  \
          \"FIELD_PROPS_ROUTED_SURFACE_CALLS\": {field_props_routed_surface_calls},\n  \
          \"FIELD_PROPS_ROUTED_SURFACE_NS\": {field_props_routed_surface_ns},\n  \
          \"FIELD_PROPS_REF_RESCUE_MATCH_CALLS\": {field_props_ref_rescue_match_calls},\n  \
@@ -945,13 +924,13 @@ pub fn spawn_watchdog(stall_threshold_ms: u64, sample_interval_ms: u64) {
 
 fn watchdog_stall_loop(stall_threshold: std::time::Duration, sample_interval: std::time::Duration) {
     let mut last_beat = WATCHDOG_PROGRESS_BEAT.load(Ordering::Relaxed);
-    let mut last_advance = std::time::Instant::now();
+    let mut last_advance = Instant::now();
     loop {
         std::thread::sleep(sample_interval);
         let current_beat = WATCHDOG_PROGRESS_BEAT.load(Ordering::Relaxed);
         if current_beat != last_beat {
             last_beat = current_beat;
-            last_advance = std::time::Instant::now();
+            last_advance = Instant::now();
             continue;
         }
         if last_advance.elapsed() >= stall_threshold {
@@ -963,7 +942,7 @@ fn watchdog_stall_loop(stall_threshold: std::time::Duration, sample_interval: st
                 current_beat,
             );
             WATCHDOG_DUMP_BACKTRACE_NOW.store(true, Ordering::Relaxed);
-            last_advance = std::time::Instant::now();
+            last_advance = Instant::now();
         }
     }
 }
@@ -1005,8 +984,6 @@ mod tests {
             "DISPATCH_OPERATOR_TOTAL_NS",
             "DISPATCH_OPERATOR_KIND_CALLS",
             "DISPATCH_OPERATOR_KIND_NS",
-            "MATERIALIZE_MACRO_SHAPE_MEMBER_TYPE_EXPR_CALLS",
-            "MATERIALIZE_MACRO_SHAPE_MEMBER_TYPE_EXPR_NS",
             "MATERIALIZE_TYPE_EXPR_UNTIL_STABLE_CALLS",
             "MATERIALIZE_TYPE_EXPR_UNTIL_STABLE_NS",
             "MATERIALIZE_STRUCTURE_CALLS",
@@ -1032,8 +1009,6 @@ mod tests {
             "FIELD_PROPS_RESCUE_FIELD_NS",
             "FIELD_PROPS_NEEDS_MEMBER_ROUTE_CALLS",
             "FIELD_PROPS_NEEDS_MEMBER_ROUTE_NS",
-            "FIELD_PROPS_MEMBER_ROUTE_LOOP_CALLS",
-            "FIELD_PROPS_MEMBER_ROUTE_LOOP_NS",
             "FIELD_PROPS_ROUTED_SURFACE_CALLS",
             "FIELD_PROPS_ROUTED_SURFACE_NS",
             "FIELD_PROPS_REF_RESCUE_MATCH_CALLS",

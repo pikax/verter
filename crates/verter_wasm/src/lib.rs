@@ -820,7 +820,7 @@ impl WasmVerterHost {
         catch_panic(AssertUnwindSafe(move || {
             let store = host.host_audit_runtime().audit_records_store();
             let mut latest_id: Option<u64> = None;
-            let mut latest_at: Option<std::time::Instant> = None;
+            let mut latest_at: Option<verter_audit::instant::Instant> = None;
             store.for_each_record(&mut |inserted_at, record| {
                 let is_newer = match latest_at {
                     None => true,
@@ -903,10 +903,10 @@ impl WasmVerterHost {
         let host = std::sync::Arc::clone(&self.inner);
         catch_panic(AssertUnwindSafe(move || {
             let store = host.host_audit_runtime().audit_records_store();
-            let since_instant: Option<std::time::Instant> = match since_id {
+            let since_instant: Option<verter_audit::instant::Instant> = match since_id {
                 None => None,
                 Some(target_id) => {
-                    let mut best: Option<std::time::Instant> = None;
+                    let mut best: Option<verter_audit::instant::Instant> = None;
                     store.for_each_record(&mut |inserted_at, record| {
                         if record.request_id <= target_id {
                             best = match best {

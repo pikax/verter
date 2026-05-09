@@ -167,7 +167,7 @@ fn all_thirteen_cache_layers_present_and_default_to_zero() {
     let ctx = make_ctx();
     // Structural regression: each named layer must compile-time
     // exist. Reading the field forces the compiler to verify it.
-    let pairs: [(u64, u64); 14] = [
+    let pairs: [(u64, u64); 13] = [
         ctx.cache_counters.indexed.snapshot(),
         ctx.cache_counters.analysis.snapshot(),
         ctx.cache_counters.owner_import.snapshot(),
@@ -179,7 +179,6 @@ fn all_thirteen_cache_layers_present_and_default_to_zero() {
         ctx.cache_counters.semantic_graph.snapshot(),
         ctx.cache_counters.materialize_structure.snapshot(),
         ctx.cache_counters.materialize_memo.snapshot(),
-        ctx.cache_counters.member_route_result.snapshot(),
         ctx.cache_counters.prepared_surface.snapshot(),
         ctx.cache_counters.prepared_member.snapshot(),
     ];

@@ -15,7 +15,7 @@
 //! can honour an `Instant`-keyed `since` window without having to
 //! re-key records by wall-clock time.
 
-use std::time::Instant;
+use crate::instant::Instant;
 
 use indexmap::IndexMap;
 use parking_lot::Mutex;

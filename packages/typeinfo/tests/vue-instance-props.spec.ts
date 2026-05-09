@@ -1,46 +1,72 @@
 /**
  * Phase 4 Test #3 — Vue worked example.
  *
- * Plan §6.4 row 3: a Vue SFC with `defineProps<{ msg: string }>()`;
- * resolveSymbol on a synthesised companion type alias for the props
- * resolves to `ObjectType { msg: PrimitiveType("string") }`.
+ * Plan §1.1 row 9 / §7.7 #5: a Vue SFC declares its props through
+ * `defineProps<{ msg: string }>()`; evaluating
+ * `InstanceType<typeof default>['$props']` against that SFC's scope
+ * via `TypeInfoSession.evaluateTypeExpression` resolves to an Object
+ * descriptor carrying a `msg: string` property.
  *
- * The session does not need the full SFC pipeline to satisfy this
- * test — the request is type-resolution only. We submit a sibling
- * `.ts` companion file that re-publishes the props type and resolve
- * that. This keeps the test hermetic and exercises the
- * `TypeInfoSession.resolveSymbol → object body` path end-to-end.
+ * This test exercises the actual `.vue` SFC pipeline end-to-end:
+ * the host parses the script-setup block, the substrate
+ * (`vue_default_synth`) synthesises the implicit `default` value
+ * symbol from the file's type-based macros, and
+ * `evaluate_type_expression` inlines the scope's eval-source into
+ * the scratch file so `typeof default` resolves to the synthesised
+ * Object surface. Without that substrate cutover the result would
+ * be `IndexedAccess { object: ..., index: '$props' }` — i.e. the
+ * `'$props'` projection would not reduce — and this test would
+ * fail.
  *
- * REGRESSION — fails against any pre-Phase 4 substrate where
- * `resolveSymbol` either does not exist or returns the alias shell
- * instead of the Object body.
+ * REGRESSION — fails against any pre-cutover substrate where the
+ * `.vue` scope's default does not publish `$props` natively, or
+ * where the typeinfo scratch file does not inherit the scope's
+ * eval-source as a prelude.
  */
 
 import { describe, expect, it } from "vitest";
 
 import { TypeInfoSession } from "../src/index.js";
 
+const VUE_SFC_SOURCE = `<script setup lang="ts">
+defineProps<{ msg: string }>();
+</script>
+<template>
+  <div>{{ msg }}</div>
+</template>
+`;
+
 describe("TypeInfoSession Vue instance props worked example", () => {
-  it("resolves the props alias to an object descriptor with the declared scalar field", () => {
+  it("evaluates InstanceType<typeof default>['$props'] against a real .vue SFC scope", () => {
     const session = new TypeInfoSession({ root: "/fixtures" });
     session.host.upsert({
-      inputId: "/fixtures/MyButton.props.ts",
-      source: `export type MyButtonProps = { msg: string };\n`,
+      canonicalId: "/fixtures/MyButton.vue",
+      inputId: "/fixtures/MyButton.vue",
+      source: Buffer.from(VUE_SFC_SOURCE, "utf-8"),
     });
 
-    const result = session.resolveSymbol("/fixtures/MyButton.props.ts", "MyButtonProps", {
+    const result = session.evaluateTypeExpression({
+      scope: "/fixtures/MyButton.vue",
+      expression: "InstanceType<typeof default>['$props']",
       mode: "expanded",
+      cacheable: false,
     });
 
+    // Discriminating contract: the result MUST be an `object`
+    // descriptor whose property list contains `msg: string`. A
+    // pre-cutover substrate would produce an `indexed-access` (or
+    // similar non-object) shape because `default` doesn't resolve
+    // to a concrete surface in the scratch's scope.
     expect(result.type).toBeDefined();
     expect(result.type?.kind).toBe("object");
     if (result.type?.kind === "object") {
-      expect(result.type.properties.length).toBe(1);
-      const msg = result.type.properties[0];
-      expect(msg.name).toBe("msg");
-      expect(msg.type.kind).toBe("primitive");
-      if (msg.type.kind === "primitive") {
-        expect(msg.type.name).toBe("string");
+      const propertyNames = result.type.properties.map((p) => p.name);
+      expect(propertyNames).toContain("msg");
+      const msg = result.type.properties.find((p) => p.name === "msg");
+      expect(msg).toBeDefined();
+      expect(msg!.type.kind).toBe("primitive");
+      if (msg!.type.kind === "primitive") {
+        expect(msg!.type.name).toBe("string");
       }
     }
 

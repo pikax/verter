@@ -11,10 +11,7 @@
 
 use std::sync::Arc;
 
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::Instant;
-#[cfg(target_arch = "wasm32")]
-use web_time::Instant;
+use crate::instant::Instant;
 
 use crate::types::*;
 use crate::VerterHost;
@@ -871,15 +868,23 @@ impl VerterHost {
             let resolver = HostShallowImportResolver {
                 dep_edges: &dep_edges,
             };
-            let shallow_state = Arc::new(
+            // Synthesise the implicit Vue SFC `default` value symbol
+            // from type-based macros — see `vue_default_synth` for
+            // the policy and rationale.
+            let mut shallow_state_inner =
                 crate::resolver_core::ShallowFileState::from_analysis_with_resolver(
                     whole_hash,
                     Arc::clone(&external_type_analysis),
                     Some(eval_source.as_ref()),
                     None,
                     &resolver,
-                ),
+                );
+            crate::resolver_core::vue_default_synth::inject_vue_default_into_shallow_state(
+                canonical_id,
+                &mut shallow_state_inner,
+                &snapshot.macros,
             );
+            let shallow_state = Arc::new(shallow_state_inner);
 
             // Prefer the scheduler's file state for script_analysis (it may have
             // richer compilation context), but fall back to the snapshot's data

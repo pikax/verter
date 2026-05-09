@@ -89,6 +89,9 @@ static_assertions = "1"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-time = "1"
+# uuid 1.22 split RNG into explicit features. On wasm32-unknown-unknown
+# the `js` feature routes through wasm-bindgen + WebCrypto.
+uuid = { version = "1", features = ["js"] }
 
 # Windows process-RSS reporting in `component_meta_audit::current_process_rss`.
 # Requires `K32GetProcessMemoryInfo` (kernel32.dll, exposed by
@@ -106,6 +109,9 @@ windows-sys = { version = "0.61", features = [
 # WASM continues to use the single-file `upsert` + `get_virtual_file` path.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rayon = { workspace = true }
+# uuid 1.22 split RNG into explicit features. Native targets use
+# `rng-getrandom` for v4 generation.
+uuid = { version = "1", features = ["rng-getrandom"] }
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }

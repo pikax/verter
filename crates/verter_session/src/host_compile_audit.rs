@@ -19,7 +19,6 @@
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Instant;
 
 use oxc_allocator::Allocator;
 use verter_audit::{
@@ -32,6 +31,7 @@ use verter_compiler::compile::{
 };
 
 use crate::component_meta_audit::{RequestMemoryAudit, RequestStoreAudit, RequestTimingAudit};
+use crate::instant::Instant;
 use crate::request_context::{RequestContext, RequestContextGuard};
 use crate::VerterHost;
 

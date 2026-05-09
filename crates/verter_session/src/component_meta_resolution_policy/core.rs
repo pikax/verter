@@ -368,15 +368,17 @@ fn rewrite_ref(
     let normalized_args = NormalizedTypeArgs::normalize(type_arguments, ctx);
     let guard_key = (decl_identity, normalized_args);
 
-    // Re-entry on the same key bails with `semanticMiss`: the prior
+    // Re-entry on the same key surfaces a `RecursiveRef`: the prior
     // invocation is still resolving this declaration, and continuing
-    // would recurse forever. The published shape is `Unknown` so the
-    // outer surface stays observable while the recursive arm is
-    // transparently signalled as unresolved.
+    // would recurse forever. The recursive back-edge preserves the
+    // declaration name plus its instantiation arguments so consumers
+    // can render the recursion target (e.g. `Tree[]` whose element
+    // is a back-edge to `Tree` publishes `RecursiveRef("Tree", [])`).
+    // Generic substitutions are part of identity — `Foo<A>` and
+    // `Foo<B>` are distinct guard keys and only collapse to a back
+    // edge when the *same* substitution recurs.
     if ctx.active_refs.contains(&guard_key) {
-        return Some(TypeExpr::Unknown {
-            raw: String::from("semanticMiss"),
-        });
+        return Some(TypeExpr::recursive_ref(name, type_arguments.to_vec()));
     }
 
     ctx.active_refs.insert(guard_key.clone());

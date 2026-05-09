@@ -39,8 +39,8 @@ use crate::resolver_core::component_meta::ResolvedMacroMeta;
 use crate::resolver_core::component_meta_query_engine::ComponentMetaQueryEngine;
 use crate::resolver_core::ResolverContext;
 use crate::semantic_query::{
-    DeclIdentity, PathSegment, ProjectionMode, QueryError, QueryResult, SemanticNodeData,
-    SemanticNodeId, SemanticQueryKey,
+    DeclIdentity, DepSignature, DepVersion, PathSegment, ProjectionMode, QueryError, QueryResult,
+    SemanticNodeData, SemanticNodeId, SemanticQueryKey,
 };
 use crate::types::FileAnalysisSnapshot;
 
@@ -185,6 +185,142 @@ fn macro_expansion_for_cycle(
     }
 }
 
+/// Build a `MacroExpansionDiagnostics` envelope describing a synthesis
+/// step-budget breach. Carries the macro_kind so consumers can route
+/// the diagnostic to the right surface.
+///
+/// Emits `ExpansionStopReason::BudgetExceeded` with `Interrupted`
+/// execution status: a budget-exceeded run is not a complete
+/// synthesis, so callers (and downstream `should_suppress` consumers)
+/// must treat the published surface as torn.
+fn macro_expansion_for_budget_exceeded(
+    macro_index: usize,
+    macro_kind: MacroExpansionKind,
+    context: String,
+) -> MacroExpansionDiagnostics {
+    MacroExpansionDiagnostics {
+        macro_kind,
+        macro_index,
+        diagnostics: vec![ExpansionDiagnostic {
+            reason: ExpansionStopReason::BudgetExceeded,
+            context,
+            property_name: None,
+        }],
+        exactness: ExpansionExactness::Incomplete,
+        execution_status: ExpansionExecutionStatus::Interrupted,
+    }
+}
+
+/// Walk a freshly-lowered macro-arg [`SemanticNodeId`] and accumulate
+/// `(canonical_id, WholeHash)` dep facts for every cross-file
+/// `DeclRef` / `InstantiationRef` carrier whose canonical differs from
+/// `owner_canonical`.
+///
+/// This closes the gap where the synthesis dispatch path (`ProjectPath`,
+/// `ResolveMacroPayload`) routes the inner cross-file `ResolveDecl`
+/// through the dep-signature-discarding dispatch API: the returned
+/// [`DepSignature`] is collapsed to the project-generation token by
+/// `build_project_path`. Without this carrier-side accumulator, an
+/// `import type { Slots } from './types'` carrier file is loaded by the
+/// shallow lowering / dispatch walk but its whole-hash never reaches
+/// the per-request signature accumulator, so the published
+/// `ComponentMetaResultDb` entry's `dep_signature` does not include the
+/// carrier and an edit to the carrier does not invalidate the warm
+/// cache through the dep-signature validator.
+///
+/// Carrier facts feed the same TLS accumulator that `execute_read`
+/// reads merge into, so the existing drain in
+/// `compute_component_meta_state_inner` picks them up before publish.
+///
+/// Cycle-safe: keeps a `visited` set of `SemanticNodeId`s so a self-
+/// referential lowered shape (e.g. `type R = { next: R }` in Navigate
+/// mode) terminates after the first visit.
+fn accumulate_lowered_node_carrier_deps(
+    ctx: &dyn ResolverContext,
+    node: SemanticNodeId,
+    owner_canonical: &str,
+) {
+    let mut visited: FxHashSet<SemanticNodeId> = FxHashSet::default();
+    let mut carriers: FxHashMap<Arc<str>, [u8; 16]> = FxHashMap::default();
+    let mut stack: Vec<SemanticNodeId> = vec![node];
+    while let Some(current) = stack.pop() {
+        if !visited.insert(current) {
+            continue;
+        }
+        let Some(data) = crate::project_semantic_dispatch::node_data_for(ctx, current) else {
+            continue;
+        };
+        match data.as_ref() {
+            SemanticNodeData::DeclRef { identity } => {
+                if identity.canonical_id.as_ref() != owner_canonical {
+                    carriers
+                        .entry(Arc::clone(&identity.canonical_id))
+                        .or_insert(identity.whole_hash);
+                }
+            }
+            SemanticNodeData::InstantiationRef { base, args } => {
+                if base.canonical_id.as_ref() != owner_canonical {
+                    carriers
+                        .entry(Arc::clone(&base.canonical_id))
+                        .or_insert(base.whole_hash);
+                }
+                for arg in args.iter() {
+                    stack.push(*arg);
+                }
+            }
+            SemanticNodeData::Alias(inner) => {
+                stack.push(*inner);
+            }
+            SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
+                for arm in arms.iter() {
+                    stack.push(*arm);
+                }
+            }
+            SemanticNodeData::Array { element, .. } => {
+                stack.push(*element);
+            }
+            SemanticNodeData::Tuple { elements, .. } => {
+                for element in elements.iter() {
+                    stack.push(element.value);
+                }
+            }
+            SemanticNodeData::TemplateLiteral { expressions, .. } => {
+                for expr in expressions.iter() {
+                    stack.push(*expr);
+                }
+            }
+            SemanticNodeData::KeyOf { base } => {
+                stack.push(*base);
+            }
+            SemanticNodeData::IndexedAccess { object, .. } => {
+                stack.push(*object);
+            }
+            SemanticNodeData::Mapped { source, .. } => {
+                stack.push(*source);
+            }
+            // Object / Function surface bodies, primitives, literals,
+            // type-params, infer placeholders, opaques, typeof shells,
+            // and Vue macro elements have no further carrier-bearing
+            // children for the purpose of dep-signature carrier
+            // discovery from the lowered macro arg. Object/Function
+            // surfaces only appear here when they are inline structural
+            // types in the SFC's own scope; nested cross-file refs
+            // surface as `DeclRef` / `InstantiationRef` carriers and
+            // are picked up directly when the walker reaches them.
+            _ => {}
+        }
+    }
+    if carriers.is_empty() {
+        return;
+    }
+    let entries: Vec<(Arc<str>, DepVersion)> = carriers
+        .into_iter()
+        .map(|(canonical, hash)| (canonical, DepVersion::WholeHash(hash)))
+        .collect();
+    let signature: DepSignature = Arc::from(entries.into_boxed_slice());
+    accumulate_dispatch_dep_signature(&signature);
+}
+
 /// Read the [`SurfaceView`] members backing `node`, if `node` resolves
 /// to a `SemanticNodeData::Object` shell. Empty for any other variant
 /// — callers treat the empty surface as "no enumerable members".
@@ -318,13 +454,41 @@ pub(crate) fn resolve_slot_bindings_graph_native(
     let dispatch = ProjectSemanticDispatch::new(ctx.ctx);
     let owner = build_owner_decl_identity(ctx.ctx, owner_canonical);
 
+    // Synthesis-step budget. Production code leaves
+    // `synthesis_steps` `None` so the synthesis runs at full
+    // budget. Tests use a small override to drive the budget-
+    // exceeded path on a hermetic fixture without requiring a
+    // pathological corpus. Each synthesis sub-action (lower macro
+    // arg, ResolveMacroPayload dispatch, slot-surface walk, per-
+    // member param walk) increments the counter; when the counter
+    // exceeds the cap, synthesis bails with
+    // `ExpansionStopReason::BudgetExceeded` and marks the run for
+    // suppression so the result is not promoted into the final
+    // `ComponentMetaResultDb` cache.
+    let synthesis_step_budget: Option<u32> =
+        ctx.ctx.config().recursion_budget_overrides.synthesis_steps;
+    let mut synthesis_steps_executed: u32 = 0;
+    // Returns `true` when consuming a step exhausted the budget. The
+    // closure increments the counter unconditionally so successive
+    // calls observe progress; the `> cap` check fires once the
+    // counter crosses the configured cap (matches the
+    // `projection_op_count` semantics: cap=N permits N steps and
+    // fires on the N+1-th).
+    let consume_synthesis_step = |steps: &mut u32| -> bool {
+        *steps = steps.saturating_add(1);
+        match synthesis_step_budget {
+            Some(cap) => *steps > cap,
+            None => false,
+        }
+    };
+
     // First pass: graph-native synthesis. Build a map keyed by
     // `(slot_name, binding_name)`. Map dedups distinct macro
     // invocations that surface the same slot/binding combination.
     let mut graph_native_bindings: FxHashMap<(Arc<str>, Arc<str>), ResolvedSlotBinding> =
         FxHashMap::default();
 
-    for (macro_index, mac) in snapshot.macros.iter().enumerate() {
+    'macro_loop: for (macro_index, mac) in snapshot.macros.iter().enumerate() {
         if mac.kind != AnalyzedMacroKind::DefineSlots || !mac.is_type_based {
             continue;
         }
@@ -351,6 +515,18 @@ pub(crate) fn resolve_slot_bindings_graph_native(
         // Step 1: lower macro arg via Navigate. Navigate keeps any
         // imported carrier types as lazy shells — the shallow walker
         // will materialise the surface when the dispatch reads it.
+        if consume_synthesis_step(&mut synthesis_steps_executed) {
+            should_suppress = true;
+            diag_sink.push(macro_expansion_for_budget_exceeded(
+                macro_index,
+                MacroExpansionKind::DefineSlots,
+                format!(
+                    "synthesis-step-budget-exceeded@lower-macro-arg::steps={}::cap={:?}",
+                    synthesis_steps_executed, synthesis_step_budget,
+                ),
+            ));
+            break 'macro_loop;
+        }
         let type_args: Arc<[SemanticNodeId]> = match dispatch.lower_type_expr_in_scope_with_mode(
             owner_canonical,
             parsed_arg,
@@ -359,8 +535,34 @@ pub(crate) fn resolve_slot_bindings_graph_native(
             Some(node) => Arc::from(vec![node].into_boxed_slice()),
             None => continue,
         };
+        // Carrier-fact propagation: walk the lowered macro arg and
+        // accumulate `(canonical_id, WholeHash)` for any cross-file
+        // `DeclRef` / `InstantiationRef` carrier so the per-request
+        // dep-signature accumulator picks up imported carriers (e.g.
+        // `import type { Slots } from './types'`). Without this, the
+        // inner shallow walker's dep-signature-discarding `ResolveDecl`
+        // dispatch path drops the carrier whole-hash, the
+        // `ComponentMetaResultDb` entry is published with a
+        // dep-signature missing the carrier, and an edit to the
+        // carrier does not invalidate the warm cache through the
+        // dep-signature validator.
+        for arg in type_args.iter() {
+            accumulate_lowered_node_carrier_deps(ctx.ctx, *arg, owner_canonical);
+        }
 
         // Step 2: ResolveMacroPayload. USE execute_read; ACCUMULATE deps.
+        if consume_synthesis_step(&mut synthesis_steps_executed) {
+            should_suppress = true;
+            diag_sink.push(macro_expansion_for_budget_exceeded(
+                macro_index,
+                MacroExpansionKind::DefineSlots,
+                format!(
+                    "synthesis-step-budget-exceeded@resolve-macro-payload::steps={}::cap={:?}",
+                    synthesis_steps_executed, synthesis_step_budget,
+                ),
+            ));
+            break 'macro_loop;
+        }
         let macro_payload_read = dispatch.execute_read(SemanticQueryKey::ResolveMacroPayload {
             owner: owner.clone(),
             macro_index,
@@ -416,7 +618,16 @@ pub(crate) fn resolve_slot_bindings_graph_native(
             },
             diag_sink,
             &mut should_suppress,
+            synthesis_step_budget,
+            &mut synthesis_steps_executed,
         );
+        if should_suppress && synthesis_step_budget.is_some() {
+            // Budget-exceeded inside `compute_bindings_via_graph`
+            // already pushed the diagnostic and flipped suppression;
+            // bail the macro loop so subsequent macros do not consume
+            // additional steps under an already-exhausted budget.
+            break 'macro_loop;
+        }
 
         for binding in bindings {
             tracing::trace!(
@@ -461,6 +672,13 @@ pub(crate) fn resolve_slot_bindings_graph_native(
 /// Aggregates `should_suppress` via `&mut bool` so every fatal
 /// `QueryError` propagates up to
 /// [`resolve_slot_bindings_graph_native`]'s return.
+///
+/// The `synthesis_step_budget` / `synthesis_steps_executed` pair
+/// extends the same step counter the entry-point owns so the slot-
+/// surface walk and per-member param walk participate in the same
+/// `synthesis_steps` cap. Returning early via the `BudgetExceeded`
+/// branch sets `*should_suppress = true` so the caller skips
+/// publication.
 pub(crate) fn compute_bindings_via_graph(
     dispatch: &ProjectSemanticDispatch<'_>,
     ctx: &dyn ResolverContext,
@@ -468,11 +686,32 @@ pub(crate) fn compute_bindings_via_graph(
     owner_macro: SlotMacroIdentity,
     diag_sink: &mut Vec<MacroExpansionDiagnostics>,
     should_suppress: &mut bool,
+    synthesis_step_budget: Option<u32>,
+    synthesis_steps_executed: &mut u32,
 ) -> Vec<ResolvedSlotBinding> {
     let mut out = Vec::new();
     let empty_path: Arc<[PathSegment]> = Arc::from(Vec::<PathSegment>::new().into_boxed_slice());
+    let consume_step = |steps: &mut u32| -> bool {
+        *steps = steps.saturating_add(1);
+        match synthesis_step_budget {
+            Some(cap) => *steps > cap,
+            None => false,
+        }
+    };
 
     // Step 3: empty-path Shallow surface for slot names.
+    if consume_step(synthesis_steps_executed) {
+        *should_suppress = true;
+        diag_sink.push(macro_expansion_for_budget_exceeded(
+            owner_macro.macro_index,
+            MacroExpansionKind::DefineSlots,
+            format!(
+                "synthesis-step-budget-exceeded@slot-surface::steps={}::cap={:?}",
+                *synthesis_steps_executed, synthesis_step_budget,
+            ),
+        ));
+        return out;
+    }
     let slot_surface_read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
         base: macro_payload_node,
         path: empty_path.clone(),
@@ -549,6 +788,18 @@ pub(crate) fn compute_bindings_via_graph(
         }
 
         // Empty-path Shallow on param0_ty.
+        if consume_step(synthesis_steps_executed) {
+            *should_suppress = true;
+            diag_sink.push(macro_expansion_for_budget_exceeded(
+                owner_macro.macro_index,
+                MacroExpansionKind::DefineSlots,
+                format!(
+                    "synthesis-step-budget-exceeded@param-surface::slot={}::steps={}::cap={:?}",
+                    slot_member.name, *synthesis_steps_executed, synthesis_step_budget,
+                ),
+            ));
+            return out;
+        }
         let param_surface_read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
             base: param0_ty,
             path: empty_path.clone(),

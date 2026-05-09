@@ -49,6 +49,7 @@ pub mod batch;
 pub mod config;
 pub mod files;
 pub mod footprint;
+pub mod instant;
 pub mod memory;
 pub mod noop;
 pub mod observer;

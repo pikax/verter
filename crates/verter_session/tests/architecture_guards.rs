@@ -3655,6 +3655,7 @@ mod foundations_guards {
         "pub(crate) mod cooperative_admission",
         "pub(crate) mod host_executor",
         "pub(crate) mod host_test_audit",
+        "pub(crate) mod instant",
         "pub(crate) mod intrinsic_registry",
         "pub(crate) mod owner_import_surface",
         "pub(crate) mod project_semantic_dispatch",

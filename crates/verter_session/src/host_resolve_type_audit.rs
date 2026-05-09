@@ -37,6 +37,7 @@ use verter_audit::{
 };
 
 use crate::host_audit_runtime::AuditRequestRegistration;
+use crate::instant::Instant;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::request_context::{RequestContext, RequestContextGuard};
 use crate::semantic_query::{ProjectionMode, SemanticNodeId, SemanticQueryApi, SemanticQueryKey};
@@ -117,7 +118,7 @@ impl VerterHost {
         // `RequestContextGuard`; Noop installs
         // `verter_audit::NoOpObserver` so emit sites still see
         // `Some(observer)` without paying downstream cost.
-        let request_start = std::time::Instant::now();
+        let request_start = Instant::now();
         let result = match registration.as_ref() {
             AuditRequestRegistration::Active(_) => {
                 let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));

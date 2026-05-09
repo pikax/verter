@@ -33,8 +33,7 @@ use super::{
 /// — the parser-side analysis already covers the runtime
 /// `defineOptions({ ... })` form via flags on `AnalyzedMacro`.
 pub(crate) fn project_options(
-    dispatch: &ProjectSemanticDispatch<'_>,
-    ctx: &dyn ResolverContext,
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     owner: &DeclIdentity,
     file: &str,
     macro_index: usize,
@@ -46,34 +45,38 @@ pub(crate) fn project_options(
         return Vec::new();
     }
 
-    let payload_node = match resolve_macro_payload(
-        dispatch,
-        owner,
-        file,
-        macro_index,
-        mac,
-        AnalyzedMacroKind::DefineOptions,
-        MacroExpansionKind::DefineProps,
-        diag_sink,
-    ) {
-        Some(node) => node,
-        None => return Vec::new(),
-    };
+    let ctx: &dyn ResolverContext = query_engine.ctx;
+    let members = {
+        let dispatch = ProjectSemanticDispatch::new(ctx);
+        let payload_node = match resolve_macro_payload(
+            &dispatch,
+            owner,
+            file,
+            macro_index,
+            mac,
+            AnalyzedMacroKind::DefineOptions,
+            MacroExpansionKind::DefineProps,
+            diag_sink,
+        ) {
+            Some(node) => node,
+            None => return Vec::new(),
+        };
 
-    let surface_node = match resolve_payload_surface(
-        dispatch,
-        payload_node,
-        macro_index,
-        MacroExpansionKind::DefineProps,
-        diag_sink,
-    ) {
-        Some(node) => node,
-        None => return Vec::new(),
-    };
+        let surface_node = match resolve_payload_surface(
+            &dispatch,
+            payload_node,
+            macro_index,
+            MacroExpansionKind::DefineProps,
+            diag_sink,
+        ) {
+            Some(node) => node,
+            None => return Vec::new(),
+        };
 
-    let members = read_surface_members(ctx, surface_node);
+        read_surface_members(ctx, surface_node)
+    };
     members
-        .iter()
-        .map(|member| surface_member_to_expanded_field(dispatch, member, None))
+        .into_iter()
+        .map(|member| surface_member_to_expanded_field(query_engine, file, &member, None))
         .collect()
 }

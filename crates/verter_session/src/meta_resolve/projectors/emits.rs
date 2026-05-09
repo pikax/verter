@@ -27,8 +27,7 @@ use super::{
 /// - the diagnostic envelope's `MacroExpansionKind` is `DefineEmits`
 /// - the raw_type comes from `mac.emit_fields[i].payload_type`
 pub(crate) fn project_emits(
-    dispatch: &ProjectSemanticDispatch<'_>,
-    ctx: &dyn ResolverContext,
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     owner: &DeclIdentity,
     file: &str,
     macro_index: usize,
@@ -40,41 +39,51 @@ pub(crate) fn project_emits(
         return Vec::new();
     }
 
-    let payload_node = match resolve_macro_payload(
-        dispatch,
-        owner,
-        file,
-        macro_index,
-        mac,
-        AnalyzedMacroKind::DefineEmits,
-        MacroExpansionKind::DefineEmits,
-        diag_sink,
-    ) {
-        Some(node) => node,
-        None => return Vec::new(),
-    };
+    let ctx: &dyn ResolverContext = query_engine.ctx;
+    let members_with_raw = {
+        let dispatch = ProjectSemanticDispatch::new(ctx);
+        let payload_node = match resolve_macro_payload(
+            &dispatch,
+            owner,
+            file,
+            macro_index,
+            mac,
+            AnalyzedMacroKind::DefineEmits,
+            MacroExpansionKind::DefineEmits,
+            diag_sink,
+        ) {
+            Some(node) => node,
+            None => return Vec::new(),
+        };
 
-    let surface_node = match resolve_payload_surface(
-        dispatch,
-        payload_node,
-        macro_index,
-        MacroExpansionKind::DefineEmits,
-        diag_sink,
-    ) {
-        Some(node) => node,
-        None => return Vec::new(),
-    };
+        let surface_node = match resolve_payload_surface(
+            &dispatch,
+            payload_node,
+            macro_index,
+            MacroExpansionKind::DefineEmits,
+            diag_sink,
+        ) {
+            Some(node) => node,
+            None => return Vec::new(),
+        };
 
-    let members = read_surface_members(ctx, surface_node);
-    members
-        .iter()
-        .map(|member| {
-            let raw_type = mac
-                .emit_fields
-                .iter()
-                .find(|e| e.name == member.name.as_ref())
-                .and_then(|e| e.payload_type.clone());
-            surface_member_to_expanded_field(dispatch, member, raw_type)
+        let members = read_surface_members(ctx, surface_node);
+        members
+            .into_iter()
+            .map(|member| {
+                let raw_type = mac
+                    .emit_fields
+                    .iter()
+                    .find(|e| e.name == member.name.as_ref())
+                    .and_then(|e| e.payload_type.clone());
+                (member, raw_type)
+            })
+            .collect::<Vec<_>>()
+    };
+    members_with_raw
+        .into_iter()
+        .map(|(member, raw_type)| {
+            surface_member_to_expanded_field(query_engine, file, &member, raw_type)
         })
         .collect()
 }

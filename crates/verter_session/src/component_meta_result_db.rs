@@ -344,6 +344,14 @@ impl ComponentMetaResultDb<CachedComponentMetaResult> {
     /// `slot_bindings_dep_signature_merges_carrier_deps` to inspect
     /// the dep-signature carriers stored alongside the cached entry.
     /// Returns an empty vec when the owner has no cached entry.
+    ///
+    /// Constructs the lookup key with the same options fingerprint
+    /// the production `publish_component_meta_cache_entry` writes
+    /// (the default `ComponentMetaOptions` fingerprint), so the
+    /// lookup matches the published entry. A bare
+    /// `ComponentMetaOptionsFingerprint::default()` (= zeros) would
+    /// silently miss every published entry, masking real cache-key
+    /// drift behind a permanently empty result.
     #[cfg(test)]
     pub fn dep_signature_for_owner_in_test(
         host: &crate::VerterHost,
@@ -357,7 +365,9 @@ impl ComponentMetaResultDb<CachedComponentMetaResult> {
         let key = ComponentMetaResultKey {
             owner_canonical: std::sync::Arc::from(owner_canonical),
             owner_whole_hash: whole_hash,
-            options_fingerprint: ComponentMetaOptionsFingerprint::default(),
+            options_fingerprint: crate::host_manage::component_meta_options_fingerprint(
+                &crate::host_manage::ComponentMetaOptions::default(),
+            ),
         };
         let backing = store.component_meta_results();
         match backing.get(&key) {
@@ -374,6 +384,10 @@ impl ComponentMetaResultDb<CachedComponentMetaResult> {
     /// entry. Used by the slot-binding regression
     /// `slot_bindings_skip_cache_on_budget_exceeded` to assert that
     /// fatal-suppression synthesis runs do not warm the cache.
+    ///
+    /// Constructs the lookup key with the same options fingerprint
+    /// the production `publish_component_meta_cache_entry` writes
+    /// (the default `ComponentMetaOptions` fingerprint).
     #[cfg(test)]
     pub fn has_owner_entry_in_test(host: &crate::VerterHost, owner_canonical: &str) -> bool {
         let store = host.project_type_store();
@@ -384,7 +398,9 @@ impl ComponentMetaResultDb<CachedComponentMetaResult> {
         let key = ComponentMetaResultKey {
             owner_canonical: std::sync::Arc::from(owner_canonical),
             owner_whole_hash: whole_hash,
-            options_fingerprint: ComponentMetaOptionsFingerprint::default(),
+            options_fingerprint: crate::host_manage::component_meta_options_fingerprint(
+                &crate::host_manage::ComponentMetaOptions::default(),
+            ),
         };
         store.component_meta_results().get(&key).is_some()
     }

@@ -24,7 +24,7 @@ use verter_semantic::analysis::{AnalyzedMacro, AnalyzedMacroKind};
 
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::resolver_core::ResolverContext;
-use crate::semantic_query::DeclIdentity;
+use crate::semantic_query::{DeclIdentity, ProjectionMode};
 use crate::types::FileAnalysisSnapshot;
 
 use super::{macro_expansion_for_query_error, resolve_macro_payload};
@@ -44,9 +44,14 @@ const DEFAULT_MODEL_NAME: &str = "modelValue";
 ///
 /// The returned field's `name` is the resolved model name from
 /// `mac.model_name` or the [`DEFAULT_MODEL_NAME`] fallback.
+///
+/// After raising the payload, the resulting `TypeExpr` is run
+/// through [`materialize_component_meta_type_expr_until_stable`] in
+/// `Expanded` mode so nested `IndexedAccess` chains collapse to the
+/// concrete leaf shape — the same self-reduction contract every
+/// per-macro projector honours.
 pub(crate) fn project_model(
-    dispatch: &ProjectSemanticDispatch<'_>,
-    _ctx: &dyn ResolverContext,
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     owner: &DeclIdentity,
     file: &str,
     macro_index: usize,
@@ -58,29 +63,48 @@ pub(crate) fn project_model(
         return None;
     }
 
-    let payload_node = resolve_macro_payload(
-        dispatch,
-        owner,
-        file,
-        macro_index,
-        mac,
-        AnalyzedMacroKind::DefineModel,
-        MacroExpansionKind::DefineProps,
-        diag_sink,
-    )?;
+    let ctx: &dyn ResolverContext = query_engine.ctx;
+    let (raised, exactness, raise_failed) = {
+        let dispatch = ProjectSemanticDispatch::new(ctx);
+        let payload_node = resolve_macro_payload(
+            &dispatch,
+            owner,
+            file,
+            macro_index,
+            mac,
+            AnalyzedMacroKind::DefineModel,
+            MacroExpansionKind::DefineProps,
+            diag_sink,
+        )?;
 
-    let r#type = match dispatch.raise_node_to_type_expr(payload_node) {
-        Some(expr) => expr,
-        None => {
-            // Raise failed — record an error so the consumer can
-            // observe the projection failed.
-            diag_sink.push(macro_expansion_for_query_error(
-                macro_index,
-                MacroExpansionKind::DefineProps,
-                "model-payload-raise-failed".to_string(),
-            ));
-            TypeExpr::Unknown { raw: String::new() }
-        }
+        let (raised, raise_failed) = match dispatch.raise_node_to_type_expr(payload_node) {
+            Some(expr) => (expr, false),
+            None => (TypeExpr::Unknown { raw: String::new() }, true),
+        };
+        let exactness = classify_node(&dispatch, payload_node);
+        (raised, exactness, raise_failed)
+    };
+
+    if raise_failed {
+        // Record raise failure so the consumer observes the missing
+        // payload through the diagnostic stream rather than as a
+        // silent `Unknown` shell.
+        diag_sink.push(macro_expansion_for_query_error(
+            macro_index,
+            MacroExpansionKind::DefineProps,
+            "model-payload-raise-failed".to_string(),
+        ));
+    }
+
+    let r#type = if super::type_expr_contains_reducible_operator(&raised) {
+        super::super::materialize::materialize_component_meta_type_expr_until_stable(
+            &raised,
+            file,
+            ProjectionMode::Expanded,
+            query_engine,
+        )
+    } else {
+        raised
     };
 
     let name = mac
@@ -93,7 +117,7 @@ pub(crate) fn project_model(
         r#type,
         raw_type: None,
         optional: false,
-        exactness: classify_node(dispatch, payload_node),
+        exactness,
         execution_status: ExpansionExecutionStatus::Completed,
         diagnostics: Vec::new(),
     })

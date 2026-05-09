@@ -32,8 +32,7 @@ use super::{
 /// publication into the slot-shape surface. One field per slot name;
 /// the field's `r#type` carries the slot function's signature.
 pub(crate) fn project_slots(
-    dispatch: &ProjectSemanticDispatch<'_>,
-    ctx: &dyn ResolverContext,
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     owner: &DeclIdentity,
     file: &str,
     macro_index: usize,
@@ -45,39 +44,43 @@ pub(crate) fn project_slots(
         return Vec::new();
     }
 
-    let payload_node = match resolve_macro_payload(
-        dispatch,
-        owner,
-        file,
-        macro_index,
-        mac,
-        AnalyzedMacroKind::DefineSlots,
-        MacroExpansionKind::DefineSlots,
-        diag_sink,
-    ) {
-        Some(node) => node,
-        None => return Vec::new(),
-    };
+    let ctx: &dyn ResolverContext = query_engine.ctx;
+    let members = {
+        let dispatch = ProjectSemanticDispatch::new(ctx);
+        let payload_node = match resolve_macro_payload(
+            &dispatch,
+            owner,
+            file,
+            macro_index,
+            mac,
+            AnalyzedMacroKind::DefineSlots,
+            MacroExpansionKind::DefineSlots,
+            diag_sink,
+        ) {
+            Some(node) => node,
+            None => return Vec::new(),
+        };
 
-    let surface_node = match resolve_payload_surface(
-        dispatch,
-        payload_node,
-        macro_index,
-        MacroExpansionKind::DefineSlots,
-        diag_sink,
-    ) {
-        Some(node) => node,
-        None => return Vec::new(),
-    };
+        let surface_node = match resolve_payload_surface(
+            &dispatch,
+            payload_node,
+            macro_index,
+            MacroExpansionKind::DefineSlots,
+            diag_sink,
+        ) {
+            Some(node) => node,
+            None => return Vec::new(),
+        };
 
-    let members = read_surface_members(ctx, surface_node);
+        read_surface_members(ctx, surface_node)
+    };
     // Slot fields don't carry a payload-style raw_type per member;
     // their parser-side annotation lives on bindings. The slot
     // surface itself is left without raw_type so the merge layer
     // (parser-side `extract_component_meta`) can populate the slot
     // structure via its own slot_fields traversal.
     members
-        .iter()
-        .map(|member| surface_member_to_expanded_field(dispatch, member, None))
+        .into_iter()
+        .map(|member| surface_member_to_expanded_field(query_engine, file, &member, None))
         .collect()
 }

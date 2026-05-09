@@ -103,6 +103,7 @@ pub(crate) mod cooperative_admission;
 pub mod cross_file;
 mod deps;
 mod hash;
+pub(crate) mod instant;
 #[cfg(test)]
 mod project_semantic_dispatch_invariants_tests;
 // `host_compile` is the host-backed parallel SFC batch compile module.

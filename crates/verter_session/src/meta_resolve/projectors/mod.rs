@@ -121,21 +121,19 @@ fn merge_projected_fields_by_name(
 /// branch the projectors hit is appended to `diag_sink`, which the
 /// caller merges into `analysis.macro_expansion_diagnostics`.
 pub(crate) fn project_evaluated_types(
-    dispatch: &ProjectSemanticDispatch<'_>,
-    ctx: &dyn ResolverContext,
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     file: &str,
     snapshot: &FileAnalysisSnapshot,
     evaluated_types: &mut verter_semantic::analysis::type_expand::ExpandedComponentTypes,
     diag_sink: &mut Vec<MacroExpansionDiagnostics>,
 ) {
-    let owner = build_owner_decl_identity(ctx, file);
+    let owner = build_owner_decl_identity(query_engine.ctx, file);
 
     for (macro_index, mac) in snapshot.macros.iter().enumerate() {
         match mac.kind {
             AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults => {
                 let fields = project_props(
-                    dispatch,
-                    ctx,
+                    query_engine,
                     &owner,
                     file,
                     macro_index,
@@ -147,8 +145,7 @@ pub(crate) fn project_evaluated_types(
             }
             AnalyzedMacroKind::DefineEmits => {
                 let fields = project_emits(
-                    dispatch,
-                    ctx,
+                    query_engine,
                     &owner,
                     file,
                     macro_index,
@@ -165,8 +162,7 @@ pub(crate) fn project_evaluated_types(
                 // projector here populates the diagnostic stream and
                 // primes the dispatch family memo.
                 let _ = project_slots(
-                    dispatch,
-                    ctx,
+                    query_engine,
                     &owner,
                     file,
                     macro_index,
@@ -184,8 +180,7 @@ pub(crate) fn project_evaluated_types(
                 // observe the resolved type without a second
                 // resolution pass.
                 let _ = project_model(
-                    dispatch,
-                    ctx,
+                    query_engine,
                     &owner,
                     file,
                     macro_index,
@@ -196,8 +191,7 @@ pub(crate) fn project_evaluated_types(
             }
             AnalyzedMacroKind::DefineExpose => {
                 let _ = project_exposed(
-                    dispatch,
-                    ctx,
+                    query_engine,
                     &owner,
                     file,
                     macro_index,
@@ -208,8 +202,7 @@ pub(crate) fn project_evaluated_types(
             }
             AnalyzedMacroKind::DefineOptions => {
                 let _ = project_options(
-                    dispatch,
-                    ctx,
+                    query_engine,
                     &owner,
                     file,
                     macro_index,
@@ -460,46 +453,161 @@ pub(crate) fn resolve_payload_surface(
 /// Build an [`ExpandedField`] for a single surface member.
 ///
 /// Raises the member's value node back to a [`TypeExpr`] (falling back
-/// to `TypeExpr::Unknown` if raise fails — mirrors §7.2 contract) and
-/// classifies its exactness through the shared
-/// [`classify_node`] predicate.
+/// to `TypeExpr::Unknown` if raise fails), classifies its exactness
+/// through the shared [`classify_node`] predicate, then runs the
+/// bounded fixed-point reducer on the raised expression so nested
+/// `IndexedAccess` chains collapse to concrete leaves.
 ///
 /// `raw_type` is taken from the parser's `analyzed_prop.type_annotation`
 /// when available. The caller passes `None` when no analyzed prop
 /// matches the surface member's name.
 ///
-/// Before classifying, the member's value is resolved through one
-/// additional `ProjectPath { mode: Shallow }` so that `DeclRef`
-/// carriers (the terminal Navigate-mode form for unparameterised
-/// type aliases) collapse to their underlying primitive / object /
+/// The member's value is also resolved through one additional
+/// `ProjectPath { mode: Shallow }` so that `DeclRef` carriers
+/// (the terminal Navigate-mode form for unparameterised type
+/// aliases) collapse to their underlying primitive / object /
 /// function shape. Without this hop, `defineProps<{ msg: MyStr }>`
 /// where `type MyStr = string` would publish `msg` as
-/// `ExactSymbolic` because the surface member's value points at the
-/// `DeclRef` for `MyStr`'s declaration, not at `Primitive(String)`
-/// directly.
+/// `ExactSymbolic`.
+///
+/// The bounded fixed-point reducer
+/// ([`materialize_component_meta_type_expr_until_stable`]) makes
+/// the projector self-sufficient for nested `IndexedAccess` shapes
+/// (e.g. `Pick<Foo, 'a'>['a']['nested']`). Generic substitutions
+/// travel through the dispatch `lower → raise_and_reduce` pipeline
+/// inside the reducer; cache keys include the relevant scope / expr
+/// / mode tuple, dep_signature is accumulated into the per-request
+/// thread-local accumulator, and any dispatch fence
+/// `MacroExpansionDiagnostics` flow through the same accumulator
+/// the projector's other dispatches use.
 pub(crate) fn surface_member_to_expanded_field(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    scope_canonical_id: &str,
     member: &SurfaceMember,
     raw_type: Option<String>,
 ) -> ExpandedField {
-    let resolved_value = resolve_member_value_for_classification(dispatch, member.value);
-    // Type raise uses the original member.value so DeclRef carriers
-    // for parameterised aliases / package-backed types stay symbolic
-    // in the published TypeExpr (matches the legacy walker's
-    // the legacy per-member materialiser
-    // contract for symbolic-route preservation). Exactness uses the
-    // resolved body so unparameterised primitive aliases collapse to
-    // `ExactConcrete`.
+    let ctx: &dyn ResolverContext = query_engine.ctx;
+    let (raised, exactness) = {
+        let dispatch = ProjectSemanticDispatch::new(ctx);
+        let resolved_value = resolve_member_value_for_classification(&dispatch, member.value);
+        let raised = dispatch
+            .raise_node_to_type_expr(member.value)
+            .unwrap_or(TypeExpr::Unknown { raw: String::new() });
+        let exactness = classify_node(&dispatch, resolved_value);
+        (raised, exactness)
+    };
+    // Run the bounded fixed-point reducer only when the raised
+    // surface contains an operator shape that benefits from
+    // reduction (`IndexedAccess` / `KeyOf` / `TypeOf` / `Conditional`
+    // / `Mapped`) AND the route's root is workspace-owned. Symbolic
+    // Refs to parameterised aliases (`TableColumn<T>`) and
+    // package-backed indexed accesses (`CoreOptions<RowState>['state']`
+    // declared in `node_modules`) stay un-reduced — matches the
+    // symbolic-route preservation contract every other surface
+    // point honours.
+    let needs_reduction = type_expr_contains_reducible_operator(&raised)
+        && !super::materialize::type_expr_has_package_backed_object_like_root(
+            &raised,
+            scope_canonical_id,
+            query_engine,
+        );
+    let r#type = if needs_reduction {
+        super::materialize::materialize_component_meta_type_expr_until_stable(
+            &raised,
+            scope_canonical_id,
+            ProjectionMode::Expanded,
+            query_engine,
+        )
+    } else {
+        raised
+    };
     ExpandedField {
         name: member.name.as_ref().to_string(),
-        r#type: dispatch
-            .raise_node_to_type_expr(member.value)
-            .unwrap_or_else(|| TypeExpr::Unknown { raw: String::new() }),
+        r#type,
         raw_type,
         optional: member.optional,
-        exactness: classify_node(dispatch, resolved_value),
+        exactness,
         execution_status: ExpansionExecutionStatus::Completed,
         diagnostics: Vec::new(),
+    }
+}
+
+/// Does `expr` contain any operator-shape node that the bounded
+/// fixed-point reducer should resolve?
+///
+/// Returns `true` when the expression carries an `IndexedAccess`,
+/// `KeyOf`, `TypeOf`, `Conditional`, `Mapped`, or `Infer` anywhere
+/// in its tree. For shells that only contain primitives, literals,
+/// `Ref`s (to parameterised aliases), `Object`s, `Function`s,
+/// `Array`s, `Tuple`s, `Union`s, `Intersection`s, `TypeParameter`s,
+/// `RecursiveRef`s, or `Unknown`s, the predicate returns `false` so
+/// the symbolic-route preservation contract holds.
+pub(crate) fn type_expr_contains_reducible_operator(expr: &TypeExpr) -> bool {
+    use verter_semantic::analysis::type_expr::ObjectMember;
+
+    match expr {
+        TypeExpr::IndexedAccess { .. }
+        | TypeExpr::KeyOf(_)
+        | TypeExpr::TypeOf(_)
+        | TypeExpr::Conditional { .. }
+        | TypeExpr::Mapped { .. }
+        | TypeExpr::Infer { .. } => true,
+        TypeExpr::Parenthesized(inner) | TypeExpr::Rest(inner) => {
+            type_expr_contains_reducible_operator(inner)
+        }
+        TypeExpr::Array { element, .. } => type_expr_contains_reducible_operator(element),
+        TypeExpr::Tuple { elements, .. } => elements
+            .iter()
+            .any(|el| type_expr_contains_reducible_operator(&el.ty)),
+        TypeExpr::Union(members) | TypeExpr::Intersection(members) => {
+            members.iter().any(type_expr_contains_reducible_operator)
+        }
+        TypeExpr::Object(object) => object.properties.iter().any(|m| match m {
+            ObjectMember::Property(p) => type_expr_contains_reducible_operator(&p.ty),
+            ObjectMember::Method(method) => {
+                method
+                    .function
+                    .parameters
+                    .iter()
+                    .any(|param| type_expr_contains_reducible_operator(&param.ty))
+                    || method
+                        .function
+                        .return_type
+                        .as_deref()
+                        .is_some_and(type_expr_contains_reducible_operator)
+            }
+            ObjectMember::IndexSignature(sig) => {
+                type_expr_contains_reducible_operator(&sig.key_type)
+                    || type_expr_contains_reducible_operator(&sig.value_type)
+            }
+            ObjectMember::CallSignature(f) | ObjectMember::ConstructSignature(f) => {
+                f.parameters
+                    .iter()
+                    .any(|p| type_expr_contains_reducible_operator(&p.ty))
+                    || f.return_type
+                        .as_deref()
+                        .is_some_and(type_expr_contains_reducible_operator)
+            }
+        }),
+        TypeExpr::Function(f) => {
+            f.parameters
+                .iter()
+                .any(|p| type_expr_contains_reducible_operator(&p.ty))
+                || f.return_type
+                    .as_deref()
+                    .is_some_and(type_expr_contains_reducible_operator)
+        }
+        TypeExpr::Ref { type_arguments, .. } => type_arguments
+            .iter()
+            .any(type_expr_contains_reducible_operator),
+        TypeExpr::TemplateLiteral { expressions, .. } => expressions
+            .iter()
+            .any(type_expr_contains_reducible_operator),
+        TypeExpr::Primitive(_)
+        | TypeExpr::Literal(_)
+        | TypeExpr::TypeParameter(_)
+        | TypeExpr::RecursiveRef { .. }
+        | TypeExpr::Unknown { .. } => false,
     }
 }
 

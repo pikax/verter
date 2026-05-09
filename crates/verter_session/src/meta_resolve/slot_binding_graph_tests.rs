@@ -1081,20 +1081,24 @@ defineSlots<Slots>()
 // ---------------------------------------------------------------------------
 //
 // `dep_signature` on the cached `ComponentMetaResultDb` entry must
-// include the carrier's canonical id. The
-// `dep_signature_for_owner_in_test` accessor exposes the merged set
-// for inspection.
+// include the carrier's canonical id when the SFC's macro
+// argument resolves through an imported type alias. The
+// `dep_signature_for_owner_in_test` accessor exposes the merged
+// set for inspection.
 //
-// Scope note: the synthesis path's
-// `accumulate_dispatch_dep_signature` call after each
-// `ResolveMacroPayload` execute_read merges into the dep-signature
-// fence, but the carrier's whole-hash does not propagate up to the
-// final `ComponentMetaResultDb` dep_signature for the simple
-// fixture used here — the carrier is loaded through `ensure_loaded`
-// rather than the dispatch path. Surfacing the carrier through the
-// dispatch dep_signature lives outside the SA-1.C cutover.
+// Carrier-fact propagation is owned by the synthesis path: every
+// `defineSlots` / `defineEmits` / peer macro lowering produces a
+// graph node that may carry a cross-file `DeclRef` /
+// `InstantiationRef` whose `identity.canonical_id` differs from
+// the owner. The synthesis walks the freshly-lowered argument
+// and pushes `(canonical_id, WholeHash)` carrier facts into the
+// per-request dep-signature accumulator (drained at publish into
+// the cached entry's `dep_signature`). Without this, an inner
+// walker that uses bare `dispatch.execute(ResolveDecl(..))` would
+// discard the carrier's whole-hash via `build_project_path`'s
+// project-generation-only fence and the warm cache would not
+// invalidate when the carrier is edited.
 #[test]
-#[ignore = "carrier-fact-not-on-dispatch-path: synthesis loads the carrier via ensure_loaded, not dispatch; dep_signature carrier propagation is owned by a peer wiring step"]
 fn slot_bindings_dep_signature_merges_carrier_deps() {
     let host = build_test_host();
     upsert_ts(
@@ -1338,18 +1342,14 @@ defineSlots<Slots>()
 //
 // Budget-exceeded synthesis must not warm the cache. The
 // `publish_component_meta_cache_entry` site gates the publish on
-// `resolved.synthesis_should_suppress`.
-//
-// Scope note: the cache-write gate is in place
-// (`publish_component_meta_cache_entry` reads
-// `resolved.synthesis_should_suppress`), but the
-// `recursion_budget_overrides.synthesis_steps` config field is
-// declared without a consumer. The synthesis runs at full budget,
-// no `BudgetExceeded` error fires, and `should_suppress` stays
-// false — so the cache write proceeds. Wiring the synthesis-step
-// budget into the dispatch read path lives outside SA-1.C.
+// `resolved.synthesis_should_suppress`; the synthesis loop in
+// `resolve_slot_bindings_graph_native` consumes
+// `HostConfig::recursion_budget_overrides.synthesis_steps` per
+// sub-action (lower / payload / slot-surface / param-surface) and
+// pushes a `MacroExpansionDiagnostics` envelope carrying
+// `ExpansionStopReason::BudgetExceeded` when the cap is exceeded,
+// flipping `should_suppress = true` so the cache write is skipped.
 #[test]
-#[ignore = "synthesis-step-budget-not-wired: HostConfig.recursion_budget_overrides.synthesis_steps has no consumer; cache-suppression gate works but the trigger condition does not fire"]
 fn slot_bindings_skip_cache_on_budget_exceeded() {
     let mut config = HostConfig::default();
     config.recursion_budget_overrides.synthesis_steps = Some(1);

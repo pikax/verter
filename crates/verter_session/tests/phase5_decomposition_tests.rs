@@ -126,37 +126,32 @@ defineEmits<Emits>()
 // `getcomponentmeta_decomposes_through_dispatch_primitives`
 // ──────────────────────────────────────────────────────────────────
 
-/// CHARACTERIZATION: the projector path is load-bearing AND the
-/// legacy per-member rescue helper does NOT fire for a primitive
-/// component-meta resolution.
+/// CHARACTERIZATION: the projector path is the sole authority for
+/// component-meta member resolution.
 ///
-/// Hard contract: `MATERIALIZE_MACRO_SHAPE_MEMBER_TYPE_EXPR_CALLS`
-/// must be 0 for any component the projector path can handle
-/// natively. A non-zero count means the legacy rescue cascade fired
-/// — i.e. the projector path failed to produce a member, and the
-/// the legacy per-member materialiser helper
-/// (kept for cross-file `Pick<>['key']` deep resolution) filled the
-/// gap.
+/// Hard contract: every published prop/emit must carry a concrete
+/// `TypeExpr` (primitive / object / function — NOT `IndexedAccess`,
+/// `Ref` shell, or `Unknown`). A symbolic / unresolved shape proves
+/// the projector failed to reduce the macro surface natively, which
+/// would have previously been recovered by the (now-deleted) legacy
+/// rescue cascade.
 ///
 /// For a `defineProps<{ message: string; count: number }>` /
 /// `defineEmits<{ click: ...; hover: ... }>` fixture the projector
-/// path MUST resolve the surface end-to-end without rescue, or the
+/// path MUST resolve the surface end-to-end natively, or the
 /// projector decomposition has regressed.
 #[test]
 fn getcomponentmeta_decomposes_through_dispatch_primitives() {
-    use std::sync::atomic::Ordering;
-    use verter_session::loop5_instrumentation::MATERIALIZE_MACRO_SHAPE_MEMBER_TYPE_EXPR_CALLS;
+    use verter_semantic::analysis::type_expr::{PrimitiveName, TypeExpr};
 
     let host = build_host(&[
         ("/workspace/src/types.ts", SHARED_TYPES_TS),
         ("/workspace/src/Comp.vue", SHARED_VUE),
     ]);
 
-    MATERIALIZE_MACRO_SHAPE_MEMBER_TYPE_EXPR_CALLS.store(0, Ordering::Relaxed);
     let meta = host
         .get_component_meta("/workspace/src/Comp.vue")
         .expect("getComponentMeta must succeed");
-    let rescue_calls = MATERIALIZE_MACRO_SHAPE_MEMBER_TYPE_EXPR_CALLS.load(Ordering::Relaxed);
 
     let prop_names: Vec<String> = meta.props.iter().map(|p| p.name.clone()).collect();
     let emit_names: Vec<String> = meta.events.iter().map(|e| e.name.clone()).collect();
@@ -178,14 +173,153 @@ fn getcomponentmeta_decomposes_through_dispatch_primitives() {
         "projector path must populate `hover` emit (got {emit_names:?})"
     );
 
+    // Structural concrete-leaf check: the projector is the sole
+    // authority post-§7.3 cutover. If it fails to reduce, props
+    // surface as `IndexedAccess` / `Ref` / `Unknown` shells. The
+    // primitive `Props` interface must publish `string` / `number`
+    // primitives — anything else proves the projector did not
+    // reduce the macro surface natively.
+    let message_prop = meta
+        .props
+        .iter()
+        .find(|p| p.name == "message")
+        .expect("`message` prop must be present");
+    assert!(
+        matches!(
+            message_prop.type_expr,
+            TypeExpr::Primitive(PrimitiveName::String)
+        ),
+        "`message` prop must reduce to a `string` primitive; got {:?}. \
+         A non-primitive shape proves the projector did not resolve \
+         the surface natively.",
+        message_prop.type_expr,
+    );
+    let count_prop = meta
+        .props
+        .iter()
+        .find(|p| p.name == "count")
+        .expect("`count` prop must be present");
+    assert!(
+        matches!(
+            count_prop.type_expr,
+            TypeExpr::Primitive(PrimitiveName::Number)
+        ),
+        "`count` prop must reduce to a `number` primitive; got {:?}. \
+         A non-primitive shape proves the projector did not resolve \
+         the surface natively.",
+        count_prop.type_expr,
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────
+// nested IndexedAccess projector self-reduction
+// ──────────────────────────────────────────────────────────────────
+
+const NESTED_INDEXED_ACCESS_FOO_TS: &str = r#"export interface Foo {
+  outer: { nested: { leaf: string } };
+}
+"#;
+
+const NESTED_INDEXED_ACCESS_VUE: &str = r#"<script setup lang="ts">
+import type { Foo } from '/workspace/src/foo'
+defineProps<{
+  wrapped: Pick<Foo, 'outer'>['outer']['nested']
+}>()
+</script>
+<template><div /></template>
+"#;
+
+/// REGRESSION: a property whose declared type is a cross-file
+/// `Pick<Foo, 'outer'>['outer']['nested']` IndexedAccess chain
+/// resolves natively through the projector path to a concrete
+/// `{ leaf: string }` object surface. The projector raises the
+/// surface-member's value to a chained
+/// `TypeExpr::IndexedAccess { object: IndexedAccess { object: Ref(Pick<Foo,'outer'>),
+/// index: 'outer' }, index: 'nested' }`; the bounded fixed-point
+/// reducer integrated into the projector flattens it natively.
+///
+/// Hard contract:
+/// - The published `wrapped` prop's `type_expr` is a concrete
+///   `Object` carrying a `leaf: string` property.
+/// - The published prop is NOT a symbolic `IndexedAccess`.
+/// - The published prop is NOT `Unknown { raw: "semanticMiss" }`.
+///
+/// The structural concrete-leaf check is the contract — the
+/// projector is the sole authority for member reduction, so a
+/// failure to reduce surfaces here as `IndexedAccess` / `Ref` /
+/// `Unknown` (the test fails). There is no rescue cascade behind it.
+#[test]
+fn projector_self_reduces_nested_indexed_access_chain() {
+    use verter_semantic::analysis::type_expr::{ObjectMember, PrimitiveName, TypeExpr};
+
+    let host = build_host(&[
+        ("/workspace/src/foo.ts", NESTED_INDEXED_ACCESS_FOO_TS),
+        ("/workspace/src/Comp.vue", NESTED_INDEXED_ACCESS_VUE),
+    ]);
+
+    let meta = host
+        .get_component_meta("/workspace/src/Comp.vue")
+        .expect("getComponentMeta must succeed for nested IndexedAccess fixture");
+
+    let wrapped_prop = meta
+        .props
+        .iter()
+        .find(|p| p.name == "wrapped")
+        .unwrap_or_else(|| {
+            panic!(
+                "projector must publish `wrapped` prop for nested IndexedAccess \
+                 surface; got {:?}",
+                meta.props.iter().map(|p| &p.name).collect::<Vec<_>>(),
+            )
+        });
+
+    // Negative assertions: the published shape must be concrete.
+    assert!(
+        !matches!(wrapped_prop.type_expr, TypeExpr::IndexedAccess { .. }),
+        "`wrapped` prop type must NOT be a symbolic IndexedAccess; got {:?}",
+        wrapped_prop.type_expr,
+    );
+    if let TypeExpr::Unknown { raw } = &wrapped_prop.type_expr {
+        panic!("`wrapped` prop must NOT be Unknown; got Unknown {{ raw: {raw:?} }}");
+    }
+
+    // Positive assertion: the published type is a concrete Object
+    // surface with a single `leaf: string` property — the structural
+    // result of `Foo['outer']['nested']`.
+    let object = match &wrapped_prop.type_expr {
+        TypeExpr::Object(object) => object.clone(),
+        other => panic!(
+            "`wrapped` prop must reduce to Object {{ leaf: string }}; \
+             got {other:?}"
+        ),
+    };
+    let leaf_member = object
+        .properties
+        .iter()
+        .find_map(|m| match m {
+            ObjectMember::Property(p) if p.name == "leaf" => Some(p),
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "Object surface must carry a `leaf` property; got members={:?}",
+                object.properties,
+            )
+        });
+    assert!(
+        matches!(leaf_member.ty, TypeExpr::Primitive(PrimitiveName::String)),
+        "`leaf` member must be `string` primitive; got {:?}",
+        leaf_member.ty,
+    );
+
+    // Sanity: exactly one prop on the macro surface.
     assert_eq!(
-        rescue_calls, 0,
-        "`MATERIALIZE_MACRO_SHAPE_MEMBER_TYPE_EXPR_CALLS` must be 0 \
-         for a primitive component-meta resolution; got \
-         {rescue_calls}. The legacy rescue cascade \
-         (the legacy per-member materialiser) \
-         fired — the projector path failed to resolve the surface \
-         natively."
+        meta.props.len(),
+        1,
+        "macro surface must publish exactly one prop (`wrapped`); \
+         got {} props: {:?}",
+        meta.props.len(),
+        meta.props.iter().map(|p| &p.name).collect::<Vec<_>>(),
     );
 }
 
@@ -341,19 +475,15 @@ fn props_emits_slots_share_path_independent_cache() {
 /// about the typeinfo path and would not catch a regression where
 /// the synthesised default-export route stops being wired.
 ///
-/// CURRENT GAP: the typeinfo path against a `.vue` scope returns
-/// `IndexedAccess { object: <typeof default surface>, index: "$props" }`
-/// — the projection on `'$props'` does NOT reduce to the Object
-/// surface even under `ProjectionMode::Expanded`. The fix lives in
-/// the typeinfo / IDE-codegen integration: either the synthesised
-/// default export must publish a concrete `$props` Object surface,
-/// or `evaluate_type_expression` must reduce the terminal
-/// indexed-access for `Expanded` mode. `#[ignore]` per CLAUDE.md
-/// "Fix Quality" — real test body kept in place so removing the
-/// attribute is the only step needed once the substrate gap
-/// closes.
+/// The substrate fix that closes this gap lives in two places:
+/// `verter_session::resolver_core::vue_default_synth` synthesises
+/// the implicit `default` value symbol for any file whose analysis
+/// carries type-based Vue compiler macros, and
+/// `verter_session::typeinfo::evaluate_type_expression` inlines the
+/// scope's eval-source as a prelude in the scratch file so the
+/// scratch picks up that synthesised `default` and `typeof default`
+/// reduces to a concrete Object surface.
 #[test]
-#[ignore = "typeinfo-vue-scope-gap: evaluate_type_expression on .vue scope leaves InstanceType<typeof default>['$props'] as IndexedAccess; the synthesised default-export must publish concrete $props OR Expanded mode must reduce terminal indexed-access"]
 fn evaluate_type_expression_for_vue_default_export_matches_props() {
     use verter_session::semantic_query::{ProjectionMode, SemanticNodeData};
     use verter_session::typeinfo::types::EvaluateTypeExpressionRequest;

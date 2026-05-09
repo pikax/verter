@@ -19,6 +19,7 @@ use rustc_hash::FxHashSet;
 use verter_semantic::analysis::type_expr::TypeExpr;
 
 use super::ProjectSemanticDispatch;
+use crate::instant::Instant;
 use crate::resolver_core::component_meta_query_engine::{
     projected_surface_to_type_expr, semantic_query_error_raw, surface_view_to_projected_surface,
     SEMANTIC_OBJECT_SURFACE,
@@ -1075,7 +1076,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let kind_idx = crate::loop5_instrumentation::kind_index_for_key(&key);
         crate::loop5_instrumentation::DISPATCH_OPERATOR_KIND_CALLS[kind_idx]
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dispatch_started = std::time::Instant::now();
+        let dispatch_started = Instant::now();
 
         let read = self.execute_read(key);
         state.merge_dep_signature(&read.dep_signature);

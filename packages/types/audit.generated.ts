@@ -207,13 +207,6 @@ materialize_structure: CacheLayerHitMiss,
  */
 materialize_memo: CacheLayerHitMiss, 
 /**
- * `MemberRouteResultDb` — macro-member walker route-result cache
- * keyed on `(scope, member_name, lowered, mode)`. Hits indicate
- * the route-candidate builder + per-candidate `until_stable`
- * recursion was short-circuited inside the macro-member walker.
- */
-member_route_result: CacheLayerHitMiss, 
-/**
  * `PreparedSurfaceDb` — prepared-surface cache.
  */
 prepared_surface: CacheLayerHitMiss, 

@@ -31,6 +31,7 @@ pub(crate) use field_types::MEMBER_ROUTE_CALLS_COUNTER;
 pub(crate) use field_types::{
     lowered_preserve_package_backed_symbolic_refs, materialize_component_meta_field_types,
     materialize_component_meta_type_expr_until_stable,
+    type_expr_has_package_backed_object_like_root,
 };
 
 pub(crate) use macro_shapes::{

@@ -28,10 +28,7 @@ use crate::resolver_core::{ComponentMetaRequestHost, RequestSource, Singleflight
 use crate::types::{FileAnalysisSnapshot, Hash16, ProjectionMode};
 use crate::VerterHost;
 
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::Instant;
-#[cfg(target_arch = "wasm32")]
-use web_time::Instant;
+use crate::instant::Instant;
 
 pub(crate) fn next_component_meta_audit_request_id() -> u64 {
     static NEXT_REQUEST_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);

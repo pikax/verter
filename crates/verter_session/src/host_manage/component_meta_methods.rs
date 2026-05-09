@@ -27,10 +27,7 @@ use crate::VerterHost;
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::Arc;
 
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::Instant;
-#[cfg(target_arch = "wasm32")]
-use web_time::Instant;
+use crate::instant::Instant;
 
 // File moved from `meta_resolve/host_methods.rs` to
 // `host_manage/component_meta_methods.rs`. The original `super::X` paths
@@ -284,6 +281,11 @@ impl VerterHost {
             // `AuditDiagnosticEntry` stream regardless of producer;
             // `should_suppress` mirrors the cache-write gate so audit
             // consumers can see why a request did not warm the cache.
+            // The bridge module itself is non-wasm only (`verter_audit`
+            // observers are a host-side concept), so the projection is
+            // gated to native targets; on wasm the audit payload
+            // remains in its default state.
+            #[cfg(not(target_arch = "wasm32"))]
             if let Some(resolved) = result.value.as_ref() {
                 let payload = audit_builder.component_meta_payload_mut();
                 payload.diagnostics = crate::host_audit_bridge::macro_expansion_to_audit_entries(
@@ -587,19 +589,20 @@ impl VerterHost {
                         // §7.1 cutover: per-macro projectors are the
                         // sole component-meta resolution path. Each
                         // projector dispatches `ResolveMacroPayload`
-                        // + empty-path Shallow `ProjectPath` and writes
-                        // `Vec<ExpandedField>` into `evaluated_types`.
-                        // Errors / cycles emit diagnostics into
-                        // `synthesis_diagnostics` per §7.5 silent-miss
-                        // prevention (treated as macro-expansion
-                        // diagnostics on the published analysis).
-                        let dispatch =
-                            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(
-                                query_engine.ctx,
-                            );
+                        // + empty-path Shallow `ProjectPath`, raises
+                        // surface members, runs the bounded
+                        // fixed-point reducer
+                        // (`materialize_component_meta_type_expr_until_stable`)
+                        // so nested operator chains collapse to
+                        // concrete leaves before publication, and
+                        // writes `Vec<ExpandedField>` into
+                        // `evaluated_types`. Errors / cycles emit
+                        // diagnostics into `synthesis_diagnostics`
+                        // per §7.5 silent-miss prevention (treated as
+                        // macro-expansion diagnostics on the
+                        // published analysis).
                         crate::meta_resolve::projectors::project_evaluated_types(
-                            &dispatch,
-                            query_engine.ctx,
+                            &mut query_engine,
                             canonical,
                             &snapshot,
                             &mut evaluated_types,
