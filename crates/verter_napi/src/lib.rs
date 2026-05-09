@@ -2317,9 +2317,9 @@ impl NapiVerterHost {
     }
 
     // =========================================================================
-    // Typeinfo entry-points (Phase 4 / typeinfo plan §6.1)
+    // Typeinfo entry-points (typeinfo public host substrate)
     //
-    // Wrap the Phase 3 host substrate methods
+    // Wrap the host substrate methods
     // (`list_file_symbols`, `resolve_named_symbol_with_audit`,
     // `evaluate_type_expression_with_audit`) and project the host
     // outputs back across the FFI boundary.
@@ -2329,7 +2329,7 @@ impl NapiVerterHost {
     //   return a `NapiTypeInfoResolveResult { typeExpr, auditRecord }`
     //   — both are JSON Buffers; consumers decode whichever they need.
     //
-    // Audit emission follows the Phase 3 contract: when
+    // Audit emission follows the typeinfo contract: when
     // `auditEnabled = true` the underlying host method publishes
     // exactly one `RequestAuditRecord` to the host's audit store and
     // also returns the cloned record on the call stack. The

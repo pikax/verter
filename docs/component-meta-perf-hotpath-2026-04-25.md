@@ -17,7 +17,7 @@
 | `rematerialize_public_component_meta_types` | 6 | 5.95 s | 13.92 s | 35.69 s | 65.38% |
 | `choose_less_symbolic_component_meta_type_expr` | 251 | 142.16 ms | 209.45 ms | 35.68 s | 65.37% |
 | `compute_component_meta_state_inner` | 7 | 2.60 s | 8.46 s | 18.20 s | 33.34% |
-| `materialize_component_meta_macro_shape_member_type_expr` | 123 | 112.03 ms | 149.29 ms | 13.78 s | 25.24% |
+| the legacy per-member materialiser | 123 | 112.03 ms | 149.29 ms | 13.78 s | 25.24% |
 | `materialize_component_meta_field_types` | 7 | 286.14 ms | 961.54 ms | 2.00 s | 3.66% |
 | `produce_macro_object_shapes_for_purpose` | 7 | 158.87 ms | 442.50 ms | 1.11 s | 2.03% |
 | `append_component_meta_registry_entries` | 6 | 144.21 ms | 251.13 ms | 865 ms | 1.58% |
@@ -71,7 +71,7 @@ Re-running the corpus categorization at this checkpoint (post-Step 1+2+3, pre-St
 
 ## Notes on plan-text imperfections discovered during execution
 
-- Plan §3 Step 1 references `materialize_member_route_current` as a function name; that string is the trace event name. The enclosing function is `materialize_component_meta_macro_shape_member_type_expr` ([`crates/verter_session/src/meta_resolve.rs:7899`](../crates/verter_session/src/meta_resolve.rs:7899)) — verified via grep when adding instrumentation.
+- Plan §3 Step 1 references `materialize_member_route_current` as a function name; that string is the trace event name. The enclosing function is the legacy per-member materialiser ([`crates/verter_session/src/meta_resolve.rs:7899`](../crates/verter_session/src/meta_resolve.rs:7899)) — verified via grep when adding instrumentation.
 - Plan §3 Step 1 prescribes `cargo build --release --package verter_napi --features hotpath`; `verter_napi` does not declare a `hotpath` feature. Bench profiling runs via `cargo run -p verter_bench --example profile_real_component_meta --release --features=hotpath` directly. The verter_napi build is only needed when the SECOND part of Step 1 (running `pnpm bench:meta:ui` to capture a baseline JSON) is performed.
 - `projected_member_surface_keys` is at line 3067, not 3077 (10-line drift).
 - `materialize_component_meta_member_surface_expr_with_active_stack` is at line 9591, not 10246.

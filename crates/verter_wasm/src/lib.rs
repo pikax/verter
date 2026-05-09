@@ -930,7 +930,7 @@ impl WasmVerterHost {
     }
 
     // =========================================================================
-    // Typeinfo entry-points (Phase 4 / typeinfo plan §6.1) — WASM
+    // Typeinfo entry-points (typeinfo public host substrate) — WASM
     //
     // Mirror the NAPI surface (`NapiVerterHost::list_symbols`,
     // `resolveSymbolWithAudit`, `evaluateTypeExpressionWithAudit`).
@@ -955,7 +955,7 @@ impl WasmVerterHost {
     }
 
     /// Resolve `name` in `canonical_id`'s scope. Returns a JSON string
-    /// carrying `{ typeExpr, auditRecord }` per the plan §6.1 contract.
+    /// carrying `{ typeExpr, auditRecord }` per the typeinfo contract.
     ///
     /// `type_args_json` is an optional JSON string carrying an array of
     /// `TypeExpr` values. `mode` is one of the projection-mode tags or
@@ -1002,7 +1002,7 @@ impl WasmVerterHost {
     }
 
     /// Evaluate a synthetic type expression in a file scope. Returns
-    /// `{ typeExpr, auditRecord }` per the plan §6.1 contract.
+    /// `{ typeExpr, auditRecord }` per the typeinfo contract.
     ///
     /// `request_json` is a JSON string carrying a
     /// `verter_protocol::typeinfo::FfiEvaluateTypeExpressionRequest`.

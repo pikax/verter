@@ -560,7 +560,7 @@ pub(crate) fn node_has_non_object_top_level_surface(
 
 /// Graph-native predicate (former TypeExpr
 /// counterpart, defined inline inside
-/// `walk_component_meta_macro_shape_member_types`, deleted in
+/// the legacy macro-shape walker, deleted in
 ///). Returns `true` when `node`'s shape allows the
 /// slot binding parameter to remain symbolic without eager
 /// materialisation.
@@ -686,7 +686,7 @@ pub(crate) fn slot_binding_param_can_stay_symbolic_node(
 /// Depth-fused at 256 like the parent predicate.
 ///
 /// Currently orphaned — the only production call site lived inside
-/// the legacy `walk_component_meta_macro_shape_member_types` walker
+/// the legacy the legacy macro-shape walker walker
 /// that the §7.1 per-macro projector cutover replaced. Retained
 /// because the helper is exercised by integration-test fixtures.
 #[allow(dead_code)]

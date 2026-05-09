@@ -751,9 +751,9 @@ fn no_phase_archaeology_in_slot_binding_graph() {
     let lower = src.to_lowercase();
     let needles = [
         "phase 1",
-        "phase-1",
+        "projector-cutover-1",
         "phase 2",
-        "phase-2",
+        "projector-cutover-2",
         "cutover",
         "post-cutover",
         "pre-phase",
@@ -1558,7 +1558,7 @@ defineSlots<Slots>()
 // both spans, and emits one `info`-level event inside each so
 // subscribers (including `tracing_test`'s default `verter_session=trace`
 // env-filter) capture the span path on the formatted log line. Per
-// plan §17.5 the synthesis layer emits at `info`; per-binding
+// spec §17.5 the synthesis layer emits at `info`; per-binding
 // (`verter::meta_resolve::slot_binding`) events stay at `trace`.
 #[test]
 #[tracing_test::traced_test]

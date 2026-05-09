@@ -1480,7 +1480,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 drop(data);
                 // Skeleton mode: unbound TypeParam arguments stay
                 // symbolic so Conditional branches don't collapse to
-                // `never`. The plan §3.1.3 step 2 mandates Skeleton
+                // `never`. The Skeleton-mode contract mandates
                 // dispatch with empty args for shallow-surface
                 // synthesis to keep generic helpers' Conditional-arm
                 // distribution intact.

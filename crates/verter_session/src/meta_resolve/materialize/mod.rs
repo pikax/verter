@@ -29,16 +29,17 @@ pub(crate) use component_config_fast_path::COMPONENT_CONFIG_FAST_PATH_HITS_COUNT
 #[cfg(test)]
 pub(crate) use field_types::MEMBER_ROUTE_CALLS_COUNTER;
 pub(crate) use field_types::{
-    define_props_member_can_stay_symbolic_without_rescue,
-    field_should_preserve_shallow_symbolic_raw_type, lowered_needs_member_route_materialization,
     lowered_preserve_package_backed_symbolic_refs, materialize_component_meta_field_types,
-    materialize_component_meta_type_expr_until_stable, type_expr_is_slots_member_route,
+    materialize_component_meta_type_expr_until_stable,
 };
 
 pub(crate) use macro_shapes::{
-    collect_type_expr_ref_names, expr_needs_projection_rescue, has_prop_shape_surface,
-    produce_macro_object_shapes_for_purpose, projection_result_beats_solver_shape,
+    collect_type_expr_ref_names, produce_macro_object_shapes_for_purpose,
 };
+// Test-only re-exports consumed by `meta_resolve_tests.rs` via the
+// `meta_resolve.rs` shell's `#[cfg(test)] pub(crate) use materialize::{…}` block.
+#[cfg(test)]
+pub(crate) use macro_shapes::{expr_needs_projection_rescue, has_prop_shape_surface};
 // Test-only macro-shape re-exports — exercised via the `meta_resolve.rs`
 // shell's `#[cfg(test)] pub(crate) use materialize::{…}` block by
 // `meta_resolve_tests.rs` (bare-name `super::*` glob).

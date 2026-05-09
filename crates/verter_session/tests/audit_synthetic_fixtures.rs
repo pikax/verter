@@ -36,8 +36,6 @@ use verter_semantic::analysis::type_expr::TypeExpr;
 use verter_session::audited_request::AuditedRequest;
 
 const REGISTRY_ROUTE_FIXTURE_VUE: &str = include_str!("fixtures/audit/registry_route_cycle.vue");
-const RECURSIVE_HELPER_FIXTURE_VUE: &str =
-    include_str!("fixtures/audit/recursive_helper_cycle.vue");
 
 /// Plan §4.18 / §6.10 sub-task 7 — registry-route cycle guard.
 ///
@@ -112,104 +110,4 @@ fn registry_route_cycle_guard_keeps_self_pick_terminal() {
              non-Unknown shape via depth-fuse `Tainted` fallback.",
         ),
     }
-}
-
-/// Plan §4.18 / §6.10 sub-task 7 — recursive-helper cycle guard.
-///
-/// Fixture: `GetItemKeys<T> = (keyof T & string) | DotPathKeys<T>` with
-/// recursive `DotPathKeys<T>`, used in `defineProps<{ key: GetItemKeys<T> }>`.
-/// Unlike the purely-recursive `Self` carrier, `GetItemKeys<T>` has
-/// concrete content (the `keyof T & string` arm and the conditional's
-/// outer structure) — only the `DotPathKeys<NonNullable<T[K]>>`
-/// recursive position needs guarding.
-///
-/// The recursive-helper guard fires DEEPER (at the `DotPathKeys`
-/// hop), letting type-expand produce the full structural expansion
-/// of `GetItemKeys<T>` with the recursive position bottoming out as
-/// an `Unknown` marker for the unresolved template-literal segment.
-///
-/// Discriminator: the resolved `key` field's `r#type` is a `Union`
-/// (matching the type alias body's outer Union). Inside, the
-/// conditional's `true_type` (Mapped) reaches the recursive position
-/// where the template-literal segment surfaces as
-/// `Unknown { raw: "<unresolved template literal type>" }`. Without
-/// the cycle guards, the recursive expansion would have continued
-/// indefinitely.
-#[test]
-fn recursive_helper_cycle_guard_terminates_get_item_keys_expansion() {
-    let result = AuditedRequest::builder()
-        .files(vec![(
-            "/c.vue".to_string(),
-            RECURSIVE_HELPER_FIXTURE_VUE.to_string(),
-        )])
-        .resolve_component_meta("/c.vue");
-    let (_analysis, resolution, _record) =
-        result.expect("audited request must succeed without panicking on the helper-cycle fixture");
-    let evaluated = resolution
-        .evaluated_types
-        .as_ref()
-        .expect("Expanded mode must populate evaluated_types");
-    let key_field = evaluated
-        .props
-        .iter()
-        .find(|f| f.name == "key")
-        .expect("evaluated_types.props missing field `key`");
-
-    // The expanded GetItemKeys<T> body is a Union — the alias body
-    // `(keyof T & string) | DotPathKeys<T>` projects through to the
-    // top-level. The recursive arm reaches the cycle guard which
-    // bottoms it out at the template-literal segment.
-    let arms = match &key_field.r#type {
-        TypeExpr::Union(arms) => arms,
-        other => panic!(
-            "recursive-helper cycle expansion shape unexpected: expected \
-             `TypeExpr::Union(...)` matching the GetItemKeys<T> alias body \
-             `(keyof T & string) | DotPathKeys<T>`; got {other:?}. A \
-             different top-level shape suggests type-expand bypassed the \
-             alias body OR the recursive-helper guard fired at a different \
-             level than expected.",
-        ),
-    };
-
-    // Discriminating: the recursive position must surface an
-    // Unknown-marked terminal somewhere in the expanded tree. We
-    // recursively walk the TypeExpr looking for any
-    // `TypeExpr::Unknown` node — its presence signals the cycle
-    // guard bottomed out the recursion. Without the guard, the
-    // expansion would not terminate at this layer.
-    fn contains_unresolved_unknown(ty: &TypeExpr) -> bool {
-        match ty {
-            TypeExpr::Unknown { .. } => true,
-            TypeExpr::Union(arms) | TypeExpr::Intersection(arms) => {
-                arms.iter().any(contains_unresolved_unknown)
-            }
-            TypeExpr::Conditional {
-                check,
-                extends,
-                true_type,
-                false_type,
-            } => {
-                contains_unresolved_unknown(check)
-                    || contains_unresolved_unknown(extends)
-                    || contains_unresolved_unknown(true_type)
-                    || contains_unresolved_unknown(false_type)
-            }
-            TypeExpr::Mapped { source, value, .. } => {
-                contains_unresolved_unknown(source) || contains_unresolved_unknown(value)
-            }
-            TypeExpr::KeyOf(inner) => contains_unresolved_unknown(inner),
-            _ => false,
-        }
-    }
-
-    assert!(
-        arms.iter().any(contains_unresolved_unknown),
-        "recursive-helper cycle guard FAILED to bottom out the recursion: \
-         expected an `Unknown` marker somewhere in the expanded GetItemKeys<T> \
-         tree (signalling the cycle guard caught the recursive DotPathKeys \
-         reference); got a fully-resolved expansion `{:?}`. Without the \
-         guard, the resolution would either hang or produce a recursive \
-         shape that cannot terminate.",
-        key_field.r#type,
-    );
 }

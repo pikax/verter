@@ -98,7 +98,7 @@ fn merge_projected_fields_by_name(
 /// fields into `evaluated_types`.
 ///
 /// This is the §7.1 replacement for the legacy
-/// `walk_component_meta_macro_shape_member_types` + per-field
+/// the legacy macro-shape walker + per-field
 /// `materialize_component_meta_field_types` enrichment pipeline. The
 /// driver:
 ///
@@ -160,7 +160,7 @@ pub(crate) fn project_evaluated_types(
             }
             AnalyzedMacroKind::DefineSlots => {
                 // Slot-shape projection is consumed by the
-                // slot-binding-graph synthesis layer (Phase 1) which
+                // slot-binding-graph synthesis layer which
                 // shares the same dispatch primitives; running the
                 // projector here populates the diagnostic stream and
                 // primes the dispatch family memo.
@@ -486,7 +486,7 @@ pub(crate) fn surface_member_to_expanded_field(
     // Type raise uses the original member.value so DeclRef carriers
     // for parameterised aliases / package-backed types stay symbolic
     // in the published TypeExpr (matches the legacy walker's
-    // `materialize_component_meta_macro_shape_member_type_expr`
+    // the legacy per-member materialiser
     // contract for symbolic-route preservation). Exactness uses the
     // resolved body so unparameterised primitive aliases collapse to
     // `ExactConcrete`.

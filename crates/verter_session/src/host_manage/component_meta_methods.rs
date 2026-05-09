@@ -14,11 +14,9 @@
 //!
 //! All cross-module imports are listed at the top so the body retains its
 //! verbatim form. Items that still live in the parent shell
-//! (`materialize_component_meta_macro_shape_member_type_expr`,
-//! `walk_component_meta_macro_shape_member_types`,
-//! `MEMBER_ROUTE_FAST_PATH_HITS`, the registry / cycle / origin-graph
-//! predicates, the resolver adapter, etc.) are reached via `super::*`
-//! until those domains land in their final per-domain siblings
+//! (the registry / cycle / origin-graph predicates, the resolver
+//! adapter, etc.) are reached via `super::*` until those domains
+//! land in their final per-domain siblings
 
 use crate::host_manage::{
     component_meta_debug, component_meta_debug_enabled, component_meta_trace_custom,
@@ -68,19 +66,12 @@ use crate::meta_resolve::{
 };
 
 // Items that live in the parent shell (`crate::meta_resolve`): the
-// walker (`walk_component_meta_macro_shape_member_types`), the
 // registry-structural materialiser, the registry-route preservers, the
 // graph-native registry-route + cycle-BFS predicates, and the
 // origin-graph builder. The `HostComponentMetaResolver` adapter lives
 // in `host_manage/jsdoc_resolve.rs` (host-impl tier).
 use crate::host_manage::jsdoc_resolve::HostComponentMetaResolver;
 use crate::meta_resolve::build_origin_graph;
-// `walk_component_meta_macro_shape_member_types` retained as a
-// `pub(crate)` symbol while still referenced by `meta_resolve_tests`;
-// the §7.1 cutover routes the production path through
-// `meta_resolve::projectors::project_evaluated_types` instead.
-#[allow(unused_imports)]
-use crate::meta_resolve::walk_component_meta_macro_shape_member_types;
 use crate::meta_resolve::{
     component_meta_registry_prefers_structural_materialization_node,
     component_meta_registry_should_keep_raw_symbolic_non_object_alias,
@@ -593,9 +584,9 @@ impl VerterHost {
                                 evaluated_types.define_slots.len(),
                             ),
                         );
-                        // §7.1 cutover: per-macro projectors replace
-                        // `walk_component_meta_macro_shape_member_types`.
-                        // Each projector dispatches `ResolveMacroPayload`
+                        // §7.1 cutover: per-macro projectors are the
+                        // sole component-meta resolution path. Each
+                        // projector dispatches `ResolveMacroPayload`
                         // + empty-path Shallow `ProjectPath` and writes
                         // `Vec<ExpandedField>` into `evaluated_types`.
                         // Errors / cycles emit diagnostics into

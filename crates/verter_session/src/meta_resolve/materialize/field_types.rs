@@ -809,7 +809,7 @@ pub(crate) fn lowered_preserve_package_backed_symbolic_refs(
 }
 
 // Currently orphaned — the only production call site lived inside
-// the legacy `walk_component_meta_macro_shape_member_types` walker
+// the legacy outer walker
 // that the §7.1 per-macro projector cutover replaced. Retained
 // because the helper is exercised by integration-test fixtures.
 #[allow(dead_code)]

@@ -251,7 +251,7 @@ crates/verter_session/src/project_semantic_dispatch_invariants_tests.rs:2835:   
 crates/verter_session/src/resolver_core/component_meta_query_engine/tests.rs:2://! `component_meta_query_engine/mod.rs` in Phase 11b.9.
 crates/verter_session/src/resolver_core/component_meta_query_engine/tests.rs:1338:    // Phase 5c (sub-plan §A9 (c) — DELETION FORBIDDEN): migrate
 crates/verter_session/src/resolver_core/component_meta_query_engine/tests.rs:3206:/// FAIL-FIRST (plan §3 Step 6.2): assert the structural ordering
-crates/verter_session/src/resolver_core/component_meta_query_engine/tests.rs:3224:    // Phase 11a — `materialize_component_meta_macro_shape_member_type_expr`
+crates/verter_session/src/resolver_core/component_meta_query_engine/tests.rs:3224:    // Phase 11a — `the_legacy_per_member_materialiser`
 crates/verter_session/src/resolver_core/component_meta_query_engine/tests.rs:3226:    // `meta_resolve/macro_member_walk.rs` (Phase 11a commit 10).
 crates/verter_session/src/resolver_core/component_meta_query_engine/tests.rs:3345:/// FAIL-FIRST (plan §3 Step 6.6.A —
 crates/verter_session/src/resolver_core/component_meta_query_engine/tests.rs:3433:/// FAIL-FIRST (plan §3 Step 8 / F5 — route_hash_pure_content_derived):

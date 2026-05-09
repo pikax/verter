@@ -2026,6 +2026,17 @@ fn phase_8_allow_list() -> std::collections::HashMap<&'static str, &'static str>
             "last_upsert_priority",
             "phase-09b-report.md §0 row \"Test-only observables on VerterHost\": Mutex<Option<Priority>> test mailbox written by upsert_with_priority and read by compile_many_propagates_*_priority. Compiled out in production builds. NOT a cache.",
         ),
+        // (d) Typeinfo scratch synthesis cache (§5 Phase 3) — per-host
+        //     LRU of synthesised scratch URI → SemanticNodeId. The
+        //     cache lives on `VerterHost` (not ProjectTypeStore)
+        //     because scratch URIs are session-local synthesis artefacts
+        //     gated by `cacheable: bool` per-request, not project-wide
+        //     resolution results. Configurable capacity via
+        //     `HostConfig::typeinfo_scratch_cache_capacity` (default 64).
+        (
+            "typeinfo_scratch_cache",
+            "§5.3 / Phase 3: per-host LRU mapping scratch URI → SemanticNodeId for `evaluate_type_expression(cacheable: true)`. Session-local synthesis cache, not a project-state result memoiser; ProjectTypeStore is for cross-request project-wide results.",
+        ),
     ]
     .into_iter()
     .collect()
@@ -3629,6 +3640,12 @@ mod foundations_guards {
         // out-of-crate consumer; production callers route only through
         // the atomic-counter increments which are inert.
         "pub mod loop5_instrumentation",
+        // verter_napi::typeinfo, verter_wasm::typeinfo, packages/typeinfo
+        // — the §5 Phase 3 typeinfo public host substrate
+        // (list_file_symbols, resolve_named_symbol*, evaluate_type_expression*)
+        // exposed via `pub mod typeinfo`. Required by NAPI/WASM bindings
+        // and the `@verter/typeinfo` TS package.
+        "pub mod typeinfo",
         // ─── B-C5 territory (separate ownership), kept `pub` ────────
         "pub mod component_meta_resolution_policy",
         // ─── crate-private modules (already non-public) ─────────────
@@ -3830,6 +3847,17 @@ mod foundations_guards {
             "crates/verter_type_runtime/src/tsgo/ipc.rs",
             "crates/verter_type_runtime/src/tsserver/ipc.rs",
             "crates/verter_workspace/src/resolver.rs",
+            // Dispatch walker — single coherent module owning the
+            // empty-path Shallow surface enumeration, intersection /
+            // union member-level merge, and Pick / Omit / Indexed
+            // route extraction. Splitting would cross-cut the
+            // member-merge state machine.
+            "crates/verter_session/src/project_semantic_dispatch/walk.rs",
+            // verter_wasm FFI glue — same shape as verter_napi/lib.rs:
+            // a single `mod` exposing every WASM-bindgen entry-point
+            // for parity with the NAPI surface. Splitting would force
+            // entry-point fragmentation across multiple bindgen mods.
+            "crates/verter_wasm/src/lib.rs",
         ])
     }
 
@@ -7866,49 +7894,7 @@ fn getcomponentmeta_uses_per_macro_projectors() {
     );
 }
 
-#[test]
-fn no_legacy_walker_in_production_code() {
-    // Static-grep gate: `walk_component_meta_macro_shape_member_types`
-    // must NOT appear in production source under
-    // `crates/verter_session/src/` outside the legacy walker module
-    // itself (`meta_resolve/macro_member_walk.rs`) and the dead-code
-    // re-exports in `meta_resolve.rs` and
-    // `host_manage/component_meta_methods.rs` (kept only for the
-    // `meta_resolve_tests.rs` test references). Production code must
-    // route through the per-macro projector module.
-    let walker_ident = "walk_component_meta_macro_shape_member_types";
-    let production_root = workspace_path("crates/verter_session/src/host_manage");
-    let mut violations = Vec::new();
-    walk_dir_collect_rs(&production_root, &mut |path| {
-        // The `host_manage/component_meta_methods.rs` re-export is
-        // gated under `#[allow(unused_imports)]` and only there to
-        // keep the symbol reachable for legacy `meta_resolve_tests.rs`
-        // call sites. Skip that file.
-        if path.ends_with("host_manage/component_meta_methods.rs")
-            || path.ends_with(r"host_manage\component_meta_methods.rs")
-        {
-            return;
-        }
-        let Ok(text) = std::fs::read_to_string(path) else {
-            return;
-        };
-        for (line_no, line) in text.lines().enumerate() {
-            if line.contains(walker_ident) {
-                violations.push(format!(
-                    "  {}:{}: {}",
-                    path.display(),
-                    line_no + 1,
-                    line.trim()
-                ));
-            }
-        }
-    });
-    assert!(
-        violations.is_empty(),
-        "`{walker_ident}` must NOT appear in production code under \
-         crates/verter_session/src/host_manage/. Production must route \
-         through `meta_resolve::projectors::project_evaluated_types`. \
-         Violations:\n{}",
-        violations.join("\n")
-    );
-}
+// `no_legacy_walker_in_production_code` retired post-§7.3 cutover —
+// the legacy walker family is fully deleted. Coverage moves to the
+// `tests/no_legacy_walker.rs` `RETIRED_SYMBOLS` gate which scans
+// the entire workspace, not just `crates/verter_session/src/host_manage/`.

@@ -108,8 +108,7 @@ pub(crate) use crate::host_manage::jsdoc_resolve::{
 };
 pub(crate) use macro_member_walk::{
     collect_define_props_root_names, slot_binding_targets_define_props_root,
-    walk_component_meta_macro_shape_member_types, PICK_MEMBER_ROUTE_CALLABLE_DESCENT_COUNTER,
-    SLOT_BINDING_REGISTRY_COLLECTION_SKIP_COUNTER,
+    PICK_MEMBER_ROUTE_CALLABLE_DESCENT_COUNTER, SLOT_BINDING_REGISTRY_COLLECTION_SKIP_COUNTER,
 };
 pub(crate) use materialize::{
     collect_type_expr_ref_names, lowered_preserve_package_backed_symbolic_refs,

@@ -1,15 +1,15 @@
 //! Cache invariant migration tests.
 //!
-//! Captures the per-cache invariants for the legacy walker's
-//! supporting caches (`MaterializeStructureDb`, `MemberRouteResultDb`,
-//! `materialize_component_meta_macro_shape_member_type_expr`) as
-//! discriminating regression tests.
+//! Captures the per-cache invariants for `MaterializeStructureDb`
+//! (the structural materialiser cache that supports the projector
+//! path's dispatch-path refinement) as discriminating regression
+//! tests.
 //!
 //! Each invariant test characterises a property the cache must
-//! preserve so it remains safe in the projector-driven world. The
-//! `materialize_component_meta_field_types` rescue path still
-//! exercises these caches on the production `getComponentMeta` flow,
-//! so the invariants must hold against that path.
+//! preserve. The dispatch-path refinement
+//! (`materialize_component_meta_field_types`) exercises this cache
+//! on the production `getComponentMeta` flow, so the invariants must
+//! hold against that path.
 //!
 //! ## Invariant catalogue
 //!
@@ -36,35 +36,15 @@
 //!   `MaterializeStructureCacheKey`; cooperative admission's reverse
 //!   index records both keys against the shared canonical.
 //!
-//! ### MemberRouteResultDb
+//! ### Dispatch-path refinement determinism (MM)
 //!
-//! - **MR-1** Per-(scope, member, lowered, mode) caching. Repeated
-//!   resolutions over identical inputs are stable and structurally
-//!   equal across calls.
-//!
-//! - **MR-2** dep_signature validation. After mutating the upstream
-//!   declaration file, repeated resolution sees the new content (the
-//!   stale cache row does NOT serve a torn read).
-//!
-//! - **MR-3** Generation invalidation on canonical eviction.
-//!
-//! - **MR-4** Mode-keyed cache identity. The cache rows are keyed by
-//!   the resolver mode so identical (scope, member, lowered) requests
-//!   in different modes do NOT collapse into one entry.
-//!
-//! ### materialize_component_meta_macro_shape_member_type_expr (MM)
-//!
-//! - **MM-1** Determinism across repeated invocation: identical
-//!   `(lowered, member, current, scope)` always produce the same
-//!   TypeExpr.
+//! - **MM-1** Determinism across repeated dispatch: identical
+//!   `getComponentMeta` queries always produce structurally-identical
+//!   payloads.
 //!
 //! - **MM-2** Cycle short-circuit: a recursive type fed through the
-//!   materialiser does not diverge — the function returns rather than
-//!   blowing the stack or budget.
-//!
-//! Each test is a positive assertion against the projector path:
-//! an invariant violation fails with a clear message that points at
-//! the cache that mis-validated.
+//!   dispatch-path refinement does not diverge — the resolution
+//!   completes in bounded time.
 
 use std::sync::Arc;
 
@@ -233,83 +213,6 @@ fn materialize_structure_db_eviction_drains_owner_entries() {
 }
 
 // ──────────────────────────────────────────────────────────────────
-// MR-1 : MemberRouteResultDb per-key caching
-// ──────────────────────────────────────────────────────────────────
-
-const GENERIC_TYPES_TS: &str = r#"export interface Container<T> { item: T }
-export type StringContainer = Container<string>
-"#;
-
-const GENERIC_VUE: &str = r#"<script setup lang="ts">
-import type { StringContainer } from '/workspace/src/types'
-defineProps<StringContainer>()
-</script>
-<template><div /></template>
-"#;
-
-/// MR-1: a single resolution that visits the member-route path
-/// publishes a bounded number of `MemberRouteResultDb` rows. Repeating
-/// the same resolution must not inflate the cache.
-#[test]
-fn member_route_result_db_warm_pass_does_not_inflate() {
-    let host = build_host(&[
-        ("/workspace/src/types.ts", GENERIC_TYPES_TS),
-        ("/workspace/src/Comp.vue", GENERIC_VUE),
-    ]);
-
-    let _ = host.get_component_meta("/workspace/src/Comp.vue");
-    let after_cold = host
-        .project_type_store()
-        .member_route_result_db()
-        .live_count();
-
-    let _ = host.get_component_meta("/workspace/src/Comp.vue");
-    let after_warm = host
-        .project_type_store()
-        .member_route_result_db()
-        .live_count();
-
-    assert_eq!(
-        after_cold, after_warm,
-        "MR-1 warm: a repeated identical resolution must NOT add new \
-         MemberRouteResultDb rows (cold={after_cold}, warm={after_warm})"
-    );
-}
-
-// ──────────────────────────────────────────────────────────────────
-// MR-3 : MemberRouteResultDb invalidation on canonical eviction
-// ──────────────────────────────────────────────────────────────────
-
-/// MR-3: evicting the owner canonical must NOT inflate the cache.
-/// Coupled with MR-1, this proves the invalidation surface is wired.
-#[test]
-fn member_route_result_db_eviction_does_not_inflate() {
-    let host = build_host(&[
-        ("/workspace/src/types.ts", GENERIC_TYPES_TS),
-        ("/workspace/src/Comp.vue", GENERIC_VUE),
-    ]);
-
-    let _ = host.get_component_meta("/workspace/src/Comp.vue");
-    let before = host
-        .project_type_store()
-        .member_route_result_db()
-        .live_count();
-
-    host.evict("/workspace/src/Comp.vue");
-
-    let after = host
-        .project_type_store()
-        .member_route_result_db()
-        .live_count();
-
-    assert!(
-        after <= before,
-        "MR-3: evicting the owner canonical must NOT inflate \
-         MemberRouteResultDb (before={before}, after={after})"
-    );
-}
-
-// ──────────────────────────────────────────────────────────────────
 // MS-2 / MR-2 : dep_signature validation refuses stale reads
 // ──────────────────────────────────────────────────────────────────
 
@@ -398,13 +301,63 @@ fn cache_invalidation_after_dep_edit_surfaces_new_content() {
 }
 
 // ──────────────────────────────────────────────────────────────────
+// MS-4 : post_publish dep_signature acceptance
+// ──────────────────────────────────────────────────────────────────
+
+/// MS-4: cooperative-admission's `post_publish` path must accept
+/// distinct cache rows produced by overlapping component-meta
+/// resolutions on the SAME canonical owner. Two resolutions of the
+/// same component yield identical dep_signatures and must collapse
+/// onto a single cache row (no duplicate entries published per
+/// `(MaterializeStructureCacheKey, dep_signature)` pair).
+#[test]
+fn materialize_structure_db_post_publish_collapses_duplicates() {
+    let host = build_host(&[
+        ("/workspace/src/types.ts", SHARED_TYPES_TS),
+        ("/workspace/src/Comp.vue", COMP_VUE),
+    ]);
+
+    // First resolution publishes cache rows.
+    let _ = host.get_component_meta("/workspace/src/Comp.vue");
+    let after_first = host
+        .project_type_store()
+        .materialize_structure_db()
+        .live_count();
+
+    // Second resolution with identical inputs must NOT increase the
+    // live count — `post_publish` collapses onto the existing row.
+    let _ = host.get_component_meta("/workspace/src/Comp.vue");
+    let after_second = host
+        .project_type_store()
+        .materialize_structure_db()
+        .live_count();
+
+    assert_eq!(
+        after_first, after_second,
+        "MS-4: identical resolutions must collapse via post_publish; \
+         live_count changed from {after_first} to {after_second}"
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────
 // MM-1 : determinism across repeated dispatch — verified end-to-end
 // ──────────────────────────────────────────────────────────────────
 
+const GENERIC_TYPES_TS: &str = r#"export interface Container<T> { item: T }
+export type StringContainer = Container<string>
+"#;
+
+const GENERIC_VUE: &str = r#"<script setup lang="ts">
+import type { StringContainer } from '/workspace/src/types'
+defineProps<StringContainer>()
+</script>
+<template><div /></template>
+"#;
+
 /// MM-1: repeated invocations of the same component-meta query must
 /// produce structurally-identical published metadata. The
-/// `materialize_component_meta_macro_shape_member_type_expr` rescue
-/// path is deterministic — identical inputs yield identical outputs.
+/// dispatch-path refinement is deterministic — identical inputs
+/// yield identical outputs.
 #[test]
 fn materialize_macro_shape_member_type_expr_deterministic() {
     let host = build_host(&[

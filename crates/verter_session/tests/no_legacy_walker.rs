@@ -121,6 +121,16 @@ const RETIRED_SYMBOLS: &[&str] = &[
     "decide_typeexpr_conditional_with_function_extends",
     "substitute_infer_in_typeexpr",
     "collect_expanded_slot_bindings_from_object_type",
+    // §7.3 cutover — the legacy outer macro-shape walker driver is
+    // retired. The per-member rescue helper
+    // `materialize_component_meta_macro_shape_member_type_expr` is
+    // KEPT as the dispatch-path refinement's deep-resolution rescue
+    // (load-bearing for cross-file recursive-alias preservation,
+    // e.g. `Tree = { children?: Tree[] }`). Production routes
+    // through `meta_resolve::projectors::project_evaluated_types`
+    // first; the per-member rescue runs only for fields the
+    // projector path leaves as unresolved IndexedAccess terminals.
+    "walk_component_meta_macro_shape_member_types",
 ];
 
 const SCAN_DIRS: &[&str] = &["crates", ".claude/skills", "docs"];

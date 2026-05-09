@@ -40,7 +40,7 @@ use crate::resolver_core::component_meta_query_engine::ComponentMetaQueryEngine;
 use crate::resolver_core::ResolverContext;
 use crate::semantic_query::{
     DeclIdentity, PathSegment, ProjectionMode, QueryError, QueryResult, SemanticNodeData,
-    SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
+    SemanticNodeId, SemanticQueryKey,
 };
 use crate::types::FileAnalysisSnapshot;
 
@@ -253,7 +253,9 @@ fn slot_param_root_is_symbolic_only(
                 args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                 body_mode: ProjectionMode::Skeleton,
             };
-            match dispatch.execute(key) {
+            let read = dispatch.execute_read(key);
+            super::dep_signature::accumulate_dispatch_dep_signature(&read.dep_signature);
+            match read.value {
                 QueryResult::Value(body_id) => {
                     slot_param_root_is_symbolic_only(dispatch, body_id, depth + 1)
                 }
@@ -300,7 +302,7 @@ pub(crate) fn resolve_slot_bindings_graph_native(
         macro_count = snapshot.macros.len(),
     );
     let _enter = span.enter();
-    // Synthesis-entry info event. Per plan §17.5 the synthesis layer
+    // Synthesis-entry info event. Per the audit contract the synthesis layer
     // emits at `info` level; the `tracing::info!` here uses the
     // module-path target so subscribers filtered to `verter_session`
     // (e.g. tracing-test) capture the span name on its formatted

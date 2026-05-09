@@ -1,21 +1,27 @@
 //! Q20 benchmark tracking for the projector decomposition.
 //!
 //! Records the warm and cold latency of `getComponentMeta` for a
-//! representative ChatMessage-like fixture as a regression baseline.
-//! The benchmark numbers go into the commit body so future agents
-//! have a reference point for the Q20 tie-breaker.
+//! representative ChatMessage-like fixture as a regression baseline,
+//! aligned to plan §7.0.3 (10 iterations, median).
 //!
-//! The test does NOT assert specific numeric thresholds — those live
-//! in commit-body documentation. The test asserts:
+//! The §7.0.3 deletion-gate (≤ 20% diff: DELETE; > 20% diff: KEEP)
+//! was applied retrospectively in §7.3 — the per-member rescue cache
+//! stays. The benchmark's ongoing role is regression detection: warm
+//! median must remain dramatically faster than cold median (proves
+//! the cache fence is functioning), and absolute medians must stay
+//! within reasonable bounds (proves the projector path's dispatch
+//! budget hasn't regressed to O(N²)).
+//!
+//! The test asserts:
 //!
 //! 1. The cold pass produces populated metadata (the projector path
 //!    is wired).
-//! 2. The warm pass is no slower than 2× the cold pass (the warm
-//!    cache fence is functioning; an unbounded warm pass would
-//!    indicate cooperative-admission breakage).
-//! 3. The fixture completes within an aggressive 10s budget — the
-//!    same kind of bound as the 100-prop check, but applied to a
-//!    smaller payload.
+//! 2. The warm-pass median is < 50% of the cold-pass median (the
+//!    cache fence is dramatically faster; this is much stricter
+//!    than the previous "< 2× cold" check and discriminates against
+//!    a regression that fully duplicates the cold work on warm).
+//! 3. Cold + warm medians together complete within 10s for the
+//!    small fixture (regression sanity).
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -91,73 +97,89 @@ defineSlots<{
 <template><div /></template>
 "#;
 
-/// Q20 benchmark — cold + warm pass timing recorded for reference.
-/// Asserts the fundamental invariants (warm < 2× cold, total < 10s)
-/// without coupling to absolute numbers.
+fn median_ns(samples: &mut [u128]) -> u128 {
+    samples.sort();
+    samples[samples.len() / 2]
+}
+
+/// Q20 benchmark — 10 iterations, median cold + median warm.
+/// Asserts (a) warm median is dramatically faster than cold median
+/// (cache fence functions), (b) totals stay within 10s budget,
+/// (c) prop counts match across cold/warm passes. Plan §7.0.3.
 #[test]
 fn phase5_q20_benchmark_recorded() {
-    let host = build_host(&[
-        ("/workspace/src/types.ts", CHATMESSAGE_TYPES_TS),
-        ("/workspace/src/ChatMessage.vue", CHATMESSAGE_VUE),
-    ]);
+    const ITERATIONS: usize = 10;
 
-    // Cold pass.
-    let started_cold = Instant::now();
-    let meta_cold = host
-        .get_component_meta("/workspace/src/ChatMessage.vue")
-        .expect("Q20 cold pass must succeed");
-    let cold_elapsed = started_cold.elapsed();
+    let mut cold_samples: Vec<u128> = Vec::with_capacity(ITERATIONS);
+    let mut warm_samples: Vec<u128> = Vec::with_capacity(ITERATIONS);
+    let mut prop_counts: Vec<usize> = Vec::with_capacity(ITERATIONS);
 
+    for _ in 0..ITERATIONS {
+        // Fresh host per iteration so cold pass is genuinely cold.
+        let host = build_host(&[
+            ("/workspace/src/types.ts", CHATMESSAGE_TYPES_TS),
+            ("/workspace/src/ChatMessage.vue", CHATMESSAGE_VUE),
+        ]);
+
+        let started_cold = Instant::now();
+        let meta_cold = host
+            .get_component_meta("/workspace/src/ChatMessage.vue")
+            .expect("Q20 cold pass must succeed");
+        cold_samples.push(started_cold.elapsed().as_nanos());
+
+        let started_warm = Instant::now();
+        let meta_warm = host
+            .get_component_meta("/workspace/src/ChatMessage.vue")
+            .expect("Q20 warm pass must succeed");
+        warm_samples.push(started_warm.elapsed().as_nanos());
+
+        assert_eq!(
+            meta_cold.props.len(),
+            meta_warm.props.len(),
+            "Q20: cold/warm prop counts must match per iteration (cold={}, warm={})",
+            meta_cold.props.len(),
+            meta_warm.props.len(),
+        );
+        assert!(
+            !meta_cold.props.is_empty(),
+            "Q20 cold: ChatMessage must publish at least one prop"
+        );
+        prop_counts.push(meta_cold.props.len());
+    }
+
+    let cold_median_ns = median_ns(&mut cold_samples.clone());
+    let warm_median_ns = median_ns(&mut warm_samples.clone());
+    let cold_median_ms = cold_median_ns as f64 / 1_000_000.0;
+    let warm_median_ms = warm_median_ns as f64 / 1_000_000.0;
+
+    // Strict warm-vs-cold gate: warm median must be < 50% of cold
+    // median (with a 10ms floor on cold to avoid jitter on very fast
+    // calls). The cache fence MUST short-circuit warm work — a
+    // regression that re-runs cold-equivalent work on warm would
+    // push warm to ≈ cold and fail this gate.
+    let cold_floor_ns = cold_median_ns.max(10_000_000);
     assert!(
-        !meta_cold.props.is_empty(),
-        "Q20 cold: ChatMessage must publish at least one prop \
-         (got {})",
-        meta_cold.props.len()
+        warm_median_ns * 2 < cold_floor_ns,
+        "Q20: warm median must be < 50% of cold median \
+         (cold={cold_median_ms:.2}ms, warm={warm_median_ms:.2}ms). \
+         A regression that re-runs cold-equivalent work on warm \
+         would fail this gate."
     );
 
-    // Warm pass.
-    let started_warm = Instant::now();
-    let meta_warm = host
-        .get_component_meta("/workspace/src/ChatMessage.vue")
-        .expect("Q20 warm pass must succeed");
-    let warm_elapsed = started_warm.elapsed();
-
-    assert_eq!(
-        meta_cold.props.len(),
-        meta_warm.props.len(),
-        "Q20: cold/warm prop counts must match (cold={}, warm={})",
-        meta_cold.props.len(),
-        meta_warm.props.len(),
-    );
-
-    // Warm pass must be no slower than 2× cold (with a 10ms floor to
-    // avoid jitter on very fast calls). A warm pass that's slower
-    // would indicate the fence/admission gate isn't returning early.
-    let cold_ns = cold_elapsed.as_nanos().max(10_000_000);
-    let warm_ns = warm_elapsed.as_nanos();
+    // Total-budget regression sanity.
+    let total_median_s = (cold_median_ns + warm_median_ns) as f64 / 1_000_000_000.0;
     assert!(
-        warm_ns < cold_ns.saturating_mul(2),
-        "Q20: warm pass must be < 2× cold (cold={:.1}ms, warm={:.1}ms)",
-        cold_elapsed.as_secs_f64() * 1000.0,
-        warm_elapsed.as_secs_f64() * 1000.0,
+        total_median_s < 10.0,
+        "Q20: cold + warm median must complete < 10s total (got {total_median_s:.2}s)"
     );
 
-    // Total budget: both passes complete well within 10s. (Generous
-    // upper bound for hermetic CI; a regression to O(N^2) dispatch
-    // would push this over.)
-    assert!(
-        cold_elapsed.as_secs_f64() + warm_elapsed.as_secs_f64() < 10.0,
-        "Q20: cold + warm must complete < 10s total (cold={:.2}s, warm={:.2}s)",
-        cold_elapsed.as_secs_f64(),
-        warm_elapsed.as_secs_f64(),
-    );
-
-    // Side-effect: print the numbers so they show in test output and
-    // get captured in CI logs / commit body. Not an assertion.
+    // Record numbers for CI / audit observability.
     eprintln!(
-        "Q20 benchmark recorded: cold={:.2}ms, warm={:.2}ms, props={}",
-        cold_elapsed.as_secs_f64() * 1000.0,
-        warm_elapsed.as_secs_f64() * 1000.0,
-        meta_cold.props.len(),
+        "Q20 benchmark (n={ITERATIONS}, median): cold={:.2}ms warm={:.2}ms \
+         (warm/cold = {:.2}%) props={}",
+        cold_median_ms,
+        warm_median_ms,
+        100.0 * warm_median_ms / cold_median_ms.max(0.001),
+        prop_counts[0],
     );
 }

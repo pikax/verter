@@ -140,9 +140,15 @@ enum ResolvedValueKind<'a> {
     },
     /// Symbolic ref kept (utility didn't expand). Asserts the
     /// outer Ref name (e.g., "Partial") is preserved.
+    #[allow(dead_code)]
     SymbolicRef {
         name: &'a str,
     },
+    /// TS mapped-type result (`Partial<T>`, `Required<T>`, etc.) —
+    /// post-§7.3 cutover the dispatch path resolves these utility
+    /// types into their `TypeExpr::Mapped` form rather than leaving
+    /// them as a symbolic outer Ref.
+    Mapped,
     /// Resolution did not produce a concrete value type — typically
     /// because the fixture exercises a code path that needs
     /// session-side resolver state not present in the hermetic
@@ -485,6 +491,15 @@ fn assert_parity(resolution: &ResolvedComponentMetaState, assertion: ParityAsser
                 "{}: Ref name mismatch",
                 assertion.fixture
             );
+        }
+        ResolvedValueKind::Mapped => {
+            if !matches!(value_ty, TypeExpr::Mapped { .. }) {
+                panic!(
+                    "{}: expected Mapped; got kind={}",
+                    assertion.fixture,
+                    typeexpr_kind(value_ty)
+                );
+            }
         }
     }
 }
@@ -842,6 +857,13 @@ const DISCRIMINATION_EXEMPT: &[(usize, usize)] = &[
     // evaluated_types.
     (8, 15),
     (15, 8),
+    // Pair (13, 14) symmetric: post-§7.3 cutover fixtures 14
+    // (`Partial<Foo>`) and 15 (`Required<Foo>`) both reduce to
+    // `TypeExpr::Mapped`. The kind-only assertion cannot
+    // discriminate two distinct mapped types that share the same
+    // outer shape.
+    (13, 14),
+    (14, 13),
 ];
 
 /// Structural assertions per fixture. Index N corresponds to fixture
@@ -990,18 +1012,17 @@ fn expected_assertions_per_fixture() -> Vec<ParityAssertion<'static>> {
             fixture: "13_indexed_access_string_literal",
             expected_value_kind: ResolvedValueKind::Primitive("String"),
         },
-        // 14: Partial<Foo> -> Ref{Partial} (kept symbolic in hermetic
-        // environment because Partial isn't expanded by the materialiser
-        // in this code path).
+        // 14: Partial<Foo> — post-§7.3 cutover the dispatch path
+        // resolves the TS mapped type, producing a `TypeExpr::Mapped`
+        // shape rather than the legacy walker's symbolic `Ref(Partial)`.
         ParityAssertion {
             fixture: "14_partial_t_makes_all_members_optional",
-            expected_value_kind: ResolvedValueKind::SymbolicRef { name: "Partial" },
+            expected_value_kind: ResolvedValueKind::Mapped,
         },
-        // 15: Required<Foo> -> Ref{Required} (similar — kept symbolic).
-        // Discriminator from 14: Ref name differs.
+        // 15: Required<Foo> — same post-cutover resolution to Mapped.
         ParityAssertion {
             fixture: "15_required_t_makes_all_members_required",
-            expected_value_kind: ResolvedValueKind::SymbolicRef { name: "Required" },
+            expected_value_kind: ResolvedValueKind::Mapped,
         },
         // 16: typeof exotic — produces no evaluated_types in hermetic
         // env.

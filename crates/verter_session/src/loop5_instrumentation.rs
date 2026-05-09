@@ -23,7 +23,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-/// Outer entries to `materialize_component_meta_macro_shape_member_type_expr`.
+/// Outer entries to the legacy per-member materialiser.
 /// One increment per request × per macro member walked.
 pub static MACRO_MEMBER_WALK_OUTER_CALLS: AtomicU64 = AtomicU64::new(0);
 
@@ -77,7 +77,7 @@ pub static FAMILY_MEMO_MISSES: AtomicU64 = AtomicU64::new(0);
 
 /// Maximum (single-call) operator-node count observed for any
 /// TypeExpr passed into
-/// `materialize_component_meta_macro_shape_member_type_expr`.
+/// the legacy per-member materialiser.
 /// Tracked via fetch_max so the value is the high-water mark.
 pub static MAX_TYPE_EXPR_OPERATOR_NODE_COUNT: AtomicU64 = AtomicU64::new(0);
 
@@ -393,7 +393,7 @@ pub static LOWERED_ROOT_CYCLE_FAST_PATH_HITS: AtomicU64 = AtomicU64::new(0);
 //
 // Loop 8 confirmed 99.98% of materialize_ms lives in two function
 // bodies — `materialize_component_meta_field_types` (20 min) and
-// `walk_component_meta_macro_shape_member_types` (12.5 min). Loop 9
+// the legacy macro-shape walker (12.5 min). Loop 9
 // drills INSIDE these functions to identify the dominant sub-block.
 //
 // Field-types sub-blocks (per-iteration counters accumulate across
@@ -423,7 +423,7 @@ pub static FIELD_PROPS_NEEDS_MEMBER_ROUTE_CALLS: AtomicU64 = AtomicU64::new(0);
 pub static FIELD_PROPS_NEEDS_MEMBER_ROUTE_NS: AtomicU64 = AtomicU64::new(0);
 
 /// Block 5: per-field `for lowered in routes` loop calling
-/// `materialize_component_meta_macro_shape_member_type_expr`.
+/// the legacy per-member materialiser.
 pub static FIELD_PROPS_MEMBER_ROUTE_LOOP_CALLS: AtomicU64 = AtomicU64::new(0);
 pub static FIELD_PROPS_MEMBER_ROUTE_LOOP_NS: AtomicU64 = AtomicU64::new(0);
 
@@ -464,7 +464,7 @@ pub static WALK_DEFINE_PROPS_PROJECTION_NS: AtomicU64 = AtomicU64::new(0);
 
 /// DefineProps arm — per-property `for property in &mut
 /// define_props.result.value.properties` loop calling
-/// `materialize_component_meta_macro_shape_member_type_expr`.
+/// the legacy per-member materialiser.
 pub static WALK_DEFINE_PROPS_PROPERTY_LOOP_CALLS: AtomicU64 = AtomicU64::new(0);
 pub static WALK_DEFINE_PROPS_PROPERTY_LOOP_NS: AtomicU64 = AtomicU64::new(0);
 
