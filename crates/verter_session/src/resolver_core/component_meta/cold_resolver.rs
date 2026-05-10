@@ -456,9 +456,9 @@ where
                 {
                     resolved_type_registry.push(ResolvedTypeAnalysis {
                         name: resolved.name.clone(),
-                        type_expr: resolved.type_expr.clone().unwrap_or_else(|| {
-                            verter_type_expr_oxc::parse_type_annotation(&resolved.expanded)
-                        }),
+                        type_expr: resolved.type_expr.clone().expect(
+                            "ResolvedLocalType.type_expr populated by analyzer (W0.2 invariant)",
+                        ),
                         type_expansion: None,
                     });
                     resolved_type_registry_meta.push(ResolvedTypeRegistryMeta {

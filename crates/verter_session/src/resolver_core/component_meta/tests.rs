@@ -635,7 +635,9 @@ defineEmits<Emits>()
             resolved_local_types: vec![ResolvedLocalType {
                 name: "Emits".to_string(),
                 expanded: "interface Emits extends RootEmits {}".to_string(),
-                type_expr: None,
+                type_expr: Some(verter_type_expr_oxc::parse_type_annotation(
+                    "interface Emits extends RootEmits {}",
+                )),
                 span: Span::new(0, source.len() as u32),
             }],
             parsed_type_argument: None,
@@ -724,7 +726,9 @@ fn local_resolved_macro_types_project_into_resolved_macro_surfaces() {
                 expanded:
                     "{ 'update:modelValue': [value: (T extends 'single' ? string : string[]) | undefined] }"
                         .to_string(),
-                type_expr: None,
+                type_expr: Some(verter_type_expr_oxc::parse_type_annotation(
+                    "{ 'update:modelValue': [value: (T extends 'single' ? string : string[]) | undefined] }",
+                )),
                 span: Span::new(0, 1),
             }],
             parsed_type_argument: None,
@@ -916,7 +920,9 @@ defineSlots<CalendarSlots>()
             resolved_local_types: vec![ResolvedLocalType {
                 name: "CalendarSlots".to_string(),
                 expanded: "{ day?: (props: { day: Date }) => any }".to_string(),
-                type_expr: None,
+                type_expr: Some(verter_type_expr_oxc::parse_type_annotation(
+                    "{ day?: (props: { day: Date }) => any }",
+                )),
                 span: Span::new(0, source.len() as u32),
             }],
             parsed_type_argument: None,
@@ -2075,5 +2081,75 @@ interface Helper {
         resolved_names,
         vec!["Props"],
         "only the direct local macro root should project into resolved_macros; helper companions should stay lazy",
+    );
+}
+
+/// Characterisation: pin the invariant that
+/// `ResolvedLocalType.type_expr` MUST be populated whenever
+/// `expanded` is non-empty. The cold resolver consumes the typed
+/// form via `.expect(...)`; a violation panics with a stable
+/// message.
+///
+/// Pre-W0.2 the consumer fell back through
+/// `parse_type_annotation(&resolved.expanded)` and silently
+/// recovered, so this fixture would not panic and `should_panic`
+/// would FAIL. Post-W0.2 the consumer asserts the invariant via
+/// `.expect(...)`, the panic fires, and `should_panic` PASSES.
+#[test]
+#[should_panic(expected = "ResolvedLocalType.type_expr populated by analyzer")]
+fn cold_resolver_panics_when_type_expr_missing_for_non_empty_expanded() {
+    let host = TestHost {
+        external_macro_elements: BTreeMap::new(),
+        eval_outputs: ComponentMetaEvalOutputs::default(),
+        projectable_owner_local_roots: BTreeSet::new(),
+        owner_local_macro_surfaces: BTreeMap::new(),
+    };
+    let snapshot = TestSnapshot {
+        imports: Vec::new(),
+        macros: vec![AnalyzedMacro {
+            kind: AnalyzedMacroKind::DefineEmits,
+            is_type_based: true,
+            type_references: vec!["ViolatingEmits".to_string()],
+            binding_name: Some("emit".to_string()),
+            model_name: None,
+            has_inherit_attrs_false: false,
+            prop_fields: Vec::new(),
+            emit_fields: Vec::new(),
+            slot_fields: Vec::new(),
+            default_keys: Vec::new(),
+            default_values: Vec::new(),
+            expose_fields: Vec::new(),
+            // Synthetic violation: `expanded` is non-empty but
+            // `type_expr` is `None`. This shape is unreachable
+            // from production producers (both constructor sites in
+            // `verter_semantic::analysis::macros` populate
+            // `type_expr` via `build_expanded_type_expr`), but the
+            // fixture mints it directly to discriminate the
+            // consumer's invariant assertion.
+            resolved_local_types: vec![ResolvedLocalType {
+                name: "ViolatingEmits".to_string(),
+                expanded: "{ change: [value: string] }".to_string(),
+                type_expr: None,
+                span: Span::new(0, 1),
+            }],
+            parsed_type_argument: None,
+            span: Span::new(0, 1),
+        }],
+        macro_type_deps: Vec::new(),
+    };
+
+    // Routing through `resolve_component_meta_parts` is the same
+    // entry point production consumers use. The direct-local
+    // resolved-type registry seeding block at the consumer's
+    // `.expect(...)` site fires for `(resolved_index == 0,
+    // direct_named_reference, first-seen registry name)`, which
+    // this fixture satisfies.
+    let _ = resolve_component_meta_parts(
+        &host,
+        "/src/Violator.vue",
+        &snapshot,
+        true,
+        None,
+        ComponentMetaResolutionPurpose::Full,
     );
 }

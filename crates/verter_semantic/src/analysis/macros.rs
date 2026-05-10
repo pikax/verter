@@ -675,10 +675,15 @@ fn resolve_local_define_props(
                             LocalTypeDecl::Alias(t) => t.span().into(),
                             LocalTypeDecl::Class => verter_span::Span::default(),
                         };
+                        let type_expr = Some(build_expanded_type_expr(&ref_fields));
+                        debug_assert!(
+                            type_expr.is_some() || expanded.is_empty(),
+                            "ResolvedLocalType.type_expr MUST be populated when expanded is non-empty"
+                        );
                         resolved_types.push(ResolvedLocalType {
                             name: type_ref.clone(),
                             expanded,
-                            type_expr: Some(build_expanded_type_expr(&ref_fields)),
+                            type_expr,
                             span,
                         });
                     }
@@ -712,10 +717,15 @@ fn resolve_local_define_props(
                         LocalTypeDecl::Alias(t) => t.span().into(),
                         LocalTypeDecl::Class => verter_span::Span::default(),
                     };
+                    let type_expr = Some(build_expanded_type_expr(&fields));
+                    debug_assert!(
+                        type_expr.is_some() || expanded.is_empty(),
+                        "ResolvedLocalType.type_expr MUST be populated when expanded is non-empty"
+                    );
                     resolved_types.push(ResolvedLocalType {
                         name: type_ref.clone(),
                         expanded,
-                        type_expr: Some(build_expanded_type_expr(&fields)),
+                        type_expr,
                         span,
                     });
                     mac.prop_fields = fields;
