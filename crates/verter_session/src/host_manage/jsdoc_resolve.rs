@@ -347,7 +347,9 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
         )?;
         Some(
             crate::resolver_core::component_meta::project_macro_surfaces_from_expanded_shape(
-                macro_kind, &shape,
+                macro_kind,
+                &shape,
+                Some(owner_canonical),
             ),
         )
     }

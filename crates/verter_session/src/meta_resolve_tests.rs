@@ -9845,6 +9845,143 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
 //    `Instantiate` dispatches; their dep_signatures appear in `local_fence`.
 // ===========================================================================
 
+/// Producer-chain invariant: when `defineEmits<Emits>()` consumes a local
+/// interface `Emits` that `extends ExternalEmits<T>` from a package, the
+/// `AnalyzedEmitField` produced via the prepared-shape path
+/// (`project_macro_surfaces_from_expanded_shape` →
+/// `projected_emit_fields_from_shape`) must carry the typed call-signature
+/// payload on `payload_expr` (`Tuple` of post-event-name params with the
+/// generic `T` substituted), and `payload_expr_scope` must hold the owner
+/// SFC's canonical id. Without the typed form, downstream consumers fall
+/// back to re-parsing the display `payload_type` text — the Typed-IR-Only
+/// Resolver Rule (CLAUDE.md) forbids that.
+#[test]
+fn resolved_macro_emits_carry_payload_expr_for_cross_file_interface_extends() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/node_modules/reka-ui/index.d.ts",
+            r#"
+export interface TabsRootEmits<T> {
+  (e: 'update:modelValue', payload: T): void
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script lang="ts">
+import type { TabsRootEmits } from 'reka-ui'
+
+export interface Emits extends TabsRootEmits<string | number> {}
+</script>
+<script setup lang="ts">
+defineEmits<Emits>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "reka-ui".to_string(),
+            resolved_canonical_id: Some("/node_modules/reka-ui/index.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let host = project.host();
+    let snapshot = host
+        .get_raw_analysis_snapshot("/src/App.vue")
+        .expect("raw snapshot should exist");
+    let resolver_host = super::HostComponentMetaResolver { host };
+    let parts = crate::resolver_core::resolve_component_meta_parts(
+        &resolver_host,
+        "/src/App.vue",
+        &snapshot,
+        true,
+        None,
+        crate::resolver_core::ComponentMetaResolutionPurpose::Full,
+    );
+
+    let define_emits = parts
+        .resolved_macros
+        .iter()
+        .find(|resolved| {
+            resolved.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineEmits
+        })
+        .expect("defineEmits<Emits> should produce a resolved macro meta entry");
+
+    let emit = define_emits
+        .emits
+        .iter()
+        .find(|emit| emit.name == "update:modelValue")
+        .unwrap_or_else(|| {
+            panic!(
+                "update:modelValue emit should be present on resolved define-emits, got {:?}",
+                define_emits
+                    .emits
+                    .iter()
+                    .map(|emit| emit.name.as_str())
+                    .collect::<Vec<_>>(),
+            )
+        });
+
+    let payload_expr = emit
+        .payload_expr
+        .as_ref()
+        .expect("payload_expr must be populated for cross-file interface-extends emits");
+    let payload_expr_scope = emit
+        .payload_expr_scope
+        .as_ref()
+        .expect("payload_expr_scope must be populated when payload_expr is populated");
+
+    assert_eq!(
+        payload_expr_scope.as_str(),
+        "/src/App.vue",
+        "payload_expr_scope should anchor to the owner SFC",
+    );
+
+    let verter_type_expr::TypeExpr::Tuple { elements, .. } = payload_expr else {
+        panic!(
+            "call-signature emit payload should lower to a Tuple, got {:?}",
+            payload_expr,
+        );
+    };
+    assert_eq!(
+        elements.len(),
+        1,
+        "(e, payload: T) tuple after skip(1) should hold a single labelled element"
+    );
+    assert_eq!(
+        elements[0].label.as_deref(),
+        Some("payload"),
+        "tuple element should preserve the payload label",
+    );
+    let verter_type_expr::TypeExpr::Union(members) = &elements[0].ty else {
+        panic!(
+            "the generic T should be substituted with the union string|number, got {:?}",
+            elements[0].ty,
+        );
+    };
+    assert!(
+        members.contains(&verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::String,
+        )),
+        "payload union should contain string, got {:?}",
+        members,
+    );
+    assert!(
+        members.contains(&verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::Number,
+        )),
+        "payload union should contain number, got {:?}",
+        members,
+    );
+}
+
 mod node_predicates_tests {
     use super::make_project;
     use crate::meta_resolve::{

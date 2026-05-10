@@ -2,7 +2,7 @@ use rustc_hash::FxHashSet;
 use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
 use verter_semantic::analysis::types::AnalyzedMacroKind;
 use verter_type_expr::{
-    FunctionExpr, FunctionParam, ObjectExpr, ObjectMember, ObjectProperty, TypeExpr,
+    FunctionExpr, FunctionParam, ObjectExpr, ObjectMember, ObjectProperty, TypeExpr, TypeExprScope,
 };
 
 use crate::resolver_core::project_macro_surfaces;
@@ -141,7 +141,9 @@ pub fn projected_macro_surfaces_to_type_expr(
 pub(crate) fn project_macro_surfaces_from_expanded_shape(
     macro_kind: AnalyzedMacroKind,
     shape: &verter_semantic::analysis::type_expand::ExpandedObjectShape,
+    owner_canonical: Option<&str>,
 ) -> ProjectedMacroSurfaces {
+    let owner_scope = owner_canonical.map(TypeExprScope::new);
     match macro_kind {
         AnalyzedMacroKind::DefineProps
         | AnalyzedMacroKind::WithDefaults
@@ -150,17 +152,28 @@ pub(crate) fn project_macro_surfaces_from_expanded_shape(
             props: shape
                 .properties
                 .iter()
-                .map(|property| verter_semantic::analysis::AnalyzedPropField {
-                    name: property.name.clone(),
-                    is_optional: property.optional,
-                    span: verter_span::Span::default(),
-                    type_annotation: render_type_expr_for_projected_surface(&property.ty),
-                    description: None,
-                    tags: Vec::new(),
-                    resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
-                    resolution_error: None,
-                    type_expr: None,
-                    type_expr_scope: None,
+                .map(|property| {
+                    let type_expr = Some(property.ty.clone());
+                    let type_expr_scope = owner_scope.clone();
+                    debug_assert_eq!(
+                        type_expr.is_some(),
+                        type_expr_scope.is_some(),
+                        "AnalyzedPropField (expanded-shape) type_expr/type_expr_scope pairing violated for prop `{}`",
+                        property.name,
+                    );
+                    verter_semantic::analysis::AnalyzedPropField {
+                        name: property.name.clone(),
+                        is_optional: property.optional,
+                        span: verter_span::Span::default(),
+                        type_annotation: render_type_expr_for_projected_surface(&property.ty),
+                        description: None,
+                        tags: Vec::new(),
+                        resolution_source:
+                            verter_semantic::analysis::types::TypeResolutionSource::Rust,
+                        resolution_error: None,
+                        type_expr,
+                        type_expr_scope,
+                    }
                 })
                 .collect(),
             emits: Vec::new(),
@@ -170,7 +183,7 @@ pub(crate) fn project_macro_surfaces_from_expanded_shape(
         AnalyzedMacroKind::DefineEmits => ProjectedMacroSurfaces {
             native_props: Vec::new(),
             props: Vec::new(),
-            emits: projected_emit_fields_from_shape(shape),
+            emits: projected_emit_fields_from_shape(shape, owner_scope.as_ref()),
             slots: Vec::new(),
             ..Default::default()
         },
@@ -189,22 +202,33 @@ pub(crate) fn project_macro_surfaces_from_expanded_shape(
 
 fn projected_emit_fields_from_shape(
     shape: &verter_semantic::analysis::type_expand::ExpandedObjectShape,
+    owner_scope: Option<&TypeExprScope>,
 ) -> Vec<verter_semantic::analysis::AnalyzedEmitField> {
     use verter_type_expr::{LiteralValue, TupleElement, TypeExpr};
 
     let mut emits = shape
         .properties
         .iter()
-        .map(|property| verter_semantic::analysis::AnalyzedEmitField {
-            name: property.name.clone(),
-            span: verter_span::Span::default(),
-            payload_type: event_payload_raw_signature_from_type_expr_for_projected_surface(
-                &property.ty,
-            ),
-            description: None,
-            tags: Vec::new(),
-            payload_expr: None,
-            payload_expr_scope: None,
+        .map(|property| {
+            let payload_expr = Some(property.ty.clone());
+            let payload_expr_scope = owner_scope.cloned();
+            debug_assert_eq!(
+                payload_expr.is_some(),
+                payload_expr_scope.is_some(),
+                "AnalyzedEmitField (expanded-shape, property-style) payload_expr/payload_expr_scope pairing violated for emit `{}`",
+                property.name,
+            );
+            verter_semantic::analysis::AnalyzedEmitField {
+                name: property.name.clone(),
+                span: verter_span::Span::default(),
+                payload_type: event_payload_raw_signature_from_type_expr_for_projected_surface(
+                    &property.ty,
+                ),
+                description: None,
+                tags: Vec::new(),
+                payload_expr,
+                payload_expr_scope,
+            }
         })
         .collect::<Vec<_>>();
 
@@ -230,6 +254,13 @@ fn projected_emit_fields_from_shape(
         };
         let payload_type =
             event_payload_raw_signature_from_type_expr_for_projected_surface(&payload);
+        let payload_expr_for_signature = Some(payload.clone());
+        let payload_expr_scope_for_signature = owner_scope.cloned();
+        debug_assert_eq!(
+            payload_expr_for_signature.is_some(),
+            payload_expr_scope_for_signature.is_some(),
+            "AnalyzedEmitField (expanded-shape, call-signature) payload_expr/payload_expr_scope pairing violated",
+        );
         match &first.ty {
             TypeExpr::Literal(LiteralValue::String(name)) => {
                 emits.push(verter_semantic::analysis::AnalyzedEmitField {
@@ -238,8 +269,8 @@ fn projected_emit_fields_from_shape(
                     payload_type: payload_type.clone(),
                     description: None,
                     tags: Vec::new(),
-                    payload_expr: None,
-                    payload_expr_scope: None,
+                    payload_expr: payload_expr_for_signature.clone(),
+                    payload_expr_scope: payload_expr_scope_for_signature.clone(),
                 })
             }
             TypeExpr::Union(types) => {
@@ -253,8 +284,8 @@ fn projected_emit_fields_from_shape(
                         payload_type: payload_type.clone(),
                         description: None,
                         tags: Vec::new(),
-                        payload_expr: None,
-                        payload_expr_scope: None,
+                        payload_expr: payload_expr_for_signature.clone(),
+                        payload_expr_scope: payload_expr_scope_for_signature.clone(),
                     });
                 }
             }
