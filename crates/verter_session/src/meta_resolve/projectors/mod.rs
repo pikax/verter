@@ -69,31 +69,29 @@ pub(crate) use slots::project_slots;
 /// Merge a projector's `Vec<ExpandedField>` output into the target
 /// `Vec<ExpandedField>` on `evaluated_types`.
 ///
-/// For each projector field, looks up the target by `name`:
-/// - If a matching name exists, the projector publishes the
-///   dispatch-resolved surface; the parser-side entry was populated
-///   by `evaluate_types` before the projector ran. When the
-///   projector's surface is the same shape or a strict improvement
-///   (more structural detail / fewer symbolic carriers), the
-///   projector wins. When the parser-side entry is strictly more
-///   concrete (e.g. it already resolved a recursive alias body that
-///   the dispatch path returned as a bare `Ref` because of cycle
-///   truncation), the parser-side shape stays and only the metadata
-///   fields the projector owns (`raw_type`, `optional`, `exactness`,
-///   execution status, diagnostics) merge in.
-/// - If no matching name exists, the projector field is appended.
+/// Per the project's component-meta shallow-by-default rule (see
+/// `CLAUDE.md`), the projector pipeline is the **sole post-projection
+/// authority** for finalising published field shapes. Parser-side
+/// pre-population of `evaluated_types.props` (from
+/// `verter_semantic::analysis::type_eval_build::expand_field_expr`
+/// and friends) eagerly inlines alias bodies, which violates the
+/// shallow-by-default contract for bare `Ref` references —
+/// `defineProps<{ user: Foo }>` where `type Foo = string` lives in
+/// the same file pre-populates `user`'s type as `Primitive(String)`,
+/// not the bare `Ref { name: "Foo" }` that the rule mandates.
 ///
-/// This keeps any parser-side fields the projector did NOT produce
-/// (e.g., entries from prop annotations that the dispatch path did
-/// not surface) AND prevents projector regressions for shapes the
-/// parser-side path resolved more concretely (recursive alias bodies,
-/// re-export chains preserved by the parser-side resolver, etc.).
+/// To honour the shallow-by-default invariant, the projector's
+/// output always wins for fields the projector produced: when both
+/// `target` and `projected` carry an entry with the same name, the
+/// projected entry replaces the existing entry wholesale. Parser-
+/// side fields the projector did NOT produce (entries that have no
+/// name match in `projected`) are preserved as-is so prop annotations
+/// the dispatch path didn't surface still appear in the published
+/// analysis.
 fn merge_projected_fields_by_name(
     target: &mut Vec<verter_semantic::analysis::type_expand::ExpandedField>,
     projected: Vec<verter_semantic::analysis::type_expand::ExpandedField>,
 ) {
-    use crate::meta_resolve::compare_type_expr_improvement;
-
     for field in projected {
         if let Some(existing) = target.iter_mut().find(|t| t.name == field.name) {
             if std::env::var("VERTER_PROJECTOR_MERGE_TRACE").is_ok() {
@@ -102,17 +100,9 @@ fn merge_projected_fields_by_name(
                     field.name, existing.r#type, field.r#type
                 );
             }
-            if compare_type_expr_improvement(&field.r#type, &existing.r#type) {
-                *existing = field;
-            } else if compare_type_expr_improvement(&existing.r#type, &field.r#type) {
-                existing.raw_type = field.raw_type;
-                existing.optional = field.optional;
-                existing.exactness = field.exactness;
-                existing.execution_status = field.execution_status;
-                existing.diagnostics = field.diagnostics;
-            } else {
-                *existing = field;
-            }
+            // Projector pipeline is the sole post-projection authority
+            // — its output always replaces parser-side pre-population.
+            *existing = field;
         } else {
             target.push(field);
         }
@@ -535,39 +525,39 @@ pub(crate) fn surface_member_to_expanded_field(
 /// by [`reduce_published_field_types`] on slot bindings, model bindings,
 /// and any leftover parser-side fields.
 ///
-/// The reduction has two stages:
+/// # Shallow-by-default invariant
 ///
-/// 1. **Operator collapse** — when `expr` contains any
-///    `IndexedAccess` / `KeyOf` / `TypeOf` / `Conditional` /
-///    `Mapped` / `Infer` shape AND the route's root is not a
-///    package-backed object surface, the bounded fixed-point reducer
-///    [`materialize_component_meta_type_expr_until_stable`] runs in
-///    `Expanded` mode. Nested chains
-///    (`Pick<Foo,'outer'>['outer']['inner']`) collapse to concrete
-///    leaves; symbolic Refs to parameterised aliases stay symbolic;
-///    package-backed indexed accesses stay symbolic per the route-
-///    preservation contract.
-/// 2. **Symbolic-Ref body lookup** — when the reduction yields a bare
-///    `Ref { name, type_arguments }` whose declaration body is itself
-///    not a non-object surface (i.e. an alias to a primitive / object
-///    / function shape) AND the body would benefit from projection,
-///    the reducer is rerun against an `IndexedAccess`-on-Ref shell so
-///    the imported alias body is recovered through the dispatch
-///    primitives. Otherwise the bare Ref is the final shape
-///    (consumers re-resolve by name through the registry).
+/// Per the project's component-meta shallow-by-default rule (see
+/// `CLAUDE.md`), types and properties are ALWAYS published shallow at
+/// the projector surface UNLESS the consumer explicitly walks the path.
+/// Concretely:
 ///
-/// Generic substitutions, dep-signature accumulation, fence-validated
-/// publication, and dispatch fence diagnostics all flow through
-/// `materialize_component_meta_type_expr_until_stable` — there is no
-/// separate cache, scope, or budget here.
+/// - Plain alias references (`type Foo = ...`, including same-file and
+///   imported aliases) MUST stay as `TypeExpr::Ref { name: "Foo" }`.
+///   The projector does NOT eagerly inline the alias body. Consumers
+///   re-resolve the alias through the registry on demand.
+/// - `Pick<Foo, "bar">` materialises ONLY the `bar` member; other
+///   `Foo` properties stay shallow. This is path-precise.
+/// - `Foo['a']['b']` materialises only the `a` and `b` hops.
+/// - Imported alias names (workspace-owned OR package-backed) stay
+///   shallow regardless of where they live.
+///
+/// This function therefore reduces ONLY when the expression carries an
+/// operator-shape node (`IndexedAccess` / `KeyOf` / `TypeOf` /
+/// `Conditional` / `Mapped` / `Infer` / `Rest` / `TemplateLiteral`)
+/// AND the route's root is not a package-backed object surface. Bare
+/// `TypeExpr::Ref { .. }` inputs — whether their declaration body
+/// resolves to a primitive, a utility wrapper, or any other shape —
+/// are returned verbatim. The bounded fixed-point reducer
+/// [`materialize_component_meta_type_expr_until_stable`] is the
+/// authoritative reduction primitive for the operator case; generic
+/// substitutions, dep-signature accumulation, and fence-validated
+/// publication all flow through it.
 pub(crate) fn reduce_field_type_expr(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     scope_canonical_id: &str,
     expr: TypeExpr,
 ) -> TypeExpr {
-    use crate::meta_resolve::expr_needs_projection_rescue;
-    use crate::meta_resolve::select_imported_materialization_scope;
-
     let route_is_package_backed = super::materialize::type_expr_has_package_backed_object_like_root(
         &expr,
         scope_canonical_id,
@@ -577,22 +567,37 @@ pub(crate) fn reduce_field_type_expr(
         return expr;
     }
 
-    // Reduction triggers when (a) the expression carries an
-    // operator-shape node (`IndexedAccess`/`KeyOf`/`TypeOf`/
-    // `Conditional`/`Mapped`/`Infer`), or (b) the expression's root
-    // is a bare `Ref` whose declaration body would benefit from
-    // expansion (utility instantiations like `Pick<X,K>`, aliases
-    // resolving to non-object surfaces, etc). `expr_needs_projection_rescue`
-    // inspects the declaration body via the dispatch primitives; its
-    // cycle guard prevents runaway recursion on recursive aliases
-    // like `TreeNode`. We restrict (b) to bare-`Ref` roots so a Union
-    // whose individual branches happen to be utility wrappers
-    // (`boolean | Omit<X, K>`) keeps the wrapper symbolic — only
-    // the Union root's own non-object surface check is consulted,
-    // not each branch's body shape.
-    let needs_reduction = type_expr_contains_reducible_operator(&expr)
-        || (matches!(&expr, TypeExpr::Ref { .. })
-            && expr_needs_projection_rescue(query_engine, scope_canonical_id, &expr));
+    // Shallow-by-default invariant: a *plain* alias reference (a
+    // `Ref` with empty `type_arguments`) is NEVER reduced here. The
+    // projector publishes alias names as carriers; consumers re-
+    // resolve through the registry on demand. Reduction fires only
+    // when the consumer explicitly walked a path:
+    //
+    // - operator-shape nodes (`IndexedAccess`/`KeyOf`/`TypeOf`/
+    //   `Conditional`/`Mapped`/`Infer`/`Rest`/`TemplateLiteral`),
+    // - generic instantiations (`Ref` with non-empty `type_arguments`)
+    //   such as `Pick<Foo,'a'>` / `Omit<Foo,'a'>` / `Partial<Foo>` /
+    //   `Required<Foo>` / userland generic type aliases.
+    //
+    // Recursive parameterised helpers (`type GetItemKeys<T> = ...
+    // GetItemKeys<...> ...`) carry non-empty `type_arguments` but
+    // resolve through a self-referential cycle. The shared
+    // transitive-cycle guard short-circuits reduction so the helper
+    // stays as a bare carrier — the reduction would otherwise produce
+    // a deep partially-resolved expression with `semanticMiss` shells
+    // because the cycle is broken mid-traversal.
+    let is_generic_instantiation =
+        matches!(&expr, TypeExpr::Ref { type_arguments, .. } if !type_arguments.is_empty());
+    if is_generic_instantiation
+        && crate::meta_resolve::lowered_root_reaches_transitive_cycle(
+            query_engine,
+            scope_canonical_id,
+            &expr,
+        )
+    {
+        return expr;
+    }
+    let needs_reduction = type_expr_contains_reducible_operator(&expr) || is_generic_instantiation;
 
     if !needs_reduction {
         return expr;
@@ -602,36 +607,17 @@ pub(crate) fn reduce_field_type_expr(
     // The dispatch's lower → raise_and_reduce pipeline carries
     // imported declarations through their prepared bodies via the
     // shared resolver caches, so the consumer scope is sufficient
-    // for cross-file alias resolution.
-    let stable = super::materialize::materialize_component_meta_type_expr_until_stable(
+    // for cross-file alias resolution within the explicitly-walked
+    // path. Cross-scope re-resolution must come from the consumer's
+    // own walk, not from a projector retry that would cross the
+    // shallow boundary on alias bodies the consumer never asked
+    // about.
+    super::materialize::materialize_component_meta_type_expr_until_stable(
         &expr,
         scope_canonical_id,
         ProjectionMode::Expanded,
         query_engine,
-    );
-
-    // Cross-scope retry: if the consumer-scope reduction didn't
-    // produce an improvement, try the imported declaration's scope
-    // via `select_imported_materialization_scope`. This covers routes
-    // whose root lives in another file (e.g. imported alias bodies
-    // that reference symbols defined alongside the alias).
-    if !crate::meta_resolve::compare_type_expr_improvement(&stable, &expr) {
-        if let Some(imported_scope) =
-            select_imported_materialization_scope(&expr, scope_canonical_id, query_engine)
-        {
-            let cross_scope = super::materialize::materialize_component_meta_type_expr_until_stable(
-                &expr,
-                imported_scope.as_str(),
-                ProjectionMode::Expanded,
-                query_engine,
-            );
-            if crate::meta_resolve::compare_type_expr_improvement(&cross_scope, &expr) {
-                return cross_scope;
-            }
-        }
-    }
-
-    stable
+    )
 }
 
 /// Run the shared field-type reducer over every published surface in

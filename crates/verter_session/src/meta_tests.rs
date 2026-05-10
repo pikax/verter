@@ -18698,6 +18698,10 @@ fn singleflight_lanes_are_session_scoped() {
 /// as the bare `Ref { name: "ImportedUser" }`. Consumers re-resolve
 /// `ImportedUser` through the registry on demand. The projector
 /// path does not eagerly inline the imported declaration's body.
+///
+/// Pairs with [`published_same_file_alias_stays_shallow`] — the
+/// shallow-by-default rule is unconditional, so the same-file case
+/// behaves identically.
 #[test]
 fn published_bare_alias_ref_stays_shallow() {
     let project = make_project();
@@ -18754,31 +18758,26 @@ defineProps<{
     }
 }
 
-/// Pinned behaviour: same-file aliases reduce eagerly through the
-/// projector, in contrast to cross-file aliases which stay shallow.
+/// Architectural rule: same-file alias names ALSO stay shallow.
 ///
 /// `defineProps<{ user: Foo }>` where `Foo` is a same-file
-/// `type Foo = string` publishes `user`'s type as
-/// `Primitive(String)` — the projector resolves the alias body
-/// locally because the declaration is in the same file.
+/// `type Foo = string` MUST publish `user`'s type as the bare
+/// `TypeExpr::Ref { name: "Foo" }`. The shallow-by-default rule is
+/// unconditional — there is no same-file vs cross-file split. The
+/// projector publishes the alias name as a carrier and consumers
+/// re-resolve `Foo` through the registry on demand.
 ///
-/// This complements [`published_bare_alias_ref_stays_shallow`]
-/// (the cross-file case): the shallow-by-default rule is owned by
-/// the cross-file resolver gate (alias bodies cross a file
-/// boundary, so the projector preserves the carrier `Ref` rather
-/// than chasing into the imported declaration). The same-file
-/// case has no boundary to cross — the alias body is part of the
-/// owner's shallow inventory and the projector reduces it.
+/// Pairs with [`published_bare_alias_ref_stays_shallow`] (the
+/// cross-file case): together they document that bare alias names
+/// stay shallow regardless of where the declaration lives.
 ///
-/// Discriminating: a regression that makes same-file aliases ALSO
-/// stay shallow (e.g., a too-broad change to the projector's
-/// reduction policy) lands as `TypeExpr::Ref { name: "Foo" }`
-/// here and fails this test. A regression that breaks the
-/// cross-file shallow rule lands in
-/// `published_bare_alias_ref_stays_shallow`. The pair documents
-/// the load-bearing same-file vs cross-file split.
+/// Discriminating: a regression that re-introduces eager bare-`Ref`
+/// reduction in the projector (e.g. a `expr_needs_projection_rescue`
+/// gate that inspects the declaration body and inlines aliases whose
+/// body is a primitive / utility wrapper / non-object surface) lands
+/// as `TypeExpr::Primitive(String)` here and fails this test.
 #[test]
-fn published_same_file_alias_reduces_through_projector() {
+fn published_same_file_alias_stays_shallow() {
     let project = make_project();
     project
         .upsert_base(
@@ -18799,38 +18798,54 @@ defineProps<{
 
     let user_ty = evaluated_prop_type(&evaluated, "user");
     match user_ty {
-        TypeExpr::Primitive(PrimitiveName::String) => {}
-        TypeExpr::Ref { name, .. } if name.as_ref() == "Foo" => panic!(
-            "FAIL (pinned behaviour): same-file alias `type Foo = string` \
-             stayed shallow at the published surface — the same-file \
-             projector path must reduce to the underlying primitive (the \
-             shallow-by-default rule is the cross-file boundary case, not \
-             a global projector contract). Got {user_ty:?}"
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => {
+            assert_eq!(
+                name.as_ref(),
+                "Foo",
+                "same-file alias `Foo` must publish as a `Ref` carrier"
+            );
+            assert!(
+                type_arguments.is_empty(),
+                "same-file alias must publish without type arguments"
+            );
+        }
+        TypeExpr::Primitive(PrimitiveName::String) => panic!(
+            "FAIL (architectural rule): same-file alias `type Foo = string` \
+             was eagerly inlined to `Primitive(String)` at the published \
+             surface. The shallow-by-default rule is unconditional — bare \
+             alias references publish as `Ref {{ name: \"Foo\" }}` regardless \
+             of whether the declaration lives in the same file or across a \
+             file boundary. The projector pipeline must not eagerly inline \
+             alias bodies. See CLAUDE.md \"Component-Meta Shallow-By-Default \
+             Rule\". Got {user_ty:?}"
         ),
         other => panic!(
-            "FAIL: same-file alias `type Foo = string` must reduce to \
-             Primitive(String); got {other:?}"
+            "FAIL: same-file alias `type Foo = string` must publish as \
+             `Ref {{ name: \"Foo\" }}`; got {other:?}"
         ),
     }
 }
 
 /// Counter-positive: the projector reduces a Pick<Foo, 'a'>
-/// indexed-access chain when `Foo` is a same-file alias.
+/// indexed-access chain — operator-shape inputs DO reduce, even
+/// though bare alias references stay shallow.
 ///
 /// `defineProps<{ k: Pick<Foo, 'a'>['a'] }>` where
 /// `type Foo = { a: string; b: number }` lives in the same file
 /// MUST publish `k` as the literal `Primitive(String)` — the
-/// terminal hop's resolved value. The shallow-by-default rule
-/// applies to bare imported aliases (the cross-file boundary
-/// case); it does NOT prevent the projector from self-reducing a
-/// structural chain over a same-file alias.
+/// terminal hop's resolved value. The consumer explicitly walked
+/// the path (`Pick<...>['a']` carries an `IndexedAccess` operator
+/// node), so the projector reduces it.
 ///
-/// Pairs with [`published_same_file_alias_reduces_through_projector`]:
-/// the bare same-file reference reduces to its primitive, AND a
-/// Pick/IndexedAccess chain over the same alias also reduces.
-/// Together the two pin the projector behaviour on same-file alias
-/// inputs and discriminate against a regression that would short-
-/// circuit one path but not the other.
+/// Pairs with [`published_same_file_alias_stays_shallow`]: the
+/// bare same-file reference stays as `Ref { "Foo" }` (alias names
+/// are shallow), but a Pick/IndexedAccess chain that explicitly
+/// walks `Foo`'s `'a'` key materialises that key. Together the two
+/// pin the projector's contract: alias references stay shallow, but
+/// explicit walks (operator-shape inputs) self-reduce path-precisely.
 #[test]
 fn projector_reduces_same_file_alias_via_pick_indexed_access() {
     let project = make_project();

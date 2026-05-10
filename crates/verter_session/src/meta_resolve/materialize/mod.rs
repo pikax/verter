@@ -25,10 +25,15 @@ pub(crate) use field_types::{
     type_expr_has_package_backed_object_like_root,
 };
 
-pub(crate) use macro_shapes::expr_needs_projection_rescue;
 pub(crate) use macro_shapes::{
     collect_type_expr_ref_names, produce_macro_object_shapes_for_purpose,
 };
+// Test-only re-export — exercised by `meta_resolve_tests.rs` via the
+// `meta_resolve.rs` shell's `#[cfg(test)] pub(crate) use materialize::expr_needs_projection_rescue;`
+// glob hop. Production call sites inside `macro_shapes.rs` reach the
+// function directly without the materialize-level re-export.
+#[cfg(test)]
+pub(crate) use macro_shapes::expr_needs_projection_rescue;
 // Test-only re-exports consumed by `meta_resolve_tests.rs` via the
 // `meta_resolve.rs` shell's `#[cfg(test)] pub(crate) use materialize::{…}` block.
 #[cfg(test)]

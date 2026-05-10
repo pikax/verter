@@ -105,10 +105,15 @@ pub(crate) use macro_member_walk::{
     PICK_MEMBER_ROUTE_CALLABLE_DESCENT_COUNTER, SLOT_BINDING_REGISTRY_COLLECTION_SKIP_COUNTER,
 };
 pub(crate) use materialize::{
-    collect_type_expr_ref_names, expr_needs_projection_rescue,
-    lowered_preserve_package_backed_symbolic_refs,
+    collect_type_expr_ref_names, lowered_preserve_package_backed_symbolic_refs,
     materialize_component_meta_type_expr_until_stable, produce_macro_object_shapes_for_purpose,
 };
+// Test-only re-export — `meta_resolve_tests.rs` exercises this helper
+// via `super::*` glob to characterise the BFS cycle-guard's effect on
+// the macro-shape produce stage. Production callers consume the helper
+// directly from `meta_resolve::materialize::macro_shapes`.
+#[cfg(test)]
+pub(crate) use materialize::expr_needs_projection_rescue;
 // Test-only re-exports — exercised by `meta_resolve_tests.rs` via
 // `super::*` glob import from the `meta_resolve_tests` child mod
 // (`#[path = "meta_resolve_tests.rs"] mod meta_resolve_tests;` at the
@@ -147,7 +152,8 @@ pub use crate::host_manage::component_meta_request_impl::{
 };
 pub(crate) use resolved_state::{
     component_meta_owner_local_shallow_substituted_alias_body,
-    select_imported_materialization_scope, RegistryMaterialization,
+    lowered_root_reaches_transitive_cycle, select_imported_materialization_scope,
+    RegistryMaterialization,
 };
 pub use resolved_state::{ResolvedComponentMetaState, SurfaceNodeIdentities};
 pub(crate) use scoring::compare_type_expr_improvement;

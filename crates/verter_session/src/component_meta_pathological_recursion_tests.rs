@@ -340,11 +340,20 @@ fn pathological_exclude_self_recursive() {
 // Expected: terminate with the correct extracted union
 // `'a' | 'b'`. Discriminating: stack overflow OR a wrongly-cached
 // `Value(_)` for the wrong shape would mark a regression.
+// `kind: Extract<typeof y, R>` is written inline rather than behind
+// a `type X = Extract<...>` alias because the component-meta shallow-
+// by-default rule (CLAUDE.md) publishes a plain alias reference like
+// `X` as the bare `Ref { name: "X" }` carrier — consumers re-resolve
+// `X` through the registry on demand. The pathological-recursion
+// concern this test pins is the Extract/typeof evaluation's
+// termination, which is exercised when the consumer explicitly walks
+// the operator chain (here: `Extract<...>` is a generic instantiation,
+// so the projector reduces it path-precisely to the literal union
+// "a" | "b").
 const PATHOLOGICAL_EXTRACT_THROUGH_TYPEOF_VUE: &str = r#"<script setup lang="ts">
 const y: 'a' | 'b' | 'c' = 'a';
 type R = 'a' | 'b';
-type X = Extract<typeof y, R>;
-defineProps<{ kind: X }>();
+defineProps<{ kind: Extract<typeof y, R> }>();
 </script>
 <template><div /></template>
 "#;
