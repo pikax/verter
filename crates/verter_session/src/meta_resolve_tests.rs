@@ -78,7 +78,17 @@ fn clear_legacy_cached_resolved_state(
 }
 
 #[test]
-fn imported_registry_seed_refresh_skips_explicit_object_surfaces() {
+fn imported_registry_seed_refresh_does_not_engage_skip_under_graph_only_authority() {
+    // Under the typed-IR-only resolver contract,
+    // `imported_declaration_surface_is_authoritative` returns false at
+    // the cold-classification site (no typed body in scope), so the
+    // skip-refresh fast path never engages from the imported direct
+    // macro seed. The pre-cutover branch that read declaration text
+    // and detected "no heritage markers" to authorise skipping has been
+    // retired with the typed-IR migration. The integration test
+    // `append_component_meta_registry_entries_seeds_explicit_object_surface_for_imported_props`
+    // covers the surviving invariant: the imported seed still carries
+    // an explicit object surface in the initial registry.
     let declaration = crate::resolver_core::ResolvedTypeDeclaration {
         requested_name: "Props".to_string(),
         declaration_id: None,
@@ -100,8 +110,11 @@ fn imported_registry_seed_refresh_skips_explicit_object_surfaces() {
     }));
 
     assert!(
-        should_skip_imported_registry_seed_refresh("/src/App.vue", &declaration, &object),
-        "imported direct-macro seeds that already hold an explicit object surface should stay on that seeded surface instead of re-entering imported registry materialization",
+        !should_skip_imported_registry_seed_refresh("/src/App.vue", &declaration, &object),
+        "graph-only contract: skip-refresh fast path does not engage; \
+         the structural refresh pipeline owns the imported direct-macro \
+         seed regardless of whether the existing surface is an explicit \
+         object",
     );
 }
 

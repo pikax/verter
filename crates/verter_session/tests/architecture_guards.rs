@@ -8327,26 +8327,6 @@ mod typed_ir_resolver_guards {
             r#".contains("\\node_modules\\")"#,
         ),
         (
-            "crates/verter_session/src/resolver_core/component_meta/cold_resolver.rs",
-            282,
-            r#".contains("/node_modules/")"#,
-        ),
-        (
-            "crates/verter_session/src/resolver_core/component_meta/cold_resolver.rs",
-            283,
-            r#".contains("/node_modules/")"#,
-        ),
-        (
-            "crates/verter_session/src/resolver_core/component_meta/cold_resolver.rs",
-            354,
-            r#".contains("/node_modules/")"#,
-        ),
-        (
-            "crates/verter_session/src/resolver_core/component_meta/cold_resolver.rs",
-            355,
-            r#".contains("/node_modules/")"#,
-        ),
-        (
             "crates/verter_session/src/resolver_core/component_meta_query_engine/helpers.rs",
             67,
             r#".contains("/node_modules/")"#,
@@ -8509,31 +8489,6 @@ mod typed_ir_resolver_guards {
             "parse_type_annotation",
         ),
         (
-            "crates/verter_session/src/resolver_core/component_meta/direct_macro.rs",
-            298,
-            "parse_type_annotation",
-        ),
-        (
-            "crates/verter_session/src/resolver_core/component_meta/direct_macro.rs",
-            317,
-            "parse_type_annotation",
-        ),
-        (
-            "crates/verter_session/src/resolver_core/component_meta/projected_type_expr.rs",
-            26,
-            "parse_type_annotation",
-        ),
-        (
-            "crates/verter_session/src/resolver_core/component_meta/projected_type_expr.rs",
-            42,
-            "parse_type_annotation",
-        ),
-        (
-            "crates/verter_session/src/resolver_core/component_meta/projected_type_expr.rs",
-            76,
-            "parse_type_annotation",
-        ),
-        (
             "crates/verter_session/src/resolver_core/component_meta_registry.rs",
             1689,
             "parse_type_annotation",
@@ -8614,21 +8569,6 @@ mod typed_ir_resolver_guards {
         (
             "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
             1222,
-            "format!(...).parse_type_annotation",
-        ),
-        (
-            "crates/verter_session/src/resolver_core/component_meta/projected_type_expr.rs",
-            57,
-            "format!(...).parse_type_annotation",
-        ),
-        (
-            "crates/verter_session/src/resolver_core/component_meta/projected_type_expr.rs",
-            63,
-            "format!(...).parse_type_annotation",
-        ),
-        (
-            "crates/verter_session/src/resolver_core/component_meta/projected_type_expr.rs",
-            71,
             "format!(...).parse_type_annotation",
         ),
     ];

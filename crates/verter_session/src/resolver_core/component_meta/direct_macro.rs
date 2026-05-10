@@ -5,7 +5,6 @@ use verter_semantic::analysis::types::{
 };
 use verter_type_expr::TypeExpr;
 
-use crate::resolver_core::component_meta_registry::component_meta_registry_has_non_object_top_level_surface;
 use crate::resolver_core::ResolvedTypeDeclaration;
 
 use super::ComponentMetaResolutionPurpose;
@@ -283,50 +282,40 @@ pub(super) fn macro_dep_exported_type_name<'a>(
     Cow::Borrowed(dep.type_name.as_str())
 }
 
+/// Whether an imported macro-type root should be seeded directly into the
+/// initial registry on the cold-resolver path.
+///
+/// Under the graph-only / typed-IR resolver contract, declaration text is
+/// not consumed for structural classification — the typed body lives on the
+/// prepared decl and is read by downstream stages on demand. Non-TypeAlias
+/// kinds (Interface / Class / Unknown) seed the registry directly so the
+/// initial publication carries the graph-typed surface; TypeAlias kinds
+/// also seed under the same contract because the only pre-cutover branch
+/// that suppressed seeding (a non-Object alias body) was a text-driven
+/// inspection that has been retired.
 pub(super) fn should_seed_direct_macro_registry_entry(
     declaration: &ResolvedTypeDeclaration,
 ) -> bool {
-    if declaration.kind != crate::resolver_core::ResolvedDeclarationKind::TypeAlias {
-        return true;
-    }
-    let Some(text) = declaration.text.as_deref() else {
-        return true;
-    };
-    let Some(body_text) = type_alias_body_text(text) else {
-        return true;
-    };
-    let parsed = verter_type_expr_oxc::parse_type_annotation(body_text);
-    !component_meta_registry_has_non_object_top_level_surface(&parsed)
+    let _ = declaration;
+    true
 }
 
+/// Whether an imported declaration's surface (as discovered through the
+/// host's macro-elements path) is structurally authoritative — i.e. the
+/// caller may publish the imported surface as the canonical projection
+/// without re-routing through the structural resolver pipeline.
+///
+/// Under the graph-only / typed-IR resolver contract this answer is always
+/// "no": the cold resolver does not have the typed body in scope at the
+/// classification site, so the conservative answer is to defer to the
+/// structural pipeline. The function is retained as a named pivot so
+/// downstream callers (cold resolver, registry-seed-can-skip-refresh,
+/// macro-shape materialiser) keep a single classification entry-point.
 pub(crate) fn imported_declaration_surface_is_authoritative(
     declaration: &ResolvedTypeDeclaration,
 ) -> bool {
-    use crate::resolver_core::ResolvedDeclarationKind;
-
-    let Some(text) = declaration.text.as_deref() else {
-        return false;
-    };
-
-    match declaration.kind {
-        ResolvedDeclarationKind::TypeAlias => {
-            let Some(body_text) = type_alias_body_text(text) else {
-                return false;
-            };
-            matches!(
-                verter_type_expr_oxc::parse_type_annotation(body_text),
-                TypeExpr::Object(_)
-            )
-        }
-        ResolvedDeclarationKind::Interface => {
-            !declaration_text_has_any_marker(text, &["extends", "typeof", "keyof", "['", "[\""])
-        }
-        ResolvedDeclarationKind::Class => !declaration_text_has_any_marker(
-            text,
-            &["extends", "implements", "typeof", "keyof", "['", "[\""],
-        ),
-        ResolvedDeclarationKind::Unknown => false,
-    }
+    let _ = declaration;
+    false
 }
 
 pub(crate) fn imported_registry_seed_can_skip_refresh(
@@ -338,63 +327,5 @@ pub(crate) fn imported_registry_seed_can_skip_refresh(
         && declaration.canonical_source != owner_canonical
         && imported_declaration_surface_is_authoritative(declaration)
         && crate::resolver_core::component_meta_registry::component_meta_registry_has_explicit_object_surface(existing_expr)
-        && !component_meta_registry_has_non_object_top_level_surface(existing_expr)
-}
-
-fn declaration_text_has_any_marker(text: &str, markers: &[&str]) -> bool {
-    let compact: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
-    markers.iter().any(|marker| compact.contains(marker))
-}
-
-fn type_alias_body_text(text: &str) -> Option<&str> {
-    let mut angle_depth = 0usize;
-    let mut paren_depth = 0usize;
-    let mut bracket_depth = 0usize;
-    let mut brace_depth = 0usize;
-    let mut in_string: Option<char> = None;
-    let mut escaped = false;
-
-    for (idx, ch) in text.char_indices() {
-        if let Some(quote) = in_string {
-            if escaped {
-                escaped = false;
-                continue;
-            }
-            if ch == '\\' {
-                escaped = true;
-                continue;
-            }
-            if ch == quote {
-                in_string = None;
-            }
-            continue;
-        }
-
-        match ch {
-            '"' | '\'' | '`' => in_string = Some(ch),
-            '<' => angle_depth += 1,
-            '>' => angle_depth = angle_depth.saturating_sub(1),
-            '(' => paren_depth += 1,
-            ')' => paren_depth = paren_depth.saturating_sub(1),
-            '[' => bracket_depth += 1,
-            ']' => bracket_depth = bracket_depth.saturating_sub(1),
-            '{' => brace_depth += 1,
-            '}' => brace_depth = brace_depth.saturating_sub(1),
-            '=' if angle_depth == 0
-                && paren_depth == 0
-                && bracket_depth == 0
-                && brace_depth == 0 =>
-            {
-                return Some(
-                    text[idx + ch.len_utf8()..]
-                        .trim()
-                        .trim_end_matches(';')
-                        .trim(),
-                );
-            }
-            _ => {}
-        }
-    }
-
-    None
+        && !crate::resolver_core::component_meta_registry::component_meta_registry_has_non_object_top_level_surface(existing_expr)
 }

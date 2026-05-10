@@ -279,8 +279,8 @@ where
                     &mut visiting,
                 );
             }
-            let package_backed_dep = dep_canonical.contains("/node_modules/")
-                || declaration.canonical_source.contains("/node_modules/");
+            let package_backed_dep = host.workspace_is_package_backed(dep_canonical.as_str())
+                || host.workspace_is_package_backed(declaration.canonical_source.as_str());
             if is_direct_macro_type_reference(macros, dep, None)
                 && !package_backed_dep
                 && should_seed_direct_macro_registry_entry(&declaration)
@@ -351,8 +351,8 @@ where
                 None,
                 &declaration,
             );
-            let package_backed_dep = dep_canonical.contains("/node_modules/")
-                || declaration.canonical_source.contains("/node_modules/");
+            let package_backed_dep = host.workspace_is_package_backed(dep_canonical.as_str())
+                || host.workspace_is_package_backed(declaration.canonical_source.as_str());
             if is_direct_macro_type_reference(macros, dep, None)
                 && !package_backed_dep
                 && should_seed_direct_macro_registry_entry(&declaration)

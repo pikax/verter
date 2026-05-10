@@ -1,7 +1,9 @@
 use rustc_hash::FxHashSet;
 use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
 use verter_semantic::analysis::types::AnalyzedMacroKind;
-use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
+use verter_type_expr::{
+    FunctionExpr, FunctionParam, ObjectExpr, ObjectMember, ObjectProperty, TypeExpr,
+};
 
 use crate::resolver_core::project_macro_surfaces;
 use crate::resolver_core::surface_projector::ProjectedMacroSurfaces;
@@ -15,80 +17,125 @@ pub fn resolved_elements_to_type_expr_via_type_text(
     )
 }
 
+/// Build a `TypeExpr::Object` (or `TypeExpr::Function`-bearing object) from a
+/// projected macro surface using the typed sidecars populated by the producer
+/// (`surface_projector::project_macro_surfaces` and the W1.1b bridge).
+///
+/// The fast path consumes `ProjectedMacroSurfaces.{props,emits,slots}_expr`
+/// when the producer was able to synthesise the aggregate (every per-field
+/// `*_expr` populated AND the owner canonical was supplied). When the
+/// aggregate is unavailable the function falls back to walking the per-field
+/// typed sidecars (`type_expr` / `payload_expr` / `return_expr` /
+/// `binding_expr`) and constructs `TypeExpr` nodes directly. No raw-text
+/// reparse path remains.
 pub fn projected_macro_surfaces_to_type_expr(
     macro_kind: AnalyzedMacroKind,
     projected: &ProjectedMacroSurfaces,
 ) -> verter_type_expr::TypeExpr {
-    let prop_properties = projected.props.iter().map(|prop| {
-        let ty = prop
-            .type_annotation
-            .as_deref()
-            .map(verter_type_expr_oxc::parse_type_annotation)
-            .unwrap_or(TypeExpr::Unknown {
-                raw: "unknown".to_string(),
-            });
-        ObjectMember::Property(ObjectProperty {
-            name: prop.name.clone(),
-            ty,
-            optional: prop.is_optional,
-            readonly: false,
-        })
-    });
-
-    let emit_properties = projected.emits.iter().map(|emit| {
-        let ty = emit
-            .payload_type
-            .as_deref()
-            .map(verter_type_expr_oxc::parse_type_annotation)
-            .unwrap_or(TypeExpr::Unknown {
-                raw: "unknown".to_string(),
-            });
-        ObjectMember::Property(ObjectProperty {
-            name: emit.name.clone(),
-            ty,
-            optional: false,
-            readonly: false,
-        })
-    });
-
-    let slot_properties = projected.slots.iter().map(|slot| {
-        let return_type = slot.return_type.as_deref().unwrap_or("any");
-        let signature = if slot.bindings.is_empty() {
-            format!("() => {return_type}")
-        } else {
-            let bindings = slot
-                .bindings
-                .iter()
-                .map(|binding| {
-                    format!(
-                        "{}: {}",
-                        binding.name,
-                        binding.type_annotation.as_deref().unwrap_or("unknown")
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("(props: {{ {bindings} }}) => {return_type}")
-        };
-
-        ObjectMember::Property(ObjectProperty {
-            name: slot.name.clone(),
-            ty: verter_type_expr_oxc::parse_type_annotation(&signature),
-            optional: !slot.is_required,
-            readonly: false,
-        })
-    });
-
-    let properties = match macro_kind {
+    match macro_kind {
         AnalyzedMacroKind::DefineProps
         | AnalyzedMacroKind::WithDefaults
-        | AnalyzedMacroKind::DefineModel => prop_properties.collect(),
-        AnalyzedMacroKind::DefineEmits => emit_properties.collect(),
-        AnalyzedMacroKind::DefineSlots => slot_properties.collect(),
-        AnalyzedMacroKind::DefineExpose | AnalyzedMacroKind::DefineOptions => Vec::new(),
-    };
-
-    TypeExpr::Object(std::sync::Arc::new(ObjectExpr { properties }))
+        | AnalyzedMacroKind::DefineModel => {
+            if let Some(aggregate) = projected.props_expr.clone() {
+                return aggregate;
+            }
+            let properties = projected
+                .props
+                .iter()
+                .map(|prop| {
+                    let ty = prop.type_expr.clone().unwrap_or(TypeExpr::Unknown {
+                        raw: "unknown".to_string(),
+                    });
+                    ObjectMember::Property(ObjectProperty {
+                        name: prop.name.clone(),
+                        ty,
+                        optional: prop.is_optional,
+                        readonly: false,
+                    })
+                })
+                .collect::<Vec<_>>();
+            TypeExpr::Object(std::sync::Arc::new(ObjectExpr { properties }))
+        }
+        AnalyzedMacroKind::DefineEmits => {
+            if let Some(aggregate) = projected.emits_expr.clone() {
+                return aggregate;
+            }
+            let properties = projected
+                .emits
+                .iter()
+                .map(|emit| {
+                    let ty = emit.payload_expr.clone().unwrap_or(TypeExpr::Unknown {
+                        raw: "unknown".to_string(),
+                    });
+                    ObjectMember::Property(ObjectProperty {
+                        name: emit.name.clone(),
+                        ty,
+                        optional: false,
+                        readonly: false,
+                    })
+                })
+                .collect::<Vec<_>>();
+            TypeExpr::Object(std::sync::Arc::new(ObjectExpr { properties }))
+        }
+        AnalyzedMacroKind::DefineSlots => {
+            if let Some(aggregate) = projected.slots_expr.clone() {
+                return aggregate;
+            }
+            let properties = projected
+                .slots
+                .iter()
+                .map(|slot| {
+                    let return_ty = slot.return_expr.clone().unwrap_or(TypeExpr::Unknown {
+                        raw: "any".to_string(),
+                    });
+                    let binding_props = slot
+                        .bindings
+                        .iter()
+                        .map(|binding| {
+                            let ty = binding.binding_expr.clone().unwrap_or(TypeExpr::Unknown {
+                                raw: "unknown".to_string(),
+                            });
+                            ObjectMember::Property(ObjectProperty {
+                                name: binding.name.clone(),
+                                ty,
+                                optional: false,
+                                readonly: false,
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    let parameters = if binding_props.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![FunctionParam {
+                            name: Some("props".to_string()),
+                            ty: TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
+                                properties: binding_props,
+                            })),
+                            optional: false,
+                            rest: false,
+                        }]
+                    };
+                    let function = TypeExpr::Function(std::sync::Arc::new(FunctionExpr {
+                        parameters,
+                        return_type: Some(std::sync::Arc::new(return_ty)),
+                        type_parameters: Vec::new(),
+                    }));
+                    ObjectMember::Property(ObjectProperty {
+                        name: slot.name.clone(),
+                        ty: function,
+                        optional: !slot.is_required,
+                        readonly: false,
+                    })
+                })
+                .collect::<Vec<_>>();
+            TypeExpr::Object(std::sync::Arc::new(ObjectExpr { properties }))
+        }
+        AnalyzedMacroKind::DefineExpose | AnalyzedMacroKind::DefineOptions => {
+            TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
+                properties: Vec::new(),
+            }))
+        }
+    }
 }
 
 pub(crate) fn project_macro_surfaces_from_expanded_shape(
@@ -409,4 +456,244 @@ fn render_function_type_for_projected_surface(
         .and_then(render_type_expr_for_projected_surface)
         .unwrap_or_else(|| "void".to_string());
     Some(format!("({params}) => {return_type}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use verter_semantic::analysis::types::{AnalyzedSlotField, AnalyzedSlotFieldBinding};
+    use verter_type_expr::{LiteralValue, ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName};
+
+    /// Discriminating regression test for the W2.2 cutover: the slot
+    /// branch of `projected_macro_surfaces_to_type_expr` constructs
+    /// `TypeExpr::Function` directly from the typed sidecars
+    /// (`AnalyzedSlotField.return_expr`, `AnalyzedSlotFieldBinding.binding_expr`),
+    /// not from a `format!("(props: {{ {bindings} }}) => {return_type}")`
+    /// reparse round-trip.
+    ///
+    /// The fixture forces a deliberate mismatch between the typed
+    /// `binding_expr` (Primitive(Number)) and the display
+    /// `type_annotation` ("BindingAlias"), and between the typed
+    /// `return_expr` (Primitive(Boolean)) and the display
+    /// `return_type` ("ReturnAlias"). Pre-W2.2 the function reparsed the
+    /// synthesised text and yielded `Ref { name: "BindingAlias" }` /
+    /// `Ref { name: "ReturnAlias" }`. Post-W2.2 it reads the typed
+    /// sidecars and yields `Primitive(Number)` / `Primitive(Boolean)`.
+    ///
+    /// The aggregate `slots_expr` is left `None` so the per-field
+    /// fallback path runs (i.e. the path the cutover deletes its
+    /// `parse_type_annotation` calls from). This is the discriminator.
+    #[test]
+    fn projected_slot_function_reads_typed_sidecars_not_synthesised_text() {
+        let projected = ProjectedMacroSurfaces {
+            native_props: Vec::new(),
+            props: Vec::new(),
+            emits: Vec::new(),
+            slots: vec![AnalyzedSlotField {
+                name: "default".to_string(),
+                is_required: true,
+                span: verter_span::Span::default(),
+                bindings: vec![AnalyzedSlotFieldBinding {
+                    name: "label".to_string(),
+                    type_annotation: Some("BindingAlias".to_string()),
+                    span: verter_span::Span::default(),
+                    binding_expr: Some(TypeExpr::Primitive(PrimitiveName::Number)),
+                    binding_expr_scope: None,
+                }],
+                return_type: Some("ReturnAlias".to_string()),
+                return_expr: Some(TypeExpr::Primitive(PrimitiveName::Boolean)),
+                return_expr_scope: None,
+                description: None,
+                tags: Vec::new(),
+            }],
+            // Aggregate left None to force the per-field typed walk —
+            // the path the W2.2 cutover replaces.
+            slots_expr: None,
+            slots_expr_scope: None,
+            ..Default::default()
+        };
+
+        let result = projected_macro_surfaces_to_type_expr(
+            verter_semantic::analysis::types::AnalyzedMacroKind::DefineSlots,
+            &projected,
+        );
+
+        let TypeExpr::Object(object) = &result else {
+            panic!("expected Object root, got {result:?}");
+        };
+        assert_eq!(object.properties.len(), 1);
+        let ObjectMember::Property(prop) = &object.properties[0] else {
+            panic!("expected Property member");
+        };
+        assert_eq!(prop.name, "default");
+
+        let TypeExpr::Function(function) = &prop.ty else {
+            panic!("expected Function ty for slot, got {:?}", prop.ty);
+        };
+        assert_eq!(function.parameters.len(), 1);
+        let param = &function.parameters[0];
+        assert_eq!(param.name.as_deref(), Some("props"));
+
+        let TypeExpr::Object(props_object) = &param.ty else {
+            panic!("expected Object props parameter, got {:?}", param.ty);
+        };
+        assert_eq!(props_object.properties.len(), 1);
+        let ObjectMember::Property(binding_prop) = &props_object.properties[0] else {
+            panic!("expected Property binding");
+        };
+        assert_eq!(binding_prop.name, "label");
+        // POST-W2.2 discriminator: the binding ty is the typed sidecar
+        // (Primitive(Number)), NOT the result of parsing
+        // type_annotation ("BindingAlias" → Ref { name: "BindingAlias" }).
+        assert!(
+            matches!(&binding_prop.ty, TypeExpr::Primitive(PrimitiveName::Number)),
+            "post-W2.2 binding ty must be the typed sidecar Primitive(Number); got {:?}",
+            binding_prop.ty
+        );
+        // Negative assertion: the previous reparse-from-string would have
+        // produced Ref { name: "BindingAlias" }.
+        assert!(
+            !matches!(
+                &binding_prop.ty,
+                TypeExpr::Ref { name, .. } if name.as_ref() == "BindingAlias"
+            ),
+            "pre-W2.2 reparse result must not appear: binding ty {:?}",
+            binding_prop.ty
+        );
+
+        // POST-W2.2 discriminator: the function return type is the
+        // typed return_expr (Primitive(Boolean)), NOT the parsed
+        // "ReturnAlias" identifier.
+        let return_ty = function
+            .return_type
+            .as_deref()
+            .expect("post-W2.2 function should carry the typed return_expr");
+        assert!(
+            matches!(return_ty, TypeExpr::Primitive(PrimitiveName::Boolean)),
+            "post-W2.2 return ty must be the typed sidecar Primitive(Boolean); got {return_ty:?}"
+        );
+        assert!(
+            !matches!(
+                return_ty,
+                TypeExpr::Ref { name, .. } if name.as_ref() == "ReturnAlias"
+            ),
+            "pre-W2.2 reparse result must not appear: return ty {return_ty:?}"
+        );
+    }
+
+    /// Companion test pinning the props branch of the same cutover:
+    /// when the aggregate `props_expr` is None, the per-field walk
+    /// reads `AnalyzedPropField.type_expr` directly. Pre-W2.2 reparsed
+    /// `type_annotation` ("PropAlias") and produced
+    /// `Ref { name: "PropAlias" }`; post-W2.2 reads the typed sidecar
+    /// (`Literal(String("done"))`).
+    #[test]
+    fn projected_props_read_typed_sidecars_not_type_annotation_text() {
+        use verter_semantic::analysis::types::AnalyzedPropField;
+        use verter_semantic::analysis::TypeResolutionSource;
+
+        let projected = ProjectedMacroSurfaces {
+            native_props: Vec::new(),
+            props: vec![AnalyzedPropField {
+                name: "kind".to_string(),
+                is_optional: false,
+                span: verter_span::Span::default(),
+                type_annotation: Some("PropAlias".to_string()),
+                description: None,
+                tags: Vec::new(),
+                resolution_source: TypeResolutionSource::Rust,
+                resolution_error: None,
+                type_expr: Some(TypeExpr::Literal(LiteralValue::String("done".to_string()))),
+                type_expr_scope: None,
+            }],
+            emits: Vec::new(),
+            slots: Vec::new(),
+            props_expr: None,
+            props_expr_scope: None,
+            ..Default::default()
+        };
+
+        let result = projected_macro_surfaces_to_type_expr(
+            verter_semantic::analysis::types::AnalyzedMacroKind::DefineProps,
+            &projected,
+        );
+
+        let TypeExpr::Object(object) = &result else {
+            panic!("expected Object root, got {result:?}");
+        };
+        assert_eq!(object.properties.len(), 1);
+        let ObjectMember::Property(prop) = &object.properties[0] else {
+            panic!("expected Property member");
+        };
+        assert_eq!(prop.name, "kind");
+        assert!(
+            matches!(
+                &prop.ty,
+                TypeExpr::Literal(LiteralValue::String(value)) if value == "done"
+            ),
+            "post-W2.2 prop ty must be the typed sidecar literal 'done'; got {:?}",
+            prop.ty
+        );
+        assert!(
+            !matches!(
+                &prop.ty,
+                TypeExpr::Ref { name, .. } if name.as_ref() == "PropAlias"
+            ),
+            "pre-W2.2 reparse-from-type_annotation must not appear: prop ty {:?}",
+            prop.ty
+        );
+    }
+
+    /// Aggregate `props_expr`-fast-path test: when the producer has
+    /// supplied an aggregate, the function clones it verbatim rather
+    /// than rebuilding from per-field walk. Discriminator: the
+    /// per-field `type_expr` is deliberately Unknown but the aggregate
+    /// is the authoritative shape.
+    #[test]
+    fn projected_props_aggregate_fast_path_clones_aggregate_verbatim() {
+        use verter_semantic::analysis::types::AnalyzedPropField;
+        use verter_semantic::analysis::TypeResolutionSource;
+
+        let aggregate = TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![ObjectMember::Property(ObjectProperty {
+                name: "kind".to_string(),
+                ty: TypeExpr::Literal(LiteralValue::String("authoritative".to_string())),
+                optional: false,
+                readonly: false,
+            })],
+        }));
+
+        let projected = ProjectedMacroSurfaces {
+            native_props: Vec::new(),
+            props: vec![AnalyzedPropField {
+                name: "kind".to_string(),
+                is_optional: false,
+                span: verter_span::Span::default(),
+                type_annotation: None,
+                description: None,
+                tags: Vec::new(),
+                resolution_source: TypeResolutionSource::Rust,
+                resolution_error: None,
+                // Per-field typed sidecar deliberately Unknown — the
+                // aggregate is the authoritative shape.
+                type_expr: Some(TypeExpr::Unknown {
+                    raw: "unknown".to_string(),
+                }),
+                type_expr_scope: None,
+            }],
+            emits: Vec::new(),
+            slots: Vec::new(),
+            props_expr: Some(aggregate.clone()),
+            props_expr_scope: None,
+            ..Default::default()
+        };
+
+        let result = projected_macro_surfaces_to_type_expr(
+            verter_semantic::analysis::types::AnalyzedMacroKind::DefineProps,
+            &projected,
+        );
+
+        assert_eq!(result, aggregate);
+    }
 }

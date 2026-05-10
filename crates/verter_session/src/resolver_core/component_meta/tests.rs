@@ -144,6 +144,10 @@ impl ComponentMetaResolverHost for TestHost {
         None
     }
 
+    fn workspace_is_package_backed(&self, canonical_id: &str) -> bool {
+        canonical_id.contains("/node_modules/")
+    }
+
     fn sync_transitive_macro_type_dependencies(
         &self,
         _canonical_id: &str,
@@ -315,6 +319,10 @@ impl ComponentMetaResolverHost for CombinedSurfaceTestHost {
         _visiting: &mut FxHashSet<(String, String)>,
     ) -> Option<ResolvedJsdocBlock> {
         None
+    }
+
+    fn workspace_is_package_backed(&self, canonical_id: &str) -> bool {
+        canonical_id.contains("/node_modules/")
     }
 
     fn sync_transitive_macro_type_dependencies(

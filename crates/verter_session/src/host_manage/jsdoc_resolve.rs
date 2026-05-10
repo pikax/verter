@@ -419,6 +419,10 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
         )
     }
 
+    fn workspace_is_package_backed(&self, canonical_id: &str) -> bool {
+        crate::resolver_core::ResolverContext::workspace_is_package_backed(self.host, canonical_id)
+    }
+
     fn sync_transitive_macro_type_dependencies(
         &self,
         canonical_id: &str,

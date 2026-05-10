@@ -267,6 +267,14 @@ pub trait ComponentMetaResolverHost: DeclarationMetadataResolver {
         visiting: &mut FxHashSet<(String, String)>,
     ) -> Option<ResolvedJsdocBlock>;
 
+    /// Whether `canonical_id` is package-backed per the workspace's
+    /// resolver classification (NOT a path-substring check on
+    /// `node_modules`). Mirrors `ResolverContext::workspace_is_package_backed`
+    /// at the component-meta-host trait layer so cold-resolver consumers
+    /// can use the structural classifier without coupling to the
+    /// `VerterHost`/`ResolverContext` surface.
+    fn workspace_is_package_backed(&self, canonical_id: &str) -> bool;
+
     fn sync_transitive_macro_type_dependencies(
         &self,
         canonical_id: &str,
