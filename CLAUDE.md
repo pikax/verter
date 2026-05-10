@@ -136,7 +136,7 @@ Concrete contract:
 - True recursive types (`type Self = Pick<Self>`) — NOT supported. The published surface stays as the bare `Ref { name: "Self" }`.
 - Imported alias names (workspace-owned OR package-backed) — stay shallow regardless of where they live.
 
-The legacy per-field rescue cascade used to drive eager materialisation; that surface is gone. The projector pipeline is the sole post-projection authority.
+The projector pipeline is the sole post-projection authority — no eager per-field materialisation runs at publication time.
 
 See `/component-meta` skill for the full rule set and the locked-down negative tests in `crates/verter_session/src/meta_tests.rs`.
 

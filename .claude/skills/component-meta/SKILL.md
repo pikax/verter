@@ -172,7 +172,7 @@ Concrete contract:
 
 The projector's reduction step fires only when the input expression carries an operator-shape node (`IndexedAccess`, `KeyOf`, `TypeOf`, `Conditional`, `Mapped`, `Infer`) OR is a bare `Ref` whose declaration body would carry a non-object top-level surface. This is the discriminating boundary between "shallow publication" and "operator collapse"; bare `Ref` to an object alias stays shallow even when the body is fully known.
 
-The retired per-field rescue cascade (the legacy field-type driver, the per-field rescue helper, the ComponentConfig fast path, the indexed-access early-out counter, the per-block instrumentation timers) used to drive eager materialisation across every field; that surface is gone. The projector pipeline is the sole post-projection authority for finalising published field types.
+The projector pipeline is the sole post-projection authority for finalising published field types — no eager per-field materialisation runs at publication time.
 
 **Negative tests** that lock the contract live in `crates/verter_session/src/meta_tests.rs`:
 - `published_bare_alias_ref_stays_shallow`
