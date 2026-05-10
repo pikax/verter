@@ -36,10 +36,11 @@
   },
   "scripts": {
     "build": "tsc --build --force && node scripts/build-string.mjs && node scripts/build-tsx.mjs",
-    "clean": "npx shx rm -rf dist tsconfig.tsbuildinfo",
+    "clean": "rimraf dist tsconfig.tsbuildinfo",
     "test": "vitest --run"
   },
   "devDependencies": {
+    "rimraf": "^6.0.1",
     "typescript": "6.0.0-beta",
     "vitest": "^4.1.0",
     "vue": "^3.5.30"
