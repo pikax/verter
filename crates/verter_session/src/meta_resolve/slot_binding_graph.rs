@@ -354,7 +354,7 @@ fn read_surface_members(
 /// `Union`, `Intersection`, `Tuple`, `Array`, etc. — these are
 /// directly enumerable by the empty-path Shallow walker.
 ///
-/// Depth-fused at 256 to mirror `slot_binding_param_can_stay_symbolic_node`.
+/// Depth-fused at 256 to bound recursion on adversarial inputs.
 fn slot_param_root_is_symbolic_only(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
@@ -381,8 +381,7 @@ fn slot_param_root_is_symbolic_only(
             // Resolve the body via Skeleton-instantiation so unbound
             // type parameters become TypeParam shells (preserving
             // Conditional branches that would otherwise collapse to
-            // `never`). This mirrors the Skeleton-dispatch contract
-            // used by `slot_binding_param_can_stay_symbolic_node`.
+            // `never`).
             use crate::semantic_query::{ProjectionMode, QueryResult, SemanticQueryKey};
             let key = SemanticQueryKey::Instantiate {
                 base: base.clone(),

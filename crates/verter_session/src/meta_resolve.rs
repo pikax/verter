@@ -91,8 +91,7 @@ pub(crate) use graph_predicates::{
 #[cfg(test)]
 pub(crate) use graph_predicates::{
     collect_ref_identities_node, declaration_body_prefers_inline_materialization_node,
-    slot_binding_param_can_stay_symbolic_node, type_node_has_package_backed_root,
-    type_node_needs_member_route_materialization,
+    type_node_has_package_backed_root, type_node_needs_member_route_materialization,
 };
 // `jsdoc_resolve` source moved to
 // `host_manage/jsdoc_resolve.rs` (host-impl tier; the

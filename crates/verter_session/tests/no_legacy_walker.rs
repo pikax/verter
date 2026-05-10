@@ -57,38 +57,34 @@ const RETIRED_SYMBOLS: &[&str] = &[
     // as the private nested `navigate_object_member` helper.
     "raw_member_path_leaf",
     "explicit_object_member",
-    // Commit N (plan §6.15) — 4 TypeExpr predicates retired after
-    // Phase 11 callers migrated to graph-native `_node` counterparts
-    // (J0/J1/J2/J4). The deletion targets (with identifier-boundary
-    // matching, suffixed names like `_node` / `_typeexpr` /
-    // `lowered_*` are NOT false-positives):
-    //   - `type_expr_has_package_backed_root` — replaced by J0
-    //     (`type_node_has_package_backed_root`).
-    //   - `type_expr_needs_member_route_materialization` — replaced
-    //     by J1 (`type_node_needs_member_route_materialization`).
-    //     Surviving callers (`field_should_preserve_shallow_symbolic_raw_type`,
-    //     `walk_component_meta_macro_shape_member_types`) lower their
-    //     TypeExpr inputs to a SemanticNodeId via Navigate and call
-    //     the J1 `_node` variant through the `lowered_*` helper.
-    //   - `slot_binding_param_can_stay_symbolic_typeexpr` (the M
-    //     lowering-failure fallback) — replaced by J2
-    //     (`slot_binding_param_can_stay_symbolic_node`).
-    //   - `preserve_package_backed_symbolic_refs` — replaced by J4
-    //     (`preserve_package_backed_symbolic_refs_node`). Caller in
-    //     `materialize_component_meta_registry_candidate` lowers
-    //     materialized + raw TypeExprs to nodes, dispatches to J4,
-    //     then raises the result back to TypeExpr.
-    // The bare `slot_binding_param_can_stay_symbolic` identifier is
-    // also retired: the post-M wrapper that retained that name is
-    // renamed to `lowered_slot_binding_param_can_stay_symbolic`,
-    // matching the lowered_* helper-naming convention introduced in
-    // commit N. Plan §6.15 / N's deletion target list cites the bare
-    // identifier; identifier-boundary matching keeps the surviving
-    // `_node` variant + the renamed wrapper from triggering the gate.
+    // Retired TypeExpr predicates whose graph-native `_node`
+    // counterparts are the sole authority. The cycle/package/route
+    // checks consume `SemanticNodeId` directly — re-introducing the
+    // TypeExpr-walking versions would resurrect the dual-path
+    // (TypeExpr-walk + node-walk) materialiser this cutover deletes.
+    // Identifier-boundary matching keeps suffixed names like `_node`
+    // and the renamed `lowered_*` migration helpers from tripping the
+    // gate.
     "type_expr_has_package_backed_root",
     "type_expr_needs_member_route_materialization",
     "slot_binding_param_can_stay_symbolic_typeexpr",
     "preserve_package_backed_symbolic_refs",
+    // Retired graph-native slot-binding stay-symbolic predicate +
+    // its private helper + the body-shape probe it depended on. The
+    // production stay-symbolic decision is owned by
+    // `slot_binding_graph::slot_param_root_is_symbolic_only`, which
+    // applies a strictly simpler shape allow-list (the synthesizer
+    // handles Object/Union/Intersection/Array/Tuple by direct
+    // empty-path Shallow walk and never asks "can the param stay
+    // symbolic" for those). The retired triplet was added as an
+    // additive variant intended for a materialiser wiring that never
+    // landed — its Object recursion + non-object-top-level-surface
+    // probe encode contracts the new architecture deliberately
+    // rejects. Re-introducing any of these symbols would resurrect
+    // a dead architectural exploration.
+    "slot_binding_param_can_stay_symbolic_node",
+    "node_value_is_concrete_or_symbolic",
+    "node_has_non_object_top_level_surface",
     // Commit O (plan §6.15) — the temporary
     // `engine.is_package_backed_decl` adapter (introduced in commit D
     // to satisfy the TypeExpr-walking caller migrations) is deleted.
