@@ -18754,6 +18754,124 @@ defineProps<{
     }
 }
 
+/// Pinned behaviour: same-file aliases reduce eagerly through the
+/// projector, in contrast to cross-file aliases which stay shallow.
+///
+/// `defineProps<{ user: Foo }>` where `Foo` is a same-file
+/// `type Foo = string` publishes `user`'s type as
+/// `Primitive(String)` — the projector resolves the alias body
+/// locally because the declaration is in the same file.
+///
+/// This complements [`published_bare_alias_ref_stays_shallow`]
+/// (the cross-file case): the shallow-by-default rule is owned by
+/// the cross-file resolver gate (alias bodies cross a file
+/// boundary, so the projector preserves the carrier `Ref` rather
+/// than chasing into the imported declaration). The same-file
+/// case has no boundary to cross — the alias body is part of the
+/// owner's shallow inventory and the projector reduces it.
+///
+/// Discriminating: a regression that makes same-file aliases ALSO
+/// stay shallow (e.g., a too-broad change to the projector's
+/// reduction policy) lands as `TypeExpr::Ref { name: "Foo" }`
+/// here and fails this test. A regression that breaks the
+/// cross-file shallow rule lands in
+/// `published_bare_alias_ref_stays_shallow`. The pair documents
+/// the load-bearing same-file vs cross-file split.
+#[test]
+fn published_same_file_alias_reduces_through_projector() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/Comp.vue",
+            r#"<script setup lang="ts">
+type Foo = string
+
+defineProps<{
+  user: Foo
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session_batch().unwrap();
+    let evaluated = session.evaluate_types("/Comp.vue").unwrap().unwrap();
+
+    let user_ty = evaluated_prop_type(&evaluated, "user");
+    match user_ty {
+        TypeExpr::Primitive(PrimitiveName::String) => {}
+        TypeExpr::Ref { name, .. } if name.as_ref() == "Foo" => panic!(
+            "FAIL (pinned behaviour): same-file alias `type Foo = string` \
+             stayed shallow at the published surface — the same-file \
+             projector path must reduce to the underlying primitive (the \
+             shallow-by-default rule is the cross-file boundary case, not \
+             a global projector contract). Got {user_ty:?}"
+        ),
+        other => panic!(
+            "FAIL: same-file alias `type Foo = string` must reduce to \
+             Primitive(String); got {other:?}"
+        ),
+    }
+}
+
+/// Counter-positive: the projector reduces a Pick<Foo, 'a'>
+/// indexed-access chain when `Foo` is a same-file alias.
+///
+/// `defineProps<{ k: Pick<Foo, 'a'>['a'] }>` where
+/// `type Foo = { a: string; b: number }` lives in the same file
+/// MUST publish `k` as the literal `Primitive(String)` — the
+/// terminal hop's resolved value. The shallow-by-default rule
+/// applies to bare imported aliases (the cross-file boundary
+/// case); it does NOT prevent the projector from self-reducing a
+/// structural chain over a same-file alias.
+///
+/// Pairs with [`published_same_file_alias_reduces_through_projector`]:
+/// the bare same-file reference reduces to its primitive, AND a
+/// Pick/IndexedAccess chain over the same alias also reduces.
+/// Together the two pin the projector behaviour on same-file alias
+/// inputs and discriminate against a regression that would short-
+/// circuit one path but not the other.
+#[test]
+fn projector_reduces_same_file_alias_via_pick_indexed_access() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/Comp.vue",
+            r#"<script setup lang="ts">
+type Foo = { a: string; b: number }
+
+defineProps<{
+  k: Pick<Foo, 'a'>['a']
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session_batch().unwrap();
+    let evaluated = session.evaluate_types("/Comp.vue").unwrap().unwrap();
+
+    let k_ty = evaluated_prop_type(&evaluated, "k");
+    match k_ty {
+        TypeExpr::Primitive(PrimitiveName::String) => {}
+        TypeExpr::Ref { name, .. } if name.as_ref() == "Foo" => panic!(
+            "FAIL (architectural rule): Pick<Foo,'a'>['a'] must reduce to \
+             the terminal `string` primitive — leaving it as a bare `Ref` \
+             over `Foo` is the bare-alias preservation rule, which does \
+             not apply to a structural Pick/IndexedAccess chain. Got {k_ty:?}"
+        ),
+        TypeExpr::IndexedAccess { .. } => panic!(
+            "FAIL (architectural rule): Pick<Foo,'a'>['a'] must self-reduce \
+             through the projector path; a symbolic IndexedAccess proves the \
+             projector did not reduce the chain. Got {k_ty:?}"
+        ),
+        other => panic!(
+            "FAIL: same-file Pick<Foo,'a'>['a'] must reduce to Primitive(String); \
+             got {other:?}"
+        ),
+    }
+}
+
 /// Architectural rule: `Pick<Foo, "bar">` materialises ONLY `bar`.
 ///
 /// The projector path resolves the indexed-access / utility chain
@@ -18930,12 +19048,20 @@ defineProps<{
     let evaluated = session.evaluate_types("/Comp.vue").unwrap().unwrap();
     let hop_ty = evaluated_prop_type(&evaluated, "hop");
 
-    // The terminal path collapses to `string` (Inner.x's type).
-    // Foo's `other` member never enters the published surface.
-    assert!(
-        matches!(hop_ty, TypeExpr::Primitive(_)),
-        "FAIL (architectural rule): `Foo['a']['x']` must collapse to \
-         the terminal `string` primitive (path-precise materialisation \
-         loads only `a` and `x`); got {hop_ty:?}"
-    );
+    // The terminal path collapses to `string` (Inner.x's declared type).
+    // The fixture deliberately uses different primitives at different
+    // depths (`Inner.x: string`, `Inner.y: number`, `Foo.other.z:
+    // boolean`) so the assertion discriminates the SPECIFIC terminal
+    // primitive — a regression that mis-routes to `y` would land on
+    // `number`, a regression that walks into `other.z` would land on
+    // `boolean`. Both would fail this assertion; a `Primitive(_)`
+    // wildcard would not.
+    match hop_ty {
+        TypeExpr::Primitive(PrimitiveName::String) => {}
+        other => panic!(
+            "FAIL (architectural rule): `Foo['a']['x']` must collapse to \
+             the terminal `string` primitive (path-precise materialisation \
+             loads only `a` and `x`); got {other:?}"
+        ),
+    }
 }

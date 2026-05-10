@@ -199,19 +199,43 @@ fn recursive_pick_local_alias_terminates_via_semantic_miss() {
     let meta = run_policy_with_overflow_check(meta, registry, registry_meta)
         .expect("recursive Pick<Recursive,'x'> must terminate via the cycle guard");
 
-    // Termination is the load-bearing contract; structural shape need
-    // only confirm the cycle did NOT silently produce an infinite
-    // expansion. The published type must surface a recognisable
-    // sentinel/preserved shape.
-    let dbg = format!("{:?}", meta.props[0].type_expr);
-    assert!(
-        dbg.contains("semanticMiss")
-            || dbg.contains("Unknown")
-            || dbg.contains("Recursive")
-            || dbg.contains("Pick"),
-        "recursive Pick<Recursive, 'x'> must terminate with a semanticMiss / Unknown / \
-         RecursiveRef / preserved-Ref sentinel; got {dbg}"
-    );
+    // Discriminating shape match: the published type must be ONE OF
+    // the documented termination sentinels, structurally typed —
+    // wildcard `dbg.contains("Recursive")` is not enough because the
+    // identifier name "Recursive" appears inside a `Ref` for any
+    // outcome (even a buggy one that fails to terminate has a
+    // `Recursive` substring in its formatted output).
+    match &meta.props[0].type_expr {
+        // Cycle-guard hit: published as the explicit semanticMiss
+        // Unknown sentinel.
+        TypeExpr::Unknown { raw } if raw.contains("semanticMiss") => {}
+        // Recursion preservation: the policy may surface a back-edge
+        // RecursiveRef for the recursive alias.
+        TypeExpr::RecursiveRef { name, .. } if name.as_ref() == "Recursive" => {}
+        // Pick was preserved unevaluated (cycle guard refused to
+        // chase the body). The type-arg shape pins this is the
+        // Pick<Recursive,'x'> we built (not an arbitrary Pick).
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } if name.as_ref() == "Pick"
+            && type_arguments.len() == 2
+            && matches!(
+                &type_arguments[0],
+                TypeExpr::Ref { name: inner, .. } if inner.as_ref() == "Recursive"
+            ) => {}
+        // The recursive alias was preserved as a bare zero-arg ref
+        // because the body chase short-circuited on the cycle guard.
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } if name.as_ref() == "Recursive" && type_arguments.is_empty() => {}
+        other => panic!(
+            "recursive Pick<Recursive, 'x'> must terminate with a structurally-typed \
+             sentinel (Unknown {{ raw: 'semanticMiss…' }}, RecursiveRef, preserved \
+             Pick<Recursive,'x'>, or zero-arg Ref 'Recursive'); got {other:?}"
+        ),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -238,15 +262,30 @@ fn recursive_omit_self_referential_alias_terminates() {
     let meta = run_policy_with_overflow_check(meta, registry, registry_meta)
         .expect("recursive Omit<SelfOmit,'gone'> must terminate via the cycle guard");
 
-    let dbg = format!("{:?}", meta.props[0].type_expr);
-    assert!(
-        dbg.contains("semanticMiss")
-            || dbg.contains("Unknown")
-            || dbg.contains("SelfOmit")
-            || dbg.contains("Omit"),
-        "recursive Omit<SelfOmit, 'gone'> must terminate with a semanticMiss / Unknown / \
-         RecursiveRef / preserved-Ref sentinel; got {dbg}"
-    );
+    // Discriminating shape match — see the Pick<Recursive,'x'> sibling
+    // test for the rationale.
+    match &meta.props[0].type_expr {
+        TypeExpr::Unknown { raw } if raw.contains("semanticMiss") => {}
+        TypeExpr::RecursiveRef { name, .. } if name.as_ref() == "SelfOmit" => {}
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } if name.as_ref() == "Omit"
+            && type_arguments.len() == 2
+            && matches!(
+                &type_arguments[0],
+                TypeExpr::Ref { name: inner, .. } if inner.as_ref() == "SelfOmit"
+            ) => {}
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } if name.as_ref() == "SelfOmit" && type_arguments.is_empty() => {}
+        other => panic!(
+            "recursive Omit<SelfOmit, 'gone'> must terminate with a structurally-typed \
+             sentinel (Unknown {{ raw: 'semanticMiss…' }}, RecursiveRef, preserved \
+             Omit<SelfOmit,'gone'>, or zero-arg Ref 'SelfOmit'); got {other:?}"
+        ),
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -1369,7 +1369,48 @@ defineSlots<Slots>()
 <template><div /></template>
 "#,
     );
-    let _ = host.get_component_meta("/src/Comp.vue");
+
+    // Resolve component meta and inspect both the cache state AND the
+    // synthesis state to discriminate against unrelated reasons the
+    // cache might be cold (e.g., a future refactor that disables
+    // caching unconditionally would silently pass `!cached`).
+    let resolved = host
+        .get_component_meta_with_resolution("/src/Comp.vue")
+        .expect("component meta resolves");
+    let (_analysis, resolution) = resolved;
+
+    // Suppression must be active — the synthesis loop saw a
+    // BudgetExceeded stop and flipped the flag.
+    assert!(
+        resolution.synthesis_should_suppress,
+        "synthesis_should_suppress must be true on a budget-exceeded run; \
+         resolution = {resolution:?}",
+    );
+
+    // The synthesis diagnostics must carry at least one
+    // BudgetExceeded ExpansionDiagnostic — the discriminator that
+    // proves the cache-skip is BECAUSE OF budget exhaustion, not an
+    // unrelated cold-cache condition.
+    let saw_budget_exceeded =
+        resolution
+            .synthesis_diagnostics
+            .iter()
+            .any(|envelope| {
+                envelope.diagnostics.iter().any(|d| {
+                    matches!(
+                        d.reason,
+                        verter_semantic::analysis::type_expand::ExpansionStopReason::BudgetExceeded
+                    )
+                })
+            });
+    assert!(
+        saw_budget_exceeded,
+        "synthesis_diagnostics must contain at least one BudgetExceeded \
+         ExpansionDiagnostic; observed envelopes = {:?}",
+        resolution.synthesis_diagnostics,
+    );
+
+    // The cache must NOT be warmed when suppression is active.
     let cached = crate::component_meta_result_db::ComponentMetaResultDb::has_owner_entry_in_test(
         &host,
         "/src/Comp.vue",
