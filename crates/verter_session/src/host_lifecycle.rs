@@ -25,13 +25,9 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::Instant;
-#[cfg(target_arch = "wasm32")]
-use web_time::Instant;
-
 use crate::deps;
 use crate::id::canonicalize_id;
+use crate::instant::Instant;
 use crate::shared::{read_lock, write_lock};
 #[cfg(feature = "session_metrics")]
 use crate::types::HostMetricsSnapshot;

@@ -11,12 +11,8 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-#[cfg(not(target_arch = "wasm32"))]
 #[cfg(feature = "session_metrics")]
-use std::time::Instant;
-#[cfg(target_arch = "wasm32")]
-#[cfg(feature = "session_metrics")]
-use web_time::Instant;
+use crate::instant::Instant;
 
 use super::vue_script_extract::template_converter_inputs;
 use crate::compile::{assemble_main_module, merge_external_sources};

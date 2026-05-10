@@ -10,12 +10,9 @@
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::Instant;
-#[cfg(target_arch = "wasm32")]
-use web_time::Instant;
-
 use parking_lot::Mutex;
+
+use crate::instant::Instant;
 
 /// Bounded sample reservoir for histogram-style metrics (path length /
 /// projection depth). Cap = 8192 samples per metric; once full, new

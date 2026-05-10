@@ -6,12 +6,8 @@
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::Instant;
-#[cfg(target_arch = "wasm32")]
-use web_time::Instant;
-
 use crate::id::canonicalize_id;
+use crate::instant::Instant;
 use crate::resolver_core::{
     fallthrough_cache_key, DynamicRootCandidate, ExportGraphFileKind, ExportGraphResolver,
     ExportSurface, FallthroughComputeHost, FallthroughRequestHost, FallthroughResolutionView,
