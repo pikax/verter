@@ -31,7 +31,7 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::type_expr::{ObjectExpr, ObjectMember, TypeExpr};
+use verter_type_expr::{ObjectExpr, ObjectMember, TypeExpr};
 
 /// Cap on the per-test counter-name interner used by
 /// [`leak_counter_name`]. The capture-token harness keys counters by

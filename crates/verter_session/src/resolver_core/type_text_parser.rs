@@ -24,7 +24,7 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::type_expr::{
+use verter_type_expr::{
     FunctionExpr, FunctionParam, ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName,
     TupleElement, TypeExpr,
 };
@@ -483,7 +483,7 @@ fn is_valid_identifier(input: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use verter_semantic::analysis::type_expr::LiteralValue;
+    use verter_type_expr::LiteralValue;
 
     fn assert_primitive(input: &str, expected: PrimitiveName) {
         match parse_type_text(input) {
@@ -676,7 +676,7 @@ mod tests {
                 assert!(
                     obj.properties.is_empty()
                         || obj.properties.iter().all(|m| match m {
-                            verter_semantic::analysis::type_expr::ObjectMember::Property(p) => {
+                            verter_type_expr::ObjectMember::Property(p) => {
                                 p.name.contains('[') // not a real prop name
                             }
                             _ => true,

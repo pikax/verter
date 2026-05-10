@@ -186,7 +186,7 @@ pub(crate) fn build_keys_union_node(
     keys: &[String],
 ) -> crate::semantic_query::SemanticNodeId {
     use crate::semantic_query::SemanticNodeData;
-    use verter_semantic::analysis::type_expr::LiteralValue;
+    use verter_type_expr::LiteralValue;
 
     if keys.len() == 1 {
         graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
@@ -266,7 +266,7 @@ pub(crate) fn collect_string_literal_union_keys_node(
     node: crate::semantic_query::SemanticNodeId,
 ) -> Option<Vec<String>> {
     use crate::semantic_query::SemanticNodeData;
-    use verter_semantic::analysis::type_expr::LiteralValue;
+    use verter_type_expr::LiteralValue;
 
     let data = graph.node_data(node)?;
     match data.as_ref() {

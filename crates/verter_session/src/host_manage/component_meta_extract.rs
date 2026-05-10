@@ -214,10 +214,10 @@ fn merge_evaluated_prop_types_into_meta(
         raw_type: Option<&str>,
     ) -> rustc_hash::FxHashSet<(String, usize)> {
         fn collect(
-            expr: &verter_semantic::analysis::type_expr::TypeExpr,
+            expr: &verter_type_expr::TypeExpr,
             refs: &mut rustc_hash::FxHashSet<(String, usize)>,
         ) {
-            use verter_semantic::analysis::type_expr::TypeExpr;
+            use verter_type_expr::TypeExpr;
 
             match expr {
                 TypeExpr::Parenthesized(inner) => collect(inner, refs),
@@ -254,7 +254,7 @@ fn merge_evaluated_prop_types_into_meta(
         let Some(raw_type) = raw_type else {
             return rustc_hash::FxHashSet::default();
         };
-        let parsed = verter_semantic::analysis::type_expr_lower::parse_type_annotation(raw_type);
+        let parsed = verter_type_expr_oxc::parse_type_annotation(raw_type);
         let mut refs = rustc_hash::FxHashSet::default();
         collect(&parsed, &mut refs);
         refs.retain(|(name, _)| {
@@ -271,11 +271,11 @@ fn merge_evaluated_prop_types_into_meta(
     }
 
     fn expr_contains_public_ref(
-        expr: &verter_semantic::analysis::type_expr::TypeExpr,
+        expr: &verter_type_expr::TypeExpr,
         name: &str,
         type_argument_arity: usize,
     ) -> bool {
-        use verter_semantic::analysis::type_expr::TypeExpr;
+        use verter_type_expr::TypeExpr;
 
         match expr {
             TypeExpr::Parenthesized(inner) => {
@@ -332,8 +332,8 @@ fn merge_evaluated_prop_types_into_meta(
             let evaluated_is_materialized_form = matches!(
                 (evaluated, &prop.type_expr),
                 (
-                    verter_semantic::analysis::type_expr::TypeExpr::Object(_),
-                    verter_semantic::analysis::type_expr::TypeExpr::Ref {
+                    verter_type_expr::TypeExpr::Object(_),
+                    verter_type_expr::TypeExpr::Ref {
                         type_arguments, ..
                     }
                 ) if type_arguments.is_empty()
@@ -346,9 +346,8 @@ fn merge_evaluated_prop_types_into_meta(
             || matches!(
                 (&prop.type_expr, *evaluated),
                 (
-                    verter_semantic::analysis::type_expr::TypeExpr::Object(_),
-                    verter_semantic::analysis::type_expr::TypeExpr::Union(_)
-                        | verter_semantic::analysis::type_expr::TypeExpr::Primitive(_),
+                    verter_type_expr::TypeExpr::Object(_),
+                    verter_type_expr::TypeExpr::Union(_) | verter_type_expr::TypeExpr::Primitive(_),
                 )
             )
         {
@@ -423,13 +422,10 @@ fn fill_missing_component_meta_prop_descriptions_from_imported_roots(
                 continue;
             }
             let local_expr = resolved_local.type_expr.clone().unwrap_or_else(|| {
-                verter_semantic::analysis::type_expr_lower::parse_type_annotation(
-                    &resolved_local.expanded,
-                )
+                verter_type_expr_oxc::parse_type_annotation(&resolved_local.expanded)
             });
-            let expanded_expr = verter_semantic::analysis::type_expr_lower::parse_type_annotation(
-                &resolved_local.expanded,
-            );
+            let expanded_expr =
+                verter_type_expr_oxc::parse_type_annotation(&resolved_local.expanded);
             for dependency in host
                 .imported_symbol_dependencies_for_expr(owner_canonical, &expanded_expr)
                 .into_iter()
@@ -706,12 +702,10 @@ fn try_project_jsdoc_descriptions(
     true
 }
 
-fn parse_annotation_or_unknown_for_public_instance(
-    raw: &str,
-) -> verter_semantic::analysis::type_expr::TypeExpr {
-    let parsed = verter_semantic::analysis::type_expr_lower::parse_type_annotation(raw);
+fn parse_annotation_or_unknown_for_public_instance(raw: &str) -> verter_type_expr::TypeExpr {
+    let parsed = verter_type_expr_oxc::parse_type_annotation(raw);
     if parsed.is_unknown() {
-        verter_semantic::analysis::type_expr::TypeExpr::Unknown {
+        verter_type_expr::TypeExpr::Unknown {
             raw: raw.to_string(),
         }
     } else {
@@ -721,56 +715,49 @@ fn parse_annotation_or_unknown_for_public_instance(
 
 fn build_public_instance_slot_type(
     slot: &verter_semantic::analysis::component_meta::SlotAnalysis,
-) -> verter_semantic::analysis::type_expr::TypeExpr {
-    let parameter_type = verter_semantic::analysis::type_expr::TypeExpr::Object(Arc::new(
-        verter_semantic::analysis::type_expr::ObjectExpr {
+) -> verter_type_expr::TypeExpr {
+    let parameter_type =
+        verter_type_expr::TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
             properties: slot
                 .bindings
                 .iter()
                 .map(|binding| {
-                    verter_semantic::analysis::type_expr::ObjectMember::Property(
-                        verter_semantic::analysis::type_expr::ObjectProperty {
-                            name: binding.name.clone(),
-                            ty: binding.type_expr.clone(),
-                            optional: false,
-                            readonly: false,
-                        },
-                    )
+                    verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty {
+                        name: binding.name.clone(),
+                        ty: binding.type_expr.clone(),
+                        optional: false,
+                        readonly: false,
+                    })
                 })
                 .collect(),
-        },
-    ));
+        }));
     let return_type = slot
         .return_type
         .as_deref()
         .map(parse_annotation_or_unknown_for_public_instance)
-        .unwrap_or(verter_semantic::analysis::type_expr::TypeExpr::Primitive(
-            verter_semantic::analysis::type_expr::PrimitiveName::Unknown,
+        .unwrap_or(verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::Unknown,
         ));
-    let function = verter_semantic::analysis::type_expr::TypeExpr::Function(Arc::new(
-        verter_semantic::analysis::type_expr::FunctionExpr {
-            parameters: if slot.bindings.is_empty() {
-                Vec::new()
-            } else {
-                vec![verter_semantic::analysis::type_expr::FunctionParam {
-                    name: Some("props".to_string()),
-                    ty: parameter_type,
-                    optional: false,
-                    rest: false,
-                }]
-            },
-            return_type: Some(Arc::new(return_type)),
-            type_parameters: Vec::new(),
+    let function = verter_type_expr::TypeExpr::Function(Arc::new(verter_type_expr::FunctionExpr {
+        parameters: if slot.bindings.is_empty() {
+            Vec::new()
+        } else {
+            vec![verter_type_expr::FunctionParam {
+                name: Some("props".to_string()),
+                ty: parameter_type,
+                optional: false,
+                rest: false,
+            }]
         },
-    ));
+        return_type: Some(Arc::new(return_type)),
+        type_parameters: Vec::new(),
+    }));
     if slot.is_required {
         function
     } else {
-        verter_semantic::analysis::type_expr::TypeExpr::union(vec![
+        verter_type_expr::TypeExpr::union(vec![
             function,
-            verter_semantic::analysis::type_expr::TypeExpr::Primitive(
-                verter_semantic::analysis::type_expr::PrimitiveName::Undefined,
-            ),
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Undefined),
         ])
     }
 }
@@ -781,25 +768,21 @@ fn build_public_instance_slots_member(
     let slot_properties = slots
         .iter()
         .map(|slot| {
-            verter_semantic::analysis::type_expr::ObjectMember::Property(
-                verter_semantic::analysis::type_expr::ObjectProperty {
-                    name: slot.name.clone(),
-                    ty: build_public_instance_slot_type(slot),
-                    optional: !slot.is_required,
-                    readonly: false,
-                },
-            )
+            verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty {
+                name: slot.name.clone(),
+                ty: build_public_instance_slot_type(slot),
+                optional: !slot.is_required,
+                readonly: false,
+            })
         })
         .collect();
 
     verter_semantic::analysis::component_meta::PublicInstanceMemberAnalysis {
         name: "$slots".to_string(),
         kind: verter_semantic::analysis::component_meta::PublicInstanceMemberKind::SlotContainer,
-        type_expr: verter_semantic::analysis::type_expr::TypeExpr::Object(Arc::new(
-            verter_semantic::analysis::type_expr::ObjectExpr {
-                properties: slot_properties,
-            },
-        )),
+        type_expr: verter_type_expr::TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
+            properties: slot_properties,
+        })),
         type_expansion: None,
         raw_type: None,
         description: None,

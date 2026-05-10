@@ -4744,7 +4744,7 @@ fn keyof_intersection_accumulates_enumerable_arms_and_ignores_unresolvable() {
 /// Shallow) keep the existing eager-resolve path.
 #[test]
 fn navigate_lowering_pick_omit_preserve_carrier_other_utilities_unchanged() {
-    use verter_semantic::analysis::type_expr::{LiteralValue, TypeExpr};
+    use verter_type_expr::{LiteralValue, TypeExpr};
 
     let host = host();
     upsert_ts(&host, "/types.ts", "export type Foo = { a: string };");

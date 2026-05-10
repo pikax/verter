@@ -55,9 +55,7 @@ impl VerterHost {
     pub(super) fn resolve_fallthrough_surface_internal_with_overrides(
         &self,
         canonical_id: &str,
-        prop_type_overrides: Option<
-            &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
-        >,
+        prop_type_overrides: Option<&rustc_hash::FxHashMap<String, verter_type_expr::TypeExpr>>,
         visiting: &mut rustc_hash::FxHashSet<String>,
     ) -> Option<crate::types::FallthroughResolution> {
         use verter_semantic::analysis::component_meta::*;
@@ -189,9 +187,7 @@ impl VerterHost {
     pub(super) fn compute_fallthrough_surface_uncached(
         &self,
         canonical_id: &str,
-        prop_type_overrides: Option<
-            &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
-        >,
+        prop_type_overrides: Option<&rustc_hash::FxHashMap<String, verter_type_expr::TypeExpr>>,
         visiting: &mut rustc_hash::FxHashSet<String>,
     ) -> Option<crate::types::FallthroughResolution> {
         // Try to reuse an already-cached Expanded resolved state before recomputing.
@@ -218,9 +214,7 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         resolved: &crate::meta_resolve::ResolvedComponentMetaState,
-        prop_type_overrides: Option<
-            &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
-        >,
+        prop_type_overrides: Option<&rustc_hash::FxHashMap<String, verter_type_expr::TypeExpr>>,
         visiting: &mut rustc_hash::FxHashSet<String>,
     ) -> Option<crate::types::FallthroughResolution> {
         let fallthrough_fact_versions = resolved.fact_versions.clone();
@@ -291,9 +285,7 @@ impl VerterHost {
         canonical_id: &str,
         snapshot: &FileAnalysisSnapshot,
         root_reachability: Option<&verter_semantic::analysis::component_meta::RootReachability>,
-        prop_type_overrides: Option<
-            &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
-        >,
+        prop_type_overrides: Option<&rustc_hash::FxHashMap<String, verter_type_expr::TypeExpr>>,
     ) -> Option<verter_semantic::analysis::type_eval::EvalEnv> {
         component_meta_trace_custom!(
             "build_fallthrough_eval_env_lightweight",
@@ -389,7 +381,7 @@ impl VerterHost {
         snapshot: &FileAnalysisSnapshot,
         usage_index: u32,
         eval_env: &mut Option<verter_semantic::analysis::type_eval::EvalEnv>,
-    ) -> Option<rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>> {
+    ) -> Option<rustc_hash::FxHashMap<String, verter_type_expr::TypeExpr>> {
         if !self.config.generic_root_propagation {
             return None;
         }
@@ -630,9 +622,7 @@ impl VerterHost {
     pub(super) fn cache_fallthrough_result(
         &self,
         canonical_id: &str,
-        prop_type_overrides: Option<
-            &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
-        >,
+        prop_type_overrides: Option<&rustc_hash::FxHashMap<String, verter_type_expr::TypeExpr>>,
         result: &crate::types::FallthroughResolution,
     ) {
         let cache_key = fallthrough_cache_key(

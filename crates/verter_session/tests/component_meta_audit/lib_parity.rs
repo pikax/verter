@@ -197,8 +197,8 @@ pub(crate) fn render_pair(
 /// form used by `correctness::snapshot_view` for the tags this test
 /// exercises (Primitive, Literal, Union, Object). Avoids coupling
 /// the parity tests to the SnapshotView crate-private code.
-fn render_type(expr: &verter_semantic::analysis::type_expr::TypeExpr) -> String {
-    use verter_semantic::analysis::type_expr::{LiteralValue, PrimitiveName, TypeExpr};
+fn render_type(expr: &verter_type_expr::TypeExpr) -> String {
+    use verter_type_expr::{LiteralValue, PrimitiveName, TypeExpr};
     match expr {
         TypeExpr::Primitive(p) => match p {
             PrimitiveName::String => "string".to_string(),

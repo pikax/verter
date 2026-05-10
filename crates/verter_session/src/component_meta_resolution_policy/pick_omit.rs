@@ -6,7 +6,7 @@
 //! result. Workspace-owned targets fall through to the standard
 //! rewrite chain so the canonical reuse path keeps ownership.
 
-use verter_semantic::analysis::type_expr::{LiteralValue, TypeExpr};
+use verter_type_expr::{LiteralValue, TypeExpr};
 
 use super::core::{peel_paren, DeclLookup, PolicyCtx};
 

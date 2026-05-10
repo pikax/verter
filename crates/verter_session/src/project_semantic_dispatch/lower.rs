@@ -14,8 +14,8 @@
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
-use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
 use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
+use verter_type_expr::{ObjectMember, TypeExpr};
 
 use super::{map_primitive_name, ProjectSemanticDispatch};
 use crate::resolver_core::bare_name_resolve::{
@@ -861,7 +861,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 ..
             } => {
                 use crate::semantic_query::{MapperKey, OptionalityMod, ReadonlyMod};
-                use verter_semantic::analysis::type_expr::MappedModifier;
+                use verter_type_expr::MappedModifier;
 
                 let mut mapper_env = env.clone();
                 let mapper_display_name: Arc<str> = Arc::from(parameter.as_str());
@@ -1064,10 +1064,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // general type-expression indices.
                 let index_key = match index.as_ref() {
                     TypeExpr::Literal(lit) => match lit {
-                        verter_semantic::analysis::type_expr::LiteralValue::String(s) => {
+                        verter_type_expr::LiteralValue::String(s) => {
                             IndexKey::String(Arc::<str>::from(s.as_str()))
                         }
-                        verter_semantic::analysis::type_expr::LiteralValue::Number(n) => {
+                        verter_type_expr::LiteralValue::Number(n) => {
                             IndexKey::Number(n.to_bits() as i64)
                         }
                         _ => {

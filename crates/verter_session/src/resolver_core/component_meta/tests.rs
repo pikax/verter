@@ -5,14 +5,12 @@ use verter_compiler::utils::oxc::vue::resolve_type::{
     ResolvedEmit, ResolvedEmitSignature, ResolvedMemberVisibility, ResolvedProp, RuntimeType,
 };
 use verter_semantic::analysis::type_eval::DeclarationId;
-use verter_semantic::analysis::type_expr::{
-    ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr,
-};
 use verter_semantic::analysis::types::{
     AnalyzedImport, AnalyzedImportBinding, AnalyzedMacro, AnalyzedMacroKind, ImportBindingKind,
     ResolvedLocalType,
 };
 use verter_span::Span;
+use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr};
 
 #[derive(Clone)]
 struct TestSnapshot {
@@ -487,12 +485,12 @@ fn resolve_component_meta_parts_fallthrough_skips_imported_define_emits_when_eva
                                     properties: vec![
                                         verter_semantic::analysis::type_expand::ExpandedProperty {
                                             name: "save".to_string(),
-                                            ty: verter_semantic::analysis::type_expr::TypeExpr::Tuple {
+                                            ty: verter_type_expr::TypeExpr::Tuple {
                                                 elements: std::sync::Arc::from(vec![
-                                                    verter_semantic::analysis::type_expr::TupleElement {
+                                                    verter_type_expr::TupleElement {
                                                         label: Some("value".to_string()),
-                                                        ty: verter_semantic::analysis::type_expr::TypeExpr::Primitive(
-                                                            verter_semantic::analysis::type_expr::PrimitiveName::String,
+                                                        ty: verter_type_expr::TypeExpr::Primitive(
+                                                            verter_type_expr::PrimitiveName::String,
                                                         ),
                                                         optional: false,
                                                         rest: false,
@@ -1645,11 +1643,9 @@ type Props = Omit<ImportedBase, 'hidden'>
             resolved_local_types: vec![ResolvedLocalType {
                 name: "Props".to_string(),
                 expanded: "Omit<ImportedBase, 'hidden'>".to_string(),
-                type_expr: Some(
-                    verter_semantic::analysis::type_expr_lower::parse_type_annotation(
-                        "Omit<ImportedBase, 'hidden'>",
-                    ),
-                ),
+                type_expr: Some(verter_type_expr_oxc::parse_type_annotation(
+                    "Omit<ImportedBase, 'hidden'>",
+                )),
                 span: Span::new(0, source.len() as u32),
             }],
             parsed_type_argument: None,

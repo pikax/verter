@@ -24,7 +24,7 @@
 //! when reaching the slot's `Function` value with `Member(binding)`
 //! remaining — `walk.rs` Function arm fall-through to `opaque_miss`).
 
-use verter_semantic::analysis::type_expr::{PrimitiveName, TypeExpr};
+use verter_type_expr::{PrimitiveName, TypeExpr};
 
 use crate::harness::{build_hermetic_host_with_lib, resolve_under_audit, STUB_LIB_ES5};
 

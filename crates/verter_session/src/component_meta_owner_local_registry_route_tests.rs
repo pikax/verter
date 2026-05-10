@@ -248,7 +248,7 @@ fn public_field_refs_keep_external_indexed_access_routes() {
     use crate::resolver_core::component_meta_registry::component_meta_registry_public_route_owner_local_root;
     use crate::resolver_core::ResolverContext;
     use std::sync::Arc;
-    use verter_semantic::analysis::type_expr::{LiteralValue, TypeExpr};
+    use verter_type_expr::{LiteralValue, TypeExpr};
     let foo_indexed = TypeExpr::IndexedAccess {
         object: Arc::new(TypeExpr::IndexedAccess {
             object: Arc::new(TypeExpr::Ref {
@@ -344,7 +344,7 @@ fn owner_local_alias_of_alias_external_import_declines() {
     use crate::resolver_core::component_meta_registry::component_meta_registry_public_route_owner_local_root;
     use crate::resolver_core::ResolverContext;
     use std::sync::Arc;
-    use verter_semantic::analysis::type_expr::{LiteralValue, TypeExpr};
+    use verter_type_expr::{LiteralValue, TypeExpr};
     let foo_indexed = TypeExpr::IndexedAccess {
         object: Arc::new(TypeExpr::IndexedAccess {
             object: Arc::new(TypeExpr::Ref {
@@ -400,7 +400,7 @@ fn owner_local_generic_typeparameter_body_declines() {
 
     use crate::resolver_core::component_meta_registry::component_meta_registry_public_route_owner_local_root;
     use crate::resolver_core::ResolverContext;
-    use verter_semantic::analysis::type_expr::{TypeExpr, TypeParam};
+    use verter_type_expr::{TypeExpr, TypeParam};
     // A bare type parameter — the predicate must decline since
     // there is no declaration to enqueue.
     let bare_param = TypeExpr::TypeParameter(TypeParam {

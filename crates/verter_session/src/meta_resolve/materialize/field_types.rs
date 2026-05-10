@@ -22,11 +22,11 @@ use super::super::registry_materialize::preserve_package_backed_symbolic_refs_no
 
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub(crate) fn materialize_component_meta_type_expr_until_stable(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    expr: &verter_type_expr::TypeExpr,
     scope_canonical_id: &str,
     mode: crate::semantic_query::ProjectionMode,
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-) -> verter_semantic::analysis::type_expr::TypeExpr {
+) -> verter_type_expr::TypeExpr {
     materialize_component_meta_type_expr_until_stable_full(
         expr,
         scope_canonical_id,
@@ -60,7 +60,7 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable(
 /// deduplication.
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    expr: &verter_type_expr::TypeExpr,
     scope_canonical_id: &str,
     mode: crate::semantic_query::ProjectionMode,
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
@@ -225,12 +225,12 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
 }
 
 pub(crate) fn type_expr_has_package_backed_object_like_root(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    expr: &verter_type_expr::TypeExpr,
     scope_canonical_id: &str,
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
 ) -> bool {
-    fn root_name(expr: &verter_semantic::analysis::type_expr::TypeExpr) -> Option<String> {
-        use verter_semantic::analysis::type_expr::TypeExpr;
+    fn root_name(expr: &verter_type_expr::TypeExpr) -> Option<String> {
+        use verter_type_expr::TypeExpr;
 
         match expr {
             TypeExpr::Parenthesized(inner) => root_name(inner),
@@ -303,11 +303,11 @@ pub(crate) fn type_expr_has_package_backed_object_like_root(
 /// fails or the raise back to TypeExpr fails — preserves existing
 /// behaviour for shapes the dispatcher cannot lower deterministically.
 pub(crate) fn lowered_preserve_package_backed_symbolic_refs(
-    materialized: &verter_semantic::analysis::type_expr::TypeExpr,
-    raw: &verter_semantic::analysis::type_expr::TypeExpr,
+    materialized: &verter_type_expr::TypeExpr,
+    raw: &verter_type_expr::TypeExpr,
     scope_canonical_id: &str,
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-) -> verter_semantic::analysis::type_expr::TypeExpr {
+) -> verter_type_expr::TypeExpr {
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     let ctx = engine.ctx;
     let dispatch = ProjectSemanticDispatch::new(ctx);

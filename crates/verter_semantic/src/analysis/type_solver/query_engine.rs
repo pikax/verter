@@ -5,7 +5,7 @@
 //! `verter_session::resolver_core::component_meta_query_engine` surfaces as
 //! return types.
 
-use crate::analysis::type_expr::TypeExpr;
+use verter_type_expr::TypeExpr;
 
 // ---------------------------------------------------------------------------
 // Projection result types

@@ -12,8 +12,8 @@ use napi_derive::napi;
 
 use verter_audit::RequestAuditRecord;
 use verter_protocol::typeinfo::FfiSymbolEntry;
-use verter_semantic::analysis::type_expr::TypeExpr;
 use verter_session::semantic_query::ProjectionMode;
+use verter_type_expr::TypeExpr;
 
 /// Combined response shape for `resolveSymbolWithAudit` /
 /// `evaluateTypeExpressionWithAudit`. Both JSON Buffers — the consumer

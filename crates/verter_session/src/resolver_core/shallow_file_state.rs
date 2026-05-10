@@ -19,8 +19,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use super::route_demand::RouteDemand;
 use verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource;
 use verter_semantic::analysis::type_eval::{FunctionSignature, TypeDeclKind, ValueDeclKind};
-use verter_semantic::analysis::type_expr::{ObjectExpr, TypeExpr, TypeParam};
 use verter_semantic::analysis::Hash16;
+use verter_type_expr::{ObjectExpr, TypeExpr, TypeParam};
 
 // ---------------------------------------------------------------------------
 // Core types
@@ -1122,7 +1122,7 @@ impl ShallowFileState {
 
                 for member in &obj.properties {
                     let status = match member {
-                        verter_semantic::analysis::type_expr::ObjectMember::Property(prop) => self
+                        verter_type_expr::ObjectMember::Property(prop) => self
                             .collect_whole_route_refs(
                                 &prop.ty,
                                 WholeRouteContext::LeafProperty,
@@ -1132,8 +1132,8 @@ impl ShallowFileState {
                                 steps,
                                 budget,
                             ),
-                        verter_semantic::analysis::type_expr::ObjectMember::IndexSignature(sig) => {
-                            self.collect_whole_route_refs(
+                        verter_type_expr::ObjectMember::IndexSignature(sig) => self
+                            .collect_whole_route_refs(
                                 &sig.value_type,
                                 WholeRouteContext::LeafProperty,
                                 visited,
@@ -1141,20 +1141,18 @@ impl ShallowFileState {
                                 external_refs,
                                 steps,
                                 budget,
-                            )
-                        }
-                        verter_semantic::analysis::type_expr::ObjectMember::CallSignature(func)
-                        | verter_semantic::analysis::type_expr::ObjectMember::ConstructSignature(
-                            func,
-                        ) => self.collect_whole_route_function_refs(
-                            func,
-                            visited,
-                            local_used,
-                            external_refs,
-                            steps,
-                            budget,
-                        ),
-                        verter_semantic::analysis::type_expr::ObjectMember::Method(method) => self
+                            ),
+                        verter_type_expr::ObjectMember::CallSignature(func)
+                        | verter_type_expr::ObjectMember::ConstructSignature(func) => self
+                            .collect_whole_route_function_refs(
+                                func,
+                                visited,
+                                local_used,
+                                external_refs,
+                                steps,
+                                budget,
+                            ),
+                        verter_type_expr::ObjectMember::Method(method) => self
                             .collect_whole_route_function_refs(
                                 &method.function,
                                 visited,
@@ -1375,7 +1373,7 @@ impl ShallowFileState {
 
     fn collect_whole_route_function_refs(
         &self,
-        func: &verter_semantic::analysis::type_expr::FunctionExpr,
+        func: &verter_type_expr::FunctionExpr,
         visited: &mut FxHashSet<String>,
         local_used: &mut Vec<String>,
         external_refs: &mut Vec<ExternalSymbolRef>,
@@ -1604,9 +1602,7 @@ impl ShallowFileState {
         seen_locals: &mut FxHashSet<String>,
     ) -> Vec<String> {
         match expr {
-            TypeExpr::Literal(verter_semantic::analysis::type_expr::LiteralValue::String(
-                value,
-            )) => {
+            TypeExpr::Literal(verter_type_expr::LiteralValue::String(value)) => {
                 vec![value.clone()]
             }
             TypeExpr::Union(types) => {
@@ -1812,18 +1808,14 @@ fn extract_enum_members_from_type_body(body: &TypeExpr) -> Option<FxHashMap<Stri
                 match member {
                     TypeExpr::Literal(lit) => {
                         let name = match lit {
-                            verter_semantic::analysis::type_expr::LiteralValue::String(s) => {
-                                s.clone()
-                            }
-                            verter_semantic::analysis::type_expr::LiteralValue::Number(n) => {
+                            verter_type_expr::LiteralValue::String(s) => s.clone(),
+                            verter_type_expr::LiteralValue::Number(n) => {
                                 format!("{n}")
                             }
-                            verter_semantic::analysis::type_expr::LiteralValue::Boolean(b) => {
+                            verter_type_expr::LiteralValue::Boolean(b) => {
                                 format!("{b}")
                             }
-                            verter_semantic::analysis::type_expr::LiteralValue::BigInt(s) => {
-                                s.clone()
-                            }
+                            verter_type_expr::LiteralValue::BigInt(s) => s.clone(),
                         };
                         result.insert(name, member.clone());
                     }
@@ -1871,15 +1863,13 @@ fn direct_object_member_names(body: &TypeExpr) -> Option<Vec<String>> {
 fn direct_object_property<'a>(
     body: &'a TypeExpr,
     name: &str,
-) -> Option<&'a verter_semantic::analysis::type_expr::ObjectProperty> {
+) -> Option<&'a verter_type_expr::ObjectProperty> {
     direct_object_properties(body)
         .into_iter()
         .find(|prop| prop.name == name)
 }
 
-fn direct_object_properties(
-    body: &TypeExpr,
-) -> Vec<&verter_semantic::analysis::type_expr::ObjectProperty> {
+fn direct_object_properties(body: &TypeExpr) -> Vec<&verter_type_expr::ObjectProperty> {
     let mut result = Vec::new();
     let mut seen = FxHashSet::default();
     collect_direct_object_properties(body, &mut result, &mut seen);
@@ -1888,13 +1878,13 @@ fn direct_object_properties(
 
 fn collect_direct_object_properties<'a>(
     body: &'a TypeExpr,
-    out: &mut Vec<&'a verter_semantic::analysis::type_expr::ObjectProperty>,
+    out: &mut Vec<&'a verter_type_expr::ObjectProperty>,
     seen: &mut FxHashSet<String>,
 ) {
     match body {
         TypeExpr::Object(obj) => {
             for member in &obj.properties {
-                if let verter_semantic::analysis::type_expr::ObjectMember::Property(prop) = member {
+                if let verter_type_expr::ObjectMember::Property(prop) = member {
                     if seen.insert(prop.name.clone()) {
                         out.push(prop);
                     }
@@ -1945,7 +1935,7 @@ fn collect_type_refs(expr: &TypeExpr, out: &mut Vec<String>) {
         TypeExpr::Array { element, .. } => collect_type_refs(element, out),
         TypeExpr::Object(obj) => {
             for member in &obj.properties {
-                if let verter_semantic::analysis::type_expr::ObjectMember::Property(prop) = member {
+                if let verter_type_expr::ObjectMember::Property(prop) = member {
                     collect_type_refs(&prop.ty, out);
                 }
             }
@@ -2107,20 +2097,18 @@ fn collect_typeof_roots(expr: &TypeExpr, out: &mut FxHashSet<String>) {
         TypeExpr::Object(object) => {
             for member in &object.properties {
                 match member {
-                    verter_semantic::analysis::type_expr::ObjectMember::Property(prop) => {
+                    verter_type_expr::ObjectMember::Property(prop) => {
                         collect_typeof_roots(&prop.ty, out);
                     }
-                    verter_semantic::analysis::type_expr::ObjectMember::IndexSignature(sig) => {
+                    verter_type_expr::ObjectMember::IndexSignature(sig) => {
                         collect_typeof_roots(&sig.key_type, out);
                         collect_typeof_roots(&sig.value_type, out);
                     }
-                    verter_semantic::analysis::type_expr::ObjectMember::CallSignature(func)
-                    | verter_semantic::analysis::type_expr::ObjectMember::ConstructSignature(
-                        func,
-                    ) => {
+                    verter_type_expr::ObjectMember::CallSignature(func)
+                    | verter_type_expr::ObjectMember::ConstructSignature(func) => {
                         collect_typeof_roots_in_function(func, out);
                     }
-                    verter_semantic::analysis::type_expr::ObjectMember::Method(method) => {
+                    verter_type_expr::ObjectMember::Method(method) => {
                         collect_typeof_roots_in_function(&method.function, out);
                     }
                 }
@@ -2170,7 +2158,7 @@ fn collect_typeof_roots(expr: &TypeExpr, out: &mut FxHashSet<String>) {
 }
 
 fn collect_typeof_roots_in_function(
-    func: &verter_semantic::analysis::type_expr::FunctionExpr,
+    func: &verter_type_expr::FunctionExpr,
     out: &mut FxHashSet<String>,
 ) {
     for param in &func.parameters {

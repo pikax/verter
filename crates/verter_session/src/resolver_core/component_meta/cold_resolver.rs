@@ -2,8 +2,8 @@ use std::collections::BTreeSet;
 
 use rustc_hash::FxHashSet;
 use verter_semantic::analysis::component_meta::ResolvedTypeAnalysis;
-use verter_semantic::analysis::type_expr::{ObjectExpr, TypeExpr};
 use verter_semantic::analysis::types::{AnalyzedMacroKind, MacroTypeDep};
+use verter_type_expr::{ObjectExpr, TypeExpr};
 
 use crate::resolver_core::{project_macro_surfaces, resolve_local_type_declaration};
 
@@ -457,9 +457,7 @@ where
                     resolved_type_registry.push(ResolvedTypeAnalysis {
                         name: resolved.name.clone(),
                         type_expr: resolved.type_expr.clone().unwrap_or_else(|| {
-                            verter_semantic::analysis::type_expr_lower::parse_type_annotation(
-                                &resolved.expanded,
-                            )
+                            verter_type_expr_oxc::parse_type_annotation(&resolved.expanded)
                         }),
                         type_expansion: None,
                     });

@@ -974,7 +974,7 @@ impl WasmVerterHost {
         let canonical_id_owned = canonical_id.to_string();
         let name_owned = name.to_string();
         catch_panic(AssertUnwindSafe(move || {
-            let arc_args: Vec<std::sync::Arc<verter_semantic::analysis::type_expr::TypeExpr>> =
+            let arc_args: Vec<std::sync::Arc<verter_type_expr::TypeExpr>> =
                 exprs.into_iter().map(std::sync::Arc::new).collect();
             let (resolved, record) = host.resolve_named_symbol_with_audit(
                 &canonical_id_owned,

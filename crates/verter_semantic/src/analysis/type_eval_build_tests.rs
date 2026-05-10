@@ -1,7 +1,7 @@
 use super::type_eval::*;
 use super::type_eval_build::parse_and_build_env;
-use super::type_expr::*;
 use std::sync::Arc;
+use verter_type_expr::*;
 
 // =============================================================================
 // Type alias extraction

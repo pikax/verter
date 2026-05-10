@@ -156,7 +156,7 @@ defineProps<{
 /// the consumer never observes them through this surface.
 #[test]
 fn concrete_slots_object_props_skip_define_props_member_route_projection() {
-    use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+    use verter_type_expr::{ObjectMember, TypeExpr};
 
     let host = build_workspace_host(&[
         ("/workspace/src/button-types.ts", POSITIVE_BUTTON_TS),

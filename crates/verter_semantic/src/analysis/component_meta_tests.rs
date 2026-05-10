@@ -1,7 +1,7 @@
 use super::*;
-use crate::analysis::type_expr::PrimitiveName;
 use crate::analysis::types::AnalyzedExposeField;
 use std::sync::Arc;
+use verter_type_expr::PrimitiveName;
 
 fn empty_input(macros: &[AnalyzedMacro]) -> ComponentMetaInput<'_> {
     ComponentMetaInput {
@@ -527,14 +527,12 @@ fn define_emits_eval_supplements_local_tuple_property_events() {
                         crate::analysis::type_expand::ExpandedProperty {
                             name: "escapeKeyDown".to_string(),
                             ty: TypeExpr::Tuple {
-                                elements: Arc::from(vec![
-                                    crate::analysis::type_expr::TupleElement {
-                                        label: Some("event".to_string()),
-                                        ty: TypeExpr::named("KeyboardEvent"),
-                                        optional: false,
-                                        rest: false,
-                                    },
-                                ]),
+                                elements: Arc::from(vec![verter_type_expr::TupleElement {
+                                    label: Some("event".to_string()),
+                                    ty: TypeExpr::named("KeyboardEvent"),
+                                    optional: false,
+                                    rest: false,
+                                }]),
                                 readonly: false,
                             },
                             optional: false,
@@ -543,14 +541,12 @@ fn define_emits_eval_supplements_local_tuple_property_events() {
                         crate::analysis::type_expand::ExpandedProperty {
                             name: "closeAutoFocus".to_string(),
                             ty: TypeExpr::Tuple {
-                                elements: Arc::from(vec![
-                                    crate::analysis::type_expr::TupleElement {
-                                        label: Some("event".to_string()),
-                                        ty: TypeExpr::named("Event"),
-                                        optional: false,
-                                        rest: false,
-                                    },
-                                ]),
+                                elements: Arc::from(vec![verter_type_expr::TupleElement {
+                                    label: Some("event".to_string()),
+                                    ty: TypeExpr::named("Event"),
+                                    optional: false,
+                                    rest: false,
+                                }]),
                                 readonly: false,
                             },
                             optional: false,
@@ -559,14 +555,12 @@ fn define_emits_eval_supplements_local_tuple_property_events() {
                         crate::analysis::type_expand::ExpandedProperty {
                             name: "update:searchTerm".to_string(),
                             ty: TypeExpr::Tuple {
-                                elements: Arc::from(vec![
-                                    crate::analysis::type_expr::TupleElement {
-                                        label: Some("value".to_string()),
-                                        ty: TypeExpr::Primitive(PrimitiveName::String),
-                                        optional: false,
-                                        rest: false,
-                                    },
-                                ]),
+                                elements: Arc::from(vec![verter_type_expr::TupleElement {
+                                    label: Some("value".to_string()),
+                                    ty: TypeExpr::Primitive(PrimitiveName::String),
+                                    optional: false,
+                                    rest: false,
+                                }]),
                                 readonly: false,
                             },
                             optional: false,
@@ -652,14 +646,12 @@ fn define_emits_eval_does_not_resurrect_omitted_imported_events() {
                         crate::analysis::type_expand::ExpandedProperty {
                             name: "escapeKeyDown".to_string(),
                             ty: TypeExpr::Tuple {
-                                elements: Arc::from(vec![
-                                    crate::analysis::type_expr::TupleElement {
-                                        label: Some("event".to_string()),
-                                        ty: TypeExpr::named("KeyboardEvent"),
-                                        optional: false,
-                                        rest: false,
-                                    },
-                                ]),
+                                elements: Arc::from(vec![verter_type_expr::TupleElement {
+                                    label: Some("event".to_string()),
+                                    ty: TypeExpr::named("KeyboardEvent"),
+                                    optional: false,
+                                    rest: false,
+                                }]),
                                 readonly: false,
                             },
                             optional: false,
@@ -777,23 +769,21 @@ fn define_slots_eval_extracts_bindings_from_optional_function_types() {
                     properties: vec![crate::analysis::type_expand::ExpandedProperty {
                         name: "leading".to_string(),
                         ty: TypeExpr::union(vec![
-                            TypeExpr::Function(Arc::new(
-                                crate::analysis::type_expr::FunctionExpr {
-                                    parameters: vec![crate::analysis::type_expr::FunctionParam {
-                                        name: Some("props".to_string()),
-                                        ty: TypeExpr::Object(Arc::new(
-                                            crate::analysis::type_expr::ObjectExpr {
-                                                properties: vec![
-                                            crate::analysis::type_expr::ObjectMember::Property(
-                                                crate::analysis::type_expr::ObjectProperty {
+                            TypeExpr::Function(Arc::new(verter_type_expr::FunctionExpr {
+                                parameters: vec![verter_type_expr::FunctionParam {
+                                    name: Some("props".to_string()),
+                                    ty: TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
+                                        properties: vec![
+                                            verter_type_expr::ObjectMember::Property(
+                                                verter_type_expr::ObjectProperty {
                                                     name: "item".to_string(),
                                                     ty: TypeExpr::Primitive(PrimitiveName::String),
                                                     optional: false,
                                                     readonly: false,
                                                 },
                                             ),
-                                            crate::analysis::type_expr::ObjectMember::Property(
-                                                crate::analysis::type_expr::ObjectProperty {
+                                            verter_type_expr::ObjectMember::Property(
+                                                verter_type_expr::ObjectProperty {
                                                     name: "open".to_string(),
                                                     ty: TypeExpr::Primitive(PrimitiveName::Boolean),
                                                     optional: false,
@@ -801,17 +791,15 @@ fn define_slots_eval_extracts_bindings_from_optional_function_types() {
                                                 },
                                             ),
                                         ],
-                                            },
-                                        )),
-                                        optional: false,
-                                        rest: false,
-                                    }],
-                                    return_type: Some(Arc::new(TypeExpr::Primitive(
-                                        PrimitiveName::Any,
-                                    ))),
-                                    type_parameters: Vec::new(),
-                                },
-                            )),
+                                    })),
+                                    optional: false,
+                                    rest: false,
+                                }],
+                                return_type: Some(Arc::new(TypeExpr::Primitive(
+                                    PrimitiveName::Any,
+                                ))),
+                                type_parameters: Vec::new(),
+                            })),
                             TypeExpr::Primitive(PrimitiveName::Undefined),
                         ]),
                         optional: true,
@@ -874,20 +862,20 @@ fn huge_partial_slot_binding_expansions_fall_back_to_symbolic_source_type() {
                 crate::analysis::type_expand::ExpandedObjectShape {
                     properties: vec![crate::analysis::type_expand::ExpandedProperty {
                         name: "day".to_string(),
-                        ty: TypeExpr::Function(Arc::new(crate::analysis::type_expr::FunctionExpr {
-                            parameters: vec![crate::analysis::type_expr::FunctionParam {
+                        ty: TypeExpr::Function(Arc::new(verter_type_expr::FunctionExpr {
+                            parameters: vec![verter_type_expr::FunctionParam {
                                 name: Some("props".to_string()),
-                                ty: TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+                                ty: TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
                                     properties: vec![
-                                        crate::analysis::type_expr::ObjectMember::Property(
-                                            crate::analysis::type_expr::ObjectProperty {
+                                        verter_type_expr::ObjectMember::Property(
+                                            verter_type_expr::ObjectProperty {
                                                 name: "day".to_string(),
                                                 ty: TypeExpr::Object(Arc::new(
-                                                    crate::analysis::type_expr::ObjectExpr {
+                                                    verter_type_expr::ObjectExpr {
                                                         properties: (0..512)
                                                             .map(|index| {
-                                                                crate::analysis::type_expr::ObjectMember::Property(
-                                                                    crate::analysis::type_expr::ObjectProperty {
+                                                                verter_type_expr::ObjectMember::Property(
+                                                                    verter_type_expr::ObjectProperty {
                                                                         name: format!("field{index}"),
                                                                         ty: TypeExpr::Primitive(
                                                                             PrimitiveName::String,
@@ -989,11 +977,9 @@ fn small_partial_helper_slot_binding_expansions_fall_back_to_symbolic_indexed_ac
             name: "default.ui".to_string(),
             r#type: TypeExpr::Ref {
                 name: Arc::from("ComponentUI"),
-                type_arguments: Arc::from(vec![TypeExpr::TypeOf(
-                    crate::analysis::type_expr::ValueRef {
-                        path: vec!["theme".to_string()],
-                    },
-                )]),
+                type_arguments: Arc::from(vec![TypeExpr::TypeOf(verter_type_expr::ValueRef {
+                    path: vec!["theme".to_string()],
+                })]),
             },
             raw_type: Some("Button['ui']".to_string()),
             optional: false,
@@ -1071,44 +1057,32 @@ fn define_slots_prefer_concrete_evaluated_slot_bindings_over_symbolic_direct_bin
                 crate::analysis::type_expand::ExpandedObjectShape {
                     properties: vec![crate::analysis::type_expand::ExpandedProperty {
                         name: "default".to_string(),
-                        ty: TypeExpr::Function(Arc::new(
-                            crate::analysis::type_expr::FunctionExpr {
-                                parameters: vec![crate::analysis::type_expr::FunctionParam {
-                                    name: Some("props".to_string()),
-                                    ty: TypeExpr::Object(Arc::new(
-                                        crate::analysis::type_expr::ObjectExpr {
-                                            properties: vec![
-                                                crate::analysis::type_expr::ObjectMember::Property(
-                                                    crate::analysis::type_expr::ObjectProperty {
-                                                        name: "ui".to_string(),
-                                                        ty: TypeExpr::Ref {
-                                                            name: Arc::from("ComponentUI"),
-                                                            type_arguments: Arc::from(vec![
-                                                                TypeExpr::TypeOf(
-                                                                    crate::analysis::type_expr::ValueRef {
-                                                                        path: vec![
-                                                                            "theme".to_string(),
-                                                                        ],
-                                                                    },
-                                                                ),
-                                                            ]),
-                                                        },
-                                                        optional: false,
-                                                        readonly: false,
+                        ty: TypeExpr::Function(Arc::new(verter_type_expr::FunctionExpr {
+                            parameters: vec![verter_type_expr::FunctionParam {
+                                name: Some("props".to_string()),
+                                ty: TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
+                                    properties: vec![verter_type_expr::ObjectMember::Property(
+                                        verter_type_expr::ObjectProperty {
+                                            name: "ui".to_string(),
+                                            ty: TypeExpr::Ref {
+                                                name: Arc::from("ComponentUI"),
+                                                type_arguments: Arc::from(vec![TypeExpr::TypeOf(
+                                                    verter_type_expr::ValueRef {
+                                                        path: vec!["theme".to_string()],
                                                     },
-                                                ),
-                                            ],
+                                                )]),
+                                            },
+                                            optional: false,
+                                            readonly: false,
                                         },
-                                    )),
-                                    optional: false,
-                                    rest: false,
-                                }],
-                                return_type: Some(Arc::new(TypeExpr::Primitive(
-                                    PrimitiveName::Any,
-                                ))),
-                                type_parameters: Vec::new(),
-                            },
-                        )),
+                                    )],
+                                })),
+                                optional: false,
+                                rest: false,
+                            }],
+                            return_type: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Any))),
+                            type_parameters: Vec::new(),
+                        })),
                         optional: true,
                         readonly: false,
                     }],
@@ -1119,9 +1093,9 @@ fn define_slots_prefer_concrete_evaluated_slot_bindings_over_symbolic_direct_bin
         }],
         slot_bindings: vec![crate::analysis::type_expand::ExpandedField {
             name: "default.ui".to_string(),
-            r#type: TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
-                properties: vec![crate::analysis::type_expr::ObjectMember::Property(
-                    crate::analysis::type_expr::ObjectProperty {
+            r#type: TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
+                properties: vec![verter_type_expr::ObjectMember::Property(
+                    verter_type_expr::ObjectProperty {
                         name: "base".to_string(),
                         ty: TypeExpr::Primitive(PrimitiveName::String),
                         optional: false,
@@ -1163,7 +1137,7 @@ fn define_slots_prefer_concrete_evaluated_slot_bindings_over_symbolic_direct_bin
         object.properties.iter().any(|member| {
             matches!(
                 member,
-                crate::analysis::type_expr::ObjectMember::Property(property)
+                verter_type_expr::ObjectMember::Property(property)
                     if property.name == "base"
             )
         }),
@@ -1203,23 +1177,19 @@ fn define_slots_keep_source_bindings_when_expanded_slot_bindings_are_empty() {
                 crate::analysis::type_expand::ExpandedObjectShape {
                     properties: vec![crate::analysis::type_expand::ExpandedProperty {
                         name: "day".to_string(),
-                        ty: TypeExpr::Function(Arc::new(
-                            crate::analysis::type_expr::FunctionExpr {
-                                parameters: vec![crate::analysis::type_expr::FunctionParam {
-                                    name: Some("props".to_string()),
-                                    ty: TypeExpr::IndexedAccess {
-                                        object: Arc::new(TypeExpr::named("CalendarSlotProps")),
-                                        index: Arc::new(TypeExpr::string_literal("day")),
-                                    },
-                                    optional: false,
-                                    rest: false,
-                                }],
-                                return_type: Some(Arc::new(TypeExpr::Primitive(
-                                    PrimitiveName::Any,
-                                ))),
-                                type_parameters: Vec::new(),
-                            },
-                        )),
+                        ty: TypeExpr::Function(Arc::new(verter_type_expr::FunctionExpr {
+                            parameters: vec![verter_type_expr::FunctionParam {
+                                name: Some("props".to_string()),
+                                ty: TypeExpr::IndexedAccess {
+                                    object: Arc::new(TypeExpr::named("CalendarSlotProps")),
+                                    index: Arc::new(TypeExpr::string_literal("day")),
+                                },
+                                optional: false,
+                                rest: false,
+                            }],
+                            return_type: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Any))),
+                            type_parameters: Vec::new(),
+                        })),
                         optional: true,
                         readonly: false,
                     }],
@@ -1286,24 +1256,24 @@ fn define_slots_extract_bindings_from_call_signature_object_types() {
                 crate::analysis::type_expand::ExpandedObjectShape {
                     properties: vec![crate::analysis::type_expand::ExpandedProperty {
                         name: "content".to_string(),
-                        ty: TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
-                            properties: vec![crate::analysis::type_expr::ObjectMember::CallSignature(
-                                crate::analysis::type_expr::FunctionExpr {
-                                    parameters: vec![crate::analysis::type_expr::FunctionParam {
+                        ty: TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
+                            properties: vec![verter_type_expr::ObjectMember::CallSignature(
+                                verter_type_expr::FunctionExpr {
+                                    parameters: vec![verter_type_expr::FunctionParam {
                                         name: Some("props".to_string()),
                                         ty: TypeExpr::Object(Arc::new(
-                                            crate::analysis::type_expr::ObjectExpr {
+                                            verter_type_expr::ObjectExpr {
                                                 properties: vec![
-                                                    crate::analysis::type_expr::ObjectMember::Property(
-                                                        crate::analysis::type_expr::ObjectProperty {
+                                                    verter_type_expr::ObjectMember::Property(
+                                                        verter_type_expr::ObjectProperty {
                                                             name: "item".to_string(),
                                                             ty: TypeExpr::named("T"),
                                                             optional: false,
                                                             readonly: false,
                                                         },
                                                     ),
-                                                    crate::analysis::type_expr::ObjectMember::Property(
-                                                        crate::analysis::type_expr::ObjectProperty {
+                                                    verter_type_expr::ObjectMember::Property(
+                                                        verter_type_expr::ObjectProperty {
                                                             name: "index".to_string(),
                                                             ty: TypeExpr::Primitive(
                                                                 PrimitiveName::Number,
@@ -1312,8 +1282,8 @@ fn define_slots_extract_bindings_from_call_signature_object_types() {
                                                             readonly: false,
                                                         },
                                                     ),
-                                                    crate::analysis::type_expr::ObjectMember::Property(
-                                                        crate::analysis::type_expr::ObjectProperty {
+                                                    verter_type_expr::ObjectMember::Property(
+                                                        verter_type_expr::ObjectProperty {
                                                             name: "ui".to_string(),
                                                             ty: TypeExpr::IndexedAccess {
                                                                 object: Arc::new(TypeExpr::named(
@@ -1576,7 +1546,7 @@ fn small_partial_placeholder_prop_expansions_fall_back_to_symbolic_source_type()
         make_prop("to", Some("RouteLocationRaw"), true),
         make_prop("href", Some("NuxtLinkProps['to']"), true),
     ])];
-    let placeholder = TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+    let placeholder = TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
         properties: Vec::new(),
     }));
     let diagnostics = vec![crate::analysis::type_expand::ExpansionDiagnostic {
@@ -1750,24 +1720,20 @@ fn small_partial_undefined_object_props_fall_back_to_symbolic_source_type() {
         Some("Button['slots']"),
         true,
     )])];
-    let degraded = TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+    let degraded = TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
         properties: vec![
-            crate::analysis::type_expr::ObjectMember::Property(
-                crate::analysis::type_expr::ObjectProperty {
-                    name: "base".to_string(),
-                    ty: TypeExpr::Primitive(PrimitiveName::Undefined),
-                    optional: false,
-                    readonly: false,
-                },
-            ),
-            crate::analysis::type_expr::ObjectMember::Property(
-                crate::analysis::type_expr::ObjectProperty {
-                    name: "label".to_string(),
-                    ty: TypeExpr::Primitive(PrimitiveName::Undefined),
-                    optional: false,
-                    readonly: false,
-                },
-            ),
+            verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty {
+                name: "base".to_string(),
+                ty: TypeExpr::Primitive(PrimitiveName::Undefined),
+                optional: false,
+                readonly: false,
+            }),
+            verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty {
+                name: "label".to_string(),
+                ty: TypeExpr::Primitive(PrimitiveName::Undefined),
+                optional: false,
+                readonly: false,
+            }),
         ],
     }));
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
@@ -1841,33 +1807,31 @@ fn huge_partial_prop_expansions_fall_back_to_symbolic_source_type() {
     )])];
     let huge_members = (0..512)
         .map(|index| {
-            crate::analysis::type_expr::ObjectMember::Property(
-                crate::analysis::type_expr::ObjectProperty {
-                    name: format!("field{index}"),
-                    ty: TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
-                        properties: vec![
-                            crate::analysis::type_expr::ObjectMember::Property(
-                                crate::analysis::type_expr::ObjectProperty {
-                                    name: "enabled".to_string(),
-                                    ty: TypeExpr::Primitive(PrimitiveName::Boolean),
-                                    optional: false,
-                                    readonly: false,
-                                },
-                            ),
-                            crate::analysis::type_expr::ObjectMember::Property(
-                                crate::analysis::type_expr::ObjectProperty {
-                                    name: "label".to_string(),
-                                    ty: TypeExpr::Primitive(PrimitiveName::String),
-                                    optional: true,
-                                    readonly: false,
-                                },
-                            ),
-                        ],
-                    })),
-                    optional: true,
-                    readonly: false,
-                },
-            )
+            verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty {
+                name: format!("field{index}"),
+                ty: TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
+                    properties: vec![
+                        verter_type_expr::ObjectMember::Property(
+                            verter_type_expr::ObjectProperty {
+                                name: "enabled".to_string(),
+                                ty: TypeExpr::Primitive(PrimitiveName::Boolean),
+                                optional: false,
+                                readonly: false,
+                            },
+                        ),
+                        verter_type_expr::ObjectMember::Property(
+                            verter_type_expr::ObjectProperty {
+                                name: "label".to_string(),
+                                ty: TypeExpr::Primitive(PrimitiveName::String),
+                                optional: true,
+                                readonly: false,
+                            },
+                        ),
+                    ],
+                })),
+                optional: true,
+                readonly: false,
+            })
         })
         .collect();
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
@@ -1875,7 +1839,7 @@ fn huge_partial_prop_expansions_fall_back_to_symbolic_source_type() {
             name: "mention".to_string(),
             r#type: TypeExpr::Union(Arc::from(vec![
                 TypeExpr::Primitive(PrimitiveName::Boolean),
-                TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+                TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
                     properties: huge_members,
                 })),
             ])),
@@ -1906,11 +1870,11 @@ fn huge_partial_prop_expansions_fall_back_to_symbolic_source_type() {
                         name: "mention".to_string(),
                         ty: TypeExpr::Union(Arc::from(vec![
                             TypeExpr::Primitive(PrimitiveName::Boolean),
-                            TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+                            TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
                                 properties: (0..512)
                                     .map(|index| {
-                                        crate::analysis::type_expr::ObjectMember::Property(
-                                            crate::analysis::type_expr::ObjectProperty {
+                                        verter_type_expr::ObjectMember::Property(
+                                            verter_type_expr::ObjectProperty {
                                                 name: format!("field{index}"),
                                                 ty: TypeExpr::Primitive(PrimitiveName::String),
                                                 optional: true,
@@ -1999,7 +1963,7 @@ fn source_event_raw_signature_beats_backend_when_backend_widens_macro_payload() 
         emits: vec![crate::analysis::type_expand::ExpandedField {
             name: "update:modelValue".to_string(),
             r#type: TypeExpr::Tuple {
-                elements: Arc::from(vec![crate::analysis::type_expr::TupleElement {
+                elements: Arc::from(vec![verter_type_expr::TupleElement {
                     label: Some("value".to_string()),
                     ty: TypeExpr::union(vec![
                         TypeExpr::Primitive(PrimitiveName::String),
@@ -2102,7 +2066,7 @@ fn source_backed_update_events_keep_their_raw_emit_payloads() {
         emits: vec![crate::analysis::type_expand::ExpandedField {
             name: "update:modelValue".to_string(),
             r#type: TypeExpr::Tuple {
-                elements: Arc::from(vec![crate::analysis::type_expr::TupleElement {
+                elements: Arc::from(vec![verter_type_expr::TupleElement {
                     label: Some("value".to_string()),
                     ty: TypeExpr::union(vec![
                         TypeExpr::Primitive(PrimitiveName::String),
@@ -2164,7 +2128,7 @@ fn evaluated_tuple_event_raw_type_is_not_double_wrapped() {
         emits: vec![crate::analysis::type_expand::ExpandedField {
             name: "update:modelValue".to_string(),
             r#type: TypeExpr::Tuple {
-                elements: Arc::from(vec![crate::analysis::type_expr::TupleElement {
+                elements: Arc::from(vec![verter_type_expr::TupleElement {
                     label: Some("date".to_string()),
                     ty: TypeExpr::named_with_args(
                         "CalendarModelValue",
@@ -2246,31 +2210,29 @@ fn expanded_slot_bindings_preserve_source_binding_order() {
                     properties: vec![crate::analysis::type_expand::ExpandedProperty {
                         name: "default".to_string(),
                         ty: TypeExpr::union(vec![
-                            TypeExpr::Function(Arc::new(
-                                crate::analysis::type_expr::FunctionExpr {
-                                    parameters: vec![crate::analysis::type_expr::FunctionParam {
-                                        name: Some("props".to_string()),
-                                        ty: TypeExpr::Object(Arc::new(
-                                            crate::analysis::type_expr::ObjectExpr {
-                                                properties: vec![
-                                            crate::analysis::type_expr::ObjectMember::Property(
-                                                crate::analysis::type_expr::ObjectProperty {
+                            TypeExpr::Function(Arc::new(verter_type_expr::FunctionExpr {
+                                parameters: vec![verter_type_expr::FunctionParam {
+                                    name: Some("props".to_string()),
+                                    ty: TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
+                                        properties: vec![
+                                            verter_type_expr::ObjectMember::Property(
+                                                verter_type_expr::ObjectProperty {
                                                     name: "index".to_string(),
                                                     ty: TypeExpr::Primitive(PrimitiveName::Number),
                                                     optional: false,
                                                     readonly: false,
                                                 },
                                             ),
-                                            crate::analysis::type_expr::ObjectMember::Property(
-                                                crate::analysis::type_expr::ObjectProperty {
+                                            verter_type_expr::ObjectMember::Property(
+                                                verter_type_expr::ObjectProperty {
                                                     name: "item".to_string(),
                                                     ty: TypeExpr::named("T"),
                                                     optional: false,
                                                     readonly: false,
                                                 },
                                             ),
-                                            crate::analysis::type_expr::ObjectMember::Property(
-                                                crate::analysis::type_expr::ObjectProperty {
+                                            verter_type_expr::ObjectMember::Property(
+                                                verter_type_expr::ObjectProperty {
                                                     name: "open".to_string(),
                                                     ty: TypeExpr::Primitive(PrimitiveName::Boolean),
                                                     optional: false,
@@ -2278,17 +2240,15 @@ fn expanded_slot_bindings_preserve_source_binding_order() {
                                                 },
                                             ),
                                         ],
-                                            },
-                                        )),
-                                        optional: false,
-                                        rest: false,
-                                    }],
-                                    return_type: Some(Arc::new(TypeExpr::Primitive(
-                                        PrimitiveName::Any,
-                                    ))),
-                                    type_parameters: Vec::new(),
-                                },
-                            )),
+                                    })),
+                                    optional: false,
+                                    rest: false,
+                                }],
+                                return_type: Some(Arc::new(TypeExpr::Primitive(
+                                    PrimitiveName::Any,
+                                ))),
+                                type_parameters: Vec::new(),
+                            })),
                             TypeExpr::Primitive(PrimitiveName::Undefined),
                         ]),
                         optional: true,
@@ -2551,7 +2511,7 @@ fn define_model_reconciles_existing_model_value_prop_from_define_props() {
         emits: vec![crate::analysis::type_expand::ExpandedField {
             name: "update:modelValue".to_string(),
             r#type: TypeExpr::Tuple {
-                elements: Arc::from(vec![crate::analysis::type_expr::TupleElement {
+                elements: Arc::from(vec![verter_type_expr::TupleElement {
                     label: Some("value".to_string()),
                     ty: TypeExpr::Primitive(PrimitiveName::String),
                     optional: false,
@@ -4246,11 +4206,9 @@ fn define_emits_call_signature_events_get_empty_diagnostics_not_global_clones() 
                             // First param is the event name literal
                             crate::analysis::type_expand::ExpandedParameter {
                                 name: "e".to_string(),
-                                ty: TypeExpr::Literal(
-                                    crate::analysis::type_expr::LiteralValue::String(
-                                        "change".to_string(),
-                                    ),
-                                ),
+                                ty: TypeExpr::Literal(verter_type_expr::LiteralValue::String(
+                                    "change".to_string(),
+                                )),
                                 optional: false,
                                 rest: false,
                             },

@@ -38,7 +38,7 @@ use std::time::Instant;
 
 use verter_semantic::analysis::component_meta::ComponentMetaAnalysis;
 use verter_semantic::analysis::type_expand::ExpansionExactness;
-use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+use verter_type_expr::{ObjectMember, TypeExpr};
 
 use crate::audited_request::AuditedRequest;
 use crate::types::FileKind;

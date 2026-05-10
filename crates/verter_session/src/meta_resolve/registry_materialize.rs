@@ -76,10 +76,10 @@ pub(crate) fn component_meta_registry_prefers_structural_materialization_node(
 }
 
 pub(crate) fn materialize_component_meta_registry_structural_expr(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    expr: &verter_type_expr::TypeExpr,
     scope_canonical_id: &str,
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-) -> verter_semantic::analysis::type_expr::TypeExpr {
+) -> verter_type_expr::TypeExpr {
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::semantic_query::{ProjectionMode, SemanticNodeData, SemanticNodeId};
 
@@ -98,7 +98,7 @@ pub(crate) fn materialize_component_meta_registry_structural_expr(
         name: &str,
     ) -> bool {
         let dispatch = ProjectSemanticDispatch::new(ctx);
-        let probe = verter_semantic::analysis::type_expr::TypeExpr::Ref {
+        let probe = verter_type_expr::TypeExpr::Ref {
             name: Arc::from(name),
             type_arguments: Arc::from(Vec::new().into_boxed_slice()),
         };
@@ -125,12 +125,12 @@ pub(crate) fn materialize_component_meta_registry_structural_expr(
     }
 
     fn inner(
-        expr: &verter_semantic::analysis::type_expr::TypeExpr,
+        expr: &verter_type_expr::TypeExpr,
         scope_canonical_id: &str,
         engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
         active: &mut rustc_hash::FxHashSet<SemanticNodeId>,
-    ) -> verter_semantic::analysis::type_expr::TypeExpr {
-        use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+    ) -> verter_type_expr::TypeExpr {
+        use verter_type_expr::{ObjectMember, TypeExpr};
 
         // Graph-native cycle guard. Lower the
         // current expr to a Navigate-mode SemanticNodeId and use
@@ -251,14 +251,12 @@ pub(crate) fn materialize_component_meta_registry_structural_expr(
                     elements: Arc::from(
                         elements
                             .iter()
-                            .map(
-                                |element| verter_semantic::analysis::type_expr::TupleElement {
-                                    label: element.label.clone(),
-                                    ty: inner(&element.ty, scope_canonical_id, engine, active),
-                                    optional: element.optional,
-                                    rest: element.rest,
-                                },
-                            )
+                            .map(|element| verter_type_expr::TupleElement {
+                                label: element.label.clone(),
+                                ty: inner(&element.ty, scope_canonical_id, engine, active),
+                                optional: element.optional,
+                                rest: element.rest,
+                            })
                             .collect::<Vec<_>>(),
                     ),
                     readonly: *readonly,
@@ -543,11 +541,11 @@ pub(crate) fn preserve_package_backed_symbolic_refs_node(
 }
 
 pub(crate) fn preserve_registry_callable_param_member_routes(
-    materialized: &verter_semantic::analysis::type_expr::TypeExpr,
-    raw: &verter_semantic::analysis::type_expr::TypeExpr,
-) -> verter_semantic::analysis::type_expr::TypeExpr {
+    materialized: &verter_type_expr::TypeExpr,
+    raw: &verter_type_expr::TypeExpr,
+) -> verter_type_expr::TypeExpr {
     use rustc_hash::FxHashMap;
-    use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+    use verter_type_expr::{ObjectMember, TypeExpr};
 
     fn inner(materialized: &TypeExpr, raw: &TypeExpr, preserve_routes: bool) -> TypeExpr {
         if preserve_routes
@@ -671,11 +669,11 @@ pub(crate) fn preserve_registry_callable_param_member_routes(
 }
 
 pub(crate) fn nested_symbolic_member_route_should_stay_symbolic(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    expr: &verter_type_expr::TypeExpr,
     scope_canonical_id: &str,
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
 ) -> bool {
-    use verter_semantic::analysis::type_expr::TypeExpr;
+    use verter_type_expr::TypeExpr;
 
     fn declaration_body_keeps_nested_member_route_symbolic(body: &TypeExpr) -> bool {
         match body {
@@ -712,10 +710,8 @@ pub(crate) fn nested_symbolic_member_route_should_stay_symbolic(
     declaration_body_keeps_nested_member_route_symbolic(&body)
 }
 
-pub(crate) fn type_expr_contains_public_member_route(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
-) -> bool {
-    use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+pub(crate) fn type_expr_contains_public_member_route(expr: &verter_type_expr::TypeExpr) -> bool {
+    use verter_type_expr::{ObjectMember, TypeExpr};
 
     if component_meta_registry_public_utility_route(expr)
         .or_else(|| component_meta_registry_public_indexed_access_route(expr))
@@ -820,9 +816,9 @@ pub(crate) fn type_expr_contains_public_member_route(
 }
 
 pub(crate) fn type_expr_needs_nested_symbolic_route_preservation(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    expr: &verter_type_expr::TypeExpr,
 ) -> bool {
-    use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+    use verter_type_expr::{ObjectMember, TypeExpr};
 
     match expr {
         TypeExpr::Parenthesized(inner)
@@ -907,14 +903,14 @@ pub(crate) fn type_expr_needs_nested_symbolic_route_preservation(
 }
 
 pub(crate) fn preserve_nested_symbolic_member_routes(
-    materialized: &verter_semantic::analysis::type_expr::TypeExpr,
-    raw: &verter_semantic::analysis::type_expr::TypeExpr,
+    materialized: &verter_type_expr::TypeExpr,
+    raw: &verter_type_expr::TypeExpr,
     scope_canonical_id: &str,
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     nested: bool,
-) -> verter_semantic::analysis::type_expr::TypeExpr {
+) -> verter_type_expr::TypeExpr {
     use std::sync::Arc;
-    use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+    use verter_type_expr::{ObjectMember, TypeExpr};
 
     let should_keep_symbolic = nested
         && nested_symbolic_member_route_should_stay_symbolic(raw, scope_canonical_id, engine);
@@ -1033,11 +1029,11 @@ pub(crate) fn preserve_nested_symbolic_member_routes(
 }
 
 pub(crate) fn component_meta_registry_should_keep_raw_symbolic_non_object_alias(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    expr: &verter_type_expr::TypeExpr,
     scope_canonical_id: &str,
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
 ) -> bool {
-    use verter_semantic::analysis::type_expr::TypeExpr;
+    use verter_type_expr::TypeExpr;
 
     fn ref_stays_symbolic_in_registry(
         scope_canonical_id: &str,

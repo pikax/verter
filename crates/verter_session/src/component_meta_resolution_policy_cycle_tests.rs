@@ -29,7 +29,7 @@ use verter_semantic::analysis::component_meta::{
     AcceptedSurfaceCompleteness, ComponentMetaAnalysis, ComponentMetaFlags, FallthroughSurface,
     NoFallthroughReason, PropAnalysis, ResolvedTypeAnalysis, RootReachability,
 };
-use verter_semantic::analysis::type_expr::{
+use verter_type_expr::{
     LiteralValue, ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr,
 };
 

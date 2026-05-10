@@ -23,7 +23,7 @@
 //!   privates).
 
 use rustc_hash::FxHashSet;
-use verter_semantic::analysis::type_expr::TypeExpr;
+use verter_type_expr::TypeExpr;
 
 use super::helpers::{is_package_canonical, strip_parens_expr, type_expr_references_type_params};
 use super::{ComponentMetaQueryEngine, FastShallowFieldExpr, FastShallowFieldExprExactness};
@@ -143,7 +143,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         active_exprs: &mut rustc_hash::FxHashSet<usize>,
         active_refs: &mut rustc_hash::FxHashSet<String>,
     ) -> bool {
-        use verter_semantic::analysis::type_expr::ObjectMember;
+        use verter_type_expr::ObjectMember;
 
         let expr_addr = expr as *const TypeExpr as usize;
         if !active_exprs.insert(expr_addr) {
@@ -537,9 +537,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             if !type_arguments.is_empty() {
                 return None;
             }
-            let TypeExpr::Literal(verter_semantic::analysis::type_expr::LiteralValue::String(
-                member_name,
-            )) = strip_parens_expr(index)
+            let TypeExpr::Literal(verter_type_expr::LiteralValue::String(member_name)) =
+                strip_parens_expr(index)
             else {
                 return None;
             };
@@ -699,7 +698,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             expr: &TypeExpr,
         ) -> bool {
             match strip_parens_expr(expr) {
-                TypeExpr::TypeOf(verter_semantic::analysis::type_expr::ValueRef { path }) => {
+                TypeExpr::TypeOf(verter_type_expr::ValueRef { path }) => {
                     path.first().is_some_and(|root| {
                         engine.bare_ref_origin_in_scope(scope_canonical_id, root)
                             == BareRefOrigin::Imported
@@ -769,14 +768,14 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     )
                 }),
                 TypeExpr::Object(object) => object.properties.iter().any(|member| match member {
-                    verter_semantic::analysis::type_expr::ObjectMember::Property(property) => {
+                    verter_type_expr::ObjectMember::Property(property) => {
                         contains_direct_imported_utility_route(
                             engine,
                             scope_canonical_id,
                             &property.ty,
                         )
                     }
-                    verter_semantic::analysis::type_expr::ObjectMember::Method(method) => {
+                    verter_type_expr::ObjectMember::Method(method) => {
                         method.function.parameters.iter().any(|parameter| {
                             contains_direct_imported_utility_route(
                                 engine,
@@ -795,8 +794,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                                 )
                             })
                     }
-                    verter_semantic::analysis::type_expr::ObjectMember::CallSignature(function)
-                    | verter_semantic::analysis::type_expr::ObjectMember::ConstructSignature(
+                    verter_type_expr::ObjectMember::CallSignature(function)
+                    | verter_type_expr::ObjectMember::ConstructSignature(
                         function,
                     ) => function.parameters.iter().any(|parameter| {
                         contains_direct_imported_utility_route(
@@ -811,7 +810,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                             return_type,
                         )
                     }),
-                    verter_semantic::analysis::type_expr::ObjectMember::IndexSignature(index) => {
+                    verter_type_expr::ObjectMember::IndexSignature(index) => {
                         contains_direct_imported_utility_route(
                             engine,
                             scope_canonical_id,
@@ -1018,7 +1017,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 let elements = elements
                     .iter()
                     .map(|element| {
-                        Some(verter_semantic::analysis::type_expr::TupleElement {
+                        Some(verter_type_expr::TupleElement {
                             label: element.label.clone(),
                             ty: self.rewrite_fast_shallow_alias_body(
                                 scope_canonical_id,
@@ -1078,12 +1077,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 ),
             }),
             TypeExpr::Function(function) => Some(TypeExpr::Function(std::sync::Arc::new(
-                verter_semantic::analysis::type_expr::FunctionExpr {
+                verter_type_expr::FunctionExpr {
                     parameters: function
                         .parameters
                         .iter()
                         .map(|parameter| {
-                            Some(verter_semantic::analysis::type_expr::FunctionParam {
+                            Some(verter_type_expr::FunctionParam {
                                 name: parameter.name.clone(),
                                 ty: self.rewrite_fast_shallow_alias_body(
                                     scope_canonical_id,
@@ -1109,7 +1108,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         .type_parameters
                         .iter()
                         .map(|parameter| {
-                            Some(verter_semantic::analysis::type_expr::TypeParam {
+                            Some(verter_type_expr::TypeParam {
                                 name: parameter.name.clone(),
                                 constraint: match parameter.constraint.as_deref() {
                                     Some(constraint) => Some(std::sync::Arc::new(
@@ -1240,7 +1239,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         scope_canonical_id: &str,
         expr: &TypeExpr,
     ) -> TypeExpr {
-        use verter_semantic::analysis::type_expr::{ObjectMember, ObjectProperty};
+        use verter_type_expr::{ObjectMember, ObjectProperty};
 
         match expr {
             TypeExpr::Object(obj) => {
@@ -1254,20 +1253,20 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                             optional: p.optional,
                             readonly: p.readonly,
                         }),
-                        ObjectMember::Method(m) => ObjectMember::Method(
-                            verter_semantic::analysis::type_expr::MethodSignature {
+                        ObjectMember::Method(m) => {
+                            ObjectMember::Method(verter_type_expr::MethodSignature {
                                 name: m.name.clone(),
                                 function: self
                                     .deep_resolve_fn_refs(scope_canonical_id, &m.function),
                                 optional: m.optional,
-                            },
-                        ),
+                            })
+                        }
                         other => other.clone(),
                     })
                     .collect();
-                TypeExpr::Object(std::sync::Arc::new(
-                    verter_semantic::analysis::type_expr::ObjectExpr { properties },
-                ))
+                TypeExpr::Object(std::sync::Arc::new(verter_type_expr::ObjectExpr {
+                    properties,
+                }))
             }
             // Path C C11-residual-A: walk compound shapes so
             // `defineSlots<TabsSlots<T>>` patterns with
@@ -1348,13 +1347,13 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     fn deep_resolve_fn_refs(
         &mut self,
         scope_canonical_id: &str,
-        func: &verter_semantic::analysis::type_expr::FunctionExpr,
-    ) -> verter_semantic::analysis::type_expr::FunctionExpr {
-        verter_semantic::analysis::type_expr::FunctionExpr {
+        func: &verter_type_expr::FunctionExpr,
+    ) -> verter_type_expr::FunctionExpr {
+        verter_type_expr::FunctionExpr {
             parameters: func
                 .parameters
                 .iter()
-                .map(|p| verter_semantic::analysis::type_expr::FunctionParam {
+                .map(|p| verter_type_expr::FunctionParam {
                     name: p.name.clone(),
                     ty: self.deep_resolve_type_refs(scope_canonical_id, &p.ty),
                     optional: p.optional,

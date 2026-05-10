@@ -36,7 +36,7 @@ pub use verter_semantic::analysis::type_solver::arena::PrimitiveKind;
 // so callers working with the semantic graph can match on exact literal
 // shapes (`"idle"` vs `"busy"`) without collapsing them to the broader
 // `Primitive(String)`.
-pub use verter_semantic::analysis::type_expr::LiteralValue;
+pub use verter_type_expr::LiteralValue;
 
 // Reuse the existing structured failure shape from the resolver — there is no
 // second failure-domain type in this rewrite.

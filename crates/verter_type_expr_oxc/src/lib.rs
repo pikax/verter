@@ -1,8 +1,15 @@
 //! Lower OXC `TSType` AST nodes into [`TypeExpr`].
 //!
-//! This module converts OXC's borrowed AST representation into our owned
-//! `TypeExpr` tree. The lowering is purely syntactic — no symbol resolution
-//! or evaluation happens here.
+//! This crate converts OXC's borrowed AST representation into the
+//! owned [`TypeExpr`] tree exposed by `verter_type_expr`. The lowering
+//! is purely syntactic — no symbol resolution or evaluation happens
+//! here.
+//!
+//! The data tier (`verter_type_expr`) intentionally has no OXC
+//! dependency so NAPI / WASM / JSON-only consumers can pull only that
+//! crate. Producer-side callers (the analyzer, the parser's
+//! cross-file external resolution path, the checker-text adapter)
+//! depend on this crate to perform the lowering at OXC visit points.
 //!
 //! # Contract
 //!
@@ -21,7 +28,7 @@ use oxc_span::GetSpan;
 
 use std::sync::Arc;
 
-use crate::analysis::type_expr::{
+use verter_type_expr::{
     FunctionExpr, FunctionParam, IndexSignature, MappedModifier, MethodSignature, ObjectExpr,
     ObjectMember, ObjectProperty, PrimitiveName, TupleElement, TypeExpr, TypeParam, ValueRef,
 };
@@ -218,9 +225,9 @@ fn lower_literal(literal: &oxc_ast::ast::TSLiteral<'_>, source: &str) -> TypeExp
         TSLiteral::StringLiteral(s) => TypeExpr::string_literal(s.value.as_str()),
         TSLiteral::NumericLiteral(n) => TypeExpr::number_literal(n.value),
         TSLiteral::BooleanLiteral(b) => TypeExpr::boolean_literal(b.value),
-        TSLiteral::BigIntLiteral(b) => TypeExpr::Literal(
-            crate::analysis::type_expr::LiteralValue::BigInt(b.value.to_string()),
-        ),
+        TSLiteral::BigIntLiteral(b) => {
+            TypeExpr::Literal(verter_type_expr::LiteralValue::BigInt(b.value.to_string()))
+        }
         TSLiteral::UnaryExpression(unary) => {
             if let Expression::NumericLiteral(n) = &unary.argument {
                 TypeExpr::number_literal(-n.value)
@@ -785,7 +792,7 @@ fn normalize_nested_function_type_params(func: &FunctionExpr, scope: &[TypeParam
 // Name extraction helpers
 // ---------------------------------------------------------------------------
 
-pub(crate) fn property_key_name(key: &PropertyKey<'_>) -> Option<String> {
+pub fn property_key_name(key: &PropertyKey<'_>) -> Option<String> {
     match key {
         PropertyKey::StaticIdentifier(id) => Some(id.name.to_string()),
         PropertyKey::StringLiteral(s) => Some(s.value.to_string()),

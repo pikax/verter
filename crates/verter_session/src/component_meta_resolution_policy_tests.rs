@@ -7,7 +7,7 @@ use verter_semantic::analysis::component_meta::{
     NoFallthroughReason, PropAnalysis, PublicInstanceAnalysis, PublicInstanceCompleteness,
     ResolvedTypeAnalysis, RootReachability,
 };
-use verter_semantic::analysis::type_expr::{
+use verter_type_expr::{
     LiteralValue, ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr,
 };
 

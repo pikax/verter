@@ -11,7 +11,7 @@ use std::sync::Arc;
 use crate::resolver_core::ResolverContext;
 use crate::resolver_core::RouteDemand;
 use crate::types::FileAnalysisSnapshot;
-use verter_semantic::analysis::type_expr::{FunctionExpr, ObjectMember, PrimitiveName, TypeExpr};
+use verter_type_expr::{FunctionExpr, ObjectMember, PrimitiveName, TypeExpr};
 
 /// Issue #7 / capture-token counters for route-demand
 /// emission. Recorded inside [`enqueue_component_meta_registry_ref`]
@@ -71,9 +71,9 @@ pub(crate) fn upsert_component_meta_registry_entry(
     queued_names: &mut rustc_hash::FxHashSet<String>,
     referenced_names: &mut VecDeque<PendingComponentMetaRegistryRef>,
     name: String,
-    type_expr: verter_semantic::analysis::type_expr::TypeExpr,
+    type_expr: verter_type_expr::TypeExpr,
     declaration: crate::resolver_core::ResolvedTypeDeclaration,
-    collection_expr: Option<&verter_semantic::analysis::type_expr::TypeExpr>,
+    collection_expr: Option<&verter_type_expr::TypeExpr>,
 ) {
     let declaration_source_hint =
         (!declaration.canonical_source.is_empty()).then(|| declaration.canonical_source.clone());
@@ -358,9 +358,9 @@ fn route_demand_keeps_exact_deep_member_path(
 }
 
 pub(crate) fn choose_preferred_component_meta_registry_candidate(
-    left: Option<verter_semantic::analysis::type_expr::TypeExpr>,
-    right: Option<verter_semantic::analysis::type_expr::TypeExpr>,
-) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+    left: Option<verter_type_expr::TypeExpr>,
+    right: Option<verter_type_expr::TypeExpr>,
+) -> Option<verter_type_expr::TypeExpr> {
     match (left, right) {
         (Some(left), Some(right)) => {
             let left_non_object = component_meta_registry_has_non_object_top_level_surface(&left);
@@ -394,20 +394,18 @@ pub(crate) fn choose_preferred_component_meta_registry_candidate(
 const MAX_REGISTRY_MERGE_DEPTH: u8 = 8;
 
 pub(crate) fn merge_component_meta_registry_candidates(
-    left: Option<verter_semantic::analysis::type_expr::TypeExpr>,
-    right: Option<verter_semantic::analysis::type_expr::TypeExpr>,
-) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+    left: Option<verter_type_expr::TypeExpr>,
+    right: Option<verter_type_expr::TypeExpr>,
+) -> Option<verter_type_expr::TypeExpr> {
     merge_component_meta_registry_candidates_bounded(left, right, 0)
 }
 
 fn merge_component_meta_registry_candidates_bounded(
-    left: Option<verter_semantic::analysis::type_expr::TypeExpr>,
-    right: Option<verter_semantic::analysis::type_expr::TypeExpr>,
+    left: Option<verter_type_expr::TypeExpr>,
+    right: Option<verter_type_expr::TypeExpr>,
     depth: u8,
-) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
-    use verter_semantic::analysis::type_expr::{
-        ObjectExpr, ObjectMember, ObjectProperty, TypeExpr,
-    };
+) -> Option<verter_type_expr::TypeExpr> {
+    use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
 
     fn merge_member_types(left: &TypeExpr, right: &TypeExpr, depth: u8) -> TypeExpr {
         if depth >= MAX_REGISTRY_MERGE_DEPTH {
@@ -1067,9 +1065,9 @@ fn imported_function_specificity_score(func: &FunctionExpr) -> usize {
 }
 
 pub(crate) fn component_meta_registry_has_non_object_top_level_surface(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    expr: &verter_type_expr::TypeExpr,
 ) -> bool {
-    use verter_semantic::analysis::type_expr::TypeExpr;
+    use verter_type_expr::TypeExpr;
 
     match expr {
         TypeExpr::Parenthesized(inner) => {
@@ -1091,9 +1089,9 @@ pub(crate) fn component_meta_registry_has_non_object_top_level_surface(
 }
 
 pub(crate) fn component_meta_registry_has_explicit_object_surface(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    expr: &verter_type_expr::TypeExpr,
 ) -> bool {
-    use verter_semantic::analysis::type_expr::TypeExpr;
+    use verter_type_expr::TypeExpr;
 
     match expr {
         TypeExpr::Parenthesized(inner) => {
@@ -1108,12 +1106,10 @@ pub(crate) fn component_meta_registry_has_explicit_object_surface(
 }
 
 pub(crate) fn component_meta_registry_raw_member_path_surface(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    expr: &verter_type_expr::TypeExpr,
     path: &[String],
-) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
-    use verter_semantic::analysis::type_expr::{
-        ObjectExpr, ObjectMember, ObjectProperty, TypeExpr,
-    };
+) -> Option<verter_type_expr::TypeExpr> {
+    use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
 
     /// Inlined replacement for the
     /// retired free helper. Navigates into a `TypeExpr::Object` by a
@@ -1154,10 +1150,10 @@ pub(crate) fn component_meta_registry_raw_member_path_surface(
 }
 
 pub(crate) fn component_meta_registry_expr_references_name(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    expr: &verter_type_expr::TypeExpr,
     target_name: &str,
 ) -> bool {
-    use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+    use verter_type_expr::{ObjectMember, TypeExpr};
 
     match expr {
         TypeExpr::Ref {
@@ -1265,9 +1261,9 @@ pub(crate) fn component_meta_registry_expr_references_name(
 }
 
 pub(crate) fn component_meta_registry_indexed_ref_penalty(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    expr: &verter_type_expr::TypeExpr,
 ) -> usize {
-    use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+    use verter_type_expr::{ObjectMember, TypeExpr};
 
     match expr {
         TypeExpr::IndexedAccess { object, index } => {
@@ -1377,14 +1373,14 @@ pub(crate) fn component_meta_registry_indexed_ref_penalty(
 }
 
 pub(crate) fn collect_component_meta_registry_refs(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    expr: &verter_type_expr::TypeExpr,
     published_names: &rustc_hash::FxHashSet<String>,
     queued_names: &mut rustc_hash::FxHashSet<String>,
     output: &mut VecDeque<PendingComponentMetaRegistryRef>,
     source_hint: Option<&str>,
     allow_plain_member_refs: bool,
 ) {
-    use verter_semantic::analysis::type_expr::TypeExpr;
+    use verter_type_expr::TypeExpr;
 
     if let Some((root_name, route)) = component_meta_registry_public_utility_route(expr) {
         enqueue_component_meta_registry_ref(
@@ -1478,7 +1474,7 @@ pub(crate) fn collect_component_meta_registry_refs(
         // are filtered later in `meta_resolve` once the consuming field surface
         // has already been projected concretely.
         TypeExpr::Object(obj) => {
-            use verter_semantic::analysis::type_expr::ObjectMember;
+            use verter_type_expr::ObjectMember;
 
             for member in &obj.properties {
                 match member {
@@ -1647,7 +1643,7 @@ pub(crate) fn collect_component_meta_registry_refs(
 }
 
 pub(crate) fn collect_component_meta_registry_function_surface_refs(
-    func: &verter_semantic::analysis::type_expr::FunctionExpr,
+    func: &verter_type_expr::FunctionExpr,
     published_names: &rustc_hash::FxHashSet<String>,
     queued_names: &mut rustc_hash::FxHashSet<String>,
     output: &mut VecDeque<PendingComponentMetaRegistryRef>,
@@ -1690,7 +1686,7 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
             field
                 .raw_type
                 .as_deref()
-                .map(verter_semantic::analysis::type_expr_lower::parse_type_annotation)
+                .map(verter_type_expr_oxc::parse_type_annotation)
         })
         .flatten()
         .filter(|raw| {
@@ -1736,10 +1732,7 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
     let skip_direct_plain_ref = component_meta_registry_ref_name(expr).is_some_and(|name| {
         ctx.prepared_type_decl(owner_canonical, name)
             .is_some_and(|prepared| {
-                matches!(
-                    prepared.body,
-                    verter_semantic::analysis::type_expr::TypeExpr::TypeParameter(_),
-                )
+                matches!(prepared.body, verter_type_expr::TypeExpr::TypeParameter(_),)
             })
             || owner_component_meta_registry_import_root(ctx, owner_canonical, snapshot, name)
                 .and_then(|(canonical_id, exported_name)| {
@@ -1784,10 +1777,7 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
             let local_type_parameter =
                 ctx.prepared_type_decl(owner_canonical, name)
                     .is_some_and(|prepared| {
-                        matches!(
-                            prepared.body,
-                            verter_semantic::analysis::type_expr::TypeExpr::TypeParameter(_),
-                        )
+                        matches!(prepared.body, verter_type_expr::TypeExpr::TypeParameter(_),)
                     });
             let import_root =
                 owner_component_meta_registry_import_root(ctx, owner_canonical, snapshot, name);
@@ -1834,10 +1824,8 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
     );
 }
 
-pub(crate) fn component_meta_registry_ref_name(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
-) -> Option<&str> {
-    use verter_semantic::analysis::type_expr::TypeExpr;
+pub(crate) fn component_meta_registry_ref_name(expr: &verter_type_expr::TypeExpr) -> Option<&str> {
+    use verter_type_expr::TypeExpr;
 
     match expr {
         TypeExpr::Ref {
@@ -1850,9 +1838,9 @@ pub(crate) fn component_meta_registry_ref_name(
 }
 
 pub(crate) fn component_meta_registry_direct_public_ref(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
-) -> Option<(&str, &[verter_semantic::analysis::type_expr::TypeExpr])> {
-    use verter_semantic::analysis::type_expr::TypeExpr;
+    expr: &verter_type_expr::TypeExpr,
+) -> Option<(&str, &[verter_type_expr::TypeExpr])> {
+    use verter_type_expr::TypeExpr;
 
     match expr {
         TypeExpr::Ref {
@@ -1865,7 +1853,7 @@ pub(crate) fn component_meta_registry_direct_public_ref(
 }
 
 pub(crate) fn component_meta_registry_field_expr_has_actionable_route(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    expr: &verter_type_expr::TypeExpr,
 ) -> bool {
     component_meta_registry_direct_public_ref(expr).is_some()
         || component_meta_registry_public_utility_route(expr).is_some()
@@ -1873,9 +1861,9 @@ pub(crate) fn component_meta_registry_field_expr_has_actionable_route(
 }
 
 pub(crate) fn component_meta_registry_string_literal_keys(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    expr: &verter_type_expr::TypeExpr,
 ) -> Option<Vec<String>> {
-    use verter_semantic::analysis::type_expr::{LiteralValue, TypeExpr};
+    use verter_type_expr::{LiteralValue, TypeExpr};
 
     match expr {
         TypeExpr::Literal(LiteralValue::String(value)) => Some(vec![value.clone()]),
@@ -1894,9 +1882,9 @@ pub(crate) fn component_meta_registry_string_literal_keys(
 }
 
 pub(crate) fn component_meta_registry_public_utility_route(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    expr: &verter_type_expr::TypeExpr,
 ) -> Option<(String, RouteDemand)> {
-    use verter_semantic::analysis::type_expr::TypeExpr;
+    use verter_type_expr::TypeExpr;
 
     match expr {
         TypeExpr::Parenthesized(inner) => component_meta_registry_public_utility_route(inner),
@@ -1921,12 +1909,12 @@ pub(crate) fn component_meta_registry_public_utility_route(
 }
 
 pub(crate) fn component_meta_registry_public_indexed_access_route(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    expr: &verter_type_expr::TypeExpr,
 ) -> Option<(String, RouteDemand)> {
-    use verter_semantic::analysis::type_expr::TypeExpr;
+    use verter_type_expr::TypeExpr;
 
     fn collect_path(expr: &TypeExpr, path: &mut Vec<String>) -> Option<String> {
-        use verter_semantic::analysis::type_expr::{LiteralValue, TypeExpr};
+        use verter_type_expr::{LiteralValue, TypeExpr};
 
         match expr {
             TypeExpr::IndexedAccess { object, index } => {
@@ -1955,13 +1943,13 @@ pub(crate) fn component_meta_registry_public_indexed_access_route(
 }
 
 pub(crate) fn collect_component_meta_registry_public_surface_refs(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    expr: &verter_type_expr::TypeExpr,
     published_names: &rustc_hash::FxHashSet<String>,
     queued_names: &mut rustc_hash::FxHashSet<String>,
     output: &mut VecDeque<PendingComponentMetaRegistryRef>,
     source_hint: Option<&str>,
 ) {
-    use verter_semantic::analysis::type_expr::TypeExpr;
+    use verter_type_expr::TypeExpr;
 
     match expr {
         TypeExpr::Ref {
@@ -2012,7 +2000,7 @@ pub(crate) fn collect_component_meta_registry_public_surface_refs(
 pub(crate) fn collect_component_meta_registry_public_indexed_access_roots(
     ctx: &dyn ResolverContext,
     owner_canonical: &str,
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    expr: &verter_type_expr::TypeExpr,
     published_names: &rustc_hash::FxHashSet<String>,
     queued_names: &mut rustc_hash::FxHashSet<String>,
     output: &mut VecDeque<PendingComponentMetaRegistryRef>,
@@ -2024,10 +2012,7 @@ pub(crate) fn collect_component_meta_registry_public_indexed_access_roots(
     let Some(prepared) = ctx.prepared_type_decl(owner_canonical, root_name.as_str()) else {
         return;
     };
-    if matches!(
-        prepared.body,
-        verter_semantic::analysis::type_expr::TypeExpr::TypeParameter(_),
-    ) {
+    if matches!(prepared.body, verter_type_expr::TypeExpr::TypeParameter(_),) {
         return;
     }
     enqueue_component_meta_registry_ref(
@@ -2042,14 +2027,14 @@ pub(crate) fn collect_component_meta_registry_public_indexed_access_roots(
 }
 
 pub(crate) fn collect_component_meta_registry_member_surface_refs(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    expr: &verter_type_expr::TypeExpr,
     published_names: &rustc_hash::FxHashSet<String>,
     queued_names: &mut rustc_hash::FxHashSet<String>,
     output: &mut VecDeque<PendingComponentMetaRegistryRef>,
     source_hint: Option<&str>,
     allow_plain_refs: bool,
 ) {
-    use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+    use verter_type_expr::{ObjectMember, TypeExpr};
 
     if let Some((root_name, route)) = component_meta_registry_public_utility_route(expr)
         .or_else(|| component_meta_registry_public_indexed_access_route(expr))
@@ -2306,7 +2291,7 @@ mod tests {
     };
     use crate::types::{AnalysisLevel, DependencyResolution, HostConfig};
     use crate::VerterHost;
-    use verter_semantic::analysis::type_expr::{
+    use verter_type_expr::{
         FunctionExpr, FunctionParam, LiteralValue, MethodSignature, ObjectExpr, ObjectMember,
         ObjectProperty, PrimitiveName, TypeExpr, ValueRef,
     };
@@ -2335,9 +2320,7 @@ mod tests {
 
     #[test]
     fn indexed_access_route_preserves_full_member_path() {
-        let expr = verter_semantic::analysis::type_expr_lower::parse_type_annotation(
-            "Button['variants']['color']",
-        );
+        let expr = verter_type_expr_oxc::parse_type_annotation("Button['variants']['color']");
 
         assert_eq!(
             component_meta_registry_public_indexed_access_route(&expr),
@@ -2350,8 +2333,7 @@ mod tests {
 
     #[test]
     fn collect_registry_refs_preserves_indexed_access_member_path() {
-        let expr =
-            verter_semantic::analysis::type_expr_lower::parse_type_annotation("Button['ui']");
+        let expr = verter_type_expr_oxc::parse_type_annotation("Button['ui']");
         let published_names = rustc_hash::FxHashSet::default();
         let mut queued_names = rustc_hash::FxHashSet::default();
         let mut output = VecDeque::new();
@@ -2490,9 +2472,7 @@ mod tests {
 
     #[test]
     fn field_expr_actionable_route_recognizes_direct_generic_refs() {
-        let expr = verter_semantic::analysis::type_expr_lower::parse_type_annotation(
-            "GetModelValue<T, VK, true>",
-        );
+        let expr = verter_type_expr_oxc::parse_type_annotation("GetModelValue<T, VK, true>");
 
         assert!(
             component_meta_registry_field_expr_has_actionable_route(&expr),

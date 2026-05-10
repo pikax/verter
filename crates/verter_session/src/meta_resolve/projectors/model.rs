@@ -19,8 +19,8 @@
 
 use verter_semantic::analysis::component_meta::{MacroExpansionDiagnostics, MacroExpansionKind};
 use verter_semantic::analysis::type_expand::{ExpandedField, ExpansionExecutionStatus};
-use verter_semantic::analysis::type_expr::TypeExpr;
 use verter_semantic::analysis::{AnalyzedMacro, AnalyzedMacroKind};
+use verter_type_expr::TypeExpr;
 
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::resolver_core::ResolverContext;

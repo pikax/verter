@@ -9,8 +9,8 @@
 use serde::Serialize;
 use verter_audit::RequestAuditRecord;
 use verter_protocol::typeinfo::{FfiEvaluateTypeExpressionRequest, FfiSymbolEntry};
-use verter_semantic::analysis::type_expr::TypeExpr;
 use verter_session::semantic_query::ProjectionMode;
+use verter_type_expr::TypeExpr;
 use wasm_bindgen::prelude::*;
 
 /// Combined response shape for `resolveSymbolWithAudit` /

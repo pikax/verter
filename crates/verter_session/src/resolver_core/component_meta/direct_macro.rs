@@ -1,9 +1,9 @@
 use std::borrow::Cow;
 
-use verter_semantic::analysis::type_expr::TypeExpr;
 use verter_semantic::analysis::types::{
     AnalyzedImport, AnalyzedMacro, AnalyzedMacroKind, MacroTypeDep,
 };
+use verter_type_expr::TypeExpr;
 
 use crate::resolver_core::component_meta_registry::component_meta_registry_has_non_object_top_level_surface;
 use crate::resolver_core::ResolvedTypeDeclaration;
@@ -295,7 +295,7 @@ pub(super) fn should_seed_direct_macro_registry_entry(
     let Some(body_text) = type_alias_body_text(text) else {
         return true;
     };
-    let parsed = verter_semantic::analysis::type_expr_lower::parse_type_annotation(body_text);
+    let parsed = verter_type_expr_oxc::parse_type_annotation(body_text);
     !component_meta_registry_has_non_object_top_level_surface(&parsed)
 }
 
@@ -314,7 +314,7 @@ pub(crate) fn imported_declaration_surface_is_authoritative(
                 return false;
             };
             matches!(
-                verter_semantic::analysis::type_expr_lower::parse_type_annotation(body_text),
+                verter_type_expr_oxc::parse_type_annotation(body_text),
                 TypeExpr::Object(_)
             )
         }

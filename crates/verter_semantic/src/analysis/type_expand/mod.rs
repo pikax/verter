@@ -13,8 +13,8 @@ pub use request::{
     ExpansionExecutionStatus, ExpansionMetadata, ExpansionResult, ExpansionStopReason,
 };
 
-use crate::analysis::type_expr::{ObjectMember, PrimitiveName, TypeExpr};
 use crate::analysis::type_solver::result::{IncompleteReason, SolverDiagnostic, SolverResult};
+use verter_type_expr::{ObjectMember, PrimitiveName, TypeExpr};
 
 // ---------------------------------------------------------------------------
 // Shared solver-result → expansion-result conversion
@@ -189,7 +189,7 @@ pub fn type_expr_to_expanded_shape(expr: &TypeExpr) -> ExpandedObjectShape {
     }
 }
 
-fn object_to_shape(obj: &crate::analysis::type_expr::ObjectExpr) -> ExpandedObjectShape {
+fn object_to_shape(obj: &verter_type_expr::ObjectExpr) -> ExpandedObjectShape {
     let mut properties = Vec::new();
     let mut index_signatures = Vec::new();
     let mut call_signatures = Vec::new();

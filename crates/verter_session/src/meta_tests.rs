@@ -5,7 +5,7 @@ use crate::VerterHost;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use verter_semantic::analysis::type_expand::ExpandedComponentTypes;
-use verter_semantic::analysis::type_expr::{LiteralValue, ObjectMember, PrimitiveName, TypeExpr};
+use verter_type_expr::{LiteralValue, ObjectMember, PrimitiveName, TypeExpr};
 
 fn make_project() -> Arc<MetaProject> {
     make_project_with_config(HostConfig {
@@ -11103,7 +11103,7 @@ defineProps<{
     assert!(
         matches!(
             &label_key.type_expr,
-            verter_semantic::analysis::type_expr::TypeExpr::Ref { name, type_arguments }
+            verter_type_expr::TypeExpr::Ref { name, type_arguments }
                 if name.as_ref() == "GetItemKeys" && type_arguments.len() == 1
         ),
         "labelKey should stay symbolic at the prop surface, got {:?}",
@@ -13041,7 +13041,7 @@ defineProps<{
     assert!(
         matches!(
             &editor_field.r#type,
-            verter_semantic::analysis::type_expr::TypeExpr::Ref { name, type_arguments }
+            verter_type_expr::TypeExpr::Ref { name, type_arguments }
                 if name.as_ref() == "Editor" && type_arguments.is_empty()
         ),
         "package-backed prop expansion should keep the raw symbolic ref instead of expanding the package object, got {:?}",
@@ -13100,12 +13100,12 @@ defineProps<{
     assert!(
         matches!(
             &editor_field.r#type,
-            verter_semantic::analysis::type_expr::TypeExpr::Ref { name, type_arguments }
+            verter_type_expr::TypeExpr::Ref { name, type_arguments }
                 if name.as_ref() == "Omit"
                     && type_arguments.len() == 2
                     && matches!(
                         &type_arguments[0],
-                        verter_semantic::analysis::type_expr::TypeExpr::Ref {
+                        verter_type_expr::TypeExpr::Ref {
                             name,
                             type_arguments
                         } if name.as_ref() == "Editor" && type_arguments.is_empty()
@@ -13169,15 +13169,15 @@ defineProps<{
     assert!(
         matches!(
             &state_field.r#type,
-            verter_semantic::analysis::type_expr::TypeExpr::IndexedAccess { object, index }
+            verter_type_expr::TypeExpr::IndexedAccess { object, index }
                 if matches!(
                     object.as_ref(),
-                    verter_semantic::analysis::type_expr::TypeExpr::Ref { name, type_arguments }
+                    verter_type_expr::TypeExpr::Ref { name, type_arguments }
                         if name.as_ref() == "CoreOptions" && type_arguments.len() == 1
                 ) && matches!(
                     index.as_ref(),
-                    verter_semantic::analysis::type_expr::TypeExpr::Literal(
-                        verter_semantic::analysis::type_expr::LiteralValue::String(key),
+                    verter_type_expr::TypeExpr::Literal(
+                        verter_type_expr::LiteralValue::String(key),
                     ) if key == "state"
                 )
         ),
@@ -13291,15 +13291,15 @@ defineProps<{
     assert!(
         matches!(
             &groups_field.r#type,
-            verter_semantic::analysis::type_expr::TypeExpr::Array { element, .. }
+            verter_type_expr::TypeExpr::Array { element, .. }
                 if matches!(
                     element.as_ref(),
-                    verter_semantic::analysis::type_expr::TypeExpr::Ref { name, type_arguments }
+                    verter_type_expr::TypeExpr::Ref { name, type_arguments }
                         if name.as_ref() == "CommandPaletteGroup"
                             && type_arguments.len() == 1
                             && matches!(
                                 &type_arguments[0],
-                                verter_semantic::analysis::type_expr::TypeExpr::Ref { name, type_arguments }
+                                verter_type_expr::TypeExpr::Ref { name, type_arguments }
                                     if name.as_ref() == "ContentSearchItem"
                                         && type_arguments.is_empty()
                             )
@@ -13360,7 +13360,7 @@ defineProps<{
     assert!(
         matches!(
             &external_field.r#type,
-            verter_semantic::analysis::type_expr::TypeExpr::Ref { name, type_arguments }
+            verter_type_expr::TypeExpr::Ref { name, type_arguments }
                 if name.as_ref() == "ExternalProps" && type_arguments.is_empty()
         ),
         "imported object-like prop expansion should keep the symbolic ref instead of expanding the imported object, got {:?}",
@@ -13416,15 +13416,13 @@ defineProps<{
         .expect("expanded evaluated types should keep the tooltip prop");
 
     let has_symbolic_tooltip = match &tooltip_field.r#type {
-        verter_semantic::analysis::type_expr::TypeExpr::Union(members) => {
-            members.iter().any(|member| {
-                matches!(
-                    member,
-                    verter_semantic::analysis::type_expr::TypeExpr::Ref { name, type_arguments }
-                        if name.as_ref() == "TooltipProps" && type_arguments.is_empty()
-                )
-            })
-        }
+        verter_type_expr::TypeExpr::Union(members) => members.iter().any(|member| {
+            matches!(
+                member,
+                verter_type_expr::TypeExpr::Ref { name, type_arguments }
+                    if name.as_ref() == "TooltipProps" && type_arguments.is_empty()
+            )
+        }),
         _ => false,
     };
 
@@ -13518,15 +13516,13 @@ defineProps<{
         .expect("expanded evaluated types should keep the tooltip prop");
 
     let has_symbolic_tooltip = match &tooltip_field.r#type {
-        verter_semantic::analysis::type_expr::TypeExpr::Union(members) => {
-            members.iter().any(|member| {
-                matches!(
-                    member,
-                    verter_semantic::analysis::type_expr::TypeExpr::Ref { name, type_arguments }
-                        if name.as_ref() == "TooltipProps" && type_arguments.is_empty()
-                )
-            })
-        }
+        verter_type_expr::TypeExpr::Union(members) => members.iter().any(|member| {
+            matches!(
+                member,
+                verter_type_expr::TypeExpr::Ref { name, type_arguments }
+                    if name.as_ref() == "TooltipProps" && type_arguments.is_empty()
+            )
+        }),
         _ => false,
     };
 
@@ -13597,7 +13593,7 @@ defineProps<{
         assert!(
             matches!(
                 &tooltip.type_expr,
-                verter_semantic::analysis::type_expr::TypeExpr::Ref { name, type_arguments }
+                verter_type_expr::TypeExpr::Ref { name, type_arguments }
                     if name.as_ref() == "TooltipProviderProps" && type_arguments.is_empty()
             ),
             "{label} component meta should keep imported *Props refs symbolic instead of rematerializing them, got {:?}",
@@ -13667,7 +13663,7 @@ defineProps<{
         assert!(
             matches!(
                 &editor.type_expr,
-                verter_semantic::analysis::type_expr::TypeExpr::Ref { name, type_arguments }
+                verter_type_expr::TypeExpr::Ref { name, type_arguments }
                     if name.as_ref() == "Editor" && type_arguments.is_empty()
             ),
             "{label} component meta should keep imported object refs symbolic instead of rematerializing them, got {:?}",
@@ -13779,20 +13775,20 @@ defineProps<{
         .expect("full component meta should exist");
 
     fn union_contains_utility_ref(
-        expr: &verter_semantic::analysis::type_expr::TypeExpr,
+        expr: &verter_type_expr::TypeExpr,
         utility_name: &str,
         inner_name: &str,
     ) -> bool {
         match expr {
-            verter_semantic::analysis::type_expr::TypeExpr::Union(members) => {
+            verter_type_expr::TypeExpr::Union(members) => {
                 members.iter().any(|member| match member {
-                    verter_semantic::analysis::type_expr::TypeExpr::Ref {
+                    verter_type_expr::TypeExpr::Ref {
                         name,
                         type_arguments,
                     } if name.as_ref() == utility_name && type_arguments.len() == 2 => {
                         matches!(
                             &type_arguments[0],
-                            verter_semantic::analysis::type_expr::TypeExpr::Ref {
+                            verter_type_expr::TypeExpr::Ref {
                                 name,
                                 type_arguments
                             } if name.as_ref() == inner_name && type_arguments.is_empty()
@@ -13822,7 +13818,7 @@ defineProps<{
         assert!(
             matches!(
                 &avatar.type_expr,
-                verter_semantic::analysis::type_expr::TypeExpr::Ref { name, type_arguments }
+                verter_type_expr::TypeExpr::Ref { name, type_arguments }
                     if name.as_ref() == "AvatarProps" && type_arguments.is_empty()
             ),
             "{label} component meta should keep imported object refs symbolic, got {:?}",
@@ -13837,10 +13833,10 @@ defineProps<{
         assert!(
             matches!(
                 &actions.type_expr,
-                verter_semantic::analysis::type_expr::TypeExpr::Array { element, .. }
+                verter_type_expr::TypeExpr::Array { element, .. }
                     if matches!(
                         element.as_ref(),
-                        verter_semantic::analysis::type_expr::TypeExpr::Ref { name, type_arguments }
+                        verter_type_expr::TypeExpr::Ref { name, type_arguments }
                             if name.as_ref() == "ButtonProps" && type_arguments.is_empty()
                     )
             ),
@@ -13941,23 +13937,21 @@ defineProps<{
         .expect("expanded evaluated types should keep the close prop");
 
     let has_symbolic_omit = match &close_field.r#type {
-        verter_semantic::analysis::type_expr::TypeExpr::Union(members) => {
-            members.iter().any(|member| match member {
-                verter_semantic::analysis::type_expr::TypeExpr::Ref {
-                    name,
-                    type_arguments,
-                } if name.as_ref() == "Omit" && type_arguments.len() == 2 => {
-                    matches!(
-                        &type_arguments[0],
-                        verter_semantic::analysis::type_expr::TypeExpr::Ref {
-                            name,
-                            type_arguments
-                        } if name.as_ref() == "ButtonProps" && type_arguments.is_empty()
-                    )
-                }
-                _ => false,
-            })
-        }
+        verter_type_expr::TypeExpr::Union(members) => members.iter().any(|member| match member {
+            verter_type_expr::TypeExpr::Ref {
+                name,
+                type_arguments,
+            } if name.as_ref() == "Omit" && type_arguments.len() == 2 => {
+                matches!(
+                    &type_arguments[0],
+                    verter_type_expr::TypeExpr::Ref {
+                        name,
+                        type_arguments
+                    } if name.as_ref() == "ButtonProps" && type_arguments.is_empty()
+                )
+            }
+            _ => false,
+        }),
         _ => false,
     };
 
@@ -14029,10 +14023,7 @@ defineProps<{
         .prepared_type_decl("/src/types.ts", "StringOrVNode")
         .expect("StringOrVNode should be present in the shallow prepared declarations");
     assert!(
-        matches!(
-            &prepared.body,
-            verter_semantic::analysis::type_expr::TypeExpr::Union(_),
-        ),
+        matches!(&prepared.body, verter_type_expr::TypeExpr::Union(_),),
         "shallow prepared declarations should keep imported non-object aliases symbolic, got {:?}",
         prepared.body
     );
@@ -14064,18 +14055,14 @@ defineProps<{
     // `VNode` is NOT eagerly expanded into its `node_modules/` body
     // (which would defeat the symbolic-preservation contract).
     let preserves_package_symbolic = match &title_field.r#type {
-        verter_semantic::analysis::type_expr::TypeExpr::Union(members) => {
-            members.iter().any(|member| {
-                matches!(
-                    member,
-                    verter_semantic::analysis::type_expr::TypeExpr::Ref { name, type_arguments }
-                        if name.as_ref() == "VNode" && type_arguments.is_empty()
-                )
-            })
-        }
-        verter_semantic::analysis::type_expr::TypeExpr::Ref { name, .. } => {
-            name.as_ref() == "StringOrVNode"
-        }
+        verter_type_expr::TypeExpr::Union(members) => members.iter().any(|member| {
+            matches!(
+                member,
+                verter_type_expr::TypeExpr::Ref { name, type_arguments }
+                    if name.as_ref() == "VNode" && type_arguments.is_empty()
+            )
+        }),
+        verter_type_expr::TypeExpr::Ref { name, .. } => name.as_ref() == "StringOrVNode",
         _ => false,
     };
 
@@ -14150,10 +14137,7 @@ defineProps<{
         .prepared_type_decl("/src/types.ts", "StringOrVNode")
         .expect("StringOrVNode should be present in the shallow prepared declarations");
     assert!(
-        matches!(
-            &prepared.body,
-            verter_semantic::analysis::type_expr::TypeExpr::Union(_),
-        ),
+        matches!(&prepared.body, verter_type_expr::TypeExpr::Union(_),),
         "shallow prepared declarations should keep imported non-object aliases symbolic, got {:?}",
         prepared.body
     );
@@ -14174,8 +14158,7 @@ defineProps<{
         .find(|entry| entry.name == "StringOrVNode")
         .expect("imported non-object alias should keep registry metadata");
 
-    let verter_semantic::analysis::type_expr::TypeExpr::Union(members) = &string_or_vnode.type_expr
-    else {
+    let verter_type_expr::TypeExpr::Union(members) = &string_or_vnode.type_expr else {
         panic!(
             "StringOrVNode should stay a symbolic union in the registry, got {:?} with declaration {:?}",
             string_or_vnode.type_expr,
@@ -14186,7 +14169,7 @@ defineProps<{
         members.iter().any(|member| {
             matches!(
                 member,
-                verter_semantic::analysis::type_expr::TypeExpr::Ref { name, type_arguments }
+                verter_type_expr::TypeExpr::Ref { name, type_arguments }
                     if name.as_ref() == "VNode" && type_arguments.is_empty()
             )
         }),
@@ -16211,7 +16194,7 @@ export interface ProjectClickEvent {
                             if property.name == "source"
                                 && matches!(
                                     property.ty,
-                                    TypeExpr::Literal(verter_semantic::analysis::type_expr::LiteralValue::String(ref value))
+                                    TypeExpr::Literal(verter_type_expr::LiteralValue::String(ref value))
                                         if value == "project"
                                 )
                     )),
@@ -18895,7 +18878,7 @@ defineProps<{
 /// through this surface.
 #[test]
 fn pick_materialises_only_named_keys_others_stay_shallow() {
-    use verter_semantic::analysis::type_expr::ObjectMember;
+    use verter_type_expr::ObjectMember;
     let project = make_project();
     project
         .upsert_base(
@@ -18970,7 +18953,7 @@ defineProps<{
 /// surface so the consumer cannot observe it through this projection.
 #[test]
 fn omit_excludes_named_keys_others_materialise() {
-    use verter_semantic::analysis::type_expr::ObjectMember;
+    use verter_type_expr::ObjectMember;
     let project = make_project();
     project
         .upsert_base(

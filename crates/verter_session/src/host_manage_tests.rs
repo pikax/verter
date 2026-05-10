@@ -1,7 +1,7 @@
 use super::*;
 
 use std::sync::Arc;
-use verter_semantic::analysis::type_expr::TypeExpr;
+use verter_type_expr::TypeExpr;
 use verter_workspace::{WorkspaceAccess, WorkspaceRead};
 
 const LAZY_ANALYSIS_SFC: &str = r#"<template><div>{{ msg }}</div></template>
@@ -8672,7 +8672,7 @@ defineProps<{ ui: typeof importedTheme }>()
     assert!(
         !matches!(
             ui_prop.type_expr,
-            verter_semantic::analysis::type_expr::TypeExpr::Unknown { .. }
+            verter_type_expr::TypeExpr::Unknown { .. }
         ),
         "typeof imported value prop type should not be Unknown",
     );

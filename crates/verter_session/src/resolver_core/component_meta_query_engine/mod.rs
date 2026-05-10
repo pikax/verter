@@ -88,8 +88,8 @@ use std::hash::Hash;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_semantic::analysis::type_eval::DeclarationId;
-use verter_semantic::analysis::type_expr::TypeExpr;
 use verter_semantic::analysis::type_solver::query_engine::ProjectedMember;
+use verter_type_expr::TypeExpr;
 
 use super::declaration_metadata::{
     DeclarationMetadataResolver, ResolvedDeclarationKind, ResolvedLocalTypeSymbolMetadata,
@@ -365,8 +365,7 @@ pub struct ComponentMetaQueryEngine<'a> {
     resolvable: RefCell<FxHashMap<(String, String), bool>>,
     /// Cached owner collection expressions (read-through view;
     /// authority is `ProjectTypeStore::owner_collection_db()`).
-    owner_collection_exprs:
-        RefCell<FxHashMap<String, Option<verter_semantic::analysis::type_expr::TypeExpr>>>,
+    owner_collection_exprs: RefCell<FxHashMap<String, Option<verter_type_expr::TypeExpr>>>,
     /// Request-local cache of declaration-scope payloads per scope canonical id.
     /// The prepared bundle stays authoritative; this cache only reuses the
     /// bundle-derived names/bindings within one request so repeated projections
@@ -403,7 +402,7 @@ pub struct ComponentMetaQueryEngine<'a> {
     /// `ProjectTypeStore::materialize_memo_db()`.
     pub(crate) materialize_memo: RefCell<
         FxHashMap<
-            (String, verter_semantic::analysis::type_expr::TypeExpr, bool),
+            (String, verter_type_expr::TypeExpr, bool),
             crate::project_semantic_dispatch::raise::MaterializedTypeExpr,
         >,
     >,

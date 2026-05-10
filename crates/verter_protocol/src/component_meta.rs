@@ -5,7 +5,7 @@ use crate::graph::{
 };
 use crate::types::*;
 use prost::Message;
-use verter_semantic::analysis::type_expr::{
+use verter_type_expr::{
     empty_type_args, ObjectExpr, ObjectMember as TypeObjectMember, ObjectProperty, PrimitiveName,
     TypeExpr,
 };
@@ -1539,7 +1539,7 @@ mod tests {
     use super::{build_test_payload, ComponentMetaPayload};
     use crate::graph::GraphBuilder;
     use crate::types::FfiComponentMetaFlags;
-    use verter_semantic::analysis::type_expr::TypeExpr;
+    use verter_type_expr::TypeExpr;
 
     #[test]
     fn component_meta_payload_roundtrips_recursive_graph() {

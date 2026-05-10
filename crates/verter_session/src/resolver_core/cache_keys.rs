@@ -26,7 +26,7 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::type_expr::TypeExpr;
+use verter_type_expr::TypeExpr;
 
 use crate::resolver_core::RouteDemand;
 

@@ -37,8 +37,8 @@ use verter_semantic::analysis::type_expand::{
     ExpandedField, ExpansionDiagnostic, ExpansionExactness, ExpansionExecutionStatus,
     ExpansionStopReason,
 };
-use verter_semantic::analysis::type_expr::TypeExpr;
 use verter_semantic::analysis::{AnalyzedMacro, AnalyzedMacroKind};
+use verter_type_expr::TypeExpr;
 
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::resolver_core::ResolverContext;
@@ -659,8 +659,7 @@ pub(crate) fn reduce_published_field_types(
         // annotation text is the authoritative per-prop string the
         // analyzer surfaced through the macro-shape path.
         if let Some(raw_text) = field.raw_type.as_deref() {
-            let raw_parsed =
-                verter_semantic::analysis::type_expr_lower::parse_type_annotation(raw_text);
+            let raw_parsed = verter_type_expr_oxc::parse_type_annotation(raw_text);
             if !matches!(raw_parsed, TypeExpr::Unknown { .. })
                 && compare_type_expr_improvement(&raw_parsed, &reduced)
             {
@@ -714,7 +713,7 @@ pub(crate) fn reduce_published_field_types(
 /// `RecursiveRef`s, or `Unknown`s, the predicate returns `false` so
 /// the symbolic-route preservation contract holds.
 pub(crate) fn type_expr_contains_reducible_operator(expr: &TypeExpr) -> bool {
-    use verter_semantic::analysis::type_expr::ObjectMember;
+    use verter_type_expr::ObjectMember;
 
     match expr {
         TypeExpr::IndexedAccess { .. }

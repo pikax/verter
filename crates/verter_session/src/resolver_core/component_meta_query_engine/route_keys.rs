@@ -13,7 +13,7 @@
 //!   `component_meta_query_engine` folder via parent-private locality.
 
 use rustc_hash::FxHashSet;
-use verter_semantic::analysis::type_expr::TypeExpr;
+use verter_type_expr::TypeExpr;
 
 use super::helpers::{projected_surface_member_names, strip_parens_expr};
 use super::{instantiate_local_generic_ref_via_engine, ComponentMetaQueryEngine};
@@ -26,7 +26,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         expr: &TypeExpr,
         active: &mut FxHashSet<(String, String)>,
     ) -> Option<Vec<String>> {
-        use verter_semantic::analysis::type_expr::{LiteralValue, TypeExpr};
+        use verter_type_expr::{LiteralValue, TypeExpr};
 
         match expr {
             TypeExpr::Literal(LiteralValue::String(value)) => Some(vec![value.clone()]),
@@ -95,7 +95,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         expr: &TypeExpr,
         depth: usize,
     ) -> Option<Vec<String>> {
-        use verter_semantic::analysis::type_expr::{LiteralValue, TypeExpr};
+        use verter_type_expr::{LiteralValue, TypeExpr};
 
         if depth >= 4 {
             return None;
@@ -243,7 +243,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         member_name: &str,
         depth: usize,
     ) -> Option<Vec<String>> {
-        use verter_semantic::analysis::type_expr::ObjectMember;
+        use verter_type_expr::ObjectMember;
 
         // Path C C11-residual-C: depth bumped from 4 to 8 to allow
         // multi-step navigation chains like
@@ -600,7 +600,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         expr: &TypeExpr,
     ) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
         use verter_semantic::analysis::type_expand::ExpandedObjectShape;
-        use verter_semantic::analysis::type_expr::TypeExpr;
+        use verter_type_expr::TypeExpr;
 
         fn shape_has_surface(shape: &ExpandedObjectShape) -> bool {
             !shape.properties.is_empty() || !shape.call_signatures.is_empty()

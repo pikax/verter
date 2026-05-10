@@ -1475,7 +1475,7 @@ export type Recur = { kids: Recur[] | null }
         });
         // Build Pick<Recur, 'kids'> using __builtin__ identity.
         let key_kids = graph.intern_node(SemanticNodeData::Literal(
-            verter_semantic::analysis::type_expr::LiteralValue::String("kids".to_string()),
+            verter_type_expr::LiteralValue::String("kids".to_string()),
         ));
         let pick_builtin = crate::semantic_query::DeclIdentity {
             canonical_id: StdArc::from("__builtin__"),
@@ -1821,7 +1821,7 @@ export type GetItemKeys<I, T extends NestedItem<I> = NestedItem<I>> =
         let decl_ref_node = dispatch
             .lower_type_expr_in_scope_with_mode(
                 "/types.ts",
-                &verter_semantic::analysis::type_expr::TypeExpr::Ref {
+                &verter_type_expr::TypeExpr::Ref {
                     name: StdArc::from("Foo"),
                     type_arguments: StdArc::from(Vec::new()),
                 },
@@ -1932,7 +1932,7 @@ export type C<T> = A<T>
         let decl_ref_node = dispatch
             .lower_type_expr_in_scope_with_mode(
                 "/types.ts",
-                &verter_semantic::analysis::type_expr::TypeExpr::Ref {
+                &verter_type_expr::TypeExpr::Ref {
                     name: StdArc::from("Foo"),
                     type_arguments: StdArc::from(Vec::new()),
                 },
@@ -1985,7 +1985,7 @@ export type C<T> = A<T>
         let decl_ref_node = dispatch
             .lower_type_expr_in_scope_with_mode(
                 "/types.ts",
-                &verter_semantic::analysis::type_expr::TypeExpr::Ref {
+                &verter_type_expr::TypeExpr::Ref {
                     name: StdArc::from("Foo"),
                     type_arguments: StdArc::from(Vec::new()),
                 },

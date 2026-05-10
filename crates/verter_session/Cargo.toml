@@ -48,6 +48,8 @@ verter_compiler = { path = "../verter_compiler" }
 verter_protocol = { path = "../verter_protocol" }
 prost = "0.14.1"
 verter_semantic = { path = "../verter_semantic" }
+verter_type_expr = { workspace = true }
+verter_type_expr_oxc = { workspace = true }
 verter_span = { path = "../verter_span" }
 verter_workspace = { path = "../verter_workspace" }
 verter_scheduler = { path = "../verter_scheduler" }

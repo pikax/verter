@@ -1289,8 +1289,8 @@ fn build_expanded_type_text(fields: &[AnalyzedPropField]) -> String {
 }
 
 /// Build a structured expanded object from resolved prop fields.
-fn build_expanded_type_expr(fields: &[AnalyzedPropField]) -> crate::analysis::type_expr::TypeExpr {
-    use crate::analysis::type_expr::{ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
+fn build_expanded_type_expr(fields: &[AnalyzedPropField]) -> verter_type_expr::TypeExpr {
+    use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
 
     let properties = fields
         .iter()
@@ -1298,7 +1298,7 @@ fn build_expanded_type_expr(fields: &[AnalyzedPropField]) -> crate::analysis::ty
             let ty = field
                 .type_annotation
                 .as_deref()
-                .map(crate::analysis::type_expr_lower::parse_type_annotation)
+                .map(verter_type_expr_oxc::parse_type_annotation)
                 .unwrap_or(TypeExpr::Unknown {
                     raw: "unknown".to_string(),
                 });
@@ -1405,12 +1405,8 @@ fn try_extract_macro(
                             if text.is_empty() {
                                 None
                             } else {
-                                let lowered =
-                                    crate::analysis::type_expr_lower::parse_type_annotation(text);
-                                if matches!(
-                                    lowered,
-                                    crate::analysis::type_expr::TypeExpr::Unknown { .. }
-                                ) {
+                                let lowered = verter_type_expr_oxc::parse_type_annotation(text);
+                                if matches!(lowered, verter_type_expr::TypeExpr::Unknown { .. }) {
                                     None
                                 } else {
                                     Some(std::sync::Arc::new(lowered))

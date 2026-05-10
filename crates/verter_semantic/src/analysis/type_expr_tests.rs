@@ -1,6 +1,6 @@
-use super::type_expr::*;
-use super::type_expr_lower::parse_type_annotation;
 use std::sync::Arc;
+use verter_type_expr::*;
+use verter_type_expr_oxc::parse_type_annotation;
 
 // =============================================================================
 // Primitive types

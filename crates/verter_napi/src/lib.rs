@@ -31,8 +31,8 @@ use napi::{Error, Status};
 use napi_derive::napi;
 use verter_ffi::convert::*;
 use verter_ffi::types::*;
-use verter_semantic::analysis::type_expr::TypeExpr;
 use verter_session as host;
+use verter_type_expr::TypeExpr;
 
 mod audit;
 mod meta;

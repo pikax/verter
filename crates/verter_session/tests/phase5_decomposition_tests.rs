@@ -147,7 +147,7 @@ defineEmits<Emits>()
 /// projector decomposition has regressed.
 #[test]
 fn getcomponentmeta_decomposes_through_dispatch_primitives() {
-    use verter_semantic::analysis::type_expr::{PrimitiveName, TypeExpr};
+    use verter_type_expr::{PrimitiveName, TypeExpr};
 
     let host = build_host(&[
         ("/workspace/src/types.ts", SHARED_TYPES_TS),
@@ -271,7 +271,7 @@ defineProps<{ size: ButtonStyles['variants']['size'] }>();
 /// - The published prop is NOT `Unknown { raw: "semanticMiss" }`.
 #[test]
 fn projector_self_reduces_nested_indexed_access_chain() {
-    use verter_semantic::analysis::type_expr::{LiteralValue, TypeExpr};
+    use verter_type_expr::{LiteralValue, TypeExpr};
 
     let host = build_host(&[("/workspace/src/Comp.vue", NESTED_INDEXED_ACCESS_VUE)]);
 

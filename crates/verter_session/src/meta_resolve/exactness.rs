@@ -30,7 +30,7 @@
 //!   it without re-entering the dispatch.
 
 use verter_semantic::analysis::type_expand::ExpansionExactness;
-use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+use verter_type_expr::{ObjectMember, TypeExpr};
 
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::{SemanticNodeData, SemanticNodeId};
@@ -153,9 +153,7 @@ fn strip_parens(expr: &TypeExpr) -> &TypeExpr {
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use verter_semantic::analysis::type_expr::{
-        LiteralValue, ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName,
-    };
+    use verter_type_expr::{LiteralValue, ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName};
 
     #[test]
     fn primitive_is_concrete() {
@@ -238,7 +236,7 @@ mod tests {
         let inner = TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![ObjectMember::Property(ObjectProperty {
                 name: "inner".to_string(),
-                ty: TypeExpr::TypeParameter(verter_semantic::analysis::type_expr::TypeParam {
+                ty: TypeExpr::TypeParameter(verter_type_expr::TypeParam {
                     name: "T".to_string(),
                     constraint: None,
                     default: None,

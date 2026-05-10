@@ -275,7 +275,7 @@ defineProps<{ key: TKey; value: number }>();
 /// concrete primitive.
 #[test]
 fn parent_generic_field_must_take_slow_path() {
-    use verter_semantic::analysis::type_expr::{PrimitiveName, TypeExpr};
+    use verter_type_expr::{PrimitiveName, TypeExpr};
 
     let host = build_hermetic_host(&[("/c.vue", COMPOUND_CARRIER_VUE)]);
     let (analysis, _resolution, _record) = resolve_under_audit(host, "/c.vue");

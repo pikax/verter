@@ -1,4 +1,4 @@
-use verter_semantic::analysis::type_expr::{MappedModifier, PrimitiveName};
+use verter_type_expr::{MappedModifier, PrimitiveName};
 
 pub const MEMBER_PROPERTY: u32 = 1;
 pub const MEMBER_INDEX_SIGNATURE: u32 = 2;

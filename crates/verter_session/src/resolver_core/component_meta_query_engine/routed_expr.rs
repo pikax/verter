@@ -17,8 +17,8 @@
 //! LOC budget: ~1534 (within the 4000-LOC sibling budget).
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use verter_semantic::analysis::type_expr::TypeExpr;
 use verter_semantic::analysis::type_solver::query_engine::{ProjectedMember, ProjectedSurface};
+use verter_type_expr::TypeExpr;
 
 use super::helpers::{
     is_builtin_name, is_package_source, prepared_decl_keeps_raw_symbolic_non_object_alias,
@@ -306,7 +306,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         projected_expr: &TypeExpr,
     ) {
         use std::collections::BTreeSet;
-        use verter_semantic::analysis::type_expr::ObjectMember;
+        use verter_type_expr::ObjectMember;
 
         let requested: BTreeSet<_> = members.iter().map(String::as_str).collect();
         let TypeExpr::Object(object) = projected_expr else {
@@ -502,7 +502,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         scope_canonical_id: &str,
         expr: &TypeExpr,
     ) -> bool {
-        use verter_semantic::analysis::type_expr::ObjectMember;
+        use verter_type_expr::ObjectMember;
 
         match expr {
             TypeExpr::Ref {
@@ -977,7 +977,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         substitutions: &FxHashMap<String, TypeExpr>,
         visited: &mut FxHashSet<(String, String)>,
     ) -> Option<TypeExpr> {
-        use verter_semantic::analysis::type_expr::ObjectMember;
+        use verter_type_expr::ObjectMember;
 
         let Some((member_name, tail)) = path.split_first() else {
             let projected_expr = apply_type_param_substitutions(expr, substitutions);
@@ -1416,7 +1416,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         symbol_name: &str,
         members: &[String],
     ) -> Option<TypeExpr> {
-        use verter_semantic::analysis::type_expr::{
+        use verter_type_expr::{
             MethodSignature, ObjectExpr, ObjectMember, ObjectProperty, TypeExpr,
         };
 
@@ -1495,7 +1495,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         symbol_name: &str,
         members: &[String],
     ) -> Option<TypeExpr> {
-        use verter_semantic::analysis::type_expr::{
+        use verter_type_expr::{
             MethodSignature, ObjectExpr, ObjectMember, ObjectProperty, TypeExpr,
         };
 

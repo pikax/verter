@@ -8,8 +8,8 @@ use verter_semantic::analysis::component_meta::{
     RootReachability, RootTargetRef, UnresolvedBranchReason,
 };
 use verter_semantic::analysis::html_intrinsics::{IntrinsicMemberKind, OwnedIntrinsicMember};
-use verter_semantic::analysis::type_expr::TypeExpr;
 use verter_semantic::analysis::types::AnalyzedImport;
+use verter_type_expr::TypeExpr;
 
 use crate::resolver_core::{FactVersionRef, FallthroughNodeKey, FallthroughNodeKind};
 
@@ -1070,7 +1070,7 @@ pub fn collect_dynamic_root_candidates_from_type(
     ty: &TypeExpr,
     imports: &[AnalyzedImport],
 ) -> Vec<DynamicRootCandidate> {
-    use verter_semantic::analysis::type_expr::{LiteralValue, TypeExpr};
+    use verter_type_expr::{LiteralValue, TypeExpr};
 
     match ty {
         TypeExpr::Literal(LiteralValue::String(tag)) => {
@@ -1297,9 +1297,7 @@ fn normalize_public_spread_key(
     }
 }
 
-fn known_spread_keys_from_object(
-    object: &verter_semantic::analysis::type_expr::ObjectExpr,
-) -> KnownSpreadKeys {
+fn known_spread_keys_from_object(object: &verter_type_expr::ObjectExpr) -> KnownSpreadKeys {
     let mut result = KnownSpreadKeys {
         exact: true,
         ..KnownSpreadKeys::default()
@@ -1307,15 +1305,15 @@ fn known_spread_keys_from_object(
 
     for member in &object.properties {
         match member {
-            verter_semantic::analysis::type_expr::ObjectMember::Property(prop) => {
+            verter_type_expr::ObjectMember::Property(prop) => {
                 normalize_public_spread_key(&prop.name, &mut result.attrs, &mut result.listeners)
             }
-            verter_semantic::analysis::type_expr::ObjectMember::Method(method) => {
+            verter_type_expr::ObjectMember::Method(method) => {
                 normalize_public_spread_key(&method.name, &mut result.attrs, &mut result.listeners)
             }
-            verter_semantic::analysis::type_expr::ObjectMember::IndexSignature(_)
-            | verter_semantic::analysis::type_expr::ObjectMember::CallSignature(_)
-            | verter_semantic::analysis::type_expr::ObjectMember::ConstructSignature(_) => {
+            verter_type_expr::ObjectMember::IndexSignature(_)
+            | verter_type_expr::ObjectMember::CallSignature(_)
+            | verter_type_expr::ObjectMember::ConstructSignature(_) => {
                 result.exact = false;
             }
         }
@@ -1358,13 +1356,13 @@ mod tests {
     };
     use verter_semantic::analysis::html_intrinsics::{IntrinsicMemberKind, OwnedIntrinsicMember};
     use verter_semantic::analysis::template::{PropValueConstness, TemplatePropUsage};
-    use verter_semantic::analysis::type_expr::{
-        ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr, ValueRef,
-    };
     use verter_semantic::analysis::types::{
         AnalyzedImport, AnalyzedImportBinding, ImportBindingKind,
     };
     use verter_span::Span;
+    use verter_type_expr::{
+        ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr, ValueRef,
+    };
 
     #[derive(Clone)]
     struct TestResolution {
@@ -1870,7 +1868,7 @@ mod tests {
             object_shape: None,
         });
 
-        let lowered = TypeExpr::TypeOf(verter_semantic::analysis::type_expr::ValueRef {
+        let lowered = TypeExpr::TypeOf(verter_type_expr::ValueRef {
             path: vec!["as".to_string()],
         });
 
@@ -1883,7 +1881,7 @@ mod tests {
     #[test]
     fn structural_substitute_typeof_refs_preserves_unresolved_refs() {
         let env = verter_semantic::analysis::type_eval::EvalEnv::new();
-        let lowered = TypeExpr::TypeOf(verter_semantic::analysis::type_expr::ValueRef {
+        let lowered = TypeExpr::TypeOf(verter_type_expr::ValueRef {
             path: vec!["missing".to_string()],
         });
 
@@ -1915,10 +1913,10 @@ mod tests {
         });
 
         let union = TypeExpr::union(vec![
-            TypeExpr::TypeOf(verter_semantic::analysis::type_expr::ValueRef {
+            TypeExpr::TypeOf(verter_type_expr::ValueRef {
                 path: vec!["a".to_string()],
             }),
-            TypeExpr::TypeOf(verter_semantic::analysis::type_expr::ValueRef {
+            TypeExpr::TypeOf(verter_type_expr::ValueRef {
                 path: vec!["b".to_string()],
             }),
         ]);
@@ -1944,7 +1942,7 @@ mod tests {
             object_shape: None,
         });
 
-        let lowered = TypeExpr::TypeOf(verter_semantic::analysis::type_expr::ValueRef {
+        let lowered = TypeExpr::TypeOf(verter_type_expr::ValueRef {
             path: vec!["props".to_string(), "name".to_string()],
         });
 

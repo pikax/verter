@@ -29,7 +29,7 @@
 //! - Identity returns the alias node verbatim (no unwrap).
 //!
 //! Type args at the boundary are
-//! [`verter_semantic::analysis::type_expr::TypeExpr`]s; the host
+//! [`verter_type_expr::TypeExpr`]s; the host
 //! method lowers them through
 //! [`crate::project_semantic_dispatch::ProjectSemanticDispatch::lower_type_expr_in_scope_with_mode`]
 //! per §5.2 ("type_args are lowered to `SemanticNodeId`s inside the
@@ -42,7 +42,7 @@ use verter_audit::{
     ProjectionModeTag, RequestAuditRecord, RequestKind, RequestKindPayload, RequestMemoryAudit,
     RequestStoreAudit, RequestTimingAudit, TypeResolutionPayload, WaitAudit,
 };
-use verter_semantic::analysis::type_expr::TypeExpr;
+use verter_type_expr::TypeExpr;
 
 use crate::host_audit_runtime::AuditRequestRegistration;
 use crate::instant::Instant;

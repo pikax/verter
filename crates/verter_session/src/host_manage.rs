@@ -794,9 +794,7 @@ impl FallthroughRequestHost for VerterHost {
     fn try_get_cached_fallthrough(
         &self,
         canonical_id: &str,
-        prop_type_overrides: Option<
-            &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
-        >,
+        prop_type_overrides: Option<&rustc_hash::FxHashMap<String, verter_type_expr::TypeExpr>>,
         store_view: &Self::View,
     ) -> Option<Self::Resolution> {
         let cache_key = fallthrough_cache_key(
@@ -873,9 +871,7 @@ impl FallthroughRequestHost for VerterHost {
     fn compute_fallthrough_surface_uncached(
         &self,
         canonical_id: &str,
-        prop_type_overrides: Option<
-            &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
-        >,
+        prop_type_overrides: Option<&rustc_hash::FxHashMap<String, verter_type_expr::TypeExpr>>,
         visiting: &mut rustc_hash::FxHashSet<String>,
         _store_view: Option<&Self::View>,
     ) -> Option<Self::Resolution> {
@@ -890,9 +886,7 @@ impl FallthroughRequestHost for VerterHost {
     fn store_fallthrough_result(
         &self,
         canonical_id: &str,
-        prop_type_overrides: Option<
-            &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
-        >,
+        prop_type_overrides: Option<&rustc_hash::FxHashMap<String, verter_type_expr::TypeExpr>>,
         result: &Self::Resolution,
     ) {
         self.cache_fallthrough_result(canonical_id, prop_type_overrides, result);
@@ -1021,9 +1015,7 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
     fn resolve_child_fallthrough(
         &self,
         canonical_id: &str,
-        prop_type_overrides: Option<
-            &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
-        >,
+        prop_type_overrides: Option<&rustc_hash::FxHashMap<String, verter_type_expr::TypeExpr>>,
         visiting: &mut rustc_hash::FxHashSet<String>,
     ) -> Option<Self::ChildResolution> {
         let cache_key = crate::resolver_core::fallthrough_resolver::child_surface_key(
@@ -1119,7 +1111,7 @@ impl FallthroughComputeHost for HostFallthroughResolver<'_> {
         snapshot: &Self::Snapshot,
         usage_index: u32,
         eval_env: &mut Option<Self::EvalEnv>,
-    ) -> Option<rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>> {
+    ) -> Option<rustc_hash::FxHashMap<String, verter_type_expr::TypeExpr>> {
         debug_assert_eq!(self.parent_canonical_id, canonical_id);
         self.host
             .build_generic_child_prop_overrides(canonical_id, snapshot, usage_index, eval_env)
@@ -1405,10 +1397,10 @@ pub(in crate::host_manage) fn is_builtin_type_symbol(name: &str) -> bool {
 }
 
 pub(crate) fn collect_type_expr_symbol_refs(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    expr: &verter_type_expr::TypeExpr,
     refs: &mut std::collections::BTreeSet<String>,
 ) {
-    use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+    use verter_type_expr::{ObjectMember, TypeExpr};
 
     match expr {
         TypeExpr::Ref {

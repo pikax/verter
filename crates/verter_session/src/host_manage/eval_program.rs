@@ -82,7 +82,7 @@ impl VerterHost {
     pub(crate) fn sfc_script_setup_type_params(
         source: &str,
         cached_parse: Option<&verter_compiler::parser::types::ParsedSfc>,
-    ) -> Vec<verter_semantic::analysis::type_expr::TypeParam> {
+    ) -> Vec<verter_type_expr::TypeParam> {
         let Some(setup) = cached_parse.and_then(|parsed| parsed.script_setup()) else {
             return Vec::new();
         };
@@ -104,7 +104,7 @@ impl VerterHost {
         for param in Self::sfc_script_setup_type_params(source, cached_parse) {
             env.type_bindings.insert(
                 param.name.clone(),
-                Arc::new(verter_semantic::analysis::type_expr::TypeExpr::type_parameter(param)),
+                Arc::new(verter_type_expr::TypeExpr::type_parameter(param)),
             );
         }
     }

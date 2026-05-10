@@ -571,7 +571,7 @@ pub struct FfiExpansionMetadata {
 pub struct FfiPropMeta {
     pub name: String,
     /// Structured type IR (passes through unchanged — TypeExpr implements Serialize).
-    pub r#type: verter_semantic::analysis::type_expr::TypeExpr,
+    pub r#type: verter_type_expr::TypeExpr,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub type_expansion: Option<FfiExpansionMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -590,7 +590,7 @@ pub struct FfiPropMeta {
 #[serde(rename_all = "camelCase")]
 pub struct FfiEventMeta {
     pub name: String,
-    pub payload: verter_semantic::analysis::type_expr::TypeExpr,
+    pub payload: verter_type_expr::TypeExpr,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payload_expansion: Option<FfiExpansionMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -620,7 +620,7 @@ pub struct FfiSlotMeta {
 #[serde(rename_all = "camelCase")]
 pub struct FfiSlotBindingMeta {
     pub name: String,
-    pub r#type: verter_semantic::analysis::type_expr::TypeExpr,
+    pub r#type: verter_type_expr::TypeExpr,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub type_expansion: Option<FfiExpansionMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -631,14 +631,14 @@ pub struct FfiSlotBindingMeta {
 #[serde(rename_all = "camelCase")]
 pub struct FfiModelMeta {
     pub name: String,
-    pub r#type: verter_semantic::analysis::type_expr::TypeExpr,
+    pub r#type: verter_type_expr::TypeExpr,
 }
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct FfiExposedMeta {
     pub name: String,
-    pub r#type: verter_semantic::analysis::type_expr::TypeExpr,
+    pub r#type: verter_type_expr::TypeExpr,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub type_expansion: Option<FfiExpansionMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -657,7 +657,7 @@ pub struct FfiPublicInstanceMeta {
 pub struct FfiPublicInstanceMemberMeta {
     pub name: String,
     pub kind: String,
-    pub r#type: verter_semantic::analysis::type_expr::TypeExpr,
+    pub r#type: verter_type_expr::TypeExpr,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub type_expansion: Option<FfiExpansionMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -748,7 +748,7 @@ pub struct FfiCustomBlockMeta {
 #[serde(rename_all = "camelCase")]
 pub struct FfiResolvedTypeMeta {
     pub name: String,
-    pub r#type: verter_semantic::analysis::type_expr::TypeExpr,
+    pub r#type: verter_type_expr::TypeExpr,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub type_expansion: Option<FfiExpansionMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -877,7 +877,7 @@ pub struct FfiResolvedJsdocTag {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subject_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub resolved_type: Option<verter_semantic::analysis::type_expr::TypeExpr>,
+    pub resolved_type: Option<verter_type_expr::TypeExpr>,
 }
 
 #[derive(Serialize, Clone)]
@@ -1243,7 +1243,7 @@ pub enum FfiAcceptedSurfaceCompleteness {
 #[serde(rename_all = "camelCase")]
 pub struct FfiAcceptedPropMeta {
     pub name: String,
-    pub r#type: verter_semantic::analysis::type_expr::TypeExpr,
+    pub r#type: verter_type_expr::TypeExpr,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw_type: Option<String>,
     pub required: bool,
@@ -1257,7 +1257,7 @@ pub struct FfiAcceptedPropMeta {
 #[serde(rename_all = "camelCase")]
 pub struct FfiAcceptedEventMeta {
     pub name: String,
-    pub payload: verter_semantic::analysis::type_expr::TypeExpr,
+    pub payload: verter_type_expr::TypeExpr,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw_signature: Option<String>,
     pub provenance: FfiMemberProvenance,
@@ -1282,7 +1282,7 @@ pub enum FfiFallthroughSurface {
 #[serde(rename_all = "camelCase")]
 pub struct FfiFallthroughPropEntry {
     pub name: String,
-    pub r#type: verter_semantic::analysis::type_expr::TypeExpr,
+    pub r#type: verter_type_expr::TypeExpr,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw_type: Option<String>,
     pub sources: Vec<FfiInheritedSource>,
@@ -1293,7 +1293,7 @@ pub struct FfiFallthroughPropEntry {
 #[serde(rename_all = "camelCase")]
 pub struct FfiFallthroughEventEntry {
     pub name: String,
-    pub payload: verter_semantic::analysis::type_expr::TypeExpr,
+    pub payload: verter_type_expr::TypeExpr,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw_signature: Option<String>,
     pub sources: Vec<FfiInheritedSource>,

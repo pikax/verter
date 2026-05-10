@@ -403,10 +403,8 @@ fn pathological_extract_through_typeof() {
 /// Render a `TypeExpr` to its canonical signature for test
 /// assertions. Mirrors the SnapshotView renderer's literal/union
 /// formatting in just enough detail for the §5.D.5 assertions.
-pub(crate) fn render_signature_for_test(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
-) -> String {
-    use verter_semantic::analysis::type_expr::{LiteralValue, TypeExpr};
+pub(crate) fn render_signature_for_test(expr: &verter_type_expr::TypeExpr) -> String {
+    use verter_type_expr::{LiteralValue, TypeExpr};
     match expr {
         TypeExpr::Union(arms) => {
             let parts: Vec<String> = arms.iter().map(render_signature_for_test).collect();

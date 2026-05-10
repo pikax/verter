@@ -20,8 +20,8 @@ use crate::types::{AnalysisLevel, HostConfig};
 use crate::VerterHost;
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
-use verter_semantic::analysis::type_expr::PrimitiveName;
-use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+use verter_type_expr::PrimitiveName;
+use verter_type_expr::{ObjectMember, TypeExpr};
 
 #[test]
 fn resolve_direct_prepared_type_declaration_matches_local_prepared_decl() {
@@ -1355,9 +1355,7 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
         .properties
         .iter()
         .filter_map(|m| match m {
-            verter_semantic::analysis::type_expr::ObjectMember::Property(prop) => {
-                Some(prop.name.as_str())
-            }
+            verter_type_expr::ObjectMember::Property(prop) => Some(prop.name.as_str()),
             _ => None,
         })
         .collect();
@@ -2610,7 +2608,7 @@ fn type_expr_references_type_params_detects_nested_member_routes() {
         object: Arc::new(TypeExpr::named("Button")),
         index: Arc::new(TypeExpr::string_literal("slots")),
     };
-    let params = vec![verter_semantic::analysis::type_expr::TypeParam {
+    let params = vec![verter_type_expr::TypeParam {
         name: "Button".to_string(),
         constraint: None,
         default: None,
@@ -2627,7 +2625,7 @@ fn type_expr_references_substitutions_ignores_unbound_type_params() {
     let expr = TypeExpr::named("U");
     let substitutions = rustc_hash::FxHashMap::from_iter([(
         "T".to_string(),
-        TypeExpr::Primitive(verter_semantic::analysis::type_expr::PrimitiveName::String),
+        TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
     )]);
 
     assert!(

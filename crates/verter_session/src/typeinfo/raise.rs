@@ -5,7 +5,7 @@
 //! FFI adapter (NAPI / WASM) calls to project a `SemanticNodeId`
 //! (returned by [`crate::VerterHost::resolve_named_symbol_with_audit`]
 //! or [`crate::VerterHost::evaluate_type_expression_with_audit`]) into
-//! a [`verter_semantic::analysis::type_expr::TypeExpr`] so the wire
+//! a [`verter_type_expr::TypeExpr`] so the wire
 //! payload carries the typeinfo plan's "TypeExpr at the boundary"
 //! contract (§5.2).
 //!
@@ -15,7 +15,7 @@
 //! `semantic_node_to_type_expr_has_exactly_one_path`). This shell is
 //! a thin FFI delegator — it does not duplicate the raise logic.
 
-use verter_semantic::analysis::type_expr::TypeExpr;
+use verter_type_expr::TypeExpr;
 
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::SemanticNodeId;

@@ -11,12 +11,12 @@
 //! - [`ComponentMetaAnalysis`] is the analysis-domain result (no serde)
 //! - Conversion to transport-facing DTOs happens via `verter_protocol` and its adapter layers
 
-use crate::analysis::type_expr::{PrimitiveName, TypeExpr};
 use crate::analysis::types::{
     AnalysisFlags, AnalyzedBinding, AnalyzedEmitField, AnalyzedImport, AnalyzedMacro,
     AnalyzedMacroKind, AnalyzedOptionsApi, AnalyzedPropField, AnalyzedSlotField, ImportBindingKind,
     JsdocTag, StoreUsage, VueApiCallSite,
 };
+use verter_type_expr::{PrimitiveName, TypeExpr};
 
 /// Convenience: build `TypeExpr::Unknown { raw }` from a string.
 fn unknown_type(raw: impl Into<String>) -> TypeExpr {
@@ -24,7 +24,7 @@ fn unknown_type(raw: impl Into<String>) -> TypeExpr {
 }
 
 fn parse_annotation_or_unknown(raw: &str) -> TypeExpr {
-    let parsed = crate::analysis::type_expr_lower::parse_type_annotation(raw);
+    let parsed = verter_type_expr_oxc::parse_type_annotation(raw);
     if parsed.is_unknown() {
         unknown_type(raw.to_string())
     } else {
@@ -1809,18 +1809,18 @@ fn type_expr_exceeds_node_limit(type_expr: &TypeExpr, limit: usize) -> bool {
                 .iter()
                 .any(|element| visit(&element.ty, seen, limit)),
             TypeExpr::Object(object) => object.properties.iter().any(|member| match member {
-                crate::analysis::type_expr::ObjectMember::Property(property) => {
+                verter_type_expr::ObjectMember::Property(property) => {
                     visit(&property.ty, seen, limit)
                 }
-                crate::analysis::type_expr::ObjectMember::IndexSignature(signature) => {
+                verter_type_expr::ObjectMember::IndexSignature(signature) => {
                     visit(&signature.key_type, seen, limit)
                         || visit(&signature.value_type, seen, limit)
                 }
-                crate::analysis::type_expr::ObjectMember::CallSignature(function)
-                | crate::analysis::type_expr::ObjectMember::ConstructSignature(function) => {
+                verter_type_expr::ObjectMember::CallSignature(function)
+                | verter_type_expr::ObjectMember::ConstructSignature(function) => {
                     type_expr_function_exceeds_node_limit(function, seen, limit)
                 }
-                crate::analysis::type_expr::ObjectMember::Method(method) => {
+                verter_type_expr::ObjectMember::Method(method) => {
                     type_expr_function_exceeds_node_limit(&method.function, seen, limit)
                 }
             }),
@@ -1863,7 +1863,7 @@ fn type_expr_exceeds_node_limit(type_expr: &TypeExpr, limit: usize) -> bool {
     }
 
     fn type_expr_function_exceeds_node_limit(
-        function: &crate::analysis::type_expr::FunctionExpr,
+        function: &verter_type_expr::FunctionExpr,
         seen: &mut usize,
         limit: usize,
     ) -> bool {
@@ -1906,15 +1906,15 @@ fn type_expr_is_placeholder_for_symbolic_fallback(type_expr: &TypeExpr) -> bool 
         TypeExpr::Object(object) => {
             object.properties.is_empty()
                 || object.properties.iter().all(|member| match member {
-                    crate::analysis::type_expr::ObjectMember::Property(property) => {
+                    verter_type_expr::ObjectMember::Property(property) => {
                         type_expr_is_placeholder_for_symbolic_fallback(&property.ty)
                     }
-                    crate::analysis::type_expr::ObjectMember::IndexSignature(signature) => {
+                    verter_type_expr::ObjectMember::IndexSignature(signature) => {
                         type_expr_is_placeholder_for_symbolic_fallback(&signature.value_type)
                     }
-                    crate::analysis::type_expr::ObjectMember::CallSignature(_)
-                    | crate::analysis::type_expr::ObjectMember::ConstructSignature(_)
-                    | crate::analysis::type_expr::ObjectMember::Method(_) => false,
+                    verter_type_expr::ObjectMember::CallSignature(_)
+                    | verter_type_expr::ObjectMember::ConstructSignature(_)
+                    | verter_type_expr::ObjectMember::Method(_) => false,
                 })
         }
         TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
@@ -2081,23 +2081,23 @@ fn event_raw_signature_from_evaluated_and_source(
 }
 
 fn event_payload_raw_signature_from_type_expr(payload: &TypeExpr) -> Option<String> {
-    use crate::analysis::type_expr::LiteralValue;
+    use verter_type_expr::LiteralValue;
 
     fn render_type_expr(expr: &TypeExpr) -> Option<String> {
         match expr {
             TypeExpr::Primitive(name) => Some(match name {
-                crate::analysis::type_expr::PrimitiveName::String => "string".to_string(),
-                crate::analysis::type_expr::PrimitiveName::Number => "number".to_string(),
-                crate::analysis::type_expr::PrimitiveName::Boolean => "boolean".to_string(),
-                crate::analysis::type_expr::PrimitiveName::BigInt => "bigint".to_string(),
-                crate::analysis::type_expr::PrimitiveName::Symbol => "symbol".to_string(),
-                crate::analysis::type_expr::PrimitiveName::Null => "null".to_string(),
-                crate::analysis::type_expr::PrimitiveName::Undefined => "undefined".to_string(),
-                crate::analysis::type_expr::PrimitiveName::Void => "void".to_string(),
-                crate::analysis::type_expr::PrimitiveName::Any => "any".to_string(),
-                crate::analysis::type_expr::PrimitiveName::Unknown => "unknown".to_string(),
-                crate::analysis::type_expr::PrimitiveName::Never => "never".to_string(),
-                crate::analysis::type_expr::PrimitiveName::Object => "object".to_string(),
+                verter_type_expr::PrimitiveName::String => "string".to_string(),
+                verter_type_expr::PrimitiveName::Number => "number".to_string(),
+                verter_type_expr::PrimitiveName::Boolean => "boolean".to_string(),
+                verter_type_expr::PrimitiveName::BigInt => "bigint".to_string(),
+                verter_type_expr::PrimitiveName::Symbol => "symbol".to_string(),
+                verter_type_expr::PrimitiveName::Null => "null".to_string(),
+                verter_type_expr::PrimitiveName::Undefined => "undefined".to_string(),
+                verter_type_expr::PrimitiveName::Void => "void".to_string(),
+                verter_type_expr::PrimitiveName::Any => "any".to_string(),
+                verter_type_expr::PrimitiveName::Unknown => "unknown".to_string(),
+                verter_type_expr::PrimitiveName::Never => "never".to_string(),
+                verter_type_expr::PrimitiveName::Object => "object".to_string(),
             }),
             TypeExpr::Literal(LiteralValue::String(value)) => Some(format!("{value:?}")),
             TypeExpr::Literal(LiteralValue::Number(value)) => Some(value.to_string()),
@@ -2434,7 +2434,7 @@ fn expanded_define_emit_events(
     evaluated: Option<&crate::analysis::type_expand::ExpandedComponentTypes>,
     macro_index: usize,
 ) -> Vec<ExpandedEventEntry> {
-    use crate::analysis::type_expr::{LiteralValue, TupleElement, TypeExpr};
+    use verter_type_expr::{LiteralValue, TupleElement, TypeExpr};
 
     let Some(entry) = expanded_define_emits_shape(evaluated, macro_index) else {
         return Vec::new();
@@ -2701,19 +2701,19 @@ fn collect_slot_binding_param_types<'a>(ty: &'a TypeExpr, out: &mut Vec<&'a Type
         TypeExpr::Object(obj) => {
             for member in &obj.properties {
                 match member {
-                    crate::analysis::type_expr::ObjectMember::CallSignature(function)
-                    | crate::analysis::type_expr::ObjectMember::ConstructSignature(function) => {
+                    verter_type_expr::ObjectMember::CallSignature(function)
+                    | verter_type_expr::ObjectMember::ConstructSignature(function) => {
                         if let Some(first) = function.parameters.first() {
                             out.push(&first.ty);
                         }
                     }
-                    crate::analysis::type_expr::ObjectMember::Method(method) => {
+                    verter_type_expr::ObjectMember::Method(method) => {
                         if let Some(first) = method.function.parameters.first() {
                             out.push(&first.ty);
                         }
                     }
-                    crate::analysis::type_expr::ObjectMember::Property(_)
-                    | crate::analysis::type_expr::ObjectMember::IndexSignature(_) => {}
+                    verter_type_expr::ObjectMember::Property(_)
+                    | verter_type_expr::ObjectMember::IndexSignature(_) => {}
                 }
             }
         }
@@ -2727,7 +2727,7 @@ fn collect_slot_bindings_from_object_type(
     seen: &mut rustc_hash::FxHashSet<String>,
     out: &mut Vec<SlotBindingAnalysis>,
 ) {
-    use crate::analysis::type_expr::{ObjectMember, TypeExpr};
+    use verter_type_expr::{ObjectMember, TypeExpr};
 
     match ty {
         TypeExpr::Parenthesized(inner) => {
@@ -2977,7 +2977,7 @@ fn synthesize_model_prop_and_event(
 fn add_top_level_undefined_to_type_expr(type_expr: TypeExpr) -> TypeExpr {
     if matches!(
         type_expr,
-        TypeExpr::Primitive(crate::analysis::type_expr::PrimitiveName::Undefined)
+        TypeExpr::Primitive(verter_type_expr::PrimitiveName::Undefined)
     ) {
         return type_expr;
     }
@@ -2986,7 +2986,7 @@ fn add_top_level_undefined_to_type_expr(type_expr: TypeExpr) -> TypeExpr {
         if members.iter().any(|member| {
             matches!(
                 member,
-                TypeExpr::Primitive(crate::analysis::type_expr::PrimitiveName::Undefined)
+                TypeExpr::Primitive(verter_type_expr::PrimitiveName::Undefined)
             )
         }) {
             return type_expr;
@@ -2997,7 +2997,7 @@ fn add_top_level_undefined_to_type_expr(type_expr: TypeExpr) -> TypeExpr {
         TypeExpr::Unknown { .. } => type_expr,
         other => TypeExpr::union(vec![
             other,
-            TypeExpr::Primitive(crate::analysis::type_expr::PrimitiveName::Undefined),
+            TypeExpr::Primitive(verter_type_expr::PrimitiveName::Undefined),
         ]),
     }
 }
@@ -3008,18 +3008,16 @@ fn add_top_level_undefined_to_model_event_payload(payload: TypeExpr) -> TypeExpr
             let updated = elements
                 .iter()
                 .enumerate()
-                .map(
-                    |(index, element)| crate::analysis::type_expr::TupleElement {
-                        label: element.label.clone(),
-                        ty: if index == 0 {
-                            add_top_level_undefined_to_type_expr(element.ty.clone())
-                        } else {
-                            element.ty.clone()
-                        },
-                        optional: element.optional,
-                        rest: element.rest,
+                .map(|(index, element)| verter_type_expr::TupleElement {
+                    label: element.label.clone(),
+                    ty: if index == 0 {
+                        add_top_level_undefined_to_type_expr(element.ty.clone())
+                    } else {
+                        element.ty.clone()
                     },
-                )
+                    optional: element.optional,
+                    rest: element.rest,
+                })
                 .collect::<Vec<_>>();
             TypeExpr::Tuple {
                 elements: std::sync::Arc::from(updated),
@@ -3239,15 +3237,9 @@ fn extract_props_from_options(opts: &AnalyzedOptionsApi, out: &mut Vec<PropAnaly
                 .map(|raw| parse_annotation_or_unknown(raw))
                 .or_else(|| {
                     prop.type_constructor.as_ref().map(|rt| match rt.as_str() {
-                        "String" => {
-                            TypeExpr::Primitive(crate::analysis::type_expr::PrimitiveName::String)
-                        }
-                        "Number" => {
-                            TypeExpr::Primitive(crate::analysis::type_expr::PrimitiveName::Number)
-                        }
-                        "Boolean" => {
-                            TypeExpr::Primitive(crate::analysis::type_expr::PrimitiveName::Boolean)
-                        }
+                        "String" => TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+                        "Number" => TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+                        "Boolean" => TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
                         "Function" => unknown_type("Function".to_string()),
                         "Array" => unknown_type("Array".to_string()),
                         "Object" => unknown_type("Object".to_string()),

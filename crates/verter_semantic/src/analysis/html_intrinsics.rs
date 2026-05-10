@@ -7,7 +7,7 @@
 //! surfaces from the consumer project's installed TypeScript/Vue JSX
 //! entrypoints.
 
-use crate::analysis::type_expr::{PrimitiveName, TypeExpr};
+use verter_type_expr::{PrimitiveName, TypeExpr};
 
 /// Kind of intrinsic member.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

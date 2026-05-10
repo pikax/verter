@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 use rustc_hash::FxHashSet;
-use verter_semantic::analysis::type_expr::TypeExpr;
+use verter_type_expr::TypeExpr;
 
 use super::ProjectSemanticDispatch;
 use crate::instant::Instant;
@@ -296,7 +296,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 readonly: *readonly,
             },
             SemanticNodeData::Tuple { elements, readonly } => {
-                use verter_semantic::analysis::type_expr::TupleElement;
+                use verter_type_expr::TupleElement;
 
                 TypeExpr::Tuple {
                     elements: std::sync::Arc::from(
@@ -329,7 +329,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // C16: DeclPlaceholder → TypeExpr::Ref (replaces DeclAnchor).
             SemanticNodeData::Opaque(QueryError::DeclPlaceholder { name, .. }) => TypeExpr::Ref {
                 name: std::sync::Arc::clone(name),
-                type_arguments: verter_semantic::analysis::type_expr::empty_type_args(),
+                type_arguments: verter_type_expr::empty_type_args(),
             },
             SemanticNodeData::Conditional {
                 check,
@@ -395,22 +395,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     self.raise_node_to_type_expr_inner(mapper.value_expr, active)?,
                 ),
                 optional: match mapper.optionality {
-                    OptionalityMod::Add => {
-                        verter_semantic::analysis::type_expr::MappedModifier::Add
-                    }
-                    OptionalityMod::Remove => {
-                        verter_semantic::analysis::type_expr::MappedModifier::Remove
-                    }
-                    OptionalityMod::Keep => {
-                        verter_semantic::analysis::type_expr::MappedModifier::None
-                    }
+                    OptionalityMod::Add => verter_type_expr::MappedModifier::Add,
+                    OptionalityMod::Remove => verter_type_expr::MappedModifier::Remove,
+                    OptionalityMod::Keep => verter_type_expr::MappedModifier::None,
                 },
                 readonly: match mapper.readonly {
-                    ReadonlyMod::Add => verter_semantic::analysis::type_expr::MappedModifier::Add,
-                    ReadonlyMod::Remove => {
-                        verter_semantic::analysis::type_expr::MappedModifier::Remove
-                    }
-                    ReadonlyMod::Keep => verter_semantic::analysis::type_expr::MappedModifier::None,
+                    ReadonlyMod::Add => verter_type_expr::MappedModifier::Add,
+                    ReadonlyMod::Remove => verter_type_expr::MappedModifier::Remove,
+                    ReadonlyMod::Keep => verter_type_expr::MappedModifier::None,
                 },
                 name_type: match mapper.name_remap {
                     Some(node) => Some(std::sync::Arc::new(
@@ -426,7 +418,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .map(|segment| segment.to_string())
                     .collect::<Vec<_>>();
                 segments.extend(path.iter().map(|segment| segment.as_ref().to_string()));
-                TypeExpr::TypeOf(verter_semantic::analysis::type_expr::ValueRef { path: segments })
+                TypeExpr::TypeOf(verter_type_expr::ValueRef { path: segments })
             }
             SemanticNodeData::TypeParam {
                 display_name,
@@ -461,7 +453,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .and_then(|d| self.raise_node_to_type_expr_inner(*d, active))
                     .map(std::sync::Arc::new);
                 active.remove(&node);
-                TypeExpr::TypeParameter(verter_semantic::analysis::type_expr::TypeParam {
+                TypeExpr::TypeParameter(verter_type_expr::TypeParam {
                     name: display_name.as_ref().to_string(),
                     constraint: constraint_expr,
                     default: default_expr,
@@ -493,9 +485,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 return_type,
                 type_parameters,
             } => {
-                use verter_semantic::analysis::type_expr::{
-                    FunctionExpr, FunctionParam, TypeParam,
-                };
+                use verter_type_expr::{FunctionExpr, FunctionParam, TypeParam};
                 let parameters: Vec<FunctionParam> = params
                     .iter()
                     .filter_map(|p| {
@@ -537,7 +527,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // direction of the Navigate-mode lazy lowering.
             SemanticNodeData::DeclRef { identity } => TypeExpr::Ref {
                 name: std::sync::Arc::clone(&identity.decl_name),
-                type_arguments: verter_semantic::analysis::type_expr::empty_type_args(),
+                type_arguments: verter_type_expr::empty_type_args(),
             },
             // InstantiationRef raises to `Ref { name, type_arguments: [...] }`.
             // A miss on any arg raise becomes `Unknown { raw: "<raise
@@ -1508,7 +1498,7 @@ impl ReduceState {
 }
 
 fn semantic_primitive_to_type_expr(kind: SemanticPrimitiveKind) -> TypeExpr {
-    use verter_semantic::analysis::type_expr::PrimitiveName;
+    use verter_type_expr::PrimitiveName;
 
     TypeExpr::Primitive(match kind {
         SemanticPrimitiveKind::String => PrimitiveName::String,
@@ -1534,7 +1524,7 @@ mod tests {
         IndexKey, PrimitiveKind as SemanticPrimitiveKind, SemanticNodeData,
     };
     use crate::VerterHost;
-    use verter_semantic::analysis::type_expr::TypeExpr;
+    use verter_type_expr::TypeExpr;
 
     use super::ProjectSemanticDispatch;
 

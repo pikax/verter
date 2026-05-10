@@ -9,7 +9,7 @@
 //! guard uses to discriminate generic instantiations.
 
 use smallvec::SmallVec;
-use verter_semantic::analysis::type_expr::{LiteralValue, TypeExpr};
+use verter_type_expr::{LiteralValue, TypeExpr};
 
 use crate::semantic_query::DeclIdentity;
 

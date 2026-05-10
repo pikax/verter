@@ -136,7 +136,7 @@ fn component_meta_type_registry_keeps_expanded_and_pre_expansion_type_informatio
         type_registry: vec![
             verter_semantic::analysis::component_meta::ResolvedTypeAnalysis {
                 name: "Props".to_string(),
-                type_expr: verter_semantic::analysis::type_expr::TypeExpr::Unknown {
+                type_expr: verter_type_expr::TypeExpr::Unknown {
                     raw: "{ label: string }".to_string(),
                 },
                 type_expansion: None,
@@ -227,7 +227,7 @@ fn component_meta_type_registry_prefers_resolved_registry_type_expr_when_availab
         type_registry: vec![
             verter_semantic::analysis::component_meta::ResolvedTypeAnalysis {
                 name: "Button".to_string(),
-                type_expr: verter_semantic::analysis::type_expr::TypeExpr::named("Button"),
+                type_expr: verter_type_expr::TypeExpr::named("Button"),
                 type_expansion: None,
             },
         ],
@@ -261,24 +261,18 @@ fn component_meta_type_registry_prefers_resolved_registry_type_expr_when_availab
         resolved_type_registry: vec![
             verter_semantic::analysis::component_meta::ResolvedTypeAnalysis {
                 name: "Button".to_string(),
-                type_expr: verter_semantic::analysis::type_expr::TypeExpr::Object(Arc::new(
-                    verter_semantic::analysis::type_expr::ObjectExpr {
-                        properties: vec![
-                            verter_semantic::analysis::type_expr::ObjectMember::Property(
-                                verter_semantic::analysis::type_expr::ObjectProperty {
-                                    name: "variants".to_string(),
-                                    ty: verter_semantic::analysis::type_expr::TypeExpr::Object(
-                                        Arc::new(
-                                            verter_semantic::analysis::type_expr::ObjectExpr {
-                                                properties: vec![],
-                                            },
-                                        ),
-                                    ),
-                                    optional: false,
-                                    readonly: false,
-                                },
-                            ),
-                        ],
+                type_expr: verter_type_expr::TypeExpr::Object(Arc::new(
+                    verter_type_expr::ObjectExpr {
+                        properties: vec![verter_type_expr::ObjectMember::Property(
+                            verter_type_expr::ObjectProperty {
+                                name: "variants".to_string(),
+                                ty: verter_type_expr::TypeExpr::Object(Arc::new(
+                                    verter_type_expr::ObjectExpr { properties: vec![] },
+                                )),
+                                optional: false,
+                                readonly: false,
+                            },
+                        )],
                     },
                 )),
                 type_expansion: None,
@@ -315,10 +309,7 @@ fn component_meta_type_registry_prefers_resolved_registry_type_expr_when_availab
         .expect("type registry entry should be present");
 
     assert!(
-        matches!(
-            entry.r#type,
-            verter_semantic::analysis::type_expr::TypeExpr::Object(_)
-        ),
+        matches!(entry.r#type, verter_type_expr::TypeExpr::Object(_)),
         "resolved registry entry should override the shallow analysis alias"
     );
     assert_eq!(

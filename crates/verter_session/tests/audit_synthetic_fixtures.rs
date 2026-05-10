@@ -32,8 +32,8 @@
 //! the guard and falls through to depth-fuse / re-entry detection
 //! (which would either hang or yield a different terminal shape).
 
-use verter_semantic::analysis::type_expr::TypeExpr;
 use verter_session::audited_request::AuditedRequest;
+use verter_type_expr::TypeExpr;
 
 const REGISTRY_ROUTE_FIXTURE_VUE: &str = include_str!("fixtures/audit/registry_route_cycle.vue");
 

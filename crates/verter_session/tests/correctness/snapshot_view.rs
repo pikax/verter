@@ -21,9 +21,7 @@ use verter_semantic::analysis::component_meta::{
     FallthroughPropEntry, FallthroughSurface, InheritedSource, ModelAnalysis, NoFallthroughReason,
     PropAnalysis, SlotAnalysis, SlotBindingAnalysis,
 };
-use verter_semantic::analysis::type_expr::{
-    LiteralValue, MappedModifier, ObjectMember, PrimitiveName, TypeExpr,
-};
+use verter_type_expr::{LiteralValue, MappedModifier, ObjectMember, PrimitiveName, TypeExpr};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct SnapshotView {
@@ -629,7 +627,7 @@ fn write_literal(buf: &mut String, lit: &LiteralValue) {
     }
 }
 
-fn write_function(buf: &mut String, sig: &verter_semantic::analysis::type_expr::FunctionExpr) {
+fn write_function(buf: &mut String, sig: &verter_type_expr::FunctionExpr) {
     write_type_parameters(buf, &sig.type_parameters);
     buf.push('(');
     let mut first = true;
@@ -661,10 +659,7 @@ fn write_function(buf: &mut String, sig: &verter_semantic::analysis::type_expr::
     }
 }
 
-fn write_function_after_name(
-    buf: &mut String,
-    sig: &verter_semantic::analysis::type_expr::FunctionExpr,
-) {
+fn write_function_after_name(buf: &mut String, sig: &verter_type_expr::FunctionExpr) {
     write_type_parameters(buf, &sig.type_parameters);
     buf.push('(');
     let mut first = true;
@@ -696,10 +691,7 @@ fn write_function_after_name(
     }
 }
 
-fn write_type_parameters(
-    buf: &mut String,
-    params: &[verter_semantic::analysis::type_expr::TypeParam],
-) {
+fn write_type_parameters(buf: &mut String, params: &[verter_type_expr::TypeParam]) {
     if params.is_empty() {
         return;
     }
@@ -739,7 +731,7 @@ fn needs_parens_for_array(expr: &TypeExpr) -> bool {
 mod self_tests {
     use super::*;
     use std::sync::Arc;
-    use verter_semantic::analysis::type_expr::{
+    use verter_type_expr::{
         FunctionExpr, FunctionParam, ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName,
         TypeExpr,
     };

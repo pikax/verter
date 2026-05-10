@@ -169,10 +169,8 @@ pub(crate) fn produce_macro_object_shapes_for_purpose(
                         }
                     }
                 } else if let Some(lowered) = define_props_lowered.filter(|lowered| {
-                    matches!(
-                        lowered,
-                        verter_semantic::analysis::type_expr::TypeExpr::Ref { .. }
-                    ) && !define_props_has_matching_resolved_root
+                    matches!(lowered, verter_type_expr::TypeExpr::Ref { .. })
+                        && !define_props_has_matching_resolved_root
                 }) {
                     let item_started = Instant::now();
                     let (shape, source) = produce_one_macro_object_shape(
@@ -689,15 +687,11 @@ pub(crate) fn define_props_fields_fast_path_allowed(
     mac: &AnalyzedMacro,
     macro_index: usize,
     resolved_macros: &[ResolvedMacroMeta],
-    lowered: Option<&verter_semantic::analysis::type_expr::TypeExpr>,
+    lowered: Option<&verter_type_expr::TypeExpr>,
 ) -> bool {
-    fn strip_parens(
-        expr: &verter_semantic::analysis::type_expr::TypeExpr,
-    ) -> &verter_semantic::analysis::type_expr::TypeExpr {
+    fn strip_parens(expr: &verter_type_expr::TypeExpr) -> &verter_type_expr::TypeExpr {
         match expr {
-            verter_semantic::analysis::type_expr::TypeExpr::Parenthesized(inner) => {
-                strip_parens(inner)
-            }
+            verter_type_expr::TypeExpr::Parenthesized(inner) => strip_parens(inner),
             other => other,
         }
     }
@@ -707,9 +701,8 @@ pub(crate) fn define_props_fields_fast_path_allowed(
     };
 
     match lowered {
-        verter_semantic::analysis::type_expr::TypeExpr::Object(_) => return true,
-        verter_semantic::analysis::type_expr::TypeExpr::Ref { type_arguments, .. }
-            if type_arguments.is_empty() => {}
+        verter_type_expr::TypeExpr::Object(_) => return true,
+        verter_type_expr::TypeExpr::Ref { type_arguments, .. } if type_arguments.is_empty() => {}
         _ => return false,
     }
 
@@ -783,24 +776,18 @@ pub(crate) fn is_direct_local_macro_type_reference(
 }
 
 pub(crate) fn define_props_known_surface_shortcut_allowed(
-    lowered: Option<&verter_semantic::analysis::type_expr::TypeExpr>,
+    lowered: Option<&verter_type_expr::TypeExpr>,
 ) -> bool {
-    fn strip_parens(
-        expr: &verter_semantic::analysis::type_expr::TypeExpr,
-    ) -> &verter_semantic::analysis::type_expr::TypeExpr {
+    fn strip_parens(expr: &verter_type_expr::TypeExpr) -> &verter_type_expr::TypeExpr {
         match expr {
-            verter_semantic::analysis::type_expr::TypeExpr::Parenthesized(inner) => {
-                strip_parens(inner)
-            }
+            verter_type_expr::TypeExpr::Parenthesized(inner) => strip_parens(inner),
             other => other,
         }
     }
 
     match lowered.map(strip_parens) {
-        Some(verter_semantic::analysis::type_expr::TypeExpr::Object(_)) => true,
-        Some(verter_semantic::analysis::type_expr::TypeExpr::Ref { type_arguments, .. }) => {
-            type_arguments.is_empty()
-        }
+        Some(verter_type_expr::TypeExpr::Object(_)) => true,
+        Some(verter_type_expr::TypeExpr::Ref { type_arguments, .. }) => type_arguments.is_empty(),
         _ => false,
     }
 }
@@ -810,7 +797,7 @@ pub(crate) fn synthesize_define_props_shape_from_known_surface_with_authority(
     snapshot: &FileAnalysisSnapshot,
     resolved_macros: &[ResolvedMacroMeta],
     evaluated_types: &verter_semantic::analysis::type_expand::ExpandedComponentTypes,
-    lowered: Option<&verter_semantic::analysis::type_expr::TypeExpr>,
+    lowered: Option<&verter_type_expr::TypeExpr>,
     require_authoritative_surface: bool,
 ) -> Option<(ShapeResult, MacroShapeSource)> {
     use verter_semantic::analysis::type_expand::{
@@ -901,8 +888,8 @@ pub(crate) fn synthesize_define_props_shape_from_known_surface_with_authority(
             let ty = prop
                 .type_annotation
                 .as_deref()
-                .map(verter_semantic::analysis::type_expr_lower::parse_type_annotation)
-                .unwrap_or_else(|| verter_semantic::analysis::type_expr::TypeExpr::Unknown {
+                .map(verter_type_expr_oxc::parse_type_annotation)
+                .unwrap_or_else(|| verter_type_expr::TypeExpr::Unknown {
                     raw: "unknown".to_string(),
                 });
             properties.push(ExpandedProperty {
@@ -970,17 +957,15 @@ pub(crate) fn synthesize_define_props_shape_from_registry_root(
 }
 
 pub(crate) fn synthesize_macro_shape_from_registry_lowered_root(
-    lowered: &verter_semantic::analysis::type_expr::TypeExpr,
+    lowered: &verter_type_expr::TypeExpr,
     resolved_type_registry: &[verter_semantic::analysis::component_meta::ResolvedTypeAnalysis],
     resolved_type_registry_meta: &[ResolvedTypeRegistryMeta],
     shape_is_usable: impl Fn(&verter_semantic::analysis::type_expand::ExpandedObjectShape) -> bool,
 ) -> Option<(ShapeResult, MacroShapeSource)> {
-    fn root_name(expr: &verter_semantic::analysis::type_expr::TypeExpr) -> Option<&str> {
+    fn root_name(expr: &verter_type_expr::TypeExpr) -> Option<&str> {
         match expr {
-            verter_semantic::analysis::type_expr::TypeExpr::Parenthesized(inner) => {
-                root_name(inner)
-            }
-            verter_semantic::analysis::type_expr::TypeExpr::Ref { name, .. } => Some(name.as_ref()),
+            verter_type_expr::TypeExpr::Parenthesized(inner) => root_name(inner),
+            verter_type_expr::TypeExpr::Ref { name, .. } => Some(name.as_ref()),
             _ => None,
         }
     }
@@ -1008,11 +993,11 @@ pub(crate) fn synthesize_macro_shape_from_registry_lowered_root(
 
 pub(crate) fn named_ref_matches_empty_shell_registry_root(
     owner_canonical: &str,
-    lowered: &verter_semantic::analysis::type_expr::TypeExpr,
+    lowered: &verter_type_expr::TypeExpr,
     resolved_type_registry: &[verter_semantic::analysis::component_meta::ResolvedTypeAnalysis],
     resolved_type_registry_meta: &[ResolvedTypeRegistryMeta],
 ) -> bool {
-    let verter_semantic::analysis::type_expr::TypeExpr::Ref {
+    let verter_type_expr::TypeExpr::Ref {
         name,
         type_arguments,
     } = lowered
@@ -1146,8 +1131,8 @@ pub(crate) fn synthesize_define_emits_shape_from_known_surface(
             let ty = emit
                 .payload_type
                 .as_deref()
-                .map(verter_semantic::analysis::type_expr_lower::parse_type_annotation)
-                .unwrap_or_else(|| verter_semantic::analysis::type_expr::TypeExpr::Unknown {
+                .map(verter_type_expr_oxc::parse_type_annotation)
+                .unwrap_or_else(|| verter_type_expr::TypeExpr::Unknown {
                     raw: "unknown".to_string(),
                 });
             properties.push(ExpandedProperty {
@@ -1217,7 +1202,7 @@ pub(crate) fn synthesize_define_slots_shape_from_known_surface(
 
 pub(crate) fn slot_field_function_type_expr(
     slot: &verter_semantic::analysis::AnalyzedSlotField,
-) -> verter_semantic::analysis::type_expr::TypeExpr {
+) -> verter_type_expr::TypeExpr {
     let return_type = slot.return_type.as_deref().unwrap_or("any");
     let signature = if slot.bindings.is_empty() {
         format!("() => {return_type}")
@@ -1237,7 +1222,7 @@ pub(crate) fn slot_field_function_type_expr(
         format!("(props: {{ {bindings} }}) => {return_type}")
     };
 
-    verter_semantic::analysis::type_expr_lower::parse_type_annotation(&signature)
+    verter_type_expr_oxc::parse_type_annotation(&signature)
 }
 
 pub(crate) fn reuse_expanded_define_props_shape(
@@ -1279,13 +1264,13 @@ pub(crate) fn merge_expansion_execution_status(
 }
 
 pub(crate) fn registry_entry_to_expanded_shape(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    expr: &verter_type_expr::TypeExpr,
 ) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
     use verter_semantic::analysis::type_expand::{
         ExpandedCallSignature, ExpandedIndexSignature, ExpandedObjectShape, ExpandedParameter,
         ExpandedProperty,
     };
-    use verter_semantic::analysis::type_expr::{ObjectMember, PrimitiveName, TypeExpr};
+    use verter_type_expr::{ObjectMember, PrimitiveName, TypeExpr};
 
     let TypeExpr::Object(object) = expr else {
         return None;
@@ -1362,8 +1347,8 @@ pub(crate) fn registry_entry_to_expanded_shape(
 
 pub(crate) fn expanded_shape_to_type_expr(
     shape: &verter_semantic::analysis::type_expand::ExpandedObjectShape,
-) -> verter_semantic::analysis::type_expr::TypeExpr {
-    use verter_semantic::analysis::type_expr::{
+) -> verter_type_expr::TypeExpr {
+    use verter_type_expr::{
         FunctionExpr, FunctionParam, ObjectExpr, ObjectMember, ObjectProperty, TypeExpr,
     };
 
@@ -1396,16 +1381,14 @@ pub(crate) fn expanded_shape_to_type_expr(
     }
 
     for signature in &shape.index_signatures {
-        properties.push(
-            verter_semantic::analysis::type_expr::ObjectMember::IndexSignature(
-                verter_semantic::analysis::type_expr::IndexSignature {
-                    key_name: "key".to_string(),
-                    key_type: signature.key_type.clone(),
-                    value_type: signature.value_type.clone(),
-                    readonly: signature.readonly,
-                },
-            ),
-        );
+        properties.push(verter_type_expr::ObjectMember::IndexSignature(
+            verter_type_expr::IndexSignature {
+                key_name: "key".to_string(),
+                key_type: signature.key_type.clone(),
+                value_type: signature.value_type.clone(),
+                readonly: signature.readonly,
+            },
+        ));
     }
 
     TypeExpr::Object(std::sync::Arc::new(ObjectExpr { properties }))
@@ -1434,9 +1417,9 @@ type ShapeResult = verter_semantic::analysis::type_expand::ExpansionResult<
 pub(crate) fn expr_needs_projection_rescue(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     owner_canonical: &str,
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    expr: &verter_type_expr::TypeExpr,
 ) -> bool {
-    use verter_semantic::analysis::type_expr::TypeExpr;
+    use verter_type_expr::TypeExpr;
 
     if lowered_root_reaches_transitive_cycle(query_engine, owner_canonical, expr) {
         return false;
@@ -1476,9 +1459,9 @@ pub(crate) fn expr_needs_projection_rescue(
 pub(crate) fn type_expr_has_non_object_top_level_surface(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     owner_canonical: &str,
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    expr: &verter_type_expr::TypeExpr,
 ) -> bool {
-    use verter_semantic::analysis::type_expr::TypeExpr;
+    use verter_type_expr::TypeExpr;
 
     match expr {
         TypeExpr::TypeOf(_)
@@ -1559,7 +1542,7 @@ pub(crate) fn type_expr_has_non_object_top_level_surface(
 pub(crate) fn produce_one_macro_object_shape(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     owner_canonical: &str,
-    lowered: &verter_semantic::analysis::type_expr::TypeExpr,
+    lowered: &verter_type_expr::TypeExpr,
     shape_is_usable: impl Fn(&verter_semantic::analysis::type_expand::ExpandedObjectShape) -> bool,
 ) -> (Option<ShapeResult>, MacroShapeSource) {
     // ── Fast path: direct Object body → DB-backed projection ──────────
@@ -1569,7 +1552,7 @@ pub(crate) fn produce_one_macro_object_shape(
         return (Some(projected), MacroShapeSource::Projection);
     }
 
-    if let verter_semantic::analysis::type_expr::TypeExpr::Ref {
+    if let verter_type_expr::TypeExpr::Ref {
         name,
         type_arguments,
     } = lowered
@@ -1601,7 +1584,7 @@ pub(crate) fn produce_one_macro_object_shape(
 
     // ── Non-object body: solver first, then projection on warm caches ─
     let scoped_solver_result = match lowered {
-        verter_semantic::analysis::type_expr::TypeExpr::Ref {
+        verter_type_expr::TypeExpr::Ref {
             name,
             type_arguments,
         } if type_arguments.is_empty() => {
@@ -1726,9 +1709,9 @@ pub(crate) fn produce_one_macro_object_shape(
 pub(crate) fn project_named_ref_prepared_surface_shape(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     owner_canonical: &str,
-    lowered: &verter_semantic::analysis::type_expr::TypeExpr,
+    lowered: &verter_type_expr::TypeExpr,
 ) -> Option<ShapeResult> {
-    let verter_semantic::analysis::type_expr::TypeExpr::Ref {
+    let verter_type_expr::TypeExpr::Ref {
         name,
         type_arguments,
     } = lowered
@@ -1910,10 +1893,10 @@ pub(crate) fn resolve_named_ref_prepared_projection_target(
 pub(crate) fn project_named_ref_surface_shape(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     owner_canonical: &str,
-    lowered: &verter_semantic::analysis::type_expr::TypeExpr,
+    lowered: &verter_type_expr::TypeExpr,
     shape_is_usable: &impl Fn(&verter_semantic::analysis::type_expand::ExpandedObjectShape) -> bool,
 ) -> Option<ShapeResult> {
-    let verter_semantic::analysis::type_expr::TypeExpr::Ref { name, .. } = lowered else {
+    let verter_type_expr::TypeExpr::Ref { name, .. } = lowered else {
         return None;
     };
 
@@ -1942,10 +1925,10 @@ pub(crate) fn project_named_ref_surface_shape(
 pub(crate) fn project_named_ref_imported_scope_shape(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     owner_canonical: &str,
-    lowered: &verter_semantic::analysis::type_expr::TypeExpr,
+    lowered: &verter_type_expr::TypeExpr,
     shape_is_usable: &impl Fn(&verter_semantic::analysis::type_expand::ExpandedObjectShape) -> bool,
 ) -> Option<ShapeResult> {
-    let verter_semantic::analysis::type_expr::TypeExpr::Ref { name, .. } = lowered else {
+    let verter_type_expr::TypeExpr::Ref { name, .. } = lowered else {
         return None;
     };
 
@@ -1974,10 +1957,10 @@ pub(crate) fn project_named_ref_imported_scope_shape(
 pub(crate) fn produce_one_macro_object_shape_for_slots(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     owner_canonical: &str,
-    lowered: &verter_semantic::analysis::type_expr::TypeExpr,
+    lowered: &verter_type_expr::TypeExpr,
 ) -> (Option<ShapeResult>, MacroShapeSource) {
     // ── Fast path: direct Object body → DB-backed projection ──────────
-    if let verter_semantic::analysis::type_expr::TypeExpr::Ref {
+    if let verter_type_expr::TypeExpr::Ref {
         name,
         type_arguments,
     } = lowered
@@ -2106,10 +2089,8 @@ pub(crate) fn has_shape_surface(
         || !shape.call_signatures.is_empty()
 }
 
-pub(crate) fn type_expr_symbolic_penalty(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
-) -> usize {
-    use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+pub(crate) fn type_expr_symbolic_penalty(expr: &verter_type_expr::TypeExpr) -> usize {
+    use verter_type_expr::{ObjectMember, TypeExpr};
 
     match expr {
         TypeExpr::Primitive(_) | TypeExpr::Literal(_) => 0,
@@ -2304,12 +2285,7 @@ pub(crate) fn classify_named_ref_for_db_projection(
         crate::resolver_core::ResolvedDeclarationKind::TypeAlias
         | crate::resolver_core::ResolvedDeclarationKind::Unknown => query_engine
             .named_decl_body(&defining_canonical, &defining_name)
-            .is_some_and(|body| {
-                matches!(
-                    body,
-                    verter_semantic::analysis::type_expr::TypeExpr::Object(_),
-                )
-            }),
+            .is_some_and(|body| matches!(body, verter_type_expr::TypeExpr::Object(_),)),
     };
     safe.then_some((defining_canonical, defining_name))
 }
@@ -2322,10 +2298,10 @@ pub(crate) fn classify_named_ref_for_db_projection(
 /// published entries and therefore must keep their own registry publication
 /// instead of being inlined as indexed-access paths.
 pub(crate) fn collect_type_expr_ref_names(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    expr: &verter_type_expr::TypeExpr,
     out: &mut rustc_hash::FxHashSet<String>,
 ) {
-    use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+    use verter_type_expr::{ObjectMember, TypeExpr};
     match expr {
         TypeExpr::Ref {
             name,

@@ -28,6 +28,8 @@ serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
 sha2 = "0.10"
 lightningcss = { version = "1.0.0-alpha.71", features = ["visitor"] }
+verter_type_expr = { path = "crates/verter_type_expr" }
+verter_type_expr_oxc = { path = "crates/verter_type_expr_oxc" }
 
 [profile.release]
 opt-level = 3

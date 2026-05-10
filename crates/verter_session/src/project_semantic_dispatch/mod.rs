@@ -69,7 +69,7 @@ use crate::semantic_query::{
     SemanticQueryApi, SemanticQueryKey, SurfaceView,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
-use verter_semantic::analysis::type_expr::{PrimitiveName, TypeExpr};
+use verter_type_expr::{PrimitiveName, TypeExpr};
 
 // Phase D §5.2 WIP-Split — module tree. Extracted sub-modules are `pub(crate)`
 // so external callers see only the `ProjectSemanticDispatch` struct / trait
@@ -262,7 +262,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub fn lower_type_expr_in_scope(
         &self,
         scope_canonical_id: &str,
-        expr: &verter_semantic::analysis::type_expr::TypeExpr,
+        expr: &verter_type_expr::TypeExpr,
     ) -> Option<SemanticNodeId> {
         self.lower_type_expr_in_scope_with_mode(
             scope_canonical_id,
@@ -287,7 +287,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub fn lower_type_expr_in_scope_with_mode(
         &self,
         scope_canonical_id: &str,
-        expr: &verter_semantic::analysis::type_expr::TypeExpr,
+        expr: &verter_type_expr::TypeExpr,
         mode: crate::semantic_query::ProjectionMode,
     ) -> Option<SemanticNodeId> {
         let shallow = self.ctx.shallow_file_state(scope_canonical_id)?;

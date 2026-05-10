@@ -616,10 +616,10 @@ pub(crate) fn resolve_jsdoc_tag_type(
     canonical_source: &str,
     raw_type: &str,
     tracked_deps: &mut std::collections::BTreeSet<String>,
-) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
-    let parsed = verter_semantic::analysis::type_expr_lower::parse_type_annotation(raw_type);
+) -> Option<verter_type_expr::TypeExpr> {
+    let parsed = verter_type_expr_oxc::parse_type_annotation(raw_type);
     let parsed = if parsed.is_unknown() {
-        verter_semantic::analysis::type_expr::TypeExpr::Unknown {
+        verter_type_expr::TypeExpr::Unknown {
             raw: raw_type.to_string(),
         }
     } else {

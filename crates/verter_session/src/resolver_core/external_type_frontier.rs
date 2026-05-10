@@ -25,7 +25,7 @@ use super::shallow_file_state::{
     BudgetDomain, BudgetExceededFailure, ExportTarget, ExternalSymbolRef, LocalClosureStatus,
     ResolutionBudgets, ResolutionCounters, ShallowFileState,
 };
-use verter_semantic::analysis::type_expr::{TypeExpr, TypeParam};
+use verter_type_expr::{TypeExpr, TypeParam};
 
 // ---------------------------------------------------------------------------
 // Core types

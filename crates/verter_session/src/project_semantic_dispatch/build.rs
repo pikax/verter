@@ -8,11 +8,9 @@
 use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use verter_semantic::analysis::type_expr::{
-    FunctionExpr, ObjectExpr, ObjectMember, ObjectProperty, TypeExpr,
-};
 use verter_semantic::analysis::type_solver::host::{ResolvedRootIdentity, UtilitySource};
 use verter_semantic::analysis::type_solver::PreparedTypeDecl;
+use verter_type_expr::{FunctionExpr, ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
 
 use super::walk::PathWalker;
 use super::{

@@ -40,8 +40,6 @@ pub mod template;
 pub mod type_eval;
 pub mod type_eval_build;
 pub mod type_expand;
-pub mod type_expr;
-pub mod type_expr_lower;
 pub mod type_expr_refs;
 pub mod type_solver;
 pub mod types;

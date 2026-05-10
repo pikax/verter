@@ -4,10 +4,8 @@
 //! pipeline to choose between candidate surfaces. These are pure leaf helpers:
 //! no shared state, no host access, no graph access.
 
-pub(crate) fn count_symbolic_carriers_in_expr(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
-) -> usize {
-    use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+pub(crate) fn count_symbolic_carriers_in_expr(expr: &verter_type_expr::TypeExpr) -> usize {
+    use verter_type_expr::{ObjectMember, TypeExpr};
 
     let mut score = 0usize;
     let mut stack = vec![expr];
@@ -125,8 +123,8 @@ pub(crate) fn count_symbolic_carriers_in_expr(
     score
 }
 
-fn count_generic_detail_in_expr(expr: &verter_semantic::analysis::type_expr::TypeExpr) -> usize {
-    use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+fn count_generic_detail_in_expr(expr: &verter_type_expr::TypeExpr) -> usize {
+    use verter_type_expr::{ObjectMember, TypeExpr};
 
     let mut score = 0usize;
     let mut stack = vec![expr];
@@ -268,10 +266,8 @@ fn count_generic_detail_in_expr(expr: &verter_semantic::analysis::type_expr::Typ
     score
 }
 
-fn type_expr_has_structural_top_level(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
-) -> bool {
-    use verter_semantic::analysis::type_expr::TypeExpr;
+fn type_expr_has_structural_top_level(expr: &verter_type_expr::TypeExpr) -> bool {
+    use verter_type_expr::TypeExpr;
 
     match expr {
         TypeExpr::Parenthesized(inner) => type_expr_has_structural_top_level(inner),
@@ -299,16 +295,12 @@ fn type_expr_has_structural_top_level(
 }
 
 pub(crate) fn compare_type_expr_improvement(
-    candidate: &verter_semantic::analysis::type_expr::TypeExpr,
-    current: &verter_semantic::analysis::type_expr::TypeExpr,
+    candidate: &verter_type_expr::TypeExpr,
+    current: &verter_type_expr::TypeExpr,
 ) -> bool {
-    if matches!(
-        current,
-        verter_semantic::analysis::type_expr::TypeExpr::Unknown { .. }
-    ) && !matches!(
-        candidate,
-        verter_semantic::analysis::type_expr::TypeExpr::Unknown { .. }
-    ) {
+    if matches!(current, verter_type_expr::TypeExpr::Unknown { .. })
+        && !matches!(candidate, verter_type_expr::TypeExpr::Unknown { .. })
+    {
         return true;
     }
 
@@ -329,9 +321,9 @@ pub(crate) fn compare_type_expr_improvement(
 // re-export. Without the promotion, the parent shell's `pub(crate) use`
 // would be rejected (E0364).
 pub(crate) fn component_meta_registry_prefers_structural_materialization(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    expr: &verter_type_expr::TypeExpr,
 ) -> bool {
-    use verter_semantic::analysis::type_expr::TypeExpr;
+    use verter_type_expr::TypeExpr;
 
     match expr {
         TypeExpr::Parenthesized(_)

@@ -100,7 +100,7 @@ impl VerterHost {
             type_name,
         )
         .or_else(|| {
-            let expr = verter_semantic::analysis::type_expr::TypeExpr::named(type_name);
+            let expr = verter_type_expr::TypeExpr::named(type_name);
             crate::meta_resolve::project_expr_class_a_via_dispatch(self, canonical_id, &expr)
         })?;
         let mut shape =
@@ -145,8 +145,8 @@ impl VerterHost {
     fn solve_project_intrinsic_member_type(
         engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
         scope_canonical_id: &str,
-        expr: &verter_semantic::analysis::type_expr::TypeExpr,
-    ) -> verter_semantic::analysis::type_expr::TypeExpr {
+        expr: &verter_type_expr::TypeExpr,
+    ) -> verter_type_expr::TypeExpr {
         // Class A via shared
         // dispatch helper. The engine here is still kept on the
         // calling intrinsic member-surface materialiser path.
@@ -159,12 +159,12 @@ impl VerterHost {
     }
 
     fn materialize_project_intrinsic_member_surface_expr(
-        expr: &verter_semantic::analysis::type_expr::TypeExpr,
+        expr: &verter_type_expr::TypeExpr,
         engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
         scope_canonical_id: &str,
         nested_surface: bool,
-    ) -> verter_semantic::analysis::type_expr::TypeExpr {
-        use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+    ) -> verter_type_expr::TypeExpr {
+        use verter_type_expr::{ObjectMember, TypeExpr};
 
         if nested_surface {
             let solved =
@@ -295,19 +295,17 @@ impl VerterHost {
                 elements: Arc::from(
                     elements
                         .iter()
-                        .map(
-                            |element| verter_semantic::analysis::type_expr::TupleElement {
-                                label: element.label.clone(),
-                                ty: Self::materialize_project_intrinsic_member_surface_expr(
-                                    &element.ty,
-                                    engine,
-                                    scope_canonical_id,
-                                    nested_surface,
-                                ),
-                                optional: element.optional,
-                                rest: element.rest,
-                            },
-                        )
+                        .map(|element| verter_type_expr::TupleElement {
+                            label: element.label.clone(),
+                            ty: Self::materialize_project_intrinsic_member_surface_expr(
+                                &element.ty,
+                                engine,
+                                scope_canonical_id,
+                                nested_surface,
+                            ),
+                            optional: element.optional,
+                            rest: element.rest,
+                        })
                         .collect::<Vec<_>>(),
                 ),
                 readonly: *readonly,

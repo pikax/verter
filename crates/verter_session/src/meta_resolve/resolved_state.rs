@@ -124,9 +124,9 @@ pub(crate) enum RegistryMaterialization {
 pub(crate) fn component_meta_owner_local_shallow_substituted_alias_body(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     scope_canonical_id: &str,
-    raw_body: Option<&verter_semantic::analysis::type_expr::TypeExpr>,
-) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
-    use verter_semantic::analysis::type_expr::TypeExpr;
+    raw_body: Option<&verter_type_expr::TypeExpr>,
+) -> Option<verter_type_expr::TypeExpr> {
+    use verter_type_expr::TypeExpr;
     let TypeExpr::Ref {
         name,
         type_arguments,
@@ -181,12 +181,10 @@ pub(crate) fn component_meta_owner_local_shallow_substituted_alias_body(
 /// delegates leaf replacement to `try_replace`: return `Some(expr)` to
 /// replace, `None` to recurse structurally.
 pub(crate) fn walk_substitute_typeexpr(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
-    try_replace: &impl Fn(
-        &verter_semantic::analysis::type_expr::TypeExpr,
-    ) -> Option<verter_semantic::analysis::type_expr::TypeExpr>,
-) -> verter_semantic::analysis::type_expr::TypeExpr {
-    use verter_semantic::analysis::type_expr::{
+    expr: &verter_type_expr::TypeExpr,
+    try_replace: &impl Fn(&verter_type_expr::TypeExpr) -> Option<verter_type_expr::TypeExpr>,
+) -> verter_type_expr::TypeExpr {
+    use verter_type_expr::{
         FunctionExpr, FunctionParam, IndexSignature, MethodSignature, ObjectExpr, ObjectMember,
         ObjectProperty, TupleElement, TypeExpr,
     };
@@ -287,10 +285,10 @@ pub(crate) fn walk_substitute_typeexpr(
 }
 
 pub(crate) fn component_meta_substitute_typeexpr(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
-    substitutions: &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
-) -> verter_semantic::analysis::type_expr::TypeExpr {
-    use verter_semantic::analysis::type_expr::TypeExpr;
+    expr: &verter_type_expr::TypeExpr,
+    substitutions: &rustc_hash::FxHashMap<String, verter_type_expr::TypeExpr>,
+) -> verter_type_expr::TypeExpr {
+    use verter_type_expr::TypeExpr;
     walk_substitute_typeexpr(expr, &|e| match e {
         TypeExpr::TypeParameter(param) => substitutions.get(&param.name).cloned(),
         TypeExpr::Ref {
@@ -302,7 +300,7 @@ pub(crate) fn component_meta_substitute_typeexpr(
 }
 
 pub(crate) fn select_imported_materialization_scope(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    expr: &verter_type_expr::TypeExpr,
     owner_canonical: &str,
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
 ) -> Option<String> {
@@ -314,7 +312,7 @@ pub(crate) fn select_imported_materialization_scope(
         .or_else(|| component_meta_registry_public_indexed_access_route(expr))
         .map(|(root_name, _)| root_name);
     let root_name = match expr {
-        verter_semantic::analysis::type_expr::TypeExpr::Ref { name, .. } => name.as_ref(),
+        verter_type_expr::TypeExpr::Ref { name, .. } => name.as_ref(),
         _ => route_root_name.as_deref()?,
     };
 
@@ -338,9 +336,9 @@ pub(crate) fn select_imported_materialization_scope(
 pub(crate) fn lowered_root_reaches_transitive_cycle(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     scope_canonical_id: &str,
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    expr: &verter_type_expr::TypeExpr,
 ) -> bool {
-    use verter_semantic::analysis::type_expr::TypeExpr;
+    use verter_type_expr::TypeExpr;
 
     // Extract the root identity carried by the TypeExpr structure
     // WITHOUT lowering. Lowering is recursive over the entire subtree

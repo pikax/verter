@@ -24,7 +24,7 @@
 //! tree (no `Union` of `'a' | 'c'` surfaces; the type_expr is
 //! `Unknown`) and PASSES once 5i's reduction lands.
 
-use verter_semantic::analysis::type_expr::{LiteralValue, TypeExpr};
+use verter_type_expr::{LiteralValue, TypeExpr};
 
 use crate::harness::{build_hermetic_host_with_lib, resolve_under_audit, STUB_LIB_ES5};
 

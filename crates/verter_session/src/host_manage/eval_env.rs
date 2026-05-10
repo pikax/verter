@@ -164,8 +164,7 @@ impl VerterHost {
             let Some(decl) = env.value_symbols.get(current.name.as_str()) else {
                 break;
             };
-            let Some(verter_semantic::analysis::type_expr::TypeExpr::TypeOf(value_ref)) =
-                decl.type_annotation.as_ref()
+            let Some(verter_type_expr::TypeExpr::TypeOf(value_ref)) = decl.type_annotation.as_ref()
             else {
                 break;
             };
@@ -517,7 +516,7 @@ impl VerterHost {
         &self,
         canonical: &str,
         requested_binding_names: &rustc_hash::FxHashSet<String>,
-    ) -> Vec<(String, verter_semantic::analysis::type_expr::TypeExpr)> {
+    ) -> Vec<(String, verter_type_expr::TypeExpr)> {
         if requested_binding_names.is_empty() {
             return Vec::new();
         }
@@ -835,7 +834,7 @@ impl VerterHost {
                                         // resolution to instantiate the body
                                         // correctly — keep `Expanded` for those.
                                         let carrier_lower_mode = {
-                                            use verter_semantic::analysis::type_expr::TypeExpr;
+                                            use verter_type_expr::TypeExpr;
                                             // Mirror the shallow_preserve helper's
                                             // "is this a Ref carrier" check.
                                             let stripped = {

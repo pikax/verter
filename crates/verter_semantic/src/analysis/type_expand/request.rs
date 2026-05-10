@@ -4,8 +4,8 @@
 //! public expansion boundary instead of collapsing back into an Exact/Partial
 //! compatibility contract.
 
-use crate::analysis::type_expr::{TypeExpr, TypeParam};
 use crate::analysis::type_solver::result::{ExecutionStatus, SolverExactness};
+use verter_type_expr::{TypeExpr, TypeParam};
 
 pub type ExpansionExactness = SolverExactness;
 pub type ExpansionExecutionStatus = ExecutionStatus;
@@ -266,7 +266,7 @@ mod tests {
     fn expansion_result_metadata_preserves_exactness_and_execution_status() {
         let result = ExpansionResult {
             value: ExpandedNormalizedExpr {
-                expr: TypeExpr::primitive(crate::analysis::type_expr::PrimitiveName::String),
+                expr: TypeExpr::primitive(verter_type_expr::PrimitiveName::String),
             },
             exactness: SolverExactness::ExactSymbolic,
             execution_status: ExecutionStatus::Interrupted,
@@ -289,7 +289,7 @@ mod tests {
 
         // A solver result that is exact but has a non-semantic diagnostic
         let mut solver_result = SolverResult::exact_concrete(TypeExpr::primitive(
-            crate::analysis::type_expr::PrimitiveName::String,
+            verter_type_expr::PrimitiveName::String,
         ));
         solver_result
             .diagnostics

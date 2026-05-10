@@ -12,8 +12,8 @@
 //! parent-private (no visibility relaxation).
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use verter_semantic::analysis::type_expr::TypeExpr;
 use verter_semantic::analysis::type_solver::query_engine::{ProjectedMember, ProjectedSurface};
+use verter_type_expr::TypeExpr;
 
 use super::{
     PreparedSubstitutionKey, SEMANTIC_MISS, SEMANTIC_OBJECT_SURFACE, SEMANTIC_SURFACE_MEMBER,
@@ -131,10 +131,10 @@ pub(super) fn dispatch_route_expr_is_materialized(expr: &TypeExpr) -> bool {
             .iter()
             .all(|element| dispatch_route_expr_is_materialized(&element.ty)),
         TypeExpr::Object(object) => object.properties.iter().all(|member| match member {
-            verter_semantic::analysis::type_expr::ObjectMember::Property(property) => {
+            verter_type_expr::ObjectMember::Property(property) => {
                 dispatch_route_expr_is_materialized(&property.ty)
             }
-            verter_semantic::analysis::type_expr::ObjectMember::Method(method) => {
+            verter_type_expr::ObjectMember::Method(method) => {
                 method
                     .function
                     .return_type
@@ -146,8 +146,8 @@ pub(super) fn dispatch_route_expr_is_materialized(expr: &TypeExpr) -> bool {
                         .iter()
                         .all(|parameter| dispatch_route_expr_is_materialized(&parameter.ty))
             }
-            verter_semantic::analysis::type_expr::ObjectMember::CallSignature(signature)
-            | verter_semantic::analysis::type_expr::ObjectMember::ConstructSignature(signature) => {
+            verter_type_expr::ObjectMember::CallSignature(signature)
+            | verter_type_expr::ObjectMember::ConstructSignature(signature) => {
                 signature
                     .return_type
                     .as_deref()
@@ -157,7 +157,7 @@ pub(super) fn dispatch_route_expr_is_materialized(expr: &TypeExpr) -> bool {
                         .iter()
                         .all(|parameter| dispatch_route_expr_is_materialized(&parameter.ty))
             }
-            verter_semantic::analysis::type_expr::ObjectMember::IndexSignature(signature) => {
+            verter_type_expr::ObjectMember::IndexSignature(signature) => {
                 dispatch_route_expr_is_materialized(&signature.key_type)
                     && dispatch_route_expr_is_materialized(&signature.value_type)
             }
@@ -391,9 +391,9 @@ pub(super) fn projected_surface_is_empty(surface: &ProjectedSurface) -> bool {
 }
 
 pub(super) fn projected_surface_from_object_expr(
-    object: &verter_semantic::analysis::type_expr::ObjectExpr,
+    object: &verter_type_expr::ObjectExpr,
 ) -> ProjectedSurface {
-    use verter_semantic::analysis::type_expr::ObjectMember;
+    use verter_type_expr::ObjectMember;
 
     let mut members = Vec::new();
     let mut call_signatures = Vec::new();
@@ -436,11 +436,11 @@ pub(super) fn projected_surface_from_object_expr(
 }
 
 pub(super) fn projected_surface_from_object_expr_with_substitutions(
-    object: &verter_semantic::analysis::type_expr::ObjectExpr,
-    _type_params: &[verter_semantic::analysis::type_expr::TypeParam],
+    object: &verter_type_expr::ObjectExpr,
+    _type_params: &[verter_type_expr::TypeParam],
     substitutions: &FxHashMap<String, TypeExpr>,
 ) -> ProjectedSurface {
-    use verter_semantic::analysis::type_expr::ObjectMember;
+    use verter_type_expr::ObjectMember;
 
     if substitutions.is_empty() {
         return projected_surface_from_object_expr(object);
@@ -491,7 +491,7 @@ pub(super) fn projected_surface_from_object_expr_with_substitutions(
 }
 
 pub(super) fn projected_surface_from_function_expr(
-    function: &verter_semantic::analysis::type_expr::FunctionExpr,
+    function: &verter_type_expr::FunctionExpr,
 ) -> ProjectedSurface {
     ProjectedSurface {
         members: Vec::new(),
@@ -502,8 +502,8 @@ pub(super) fn projected_surface_from_function_expr(
 }
 
 pub(super) fn projected_surface_from_function_expr_with_substitutions(
-    function: &verter_semantic::analysis::type_expr::FunctionExpr,
-    _type_params: &[verter_semantic::analysis::type_expr::TypeParam],
+    function: &verter_type_expr::FunctionExpr,
+    _type_params: &[verter_type_expr::TypeParam],
     substitutions: &FxHashMap<String, TypeExpr>,
 ) -> ProjectedSurface {
     if substitutions.is_empty() {
@@ -706,9 +706,9 @@ pub(super) fn apply_type_param_substitutions(
 }
 
 pub(super) fn substitute_function_expr_if_needed(
-    function: &verter_semantic::analysis::type_expr::FunctionExpr,
+    function: &verter_type_expr::FunctionExpr,
     substitutions: &FxHashMap<String, TypeExpr>,
-) -> verter_semantic::analysis::type_expr::FunctionExpr {
+) -> verter_type_expr::FunctionExpr {
     if substitutions.is_empty() || !function_expr_references_substitutions(function, substitutions)
     {
         function.clone()
@@ -736,7 +736,7 @@ pub(super) fn substituted_ref_expr_if_needed(
 }
 
 fn substitute_type_expr(expr: &TypeExpr, substitutions: &FxHashMap<String, TypeExpr>) -> TypeExpr {
-    use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+    use verter_type_expr::{ObjectMember, TypeExpr};
 
     match expr {
         TypeExpr::Ref {
@@ -769,14 +769,12 @@ fn substitute_type_expr(expr: &TypeExpr, substitutions: &FxHashMap<String, TypeE
             elements: std::sync::Arc::from(
                 elements
                     .iter()
-                    .map(
-                        |element| verter_semantic::analysis::type_expr::TupleElement {
-                            label: element.label.clone(),
-                            ty: substitute_type_expr(&element.ty, substitutions),
-                            optional: element.optional,
-                            rest: element.rest,
-                        },
-                    )
+                    .map(|element| verter_type_expr::TupleElement {
+                        label: element.label.clone(),
+                        ty: substitute_type_expr(&element.ty, substitutions),
+                        optional: element.optional,
+                        rest: element.rest,
+                    })
                     .collect::<Vec<_>>(),
             ),
             readonly: *readonly,
@@ -793,20 +791,20 @@ fn substitute_type_expr(expr: &TypeExpr, substitutions: &FxHashMap<String, TypeE
                 .map(|ty| substitute_type_expr(ty, substitutions))
                 .collect::<Vec<_>>(),
         )),
-        TypeExpr::Object(object) => TypeExpr::Object(std::sync::Arc::new(
-            verter_semantic::analysis::type_expr::ObjectExpr {
+        TypeExpr::Object(object) => {
+            TypeExpr::Object(std::sync::Arc::new(verter_type_expr::ObjectExpr {
                 properties: object
                     .properties
                     .iter()
                     .map(|member| match member {
-                        ObjectMember::Property(property) => ObjectMember::Property(
-                            verter_semantic::analysis::type_expr::ObjectProperty {
+                        ObjectMember::Property(property) => {
+                            ObjectMember::Property(verter_type_expr::ObjectProperty {
                                 name: property.name.clone(),
                                 ty: substitute_type_expr(&property.ty, substitutions),
                                 optional: property.optional,
                                 readonly: property.readonly,
-                            },
-                        ),
+                            })
+                        }
                         ObjectMember::Method(method) => {
                             let mut method = method.clone();
                             for parameter in &mut method.function.parameters {
@@ -820,8 +818,8 @@ fn substitute_type_expr(expr: &TypeExpr, substitutions: &FxHashMap<String, TypeE
                             }
                             ObjectMember::Method(method)
                         }
-                        ObjectMember::IndexSignature(signature) => ObjectMember::IndexSignature(
-                            verter_semantic::analysis::type_expr::IndexSignature {
+                        ObjectMember::IndexSignature(signature) => {
+                            ObjectMember::IndexSignature(verter_type_expr::IndexSignature {
                                 key_name: signature.key_name.clone(),
                                 key_type: substitute_type_expr(&signature.key_type, substitutions),
                                 value_type: substitute_type_expr(
@@ -829,8 +827,8 @@ fn substitute_type_expr(expr: &TypeExpr, substitutions: &FxHashMap<String, TypeE
                                     substitutions,
                                 ),
                                 readonly: signature.readonly,
-                            },
-                        ),
+                            })
+                        }
                         ObjectMember::CallSignature(function) => ObjectMember::CallSignature(
                             substitute_function_expr(function, substitutions),
                         ),
@@ -842,8 +840,8 @@ fn substitute_type_expr(expr: &TypeExpr, substitutions: &FxHashMap<String, TypeE
                         }
                     })
                     .collect(),
-            },
-        )),
+            }))
+        }
         TypeExpr::Function(function) => TypeExpr::Function(std::sync::Arc::new(
             substitute_function_expr(function, substitutions),
         )),
@@ -926,9 +924,9 @@ fn substitute_type_expr(expr: &TypeExpr, substitutions: &FxHashMap<String, TypeE
 }
 
 fn substitute_function_expr(
-    function: &verter_semantic::analysis::type_expr::FunctionExpr,
+    function: &verter_type_expr::FunctionExpr,
     substitutions: &FxHashMap<String, TypeExpr>,
-) -> verter_semantic::analysis::type_expr::FunctionExpr {
+) -> verter_type_expr::FunctionExpr {
     let mut scoped_substitutions = substitutions.clone();
     for type_parameter in &function.type_parameters {
         scoped_substitutions.remove(type_parameter.name.as_str());
@@ -955,7 +953,7 @@ fn substitute_function_expr(
 }
 
 fn function_expr_references_substitutions(
-    function: &verter_semantic::analysis::type_expr::FunctionExpr,
+    function: &verter_type_expr::FunctionExpr,
     substitutions: &FxHashMap<String, TypeExpr>,
 ) -> bool {
     function.type_parameters.iter().any(|parameter| {
@@ -978,7 +976,7 @@ fn function_expr_references_substitutions(
 
 pub(crate) fn projected_surface_to_type_expr(surface: &ProjectedSurface) -> Option<TypeExpr> {
     use std::sync::Arc;
-    use verter_semantic::analysis::type_expr::{
+    use verter_type_expr::{
         FunctionExpr, IndexSignature, MethodSignature, ObjectExpr, ObjectMember, ObjectProperty,
         PrimitiveName,
     };
@@ -1063,7 +1061,7 @@ pub(crate) fn projected_surface_to_expanded_shape(
         ExpandedCallSignature, ExpandedIndexSignature, ExpandedObjectShape, ExpandedParameter,
         ExpandedProperty,
     };
-    use verter_semantic::analysis::type_expr::PrimitiveName;
+    use verter_type_expr::PrimitiveName;
 
     let properties = surface
         .members
@@ -1177,17 +1175,15 @@ pub(super) fn type_expr_references_names(
                 expressions: types, ..
             } => types.iter().any(|ty| visit(ty, contains_name)),
             TypeExpr::Object(object) => object.properties.iter().any(|member| match member {
-                verter_semantic::analysis::type_expr::ObjectMember::Property(property) => {
+                verter_type_expr::ObjectMember::Property(property) => {
                     visit(&property.ty, contains_name)
                 }
-                verter_semantic::analysis::type_expr::ObjectMember::IndexSignature(signature) => {
+                verter_type_expr::ObjectMember::IndexSignature(signature) => {
                     visit(&signature.key_type, contains_name)
                         || visit(&signature.value_type, contains_name)
                 }
-                verter_semantic::analysis::type_expr::ObjectMember::CallSignature(function)
-                | verter_semantic::analysis::type_expr::ObjectMember::ConstructSignature(
-                    function,
-                ) => {
+                verter_type_expr::ObjectMember::CallSignature(function)
+                | verter_type_expr::ObjectMember::ConstructSignature(function) => {
                     function
                         .parameters
                         .iter()
@@ -1197,7 +1193,7 @@ pub(super) fn type_expr_references_names(
                             .as_deref()
                             .is_some_and(|return_type| visit(return_type, contains_name))
                 }
-                verter_semantic::analysis::type_expr::ObjectMember::Method(method) => {
+                verter_type_expr::ObjectMember::Method(method) => {
                     method
                         .function
                         .parameters

@@ -13,7 +13,7 @@ use rustc_hash::FxHashMap;
 
 use super::host::ResolvedRootIdentity;
 use crate::analysis::type_eval::{FunctionSignature, TypeDeclKind, ValueDeclKind};
-use crate::analysis::type_expr::{
+use verter_type_expr::{
     MappedModifier, ObjectExpr, ObjectMember, PrimitiveName, TypeExpr, TypeParam,
 };
 
@@ -438,7 +438,7 @@ impl PreparedTypeDecl {
     /// when called from intersection traversal).
     fn index_object_members(
         member_index: &mut rustc_hash::FxHashMap<String, PreparedMember>,
-        obj: &crate::analysis::type_expr::ObjectExpr,
+        obj: &verter_type_expr::ObjectExpr,
     ) {
         for member in &obj.properties {
             if let ObjectMember::Property(prop) = member {
@@ -813,9 +813,7 @@ impl PreparedValueDecl {
 mod tests {
     use std::sync::Arc;
 
-    use crate::analysis::type_expr::{
-        LiteralValue, ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName,
-    };
+    use verter_type_expr::{LiteralValue, ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName};
 
     use super::*;
 

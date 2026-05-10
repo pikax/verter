@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use crate::analysis::type_expr::*;
+use verter_type_expr::*;
 
 pub type DeclarationId = u64;
 

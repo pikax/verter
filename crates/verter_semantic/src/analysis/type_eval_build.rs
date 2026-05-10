@@ -12,11 +12,6 @@ use std::time::Instant;
 use web_time::Instant;
 
 use crate::analysis::type_eval::*;
-use crate::analysis::type_expr::{
-    self, FunctionExpr, FunctionParam, IndexSignature, MethodSignature, ObjectExpr, ObjectMember,
-    PrimitiveName, TypeExpr, TypeParam, ValueRef,
-};
-use crate::analysis::type_expr_lower::{lower_ts_type, property_key_name};
 use oxc_ast::ast::{
     Argument, ArrowFunctionExpression, BindingPattern, CallExpression, Class, ClassElement,
     Declaration, ExportDefaultDeclarationKind, Expression, FormalParameters, Function,
@@ -25,6 +20,11 @@ use oxc_ast::ast::{
     TSModuleDeclarationName, TSSignature, TSTypeAliasDeclaration, TSTypeParameterDeclaration,
     VariableDeclarationKind, VariableDeclarator,
 };
+use verter_type_expr::{
+    FunctionExpr, FunctionParam, IndexSignature, MethodSignature, ObjectExpr, ObjectMember,
+    PrimitiveName, TypeExpr, TypeParam, ValueRef,
+};
+use verter_type_expr_oxc::{lower_ts_type, property_key_name};
 
 fn type_expand_debug_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -404,7 +404,7 @@ fn extract_class(decl: &Class<'_>, source: &str, env: &mut EvalEnv) {
                             .as_ref()
                             .map(|ta| lower_ts_type(&ta.type_annotation, source))
                             .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any));
-                        members.push(ObjectMember::Property(type_expr::ObjectProperty {
+                        members.push(ObjectMember::Property(verter_type_expr::ObjectProperty {
                             name: prop_name,
                             ty,
                             optional: prop.optional,
@@ -680,7 +680,7 @@ fn extract_object_literal(obj: &ObjectExpression<'_>, source: &str) -> ObjectExp
                     let ty = infer_expression_type(&p.value, source);
                     push_object_property_with_override(
                         &mut members,
-                        type_expr::ObjectProperty {
+                        verter_type_expr::ObjectProperty {
                             name,
                             ty,
                             optional: false,
@@ -712,7 +712,7 @@ fn extract_object_literal_as_type(obj: &ObjectExpression<'_>, source: &str) -> T
                     let ty = infer_expression_type(&p.value, source);
                     push_object_property_with_override(
                         &mut members,
-                        type_expr::ObjectProperty {
+                        verter_type_expr::ObjectProperty {
                             name,
                             ty,
                             optional: false,
@@ -754,7 +754,7 @@ fn extract_object_literal_as_type(obj: &ObjectExpression<'_>, source: &str) -> T
 
 fn push_object_property_with_override(
     members: &mut Vec<ObjectMember>,
-    property: type_expr::ObjectProperty,
+    property: verter_type_expr::ObjectProperty,
 ) {
     if let Some(existing_index) = members.iter().position(|member| match member {
         ObjectMember::Property(existing) => existing.name == property.name,
@@ -1004,16 +1004,16 @@ fn append_union_members(into: &mut Vec<TypeExpr>, ty: TypeExpr) {
 
 fn widen_literal_type(expr: TypeExpr) -> TypeExpr {
     match expr {
-        TypeExpr::Literal(type_expr::LiteralValue::String(_)) => {
+        TypeExpr::Literal(verter_type_expr::LiteralValue::String(_)) => {
             TypeExpr::Primitive(PrimitiveName::String)
         }
-        TypeExpr::Literal(type_expr::LiteralValue::Number(_)) => {
+        TypeExpr::Literal(verter_type_expr::LiteralValue::Number(_)) => {
             TypeExpr::Primitive(PrimitiveName::Number)
         }
-        TypeExpr::Literal(type_expr::LiteralValue::Boolean(_)) => {
+        TypeExpr::Literal(verter_type_expr::LiteralValue::Boolean(_)) => {
             TypeExpr::Primitive(PrimitiveName::Boolean)
         }
-        TypeExpr::Literal(type_expr::LiteralValue::BigInt(_)) => {
+        TypeExpr::Literal(verter_type_expr::LiteralValue::BigInt(_)) => {
             TypeExpr::Primitive(PrimitiveName::BigInt)
         }
         TypeExpr::Union(members) => TypeExpr::union(dedupe_type_exprs(
@@ -1138,7 +1138,7 @@ fn lower_interface_member(sig: &TSSignature<'_>, source: &str) -> Option<ObjectM
                 .as_ref()
                 .map(|ta| lower_ts_type(&ta.type_annotation, source))
                 .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any));
-            Some(ObjectMember::Property(type_expr::ObjectProperty {
+            Some(ObjectMember::Property(verter_type_expr::ObjectProperty {
                 name,
                 ty,
                 optional: prop.optional,
@@ -1402,7 +1402,7 @@ where
     >,
 {
     use crate::analysis::type_expand::{ExpandedComponentTypes, ExpandedField};
-    use crate::analysis::type_expr_lower::parse_type_annotation;
+    use verter_type_expr_oxc::parse_type_annotation;
 
     let mut result = ExpandedComponentTypes::default();
     let started = Instant::now();

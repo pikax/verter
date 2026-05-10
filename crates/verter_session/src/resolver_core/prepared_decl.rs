@@ -46,8 +46,8 @@ pub struct TypeParamBinding {
     /// Path C C6a item 1: 0-based position in the
     /// `<script setup generic="T, U, V">` clause.
     pub ordinal: u16,
-    pub constraint: Option<Arc<verter_semantic::analysis::type_expr::TypeExpr>>,
-    pub default: Option<Arc<verter_semantic::analysis::type_expr::TypeExpr>>,
+    pub constraint: Option<Arc<verter_type_expr::TypeExpr>>,
+    pub default: Option<Arc<verter_type_expr::TypeExpr>>,
 }
 
 fn resolve_import_target(

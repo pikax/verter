@@ -6,7 +6,11 @@
 //!
 //! # Design
 //!
-//! The AST is populated from OXC's `TSType` nodes during analysis.
+//! The AST is populated from OXC's `TSType` nodes during analysis
+//! (lowering lives in the sibling `verter_type_expr_oxc` crate so
+//! consumers that only need the data tier — NAPI / WASM / JSON
+//! readers — can avoid pulling in OXC).
+//!
 //! The evaluator reduces `TypeExpr` → `TypeDescriptor` through the
 //! symbol tables and evaluation environment.
 //!
@@ -17,6 +21,38 @@ use serde::ser::Serialize;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, LazyLock};
+
+// ---------------------------------------------------------------------------
+// Send + Sync invariant
+// ---------------------------------------------------------------------------
+
+const _: fn() = || {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<TypeExpr>();
+    assert_send_sync::<TypeExprScope>();
+};
+
+// ---------------------------------------------------------------------------
+// TypeExprScope — scope sidecar for paired `*_expr` schema fields
+// ---------------------------------------------------------------------------
+
+/// Scope sidecar for a paired `TypeExpr`. Carries the canonical_id of
+/// the file whose OXC parse produced the typed expression. Consumers
+/// walking nested `TypeExpr::Ref` nodes resolve them in the file where
+/// the annotation was written — which differs from the SFC owner for
+/// cross-file pre-resolved props.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct TypeExprScope(pub String);
+
+impl TypeExprScope {
+    pub fn new(canonical_id: impl Into<String>) -> Self {
+        Self(canonical_id.into())
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Core AST
@@ -176,7 +212,7 @@ impl<'de> serde::Deserialize<'de> for TypeExpr {
 }
 
 /// Reconstruct a TypeExpr from a JSON Value.
-fn type_expr_from_json(v: &serde_json::Value) -> Option<TypeExpr> {
+pub fn type_expr_from_json(v: &serde_json::Value) -> Option<TypeExpr> {
     let kind = v.get("kind")?.as_str()?;
     match kind {
         "primitive" => {
@@ -816,8 +852,7 @@ impl TypeExpr {
     }
 
     /// Returns `true` if this is a primitive type.
-    #[cfg(test)]
-    pub(crate) fn is_primitive(&self) -> bool {
+    pub fn is_primitive(&self) -> bool {
         matches!(self, Self::Primitive(_))
     }
 

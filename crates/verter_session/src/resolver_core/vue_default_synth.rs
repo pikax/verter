@@ -28,8 +28,8 @@
 use std::sync::Arc;
 
 use verter_semantic::analysis::type_eval::{FunctionSignature, ValueDeclKind};
-use verter_semantic::analysis::type_expr::{ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
 use verter_semantic::analysis::types::{AnalyzedMacro, AnalyzedMacroKind};
+use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
 
 use super::shallow_file_state::{ShallowFileState, ShallowValueSymbol};
 
@@ -182,12 +182,12 @@ pub fn inject_vue_default_into_shallow_state(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use verter_semantic::analysis::type_expr::TypeExpr;
     use verter_semantic::analysis::types::AnalyzedMacro;
     use verter_span::Span;
+    use verter_type_expr::TypeExpr;
 
     fn type_based_macro(kind: AnalyzedMacroKind, type_text: &str) -> AnalyzedMacro {
-        let parsed = verter_semantic::analysis::type_expr_lower::parse_type_annotation(type_text);
+        let parsed = verter_type_expr_oxc::parse_type_annotation(type_text);
         AnalyzedMacro {
             kind,
             is_type_based: true,

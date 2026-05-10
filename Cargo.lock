@@ -3812,6 +3812,7 @@ dependencies = [
  "verter_semantic",
  "verter_session",
  "verter_span",
+ "verter_type_expr",
 ]
 
 [[package]]
@@ -3912,6 +3913,7 @@ dependencies = [
  "verter_semantic",
  "verter_session",
  "verter_span",
+ "verter_type_expr",
  "verter_type_runtime",
  "verter_workspace",
 ]
@@ -3955,6 +3957,7 @@ dependencies = [
  "syn 2.0.117",
  "verter_semantic",
  "verter_span",
+ "verter_type_expr",
 ]
 
 [[package]]
@@ -3991,6 +3994,8 @@ dependencies = [
  "smallvec",
  "verter_parser",
  "verter_span",
+ "verter_type_expr",
+ "verter_type_expr_oxc",
  "verter_workspace",
  "web-time",
 ]
@@ -4039,6 +4044,8 @@ dependencies = [
  "verter_scheduler",
  "verter_semantic",
  "verter_span",
+ "verter_type_expr",
+ "verter_type_expr_oxc",
  "verter_workspace",
  "walkdir",
  "web-time",
@@ -4074,6 +4081,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "verter_type_expr"
+version = "0.0.1-beta.1"
+dependencies = [
+ "rustc-hash 2.1.1",
+ "serde",
+ "serde_json",
+ "verter_span",
+]
+
+[[package]]
+name = "verter_type_expr_oxc"
+version = "0.0.1-beta.1"
+dependencies = [
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_parser",
+ "oxc_span",
+ "verter_span",
+ "verter_type_expr",
+]
+
+[[package]]
 name = "verter_type_runtime"
 version = "0.0.1-beta.1"
 dependencies = [
@@ -4103,6 +4132,7 @@ dependencies = [
  "verter_semantic",
  "verter_session",
  "verter_span",
+ "verter_type_expr",
  "wasm-bindgen",
  "wasm-bindgen-test",
 ]

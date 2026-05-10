@@ -51,11 +51,8 @@ fn prop_by_name<'a>(
         .unwrap_or_else(|| panic!("expected prop `{name}` in resolved meta"))
 }
 
-fn assert_no_unresolved_ref(
-    type_expr: &verter_semantic::analysis::type_expr::TypeExpr,
-    forbidden_name: &str,
-) {
-    use verter_semantic::analysis::type_expr::TypeExpr;
+fn assert_no_unresolved_ref(type_expr: &verter_type_expr::TypeExpr, forbidden_name: &str) {
+    use verter_type_expr::TypeExpr;
     fn walk(expr: &TypeExpr, forbidden: &str, hits: &mut Vec<String>) {
         match expr {
             TypeExpr::Ref { name, .. } if name.as_ref() == forbidden => {
@@ -81,7 +78,7 @@ fn assert_no_unresolved_ref(
                 }
             }
             TypeExpr::Object(object) => {
-                use verter_semantic::analysis::type_expr::ObjectMember;
+                use verter_type_expr::ObjectMember;
                 for member in object.properties.iter() {
                     match member {
                         ObjectMember::Property(prop) => walk(&prop.ty, forbidden, hits),

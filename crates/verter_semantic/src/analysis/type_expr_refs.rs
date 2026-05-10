@@ -30,7 +30,7 @@
 //! All three are `pub` rather than `pub(crate)` because the host
 //! crate (`verter_session`) consumes them across the crate boundary.
 
-use crate::analysis::type_expr::{FunctionExpr, ObjectMember, TypeExpr, TypeParam};
+use verter_type_expr::{FunctionExpr, ObjectMember, TypeExpr, TypeParam};
 
 /// True iff `expr` transitively references any name for which
 /// `is_active(name)` returns `true`, after honouring shadowing
@@ -253,10 +253,10 @@ fn visit_function(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analysis::type_expr::{
+    use std::sync::Arc;
+    use verter_type_expr::{
         FunctionParam, ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr,
     };
-    use std::sync::Arc;
 
     fn t_ref(name: &str) -> TypeExpr {
         TypeExpr::Ref {
@@ -331,8 +331,8 @@ mod tests {
             parameter: "K".to_string(),
             source: Arc::new(t_ref("U")),
             value: Arc::new(t_ref("K")),
-            optional: crate::analysis::type_expr::MappedModifier::None,
-            readonly: crate::analysis::type_expr::MappedModifier::None,
+            optional: verter_type_expr::MappedModifier::None,
+            readonly: verter_type_expr::MappedModifier::None,
             name_type: None,
         };
         let active = vec![TypeParam {
@@ -355,8 +355,8 @@ mod tests {
             parameter: "K".to_string(),
             source: Arc::new(t_ref("T")),
             value: Arc::new(TypeExpr::Primitive(PrimitiveName::Number)),
-            optional: crate::analysis::type_expr::MappedModifier::None,
-            readonly: crate::analysis::type_expr::MappedModifier::None,
+            optional: verter_type_expr::MappedModifier::None,
+            readonly: verter_type_expr::MappedModifier::None,
             name_type: None,
         };
         assert!(
@@ -418,16 +418,16 @@ mod tests {
             parameter: "K".to_string(),
             source: Arc::new(TypeExpr::KeyOf(Arc::new(t_ref("Inner")))),
             value: Arc::new(t_ref("K")),
-            optional: crate::analysis::type_expr::MappedModifier::None,
-            readonly: crate::analysis::type_expr::MappedModifier::None,
+            optional: verter_type_expr::MappedModifier::None,
+            readonly: verter_type_expr::MappedModifier::None,
             name_type: None,
         };
         let outer = TypeExpr::Mapped {
             parameter: "K".to_string(),
             source: Arc::new(t_ref("T")),
             value: Arc::new(inner),
-            optional: crate::analysis::type_expr::MappedModifier::None,
-            readonly: crate::analysis::type_expr::MappedModifier::None,
+            optional: verter_type_expr::MappedModifier::None,
+            readonly: verter_type_expr::MappedModifier::None,
             name_type: None,
         };
         // Active set: {T, K}. Outer T is observed via outer source.

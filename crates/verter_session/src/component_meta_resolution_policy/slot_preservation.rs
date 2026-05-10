@@ -7,7 +7,7 @@
 //! signature; the navigable member-path contract is the better public
 //! surface.
 
-use verter_semantic::analysis::type_expr::{LiteralValue, ObjectMember, TypeExpr};
+use verter_type_expr::{LiteralValue, ObjectMember, TypeExpr};
 
 use super::core::{peel_paren, DeclLookup, PolicyCtx};
 
@@ -25,7 +25,7 @@ pub(super) fn slot_binding_should_preserve_symbolic_raw_type(
     if trimmed.is_empty() {
         return false;
     }
-    let parsed = verter_semantic::analysis::type_expr_lower::parse_type_annotation(trimmed);
+    let parsed = verter_type_expr_oxc::parse_type_annotation(trimmed);
     raw_indexed_access_root_is_imported(&parsed, ctx)
 }
 
@@ -39,7 +39,7 @@ pub(super) fn parse_indexed_access_from_raw(raw_type: Option<&str>) -> Option<Ty
     if trimmed.is_empty() {
         return None;
     }
-    let parsed = verter_semantic::analysis::type_expr_lower::parse_type_annotation(trimmed);
+    let parsed = verter_type_expr_oxc::parse_type_annotation(trimmed);
     if matches!(peel_paren(&parsed), TypeExpr::IndexedAccess { .. }) {
         Some(parsed)
     } else {

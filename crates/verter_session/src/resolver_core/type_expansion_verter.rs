@@ -8,9 +8,9 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::type_expr::{PrimitiveName, TypeExpr};
 #[cfg(test)]
 use verter_span::Span;
+use verter_type_expr::{PrimitiveName, TypeExpr};
 
 use crate::resolver_core::type_expansion::{
     ExpandedMember, ExpanderFuture, ExpansionCompleteness, TypeExpander, TypeExpansionError,
@@ -522,7 +522,7 @@ export interface Button {
         match &result.members[0].type_expr {
             TypeExpr::Object(shape) => assert!(shape.properties.iter().any(|member| matches!(
                 member,
-                verter_semantic::analysis::type_expr::ObjectMember::Property(prop)
+                verter_type_expr::ObjectMember::Property(prop)
                     if prop.name == "variants"
             ))),
             other => panic!("expected declaration-scoped object resolution, got {other:?}"),

@@ -35,7 +35,7 @@ use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
 use verter_semantic::analysis::component_meta::ComponentMetaAnalysis;
-use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+use verter_type_expr::{ObjectMember, TypeExpr};
 
 const FIXTURE_HELPER: &str = "export interface HelperProps {\n\
     size?: 'sm' | 'md' | 'lg'\n\

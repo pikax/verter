@@ -29,7 +29,7 @@ use verter_semantic::analysis::component_meta::{
 #[cfg(test)]
 use verter_semantic::analysis::type_expand::ExpandedComponentTypes;
 #[cfg(test)]
-use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+use verter_type_expr::{ObjectMember, TypeExpr};
 
 use crate::host_manage::component_meta_trace_custom;
 use crate::VerterHost;

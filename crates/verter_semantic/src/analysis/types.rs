@@ -1209,7 +1209,7 @@ pub struct ResolvedLocalType {
     /// Structured expanded object form retained for consumers that need
     /// canonical IR instead of reparsing `expanded`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub type_expr: Option<crate::analysis::type_expr::TypeExpr>,
+    pub type_expr: Option<verter_type_expr::TypeExpr>,
     /// SFC-absolute byte span of the type declaration.
     pub span: Span,
 }
@@ -1274,7 +1274,7 @@ pub struct AnalyzedMacro {
     /// `Arc<TypeExpr>` rather than `Box<TypeExpr>` so the closure +
     /// dispatch lower call clone a single refcount instead of deep-copying
     /// the full expression tree (R6).
-    pub parsed_type_argument: Option<std::sync::Arc<crate::analysis::type_expr::TypeExpr>>,
+    pub parsed_type_argument: Option<std::sync::Arc<verter_type_expr::TypeExpr>>,
     /// SFC-absolute byte span of the macro call.
     pub span: Span,
 }
@@ -1328,7 +1328,7 @@ impl serde::Serialize for AnalyzedMacro {
         // argument). Field name is camelCase to match the Wire struct's
         // `#[serde(rename_all = "camelCase")]` deserialization.
         if let Some(arg) = self.parsed_type_argument.as_ref() {
-            let inner: &crate::analysis::type_expr::TypeExpr = arg.as_ref();
+            let inner: &verter_type_expr::TypeExpr = arg.as_ref();
             s.serialize_field("parsedTypeArgument", inner)?;
         }
         s.serialize_field("spanStart", &self.span.start)?;
@@ -1369,7 +1369,7 @@ impl<'de> serde::Deserialize<'de> for AnalyzedMacro {
             // pick up `#[serde(default)]` on the outer struct so the
             // attribute lives on the Wire deserialization helper.
             #[serde(default)]
-            parsed_type_argument: Option<crate::analysis::type_expr::TypeExpr>,
+            parsed_type_argument: Option<verter_type_expr::TypeExpr>,
             #[serde(default)]
             span_start: u32,
             #[serde(default)]
@@ -1829,9 +1829,9 @@ mod analyzed_macro_serde_tests {
     //! to drop `#[serde(default)]` on the field, the test would fail with
     //! "missing field" error.
     use super::{AnalyzedMacro, AnalyzedMacroKind};
-    use crate::analysis::type_expr::TypeExpr;
     use std::sync::Arc;
     use verter_span::Span;
+    use verter_type_expr::TypeExpr;
 
     fn empty_macro() -> AnalyzedMacro {
         AnalyzedMacro {

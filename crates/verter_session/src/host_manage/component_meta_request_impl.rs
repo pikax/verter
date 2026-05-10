@@ -63,7 +63,7 @@ pub(crate) fn request_source_performed_compute(source: RequestSource) -> bool {
 pub(crate) fn should_skip_imported_registry_seed_refresh(
     owner_canonical: &str,
     declaration: &ResolvedTypeDeclaration,
-    existing_expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    existing_expr: &verter_type_expr::TypeExpr,
 ) -> bool {
     crate::resolver_core::component_meta::imported_registry_seed_can_skip_refresh(
         owner_canonical,

@@ -58,8 +58,8 @@ use std::sync::Arc;
 pub(crate) fn project_expr_class_a_via_dispatch(
     ctx: &dyn ResolverContext,
     scope_canonical_id: &str,
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
-) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+    expr: &verter_type_expr::TypeExpr,
+) -> Option<verter_type_expr::TypeExpr> {
     project_expr_class_a_via_dispatch_threaded(ctx, None, scope_canonical_id, expr)
 }
 
@@ -87,8 +87,8 @@ pub(crate) fn project_expr_class_a_via_dispatch_threaded<'ctx>(
     ctx: &'ctx dyn ResolverContext,
     engine: Option<&mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>>,
     scope_canonical_id: &str,
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
-) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+    expr: &verter_type_expr::TypeExpr,
+) -> Option<verter_type_expr::TypeExpr> {
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::resolver_core::{
         component_meta_registry::{
@@ -206,13 +206,13 @@ pub(crate) fn project_expr_class_a_via_dispatch_threaded<'ctx>(
 /// the first non-string-literal index (returns the partial chain as
 /// path with the partial-chain root as base).
 fn decompose_indexed_access_chain(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    expr: &verter_type_expr::TypeExpr,
 ) -> (
-    &verter_semantic::analysis::type_expr::TypeExpr,
+    &verter_type_expr::TypeExpr,
     Arc<[crate::semantic_query::PathSegment]>,
 ) {
     use crate::semantic_query::{IndexKey, PathSegment};
-    use verter_semantic::analysis::type_expr::{LiteralValue, TypeExpr};
+    use verter_type_expr::{LiteralValue, TypeExpr};
 
     fn descend<'a>(expr: &'a TypeExpr, path: &mut Vec<PathSegment>) -> &'a TypeExpr {
         match expr {
@@ -245,7 +245,7 @@ fn decompose_indexed_access_chain(
 pub(crate) fn project_expr_class_a_shape_via_dispatch(
     ctx: &dyn ResolverContext,
     scope_canonical_id: &str,
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    expr: &verter_type_expr::TypeExpr,
 ) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
     project_expr_class_a_shape_via_dispatch_threaded(ctx, None, scope_canonical_id, expr)
 }
@@ -256,7 +256,7 @@ pub(crate) fn project_expr_class_a_shape_via_dispatch_threaded<'ctx>(
     ctx: &'ctx dyn ResolverContext,
     engine: Option<&mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>>,
     scope_canonical_id: &str,
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    expr: &verter_type_expr::TypeExpr,
 ) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
     let projected =
         project_expr_class_a_via_dispatch_threaded(ctx, engine, scope_canonical_id, expr)?;
@@ -291,12 +291,12 @@ pub(crate) fn pick_via_dispatch_pick_helper(
     scope_canonical_id: &str,
     symbol_name: &str,
     members: &[String],
-) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+) -> Option<verter_type_expr::TypeExpr> {
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::semantic_query::{ProjectionMode, QueryResult};
 
     let dispatch = ProjectSemanticDispatch::new(query_engine.ctx());
-    let symbol_ref = verter_semantic::analysis::type_expr::TypeExpr::Ref {
+    let symbol_ref = verter_type_expr::TypeExpr::Ref {
         name: Arc::from(symbol_name),
         type_arguments: Arc::from(Vec::new().into_boxed_slice()),
     };
@@ -338,10 +338,10 @@ pub(crate) fn pick_via_dispatch_pick_helper(
 pub(crate) fn instantiate_local_generic_ref_via_dispatch(
     ctx: &dyn ResolverContext,
     scope_canonical_id: &str,
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
-) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+    expr: &verter_type_expr::TypeExpr,
+) -> Option<verter_type_expr::TypeExpr> {
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use verter_semantic::analysis::type_expr::TypeExpr;
+    use verter_type_expr::TypeExpr;
 
     // Engine-method parity: bail when `expr` is not a generic `Ref`.
     let TypeExpr::Ref { type_arguments, .. } = expr else {
@@ -383,7 +383,7 @@ pub(crate) fn project_type_surface_expr_via_host_threaded<'ctx>(
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
     scope_canonical_id: &str,
     symbol_name: &str,
-) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+) -> Option<verter_type_expr::TypeExpr> {
     use crate::resolver_core::projected_surface_to_type_expr;
     if engine.projection_op_budget_exhausted() {
         return None;
@@ -414,7 +414,7 @@ pub(crate) fn project_prepared_type_surface_expr_via_host_threaded<'ctx>(
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
     scope_canonical_id: &str,
     symbol_name: &str,
-) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+) -> Option<verter_type_expr::TypeExpr> {
     use crate::resolver_core::projected_surface_to_type_expr;
     let surface = engine.cached_prepared_root_surface(scope_canonical_id, symbol_name)?;
     projected_surface_to_type_expr(&surface)
@@ -433,7 +433,7 @@ pub(crate) fn project_prepared_type_surface_shape_via_host_threaded<'ctx>(
 pub(crate) fn project_expr_surface_shape_via_host_threaded<'ctx>(
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
     scope_canonical_id: &str,
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    expr: &verter_type_expr::TypeExpr,
 ) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::resolver_core::component_meta_registry::{
@@ -484,7 +484,7 @@ pub(crate) fn project_route_surface_expr_via_host_threaded<'ctx>(
     scope_canonical_id: &str,
     root_symbol: &str,
     route: &crate::resolver_core::RouteDemand,
-) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+) -> Option<verter_type_expr::TypeExpr> {
     if engine.projection_op_budget_exhausted() {
         return None;
     }
@@ -494,8 +494,8 @@ pub(crate) fn project_route_surface_expr_via_host_threaded<'ctx>(
 pub(crate) fn lower_and_project_to_expanded_via_host_threaded<'ctx>(
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
     scope_canonical_id: &str,
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
-) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+    expr: &verter_type_expr::TypeExpr,
+) -> Option<verter_type_expr::TypeExpr> {
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::resolver_core::{type_expr_contains_semantic_miss, type_expr_is_expanded_surface};
     use crate::semantic_query::{PathSegment, ProjectionMode, QueryResult, SemanticQueryKey};
@@ -534,8 +534,8 @@ pub(crate) fn lower_and_project_to_expanded_via_host_threaded<'ctx>(
 pub(crate) fn project_expr_surface_expr_via_host_threaded<'ctx>(
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
     scope_canonical_id: &str,
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
-) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+    expr: &verter_type_expr::TypeExpr,
+) -> Option<verter_type_expr::TypeExpr> {
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::resolver_core::component_meta_registry::{
         component_meta_registry_public_indexed_access_route,
@@ -583,8 +583,8 @@ pub(crate) fn project_expr_surface_expr_via_host_threaded<'ctx>(
 pub(crate) fn project_expr_surface_expr_with_compound_objects_via_host_threaded<'ctx>(
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
     scope_canonical_id: &str,
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
-) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+    expr: &verter_type_expr::TypeExpr,
+) -> Option<verter_type_expr::TypeExpr> {
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::resolver_core::type_expr_has_any_object_arm;
     use crate::semantic_query::{PathSegment, ProjectionMode, QueryResult, SemanticQueryKey};

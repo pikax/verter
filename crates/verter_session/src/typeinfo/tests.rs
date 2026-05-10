@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 use verter_audit::{RequestKind, RequestKindPayload};
-use verter_semantic::analysis::type_expr::{PrimitiveName, TypeExpr};
+use verter_type_expr::{PrimitiveName, TypeExpr};
 
 use super::types::{EvaluateTypeExpressionRequest, ImportSpec, NamedImport, SymbolKind};
 use crate::semantic_query::{ProjectionMode, SemanticNodeData};

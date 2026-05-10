@@ -119,8 +119,8 @@ pub static SLOT_BINDING_EXPANDED_INSTANTIATE_CALLS: AtomicU64 = AtomicU64::new(0
 /// don't themselves count. Terminal shapes (`Primitive`, `Literal`,
 /// `TypeParameter`, `Unknown`, `RecursiveRef`) and `Rest`/`Parenthesized`
 /// (which the lowering walks through) are ignored.
-pub fn count_operator_nodes(expr: &verter_semantic::analysis::type_expr::TypeExpr) -> u64 {
-    use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+pub fn count_operator_nodes(expr: &verter_type_expr::TypeExpr) -> u64 {
+    use verter_type_expr::{ObjectMember, TypeExpr};
 
     fn walk(expr: &TypeExpr, acc: &mut u64) {
         match expr {
@@ -237,7 +237,7 @@ pub fn count_operator_nodes(expr: &verter_semantic::analysis::type_expr::TypeExp
 
 /// Record one outer macro-member walk's TypeExpr operator-node count.
 /// Updates both the running sum and the high-water mark via fetch_max.
-pub fn record_outer_call_type_expr(expr: &verter_semantic::analysis::type_expr::TypeExpr) {
+pub fn record_outer_call_type_expr(expr: &verter_type_expr::TypeExpr) {
     let n = count_operator_nodes(expr);
     TYPE_EXPR_OPERATOR_NODE_COUNT_SUM.fetch_add(n, Ordering::Relaxed);
     MAX_TYPE_EXPR_OPERATOR_NODE_COUNT.fetch_max(n, Ordering::Relaxed);
@@ -997,7 +997,7 @@ mod tests {
 
     #[test]
     fn count_operator_nodes_terminal_zero() {
-        use verter_semantic::analysis::type_expr::{PrimitiveName, TypeExpr};
+        use verter_type_expr::{PrimitiveName, TypeExpr};
         let expr = TypeExpr::Primitive(PrimitiveName::String);
         assert_eq!(count_operator_nodes(&expr), 0);
     }
@@ -1005,7 +1005,7 @@ mod tests {
     #[test]
     fn count_operator_nodes_indexed_access_three() {
         // IndexedAccess(Ref<A>, Ref<B>) → 1 indexed-access + 2 refs = 3
-        use verter_semantic::analysis::type_expr::TypeExpr;
+        use verter_type_expr::TypeExpr;
         let make_ref = |name: &str| TypeExpr::Ref {
             name: Arc::from(name),
             type_arguments: Arc::from(Vec::<TypeExpr>::new()),

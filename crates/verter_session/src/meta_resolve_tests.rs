@@ -88,22 +88,16 @@ fn imported_registry_seed_refresh_skips_explicit_object_surfaces() {
         kind: crate::resolver_core::ResolvedDeclarationKind::Interface,
         text: Some("export interface Props { label?: string }".to_string()),
     };
-    let object = verter_semantic::analysis::type_expr::TypeExpr::Object(Arc::new(
-        verter_semantic::analysis::type_expr::ObjectExpr {
-            properties: vec![
-                verter_semantic::analysis::type_expr::ObjectMember::Property(
-                    verter_semantic::analysis::type_expr::ObjectProperty {
-                        name: "label".to_string(),
-                        ty: verter_semantic::analysis::type_expr::TypeExpr::Primitive(
-                            verter_semantic::analysis::type_expr::PrimitiveName::String,
-                        ),
-                        optional: true,
-                        readonly: false,
-                    },
-                ),
-            ],
-        },
-    ));
+    let object = verter_type_expr::TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
+        properties: vec![verter_type_expr::ObjectMember::Property(
+            verter_type_expr::ObjectProperty {
+                name: "label".to_string(),
+                ty: verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+                optional: true,
+                readonly: false,
+            },
+        )],
+    }));
 
     assert!(
         should_skip_imported_registry_seed_refresh("/src/App.vue", &declaration, &object),
@@ -122,11 +116,9 @@ fn imported_registry_seed_refresh_keeps_symbolic_imported_surfaces_refreshable()
         kind: crate::resolver_core::ResolvedDeclarationKind::TypeAlias,
         text: Some("export type Button = VariantProps<typeof config>".to_string()),
     };
-    let symbolic = verter_semantic::analysis::type_expr::TypeExpr::IndexedAccess {
-        object: Arc::new(verter_semantic::analysis::type_expr::TypeExpr::named(
-            "Button",
-        )),
-        index: Arc::new(verter_semantic::analysis::type_expr::TypeExpr::string_literal("variants")),
+    let symbolic = verter_type_expr::TypeExpr::IndexedAccess {
+        object: Arc::new(verter_type_expr::TypeExpr::named("Button")),
+        index: Arc::new(verter_type_expr::TypeExpr::string_literal("variants")),
     };
 
     assert!(
@@ -188,10 +180,7 @@ defineProps<Props>()
         .find(|entry| entry.name == "Props")
         .expect("the direct imported macro root should seed the initial registry");
     assert!(
-        matches!(
-            props_entry.type_expr,
-            verter_semantic::analysis::type_expr::TypeExpr::Object(_),
-        ),
+        matches!(props_entry.type_expr, verter_type_expr::TypeExpr::Object(_),),
         "the initial direct imported seed should already hold an explicit object surface"
     );
 }
@@ -237,7 +226,7 @@ defineProps<{ modelValue?: ModelValue<R> }>()
         &mut query_engine,
     );
 
-    let verter_semantic::analysis::type_expr::TypeExpr::Conditional {
+    let verter_type_expr::TypeExpr::Conditional {
         true_type,
         false_type,
         ..
@@ -248,15 +237,15 @@ defineProps<{ modelValue?: ModelValue<R> }>()
 
     assert_eq!(
         true_type,
-        Arc::new(verter_semantic::analysis::type_expr::TypeExpr::Primitive(
-            verter_semantic::analysis::type_expr::PrimitiveName::Number,
+        Arc::new(verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::Number,
         )),
         "the true branch should materialize through the routed imported member surface",
     );
     assert_eq!(
         false_type,
-        Arc::new(verter_semantic::analysis::type_expr::TypeExpr::Primitive(
-            verter_semantic::analysis::type_expr::PrimitiveName::String,
+        Arc::new(verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::String,
         )),
         "the false branch should materialize through the routed imported member surface",
     );
@@ -322,7 +311,7 @@ defineProps<{ modelValue?: ModelValue<R> }>()
         .find(|entry| entry.name == "ModelValue")
         .expect("local routed helper should be published into the type registry");
 
-    let verter_semantic::analysis::type_expr::TypeExpr::Conditional {
+    let verter_type_expr::TypeExpr::Conditional {
         true_type,
         false_type,
         ..
@@ -333,15 +322,11 @@ defineProps<{ modelValue?: ModelValue<R> }>()
 
     assert_eq!(
         true_type.as_ref(),
-        &verter_semantic::analysis::type_expr::TypeExpr::Primitive(
-            verter_semantic::analysis::type_expr::PrimitiveName::Number,
-        ),
+        &verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number,),
     );
     assert_eq!(
         false_type.as_ref(),
-        &verter_semantic::analysis::type_expr::TypeExpr::Primitive(
-            verter_semantic::analysis::type_expr::PrimitiveName::String,
-        ),
+        &verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String,),
     );
 }
 
@@ -2036,7 +2021,7 @@ export interface Props { a: string }
             .expect("typed JSDoc payload should resolve through cached imported lookup");
 
     assert!(
-        matches!(resolved, verter_semantic::analysis::type_expr::TypeExpr::Object(_)),
+        matches!(resolved, verter_type_expr::TypeExpr::Object(_)),
         "typed JSDoc should resolve the imported symbol through the cached eval env, got {resolved:?}",
     );
     assert!(
@@ -3393,9 +3378,8 @@ const len = computed(() => props.text.length)
     assert!(
         !matches!(
             ui_prop.type_expr,
-            verter_semantic::analysis::type_expr::TypeExpr::Primitive(
-                verter_semantic::analysis::type_expr::PrimitiveName::Any
-                    | verter_semantic::analysis::type_expr::PrimitiveName::Unknown,
+            verter_type_expr::TypeExpr::Primitive(
+                verter_type_expr::PrimitiveName::Any | verter_type_expr::PrimitiveName::Unknown,
             )
         ),
         "ui prop should resolve to a concrete type, not any/unknown: got {:?}",
@@ -4635,8 +4619,8 @@ fn define_props_macro_shape_reuses_expanded_fields_directly() {
         props: vec![
             verter_semantic::analysis::type_expand::ExpandedField {
                 name: "title".to_string(),
-                r#type: verter_semantic::analysis::type_expr::TypeExpr::primitive(
-                    verter_semantic::analysis::type_expr::PrimitiveName::String,
+                r#type: verter_type_expr::TypeExpr::primitive(
+                    verter_type_expr::PrimitiveName::String,
                 ),
                 raw_type: Some("string".to_string()),
                 optional: false,
@@ -4653,8 +4637,8 @@ fn define_props_macro_shape_reuses_expanded_fields_directly() {
             },
             verter_semantic::analysis::type_expand::ExpandedField {
                 name: "icon".to_string(),
-                r#type: verter_semantic::analysis::type_expr::TypeExpr::primitive(
-                    verter_semantic::analysis::type_expr::PrimitiveName::String,
+                r#type: verter_type_expr::TypeExpr::primitive(
+                    verter_type_expr::PrimitiveName::String,
                 ),
                 raw_type: Some("string".to_string()),
                 optional: true,
@@ -4672,7 +4656,7 @@ fn define_props_macro_shape_reuses_expanded_fields_directly() {
         ],
         ..Default::default()
     };
-    let lowered = verter_semantic::analysis::type_expr::TypeExpr::Ref {
+    let lowered = verter_type_expr::TypeExpr::Ref {
         name: "Props".into(),
         type_arguments: Vec::new().into(),
     };
@@ -4807,9 +4791,7 @@ fn define_props_macro_shape_prefers_resolved_macro_when_expanded_fields_are_inco
     let evaluated = verter_semantic::analysis::type_expand::ExpandedComponentTypes {
         props: vec![verter_semantic::analysis::type_expand::ExpandedField {
             name: "own".to_string(),
-            r#type: verter_semantic::analysis::type_expr::TypeExpr::primitive(
-                verter_semantic::analysis::type_expr::PrimitiveName::Boolean,
-            ),
+            r#type: verter_type_expr::TypeExpr::primitive(verter_type_expr::PrimitiveName::Boolean),
             raw_type: Some("boolean".to_string()),
             optional: true,
             exactness: verter_semantic::analysis::type_expand::ExpansionExactness::ExactConcrete,
@@ -4819,7 +4801,7 @@ fn define_props_macro_shape_prefers_resolved_macro_when_expanded_fields_are_inco
         }],
         ..Default::default()
     };
-    let lowered = verter_semantic::analysis::type_expr::TypeExpr::Ref {
+    let lowered = verter_type_expr::TypeExpr::Ref {
         name: "Props".into(),
         type_arguments: Vec::new().into(),
     };
@@ -4870,8 +4852,7 @@ fn define_props_fields_fast_path_allows_direct_object_literals() {
         parsed_type_argument: None,
         span: verter_span::Span::new(0, 0),
     };
-    let lowered =
-        verter_semantic::analysis::type_expr_lower::parse_type_annotation("{ title: string }");
+    let lowered = verter_type_expr_oxc::parse_type_annotation("{ title: string }");
 
     assert!(
         define_props_fields_fast_path_allowed(&mac, 0, &[], Some(&lowered)),
@@ -4944,7 +4925,7 @@ fn define_props_fields_fast_path_rejects_complex_heritage_refs() {
         slots: Vec::new(),
         jsdoc: None,
     }];
-    let lowered = verter_semantic::analysis::type_expr_lower::parse_type_annotation("LinkProps");
+    let lowered = verter_type_expr_oxc::parse_type_annotation("LinkProps");
 
     assert!(
         !define_props_fields_fast_path_allowed(
@@ -5042,7 +5023,7 @@ fn define_props_fields_fast_path_rejects_multi_surface_macro_candidates() {
             jsdoc: None,
         },
     ];
-    let lowered = verter_semantic::analysis::type_expr_lower::parse_type_annotation("LinkProps");
+    let lowered = verter_type_expr_oxc::parse_type_annotation("LinkProps");
 
     assert!(
         !define_props_fields_fast_path_allowed(&mac, 0, &resolved_macros, Some(&lowered)),
@@ -5115,7 +5096,7 @@ defineProps<Props>()
     let host = project.host();
     let _store_view = host.resolver_store_view();
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
-    let lowered = verter_semantic::analysis::type_expr_lower::parse_type_annotation("Props");
+    let lowered = verter_type_expr_oxc::parse_type_annotation("Props");
 
     let (shape, source) = produce_one_macro_object_shape(
         &mut query_engine,
@@ -5168,7 +5149,7 @@ defineProps<Props>()
     let host = project.host();
     let _store_view = host.resolver_store_view();
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
-    let lowered = verter_semantic::analysis::type_expr_lower::parse_type_annotation("Props");
+    let lowered = verter_type_expr_oxc::parse_type_annotation("Props");
 
     let (shape, source) = produce_one_macro_object_shape(
         &mut query_engine,
@@ -5277,8 +5258,8 @@ defineProps<Props>()
         props: vec![
             verter_semantic::analysis::type_expand::ExpandedField {
                 name: "title".to_string(),
-                r#type: verter_semantic::analysis::type_expr::TypeExpr::primitive(
-                    verter_semantic::analysis::type_expr::PrimitiveName::String,
+                r#type: verter_type_expr::TypeExpr::primitive(
+                    verter_type_expr::PrimitiveName::String,
                 ),
                 raw_type: Some("string".to_string()),
                 optional: false,
@@ -5290,8 +5271,8 @@ defineProps<Props>()
             },
             verter_semantic::analysis::type_expand::ExpandedField {
                 name: "count".to_string(),
-                r#type: verter_semantic::analysis::type_expr::TypeExpr::primitive(
-                    verter_semantic::analysis::type_expr::PrimitiveName::Number,
+                r#type: verter_type_expr::TypeExpr::primitive(
+                    verter_type_expr::PrimitiveName::Number,
                 ),
                 raw_type: Some("number".to_string()),
                 optional: true,
@@ -5467,8 +5448,8 @@ defineModel<boolean>('open')
         props: vec![
             verter_semantic::analysis::type_expand::ExpandedField {
                 name: "title".to_string(),
-                r#type: verter_semantic::analysis::type_expr::TypeExpr::primitive(
-                    verter_semantic::analysis::type_expr::PrimitiveName::String,
+                r#type: verter_type_expr::TypeExpr::primitive(
+                    verter_type_expr::PrimitiveName::String,
                 ),
                 raw_type: Some("string".to_string()),
                 optional: false,
@@ -5480,8 +5461,8 @@ defineModel<boolean>('open')
             },
             verter_semantic::analysis::type_expand::ExpandedField {
                 name: "count".to_string(),
-                r#type: verter_semantic::analysis::type_expr::TypeExpr::primitive(
-                    verter_semantic::analysis::type_expr::PrimitiveName::Number,
+                r#type: verter_type_expr::TypeExpr::primitive(
+                    verter_type_expr::PrimitiveName::Number,
                 ),
                 raw_type: Some("number".to_string()),
                 optional: true,
@@ -5493,8 +5474,8 @@ defineModel<boolean>('open')
             },
             verter_semantic::analysis::type_expand::ExpandedField {
                 name: "open".to_string(),
-                r#type: verter_semantic::analysis::type_expr::TypeExpr::primitive(
-                    verter_semantic::analysis::type_expr::PrimitiveName::Boolean,
+                r#type: verter_type_expr::TypeExpr::primitive(
+                    verter_type_expr::PrimitiveName::Boolean,
                 ),
                 raw_type: Some("boolean".to_string()),
                 optional: true,
@@ -5633,18 +5614,14 @@ defineSlots<Slots<T>>()
         .iter()
         .find(|entry| entry.name == "Section")
         .expect("local helper should be published into the registry");
-    let verter_semantic::analysis::type_expr::TypeExpr::Object(section_object) =
-        &section_entry.type_expr
-    else {
+    let verter_type_expr::TypeExpr::Object(section_object) = &section_entry.type_expr else {
         panic!("local explicit helper should stay an object surface");
     };
     let feature_property = section_object
         .properties
         .iter()
         .find_map(|member| match member {
-            verter_semantic::analysis::type_expr::ObjectMember::Property(property)
-                if property.name == "features" =>
-            {
+            verter_type_expr::ObjectMember::Property(property) if property.name == "features" => {
                 Some(property)
             }
             _ => None,
@@ -5653,7 +5630,7 @@ defineSlots<Slots<T>>()
     assert!(
         matches!(
             feature_property.ty,
-            verter_semantic::analysis::type_expr::TypeExpr::Array { .. }
+            verter_type_expr::TypeExpr::Array { .. }
         ),
         "the raw object surface should keep the local array member instead of flattening the whole helper"
     );
@@ -6327,9 +6304,7 @@ defineEmits<Emits>()
         emits: vec![
             verter_semantic::analysis::type_expand::ExpandedField {
                 name: "save".to_string(),
-                r#type: verter_semantic::analysis::type_expr_lower::parse_type_annotation(
-                    "[id: number]",
-                ),
+                r#type: verter_type_expr_oxc::parse_type_annotation("[id: number]"),
                 raw_type: Some("[id: number]".to_string()),
                 optional: false,
                 exactness:
@@ -6340,9 +6315,7 @@ defineEmits<Emits>()
             },
             verter_semantic::analysis::type_expand::ExpandedField {
                 name: "update:open".to_string(),
-                r#type: verter_semantic::analysis::type_expr_lower::parse_type_annotation(
-                    "[value: boolean]",
-                ),
+                r#type: verter_type_expr_oxc::parse_type_annotation("[value: boolean]"),
                 raw_type: Some("[value: boolean]".to_string()),
                 optional: false,
                 exactness:
@@ -6435,23 +6408,19 @@ defineEmits<Emits>()
                 result: verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(
                     verter_semantic::analysis::type_expand::ExpandedObjectShape {
                         properties: vec![
-                        verter_semantic::analysis::type_expand::ExpandedProperty {
-                            name: "save".to_string(),
-                            ty: verter_semantic::analysis::type_expr_lower::parse_type_annotation(
-                                "[id: number]",
-                            ),
-                            optional: false,
-                            readonly: false,
-                        },
-                        verter_semantic::analysis::type_expand::ExpandedProperty {
-                            name: "update:open".to_string(),
-                            ty: verter_semantic::analysis::type_expr_lower::parse_type_annotation(
-                                "[value: boolean]",
-                            ),
-                            optional: false,
-                            readonly: false,
-                        },
-                    ],
+                            verter_semantic::analysis::type_expand::ExpandedProperty {
+                                name: "save".to_string(),
+                                ty: verter_type_expr_oxc::parse_type_annotation("[id: number]"),
+                                optional: false,
+                                readonly: false,
+                            },
+                            verter_semantic::analysis::type_expand::ExpandedProperty {
+                                name: "update:open".to_string(),
+                                ty: verter_type_expr_oxc::parse_type_annotation("[value: boolean]"),
+                                optional: false,
+                                readonly: false,
+                            },
+                        ],
                         index_signatures: Vec::new(),
                         call_signatures: Vec::new(),
                     },
@@ -6551,9 +6520,7 @@ defineModel<string>('searchTerm')
         emits: vec![
             verter_semantic::analysis::type_expand::ExpandedField {
                 name: "save".to_string(),
-                r#type: verter_semantic::analysis::type_expr_lower::parse_type_annotation(
-                    "[id: number]",
-                ),
+                r#type: verter_type_expr_oxc::parse_type_annotation("[id: number]"),
                 raw_type: Some("[id: number]".to_string()),
                 optional: false,
                 exactness:
@@ -6564,9 +6531,7 @@ defineModel<string>('searchTerm')
             },
             verter_semantic::analysis::type_expand::ExpandedField {
                 name: "update:open".to_string(),
-                r#type: verter_semantic::analysis::type_expr_lower::parse_type_annotation(
-                    "[value: boolean]",
-                ),
+                r#type: verter_type_expr_oxc::parse_type_annotation("[value: boolean]"),
                 raw_type: Some("[value: boolean]".to_string()),
                 optional: false,
                 exactness:
@@ -6719,9 +6684,7 @@ defineEmits<Emits>()
         emits: vec![
             verter_semantic::analysis::type_expand::ExpandedField {
                 name: "save".to_string(),
-                r#type: verter_semantic::analysis::type_expr_lower::parse_type_annotation(
-                    "[id: number]",
-                ),
+                r#type: verter_type_expr_oxc::parse_type_annotation("[id: number]"),
                 raw_type: Some("[id: number]".to_string()),
                 optional: false,
                 exactness:
@@ -6732,9 +6695,7 @@ defineEmits<Emits>()
             },
             verter_semantic::analysis::type_expand::ExpandedField {
                 name: "update:open".to_string(),
-                r#type: verter_semantic::analysis::type_expr_lower::parse_type_annotation(
-                    "[value: boolean]",
-                ),
+                r#type: verter_type_expr_oxc::parse_type_annotation("[value: boolean]"),
                 raw_type: Some("[value: boolean]".to_string()),
                 optional: false,
                 exactness:
@@ -6907,7 +6868,7 @@ defineSlots<Slots>()
     assert!(
         matches!(
             evaluated_types.define_slots[0].result.value.properties[0].ty,
-            verter_semantic::analysis::type_expr::TypeExpr::Function(_),
+            verter_type_expr::TypeExpr::Function(_),
         ),
         "resolved defineSlots reuse should preserve function-valued slot members"
     );
@@ -7199,7 +7160,7 @@ defineProps<Props<T>>()
     let host = project.host();
     let _store_view = host.resolver_store_view();
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
-    let lowered = verter_semantic::analysis::type_expr_lower::parse_type_annotation("Props<T>");
+    let lowered = verter_type_expr_oxc::parse_type_annotation("Props<T>");
 
     let (shape, source) = produce_one_macro_object_shape(
         &mut query_engine,
@@ -7301,8 +7262,7 @@ defineProps<ColorModeSelectProps>()
     let host = project.host();
     let _store_view = host.resolver_store_view();
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
-    let lowered =
-        verter_semantic::analysis::type_expr_lower::parse_type_annotation("ColorModeSelectProps");
+    let lowered = verter_type_expr_oxc::parse_type_annotation("ColorModeSelectProps");
 
     let (shape, source) = produce_one_macro_object_shape(
         &mut query_engine,
@@ -7390,7 +7350,7 @@ defineProps<Props>()
     let host = project.host();
     let _store_view = host.resolver_store_view();
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
-    let lowered = verter_semantic::analysis::type_expr_lower::parse_type_annotation("Props");
+    let lowered = verter_type_expr_oxc::parse_type_annotation("Props");
 
     let (shape, source) = produce_one_macro_object_shape(
         &mut query_engine,
@@ -7613,8 +7573,7 @@ defineProps<ColorModeSelectProps>()
     );
 
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
-    let lowered =
-        verter_semantic::analysis::type_expr_lower::parse_type_annotation("ColorModeSelectProps");
+    let lowered = verter_type_expr_oxc::parse_type_annotation("ColorModeSelectProps");
 
     let (shape, source) = produce_one_macro_object_shape(
         &mut query_engine,
@@ -7937,8 +7896,7 @@ defineProps<ColorModeSelectProps>()
         has_prop_shape_surface(&prepared_overlay_shape),
         "overlay-backed prepared root surface should still expose props after registry append",
     );
-    let lowered =
-        verter_semantic::analysis::type_expr_lower::parse_type_annotation("ColorModeSelectProps");
+    let lowered = verter_type_expr_oxc::parse_type_annotation("ColorModeSelectProps");
     let direct_solves_before = 0u32;
     let (direct_shape, direct_source) = produce_one_macro_object_shape(
         &mut query_engine,
@@ -8103,7 +8061,7 @@ defineProps<ColorModeSelectProps>()
     assert!(
         matches!(
             registry_root.type_expr,
-            verter_semantic::analysis::type_expr::TypeExpr::Object(_),
+            verter_type_expr::TypeExpr::Object(_),
         ),
         "appended registry root should still lower to an object shell for ColorModeSelectProps",
     );
@@ -8212,7 +8170,7 @@ defineProps<{ first: Inner; second: Inner }>()
     let host = project.host();
     let _store_view = host.resolver_store_view();
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
-    let expr = verter_semantic::analysis::type_expr::TypeExpr::named("Inner");
+    let expr = verter_type_expr::TypeExpr::named("Inner");
 
     let first = query_engine.materialize_member_surface_expr("/src/types.ts", &expr, true);
     let cache_len_after_first = query_engine.materialized_member_surface_cache_len();
@@ -8285,7 +8243,7 @@ defineProps<{ ui?: Button['ui'] }>()
     let host = project.host();
     let _store_view = host.resolver_store_view();
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
-    let expr = verter_semantic::analysis::type_expr_lower::parse_type_annotation("Button['ui']");
+    let expr = verter_type_expr_oxc::parse_type_annotation("Button['ui']");
 
     let first = query_engine.materialize_member_surface_expr("/src/button-types.ts", &expr, true);
     let cache_len_after_first = query_engine.materialized_member_surface_cache_len();
@@ -8334,9 +8292,7 @@ defineProps<{ first: Inner; second: Inner }>()
     let host = project.host();
     let _store_view = host.resolver_store_view();
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
-    let expr = verter_semantic::analysis::type_expr_lower::parse_type_annotation(
-        "{ first: Inner; second: Inner }",
-    );
+    let expr = verter_type_expr_oxc::parse_type_annotation("{ first: Inner; second: Inner }");
 
     let first = query_engine.materialize_member_surface_expr("/src/types.ts", &expr, true);
     let cache_len_after_first = query_engine.materialized_member_surface_cache_len();
@@ -8607,7 +8563,7 @@ fn spike_dispatch_handles_props_t_substitution_via_macro_shell() {
         PathSegment, ProjectionMode, QueryResult, SemanticQueryApi, SemanticQueryKey,
     };
     use std::sync::Arc as StdArc;
-    use verter_semantic::analysis::type_expr::TypeExpr;
+    use verter_type_expr::TypeExpr;
 
     let project = make_project();
     project
@@ -9122,7 +9078,7 @@ fn instantiate_memo_splits_per_body_mode() {
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::semantic_query::ProjectionMode;
     use std::sync::Arc as StdArc;
-    use verter_semantic::analysis::type_expr::TypeExpr;
+    use verter_type_expr::TypeExpr;
 
     let project = make_project();
     project
@@ -9248,7 +9204,7 @@ fn dispatch_only_pick_indexed_access_reduces_to_member_union() {
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::semantic_query::ProjectionMode;
     use std::sync::Arc as StdArc;
-    use verter_semantic::analysis::type_expr::{empty_type_args, LiteralValue, TypeExpr};
+    use verter_type_expr::{empty_type_args, LiteralValue, TypeExpr};
 
     let project = make_project();
     project
@@ -9369,7 +9325,7 @@ fn dispatch_only_imported_mapped_slots_resolved_shape_via_dispatch_only() {
         PathSegment, ProjectionMode, QueryResult, SemanticQueryApi, SemanticQueryKey,
     };
     use std::sync::Arc as StdArc;
-    use verter_semantic::analysis::type_expr::{empty_type_args, TypeExpr};
+    use verter_type_expr::{empty_type_args, TypeExpr};
 
     let project = make_project();
     project
@@ -9416,30 +9372,22 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
     let dispatch = ProjectSemanticDispatch::new(host);
 
     // The macro shell: `PricingPlansSlots<{ id: string; tier: 'pro' }>`.
-    let plan_arg = TypeExpr::Object(StdArc::new(
-        verter_semantic::analysis::type_expr::ObjectExpr {
-            properties: vec![
-                verter_semantic::analysis::type_expr::ObjectMember::Property(
-                    verter_semantic::analysis::type_expr::ObjectProperty {
-                        name: "id".to_string(),
-                        ty: TypeExpr::Primitive(
-                            verter_semantic::analysis::type_expr::PrimitiveName::String,
-                        ),
-                        optional: false,
-                        readonly: false,
-                    },
-                ),
-                verter_semantic::analysis::type_expr::ObjectMember::Property(
-                    verter_semantic::analysis::type_expr::ObjectProperty {
-                        name: "tier".to_string(),
-                        ty: TypeExpr::string_literal("pro"),
-                        optional: false,
-                        readonly: false,
-                    },
-                ),
-            ],
-        },
-    ));
+    let plan_arg = TypeExpr::Object(StdArc::new(verter_type_expr::ObjectExpr {
+        properties: vec![
+            verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty {
+                name: "id".to_string(),
+                ty: TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+                optional: false,
+                readonly: false,
+            }),
+            verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty {
+                name: "tier".to_string(),
+                ty: TypeExpr::string_literal("pro"),
+                optional: false,
+                readonly: false,
+            }),
+        ],
+    }));
 
     let macro_shell = TypeExpr::Ref {
         name: StdArc::from("PricingPlansSlots"),
@@ -9509,10 +9457,10 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
             TypeExpr::Object(obj) => {
                 for member in &obj.properties {
                     match member {
-                        verter_semantic::analysis::type_expr::ObjectMember::Property(p) => {
+                        verter_type_expr::ObjectMember::Property(p) => {
                             names.insert(p.name.clone());
                         }
-                        verter_semantic::analysis::type_expr::ObjectMember::Method(m) => {
+                        verter_type_expr::ObjectMember::Method(m) => {
                             names.insert(m.name.clone());
                         }
                         _ => {}
@@ -9576,7 +9524,7 @@ fn dispatch_only_imported_mapped_slots_final_shape_via_dispatch_only() {
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::semantic_query::ProjectionMode;
     use std::sync::Arc as StdArc;
-    use verter_semantic::analysis::type_expr::TypeExpr;
+    use verter_type_expr::TypeExpr;
 
     let project = make_project();
     project
@@ -9622,30 +9570,22 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
     let host = project.host();
     let dispatch = ProjectSemanticDispatch::new(host);
 
-    let plan_arg = TypeExpr::Object(StdArc::new(
-        verter_semantic::analysis::type_expr::ObjectExpr {
-            properties: vec![
-                verter_semantic::analysis::type_expr::ObjectMember::Property(
-                    verter_semantic::analysis::type_expr::ObjectProperty {
-                        name: "id".to_string(),
-                        ty: TypeExpr::Primitive(
-                            verter_semantic::analysis::type_expr::PrimitiveName::String,
-                        ),
-                        optional: false,
-                        readonly: false,
-                    },
-                ),
-                verter_semantic::analysis::type_expr::ObjectMember::Property(
-                    verter_semantic::analysis::type_expr::ObjectProperty {
-                        name: "tier".to_string(),
-                        ty: TypeExpr::string_literal("pro"),
-                        optional: false,
-                        readonly: false,
-                    },
-                ),
-            ],
-        },
-    ));
+    let plan_arg = TypeExpr::Object(StdArc::new(verter_type_expr::ObjectExpr {
+        properties: vec![
+            verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty {
+                name: "id".to_string(),
+                ty: TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+                optional: false,
+                readonly: false,
+            }),
+            verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty {
+                name: "tier".to_string(),
+                ty: TypeExpr::string_literal("pro"),
+                optional: false,
+                readonly: false,
+            }),
+        ],
+    }));
     let macro_shell = TypeExpr::Ref {
         name: StdArc::from("PricingPlansSlots"),
         type_arguments: StdArc::from(vec![plan_arg]),
@@ -9673,10 +9613,10 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
             TypeExpr::Object(obj) => {
                 for member in &obj.properties {
                     match member {
-                        verter_semantic::analysis::type_expr::ObjectMember::Property(p) => {
+                        verter_type_expr::ObjectMember::Property(p) => {
                             out.insert(p.name.clone());
                         }
-                        verter_semantic::analysis::type_expr::ObjectMember::Method(m) => {
+                        verter_type_expr::ObjectMember::Method(m) => {
                             out.insert(m.name.clone());
                         }
                         _ => {}
@@ -9714,8 +9654,7 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
         match expr {
             TypeExpr::Object(obj) => {
                 for member in &obj.properties {
-                    if let verter_semantic::analysis::type_expr::ObjectMember::Property(p) = member
-                    {
+                    if let verter_type_expr::ObjectMember::Property(p) = member {
                         if p.name == name {
                             return Some(&p.ty);
                         }
@@ -9755,10 +9694,10 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
             TypeExpr::Object(obj) => {
                 for member in &obj.properties {
                     match member {
-                        verter_semantic::analysis::type_expr::ObjectMember::Property(p) => {
+                        verter_type_expr::ObjectMember::Property(p) => {
                             names.insert(p.name.clone());
                         }
-                        verter_semantic::analysis::type_expr::ObjectMember::Method(m) => {
+                        verter_type_expr::ObjectMember::Method(m) => {
                             names.insert(m.name.clone());
                         }
                         _ => {}
@@ -9820,7 +9759,7 @@ mod node_predicates_tests {
         SurfaceView,
     };
     use std::sync::Arc as StdArc;
-    use verter_semantic::analysis::type_expr::LiteralValue;
+    use verter_type_expr::LiteralValue;
 
     fn empty_surface(members: Vec<SurfaceMember>) -> SurfaceView {
         SurfaceView {
@@ -10328,7 +10267,7 @@ defineProps<{ value: Pick<Foo, 'a'> }>()
         };
         use crate::resolver_core::ComponentMetaQueryEngine;
         use std::sync::Arc as StdArc;
-        use verter_semantic::analysis::type_expr::TypeExpr;
+        use verter_type_expr::TypeExpr;
 
         let project = make_project();
         project
@@ -10376,7 +10315,7 @@ defineProps<{ value: GetItemKeys<unknown> }>()
             name: StdArc::from("GetItemKeys"),
             type_arguments: StdArc::from(
                 vec![TypeExpr::Primitive(
-                    verter_semantic::analysis::type_expr::PrimitiveName::Unknown,
+                    verter_type_expr::PrimitiveName::Unknown,
                 )]
                 .into_boxed_slice(),
             ),
@@ -10409,7 +10348,7 @@ defineProps<{ value: GetItemKeys<unknown> }>()
         };
         use crate::resolver_core::ComponentMetaQueryEngine;
         use std::sync::Arc as StdArc;
-        use verter_semantic::analysis::type_expr::TypeExpr;
+        use verter_type_expr::TypeExpr;
 
         let project = make_project();
         project
@@ -10833,7 +10772,7 @@ defineProps<{ value: Foo }>()
         use crate::meta_resolve::materialize_component_meta_registry_structural_expr;
         use crate::resolver_core::ComponentMetaQueryEngine;
         use std::sync::Arc as StdArc;
-        use verter_semantic::analysis::type_expr::TypeExpr;
+        use verter_type_expr::TypeExpr;
 
         let project = make_project();
         // Local interface — projects through surface.

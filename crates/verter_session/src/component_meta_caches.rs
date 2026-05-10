@@ -37,8 +37,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use verter_semantic::analysis::type_expr::TypeExpr;
 use verter_semantic::analysis::type_solver::query_engine::ProjectedMember;
+use verter_type_expr::TypeExpr;
 
 use crate::cooperative_admission::{cooperative_get_or_insert, InflightTable};
 use crate::instant::Instant;

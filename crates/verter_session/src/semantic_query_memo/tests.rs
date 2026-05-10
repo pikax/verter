@@ -2264,7 +2264,7 @@ fn record_path_length_and_projection_depth_drive_percentiles() {
 /// changed.
 #[test]
 fn origin_edges_per_node_percentiles_derive_from_derivation_store() {
-    use verter_semantic::analysis::type_expr::LiteralValue;
+    use verter_type_expr::LiteralValue;
     let store = SemanticGraphStore::new();
     let src = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     // Ten structurally-distinct payloads. Under C7 compound-key

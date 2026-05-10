@@ -1,14 +1,14 @@
 use rustc_hash::FxHashSet;
 use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
-use verter_semantic::analysis::type_expr::{ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
 use verter_semantic::analysis::types::AnalyzedMacroKind;
+use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
 
 use crate::resolver_core::project_macro_surfaces;
 use crate::resolver_core::surface_projector::ProjectedMacroSurfaces;
 
 pub fn resolved_elements_to_type_expr_via_type_text(
     resolved: &ResolvedElements,
-) -> verter_semantic::analysis::type_expr::TypeExpr {
+) -> verter_type_expr::TypeExpr {
     projected_macro_surfaces_to_type_expr(
         AnalyzedMacroKind::DefineProps,
         &project_macro_surfaces(None, AnalyzedMacroKind::DefineProps, resolved),
@@ -18,12 +18,12 @@ pub fn resolved_elements_to_type_expr_via_type_text(
 pub fn projected_macro_surfaces_to_type_expr(
     macro_kind: AnalyzedMacroKind,
     projected: &ProjectedMacroSurfaces,
-) -> verter_semantic::analysis::type_expr::TypeExpr {
+) -> verter_type_expr::TypeExpr {
     let prop_properties = projected.props.iter().map(|prop| {
         let ty = prop
             .type_annotation
             .as_deref()
-            .map(verter_semantic::analysis::type_expr_lower::parse_type_annotation)
+            .map(verter_type_expr_oxc::parse_type_annotation)
             .unwrap_or(TypeExpr::Unknown {
                 raw: "unknown".to_string(),
             });
@@ -39,7 +39,7 @@ pub fn projected_macro_surfaces_to_type_expr(
         let ty = emit
             .payload_type
             .as_deref()
-            .map(verter_semantic::analysis::type_expr_lower::parse_type_annotation)
+            .map(verter_type_expr_oxc::parse_type_annotation)
             .unwrap_or(TypeExpr::Unknown {
                 raw: "unknown".to_string(),
             });
@@ -73,7 +73,7 @@ pub fn projected_macro_surfaces_to_type_expr(
 
         ObjectMember::Property(ObjectProperty {
             name: slot.name.clone(),
-            ty: verter_semantic::analysis::type_expr_lower::parse_type_annotation(&signature),
+            ty: verter_type_expr_oxc::parse_type_annotation(&signature),
             optional: !slot.is_required,
             readonly: false,
         })
@@ -138,7 +138,7 @@ pub(crate) fn project_macro_surfaces_from_expanded_shape(
 fn projected_emit_fields_from_shape(
     shape: &verter_semantic::analysis::type_expand::ExpandedObjectShape,
 ) -> Vec<verter_semantic::analysis::AnalyzedEmitField> {
-    use verter_semantic::analysis::type_expr::{LiteralValue, TupleElement, TypeExpr};
+    use verter_type_expr::{LiteralValue, TupleElement, TypeExpr};
 
     let mut emits = shape
         .properties
@@ -239,17 +239,13 @@ fn projected_slot_fields_from_shape(
 }
 
 fn event_payload_raw_signature_from_type_expr_for_projected_surface(
-    payload: &verter_semantic::analysis::type_expr::TypeExpr,
+    payload: &verter_type_expr::TypeExpr,
 ) -> Option<String> {
     render_type_expr_for_projected_surface(payload).filter(|rendered| rendered.starts_with('['))
 }
 
-fn render_type_expr_for_projected_surface(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
-) -> Option<String> {
-    use verter_semantic::analysis::type_expr::{
-        LiteralValue, ObjectMember, PrimitiveName, TypeExpr,
-    };
+fn render_type_expr_for_projected_surface(expr: &verter_type_expr::TypeExpr) -> Option<String> {
+    use verter_type_expr::{LiteralValue, ObjectMember, PrimitiveName, TypeExpr};
 
     match expr {
         TypeExpr::Primitive(name) => Some(match name {
@@ -374,7 +370,7 @@ fn render_type_expr_for_projected_surface(
 }
 
 fn render_function_type_for_projected_surface(
-    function: &verter_semantic::analysis::type_expr::FunctionExpr,
+    function: &verter_type_expr::FunctionExpr,
 ) -> Option<String> {
     let params = function
         .parameters

@@ -791,10 +791,8 @@ impl VerterHost {
                 tracked_dependencies.insert(canonical_id.to_string());
             }
         }
-        fn imported_registry_alias_should_stay_symbolic(
-            expr: &verter_semantic::analysis::type_expr::TypeExpr,
-        ) -> bool {
-            use verter_semantic::analysis::type_expr::TypeExpr;
+        fn imported_registry_alias_should_stay_symbolic(expr: &verter_type_expr::TypeExpr) -> bool {
+            use verter_type_expr::TypeExpr;
 
             match expr {
                 TypeExpr::Parenthesized(inner) => {
@@ -811,12 +809,10 @@ impl VerterHost {
             query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
             scope_canonical_id: &str,
             symbol_name: &str,
-            raw_body: Option<&verter_semantic::analysis::type_expr::TypeExpr>,
+            raw_body: Option<&verter_type_expr::TypeExpr>,
             prefer_explicit_raw_surface: bool,
-        ) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
-            use verter_semantic::analysis::type_expr::{
-                ObjectExpr, ObjectMember, ObjectProperty, TypeExpr,
-            };
+        ) -> Option<verter_type_expr::TypeExpr> {
+            use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
 
             let imported_generic_alias_scope: Option<String> = raw_body.and_then(|expr| {
                 let TypeExpr::Ref {
@@ -1070,36 +1066,32 @@ impl VerterHost {
         fn build_registry_indexed_access_expr(
             symbol_name: &str,
             path: &[String],
-        ) -> verter_semantic::analysis::type_expr::TypeExpr {
+        ) -> verter_type_expr::TypeExpr {
             path.iter().fold(
-                verter_semantic::analysis::type_expr::TypeExpr::named(symbol_name),
-                |object, member| verter_semantic::analysis::type_expr::TypeExpr::IndexedAccess {
+                verter_type_expr::TypeExpr::named(symbol_name),
+                |object, member| verter_type_expr::TypeExpr::IndexedAccess {
                     object: std::sync::Arc::new(object),
-                    index: std::sync::Arc::new(
-                        verter_semantic::analysis::type_expr::TypeExpr::string_literal(
-                            member.clone(),
-                        ),
-                    ),
+                    index: std::sync::Arc::new(verter_type_expr::TypeExpr::string_literal(
+                        member.clone(),
+                    )),
                 },
             )
         }
         fn wrap_registry_member_path_surface(
             path: &[String],
-            leaf: verter_semantic::analysis::type_expr::TypeExpr,
-        ) -> verter_semantic::analysis::type_expr::TypeExpr {
+            leaf: verter_type_expr::TypeExpr,
+        ) -> verter_type_expr::TypeExpr {
             path.iter().rfold(leaf, |child, member| {
-                verter_semantic::analysis::type_expr::TypeExpr::Object(std::sync::Arc::new(
-                    verter_semantic::analysis::type_expr::ObjectExpr {
-                        properties: vec![
-                            verter_semantic::analysis::type_expr::ObjectMember::Property(
-                                verter_semantic::analysis::type_expr::ObjectProperty {
-                                    name: member.clone(),
-                                    ty: child,
-                                    optional: true,
-                                    readonly: false,
-                                },
-                            ),
-                        ],
+                verter_type_expr::TypeExpr::Object(std::sync::Arc::new(
+                    verter_type_expr::ObjectExpr {
+                        properties: vec![verter_type_expr::ObjectMember::Property(
+                            verter_type_expr::ObjectProperty {
+                                name: member.clone(),
+                                ty: child,
+                                optional: true,
+                                readonly: false,
+                            },
+                        )],
                     },
                 ))
             })
@@ -1115,10 +1107,8 @@ impl VerterHost {
         /// callable parameter type — which, when the param root is
         /// package-backed, must be preserved symbolically rather than
         /// expanded as if it were prop metadata.
-        fn type_expr_contains_callable_surface(
-            expr: &verter_semantic::analysis::type_expr::TypeExpr,
-        ) -> bool {
-            use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+        fn type_expr_contains_callable_surface(expr: &verter_type_expr::TypeExpr) -> bool {
+            use verter_type_expr::{ObjectMember, TypeExpr};
             match expr {
                 TypeExpr::Function(_) => true,
                 TypeExpr::Object(object) => object.properties.iter().any(|m| match m {
@@ -1147,10 +1137,10 @@ impl VerterHost {
         /// resolved body of the picked alias). Returns `None` when
         /// `raw_body` is not an Object or no property matches.
         fn raw_pick_member_leaf(
-            raw_body: &verter_semantic::analysis::type_expr::TypeExpr,
+            raw_body: &verter_type_expr::TypeExpr,
             member: &str,
-        ) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
-            use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+        ) -> Option<verter_type_expr::TypeExpr> {
+            use verter_type_expr::{ObjectMember, TypeExpr};
             match raw_body {
                 TypeExpr::Parenthesized(inner) => raw_pick_member_leaf(inner, member),
                 TypeExpr::Object(object) => object.properties.iter().find_map(|m| match m {
@@ -1171,14 +1161,14 @@ impl VerterHost {
         /// graph-native `is_package_backed_ref` predicate, which
         /// delegates to `canonical_resolves_to_package`).
         fn callable_param_root_is_package_backed(
-            param_ty: &verter_semantic::analysis::type_expr::TypeExpr,
+            param_ty: &verter_type_expr::TypeExpr,
             ctx: &dyn crate::resolver_core::ResolverContext,
             scope_canonical_id: &str,
         ) -> bool {
             use crate::component_meta_materialize::is_package_backed_ref;
             use crate::project_semantic_dispatch::ProjectSemanticDispatch;
             use crate::semantic_query::ProjectionMode;
-            use verter_semantic::analysis::type_expr::TypeExpr;
+            use verter_type_expr::TypeExpr;
             fn collect_root_refs<'a>(expr: &'a TypeExpr, out: &mut Vec<&'a TypeExpr>) {
                 match expr {
                     TypeExpr::Ref { .. } => out.push(expr),
@@ -1221,11 +1211,11 @@ impl VerterHost {
         /// and project the raw leaf directly so the package-backed
         /// callable parameter type stays symbolic.
         fn pick_member_route_should_skip_callable_descent(
-            raw_leaf: &verter_semantic::analysis::type_expr::TypeExpr,
+            raw_leaf: &verter_type_expr::TypeExpr,
             ctx: &dyn crate::resolver_core::ResolverContext,
             scope_canonical_id: &str,
         ) -> bool {
-            use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+            use verter_type_expr::{ObjectMember, TypeExpr};
             // Visit every Function surface reachable from `raw_leaf`
             // and check ANY parameter root for package-backed-ness.
             fn any_callable_param_is_package_backed(
@@ -1292,12 +1282,10 @@ impl VerterHost {
             scope_canonical_id: &str,
             symbol_name: &str,
             route: &crate::resolver_core::RouteDemand,
-            raw_body: Option<&verter_semantic::analysis::type_expr::TypeExpr>,
+            raw_body: Option<&verter_type_expr::TypeExpr>,
             prefer_explicit_raw_surface: bool,
-        ) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
-            use verter_semantic::analysis::type_expr::{
-                ObjectExpr, ObjectMember, ObjectProperty, TypeExpr,
-            };
+        ) -> Option<verter_type_expr::TypeExpr> {
+            use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
 
             match route {
                 crate::resolver_core::RouteDemand::Whole => {
@@ -1599,13 +1587,13 @@ impl VerterHost {
             }
         }
         fn collect_imported_component_meta_registry_seed_refs(
-            expr: &verter_semantic::analysis::type_expr::TypeExpr,
+            expr: &verter_type_expr::TypeExpr,
             published_names: &rustc_hash::FxHashSet<String>,
             queued_names: &mut rustc_hash::FxHashSet<String>,
             output: &mut std::collections::VecDeque<PendingComponentMetaRegistryRef>,
             source_hint: Option<&str>,
         ) {
-            use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+            use verter_type_expr::{ObjectMember, TypeExpr};
 
             fn drain_filtered_pending(
                 published_names: &rustc_hash::FxHashSet<String>,
@@ -1633,7 +1621,7 @@ impl VerterHost {
             }
 
             fn collect_one_filtered_expr(
-                expr: &verter_semantic::analysis::type_expr::TypeExpr,
+                expr: &verter_type_expr::TypeExpr,
                 published_names: &rustc_hash::FxHashSet<String>,
                 queued_names: &mut rustc_hash::FxHashSet<String>,
                 output: &mut std::collections::VecDeque<PendingComponentMetaRegistryRef>,
@@ -1761,8 +1749,7 @@ impl VerterHost {
             }
             meta.declaration.canonical_source = resolved.canonical_id.clone();
             if imported_registry_alias_should_stay_symbolic(&resolved.body) {
-                entry.type_expr =
-                    verter_semantic::analysis::type_expr::TypeExpr::named(entry.name.clone());
+                entry.type_expr = verter_type_expr::TypeExpr::named(entry.name.clone());
                 continue;
             }
             let materialized = materialize_component_meta_registry_candidate(
@@ -2108,9 +2095,7 @@ impl VerterHost {
                                 &mut queued_names,
                                 &mut referenced_names,
                                 type_name.clone(),
-                                verter_semantic::analysis::type_expr::TypeExpr::named(
-                                    type_name.clone(),
-                                ),
+                                verter_type_expr::TypeExpr::named(type_name.clone()),
                                 declaration,
                                 None,
                             );
@@ -2220,7 +2205,7 @@ impl VerterHost {
                 && !pending_route_is_whole_local
                 && !seeded_dependency_names.contains(&type_name)
             {
-                if let Some(verter_semantic::analysis::type_expr::TypeExpr::Ref {
+                if let Some(verter_type_expr::TypeExpr::Ref {
                     name: body_ref_name,
                     type_arguments,
                 }) = owner_collection_expr.as_ref()
@@ -2247,7 +2232,7 @@ impl VerterHost {
                     if owner_collection_expr.as_ref().is_some_and(|expr| {
                         matches!(
                             expr,
-                            verter_semantic::analysis::type_expr::TypeExpr::Ref {
+                            verter_type_expr::TypeExpr::Ref {
                                 type_arguments, ..
                             } if !type_arguments.is_empty()
                         )

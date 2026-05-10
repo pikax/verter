@@ -35,10 +35,10 @@
 //!   stay private and are visible inside the
 //!   `component_meta_query_engine` folder via parent-private locality.
 
-use verter_semantic::analysis::type_expr::TypeExpr;
 use verter_semantic::analysis::type_solver::query_engine::{
     ProjectedKeyspace, ProjectedMember, ProjectedSurface,
 };
+use verter_type_expr::TypeExpr;
 
 use super::helpers::{is_builtin_name, resolve_imported_registry_symbol_with_budget};
 use super::surface::{
@@ -141,9 +141,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     pub(crate) fn materialize_member_surface_expr(
         &mut self,
         scope_canonical_id: &str,
-        expr: &verter_semantic::analysis::type_expr::TypeExpr,
+        expr: &verter_type_expr::TypeExpr,
         nested_surface: bool,
-    ) -> verter_semantic::analysis::type_expr::TypeExpr {
+    ) -> verter_type_expr::TypeExpr {
         use crate::component_meta_materialize::{
             materialize_component_meta_structure, MaterializationScope, MaterializeOutcome,
             MaterializeStructureCacheKey,
@@ -292,7 +292,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         &mut self,
         owner_canonical: &str,
         name: &str,
-    ) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+    ) -> Option<verter_type_expr::TypeExpr> {
         #[cfg(test)]
         crate::spike_instrumentation::record_cache_read("owner_collection_exprs");
         if let Some(cached) = self.owner_collection_exprs.borrow().get(name).cloned() {
@@ -312,7 +312,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             let dep_sig = engine_dep_signature_for_canonical(self.ctx, owner_canonical);
             Some((computed, dep_sig))
         });
-        let body: Option<verter_semantic::analysis::type_expr::TypeExpr> = match host_value {
+        let body: Option<verter_type_expr::TypeExpr> = match host_value {
             Some(opt_arc) => opt_arc.map(|arc_expr| arc_expr.as_ref().clone()),
             None => self
                 .prepared_type_decl(owner_canonical, name)

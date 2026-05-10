@@ -43,8 +43,8 @@ pub(crate) const PICK_MEMBER_ROUTE_CALLABLE_DESCENT_COUNTER: &str =
 pub(crate) fn collect_define_props_root_names(
     snapshot: &FileAnalysisSnapshot,
 ) -> rustc_hash::FxHashSet<String> {
-    use verter_semantic::analysis::type_expr::TypeExpr;
     use verter_semantic::analysis::AnalyzedMacroKind;
+    use verter_type_expr::TypeExpr;
 
     fn root_ref_name(ty: &TypeExpr) -> Option<&str> {
         match ty {
@@ -95,7 +95,7 @@ pub(crate) fn slot_binding_targets_define_props_root(
     field: &verter_semantic::analysis::type_expand::ExpandedField,
     define_props_roots: &rustc_hash::FxHashSet<String>,
 ) -> bool {
-    use verter_semantic::analysis::type_expr::TypeExpr;
+    use verter_type_expr::TypeExpr;
 
     if define_props_roots.is_empty() {
         return false;
@@ -108,7 +108,7 @@ pub(crate) fn slot_binding_targets_define_props_root(
     let parsed_raw = field
         .raw_type
         .as_deref()
-        .map(verter_semantic::analysis::type_expr_lower::parse_type_annotation);
+        .map(verter_type_expr_oxc::parse_type_annotation);
     let expr: &TypeExpr = parsed_raw.as_ref().unwrap_or(&field.r#type);
 
     fn unwrap_paren(ty: &TypeExpr) -> &TypeExpr {

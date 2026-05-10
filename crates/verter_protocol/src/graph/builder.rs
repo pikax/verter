@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use verter_semantic::analysis::type_expr::{
+use verter_type_expr::{
     FunctionExpr, FunctionParam, IndexSignature, LiteralValue, MappedModifier, MethodSignature,
     ObjectMember, ObjectProperty, TupleElement, TypeExpr, TypeParam, ValueRef,
 };
@@ -144,8 +144,8 @@ pub struct GraphFunctionParam {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum ExprMemoKey {
-    Primitive(verter_semantic::analysis::type_expr::PrimitiveName),
-    Literal(verter_semantic::analysis::type_expr::LiteralValue),
+    Primitive(verter_type_expr::PrimitiveName),
+    Literal(verter_type_expr::LiteralValue),
     Union {
         ptr: usize,
         len: usize,
@@ -174,11 +174,11 @@ enum ExprMemoKey {
         type_arguments_ptr: usize,
         type_arguments_len: usize,
     },
-    TypeParameter(verter_semantic::analysis::type_expr::TypeParam),
+    TypeParameter(verter_type_expr::TypeParam),
     KeyOf {
         operand_ptr: usize,
     },
-    TypeOf(verter_semantic::analysis::type_expr::ValueRef),
+    TypeOf(verter_type_expr::ValueRef),
     IndexedAccess {
         object_ptr: usize,
         index_ptr: usize,
@@ -719,8 +719,8 @@ impl GraphBuilder {
                     .iter()
                     .map(|f| GraphConditionalFrame {
                         branch: match f.branch {
-                            verter_semantic::analysis::type_expr::RecursiveConditionalBranch::True => 1,
-                            verter_semantic::analysis::type_expr::RecursiveConditionalBranch::False => 2,
+                            verter_type_expr::RecursiveConditionalBranch::True => 1,
+                            verter_type_expr::RecursiveConditionalBranch::False => 2,
                         },
                         decided: f.decided,
                         check: self.node_id(&f.check),
@@ -891,7 +891,7 @@ fn mapped_modifier_tag(modifier: MappedModifier) -> u32 {
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use verter_semantic::analysis::type_expr::{
+    use verter_type_expr::{
         LiteralValue, PrimitiveName, RecursiveConditionalBranch, RecursiveConditionalFrame,
         TypeExpr,
     };
@@ -943,10 +943,9 @@ mod tests {
         // Build an expression tree with pointer-based variants (Union, Object,
         // Function, IndexedAccess, Array) and verify that repeat lookups hit
         // the ptr cache without building ExprMemoKey or GraphNode.
-        let inner_obj =
-            TypeExpr::Object(Arc::new(verter_semantic::analysis::type_expr::ObjectExpr {
-                properties: vec![],
-            }));
+        let inner_obj = TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
+            properties: vec![],
+        }));
         let union = TypeExpr::Union(Arc::from(vec![
             inner_obj.clone(),
             TypeExpr::Primitive(PrimitiveName::String),

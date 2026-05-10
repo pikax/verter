@@ -94,7 +94,7 @@ fn assert_value_prop_resolved(resolution: &ResolvedComponentMetaState, fixture: 
 //   - AllRequired   (member names — all must be required)
 // =====================================================================
 
-use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+use verter_type_expr::{ObjectMember, TypeExpr};
 
 #[derive(Clone)]
 struct ParityAssertion<'a> {

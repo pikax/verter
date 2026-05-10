@@ -28,9 +28,9 @@ use verter_semantic::analysis::type_expand::{
     ExpandedComponentTypes, ExpandedField, ExpansionDiagnostic, ExpansionExactness,
     ExpansionExecutionStatus, ExpansionStopReason,
 };
-use verter_semantic::analysis::type_expr::TypeExpr;
-use verter_semantic::analysis::type_expr_lower::parse_type_annotation;
 use verter_semantic::analysis::AnalyzedMacroKind;
+use verter_type_expr::TypeExpr;
+use verter_type_expr_oxc::parse_type_annotation;
 
 use super::dep_signature::accumulate_dispatch_dep_signature;
 use super::diagnostic_convert::shallow_diagnostics_to_macro_expansion;

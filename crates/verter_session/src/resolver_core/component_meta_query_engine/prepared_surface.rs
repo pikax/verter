@@ -18,8 +18,8 @@
 //!   parent-private locality.
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use verter_semantic::analysis::type_expr::TypeExpr;
 use verter_semantic::analysis::type_solver::query_engine::{ProjectedMember, ProjectedSurface};
+use verter_type_expr::TypeExpr;
 
 use super::helpers::{is_builtin_name, type_expr_references_type_params};
 use super::surface::{
@@ -708,7 +708,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         substitutions: &FxHashMap<String, TypeExpr>,
         active: &mut FxHashSet<(String, String)>,
     ) -> Option<ProjectedMember> {
-        use verter_semantic::analysis::type_expr::ObjectMember;
+        use verter_type_expr::ObjectMember;
 
         match expr {
             TypeExpr::Parenthesized(inner) => self.project_prepared_requested_member_from_expr(

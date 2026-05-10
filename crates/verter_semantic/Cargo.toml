@@ -16,6 +16,8 @@ hotpath = ["dep:hotpath", "hotpath/hotpath"]
 verter_span = { path = "../verter_span" }
 verter_parser = { path = "../verter_parser" }
 verter_workspace = { path = "../verter_workspace" }
+verter_type_expr = { workspace = true }
+verter_type_expr_oxc = { workspace = true }
 rustc-hash = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -95,7 +95,7 @@ pub struct ResolvedJsdocTag {
     pub text: Option<String>,
     pub raw_type: Option<String>,
     pub subject_name: Option<String>,
-    pub resolved_type: Option<verter_semantic::analysis::type_expr::TypeExpr>,
+    pub resolved_type: Option<verter_type_expr::TypeExpr>,
 }
 
 #[derive(Debug, Clone)]

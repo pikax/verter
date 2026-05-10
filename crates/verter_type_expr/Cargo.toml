@@ -1,0 +1,16 @@
+[package]
+name = "verter_type_expr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Verter type-expression DTO — owned, Send+Sync, OXC-free"
+publish = false
+
+[dependencies]
+verter_span = { path = "../verter_span" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rustc-hash = { workspace = true }

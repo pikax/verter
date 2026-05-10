@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::type_expr::TypeExpr;
+use verter_type_expr::TypeExpr;
 
 use super::core::{is_props_suffix, PolicyCtx};
 
@@ -38,7 +38,7 @@ pub(super) fn restore_props_suffix_from_raw(
     if trimmed.is_empty() {
         return false;
     }
-    let parsed = verter_semantic::analysis::type_expr_lower::parse_type_annotation(trimmed);
+    let parsed = verter_type_expr_oxc::parse_type_annotation(trimmed);
 
     // Bare Props-suffix Refs stay deferred to the bare-Ref merge escape
     // hatch — see doc comment.

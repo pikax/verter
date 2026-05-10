@@ -190,9 +190,7 @@ mod tests {
             name: "theme".to_string(),
             declaration_id: 1,
             kind: ValueDeclKind::Const,
-            type_annotation: Some(
-                verter_semantic::analysis::type_expr::TypeExpr::string_literal("dark"),
-            ),
+            type_annotation: Some(verter_type_expr::TypeExpr::string_literal("dark")),
             function_signature: None,
             object_shape: None,
         });
@@ -243,8 +241,7 @@ mod tests {
                     ValueDeclKind::Const,
                 );
                 decl.exported_name = Some("theme".to_string());
-                decl.type_annotation =
-                    Some(verter_semantic::analysis::type_expr::TypeExpr::string_literal("dark"));
+                decl.type_annotation = Some(verter_type_expr::TypeExpr::string_literal("dark"));
                 Arc::new(decl)
             });
 
@@ -285,9 +282,7 @@ mod tests {
             name: "themeConfig".to_string(),
             declaration_id: 2,
             kind: ValueDeclKind::Const,
-            type_annotation: Some(
-                verter_semantic::analysis::type_expr::TypeExpr::string_literal("dark"),
-            ),
+            type_annotation: Some(verter_type_expr::TypeExpr::string_literal("dark")),
             function_signature: None,
             object_shape: None,
         });
@@ -302,9 +297,7 @@ mod tests {
             name: "theme".to_string(),
             declaration_id: 3,
             kind: ValueDeclKind::Const,
-            type_annotation: Some(
-                verter_semantic::analysis::type_expr::TypeExpr::string_literal("local"),
-            ),
+            type_annotation: Some(verter_type_expr::TypeExpr::string_literal("local")),
             function_signature: None,
             object_shape: None,
         });
@@ -320,7 +313,7 @@ mod tests {
             env.value_symbols
                 .get("theme")
                 .and_then(|value| value.type_annotation.clone()),
-            Some(verter_semantic::analysis::type_expr::TypeExpr::string_literal("local"))
+            Some(verter_type_expr::TypeExpr::string_literal("local"))
         );
     }
 
@@ -355,9 +348,7 @@ mod tests {
             name: "theme".to_string(),
             declaration_id: 1,
             kind: ValueDeclKind::Const,
-            type_annotation: Some(
-                verter_semantic::analysis::type_expr::TypeExpr::string_literal("dark"),
-            ),
+            type_annotation: Some(verter_type_expr::TypeExpr::string_literal("dark")),
             function_signature: None,
             object_shape: None,
         });
@@ -365,9 +356,7 @@ mod tests {
             name: "helper".to_string(),
             declaration_id: 2,
             kind: ValueDeclKind::Const,
-            type_annotation: Some(
-                verter_semantic::analysis::type_expr::TypeExpr::string_literal("helper"),
-            ),
+            type_annotation: Some(verter_type_expr::TypeExpr::string_literal("helper")),
             function_signature: None,
             object_shape: None,
         });
@@ -428,9 +417,7 @@ mod tests {
             name: "theme".to_string(),
             declaration_id: 1,
             kind: ValueDeclKind::Const,
-            type_annotation: Some(
-                verter_semantic::analysis::type_expr::TypeExpr::string_literal("dark"),
-            ),
+            type_annotation: Some(verter_type_expr::TypeExpr::string_literal("dark")),
             function_signature: None,
             object_shape: None,
         });
@@ -439,9 +426,7 @@ mod tests {
             name: "helper".to_string(),
             declaration_id: 2,
             kind: ValueDeclKind::Const,
-            type_annotation: Some(
-                verter_semantic::analysis::type_expr::TypeExpr::string_literal("helper"),
-            ),
+            type_annotation: Some(verter_type_expr::TypeExpr::string_literal("helper")),
             function_signature: None,
             object_shape: None,
         });
@@ -509,9 +494,7 @@ mod tests {
             name: "theme".to_string(),
             declaration_id: 1,
             kind: ValueDeclKind::Const,
-            type_annotation: Some(
-                verter_semantic::analysis::type_expr::TypeExpr::string_literal("primary"),
-            ),
+            type_annotation: Some(verter_type_expr::TypeExpr::string_literal("primary")),
             function_signature: None,
             object_shape: None,
         });
@@ -519,8 +502,8 @@ mod tests {
             name: "default".to_string(),
             declaration_id: 2,
             kind: ValueDeclKind::Const,
-            type_annotation: Some(verter_semantic::analysis::type_expr::TypeExpr::TypeOf(
-                verter_semantic::analysis::type_expr::ValueRef {
+            type_annotation: Some(verter_type_expr::TypeExpr::TypeOf(
+                verter_type_expr::ValueRef {
                     path: vec!["theme".to_string()],
                 },
             )),
@@ -550,7 +533,7 @@ mod tests {
             env.value_symbols
                 .get("theme")
                 .and_then(|value| value.type_annotation.clone()),
-            Some(verter_semantic::analysis::type_expr::TypeExpr::string_literal("primary")),
+            Some(verter_type_expr::TypeExpr::string_literal("primary")),
             "default imports should hydrate the underlying exported value, not the synthetic default wrapper",
         );
     }
@@ -577,9 +560,7 @@ mod tests {
             name: "theme".to_string(),
             declaration_id: 1,
             kind: ValueDeclKind::Const,
-            type_annotation: Some(
-                verter_semantic::analysis::type_expr::TypeExpr::string_literal("primary"),
-            ),
+            type_annotation: Some(verter_type_expr::TypeExpr::string_literal("primary")),
             function_signature: None,
             object_shape: None,
         });
@@ -613,9 +594,7 @@ mod tests {
                 name: "defaults".to_string(),
                 declaration_id: 0,
                 kind: ValueDeclKind::Const,
-                type_annotation: Some(
-                    verter_semantic::analysis::type_expr::TypeExpr::string_literal("cached"),
-                ),
+                type_annotation: Some(verter_type_expr::TypeExpr::string_literal("cached")),
                 function_signature: None,
                 object_shape: None,
             },
@@ -655,7 +634,7 @@ mod tests {
             env.value_symbols
                 .get("defaults")
                 .and_then(|v| v.type_annotation.clone()),
-            Some(verter_semantic::analysis::type_expr::TypeExpr::string_literal("cached")),
+            Some(verter_type_expr::TypeExpr::string_literal("cached")),
             "runtime value materialization should use import.resolved_canonical_id directly"
         );
     }

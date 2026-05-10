@@ -442,7 +442,7 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         exported_name: &str,
-        decl_body: &verter_semantic::analysis::type_expr::TypeExpr,
+        decl_body: &verter_type_expr::TypeExpr,
     ) -> Vec<ImportedSymbolDependency> {
         let analysis = match self.external_type_analysis(canonical_id) {
             Some(analysis) => analysis,
@@ -528,7 +528,7 @@ impl VerterHost {
     pub(crate) fn imported_symbol_dependencies_for_expr(
         &self,
         canonical_id: &str,
-        expr: &verter_semantic::analysis::type_expr::TypeExpr,
+        expr: &verter_type_expr::TypeExpr,
     ) -> Vec<ImportedSymbolDependency> {
         self.cache_only_lookup_symbol_dependencies_for_expr(canonical_id, expr)
     }
@@ -536,7 +536,7 @@ impl VerterHost {
     fn cache_only_lookup_symbol_dependencies_for_expr(
         &self,
         canonical_id: &str,
-        expr: &verter_semantic::analysis::type_expr::TypeExpr,
+        expr: &verter_type_expr::TypeExpr,
     ) -> Vec<ImportedSymbolDependency> {
         let mut dependencies = self.imported_symbol_dependencies(canonical_id, "", expr);
         dependencies.sort_by(|left, right| {

@@ -13,7 +13,7 @@
 
 use std::collections::BTreeSet;
 
-use verter_semantic::analysis::type_expr::TypeExpr;
+use verter_type_expr::TypeExpr;
 
 use super::surface::type_expr_references_names;
 use super::ResolvedImportedRegistrySymbol;
@@ -254,7 +254,7 @@ where
 
 pub(super) fn type_expr_references_type_params(
     expr: &TypeExpr,
-    type_params: &[verter_semantic::analysis::type_expr::TypeParam],
+    type_params: &[verter_type_expr::TypeParam],
 ) -> bool {
     type_expr_references_names(expr, &|name| {
         type_params.iter().any(|param| param.name == name)
@@ -262,7 +262,7 @@ pub(super) fn type_expr_references_type_params(
 }
 
 pub(super) fn projected_surface_member_names(expr: &TypeExpr) -> Option<Vec<String>> {
-    use verter_semantic::analysis::type_expr::ObjectMember;
+    use verter_type_expr::ObjectMember;
 
     match expr {
         TypeExpr::Object(object) => {
