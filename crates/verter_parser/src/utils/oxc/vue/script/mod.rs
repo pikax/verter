@@ -266,3 +266,6 @@ fn collect_vue_dynamic_imports(program: &Program<'_>) -> Vec<crate::common::Span
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod resolve_type_typed_form_tests;

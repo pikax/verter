@@ -239,8 +239,8 @@ pub(crate) fn should_invalidate_dependent_view(
                 let key = (dependency_id.to_string(), type_name.to_string());
 
                 if let Some(resolved) =
-                    verter_compiler::utils::oxc::vue::resolve_type::resolve_external_type(
-                        type_name, dep_src, &alloc,
+                    verter_compiler::utils::oxc::vue::resolve_type::resolve_external_type_with_canonical(
+                        type_name, dep_src, &alloc, dependency_id,
                     )
                 {
                     let new_hash =

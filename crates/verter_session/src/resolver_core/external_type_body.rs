@@ -371,7 +371,7 @@ mod tests {
 
         fn resolve_external_type_from_analysis(
             &self,
-            _dep_canonical: &str,
+            dep_canonical: &str,
             type_name: &str,
             effective_source: &str,
             analysis: &AnalyzedExternalTypeSource,
@@ -382,12 +382,13 @@ mod tests {
                 oxc_parser::Parser::new(&allocator, effective_source, oxc_span::SourceType::ts())
                     .parse();
             (!parsed.panicked).then(|| {
-                verter_compiler::utils::oxc::vue::resolve_type::resolve_external_type_in_program_with_analyzed_symbol_companion(
+                verter_compiler::utils::oxc::vue::resolve_type::resolve_external_type_in_program_with_analyzed_symbol_companion_and_canonical(
                     type_name,
                     &parsed.program,
                     effective_source.as_bytes(),
                     analysis,
                     imported_companions,
+                    dep_canonical,
                 )
             })?
         }

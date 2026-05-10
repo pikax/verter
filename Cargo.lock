@@ -3943,6 +3943,7 @@ dependencies = [
  "smallvec",
  "verter_span",
  "verter_type_expr",
+ "verter_type_expr_oxc",
 ]
 
 [[package]]

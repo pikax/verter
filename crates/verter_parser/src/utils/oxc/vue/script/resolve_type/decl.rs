@@ -23,6 +23,7 @@ use oxc_span::GetSpan;
 
 use crate::common::Span;
 
+use super::elements::{lower_method_signature_for_class, lower_ts_type_from_bytes};
 use super::{
     callable_signature_text, component_meta_core_trace_enabled, component_meta_core_trace_event,
     extract_string_literal_keys_with_ctx, get_property_key_name, get_property_key_span,
@@ -1008,6 +1009,10 @@ pub(super) fn resolve_class_property_definition(
         .type_annotation
         .as_ref()
         .and_then(|ann| span_text(source, ann.type_annotation.span().into()));
+    let type_expr = prop
+        .type_annotation
+        .as_ref()
+        .map(|ann| lower_ts_type_from_bytes(&ann.type_annotation, source));
 
     Some(ResolvedProp {
         span: Span {
@@ -1023,7 +1028,7 @@ pub(super) fn resolve_class_property_definition(
         type_text,
         map_local: true,
         span_is_absolute: base_offset != 0,
-        type_expr: None,
+        type_expr,
         type_expr_scope: None,
     })
 }
@@ -1047,6 +1052,7 @@ pub(super) fn resolve_class_method_definition(
             .as_ref()
             .map(|return_type| &return_type.type_annotation),
     );
+    let type_expr = lower_method_signature_for_class(method, source);
     Some(ResolvedProp {
         span: Span {
             start: method.span.start + base_offset,
@@ -1061,7 +1067,7 @@ pub(super) fn resolve_class_method_definition(
         type_text,
         map_local: true,
         span_is_absolute: base_offset != 0,
-        type_expr: None,
+        type_expr: Some(type_expr),
         type_expr_scope: None,
     })
 }
@@ -1090,6 +1096,10 @@ pub(super) fn resolve_class_accessor_property(
         .type_annotation
         .as_ref()
         .and_then(|ann| span_text(source, ann.type_annotation.span().into()));
+    let type_expr = prop
+        .type_annotation
+        .as_ref()
+        .map(|ann| lower_ts_type_from_bytes(&ann.type_annotation, source));
 
     Some(ResolvedProp {
         span: Span {
@@ -1105,7 +1115,7 @@ pub(super) fn resolve_class_accessor_property(
         type_text,
         map_local: true,
         span_is_absolute: base_offset != 0,
-        type_expr: None,
+        type_expr,
         type_expr_scope: None,
     })
 }

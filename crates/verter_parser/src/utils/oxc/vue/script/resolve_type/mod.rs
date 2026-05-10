@@ -374,6 +374,79 @@ impl ResolvedElements {
             }
         });
     }
+
+    /// Stamp `type_expr_scope` on every prop / emit whose `type_expr` is
+    /// populated but whose scope is missing. Called by parser-boundary callers
+    /// to attach the canonical_id of the file whose OXC parse produced the
+    /// typed expression.
+    ///
+    /// The local-SFC parse path stamps the owner SFC's canonical_id; the
+    /// external-resolution path is stamped inside
+    /// `finalize_external_resolution_with_offset` with the external file's
+    /// canonical_id.
+    ///
+    /// This method is the producer-side authority for the pairing invariant
+    /// `type_expr.is_some() <=> type_expr_scope.is_some()` enforced by
+    /// `assert_typed_form_populated`.
+    pub fn stamp_type_expr_scope(&mut self, scope: &TypeExprScope) {
+        for prop in &mut self.props {
+            if prop.type_expr.is_some() && prop.type_expr_scope.is_none() {
+                prop.type_expr_scope = Some(scope.clone());
+            }
+        }
+        for emit in &mut self.emits {
+            if emit.type_expr.is_some() && emit.type_expr_scope.is_none() {
+                emit.type_expr_scope = Some(scope.clone());
+            }
+        }
+    }
+
+    /// Assert that every `ResolvedProp` and `ResolvedEmit` satisfies the typed
+    /// form pairing invariant:
+    /// - `type_expr.is_some() <=> type_expr_scope.is_some()`, and
+    /// - `type_expr.is_some()` whenever `type_span.is_some() || type_text.is_some()`
+    ///   (props) or `signature` carries a non-empty payload (emits).
+    ///
+    /// Returns `Ok(())` if every prop / emit complies. Returns a `Err(message)`
+    /// listing every violator. Used for `debug_assert!` at the parser-boundary
+    /// exit so consumers can `expect("type_expr+scope populated by parser")`
+    /// at read time.
+    pub fn assert_typed_form_populated(&self) -> Result<(), String> {
+        let mut violators: Vec<String> = Vec::new();
+        for prop in &self.props {
+            let display_name = prop
+                .key_name
+                .clone()
+                .unwrap_or_else(|| "<anonymous>".to_string());
+            if prop.type_expr.is_some() != prop.type_expr_scope.is_some() {
+                violators.push(format!(
+                    "ResolvedProp `{display_name}`: type_expr/type_expr_scope pairing violated (type_expr.is_some()={}, type_expr_scope.is_some()={})",
+                    prop.type_expr.is_some(),
+                    prop.type_expr_scope.is_some(),
+                ));
+            }
+            if prop.type_expr.is_none() && (prop.type_span.is_some() || prop.type_text.is_some()) {
+                violators.push(format!(
+                    "ResolvedProp `{display_name}`: type_span/type_text present but type_expr is None"
+                ));
+            }
+        }
+        for emit in &self.emits {
+            if emit.type_expr.is_some() != emit.type_expr_scope.is_some() {
+                violators.push(format!(
+                    "ResolvedEmit `{}`: type_expr/type_expr_scope pairing violated (type_expr.is_some()={}, type_expr_scope.is_some()={})",
+                    emit.name,
+                    emit.type_expr.is_some(),
+                    emit.type_expr_scope.is_some(),
+                ));
+            }
+        }
+        if violators.is_empty() {
+            Ok(())
+        } else {
+            Err(violators.join("\n"))
+        }
+    }
 }
 
 // =============================================================================
@@ -511,6 +584,17 @@ pub struct TypeResolutionContext<'ctx, 'a: 'ctx> {
     companion_cache_key: Arc<[Box<[u8]>]>,
     /// Optional debug/trace label for the owning source file.
     trace_label: Option<Arc<str>>,
+    /// Optional canonical_id of the file whose source is being resolved by
+    /// this context. When set, the lowering producer sites in
+    /// `elements.rs` / `decl.rs` populate `ResolvedProp.type_expr_scope` /
+    /// `ResolvedEmit.type_expr_scope` with this value, completing the
+    /// pairing invariant
+    /// (`type_expr.is_some() <=> type_expr_scope.is_some()`) at construction
+    /// time. When `None`, construction sites leave `type_expr_scope` as
+    /// `None` and a downstream stamping helper
+    /// (`ResolvedElements::stamp_type_expr_scope`) is responsible for
+    /// completing the invariant before the result leaves the parser.
+    owner_canonical: Option<TypeExprScope>,
     /// Injected host-owned cache handle for fully-resolved named local symbols.
     /// `None` for standalone callers (tests, direct parsing); resolution still
     /// succeeds but pays no memoization cost. When `Some`, the adapter closes
@@ -774,8 +858,24 @@ impl<'ctx, 'a: 'ctx> TypeResolutionContext<'ctx, 'a> {
             current_surface: None,
             companion_cache_key: Arc::from(Vec::<Box<[u8]>>::new().into_boxed_slice()),
             trace_label: None,
+            owner_canonical: None,
             named_type_cache: None,
         }
+    }
+
+    /// Set the canonical_id of the file this context is resolving against.
+    /// When set, construction-site lowering populates `type_expr_scope`
+    /// atomically with `type_expr`, satisfying the pairing invariant at the
+    /// producer site.
+    pub fn set_owner_canonical(&mut self, canonical_id: impl Into<String>) {
+        self.owner_canonical = Some(TypeExprScope::new(canonical_id));
+    }
+
+    /// Read the canonical_id of the file this context is resolving against.
+    /// Returns `None` for standalone callers (tests, direct parsing) that
+    /// have not bound the context to a file canonical_id.
+    pub(super) fn owner_canonical_scope(&self) -> Option<&TypeExprScope> {
+        self.owner_canonical.as_ref()
     }
 
     /// Inject a host-owned named-type cache. Subsequent recursive resolutions
@@ -1601,6 +1701,19 @@ pub fn resolve_type_elements(node: &TSType, base_offset: u32) -> ResolvedElement
     let mut result = ResolvedElements::default();
     resolve_type_elements_inner(node, base_offset, &mut result, b"");
     result.root_runtime_types = infer_runtime_type(node);
+    // Standalone (no-ctx) callers have no canonical_id; stamp the empty
+    // scope so the pairing invariant holds without requiring callers to
+    // know about the typed-form contract.
+    let scope = TypeExprScope::new("");
+    result.stamp_type_expr_scope(&scope);
+    debug_assert!(
+        result.assert_typed_form_populated().is_ok(),
+        "resolve_type_elements must satisfy the typed-form pairing invariant: {}",
+        result
+            .assert_typed_form_populated()
+            .err()
+            .unwrap_or_default()
+    );
     result
 }
 
@@ -1620,6 +1733,19 @@ pub fn resolve_type_elements_with_ctx<'ctx, 'a: 'ctx>(
     resolve_type_elements_inner_with_ctx(node, base_offset, &mut result, ctx);
     result.root_runtime_types =
         resolve_root_runtime_type_with_ctx(node, ctx).unwrap_or_else(|| infer_runtime_type(node));
+    let scope = ctx
+        .owner_canonical_scope()
+        .cloned()
+        .unwrap_or_else(|| TypeExprScope::new(""));
+    result.stamp_type_expr_scope(&scope);
+    debug_assert!(
+        result.assert_typed_form_populated().is_ok(),
+        "resolve_type_elements_with_ctx must satisfy the typed-form pairing invariant: {}",
+        result
+            .assert_typed_form_populated()
+            .err()
+            .unwrap_or_default()
+    );
     result
 }
 
@@ -1641,6 +1767,19 @@ pub fn resolve_type_elements_with_ctx_ref<'ctx, 'a: 'ctx>(
     resolve_type_elements_inner_with_ctx_ref(node, base_offset, &mut result, ctx);
     result.root_runtime_types = resolve_root_runtime_type_with_ctx_ref(node, ctx)
         .unwrap_or_else(|| infer_runtime_type(node));
+    let scope = ctx
+        .owner_canonical_scope()
+        .cloned()
+        .unwrap_or_else(|| TypeExprScope::new(""));
+    result.stamp_type_expr_scope(&scope);
+    debug_assert!(
+        result.assert_typed_form_populated().is_ok(),
+        "resolve_type_elements_with_ctx_ref must satisfy the typed-form pairing invariant: {}",
+        result
+            .assert_typed_form_populated()
+            .err()
+            .unwrap_or_default()
+    );
     result
 }
 
@@ -1672,8 +1811,11 @@ pub use external::{
     extract_imported_type_bindings, hash_resolved_type, imported_member_name_for_required_alias,
     required_import_alias_names_for_binding, resolve_external_type,
     resolve_external_type_in_context_with_analyzed_symbol_companion,
+    resolve_external_type_in_context_with_analyzed_symbol_companion_and_canonical,
     resolve_external_type_in_program_with_analyzed_symbol_companion,
-    resolve_external_type_with_companion, AnalyzedExternalTypeSource,
+    resolve_external_type_in_program_with_analyzed_symbol_companion_and_canonical,
+    resolve_external_type_with_canonical, resolve_external_type_with_companion,
+    resolve_external_type_with_companion_and_canonical, AnalyzedExternalTypeSource,
     AnalyzedExternalTypeSourceStats, AnalyzedExternalTypeSymbol, AnalyzedExternalTypeSymbolKind,
     ExtractedExportSurface, ExtractedTypeBindings, ImportedTypeBinding,
 };

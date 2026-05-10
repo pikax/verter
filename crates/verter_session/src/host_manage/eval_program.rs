@@ -472,12 +472,13 @@ impl VerterHost {
         }
         let program_ref = entry.program.borrow_dependent();
         let source_bytes = inputs.eval_source.as_bytes();
-        let resolved = verter_compiler::utils::oxc::vue::resolve_type::resolve_external_type_in_program_with_analyzed_symbol_companion(
+        let resolved = verter_compiler::utils::oxc::vue::resolve_type::resolve_external_type_in_program_with_analyzed_symbol_companion_and_canonical(
             exported_name,
             program_ref,
             source_bytes,
             inputs.analysis.as_ref(),
             &rustc_hash::FxHashMap::default(),
+            dep_canonical,
         )?;
         Some(
             crate::resolver_core::surface_projector::project_macro_surfaces(

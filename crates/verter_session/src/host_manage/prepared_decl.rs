@@ -1033,13 +1033,14 @@ impl VerterHost {
         };
         let program = type_context.borrow_owner().borrow_dependent();
         let base_ctx = type_context.borrow_dependent();
-        let resolved = verter_compiler::utils::oxc::vue::resolve_type::resolve_external_type_in_context_with_analyzed_symbol_companion(
+        let resolved = verter_compiler::utils::oxc::vue::resolve_type::resolve_external_type_in_context_with_analyzed_symbol_companion_and_canonical(
             type_name,
             program,
             type_context.borrow_owner().source_bytes(),
             base_ctx,
             inputs.analysis.as_ref(),
             imported_companions,
+            dep_canonical,
         );
         component_meta_trace_custom!(
             "resolve_external_type_from_indexed_ready_result",
