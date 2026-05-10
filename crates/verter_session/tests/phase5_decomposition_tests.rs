@@ -22,6 +22,15 @@
 //!   the same `semantic_query_memo` row when the underlying
 //!   declaration matches. Path-independent caching invariant.
 //!
+//! - **#4** `projector_self_reduces_nested_indexed_access_chain` — a
+//!   same-file two-level IndexedAccess
+//!   (`ButtonStyles['variants']['size']`) reduces to its concrete
+//!   literal-union leaf. Discriminating: the parser-side
+//!   `expand_field_expr` closure preserves this surface symbolically,
+//!   so the projector's `reduce_field_type_expr` is the sole reducer
+//!   on the publication path. Bypassing it surfaces the symbolic
+//!   IndexedAccess and fails the assertion.
+//!
 //! - **#5** `evaluate_type_expression_for_vue_default_export_matches_props`
 //!   — the synthesised default-export typeinfo path produces a result
 //!   structurally compatible with the macro-path props.
@@ -215,59 +224,72 @@ fn getcomponentmeta_decomposes_through_dispatch_primitives() {
 // nested IndexedAccess projector self-reduction
 // ──────────────────────────────────────────────────────────────────
 
-const NESTED_INDEXED_ACCESS_FOO_TS: &str = r#"export interface Foo {
-  outer: { nested: { leaf: string } };
-}
-"#;
-
+// Single-file inline interface with two-level IndexedAccess. The
+// parser-side `expand_field_expr` closure preserves this expression
+// symbolically (no cross-block dispatch projection turns the chain
+// into a concrete leaf for this surface shape), so the projector's
+// `reduce_field_type_expr` is the SOLE authority that reduces
+// `ButtonStyles['variants']['size']` → `"sm" | "md" | "lg"`. Mirrors
+// the `indexed_access_two_levels` correctness-suite fixture
+// (`tests/correctness/fixtures.rs`), which is the canonical Tier-1
+// regression for this invariant — duplicated here so the
+// `phase5_decomposition_tests` characterization fails loudly when the
+// projector's reducer is regressed (e.g. an early-return that bypasses
+// `materialize_component_meta_type_expr_until_stable`).
 const NESTED_INDEXED_ACCESS_VUE: &str = r#"<script setup lang="ts">
-import type { Foo } from '/workspace/src/foo'
-defineProps<{
-  wrapped: Pick<Foo, 'outer'>['outer']['nested']
-}>()
+interface ButtonStyles {
+  variants: {
+    size: 'sm' | 'md' | 'lg';
+    color: 'red' | 'blue';
+  };
+}
+defineProps<{ size: ButtonStyles['variants']['size'] }>();
 </script>
 <template><div /></template>
 "#;
 
-/// REGRESSION: a property whose declared type is a cross-file
-/// `Pick<Foo, 'outer'>['outer']['nested']` IndexedAccess chain
-/// resolves natively through the projector path to a concrete
-/// `{ leaf: string }` object surface. The projector raises the
-/// surface-member's value to a chained
-/// `TypeExpr::IndexedAccess { object: IndexedAccess { object: Ref(Pick<Foo,'outer'>),
-/// index: 'outer' }, index: 'nested' }`; the bounded fixed-point
-/// reducer integrated into the projector flattens it natively.
+/// REGRESSION: a property whose declared type is a same-file
+/// two-level `ButtonStyles['variants']['size']` IndexedAccess chain
+/// reduces natively through the projector path's
+/// `reduce_field_type_expr` to the concrete literal union
+/// `"sm" | "md" | "lg"`.
+///
+/// **Discriminating contract (this is the property the test exists to
+/// enforce):** for this fixture the parser-side `expand_field_expr`
+/// closure returns the IndexedAccess shell symbolically — there is no
+/// alternate path that produces the literal union. So the projector's
+/// `reduce_field_type_expr` is the sole reducer on the publication
+/// path. Bypassing it (e.g. an early-return, an always-true guard, or
+/// removing it from `reduce_published_field_types`) will surface here
+/// as a symbolic `IndexedAccess` and fail the assertion. This was
+/// validated by injecting `if route_is_package_backed || true { return
+/// expr; }` into the bypass guard and observing the published prop
+/// regress to `IndexedAccess { object: IndexedAccess { object: Ref { name:
+/// "ButtonStyles", .. }, index: Literal("variants") }, index:
+/// Literal("size") }`.
 ///
 /// Hard contract:
-/// - The published `wrapped` prop's `type_expr` is a concrete
-///   `Object` carrying a `leaf: string` property.
+/// - The published `size` prop's `type_expr` is a concrete
+///   `Union([Literal("sm"), Literal("md"), Literal("lg")])`.
 /// - The published prop is NOT a symbolic `IndexedAccess`.
 /// - The published prop is NOT `Unknown { raw: "semanticMiss" }`.
-///
-/// The structural concrete-leaf check is the contract — the
-/// projector is the sole authority for member reduction, so a
-/// failure to reduce surfaces here as `IndexedAccess` / `Ref` /
-/// `Unknown` (the test fails). There is no rescue cascade behind it.
 #[test]
 fn projector_self_reduces_nested_indexed_access_chain() {
-    use verter_semantic::analysis::type_expr::{ObjectMember, PrimitiveName, TypeExpr};
+    use verter_semantic::analysis::type_expr::{LiteralValue, TypeExpr};
 
-    let host = build_host(&[
-        ("/workspace/src/foo.ts", NESTED_INDEXED_ACCESS_FOO_TS),
-        ("/workspace/src/Comp.vue", NESTED_INDEXED_ACCESS_VUE),
-    ]);
+    let host = build_host(&[("/workspace/src/Comp.vue", NESTED_INDEXED_ACCESS_VUE)]);
 
     let meta = host
         .get_component_meta("/workspace/src/Comp.vue")
         .expect("getComponentMeta must succeed for nested IndexedAccess fixture");
 
-    let wrapped_prop = meta
+    let size_prop = meta
         .props
         .iter()
-        .find(|p| p.name == "wrapped")
+        .find(|p| p.name == "size")
         .unwrap_or_else(|| {
             panic!(
-                "projector must publish `wrapped` prop for nested IndexedAccess \
+                "projector must publish `size` prop for nested IndexedAccess \
                  surface; got {:?}",
                 meta.props.iter().map(|p| &p.name).collect::<Vec<_>>(),
             )
@@ -275,48 +297,48 @@ fn projector_self_reduces_nested_indexed_access_chain() {
 
     // Negative assertions: the published shape must be concrete.
     assert!(
-        !matches!(wrapped_prop.type_expr, TypeExpr::IndexedAccess { .. }),
-        "`wrapped` prop type must NOT be a symbolic IndexedAccess; got {:?}",
-        wrapped_prop.type_expr,
+        !matches!(size_prop.type_expr, TypeExpr::IndexedAccess { .. }),
+        "`size` prop type must NOT be a symbolic IndexedAccess; got {:?}. \
+         A symbolic IndexedAccess proves the projector's \
+         `reduce_field_type_expr` was bypassed.",
+        size_prop.type_expr,
     );
-    if let TypeExpr::Unknown { raw } = &wrapped_prop.type_expr {
-        panic!("`wrapped` prop must NOT be Unknown; got Unknown {{ raw: {raw:?} }}");
+    if let TypeExpr::Unknown { raw } = &size_prop.type_expr {
+        panic!("`size` prop must NOT be Unknown; got Unknown {{ raw: {raw:?} }}");
     }
 
-    // Positive assertion: the published type is a concrete Object
-    // surface with a single `leaf: string` property — the structural
-    // result of `Foo['outer']['nested']`.
-    let object = match &wrapped_prop.type_expr {
-        TypeExpr::Object(object) => object.clone(),
+    // Positive assertion: the published type is the literal union
+    // `"sm" | "md" | "lg"` — the structural result of
+    // `ButtonStyles['variants']['size']`.
+    let union_members = match &size_prop.type_expr {
+        TypeExpr::Union(members) => members.clone(),
         other => panic!(
-            "`wrapped` prop must reduce to Object {{ leaf: string }}; \
-             got {other:?}"
+            "`size` prop must reduce to Union([\"sm\", \"md\", \"lg\"]); \
+             got {other:?}. A non-union shape proves the projector did \
+             not reduce the IndexedAccess chain natively."
         ),
     };
-    let leaf_member = object
-        .properties
+    let mut literal_strings: Vec<String> = union_members
         .iter()
-        .find_map(|m| match m {
-            ObjectMember::Property(p) if p.name == "leaf" => Some(p),
+        .filter_map(|m| match m {
+            TypeExpr::Literal(LiteralValue::String(s)) => Some(s.clone()),
             _ => None,
         })
-        .unwrap_or_else(|| {
-            panic!(
-                "Object surface must carry a `leaf` property; got members={:?}",
-                object.properties,
-            )
-        });
-    assert!(
-        matches!(leaf_member.ty, TypeExpr::Primitive(PrimitiveName::String)),
-        "`leaf` member must be `string` primitive; got {:?}",
-        leaf_member.ty,
+        .collect();
+    literal_strings.sort();
+    assert_eq!(
+        literal_strings,
+        vec!["lg".to_string(), "md".to_string(), "sm".to_string()],
+        "Union must contain exactly the three literal members `\"sm\" | \"md\" | \"lg\"`; \
+         got members={:?}",
+        union_members,
     );
 
     // Sanity: exactly one prop on the macro surface.
     assert_eq!(
         meta.props.len(),
         1,
-        "macro surface must publish exactly one prop (`wrapped`); \
+        "macro surface must publish exactly one prop (`size`); \
          got {} props: {:?}",
         meta.props.len(),
         meta.props.iter().map(|p| &p.name).collect::<Vec<_>>(),
