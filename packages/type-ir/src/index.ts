@@ -33,6 +33,7 @@ export type {
   RefType,
   RecursiveRefConditionalFrame,
   RecursiveRefType,
+  IndexedAccessType,
   UnknownType,
   TypeDescriptor,
 } from "./type-ir.js";
@@ -49,5 +50,6 @@ export {
   func,
   ref,
   recursiveRef,
+  indexedAccess,
   unknown,
 } from "./type-ir.js";

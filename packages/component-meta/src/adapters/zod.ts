@@ -115,6 +115,11 @@ export function typeToZodString(type: TypeDescriptor): string {
       // Named types we can't resolve — fall back to unknown
       return "z.unknown()";
 
+    case "indexedAccess":
+      // Indexed-access types (`T['K']`) require host-side resolution
+      // to materialise the member type; fall back to unknown.
+      return "z.unknown()";
+
     case "enum": {
       if (type.members.length === 0) return "z.never()";
       const vals = type.members.map((m) =>
@@ -279,6 +284,9 @@ function buildZodSchema(z: typeof import("zod"), type: TypeDescriptor): unknown 
 
     case "ref":
     case "recursiveRef":
+      return z.unknown();
+
+    case "indexedAccess":
       return z.unknown();
 
     case "enum": {

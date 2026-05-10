@@ -171,6 +171,8 @@ function typeToSummary(type: TypeDescriptor): string {
       return type.typeArguments.length > 0
         ? `${type.name}<${type.typeArguments.map(typeToSummary).join(", ")}>`
         : type.name;
+    case "indexedAccess":
+      return `${typeToSummary(type.objectType)}[${typeToSummary(type.indexType)}]`;
     case "enum":
       return type.name;
     case "unknown":

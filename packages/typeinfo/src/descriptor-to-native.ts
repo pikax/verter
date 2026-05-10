@@ -96,6 +96,12 @@ export function descriptorToNative(d: TypeDescriptor): NativeTypeExpr {
         constraint: d.constraint ? descriptorToNative(d.constraint) : undefined,
         default: d.default ? descriptorToNative(d.default) : undefined,
       };
+    case "indexedAccess":
+      return {
+        kind: "indexedAccess",
+        object: descriptorToNative(d.objectType),
+        index: descriptorToNative(d.indexType),
+      };
     case "unknown":
       return { kind: "unknown", raw: d.rawType };
     default:

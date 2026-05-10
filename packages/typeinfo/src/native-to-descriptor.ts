@@ -4,12 +4,13 @@
  * `TypeDescriptor` IR exported by `@verter/type-ir`.
  *
  * The mapping is structural and lossless for the descriptors that
- * `@verter/type-ir` represents. Operator-shaped variants (`keyOf`,
- * `typeOf`, `indexedAccess`, `templateLiteral`, `infer`, `rest`,
- * `mapped`, `parenthesized`) lower to `unknown(raw)` because the
- * caller is expected to issue an `Expanded`-mode resolution if it
- * wants the body of the operator instead of a syntax-preserving
- * shell.
+ * `@verter/type-ir` represents. `indexedAccess` lowers to the dedicated
+ * `IndexedAccessType` variant so consumers can structurally inspect
+ * `T['K']` shapes. The remaining operator-shaped variants (`keyOf`,
+ * `typeOf`, `templateLiteral`, `infer`, `rest`, `mapped`, `conditional`)
+ * lower to `unknown(raw)` because the caller is expected to issue an
+ * `Expanded`-mode resolution if it wants the body of the operator
+ * instead of a syntax-preserving shell.
  */
 
 import {
@@ -24,6 +25,7 @@ import {
   ref,
   recursiveRef,
   typeParameter,
+  indexedAccess,
   unknown,
   type ObjectIndexSignature,
   type ObjectProperty,
@@ -136,7 +138,7 @@ export function nativeToDescriptor(expr: NativeTypeExpr): TypeDescriptor {
     case "typeOf":
       return unknown(`typeof ${expr.path.join(".")}`);
     case "indexedAccess":
-      return unknown(`${describeBrief(expr.object)}[${describeBrief(expr.index)}]`);
+      return indexedAccess(nativeToDescriptor(expr.object), nativeToDescriptor(expr.index));
     case "conditional":
       return unknown(
         `${describeBrief(expr.check)} extends ${describeBrief(expr.extends)} ? ` +

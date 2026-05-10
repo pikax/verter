@@ -212,6 +212,14 @@ function convertType(
     case "recursiveRef":
       return { kind: "object" as const, type: typeDescriptorToString(td), schema: {} };
 
+    case "indexedAccess":
+      // Indexed-access types (`T['K']`) carry a structural shape but
+      // require host-side resolution to materialise the underlying
+      // member. Surface as the structural string form with an empty
+      // schema (matches the Volar "unresolved compound type" behaviour
+      // used for refs).
+      return { kind: "object" as const, type: typeDescriptorToString(td), schema: {} };
+
     case "unknown":
       return td.rawType || "unknown";
   }
@@ -313,6 +321,8 @@ function schemaDescriptorToString(
     }
     case "recursiveRef":
       return typeDescriptorToString(td);
+    case "indexedAccess":
+      return typeDescriptorToString(td);
   }
 }
 
@@ -382,6 +392,8 @@ export function typeDescriptorToString(td: TypeDescriptor): string {
       return td.typeArguments.length > 0
         ? `${td.name}<${td.typeArguments.map(typeDescriptorToString).join(", ")}>`
         : td.name;
+    case "indexedAccess":
+      return `${typeDescriptorToString(td.objectType)}[${typeDescriptorToString(td.indexType)}]`;
     case "enum":
       return td.name;
     case "unknown":

@@ -109,6 +109,11 @@ export function typeToJsonSchema(type: TypeDescriptor): JSONSchema {
       // Named type reference — cannot resolve without context
       return { description: type.name };
 
+    case "indexedAccess":
+      // Indexed-access types (`T['K']`) cannot be resolved without
+      // their host registry; surface a description placeholder.
+      return {};
+
     case "enum": {
       const values = type.members.map((m) => m.value ?? m.name);
       return { enum: values };

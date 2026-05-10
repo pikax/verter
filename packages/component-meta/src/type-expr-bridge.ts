@@ -18,6 +18,7 @@ import {
   typeParameter,
   ref as typeRef,
   recursiveRef,
+  indexedAccess,
   unknown,
 } from "@verter/type-ir";
 import {
@@ -433,7 +434,10 @@ export function typeExprToDescriptor(
       if (resolved) {
         return resolved;
       }
-      return unknown(nativeTypeExprToString(expr));
+      return indexedAccess(
+        typeExprToDescriptor(expr.object, nativeRegistry, visiting, graphVisiting),
+        typeExprToDescriptor(expr.index, nativeRegistry, visiting, graphVisiting),
+      );
     }
 
     case "parenthesized":
@@ -858,6 +862,11 @@ function substituteDescriptorTypeParameters(
       }
       return descriptor;
     }
+    case "indexedAccess":
+      return indexedAccess(
+        substituteDescriptorTypeParameters(descriptor.objectType, bindings),
+        substituteDescriptorTypeParameters(descriptor.indexType, bindings),
+      );
   }
 }
 
@@ -2133,7 +2142,23 @@ function graphNodeToDescriptor(
             graphVisiting,
           )
         : undefined;
-      return resolved ?? unknown(graphTypeExprToString(expr));
+      if (resolved) {
+        return resolved;
+      }
+      return indexedAccess(
+        typeExprToDescriptor(
+          createGraphTypeExprRef(expr.graph, node.objectNodeId),
+          nativeRegistry,
+          visiting,
+          graphVisiting,
+        ),
+        typeExprToDescriptor(
+          createGraphTypeExprRef(expr.graph, node.indexNodeId),
+          nativeRegistry,
+          visiting,
+          graphVisiting,
+        ),
+      );
     }
     case NODE_PARENTHESIZED:
       return typeExprToDescriptor(

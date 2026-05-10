@@ -567,7 +567,49 @@ describe("typeExprToDescriptor", () => {
       ]),
     );
 
-    expect(result.kind).toBe("unknown");
+    // Post-W0.6: unresolvable indexed access surfaces as the dedicated
+    // `IndexedAccessType` variant so structural consumers (W7.2 compat
+    // checker rewrite) can match `t.kind === "indexedAccess"` instead
+    // of regex-scanning a raw-type string.
+    expect(result.kind).toBe("indexedAccess");
+    if (result.kind === "indexedAccess") {
+      expect(result.objectType).toEqual({ kind: "ref", name: "Variants" });
+      expect(result.indexType).toEqual({ kind: "literal", value: "color" });
+    }
+  });
+
+  it("emits IndexedAccessType when no native registry is supplied", () => {
+    // Discriminating fixture for W0.6: pre-cutover this would collapse
+    // to `kind: "unknown"`; post-cutover the structural form survives.
+    const result = typeExprToDescriptor({
+      kind: "indexedAccess",
+      object: { kind: "ref", name: "NuxtLinkProps", typeArguments: [] },
+      index: { kind: "literal", literalKind: "string", value: "to" },
+    });
+
+    expect(result).toEqual({
+      kind: "indexedAccess",
+      objectType: { kind: "ref", name: "NuxtLinkProps" },
+      indexType: { kind: "literal", value: "to" },
+    });
+  });
+
+  it("emits IndexedAccessType for non-literal index types (T[K])", () => {
+    // Pre-W0.6 this would return `unknown("T[K]")` — the regex-based
+    // `looksLikeIndexedAccessType` heuristic in compat/checker.ts
+    // existed precisely because the structural shape was lost here.
+    // Post-W0.6 the descriptor preserves both sub-shapes.
+    const result = typeExprToDescriptor({
+      kind: "indexedAccess",
+      object: { kind: "ref", name: "T", typeArguments: [] },
+      index: { kind: "ref", name: "K", typeArguments: [] },
+    });
+
+    expect(result).toEqual({
+      kind: "indexedAccess",
+      objectType: { kind: "ref", name: "T" },
+      indexType: { kind: "ref", name: "K" },
+    });
   });
 
   it("resolves chained indexed access through registry-materialized objects", () => {

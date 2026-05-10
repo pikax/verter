@@ -140,6 +140,26 @@ export interface RecursiveRefType {
   conditionalContext: RecursiveRefConditionalFrame[];
 }
 
+// ── IndexedAccess ────────────────────────────────────────────────
+
+/**
+ * Represents an indexed-access TypeScript type (`T['K']` / `T[K]`).
+ *
+ * Surfaces unresolvable indexed-access shapes (e.g. when the object type
+ * is a generic parameter or an unresolved external ref) so consumers can
+ * structurally inspect the form rather than recovering it from raw text.
+ *
+ * When resolution succeeds (the object type is a concrete object whose
+ * `K` member is known), the bridge collapses the indexed access to the
+ * member type directly — `IndexedAccessType` only appears when the
+ * structural shape has to survive opaquely.
+ */
+export interface IndexedAccessType {
+  kind: "indexedAccess";
+  objectType: TypeDescriptor;
+  indexType: TypeDescriptor;
+}
+
 // ── Unknown (fallback) ──────────────────────────────────────────
 
 export interface UnknownType {
@@ -162,6 +182,7 @@ export type TypeDescriptor =
   | EnumType
   | RefType
   | RecursiveRefType
+  | IndexedAccessType
   | UnknownType;
 
 // ── Factory helpers ──────────────────────────────────────────────
@@ -251,6 +272,13 @@ export function recursiveRef(
   conditionalContext: RecursiveRefConditionalFrame[],
 ): RecursiveRefType {
   return { kind: "recursiveRef", name, typeArguments, conditionalContext };
+}
+
+export function indexedAccess(
+  objectType: TypeDescriptor,
+  indexType: TypeDescriptor,
+): IndexedAccessType {
+  return { kind: "indexedAccess", objectType, indexType };
 }
 
 export function unknown(rawType: string): UnknownType {

@@ -1512,6 +1512,13 @@ function typeDescriptorToCompatDisplay(
     }
     case "recursiveRef":
       return typeDescriptorToString(descriptor);
+    case "indexedAccess":
+      // TODO(W7.2): the `indexedAccess` variant exists structurally for
+      // the W7.2 rewrite of looksLikeIndexedAccessType /
+      // looksLikeSlotsHelperRawType / looksLikeUiHelperRawType. Until
+      // W7.2 lands, the display formatter falls back to the structural
+      // `obj[idx]` rendering so the exhaustive switch compiles.
+      return typeDescriptorToString(descriptor);
   }
 }
 
