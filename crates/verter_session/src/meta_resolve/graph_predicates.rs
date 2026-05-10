@@ -313,7 +313,6 @@ pub(crate) fn component_meta_ref_resolves_to_package_node(
     canonical_resolves_to_package(identity.canonical_id.as_ref())
 }
 
-
 /// Graph-native predicate. Returns `true` when `node`'s route root
 /// resolves to a `/node_modules/`-rooted decl identity.
 ///

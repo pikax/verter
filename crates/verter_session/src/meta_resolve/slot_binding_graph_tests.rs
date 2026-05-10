@@ -1391,18 +1391,14 @@ defineSlots<Slots>()
     // BudgetExceeded ExpansionDiagnostic — the discriminator that
     // proves the cache-skip is BECAUSE OF budget exhaustion, not an
     // unrelated cold-cache condition.
-    let saw_budget_exceeded =
-        resolution
-            .synthesis_diagnostics
-            .iter()
-            .any(|envelope| {
-                envelope.diagnostics.iter().any(|d| {
-                    matches!(
-                        d.reason,
-                        verter_semantic::analysis::type_expand::ExpansionStopReason::BudgetExceeded
-                    )
-                })
-            });
+    let saw_budget_exceeded = resolution.synthesis_diagnostics.iter().any(|envelope| {
+        envelope.diagnostics.iter().any(|d| {
+            matches!(
+                d.reason,
+                verter_semantic::analysis::type_expand::ExpansionStopReason::BudgetExceeded
+            )
+        })
+    });
     assert!(
         saw_budget_exceeded,
         "synthesis_diagnostics must contain at least one BudgetExceeded \
