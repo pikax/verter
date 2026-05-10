@@ -8460,12 +8460,12 @@ mod typed_ir_resolver_guards {
         ),
         (
             "crates/verter_semantic/src/analysis/macros.rs",
-            1301,
+            1315,
             "parse_type_annotation",
         ),
         (
             "crates/verter_semantic/src/analysis/macros.rs",
-            1408,
+            1422,
             "parse_type_annotation",
         ),
         (
@@ -8556,11 +8556,6 @@ mod typed_ir_resolver_guards {
         (
             "crates/verter_session/src/meta_resolve/slot_binding_graph.rs",
             958,
-            "parse_type_annotation",
-        ),
-        (
-            "crates/verter_session/src/resolver_core/component_meta/cold_resolver.rs",
-            460,
             "parse_type_annotation",
         ),
         (
@@ -8765,17 +8760,17 @@ mod typed_ir_resolver_guards {
     const PICK_OMIT_PREFIX_ALLOWLIST: &[(&str, u32, &str)] = &[
         (
             "crates/verter_semantic/src/analysis/macros.rs",
-            2463,
+            2499,
             r#"starts_with("Pick<")"#,
         ),
         (
             "crates/verter_session/src/resolver_core/surface_projector.rs",
-            348,
+            382,
             r#"starts_with("Pick<")"#,
         ),
         (
             "crates/verter_session/src/resolver_core/surface_projector.rs",
-            378,
+            414,
             r#"starts_with("Pick<")"#,
         ),
     ];
@@ -8958,5 +8953,4 @@ mod typed_ir_resolver_guards {
             CHECKER_TEXT_ADAPTER_ALLOWLIST,
         );
     }
-
 }
