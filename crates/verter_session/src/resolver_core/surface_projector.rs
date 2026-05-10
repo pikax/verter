@@ -8,7 +8,9 @@ use verter_semantic::analysis::types::{
     AnalyzedEmitField, AnalyzedMacroKind, AnalyzedPropField, AnalyzedSlotField,
     AnalyzedSlotFieldBinding, JsdocTag,
 };
-use verter_type_expr::{TypeExpr, TypeExprScope};
+use verter_type_expr::{
+    FunctionExpr, FunctionParam, ObjectExpr, ObjectMember, ObjectProperty, TypeExpr, TypeExprScope,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedNativeProp {
@@ -51,18 +53,50 @@ pub fn project_macro_surfaces(
     macro_kind: AnalyzedMacroKind,
     elements: &ResolvedElements,
 ) -> ProjectedMacroSurfaces {
+    project_macro_surfaces_with_owner(source, None, macro_kind, elements)
+}
+
+/// Projector entry-point that propagates the local SFC's canonical_id so the
+/// aggregate `ProjectedMacroSurfaces.*_expr_scope` fields can be stamped.
+///
+/// Per-field scopes (`AnalyzedPropField.type_expr_scope`,
+/// `AnalyzedEmitField.payload_expr_scope`, `AnalyzedSlotField.return_expr_scope`)
+/// are bridged from the parser-side `ResolvedProp`/`ResolvedEmit` regardless of
+/// `owner_canonical` — they carry the file the OXC parse was performed in
+/// (local SFC for inferred props, external file for cross-file resolved props).
+///
+/// `owner_canonical` is only used for the aggregate scope (the synthesized
+/// `Object` covers the whole macro surface, so its scope is the SFC where the
+/// macro was written). Pass `None` when the caller does not have the local
+/// SFC's canonical_id; aggregate `*_expr` are then left as `None` because the
+/// pairing invariant `*_expr.is_some() <=> *_expr_scope.is_some()` requires a
+/// scope.
+pub fn project_macro_surfaces_with_owner(
+    source: Option<&str>,
+    owner_canonical: Option<&str>,
+    macro_kind: AnalyzedMacroKind,
+    elements: &ResolvedElements,
+) -> ProjectedMacroSurfaces {
     let native_props = collect_native_props(elements);
 
     match macro_kind {
         AnalyzedMacroKind::DefineProps
         | AnalyzedMacroKind::WithDefaults
         | AnalyzedMacroKind::DefineModel => {
-            let props = elements
+            let props: Vec<AnalyzedPropField> = elements
                 .props
                 .iter()
                 .filter(|prop| prop.visibility.is_public())
                 .map(|prop| {
                     let (description, tags) = member_jsdoc(source, prop.span);
+                    let type_expr = prop.type_expr.clone();
+                    let type_expr_scope = prop.type_expr_scope.clone();
+                    debug_assert_eq!(
+                        type_expr.is_some(),
+                        type_expr_scope.is_some(),
+                        "AnalyzedPropField type_expr/type_expr_scope pairing violated for prop `{}`",
+                        prop.key_name.as_deref().unwrap_or("<anon>")
+                    );
                     AnalyzedPropField {
                         name: prop
                             .key_name
@@ -75,17 +109,22 @@ pub fn project_macro_surfaces(
                         tags,
                         resolution_source: verter_semantic::analysis::TypeResolutionSource::Rust,
                         resolution_error: None,
-                        type_expr: None,
-                        type_expr_scope: None,
+                        type_expr,
+                        type_expr_scope,
                     }
                 })
                 .collect();
+
+            let (props_expr, props_expr_scope) =
+                build_aggregate_props_expr(&props, owner_canonical);
 
             ProjectedMacroSurfaces {
                 native_props,
                 props,
                 emits: Vec::new(),
                 slots: Vec::new(),
+                props_expr,
+                props_expr_scope,
                 ..Default::default()
             }
         }
@@ -96,14 +135,22 @@ pub fn project_macro_surfaces(
                 .map(|emit| {
                     let (description, tags) = member_jsdoc(source, emit.span);
                     let payload_type = raw_emit_payload_text(source, emit);
+                    let payload_expr = emit.type_expr.clone();
+                    let payload_expr_scope = emit.type_expr_scope.clone();
+                    debug_assert_eq!(
+                        payload_expr.is_some(),
+                        payload_expr_scope.is_some(),
+                        "AnalyzedEmitField payload_expr/payload_expr_scope pairing violated for emit `{}`",
+                        emit.name
+                    );
                     AnalyzedEmitField {
                         name: emit.name.clone(),
                         span: verter_span::Span::default(),
                         payload_type,
                         description,
                         tags,
-                        payload_expr: None,
-                        payload_expr_scope: None,
+                        payload_expr,
+                        payload_expr_scope,
                     }
                 })
                 .collect();
@@ -127,28 +174,41 @@ pub fn project_macro_surfaces(
                     }
                     let (description, tags) = member_jsdoc(source, prop.span);
                     let payload_type = raw_prop_type_text(source, prop);
+                    let payload_expr = prop.type_expr.clone();
+                    let payload_expr_scope = prop.type_expr_scope.clone();
+                    debug_assert_eq!(
+                        payload_expr.is_some(),
+                        payload_expr_scope.is_some(),
+                        "AnalyzedEmitField (property-style) payload_expr/payload_expr_scope pairing violated for emit `{}`",
+                        name
+                    );
                     emits.push(AnalyzedEmitField {
                         name,
                         span: verter_span::Span::default(),
                         payload_type,
                         description,
                         tags,
-                        payload_expr: None,
-                        payload_expr_scope: None,
+                        payload_expr,
+                        payload_expr_scope,
                     });
                 }
             }
+
+            let (emits_expr, emits_expr_scope) =
+                build_aggregate_emits_expr(&emits, owner_canonical);
 
             ProjectedMacroSurfaces {
                 native_props,
                 props: Vec::new(),
                 emits,
                 slots: Vec::new(),
+                emits_expr,
+                emits_expr_scope,
                 ..Default::default()
             }
         }
         AnalyzedMacroKind::DefineSlots => {
-            let slots = elements
+            let slots: Vec<AnalyzedSlotField> = elements
                 .props
                 .iter()
                 .filter(|prop| prop.visibility.is_public())
@@ -170,6 +230,24 @@ pub fn project_macro_surfaces(
                     if bindings.is_empty() && return_type.is_none() && !resolved_as_slot {
                         return None;
                     }
+                    // The slot prop's `type_expr` is the function type
+                    // `(props: T) => R`. Pull the return type for `return_expr`
+                    // and keep the same scope (the file whose OXC parse
+                    // produced the slot signature). Non-function shapes leave
+                    // `return_expr: None` (consumers fall back to display
+                    // `return_type`).
+                    let return_expr = prop
+                        .type_expr
+                        .as_ref()
+                        .and_then(slot_return_expr_from_function_type);
+                    let return_expr_scope =
+                        return_expr.as_ref().and(prop.type_expr_scope.clone());
+                    debug_assert_eq!(
+                        return_expr.is_some(),
+                        return_expr_scope.is_some(),
+                        "AnalyzedSlotField return_expr/return_expr_scope pairing violated for slot `{}`",
+                        name
+                    );
                     Some(AnalyzedSlotField {
                         name,
                         is_required: !prop.optional,
@@ -178,17 +256,22 @@ pub fn project_macro_surfaces(
                         return_type,
                         description,
                         tags,
-                        return_expr: None,
-                        return_expr_scope: None,
+                        return_expr,
+                        return_expr_scope,
                     })
                 })
                 .collect();
+
+            let (slots_expr, slots_expr_scope) =
+                build_aggregate_slots_expr(&slots, owner_canonical);
 
             ProjectedMacroSurfaces {
                 native_props,
                 props: Vec::new(),
                 emits: Vec::new(),
                 slots,
+                slots_expr,
+                slots_expr_scope,
                 ..Default::default()
             }
         }
@@ -200,6 +283,177 @@ pub fn project_macro_surfaces(
             ..Default::default()
         },
     }
+}
+
+/// Pull the return type out of a `TypeExpr::Function` so a slot's `return_expr`
+/// can be populated from the slot prop's typed function annotation. Returns
+/// `None` for non-function shapes (where the slot's return type cannot be
+/// recovered from the slot prop's type without consulting alias bodies, which
+/// is a downstream resolver concern, not the projector's).
+///
+/// Iterative parenthesis unwrap: `((...((T) => R)))` resolves to `Some(R)`
+/// without recursion. Bounded by `MAX_PAREN_UNWRAP` to satisfy the
+/// resolver-core no-unbounded-recursion guard.
+fn slot_return_expr_from_function_type(prop_type: &TypeExpr) -> Option<TypeExpr> {
+    const MAX_PAREN_UNWRAP: usize = 32;
+    let mut current = prop_type;
+    for _ in 0..MAX_PAREN_UNWRAP {
+        match current {
+            TypeExpr::Function(function) => {
+                return function.return_type.as_ref().map(|rt| (**rt).clone());
+            }
+            TypeExpr::Parenthesized(inner) => current = inner.as_ref(),
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// Synthesise the aggregate `props_expr` from the per-field typed forms.
+///
+/// Returns `(Some(Object), Some(scope))` only when every prop has a populated
+/// `type_expr` AND `owner_canonical` is provided. Pairing invariant:
+/// `props_expr.is_some() <=> props_expr_scope.is_some()`.
+fn build_aggregate_props_expr(
+    props: &[AnalyzedPropField],
+    owner_canonical: Option<&str>,
+) -> (Option<TypeExpr>, Option<TypeExprScope>) {
+    let scope = match owner_canonical {
+        Some(canonical) if !canonical.is_empty() => canonical,
+        _ => return (None, None),
+    };
+    if props.is_empty() {
+        return (None, None);
+    }
+    let mut properties: Vec<ObjectMember> = Vec::with_capacity(props.len());
+    for prop in props {
+        let ty = match &prop.type_expr {
+            Some(ty) => ty.clone(),
+            None => return (None, None),
+        };
+        properties.push(ObjectMember::Property(ObjectProperty {
+            name: prop.name.clone(),
+            ty,
+            optional: prop.is_optional,
+            readonly: false,
+        }));
+    }
+    let aggregate = TypeExpr::Object(std::sync::Arc::new(ObjectExpr { properties }));
+    let aggregate_scope = TypeExprScope::new(scope);
+    debug_assert!(
+        // Tautology after construction; pinning the invariant for readers.
+        Some(&aggregate).is_some() && Some(&aggregate_scope).is_some(),
+        "props_expr/props_expr_scope pairing violated"
+    );
+    (Some(aggregate), Some(aggregate_scope))
+}
+
+/// Synthesise the aggregate `emits_expr` from the per-field typed payloads.
+///
+/// Mirrors the shape `projected_macro_surfaces_to_type_expr` constructs from
+/// raw text for the `DefineEmits` branch: a `TypeExpr::Object` whose properties
+/// are `event_name: payload_expr`. Returns `(Some, Some)` only when every emit
+/// has a populated `payload_expr` AND `owner_canonical` is provided.
+fn build_aggregate_emits_expr(
+    emits: &[AnalyzedEmitField],
+    owner_canonical: Option<&str>,
+) -> (Option<TypeExpr>, Option<TypeExprScope>) {
+    let scope = match owner_canonical {
+        Some(canonical) if !canonical.is_empty() => canonical,
+        _ => return (None, None),
+    };
+    if emits.is_empty() {
+        return (None, None);
+    }
+    let mut properties: Vec<ObjectMember> = Vec::with_capacity(emits.len());
+    for emit in emits {
+        let ty = match &emit.payload_expr {
+            Some(ty) => ty.clone(),
+            None => return (None, None),
+        };
+        properties.push(ObjectMember::Property(ObjectProperty {
+            name: emit.name.clone(),
+            ty,
+            optional: false,
+            readonly: false,
+        }));
+    }
+    let aggregate = TypeExpr::Object(std::sync::Arc::new(ObjectExpr { properties }));
+    (Some(aggregate), Some(TypeExprScope::new(scope)))
+}
+
+/// Synthesise the aggregate `slots_expr` from the per-field typed return types
+/// and bindings.
+///
+/// Each slot becomes a property whose value is a function type
+/// `(props: <bindings as Object>) => return_expr`. The bindings object is
+/// constructed from the per-binding `binding_expr` values (typically populated
+/// by `extract_slot_bindings_from_pick_ast_text`). Returns `(Some, Some)` only
+/// when every slot has a populated `return_expr` AND every binding (if any)
+/// has a populated `binding_expr` AND `owner_canonical` is provided.
+fn build_aggregate_slots_expr(
+    slots: &[AnalyzedSlotField],
+    owner_canonical: Option<&str>,
+) -> (Option<TypeExpr>, Option<TypeExprScope>) {
+    let scope = match owner_canonical {
+        Some(canonical) if !canonical.is_empty() => canonical,
+        _ => return (None, None),
+    };
+    if slots.is_empty() {
+        return (None, None);
+    }
+    let mut properties: Vec<ObjectMember> = Vec::with_capacity(slots.len());
+    for slot in slots {
+        let return_ty = match &slot.return_expr {
+            Some(ty) => ty.clone(),
+            None => return (None, None),
+        };
+
+        let binding_props: Vec<ObjectMember> = if slot.bindings.is_empty() {
+            Vec::new()
+        } else {
+            let mut acc: Vec<ObjectMember> = Vec::with_capacity(slot.bindings.len());
+            for binding in &slot.bindings {
+                let ty = match &binding.binding_expr {
+                    Some(ty) => ty.clone(),
+                    None => return (None, None),
+                };
+                acc.push(ObjectMember::Property(ObjectProperty {
+                    name: binding.name.clone(),
+                    ty,
+                    optional: false,
+                    readonly: false,
+                }));
+            }
+            acc
+        };
+
+        let mut parameters: Vec<FunctionParam> = Vec::new();
+        if !binding_props.is_empty() {
+            parameters.push(FunctionParam {
+                name: Some("props".to_string()),
+                ty: TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
+                    properties: binding_props,
+                })),
+                optional: false,
+                rest: false,
+            });
+        }
+        let function = TypeExpr::Function(std::sync::Arc::new(FunctionExpr {
+            parameters,
+            return_type: Some(std::sync::Arc::new(return_ty)),
+            type_parameters: Vec::new(),
+        }));
+
+        properties.push(ObjectMember::Property(ObjectProperty {
+            name: slot.name.clone(),
+            ty: function,
+            optional: !slot.is_required,
+            readonly: false,
+        }));
+    }
+    let aggregate = TypeExpr::Object(std::sync::Arc::new(ObjectExpr { properties }));
+    (Some(aggregate), Some(TypeExprScope::new(scope)))
 }
 
 /// When a type is not locally defined in a source file (e.g., barrel re-export),
@@ -731,337 +985,4 @@ fn member_jsdoc(source: Option<&str>, span: verter_span::Span) -> (Option<String
         return (None, Vec::new());
     };
     extract_jsdoc_near_offset(source, span.start)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use verter_compiler::utils::oxc::vue::resolve_type::{ResolvedEmit, ResolvedProp};
-    use verter_semantic::analysis::TypeResolutionSource;
-
-    fn prop(
-        name: &str,
-        optional: bool,
-        visibility: ResolvedMemberVisibility,
-        type_text: Option<&str>,
-        span_start: u32,
-    ) -> ResolvedProp {
-        ResolvedProp {
-            span: verter_span::Span::new(span_start, span_start + 8),
-            key: verter_span::Span::new(span_start, span_start + 3),
-            key_name: Some(name.to_string()),
-            optional,
-            types: Vec::new(),
-            visibility,
-            type_span: None,
-            type_text: type_text.map(str::to_string),
-            map_local: false,
-            span_is_absolute: true,
-            type_expr: None,
-            type_expr_scope: None,
-        }
-    }
-
-    fn prop_with_type_span(
-        name: &str,
-        optional: bool,
-        visibility: ResolvedMemberVisibility,
-        type_text: Option<&str>,
-        span: verter_span::Span,
-        key: verter_span::Span,
-        type_span: verter_span::Span,
-    ) -> ResolvedProp {
-        ResolvedProp {
-            span,
-            key,
-            key_name: Some(name.to_string()),
-            optional,
-            types: Vec::new(),
-            visibility,
-            type_span: Some(type_span),
-            type_text: type_text.map(str::to_string),
-            map_local: false,
-            span_is_absolute: true,
-            type_expr: None,
-            type_expr_scope: None,
-        }
-    }
-
-    #[test]
-    fn project_define_props_filters_non_public_members() {
-        let elements = ResolvedElements {
-            props: vec![
-                prop(
-                    "label",
-                    false,
-                    ResolvedMemberVisibility::Public,
-                    Some("string"),
-                    0,
-                ),
-                prop(
-                    "secret",
-                    true,
-                    ResolvedMemberVisibility::Private,
-                    Some("number"),
-                    10,
-                ),
-            ],
-            ..ResolvedElements::default()
-        };
-
-        let projected = project_macro_surfaces(None, AnalyzedMacroKind::DefineProps, &elements);
-
-        assert_eq!(projected.native_props.len(), 2);
-        assert_eq!(projected.props.len(), 1);
-        assert_eq!(projected.props[0].name, "label");
-        assert_eq!(
-            projected.props[0].resolution_source,
-            TypeResolutionSource::Rust
-        );
-    }
-
-    #[test]
-    fn project_define_emits_formats_payloads() {
-        let elements = ResolvedElements {
-            emits: vec![
-                ResolvedEmit {
-                    span: verter_span::Span::new(0, 5),
-                    name: "save".to_string(),
-                    name_span: None,
-                    signature: ResolvedEmitSignature::Call {
-                        params_text: "value: string".to_string(),
-                    },
-                    map_local: false,
-                    span_is_absolute: true,
-                    type_expr: None,
-                    type_expr_scope: None,
-                },
-                ResolvedEmit {
-                    span: verter_span::Span::new(6, 12),
-                    name: "cancel".to_string(),
-                    name_span: None,
-                    signature: ResolvedEmitSignature::Tuple {
-                        tuple_text: "[reason: number]".to_string(),
-                    },
-                    map_local: false,
-                    span_is_absolute: true,
-                    type_expr: None,
-                    type_expr_scope: None,
-                },
-            ],
-            ..ResolvedElements::default()
-        };
-
-        let projected = project_macro_surfaces(None, AnalyzedMacroKind::DefineEmits, &elements);
-
-        assert_eq!(projected.emits.len(), 2);
-        assert_eq!(
-            projected.emits[0].payload_type.as_deref(),
-            Some("[value: string]")
-        );
-        assert_eq!(
-            projected.emits[1].payload_type.as_deref(),
-            Some("[reason: number]")
-        );
-    }
-
-    #[test]
-    fn project_define_props_prefers_raw_source_type_span_text() {
-        let source = "interface Props { type?: SingleOrMultipleType }";
-        let type_start = source.find("SingleOrMultipleType").unwrap() as u32;
-        let prop_start = source.find("type?").unwrap() as u32;
-        let elements = ResolvedElements {
-            props: vec![prop_with_type_span(
-                "type",
-                true,
-                ResolvedMemberVisibility::Public,
-                None,
-                verter_span::Span::new(prop_start, source.len() as u32 - 2),
-                verter_span::Span::new(prop_start, prop_start + 4),
-                verter_span::Span::new(
-                    type_start,
-                    type_start + "SingleOrMultipleType".len() as u32,
-                ),
-            )],
-            ..ResolvedElements::default()
-        };
-
-        let projected =
-            project_macro_surfaces(Some(source), AnalyzedMacroKind::DefineProps, &elements);
-
-        assert_eq!(
-            projected.props[0].type_annotation.as_deref(),
-            Some("SingleOrMultipleType")
-        );
-    }
-
-    #[test]
-    fn project_define_props_prefers_pre_resolved_cross_file_type_text_over_source_span() {
-        let source = r#"export interface ButtonProps {
-  /**
-   * @defaultValue 'md'
-   */
-  size?: Button['variants']['size']
-}"#;
-        let type_start = source.find("'md'").unwrap() as u32;
-        let prop_start = source.find("size?").unwrap() as u32;
-        let elements = ResolvedElements {
-            props: vec![prop_with_type_span(
-                "size",
-                true,
-                ResolvedMemberVisibility::Public,
-                Some("Button['variants']['size']"),
-                verter_span::Span::new(prop_start, source.len() as u32 - 2),
-                verter_span::Span::new(prop_start, prop_start + 4),
-                verter_span::Span::new(type_start, type_start + 4),
-            )],
-            ..ResolvedElements::default()
-        };
-
-        let projected =
-            project_macro_surfaces(Some(source), AnalyzedMacroKind::DefineProps, &elements);
-
-        assert_eq!(
-            projected.props[0].type_annotation.as_deref(),
-            Some("Button['variants']['size']")
-        );
-    }
-
-    #[test]
-    fn project_define_emits_prefers_raw_source_tuple_payload_text() {
-        let source =
-            "type Emits = { 'update:modelValue': [value: (T extends 'single' ? string : string[]) | undefined]; }";
-        let emit_start = source.find("'update:modelValue'").unwrap() as u32;
-        let emit_end = source[emit_start as usize..].find(';').unwrap() as u32 + emit_start;
-        let elements = ResolvedElements {
-            emits: vec![ResolvedEmit {
-                span: verter_span::Span::new(emit_start, emit_end),
-                name: "update:modelValue".to_string(),
-                name_span: None,
-                signature: ResolvedEmitSignature::Tuple {
-                    tuple_text: "[value: string | string[] | undefined]".to_string(),
-                },
-                map_local: false,
-                span_is_absolute: true,
-                type_expr: None,
-                type_expr_scope: None,
-            }],
-            ..ResolvedElements::default()
-        };
-
-        let projected =
-            project_macro_surfaces(Some(source), AnalyzedMacroKind::DefineEmits, &elements);
-
-        assert_eq!(
-            projected.emits[0].payload_type.as_deref(),
-            Some("[value: (T extends 'single' ? string : string[]) | undefined]")
-        );
-    }
-
-    #[test]
-    fn project_define_slots_extracts_bindings_and_return_type() {
-        let elements = ResolvedElements {
-            props: vec![prop(
-                "default",
-                false,
-                ResolvedMemberVisibility::Public,
-                Some("(props: { foo: string; bar?: number }) => VNode[]"),
-                0,
-            )],
-            ..ResolvedElements::default()
-        };
-
-        let projected = project_macro_surfaces(None, AnalyzedMacroKind::DefineSlots, &elements);
-
-        assert_eq!(projected.slots.len(), 1);
-        assert_eq!(projected.slots[0].name, "default");
-        assert_eq!(projected.slots[0].bindings.len(), 2);
-        assert_eq!(projected.slots[0].bindings[0].name, "foo");
-        assert_eq!(projected.slots[0].bindings[1].name, "bar");
-        assert_eq!(projected.slots[0].return_type.as_deref(), Some("VNode[]"));
-    }
-
-    #[test]
-    fn project_define_slots_preserves_symbolic_binding_types_for_pick_params() {
-        let source = r#"
-type CalendarCellTriggerProps = { day: string; month: number }
-export interface Slots {
-  day?: (props: Pick<CalendarCellTriggerProps, 'day'>) => any
-}
-"#;
-        let elements = ResolvedElements {
-            props: vec![prop(
-                "day",
-                true,
-                ResolvedMemberVisibility::Public,
-                Some("(props: Pick<CalendarCellTriggerProps, 'day'>) => any"),
-                0,
-            )],
-            ..ResolvedElements::default()
-        };
-
-        let projected =
-            project_macro_surfaces(Some(source), AnalyzedMacroKind::DefineSlots, &elements);
-
-        assert_eq!(projected.slots.len(), 1);
-        assert_eq!(projected.slots[0].bindings.len(), 1);
-        assert_eq!(projected.slots[0].bindings[0].name, "day");
-        assert_eq!(
-            projected.slots[0].bindings[0].type_annotation.as_deref(),
-            Some("CalendarCellTriggerProps['day']")
-        );
-    }
-
-    // the
-    // `project_expanded_text_define_emits_preserves_conditional_payload_text`
-    // and `project_local_source_define_slots_preserves_symbolic_pick_binding`
-    // unit tests were attached to the (now-deleted) text-based
-    // projector helpers. Their behaviour contracts are now covered
-    // by integration tests in `meta_resolve_tests` and
-    // `component_meta_audit`.
-
-    #[test]
-    fn project_define_slots_ignores_non_callable_helper_members() {
-        let elements = ResolvedElements {
-            props: vec![
-                prop(
-                    "default",
-                    false,
-                    ResolvedMemberVisibility::Public,
-                    Some("(props: { item: string }) => any"),
-                    0,
-                ),
-                prop(
-                    "appConfig",
-                    false,
-                    ResolvedMemberVisibility::Public,
-                    Some("{ ui?: { variant: string } }"),
-                    0,
-                ),
-                prop(
-                    "slots",
-                    false,
-                    ResolvedMemberVisibility::Public,
-                    Some("{ leading?: string; trailing?: string }"),
-                    0,
-                ),
-            ],
-            ..ResolvedElements::default()
-        };
-
-        let projected = project_macro_surfaces(None, AnalyzedMacroKind::DefineSlots, &elements);
-        let names: Vec<_> = projected
-            .slots
-            .iter()
-            .map(|slot| slot.name.as_str())
-            .collect();
-
-        assert_eq!(names, vec!["default"]);
-    }
-
-    // the `project_local_source_define_props_*` tests
-    // exercised the (now-deleted) source-typed projector. The
-    // behaviour contracts they covered (heritage resolution, JSDoc
-    // through `@vue-ignore`-annotated `Omit<>`) are covered by
-    // integration tests in `meta_resolve_tests` and `meta_tests`.
 }

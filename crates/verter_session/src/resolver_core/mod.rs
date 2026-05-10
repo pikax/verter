@@ -24,6 +24,8 @@ pub mod route_demand;
 mod runtime_values;
 pub mod shallow_file_state;
 pub(crate) mod surface_projector;
+#[cfg(test)]
+mod surface_projector_tests;
 pub mod symbol_resolver;
 pub mod type_expansion;
 pub mod type_expansion_host;
