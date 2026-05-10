@@ -77,6 +77,20 @@ export interface NativeExpandedField {
   exactness: "exactConcrete" | "exactSymbolic" | "incomplete";
   executionStatus: "completed" | "cancelled" | "interrupted" | "hardStop";
   diagnostics: NativeExpansionDiagnostic[];
+  /**
+   * Shallow lowered typed form carried alongside `type` (post-expansion).
+   * Surfaces the bare annotation expression the user wrote
+   * (e.g. `Ref { name: "ImportedAlias" }`) so consumers that need the
+   * syntactic shape do not have to reparse the display `rawType`. `None`
+   * when the analyzer's shallow source was absent.
+   */
+  shallowTypeExpr?: NativeTypeExpr;
+  /**
+   * Scope of `shallowTypeExpr`: canonical_id of the file whose OXC parse
+   * produced the shallow expression. Pairing invariant:
+   * `shallowTypeExpr` is set iff `shallowTypeExprScope` is set.
+   */
+  shallowTypeExprScope?: string;
 }
 
 /** Mirrors `ExpandedMacroProps` from Rust. */

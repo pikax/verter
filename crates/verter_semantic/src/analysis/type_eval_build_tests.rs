@@ -1356,3 +1356,102 @@ fn expand_macro_types_threads_field_kind_and_path_through_closure() {
 
     assert_eq!(captured, vec![(FieldKind::Prop, vec!["alpha".to_string()])]);
 }
+
+// ── W1.1c: `ExpandedField.shallow_type_expr` carries the analyzer-side
+//          shallow typed sidecar through the expander ──
+//
+// The producer at `expand_macro_types_impl_with_expander` reads
+// `field.type_expr` / `field.payload_expr` / `binding.binding_expr`
+// (shallow, analyzer-populated) and stamps each onto
+// `ExpandedField.shallow_type_expr` (+ paired scope). Pre-W1.1c the
+// field did not exist; consumers fell back to reparsing `raw_type`.
+// Post-W1.1c the bare alias `Ref` is preserved alongside the
+// (potentially distinct) post-expansion `r#type`.
+
+#[test]
+fn expand_macro_types_props_publish_shallow_type_expr_from_prop_field_typed_form() {
+    // The analyzer captured a bare `Ref` for `foo: ImportedAlias`. The
+    // passthrough expander leaves `r#type` equal to the input, but the
+    // discriminating assertion is that `shallow_type_expr` is
+    // independently populated from the producer's analyzer-side
+    // `field.type_expr` and survives all the way to the `ExpandedField`.
+    let bare_ref = TypeExpr::Ref {
+        name: "ImportedAlias".into(),
+        type_arguments: Vec::<TypeExpr>::new().into(),
+    };
+    let macros = vec![make_synth_macro(
+        AnalyzedMacroKind::DefineProps,
+        vec![make_synth_typed_prop("foo", bare_ref.clone())],
+        Vec::new(),
+        Vec::new(),
+    )];
+
+    let result = expand_macro_types_impl_with_expander(
+        &macros,
+        None,
+        &[],
+        None,
+        MacroExpansionScope::Full,
+        passthrough_expander(),
+    );
+
+    assert_eq!(result.props.len(), 1);
+    // Discriminator: pre-W1.1c the field did not exist; post-W1.1c it
+    // carries the bare alias `Ref` from `field.type_expr`.
+    assert_eq!(
+        result.props[0].shallow_type_expr.as_ref(),
+        Some(&bare_ref),
+        "shallow_type_expr must surface the analyzer-side bare alias Ref directly"
+    );
+    // Pairing invariant: scope present iff expr present.
+    assert!(
+        result.props[0].shallow_type_expr_scope.is_some(),
+        "shallow_type_expr_scope must be populated when shallow_type_expr is Some"
+    );
+    assert_eq!(
+        result.props[0]
+            .shallow_type_expr_scope
+            .as_ref()
+            .map(|s| s.as_str()),
+        Some("test:fixture"),
+        "shallow_type_expr_scope must inherit the analyzer field's scope"
+    );
+}
+
+#[test]
+fn expand_macro_types_emits_publish_shallow_type_expr_from_emit_field_typed_form() {
+    let bare_ref = TypeExpr::Ref {
+        name: "ImportedPayload".into(),
+        type_arguments: Vec::<TypeExpr>::new().into(),
+    };
+    let macros = vec![make_synth_macro(
+        AnalyzedMacroKind::DefineEmits,
+        Vec::new(),
+        vec![make_synth_typed_emit("update", bare_ref.clone())],
+        Vec::new(),
+    )];
+
+    let result = expand_macro_types_impl_with_expander(
+        &macros,
+        None,
+        &[],
+        None,
+        MacroExpansionScope::Full,
+        passthrough_expander(),
+    );
+
+    assert_eq!(result.emits.len(), 1);
+    assert_eq!(
+        result.emits[0].shallow_type_expr.as_ref(),
+        Some(&bare_ref),
+        "shallow_type_expr must surface the analyzer-side bare alias Ref for emits"
+    );
+    assert!(result.emits[0].shallow_type_expr_scope.is_some());
+    assert_eq!(
+        result.emits[0]
+            .shallow_type_expr_scope
+            .as_ref()
+            .map(|s| s.as_str()),
+        Some("test:fixture")
+    );
+}

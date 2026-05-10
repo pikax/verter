@@ -518,6 +518,8 @@ pub(crate) fn surface_member_to_expanded_field(
         exactness,
         execution_status: ExpansionExecutionStatus::Completed,
         diagnostics: Vec::new(),
+        shallow_type_expr: None,
+        shallow_type_expr_scope: None,
     }
 }
 

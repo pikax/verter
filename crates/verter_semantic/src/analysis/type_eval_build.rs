@@ -22,7 +22,7 @@ use oxc_ast::ast::{
 };
 use verter_type_expr::{
     FunctionExpr, FunctionParam, IndexSignature, MethodSignature, ObjectExpr, ObjectMember,
-    PrimitiveName, TypeExpr, TypeParam, ValueRef,
+    PrimitiveName, TypeExpr, TypeExprScope, TypeParam, ValueRef,
 };
 use verter_type_expr_oxc::{lower_ts_type, property_key_name};
 
@@ -1452,6 +1452,14 @@ where
                         &expanded.diagnostics,
                         debug_env.as_deref(),
                     );
+                    let shallow_type_expr = field.type_expr.clone();
+                    let shallow_type_expr_scope = field.type_expr_scope.clone();
+                    debug_assert_eq!(
+                        shallow_type_expr.is_some(),
+                        shallow_type_expr_scope.is_some(),
+                        "ExpandedField (prop) shallow_type_expr/shallow_type_expr_scope pairing violated for field `{}`",
+                        field.name
+                    );
                     result.props.push(ExpandedField {
                         name: field.name.clone(),
                         r#type: expanded.value.expr,
@@ -1460,6 +1468,8 @@ where
                         exactness: expanded.exactness,
                         execution_status: expanded.execution_status,
                         diagnostics: expanded.diagnostics,
+                        shallow_type_expr,
+                        shallow_type_expr_scope,
                     });
                 }
             }
@@ -1498,6 +1508,14 @@ where
                         &expanded.diagnostics,
                         debug_env.as_deref(),
                     );
+                    let shallow_type_expr = field.payload_expr.clone();
+                    let shallow_type_expr_scope = field.payload_expr_scope.clone();
+                    debug_assert_eq!(
+                        shallow_type_expr.is_some(),
+                        shallow_type_expr_scope.is_some(),
+                        "ExpandedField (emit) shallow_type_expr/shallow_type_expr_scope pairing violated for emit `{}`",
+                        field.name
+                    );
                     result.emits.push(ExpandedField {
                         name: field.name.clone(),
                         r#type: expanded.value.expr,
@@ -1506,6 +1524,8 @@ where
                         exactness: expanded.exactness,
                         execution_status: expanded.execution_status,
                         diagnostics: expanded.diagnostics,
+                        shallow_type_expr,
+                        shallow_type_expr_scope,
                     });
                 }
             }
@@ -1549,6 +1569,14 @@ where
                                 &expanded.diagnostics,
                                 debug_env.as_deref(),
                             );
+                            let shallow_type_expr = binding.binding_expr.clone();
+                            let shallow_type_expr_scope = binding.binding_expr_scope.clone();
+                            debug_assert_eq!(
+                                shallow_type_expr.is_some(),
+                                shallow_type_expr_scope.is_some(),
+                                "ExpandedField (slot binding) shallow_type_expr/shallow_type_expr_scope pairing violated for binding `{}`",
+                                slot_binding_target
+                            );
                             result.slot_bindings.push(ExpandedField {
                                 name: slot_binding_target,
                                 r#type: expanded.value.expr,
@@ -1557,6 +1585,8 @@ where
                                 exactness: expanded.exactness,
                                 execution_status: expanded.execution_status,
                                 diagnostics: expanded.diagnostics,
+                                shallow_type_expr,
+                                shallow_type_expr_scope,
                             });
                         }
                     }
@@ -1599,6 +1629,15 @@ where
                 &expanded.diagnostics,
                 debug_env.as_deref(),
             );
+            // `defineExpose` binding entries are top-level value bindings
+            // with no analyzer-side shallow typed sidecar. The pairing
+            // invariant holds trivially with both fields `None`.
+            debug_assert_eq!(
+                Option::<TypeExpr>::None.is_some(),
+                Option::<TypeExprScope>::None.is_some(),
+                "ExpandedField (expose binding) shallow_type_expr/shallow_type_expr_scope pairing violated for binding `{}`",
+                name
+            );
             result.bindings.push(ExpandedField {
                 name: name.clone(),
                 r#type: expanded.value.expr,
@@ -1607,6 +1646,8 @@ where
                 exactness: expanded.exactness,
                 execution_status: expanded.execution_status,
                 diagnostics: expanded.diagnostics,
+                shallow_type_expr: None,
+                shallow_type_expr_scope: None,
             });
         }
     }

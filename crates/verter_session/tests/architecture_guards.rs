@@ -8475,7 +8475,7 @@ mod typed_ir_resolver_guards {
         ),
         (
             "crates/verter_session/src/meta_resolve/projectors/mod.rs",
-            662,
+            664,
             "parse_type_annotation",
         ),
         (
@@ -8485,7 +8485,7 @@ mod typed_ir_resolver_guards {
         ),
         (
             "crates/verter_session/src/meta_resolve/slot_binding_graph.rs",
-            958,
+            960,
             "parse_type_annotation",
         ),
         (

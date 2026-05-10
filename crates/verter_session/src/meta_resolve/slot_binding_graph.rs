@@ -934,6 +934,8 @@ pub(crate) fn publish_merged_bindings(
             exactness,
             execution_status: ExpansionExecutionStatus::Completed,
             diagnostics: Vec::new(),
+            shallow_type_expr: None,
+            shallow_type_expr_scope: None,
         });
     }
 
@@ -959,6 +961,14 @@ pub(crate) fn publish_merged_bindings(
             .unwrap_or_else(|| TypeExpr::Unknown {
                 raw: "unknown".to_string(),
             });
+        let shallow_type_expr = pb.binding_expr.clone();
+        let shallow_type_expr_scope = pb.binding_expr_scope.clone();
+        debug_assert_eq!(
+            shallow_type_expr.is_some(),
+            shallow_type_expr_scope.is_some(),
+            "ExpandedField (parser-only slot binding) shallow_type_expr/shallow_type_expr_scope pairing violated for binding `{}`",
+            field_name
+        );
         expanded.slot_bindings.push(ExpandedField {
             name: field_name,
             r#type: parsed_type,
@@ -967,6 +977,8 @@ pub(crate) fn publish_merged_bindings(
             exactness: ExpansionExactness::ExactConcrete,
             execution_status: ExpansionExecutionStatus::Completed,
             diagnostics: Vec::new(),
+            shallow_type_expr,
+            shallow_type_expr_scope,
         });
     }
 }

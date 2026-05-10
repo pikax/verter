@@ -120,5 +120,7 @@ pub(crate) fn project_model(
         exactness,
         execution_status: ExpansionExecutionStatus::Completed,
         diagnostics: Vec::new(),
+        shallow_type_expr: None,
+        shallow_type_expr_scope: None,
     })
 }

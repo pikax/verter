@@ -5,7 +5,7 @@
 //! compatibility contract.
 
 use crate::analysis::type_solver::result::{ExecutionStatus, SolverExactness};
-use verter_type_expr::{TypeExpr, TypeParam};
+use verter_type_expr::{TypeExpr, TypeExprScope, TypeParam};
 
 pub type ExpansionExactness = SolverExactness;
 pub type ExpansionExecutionStatus = ExecutionStatus;
@@ -230,6 +230,23 @@ pub struct ExpandedField {
     pub execution_status: ExpansionExecutionStatus,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<ExpansionDiagnostic>,
+    /// Shallow lowered typed form preserved alongside the post-expansion
+    /// `r#type`. Carries the bare annotation expression the user wrote
+    /// (e.g. `TypeExpr::Ref { name: "ImportedAlias" }`) so consumers that
+    /// need to recover the syntactic shape of the prop / emit / slot-binding
+    /// annotation do not have to reparse `raw_type`. Populated by the
+    /// producer at `expand_macro_types_impl_with_expander` from the
+    /// analyzer-side `AnalyzedPropField.type_expr` /
+    /// `AnalyzedEmitField.payload_expr` / `AnalyzedSlotFieldBinding.binding_expr`
+    /// shallow source. `None` when the analyzer's shallow source was
+    /// `None` (e.g. Options-API binding entries).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shallow_type_expr: Option<TypeExpr>,
+    /// Scope of `shallow_type_expr`: canonical_id of the file whose OXC
+    /// parse produced the shallow expression. Pairing invariant:
+    /// `shallow_type_expr.is_some() <=> shallow_type_expr_scope.is_some()`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shallow_type_expr_scope: Option<TypeExprScope>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

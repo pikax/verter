@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 use crate::analysis::types::AnalyzedExposeField;
 use std::sync::Arc;
 use verter_type_expr::PrimitiveName;
@@ -142,6 +142,8 @@ fn props_use_evaluated_type_when_available() {
             exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
             execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
             diagnostics: Vec::new(),
+            shallow_type_expr: None,
+            shallow_type_expr_scope: None,
         }],
         define_props: Vec::new(),
         define_emits: Vec::new(),
@@ -191,6 +193,8 @@ fn props_preserve_expansion_metadata_when_available() {
                 context: "unresolved type reference 'Missing'".to_string(),
                 property_name: None,
             }],
+            shallow_type_expr: None,
+            shallow_type_expr_scope: None,
         }],
         define_props: Vec::new(),
         define_emits: Vec::new(),
@@ -236,6 +240,8 @@ fn evaluated_types_are_used_when_supplied() {
             exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
             execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
             diagnostics: Vec::new(),
+            shallow_type_expr: None,
+            shallow_type_expr_scope: None,
         }],
         define_props: Vec::new(),
         define_emits: Vec::new(),
@@ -1054,6 +1060,8 @@ fn small_partial_helper_slot_binding_expansions_fall_back_to_symbolic_indexed_ac
                     property_name: Some("default.ui".to_string()),
                 },
             ],
+            shallow_type_expr: None,
+            shallow_type_expr_scope: None,
         }],
         bindings: Vec::new(),
     };
@@ -1169,6 +1177,8 @@ fn define_slots_prefer_concrete_evaluated_slot_bindings_over_symbolic_direct_bin
             exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
             execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
             diagnostics: Vec::new(),
+            shallow_type_expr: None,
+            shallow_type_expr_scope: None,
         }],
         bindings: Vec::new(),
     };
@@ -1426,6 +1436,8 @@ fn source_prop_raw_type_beats_expanded_backend_display_when_it_preserves_macro_c
             exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
             execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
             diagnostics: Vec::new(),
+            shallow_type_expr: None,
+            shallow_type_expr_scope: None,
         }],
         define_props: vec![crate::analysis::type_expand::ExpandedMacroProps {
             macro_index: 0,
@@ -1488,6 +1500,8 @@ fn optional_prop_raw_type_prefers_source_annotation_without_adding_undefined() {
             exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
             execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
             diagnostics: Vec::new(),
+            shallow_type_expr: None,
+            shallow_type_expr_scope: None,
         }],
         define_props: vec![crate::analysis::type_expand::ExpandedMacroProps {
             macro_index: 0,
@@ -1547,6 +1561,8 @@ fn placeholder_evaluated_prop_raw_type_falls_back_to_meaningful_source_annotatio
                 exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
                 execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
                 diagnostics: Vec::new(),
+                shallow_type_expr: None,
+                shallow_type_expr_scope: None,
             },
             crate::analysis::type_expand::ExpandedField {
                 name: "trailingIcon".to_string(),
@@ -1556,6 +1572,8 @@ fn placeholder_evaluated_prop_raw_type_falls_back_to_meaningful_source_annotatio
                 exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
                 execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
                 diagnostics: Vec::new(),
+                shallow_type_expr: None,
+                shallow_type_expr_scope: None,
             },
         ],
         define_props: vec![crate::analysis::type_expand::ExpandedMacroProps {
@@ -1631,6 +1649,8 @@ fn small_partial_placeholder_prop_expansions_fall_back_to_symbolic_source_type()
                 exactness: crate::analysis::type_expand::ExpansionExactness::Incomplete,
                 execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
                 diagnostics: diagnostics.clone(),
+                shallow_type_expr: None,
+                shallow_type_expr_scope: None,
             },
             crate::analysis::type_expand::ExpandedField {
                 name: "href".to_string(),
@@ -1645,6 +1665,8 @@ fn small_partial_placeholder_prop_expansions_fall_back_to_symbolic_source_type()
                     context: "conditional type could not be resolved".to_string(),
                     property_name: Some("href".to_string()),
                 }],
+                shallow_type_expr: None,
+                shallow_type_expr_scope: None,
             },
         ],
         define_props: vec![crate::analysis::type_expand::ExpandedMacroProps {
@@ -1736,6 +1758,8 @@ fn suspicious_partial_identifier_props_fall_back_to_source_any() {
             exactness: crate::analysis::type_expand::ExpansionExactness::Incomplete,
             execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
             diagnostics: Vec::new(),
+            shallow_type_expr: None,
+            shallow_type_expr_scope: None,
         }],
         define_props: vec![crate::analysis::type_expand::ExpandedMacroProps {
             macro_index: 0,
@@ -1816,6 +1840,8 @@ fn small_partial_undefined_object_props_fall_back_to_symbolic_source_type() {
                 context: "indexed access was preserved symbolically".to_string(),
                 property_name: Some("ui".to_string()),
             }],
+            shallow_type_expr: None,
+            shallow_type_expr_scope: None,
         }],
         define_props: vec![crate::analysis::type_expand::ExpandedMacroProps {
             macro_index: 0,
@@ -1928,6 +1954,8 @@ fn huge_partial_prop_expansions_fall_back_to_symbolic_source_type() {
                     property_name: Some("mention".to_string()),
                 },
             ],
+            shallow_type_expr: None,
+            shallow_type_expr_scope: None,
         }],
         define_props: vec![crate::analysis::type_expand::ExpandedMacroProps {
             macro_index: 0,
@@ -2048,6 +2076,8 @@ fn source_event_raw_signature_beats_backend_when_backend_widens_macro_payload() 
             exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
             execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
             diagnostics: Vec::new(),
+            shallow_type_expr: None,
+            shallow_type_expr_scope: None,
         }],
         define_slots: Vec::new(),
         slot_bindings: Vec::new(),
@@ -2110,6 +2140,8 @@ fn source_backed_update_events_keep_their_raw_emit_payloads() {
             exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
             execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
             diagnostics: Vec::new(),
+            shallow_type_expr: None,
+            shallow_type_expr_scope: None,
         }],
         define_props: vec![crate::analysis::type_expand::ExpandedMacroProps {
             macro_index: 0,
@@ -2157,6 +2189,8 @@ fn source_backed_update_events_keep_their_raw_emit_payloads() {
             exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
             execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
             diagnostics: Vec::new(),
+            shallow_type_expr: None,
+            shallow_type_expr_scope: None,
         }],
         define_slots: Vec::new(),
         slot_bindings: Vec::new(),
@@ -2217,6 +2251,8 @@ fn evaluated_tuple_event_raw_type_is_not_double_wrapped() {
             exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
             execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
             diagnostics: Vec::new(),
+            shallow_type_expr: None,
+            shallow_type_expr_scope: None,
         }],
         define_slots: Vec::new(),
         slot_bindings: Vec::new(),
@@ -2564,6 +2600,8 @@ fn define_model_reconciles_existing_model_value_prop_from_define_props() {
                 exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
                 execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
                 diagnostics: Vec::new(),
+                shallow_type_expr: None,
+                shallow_type_expr_scope: None,
             },
             crate::analysis::type_expand::ExpandedField {
                 name: "label".to_string(),
@@ -2573,6 +2611,8 @@ fn define_model_reconciles_existing_model_value_prop_from_define_props() {
                 exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
                 execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
                 diagnostics: Vec::new(),
+                shallow_type_expr: None,
+                shallow_type_expr_scope: None,
             },
         ],
         define_props: vec![crate::analysis::type_expand::ExpandedMacroProps {
@@ -2615,6 +2655,8 @@ fn define_model_reconciles_existing_model_value_prop_from_define_props() {
             exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
             execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
             diagnostics: Vec::new(),
+            shallow_type_expr: None,
+            shallow_type_expr_scope: None,
         }],
         define_slots: Vec::new(),
         slot_bindings: Vec::new(),
@@ -4130,6 +4172,8 @@ fn macro_wide_diagnostics_split_from_per_field_diagnostics() {
                 exactness: crate::analysis::type_expand::ExpansionExactness::Incomplete,
                 execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
                 diagnostics: Vec::new(),
+                shallow_type_expr: None,
+                shallow_type_expr_scope: None,
             },
             crate::analysis::type_expand::ExpandedField {
                 name: "bar".to_string(),
@@ -4139,6 +4183,8 @@ fn macro_wide_diagnostics_split_from_per_field_diagnostics() {
                 exactness: crate::analysis::type_expand::ExpansionExactness::Incomplete,
                 execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
                 diagnostics: Vec::new(),
+                shallow_type_expr: None,
+                shallow_type_expr_scope: None,
             },
         ],
         define_props: vec![crate::analysis::type_expand::ExpandedMacroProps {

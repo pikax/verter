@@ -219,7 +219,7 @@ pub fn project_macro_surfaces_with_owner(
                         .unwrap_or_else(|| "unknown".to_string());
                     let (description, tags) = member_jsdoc(source, prop.span);
                     let raw_type_text = raw_prop_type_text(source, prop);
-                    let (bindings, return_type) =
+                    let (mut bindings, return_type) =
                         extract_slot_info_from_type_text(source, raw_type_text.as_deref());
                     let resolved_as_slot = prop.types.iter().any(|runtime| {
                         matches!(
@@ -247,6 +247,21 @@ pub fn project_macro_surfaces_with_owner(
                         return_expr_scope.is_some(),
                         "AnalyzedSlotField return_expr/return_expr_scope pairing violated for slot `{}`",
                         name
+                    );
+                    // Populate each binding's `binding_expr` from the slot
+                    // prop's typed function form. The Pick AST walker already
+                    // populates `binding_expr` for the Pick-shaped path; the
+                    // synthetic-declaration fallback in
+                    // `extract_slot_info_from_type_text` leaves
+                    // `binding_expr: None`. Walk the first function param's
+                    // typed `Object { properties }` and look up each binding
+                    // by name to fill the gap. The scope is the slot prop's
+                    // own `type_expr_scope` — the function signature, its
+                    // first param, and the bindings live in the same file.
+                    populate_binding_exprs_from_function_param(
+                        prop.type_expr.as_ref(),
+                        prop.type_expr_scope.as_ref(),
+                        &mut bindings,
                     );
                     Some(AnalyzedSlotField {
                         name,
@@ -307,6 +322,118 @@ fn slot_return_expr_from_function_type(prop_type: &TypeExpr) -> Option<TypeExpr>
         }
     }
     None
+}
+
+/// Unwrap the first parameter's typed value out of a `TypeExpr::Function`.
+///
+/// Mirrors `slot_return_expr_from_function_type`: iterative parenthesis
+/// unwrap, bounded by `MAX_PAREN_UNWRAP`. Returns `None` for non-function
+/// shapes, and for functions without a first parameter.
+fn slot_first_param_ty_from_function_type(prop_type: &TypeExpr) -> Option<TypeExpr> {
+    const MAX_PAREN_UNWRAP: usize = 32;
+    let mut current = prop_type;
+    for _ in 0..MAX_PAREN_UNWRAP {
+        match current {
+            TypeExpr::Function(function) => {
+                return function.parameters.first().map(|p| p.ty.clone());
+            }
+            TypeExpr::Parenthesized(inner) => current = inner.as_ref(),
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// Walk the slot prop's typed function form and populate each binding's
+/// `binding_expr` (and paired scope) from the first param's typed value.
+///
+/// The slot prop is typically typed as
+/// `TypeExpr::Function { params: [{ ty: TypeExpr::Object { properties: [bindings] }, ... }], return_type, ... }`.
+/// For each binding name, find the matching `ObjectProperty.name == binding.name`
+/// in the function's first param's object body. The property's `ty` is the
+/// binding's typed value.
+///
+/// Bindings that already carry `binding_expr: Some(...)` (e.g. the Pick AST
+/// walker's output, which encodes
+/// `IndexedAccess { object, index: Literal(String(k)) }`) are left untouched —
+/// those entries already satisfy the producer-chain typed contract.
+///
+/// The scope of every populated `binding_expr` is the slot prop's own
+/// `type_expr_scope` (the function signature, its first param, and the
+/// bindings all live in the file where the slot prop's typed form was
+/// produced). Pairing invariant:
+/// `binding_expr.is_some() <=> binding_expr_scope.is_some()` — debug-asserted
+/// per binding.
+fn populate_binding_exprs_from_function_param(
+    prop_type_expr: Option<&TypeExpr>,
+    prop_type_expr_scope: Option<&TypeExprScope>,
+    bindings: &mut [AnalyzedSlotFieldBinding],
+) {
+    let Some(prop_type) = prop_type_expr else {
+        return;
+    };
+    let Some(first_param_ty) = slot_first_param_ty_from_function_type(prop_type) else {
+        return;
+    };
+    // Iterative parenthesis unwrap on the first param's value before pattern
+    // match — `(props: ({ x: number }))` should still resolve to an Object.
+    // Bounded by `MAX_PAREN_UNWRAP` to satisfy the resolver-core
+    // no-unbounded-recursion guard.
+    const MAX_PAREN_UNWRAP: usize = 32;
+    let mut current = &first_param_ty;
+    let mut object_expr: Option<std::sync::Arc<ObjectExpr>> = None;
+    for _ in 0..MAX_PAREN_UNWRAP {
+        match current {
+            TypeExpr::Object(obj) => {
+                object_expr = Some(obj.clone());
+                break;
+            }
+            TypeExpr::Parenthesized(inner) => current = inner.as_ref(),
+            _ => break,
+        }
+    }
+    let Some(object_expr) = object_expr else {
+        return;
+    };
+    for binding in bindings.iter_mut() {
+        if binding.binding_expr.is_some() {
+            debug_assert!(
+                binding.binding_expr_scope.is_some(),
+                "AnalyzedSlotFieldBinding binding_expr/binding_expr_scope pairing violated for binding `{}`",
+                binding.name
+            );
+            continue;
+        }
+        let found = object_expr
+            .properties
+            .iter()
+            .find_map(|member| match member {
+                ObjectMember::Property(ObjectProperty { name, ty, .. })
+                    if name == &binding.name =>
+                {
+                    Some(ty.clone())
+                }
+                _ => None,
+            });
+        if let Some(ty) = found {
+            let scope = prop_type_expr_scope.cloned();
+            // Producer-chain pairing invariant: a populated typed form must
+            // travel with its scope. The scope is the slot prop's own
+            // `type_expr_scope`; if that's missing we cannot publish a valid
+            // pair, so we skip rather than emit an unscoped expr.
+            if scope.is_none() {
+                continue;
+            }
+            binding.binding_expr = Some(ty);
+            binding.binding_expr_scope = scope;
+            debug_assert_eq!(
+                binding.binding_expr.is_some(),
+                binding.binding_expr_scope.is_some(),
+                "AnalyzedSlotFieldBinding binding_expr/binding_expr_scope pairing violated post-populate for binding `{}`",
+                binding.name
+            );
+        }
+    }
 }
 
 /// Synthesise the aggregate `props_expr` from the per-field typed forms.

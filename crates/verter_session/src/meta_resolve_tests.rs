@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 use crate::meta::MetaProject;
 use crate::resolver_core::ComponentMetaRequestHost;
 use crate::types::{HostConfig, ProjectionMode};
@@ -4648,6 +4648,8 @@ fn define_props_macro_shape_reuses_expanded_fields_directly() {
                         property_name: Some("title".to_string()),
                     },
                 ],
+                shallow_type_expr: None,
+                shallow_type_expr_scope: None,
             },
             verter_semantic::analysis::type_expand::ExpandedField {
                 name: "icon".to_string(),
@@ -4666,6 +4668,8 @@ fn define_props_macro_shape_reuses_expanded_fields_directly() {
                         property_name: Some("icon".to_string()),
                     },
                 ],
+                shallow_type_expr: None,
+                shallow_type_expr_scope: None,
             },
         ],
         ..Default::default()
@@ -4819,6 +4823,8 @@ fn define_props_macro_shape_prefers_resolved_macro_when_expanded_fields_are_inco
             execution_status:
                 verter_semantic::analysis::type_expand::ExpansionExecutionStatus::Completed,
             diagnostics: Vec::new(),
+            shallow_type_expr: None,
+            shallow_type_expr_scope: None,
         }],
         ..Default::default()
     };
@@ -5301,6 +5307,8 @@ defineProps<Props>()
                 execution_status:
                     verter_semantic::analysis::type_expand::ExpansionExecutionStatus::Completed,
                 diagnostics: Vec::new(),
+                shallow_type_expr: None,
+                shallow_type_expr_scope: None,
             },
             verter_semantic::analysis::type_expand::ExpandedField {
                 name: "count".to_string(),
@@ -5314,6 +5322,8 @@ defineProps<Props>()
                 execution_status:
                     verter_semantic::analysis::type_expand::ExpansionExecutionStatus::Completed,
                 diagnostics: Vec::new(),
+                shallow_type_expr: None,
+                shallow_type_expr_scope: None,
             },
         ],
         ..Default::default()
@@ -5497,6 +5507,8 @@ defineModel<boolean>('open')
                 execution_status:
                     verter_semantic::analysis::type_expand::ExpansionExecutionStatus::Completed,
                 diagnostics: Vec::new(),
+                shallow_type_expr: None,
+                shallow_type_expr_scope: None,
             },
             verter_semantic::analysis::type_expand::ExpandedField {
                 name: "count".to_string(),
@@ -5510,6 +5522,8 @@ defineModel<boolean>('open')
                 execution_status:
                     verter_semantic::analysis::type_expand::ExpansionExecutionStatus::Completed,
                 diagnostics: Vec::new(),
+                shallow_type_expr: None,
+                shallow_type_expr_scope: None,
             },
             verter_semantic::analysis::type_expand::ExpandedField {
                 name: "open".to_string(),
@@ -5523,6 +5537,8 @@ defineModel<boolean>('open')
                 execution_status:
                     verter_semantic::analysis::type_expand::ExpansionExecutionStatus::Completed,
                 diagnostics: Vec::new(),
+                shallow_type_expr: None,
+                shallow_type_expr_scope: None,
             },
         ],
         ..Default::default()
@@ -6357,6 +6373,8 @@ defineEmits<Emits>()
                 execution_status:
                     verter_semantic::analysis::type_expand::ExpansionExecutionStatus::Completed,
                 diagnostics: Vec::new(),
+                shallow_type_expr: None,
+                shallow_type_expr_scope: None,
             },
             verter_semantic::analysis::type_expand::ExpandedField {
                 name: "update:open".to_string(),
@@ -6368,6 +6386,8 @@ defineEmits<Emits>()
                 execution_status:
                     verter_semantic::analysis::type_expand::ExpansionExecutionStatus::Completed,
                 diagnostics: Vec::new(),
+                shallow_type_expr: None,
+                shallow_type_expr_scope: None,
             },
         ],
         ..Default::default()
@@ -6576,6 +6596,8 @@ defineModel<string>('searchTerm')
                 execution_status:
                     verter_semantic::analysis::type_expand::ExpansionExecutionStatus::Completed,
                 diagnostics: Vec::new(),
+                shallow_type_expr: None,
+                shallow_type_expr_scope: None,
             },
             verter_semantic::analysis::type_expand::ExpandedField {
                 name: "update:open".to_string(),
@@ -6587,6 +6609,8 @@ defineModel<string>('searchTerm')
                 execution_status:
                     verter_semantic::analysis::type_expand::ExpansionExecutionStatus::Completed,
                 diagnostics: Vec::new(),
+                shallow_type_expr: None,
+                shallow_type_expr_scope: None,
             },
         ],
         ..Default::default()
@@ -6745,6 +6769,8 @@ defineEmits<Emits>()
                 execution_status:
                     verter_semantic::analysis::type_expand::ExpansionExecutionStatus::Completed,
                 diagnostics: Vec::new(),
+                shallow_type_expr: None,
+                shallow_type_expr_scope: None,
             },
             verter_semantic::analysis::type_expand::ExpandedField {
                 name: "update:open".to_string(),
@@ -6756,6 +6782,8 @@ defineEmits<Emits>()
                 execution_status:
                     verter_semantic::analysis::type_expand::ExpansionExecutionStatus::Completed,
                 diagnostics: Vec::new(),
+                shallow_type_expr: None,
+                shallow_type_expr_scope: None,
             },
         ],
         ..Default::default()
