@@ -148,6 +148,25 @@ Core rules: Fix metadata in the native layer first. Rust owns resolution, declar
 
 See `/component-meta` skill for the full policy, resolver rules, and cache contracts.
 
+### Typed-IR-Only Resolver Rule (CRITICAL)
+
+The native component-meta / typeinfo type resolver — analyzer → projector → registry → policy → materialiser — drives semantic decisions exclusively from the typed IR (`verter_semantic::analysis::type_expr::TypeExpr` on the Rust side, `TypeDescriptor` from `@verter/type-ir` on the TS side). Source slicing, regex against type text, hand-rolled type-text splitters (`split_top_level_*`, `find_top_level_char`, etc.), `starts_with("Pick<")` shape sniffing, `path.contains("/node_modules/")` classification, and the synthesise-then-reparse pattern (`format!(...).parse_type_annotation(...)`) are all forbidden inside that pipeline.
+
+Concrete contract:
+
+- OXC lowering happens once during shallow analysis via `lower_ts_type(ts_type, source)`. The lowered `TypeExpr` is stored alongside `Analyzed*Field` (and on `ResolvedLocalType.type_expr`, `ProjectedMacroSurfaces.*_expr`) and survives all caches.
+- `parse_type_annotation` is reserved for JSDoc tag-type payloads. Calling it from the resolver / projector / registry / policy / materialiser / compat pipeline is the bug.
+- Raw / display strings (`Analyzed*Field.type_annotation`, `ExpandedField.raw_type`, `ResolvedLocalType.expanded`, `PropMeta.rawType`) are display-only passthroughs. Resolver and compat consumers MUST NOT parse them back.
+- Workspace classification uses `ResolverContext::workspace_is_workspace_owned` and `workspace_is_package_backed`. Substring tests on canonical paths (`"/node_modules/"`, `"\\node_modules\\"`) are banned.
+- Hand-rolled type-text parsers (e.g. `extract_pick_slot_bindings`, `extract_string_literal_name`, `splitTopLevelTypeOperator`) must not exist inside the resolver or compat layer. Walk the typed IR instead.
+- The JS compat layer (`@verter/component-meta/compat`) reads `prop.type` (`TypeDescriptor`) for every semantic decision. `prop.rawType` is display passthrough only — it must not feed any `looksLike*`, `extract*`, `normalize*`, `split*`, `strip*`, `prefer*`, `shouldPrefer*`, or `repairOpaque*` branch.
+- Type-role classification is structural, not nominal. A type is a "prop type" / "emit type" / "model type" / "slot type" because a Vue SFC macro (`defineProps`, `defineEmits`, `defineModel`, `defineSlots`, `withDefaults`) consumes it — NOT because its identifier name ends with `"Props"` / `"Emits"` / `"Events"` / `"Model"` / `"Slots"`. Macro participation is read from `AnalyzedMacro.kind` / `parsed_type_argument` / `type_references` on the analyzer snapshot. Identifier-name suffix checks (`name.ends_with("Props")` etc.) are forbidden inside the resolver.
+- The single explicit exception is JSDoc: `{Type}` payloads inside JSDoc tags are inherently text and may be parsed via the dedicated JSDoc path.
+
+If a new requirement appears to need text manipulation inside the resolver, fix the producer (lower the right OXC node, store the right typed field, extend `@verter/type-ir` with a missing variant) rather than reparsing or pattern-matching on text.
+
+See `/component-meta` and `/type-resolution` skills for the typed schema contract, the producer-side lowering points, and the architecture-guard list.
+
 ### CodeTransform Is the Single Source of Truth (CRITICAL)
 
 **All modifications to generated code MUST go through `CodeTransform` operations** (`overwrite`, `prepend_left`, `append_left`, `move_with_suffix`, etc.). Never apply string replacements, regex transforms, or manual splicing to the output of `build_string()` or to content that was produced by a `CodeTransform`.

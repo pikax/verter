@@ -523,6 +523,21 @@ If a file imports 20 modules but the requested macro type only references `Avata
 
 **Owned resolution is bounded by `workspace_root`:** For owned and project-scoped resolution, `node_modules` and package `#imports` ancestor walks stop at `IdeProjectConfig.workspace_root`. In monorepos, `workspace_root` may be above `project_root` to reach hoisted `node_modules`. In compat `createCheckerByJson()`, `workspace_root == project_root`. Unowned resolution (no owning project) remains unbounded. The boundary is passed via `ancestor_dirs(path, Some(&workspace_root))` and `ancestor_dirs_from_dir(start_dir, Some(&workspace_root))` in `verter_workspace::resolver`.
 
+## Typed-IR-Only Resolver Rule (CRITICAL)
+
+The native component-meta / typeinfo resolver pipeline drives every semantic decision from the typed IR (`TypeExpr` on the Rust side, `TypeDescriptor` from `@verter/type-ir` on the TS side). Source slicing, regex against type text, hand-rolled type-text splitters, `starts_with("Pick<")` shape sniffing, the synthesise-then-reparse pattern (`format!(...).parse_type_annotation(...)`), and `path.contains("/node_modules/")` classification are all forbidden inside that pipeline.
+
+- OXC AST is lowered exactly once during shallow analysis via `lower_ts_type(ts_type, source)` (in `verter_semantic::analysis::type_expr_lower`). The analyzer takes the OXC `TSType` AST node it already has in scope; downstream stages walk the resulting `TypeExpr`.
+- `parse_type_annotation` is reserved for JSDoc tag-type payloads (`{Type}` text inside `@type`/`@param`/`@returns`). Calling it from the resolver / projector / registry / policy / materialiser / compat pipeline is the bug.
+- Raw display strings (`Analyzed*Field.type_annotation`, `ExpandedField.raw_type`, `ResolvedLocalType.expanded`, `PropMeta.rawType`) are display passthroughs only. Resolver and compat consumers MUST NOT parse them back into `TypeExpr` / `TypeDescriptor`.
+- Workspace classification uses `ResolverContext::workspace_is_workspace_owned(canonical_id)` / `workspace_is_package_backed(canonical_id)`. Substring checks on canonical paths (`"/node_modules/"`, `"\\node_modules\\"`) are banned. The classification API is path-agnostic and handles symlinked / pnpm-hoisted / Windows-backslash / workspace-linked-package cases.
+- Hand-rolled type-text parsers must not exist inside the resolver. Walk `TypeExpr` nodes — `IndexedAccess`, `Ref { name: "Pick", type_arguments }`, `Union`, `Intersection`, etc. — directly via Rust pattern matching.
+- The JS compat layer reads `prop.type` (`TypeDescriptor`) for every semantic decision. `prop.rawType` is display passthrough only. Operator splits use union/intersection tag matching on `TypeDescriptor`, not hand-rolled string operator parsers.
+
+If a new requirement appears to need text manipulation inside the resolver, fix the producer (lower the right OXC node, store the right typed field, extend `@verter/type-ir` with a missing variant) rather than reparsing or pattern-matching on text. Architecture-guard tests in `crates/verter_session/tests/architecture_guards.rs` and equivalents in `packages/component-meta` lock down this contract.
+
+See `/component-meta` skill for the full producer-side schema (typed `*_expr` fields on `Analyzed*Field`, `ProjectedMacroSurfaces`, `ResolvedLocalType.type_expr` "always populated" invariant) and the post-cutover delete list.
+
 ## Frontier Engine Tests
 
 Tests in `crates/verter_session/src/frontier_tests.rs` cover diamond dedup, barrel ordering, cycle termination, budget enforcement, export routing, and store-view consistency. Run with `cargo test --package verter_session frontier_tests`.

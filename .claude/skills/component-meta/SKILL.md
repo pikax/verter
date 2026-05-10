@@ -116,6 +116,46 @@ The official/native component-meta payload is the semantic authority. `@verter/c
 - Host-owned resolver artifacts, graph artifacts, and encoded payload caches must share one invalidation story. Do not add a second ownership path for the same component-meta query state.
 - Raw graph cycles reaching JS without explicit recursion nodes are native bugs, not a normal compat fallback path.
 
+## Typed-IR-Only Resolver Rule (CRITICAL)
+
+The native component-meta / typeinfo type resolver — analyzer (`verter_semantic::analysis::macros`) → projector (`meta_resolve::projectors`) → registry (`resolver_core::component_meta_registry`) → policy (`component_meta_resolution_policy`) → materialiser (`meta_resolve::materialize`) → JS compat (`@verter/component-meta/compat`) — drives semantic decisions exclusively from the typed IR. Source slicing, regex against type text, hand-rolled type-text splitters, `starts_with("Pick<")` shape sniffing, `path.contains("/node_modules/")` classification, and the synthesise-then-reparse pattern (`format!(...).parse_type_annotation(...)`) are all forbidden inside that pipeline.
+
+**Producer contract** — OXC AST is lowered once during shallow analysis:
+
+- `lower_ts_type(ts_type, source)` (in `verter_semantic::analysis::type_expr_lower`) is the single allowed lowering call. The analyzer takes the OXC `TSType` AST node it already has in scope and stores the resulting `TypeExpr` on the analyzed struct. There is no source-slice + reparse step.
+- `Analyzed*Field` carries the typed form alongside the raw display string:
+  - `AnalyzedPropField.type_expr: Option<TypeExpr>` (raw text on `type_annotation`)
+  - `AnalyzedEmitField.payload_expr: Option<TypeExpr>` (raw text on `payload_type`)
+  - `AnalyzedSlotFieldBinding.binding_expr: Option<TypeExpr>` (raw text on `type_annotation`)
+  - `AnalyzedSlotField.return_expr: Option<TypeExpr>` (raw text on `return_type`)
+  - `ResolvedLocalType.type_expr` MUST be populated whenever `expanded` is non-empty.
+  - `AnalyzedMacro.parsed_type_argument` is populated via `lower_ts_type(first, source)` directly on the OXC AST node, not via source slice + `parse_type_annotation`.
+- `ProjectedMacroSurfaces` holds typed `*_expr` fields; the string-keyed `*_type` / `*_annotation` fields are display-only passthroughs and consumers do not parse them back.
+
+**Consumer contract** — every downstream stage walks the typed form:
+
+- The projector reads `field.r#type` (already typed). The "raw-annotation fallback" branch in `reduce_published_field_types` is removed once the producer guarantees the typed form.
+- The registry's `collect_component_meta_registry_public_field_refs` drives route extraction from the typed expression; `component_meta_registry_public_indexed_access_route` already takes `&TypeExpr`.
+- Policy helpers (`raw_restoration::restore_props_suffix_from_raw`, `slot_preservation::slot_binding_should_preserve_symbolic_raw_type`, `parse_indexed_access_from_raw`) take `Option<&TypeExpr>` rather than `Option<&str>`.
+- Materialise / cold-resolver consumers (`synthesize_define_props_shape_from_known_surface_with_authority`, `slot_field_function_type_expr`, `resolve_component_meta_parts`) construct `TypeExpr::Function`/`TypeExpr::Object` directly from typed inputs — no `format!("(props: { … }) => RT")` synthesise-and-reparse.
+- The JS compat layer (`@verter/component-meta/compat/checker.ts`) walks `prop.type` (`TypeDescriptor` from `@verter/type-ir`) for every semantic decision. `prop.rawType` is display passthrough only — it does not feed any `looksLike*`, `extract*`, `normalize*`, `split*`, `strip*`, `prefer*`, `shouldPrefer*`, `compat*ToString`, or `repairOpaque*` branch. Operator splits use union/intersection tag matching on `TypeDescriptor`, not hand-rolled string operator parsers.
+
+**Workspace classification** — substring tests on canonical paths are banned:
+
+- Use `ResolverContext::workspace_is_workspace_owned(canonical_id)` and `workspace_is_package_backed(canonical_id)`.
+- `path.contains("/node_modules/")` and `path.contains("\\node_modules\\")` are forbidden in production source.
+- The `workspace_is_*` API is path-agnostic (handles symlinked / pnpm-hoisted / Windows-backslash / workspace-linked-package cases that the substring approach silently mishandled).
+
+**Type-role classification is structural, not nominal** — a type's role in a Vue SFC (prop / emit / model / slot) is determined by which macro consumes it: `defineProps` / `withDefaults` / `defineModel` for props, `defineEmits` for emits, `defineSlots` for slots, etc. The structural fact is recorded on `AnalyzedMacro` (`kind`, `parsed_type_argument: Option<Arc<TypeExpr>>`, `type_references: Vec<String>`) and propagated through `resolved.snapshot.macros` / `resolved.snapshot.macro_type_deps`. Identifier-name suffix heuristics (`name.ends_with("Props")` / `"Emits"` / `"Events"` / `"Slots"` / `"Model"`) are forbidden inside the resolver — they are Vue community naming conventions, not type-system facts. Walk `AnalyzedMacro` to compute the macro-participation closure of any ref; do not test the ref's identifier text. Architecture guard `no_role_inference_from_name_suffix` enforces this.
+
+**Single allowed exception** — JSDoc tag-type payloads (`{Type}` text inside `@type`, `@param`, `@returns`, …) are inherently text. They are parsed via `verter_semantic::analysis::jsdoc` / `host_manage::jsdoc_resolve::resolve_jsdoc_tag_type` only. Treating any other text as JSDoc-like to dodge this rule is itself a bug.
+
+**Why** — the resolver was specified as a typed pipeline: read each canonical file once, lower OXC `TSType` once, cache the typed form, walk it. Every time a downstream stage needs to "look at the type" through a regex on a stored string, that round-trip drops generic substitutions / negative literals / brand information / function-param metadata / readonly modifiers / qualified-name segments that `lower_ts_type` already preserved. The hand-rolled string parsers (`split_top_level_*`, `find_top_level_char`, `extract_pick_slot_bindings`, `splitTopLevelTypeOperator`) duplicate OXC's TS parser, drift from it as TS evolves, and re-introduce the bugs OXC has already fixed.
+
+**Diagnosing a violation** — `parse_type_annotation` callers, `format!(...).parse_*` patterns, `starts_with("Pick<") | starts_with("Omit<") | starts_with("Required<") | starts_with("Partial<")` shape sniffing, and `path.contains("/node_modules/")` substring tests are caught by architecture-guard tests in `crates/verter_session/tests/architecture_guards.rs`. The compat-side equivalent (no `prop.rawType` reads inside `buildCompat*` / `looksLike*` / `extract*`) is enforced by an ESLint rule / Vitest assertion in `packages/component-meta`.
+
+**Fixing a violation** — fix the producer (lower the right OXC node, store the right typed field), or extend `@verter/type-ir` with a missing variant. Do not paper over by adding another reparse fallback or another regex.
+
 ## Fallthrough / Root Inheritance (CRITICAL)
 
 The shared Rust pipeline owns all fallthrough and root inheritance semantics. `verter_semantic::analysis` extracts root reachability facts only. `verter_session` owns the single inheritance resolver, recursion, conditional branch composition, generic propagation, caching, and final metadata projection.
