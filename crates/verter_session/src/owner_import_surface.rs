@@ -67,6 +67,12 @@ pub struct OwnerImportSurface {
 pub struct OwnerImportSurfaceDb {
     entries: DashMap<Arc<str>, Arc<OwnerImportSurface>>,
     live_counter: Arc<AtomicU64>,
+    /// Cache-cluster schema version this Db was constructed under. See
+    /// [`crate::cache_schema`] for the contract. Production paths always use
+    /// [`crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION`]; test fixtures
+    /// may construct a Db with an explicit older version to exercise the
+    /// stale-entry eviction invariant.
+    schema_version: u32,
 }
 
 impl OwnerImportSurfaceDb {
@@ -79,21 +85,46 @@ impl OwnerImportSurfaceDb {
     /// [`ProjectTypeStoreCounters`](crate::project_type_store::ProjectTypeStoreCounters)
     /// snapshot reflects live-entry changes without a second read.
     pub(crate) fn with_counter(live_counter: Arc<AtomicU64>) -> Self {
+        Self::with_counter_and_schema_version(
+            live_counter,
+            crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
+        )
+    }
+
+    /// Test-only constructor that pins a specific schema version on the Db,
+    /// for cache_invariant_migration fixtures that need to plant stale
+    /// entries under a prior cluster version.
+    #[cfg(any(test, debug_assertions))]
+    pub fn new_with_schema_version_for_test(schema_version: u32) -> Self {
+        Self::with_counter_and_schema_version(Arc::new(AtomicU64::new(0)), schema_version)
+    }
+
+    fn with_counter_and_schema_version(live_counter: Arc<AtomicU64>, schema_version: u32) -> Self {
         Self {
             entries: DashMap::new(),
             live_counter,
+            schema_version,
         }
     }
 
     /// Look up the owner surface for `owner_canonical` if the cached entry
     /// matches `expected_owner_whole_hash`. Stale entries are rejected at
     /// the key level so no callers observe a mixed-version surface.
+    ///
+    /// Lookups against a Db whose `schema_version` does not match the current
+    /// [`crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION`] return `None`
+    /// without consulting the entry map. Use [`Self::evict_if_schema_mismatch`]
+    /// to drain the storage; it is exposed so test fixtures can verify the
+    /// stale-eviction invariant deterministically.
     #[must_use]
     pub fn get(
         &self,
         owner_canonical: &str,
         expected_owner_whole_hash: Hash16,
     ) -> Option<Arc<OwnerImportSurface>> {
+        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+            return None;
+        }
         let result = match self.entries.get(owner_canonical) {
             Some(entry) if entry.owner_whole_hash == expected_owner_whole_hash => {
                 Some(entry.clone())
@@ -152,11 +183,44 @@ impl OwnerImportSurfaceDb {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    /// Test-only synthetic-entry inserter used exclusively by
+    /// `cache_invariant_migration` fixtures to verify the cache-cluster
+    /// schema-version eviction invariant.
+    #[cfg(any(test, debug_assertions))]
+    pub fn insert_synthetic_for_schema_test(&self, marker: &str) {
+        let canonical: Arc<str> = Arc::from(marker);
+        let surface = Arc::new(OwnerImportSurface {
+            owner_canonical: Arc::clone(&canonical),
+            owner_whole_hash: [0u8; 16],
+            bindings: Arc::new(FxHashMap::default()),
+            dep_signature: Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
+        });
+        self.insert(canonical, surface);
+    }
 }
 
 impl Default for OwnerImportSurfaceDb {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl crate::cache_schema::CacheSchemaVersioned for OwnerImportSurfaceDb {
+    fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+
+    fn evict_if_schema_mismatch(&self, current: u32) -> usize {
+        if self.schema_version == current {
+            return 0;
+        }
+        let count = self.entries.len();
+        self.entries.clear();
+        if count > 0 {
+            self.live_counter.fetch_sub(count as u64, Ordering::Relaxed);
+        }
+        count
     }
 }
 

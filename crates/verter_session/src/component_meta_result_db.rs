@@ -195,6 +195,9 @@ pub struct ComponentMetaResultDb<P> {
     capacity: usize,
     live_counter: Arc<AtomicU64>,
     stale_sweeps: Arc<AtomicU64>,
+    /// Cache-cluster schema version this Db was constructed under. See
+    /// [`crate::cache_schema`] for the contract.
+    schema_version: u32,
 }
 
 impl<P> ComponentMetaResultDb<P> {
@@ -223,11 +226,38 @@ impl<P> ComponentMetaResultDb<P> {
         live_counter: Arc<AtomicU64>,
         stale_sweeps: Arc<AtomicU64>,
     ) -> Self {
+        Self::with_counters_and_schema_version(
+            capacity,
+            live_counter,
+            stale_sweeps,
+            crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
+        )
+    }
+
+    /// Test-only constructor that pins a specific schema version on the Db.
+    /// Used by `cache_invariant_migration` fixtures.
+    #[cfg(any(test, debug_assertions))]
+    pub fn new_with_schema_version_for_test(schema_version: u32) -> Self {
+        Self::with_counters_and_schema_version(
+            Self::DEFAULT_CAPACITY,
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            schema_version,
+        )
+    }
+
+    fn with_counters_and_schema_version(
+        capacity: usize,
+        live_counter: Arc<AtomicU64>,
+        stale_sweeps: Arc<AtomicU64>,
+        schema_version: u32,
+    ) -> Self {
         Self {
             entries: DashMap::new(),
             capacity,
             live_counter,
             stale_sweeps,
+            schema_version,
         }
     }
 
@@ -240,8 +270,15 @@ impl<P> ComponentMetaResultDb<P> {
     /// Strict lookup — returns the cached entry when present. The caller
     /// is responsible for revalidating the dep signature before publishing
     /// the result; this split keeps the cache decoupled from the live host.
+    ///
+    /// Lookups against a Db whose `schema_version` does not match the current
+    /// [`crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION`] return `None`
+    /// without consulting the entry map.
     #[must_use]
     pub fn get(&self, key: &ComponentMetaResultKey) -> Option<ComponentMetaResultEntry<P>> {
+        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+            return None;
+        }
         let result = self.entries.get(key).map(|v| v.clone());
         if let Some(ctx) = crate::request_context::current_request_context() {
             if result.is_some() {
@@ -336,6 +373,26 @@ impl<P> ComponentMetaResultDb<P> {
             .map(|entry| entry.key().clone())
             .collect()
     }
+
+    /// Test-only synthetic-entry inserter used exclusively by
+    /// `cache_invariant_migration` fixtures to verify the cache-cluster
+    /// schema-version eviction invariant. The caller supplies a payload
+    /// constructor so generic-parameter Dbs (`ComponentMetaResultDb<P>`)
+    /// can be exercised without binding the helper to a single payload
+    /// type.
+    #[cfg(any(test, debug_assertions))]
+    pub fn insert_synthetic_for_schema_test_with_payload(&self, marker: &str, payload: P) {
+        let key = ComponentMetaResultKey {
+            owner_canonical: Arc::from(marker),
+            owner_whole_hash: [0u8; 16],
+            options_fingerprint: [0u8; 16],
+        };
+        let entry = ComponentMetaResultEntry {
+            payload: Arc::new(payload),
+            dep_signature: Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
+        };
+        self.insert(key, entry);
+    }
 }
 
 impl ComponentMetaResultDb<CachedComponentMetaResult> {
@@ -409,6 +466,25 @@ impl ComponentMetaResultDb<CachedComponentMetaResult> {
 impl<P> Default for ComponentMetaResultDb<P> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl<P> crate::cache_schema::CacheSchemaVersioned for ComponentMetaResultDb<P> {
+    fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+
+    fn evict_if_schema_mismatch(&self, current: u32) -> usize {
+        if self.schema_version == current {
+            return 0;
+        }
+        let count = self.entries.len();
+        self.entries.clear();
+        if count > 0 {
+            self.live_counter.fetch_sub(count as u64, Ordering::Relaxed);
+            self.stale_sweeps.fetch_add(count as u64, Ordering::Relaxed);
+        }
+        count
     }
 }
 

@@ -68,6 +68,9 @@ pub struct ImportedRegistryDb {
     inflight: InflightTable<ImportedRegistryKey>,
     live_counter: Arc<AtomicU64>,
     canonical_index: crate::invalidation_domain::CanonicalReverseIndex<ImportedRegistryKey>,
+    /// Cache-cluster schema version this Db was constructed under. See
+    /// [`crate::cache_schema`] for the contract.
+    schema_version: u32,
 }
 
 impl ImportedRegistryDb {
@@ -76,11 +79,26 @@ impl ImportedRegistryDb {
     }
 
     pub(crate) fn with_counter(live_counter: Arc<AtomicU64>) -> Self {
+        Self::with_counter_and_schema_version(
+            live_counter,
+            crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
+        )
+    }
+
+    /// Test-only constructor that pins a specific schema version on the Db.
+    /// Used by `cache_invariant_migration` fixtures.
+    #[cfg(any(test, debug_assertions))]
+    pub fn new_with_schema_version_for_test(schema_version: u32) -> Self {
+        Self::with_counter_and_schema_version(Arc::new(AtomicU64::new(0)), schema_version)
+    }
+
+    fn with_counter_and_schema_version(live_counter: Arc<AtomicU64>, schema_version: u32) -> Self {
         Self {
             entries: DashMap::new(),
             inflight: InflightTable::new(),
             live_counter,
             canonical_index: crate::invalidation_domain::CanonicalReverseIndex::new(),
+            schema_version,
         }
     }
 
@@ -170,6 +188,21 @@ impl ImportedRegistryDb {
         self.entries.insert(key, entry);
         self.live_counter.fetch_add(1, Ordering::Relaxed);
     }
+
+    /// Test-only synthetic-entry inserter used exclusively by
+    /// `cache_invariant_migration` fixtures to verify the cache-cluster
+    /// schema-version eviction invariant. The entry payload is a placeholder;
+    /// the fixture only inspects `live_count()` before and after
+    /// `evict_if_schema_mismatch()`.
+    #[cfg(any(test, debug_assertions))]
+    pub fn insert_synthetic_for_schema_test(&self, marker: &str) {
+        let key: ImportedRegistryKey = (Arc::from(marker), Arc::from("synthetic"));
+        let entry = Arc::new(ImportedRegistryEntry {
+            value: None,
+            dep_signature: Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
+        });
+        self.insert_for_test(key, entry);
+    }
 }
 
 impl crate::invalidation_domain::ParticipatesInInvalidation for ImportedRegistryDb {
@@ -213,6 +246,25 @@ impl crate::invalidation_domain::InvalidationByCanonical for ImportedRegistryDb 
 impl Default for ImportedRegistryDb {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl crate::cache_schema::CacheSchemaVersioned for ImportedRegistryDb {
+    fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+
+    fn evict_if_schema_mismatch(&self, current: u32) -> usize {
+        if self.schema_version == current {
+            return 0;
+        }
+        let count = self.entries.len();
+        self.entries.clear();
+        self.canonical_index.clear();
+        if count > 0 {
+            self.live_counter.fetch_sub(count as u64, Ordering::Relaxed);
+        }
+        count
     }
 }
 
@@ -556,6 +608,9 @@ pub struct PreparedTargetDb {
     entries: DashMap<PreparedTargetCacheKey, Arc<PreparedTargetEntry>>,
     inflight: InflightTable<PreparedTargetCacheKey>,
     live_counter: Arc<AtomicU64>,
+    /// Cache-cluster schema version this Db was constructed under. See
+    /// [`crate::cache_schema`] for the contract.
+    schema_version: u32,
 }
 
 impl PreparedTargetDb {
@@ -564,10 +619,25 @@ impl PreparedTargetDb {
     }
 
     pub(crate) fn with_counter(live_counter: Arc<AtomicU64>) -> Self {
+        Self::with_counter_and_schema_version(
+            live_counter,
+            crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
+        )
+    }
+
+    /// Test-only constructor that pins a specific schema version on the Db.
+    /// Used by `cache_invariant_migration` fixtures.
+    #[cfg(any(test, debug_assertions))]
+    pub fn new_with_schema_version_for_test(schema_version: u32) -> Self {
+        Self::with_counter_and_schema_version(Arc::new(AtomicU64::new(0)), schema_version)
+    }
+
+    fn with_counter_and_schema_version(live_counter: Arc<AtomicU64>, schema_version: u32) -> Self {
         Self {
             entries: DashMap::new(),
             inflight: InflightTable::new(),
             live_counter,
+            schema_version,
         }
     }
 
@@ -578,6 +648,9 @@ impl PreparedTargetDb {
         key: &PreparedTargetCacheKey,
         ctx: &dyn ResolverContext,
     ) -> Option<Option<(Arc<str>, Arc<str>)>> {
+        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+            return None;
+        }
         let entry_arc = self.entries.get(key).map(|e| e.clone())?;
         if ctx.validate_dep_signature(&entry_arc.dep_signature) {
             Some(entry_arc.value.clone())
@@ -655,11 +728,48 @@ impl PreparedTargetDb {
     pub fn live_count(&self) -> usize {
         self.entries.len()
     }
+
+    /// Test-only synthetic-entry inserter used exclusively by
+    /// `cache_invariant_migration` fixtures to verify the cache-cluster
+    /// schema-version eviction invariant.
+    #[cfg(any(test, debug_assertions))]
+    pub fn insert_synthetic_for_schema_test(&self, marker: &str) {
+        let key = PreparedTargetCacheKey {
+            active_scope_canonical_id: Arc::from(marker),
+            decl_canonical_id: Arc::from(marker),
+            decl_symbol_name: Arc::from("Synthetic"),
+            requested_name: Arc::from("Synthetic"),
+        };
+        let entry = Arc::new(PreparedTargetEntry {
+            value: None,
+            dep_signature: Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
+        });
+        self.entries.insert(key, entry);
+        self.live_counter.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 impl Default for PreparedTargetDb {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl crate::cache_schema::CacheSchemaVersioned for PreparedTargetDb {
+    fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+
+    fn evict_if_schema_mismatch(&self, current: u32) -> usize {
+        if self.schema_version == current {
+            return 0;
+        }
+        let count = self.entries.len();
+        self.entries.clear();
+        if count > 0 {
+            self.live_counter.fetch_sub(count as u64, Ordering::Relaxed);
+        }
+        count
     }
 }
 
@@ -679,6 +789,9 @@ pub struct MaterializeMemoDb {
     entries: DashMap<MaterializeMemoKey, Arc<MaterializeMemoEntry>>,
     inflight: InflightTable<MaterializeMemoKey>,
     live_counter: Arc<AtomicU64>,
+    /// Cache-cluster schema version this Db was constructed under. See
+    /// [`crate::cache_schema`] for the contract.
+    schema_version: u32,
 }
 
 impl MaterializeMemoDb {
@@ -687,10 +800,25 @@ impl MaterializeMemoDb {
     }
 
     pub(crate) fn with_counter(live_counter: Arc<AtomicU64>) -> Self {
+        Self::with_counter_and_schema_version(
+            live_counter,
+            crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
+        )
+    }
+
+    /// Test-only constructor that pins a specific schema version on the Db.
+    /// Used by `cache_invariant_migration` fixtures.
+    #[cfg(any(test, debug_assertions))]
+    pub fn new_with_schema_version_for_test(schema_version: u32) -> Self {
+        Self::with_counter_and_schema_version(Arc::new(AtomicU64::new(0)), schema_version)
+    }
+
+    fn with_counter_and_schema_version(live_counter: Arc<AtomicU64>, schema_version: u32) -> Self {
         Self {
             entries: DashMap::new(),
             inflight: InflightTable::new(),
             live_counter,
+            schema_version,
         }
     }
 
@@ -701,6 +829,9 @@ impl MaterializeMemoDb {
         key: &MaterializeMemoKey,
         ctx: &dyn ResolverContext,
     ) -> Option<MaterializedTypeExpr> {
+        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+            return None;
+        }
         let result = (|| -> Option<MaterializedTypeExpr> {
             let entry_arc = self.entries.get(key).map(|e| e.clone())?;
             if ctx.validate_dep_signature(&entry_arc.dep_signature) {
@@ -792,11 +923,52 @@ impl MaterializeMemoDb {
     pub fn live_count(&self) -> usize {
         self.entries.len()
     }
+
+    /// Test-only synthetic-entry inserter used exclusively by
+    /// `cache_invariant_migration` fixtures to verify the cache-cluster
+    /// schema-version eviction invariant.
+    #[cfg(any(test, debug_assertions))]
+    pub fn insert_synthetic_for_schema_test(&self, marker: &str) {
+        use crate::project_semantic_dispatch::raise::MaterializedTypeExpr;
+        let key: MaterializeMemoKey = (
+            Arc::from(marker),
+            Arc::new(TypeExpr::Unknown { raw: String::new() }),
+            ProjectionMode::Shallow,
+        );
+        let entry = Arc::new(MaterializeMemoEntry {
+            value: MaterializedTypeExpr {
+                node_id: None,
+                type_expr: TypeExpr::Unknown { raw: String::new() },
+                dep_signature: Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
+            },
+            dep_signature: Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
+        });
+        self.entries.insert(key, entry);
+        self.live_counter.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 impl Default for MaterializeMemoDb {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl crate::cache_schema::CacheSchemaVersioned for MaterializeMemoDb {
+    fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+
+    fn evict_if_schema_mismatch(&self, current: u32) -> usize {
+        if self.schema_version == current {
+            return 0;
+        }
+        let count = self.entries.len();
+        self.entries.clear();
+        if count > 0 {
+            self.live_counter.fetch_sub(count as u64, Ordering::Relaxed);
+        }
+        count
     }
 }
 
@@ -828,6 +1000,9 @@ pub struct PreparedSurfaceDb {
     entries: DashMap<PreparedSurfaceCacheKey, Arc<PreparedSurfaceEntry>>,
     inflight: InflightTable<PreparedSurfaceCacheKey>,
     live_counter: Arc<AtomicU64>,
+    /// Cache-cluster schema version this Db was constructed under. See
+    /// [`crate::cache_schema`] for the contract.
+    schema_version: u32,
 }
 
 impl PreparedSurfaceDb {
@@ -836,10 +1011,25 @@ impl PreparedSurfaceDb {
     }
 
     pub(crate) fn with_counter(live_counter: Arc<AtomicU64>) -> Self {
+        Self::with_counter_and_schema_version(
+            live_counter,
+            crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
+        )
+    }
+
+    /// Test-only constructor that pins a specific schema version on the Db.
+    /// Used by `cache_invariant_migration` fixtures.
+    #[cfg(any(test, debug_assertions))]
+    pub fn new_with_schema_version_for_test(schema_version: u32) -> Self {
+        Self::with_counter_and_schema_version(Arc::new(AtomicU64::new(0)), schema_version)
+    }
+
+    fn with_counter_and_schema_version(live_counter: Arc<AtomicU64>, schema_version: u32) -> Self {
         Self {
             entries: DashMap::new(),
             inflight: InflightTable::new(),
             live_counter,
+            schema_version,
         }
     }
 
@@ -850,6 +1040,9 @@ impl PreparedSurfaceDb {
         key: &PreparedSurfaceCacheKey,
         ctx: &dyn ResolverContext,
     ) -> Option<PreparedSurfacePayload> {
+        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+            return None;
+        }
         let result = (|| -> Option<PreparedSurfacePayload> {
             let entry_arc = self.entries.get(key).map(|e| e.clone())?;
             if ctx.validate_dep_signature(&entry_arc.dep_signature) {
@@ -941,11 +1134,48 @@ impl PreparedSurfaceDb {
     pub fn live_count(&self) -> usize {
         self.entries.len()
     }
+
+    /// Test-only synthetic-entry inserter used exclusively by
+    /// `cache_invariant_migration` fixtures to verify the cache-cluster
+    /// schema-version eviction invariant.
+    #[cfg(any(test, debug_assertions))]
+    pub fn insert_synthetic_for_schema_test(&self, marker: &str) {
+        use crate::resolver_core::cache_keys::PreparedSubstitutionKey;
+        let key = PreparedSurfaceCacheKey {
+            canonical_id: Arc::from(marker),
+            symbol_name: Arc::from("Synthetic"),
+            substitutions: PreparedSubstitutionKey::Empty,
+        };
+        let entry = Arc::new(PreparedSurfaceEntry {
+            value: PreparedSurfacePayload::Empty,
+            dep_signature: Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
+        });
+        self.entries.insert(key, entry);
+        self.live_counter.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 impl Default for PreparedSurfaceDb {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl crate::cache_schema::CacheSchemaVersioned for PreparedSurfaceDb {
+    fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+
+    fn evict_if_schema_mismatch(&self, current: u32) -> usize {
+        if self.schema_version == current {
+            return 0;
+        }
+        let count = self.entries.len();
+        self.entries.clear();
+        if count > 0 {
+            self.live_counter.fetch_sub(count as u64, Ordering::Relaxed);
+        }
+        count
     }
 }
 
@@ -963,6 +1193,9 @@ pub struct PreparedMemberDb {
     entries: DashMap<PreparedMemberCacheKey, Arc<PreparedMemberEntry>>,
     inflight: InflightTable<PreparedMemberCacheKey>,
     live_counter: Arc<AtomicU64>,
+    /// Cache-cluster schema version this Db was constructed under. See
+    /// [`crate::cache_schema`] for the contract.
+    schema_version: u32,
 }
 
 impl PreparedMemberDb {
@@ -971,10 +1204,25 @@ impl PreparedMemberDb {
     }
 
     pub(crate) fn with_counter(live_counter: Arc<AtomicU64>) -> Self {
+        Self::with_counter_and_schema_version(
+            live_counter,
+            crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
+        )
+    }
+
+    /// Test-only constructor that pins a specific schema version on the Db.
+    /// Used by `cache_invariant_migration` fixtures.
+    #[cfg(any(test, debug_assertions))]
+    pub fn new_with_schema_version_for_test(schema_version: u32) -> Self {
+        Self::with_counter_and_schema_version(Arc::new(AtomicU64::new(0)), schema_version)
+    }
+
+    fn with_counter_and_schema_version(live_counter: Arc<AtomicU64>, schema_version: u32) -> Self {
         Self {
             entries: DashMap::new(),
             inflight: InflightTable::new(),
             live_counter,
+            schema_version,
         }
     }
 
@@ -985,6 +1233,9 @@ impl PreparedMemberDb {
         key: &PreparedMemberCacheKey,
         ctx: &dyn ResolverContext,
     ) -> Option<Option<Arc<ProjectedMember>>> {
+        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+            return None;
+        }
         let result = (|| -> Option<Option<Arc<ProjectedMember>>> {
             let entry_arc = self.entries.get(key).map(|e| e.clone())?;
             if ctx.validate_dep_signature(&entry_arc.dep_signature) {
@@ -1076,11 +1327,50 @@ impl PreparedMemberDb {
     pub fn live_count(&self) -> usize {
         self.entries.len()
     }
+
+    /// Test-only synthetic-entry inserter used exclusively by
+    /// `cache_invariant_migration` fixtures to verify the cache-cluster
+    /// schema-version eviction invariant.
+    #[cfg(any(test, debug_assertions))]
+    pub fn insert_synthetic_for_schema_test(&self, marker: &str) {
+        use crate::resolver_core::cache_keys::{PreparedMemberCacheKind, PreparedSubstitutionKey};
+        let key = PreparedMemberCacheKey {
+            canonical_id: Arc::from(marker),
+            symbol_name: Arc::from("Synthetic"),
+            member_name: Arc::from("synthetic"),
+            kind: PreparedMemberCacheKind::Requested,
+            substitutions: PreparedSubstitutionKey::Empty,
+        };
+        let entry = Arc::new(PreparedMemberEntry {
+            value: None,
+            dep_signature: Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
+        });
+        self.entries.insert(key, entry);
+        self.live_counter.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 impl Default for PreparedMemberDb {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl crate::cache_schema::CacheSchemaVersioned for PreparedMemberDb {
+    fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+
+    fn evict_if_schema_mismatch(&self, current: u32) -> usize {
+        if self.schema_version == current {
+            return 0;
+        }
+        let count = self.entries.len();
+        self.entries.clear();
+        if count > 0 {
+            self.live_counter.fetch_sub(count as u64, Ordering::Relaxed);
+        }
+        count
     }
 }
 
@@ -1098,6 +1388,9 @@ pub struct RoutedExprSurfaceDb {
     entries: DashMap<RoutedExprSurfaceCacheKey, Arc<RoutedExprSurfaceEntry>>,
     inflight: InflightTable<RoutedExprSurfaceCacheKey>,
     live_counter: Arc<AtomicU64>,
+    /// Cache-cluster schema version this Db was constructed under. See
+    /// [`crate::cache_schema`] for the contract.
+    schema_version: u32,
 }
 
 impl RoutedExprSurfaceDb {
@@ -1106,10 +1399,25 @@ impl RoutedExprSurfaceDb {
     }
 
     pub(crate) fn with_counter(live_counter: Arc<AtomicU64>) -> Self {
+        Self::with_counter_and_schema_version(
+            live_counter,
+            crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
+        )
+    }
+
+    /// Test-only constructor that pins a specific schema version on the Db.
+    /// Used by `cache_invariant_migration` fixtures.
+    #[cfg(any(test, debug_assertions))]
+    pub fn new_with_schema_version_for_test(schema_version: u32) -> Self {
+        Self::with_counter_and_schema_version(Arc::new(AtomicU64::new(0)), schema_version)
+    }
+
+    fn with_counter_and_schema_version(live_counter: Arc<AtomicU64>, schema_version: u32) -> Self {
         Self {
             entries: DashMap::new(),
             inflight: InflightTable::new(),
             live_counter,
+            schema_version,
         }
     }
 
@@ -1120,6 +1428,9 @@ impl RoutedExprSurfaceDb {
         key: &RoutedExprSurfaceCacheKey,
         ctx: &dyn ResolverContext,
     ) -> Option<Arc<TypeExpr>> {
+        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+            return None;
+        }
         let entry_arc = self.entries.get(key).map(|e| e.clone())?;
         if ctx.validate_dep_signature(&entry_arc.dep_signature) {
             Some(entry_arc.value.clone())
@@ -1195,11 +1506,48 @@ impl RoutedExprSurfaceDb {
     pub fn live_count(&self) -> usize {
         self.entries.len()
     }
+
+    /// Test-only synthetic-entry inserter used exclusively by
+    /// `cache_invariant_migration` fixtures to verify the cache-cluster
+    /// schema-version eviction invariant.
+    #[cfg(any(test, debug_assertions))]
+    pub fn insert_synthetic_for_schema_test(&self, marker: &str) {
+        use crate::resolver_core::RouteDemand;
+        let key = RoutedExprSurfaceCacheKey {
+            scope_canonical_id: Arc::from(marker),
+            root_symbol: Arc::from("Synthetic"),
+            route: RouteDemand::Whole,
+        };
+        let entry = Arc::new(RoutedExprSurfaceEntry {
+            value: Arc::new(TypeExpr::Unknown { raw: String::new() }),
+            dep_signature: Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
+        });
+        self.entries.insert(key, entry);
+        self.live_counter.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 impl Default for RoutedExprSurfaceDb {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl crate::cache_schema::CacheSchemaVersioned for RoutedExprSurfaceDb {
+    fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+
+    fn evict_if_schema_mismatch(&self, current: u32) -> usize {
+        if self.schema_version == current {
+            return 0;
+        }
+        let count = self.entries.len();
+        self.entries.clear();
+        if count > 0 {
+            self.live_counter.fetch_sub(count as u64, Ordering::Relaxed);
+        }
+        count
     }
 }
 
@@ -1242,6 +1590,9 @@ pub struct MaterializeStructureDb {
         parking_lot::Mutex<rustc_hash::FxHashMap<MaterializeStructureCacheKey, DepSignature>>,
     >,
     live_counter: Arc<AtomicU64>,
+    /// Cache-cluster schema version this Db was constructed under. See
+    /// [`crate::cache_schema`] for the contract.
+    schema_version: u32,
 }
 
 impl MaterializeStructureDb {
@@ -1252,11 +1603,26 @@ impl MaterializeStructureDb {
     }
 
     pub(crate) fn with_counter(live_counter: Arc<AtomicU64>) -> Self {
+        Self::with_counter_and_schema_version(
+            live_counter,
+            crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
+        )
+    }
+
+    /// Test-only constructor that pins a specific schema version on the Db.
+    /// Used by `cache_invariant_migration` fixtures.
+    #[cfg(any(test, debug_assertions))]
+    pub fn new_with_schema_version_for_test(schema_version: u32) -> Self {
+        Self::with_counter_and_schema_version(Arc::new(AtomicU64::new(0)), schema_version)
+    }
+
+    fn with_counter_and_schema_version(live_counter: Arc<AtomicU64>, schema_version: u32) -> Self {
         Self {
             entries: DashMap::new(),
             inflight: InflightTable::new(),
             canonical_to_keys: DashMap::new(),
             live_counter,
+            schema_version,
         }
     }
 
@@ -1286,6 +1652,9 @@ impl MaterializeStructureDb {
         key: &MaterializeStructureCacheKey,
         ctx: &dyn ResolverContext,
     ) -> Option<crate::semantic_query::CacheRead<MaterializeOutcome>> {
+        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+            return None;
+        }
         let result = (|| -> Option<crate::semantic_query::CacheRead<MaterializeOutcome>> {
             let entry_arc = self.entries.get(key).map(|e| e.clone())?;
             if !ctx.validate_dep_signature(&entry_arc.dep_signature) {
@@ -1384,6 +1753,27 @@ impl MaterializeStructureDb {
         self.entries.len()
     }
 
+    /// Test-only synthetic-entry inserter used exclusively by
+    /// `cache_invariant_migration` fixtures to verify the cache-cluster
+    /// schema-version eviction invariant.
+    #[cfg(any(test, debug_assertions))]
+    pub fn insert_synthetic_for_schema_test(&self, marker: &str) {
+        use crate::component_meta_materialize::MaterializationScope;
+        use crate::semantic_query::SemanticNodeId;
+        let key = MaterializeStructureCacheKey {
+            scope_canonical_id: Arc::from(marker),
+            base: SemanticNodeId(0),
+            scope_axis: MaterializationScope::TopLevel,
+            mode: ProjectionMode::Shallow,
+        };
+        let entry = Arc::new(MaterializeStructureEntry {
+            outcome: MaterializeOutcome::Miss(SemanticNodeId(0)),
+            dep_signature: Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
+        });
+        self.entries.insert(key, entry);
+        self.live_counter.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Internal — register a `(key, dep_signature)` pair under every
     /// canonical in the dep_signature. Called from the materialiser's
     /// `post_publish` callback.
@@ -1436,6 +1826,25 @@ impl MaterializeStructureDb {
 impl Default for MaterializeStructureDb {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl crate::cache_schema::CacheSchemaVersioned for MaterializeStructureDb {
+    fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+
+    fn evict_if_schema_mismatch(&self, current: u32) -> usize {
+        if self.schema_version == current {
+            return 0;
+        }
+        let count = self.entries.len();
+        self.entries.clear();
+        self.canonical_to_keys.clear();
+        if count > 0 {
+            self.live_counter.fetch_sub(count as u64, Ordering::Relaxed);
+        }
+        count
     }
 }
 

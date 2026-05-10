@@ -56,6 +56,7 @@ pub mod audited_request;
 #[cfg(test)]
 mod audited_request_tests;
 mod cache;
+pub mod cache_schema;
 mod compile;
 pub(crate) mod completion_fence;
 pub mod component_meta_audit;
@@ -94,7 +95,7 @@ mod component_meta_read_once_tests;
 #[cfg(test)]
 mod component_meta_repo_first_pass_diagnosis_tests;
 pub mod component_meta_resolution_policy;
-pub(crate) mod component_meta_result_db;
+pub mod component_meta_result_db;
 #[cfg(test)]
 mod component_meta_slot_binding_skip_tests;
 #[cfg(test)]
@@ -151,7 +152,7 @@ pub mod loop5_instrumentation;
 pub mod meta;
 pub mod meta_resolve;
 pub mod owned_artifacts;
-pub(crate) mod owner_import_surface;
+pub mod owner_import_surface;
 #[cfg(test)]
 mod parity_tests;
 mod parse;

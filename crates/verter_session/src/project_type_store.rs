@@ -242,6 +242,9 @@ pub struct IndexedReadyDb {
     /// Stale-sweep counter — bumped when [`Self::remove`] evicts an
     /// existing entry or a replacement supersedes a prior whole-hash.
     stale_sweeps: Arc<AtomicU64>,
+    /// Cache-cluster schema version this Db was constructed under. See
+    /// [`crate::cache_schema`] for the contract.
+    schema_version: u32,
     /// Test-only host-level audit hook. Installed by
     /// [`crate::VerterHost::new_with_scheduler_config`] post-construction.
     /// On every fresh `insert`, the hook (if present) bumps the host's
@@ -257,12 +260,36 @@ impl IndexedReadyDb {
     }
 
     pub(crate) fn with_counters(live: Arc<AtomicU64>, stale: Arc<AtomicU64>) -> Self {
+        Self::with_counters_and_schema_version(
+            live,
+            stale,
+            crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
+        )
+    }
+
+    /// Test-only constructor that pins a specific schema version on the Db.
+    /// Used by `cache_invariant_migration` fixtures.
+    #[cfg(any(test, debug_assertions))]
+    pub fn new_with_schema_version_for_test(schema_version: u32) -> Self {
+        Self::with_counters_and_schema_version(
+            Default::default(),
+            Default::default(),
+            schema_version,
+        )
+    }
+
+    fn with_counters_and_schema_version(
+        live: Arc<AtomicU64>,
+        stale: Arc<AtomicU64>,
+        schema_version: u32,
+    ) -> Self {
         Self {
             entries: DashMap::new(),
             last_access: DashMap::new(),
             access_tick: AtomicU64::new(0),
             live_counter: live,
             stale_sweeps: stale,
+            schema_version,
             #[cfg(test)]
             test_audit_hook: parking_lot::Mutex::new(None),
         }
@@ -284,12 +311,19 @@ impl IndexedReadyDb {
     /// Look up the indexed artifact for `canonical_id` if the cached entry
     /// matches `expected_whole_hash`. Stale entries are ignored; callers
     /// materialize through the scheduler and re-populate.
+    ///
+    /// Lookups against a Db whose `schema_version` does not match the current
+    /// [`crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION`] return `None`
+    /// without consulting the entry map.
     #[must_use]
     pub fn get(
         &self,
         canonical_id: &str,
         expected_whole_hash: Hash16,
     ) -> Option<Arc<IndexedReady>> {
+        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+            return None;
+        }
         let result = match self.entries.get(canonical_id) {
             Some(entry) if entry.whole_hash == expected_whole_hash => {
                 self.bump_access_tick(canonical_id);
@@ -321,6 +355,9 @@ impl IndexedReadyDb {
     /// `IndexedReadyDb::get_any` access pattern.
     #[must_use]
     pub fn get_any(&self, canonical_id: &str) -> Option<Arc<IndexedReady>> {
+        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+            return None;
+        }
         let result = self.entries.get(canonical_id).map(|entry| entry.clone());
         if result.is_some() {
             self.bump_access_tick(canonical_id);
@@ -480,11 +517,44 @@ impl IndexedReadyDb {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    /// Test-only synthetic-entry inserter used exclusively by
+    /// `cache_invariant_migration` fixtures to verify the cache-cluster
+    /// schema-version eviction invariant.
+    #[cfg(any(test, debug_assertions))]
+    pub fn insert_synthetic_for_schema_test(&self, marker: &str) {
+        let canonical: Arc<str> = Arc::from(marker);
+        let entry = Arc::new(IndexedReady::new_for_test([0u8; 16]));
+        let prev = self.entries.insert(Arc::clone(&canonical), entry);
+        if prev.is_none() {
+            self.live_counter.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 impl Default for IndexedReadyDb {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl crate::cache_schema::CacheSchemaVersioned for IndexedReadyDb {
+    fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+
+    fn evict_if_schema_mismatch(&self, current: u32) -> usize {
+        if self.schema_version == current {
+            return 0;
+        }
+        let count = self.entries.len();
+        self.entries.clear();
+        self.last_access.clear();
+        if count > 0 {
+            self.live_counter.fetch_sub(count as u64, Ordering::Relaxed);
+            self.stale_sweeps.fetch_add(count as u64, Ordering::Relaxed);
+        }
+        count
     }
 }
 
@@ -514,6 +584,9 @@ pub struct AnalysisReadyDb {
     entries: DashMap<AnalysisArtifactKey, Arc<AnalysisReady>>,
     live_counter: Arc<AtomicU64>,
     stale_sweeps: Arc<AtomicU64>,
+    /// Cache-cluster schema version this Db was constructed under. See
+    /// [`crate::cache_schema`] for the contract.
+    schema_version: u32,
 }
 
 impl AnalysisReadyDb {
@@ -522,16 +595,43 @@ impl AnalysisReadyDb {
     }
 
     pub(crate) fn with_counters(live: Arc<AtomicU64>, stale: Arc<AtomicU64>) -> Self {
+        Self::with_counters_and_schema_version(
+            live,
+            stale,
+            crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
+        )
+    }
+
+    /// Test-only constructor that pins a specific schema version on the Db.
+    /// Used by `cache_invariant_migration` fixtures.
+    #[cfg(any(test, debug_assertions))]
+    pub fn new_with_schema_version_for_test(schema_version: u32) -> Self {
+        Self::with_counters_and_schema_version(
+            Default::default(),
+            Default::default(),
+            schema_version,
+        )
+    }
+
+    fn with_counters_and_schema_version(
+        live: Arc<AtomicU64>,
+        stale: Arc<AtomicU64>,
+        schema_version: u32,
+    ) -> Self {
         Self {
             entries: DashMap::new(),
             live_counter: live,
             stale_sweeps: stale,
+            schema_version,
         }
     }
 
     /// Strict lookup by full key.
     #[must_use]
     pub fn get(&self, key: &AnalysisArtifactKey) -> Option<Arc<AnalysisReady>> {
+        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+            return None;
+        }
         let result = self.entries.get(key).map(|v| v.clone());
         if let Some(ctx) = crate::request_context::current_request_context() {
             if result.is_some() {
@@ -560,6 +660,9 @@ impl AnalysisReadyDb {
         whole_hash: Hash16,
         requested_scope: AnalysisScope,
     ) -> Option<Arc<AnalysisReady>> {
+        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+            return None;
+        }
         let result = {
             let mut found: Option<Arc<AnalysisReady>> = None;
             for entry in self.entries.iter() {
@@ -631,11 +734,50 @@ impl AnalysisReadyDb {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    /// Test-only synthetic-entry inserter used exclusively by
+    /// `cache_invariant_migration` fixtures to verify the cache-cluster
+    /// schema-version eviction invariant.
+    #[cfg(any(test, debug_assertions))]
+    pub fn insert_synthetic_for_schema_test(&self, marker: &str) {
+        let key = AnalysisArtifactKey {
+            canonical_id: Arc::from(marker),
+            whole_hash: [0u8; 16],
+            scope: AnalysisScope::empty(),
+        };
+        let value = Arc::new(AnalysisReady {
+            whole_hash: [0u8; 16],
+            scope: AnalysisScope::empty(),
+            script_analysis: None,
+            export_signatures: None,
+            snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
+        });
+        self.insert(key, value);
+    }
 }
 
 impl Default for AnalysisReadyDb {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl crate::cache_schema::CacheSchemaVersioned for AnalysisReadyDb {
+    fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+
+    fn evict_if_schema_mismatch(&self, current: u32) -> usize {
+        if self.schema_version == current {
+            return 0;
+        }
+        let count = self.entries.len();
+        self.entries.clear();
+        if count > 0 {
+            self.live_counter.fetch_sub(count as u64, Ordering::Relaxed);
+            self.stale_sweeps.fetch_add(count as u64, Ordering::Relaxed);
+        }
+        count
     }
 }
 
@@ -777,6 +919,9 @@ pub struct RouteOwnedShallowDb {
     /// Stale-sweep counter — bumped when [`Self::remove`] evicts an
     /// existing entry or a replacement supersedes a prior whole-hash.
     stale_sweeps: Arc<AtomicU64>,
+    /// Cache-cluster schema version this Db was constructed under. See
+    /// [`crate::cache_schema`] for the contract.
+    schema_version: u32,
 }
 
 impl RouteOwnedShallowDb {
@@ -785,10 +930,34 @@ impl RouteOwnedShallowDb {
     }
 
     pub(crate) fn with_counters(live: Arc<AtomicU64>, stale: Arc<AtomicU64>) -> Self {
+        Self::with_counters_and_schema_version(
+            live,
+            stale,
+            crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
+        )
+    }
+
+    /// Test-only constructor that pins a specific schema version on the Db.
+    /// Used by `cache_invariant_migration` fixtures.
+    #[cfg(any(test, debug_assertions))]
+    pub fn new_with_schema_version_for_test(schema_version: u32) -> Self {
+        Self::with_counters_and_schema_version(
+            Default::default(),
+            Default::default(),
+            schema_version,
+        )
+    }
+
+    fn with_counters_and_schema_version(
+        live: Arc<AtomicU64>,
+        stale: Arc<AtomicU64>,
+        schema_version: u32,
+    ) -> Self {
         Self {
             entries: DashMap::new(),
             live_counter: live,
             stale_sweeps: stale,
+            schema_version,
         }
     }
 
@@ -801,6 +970,9 @@ impl RouteOwnedShallowDb {
         canonical_id: &str,
         expected_whole_hash: Hash16,
     ) -> Option<Arc<RouteOwnedShallowEntry>> {
+        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+            return None;
+        }
         let result = match self.entries.get(canonical_id) {
             Some(entry) if entry.whole_hash == expected_whole_hash => Some(entry.clone()),
             _ => None,
@@ -827,6 +999,9 @@ impl RouteOwnedShallowDb {
     /// returned entry. Mirrors [`IndexedReadyDb::get_any`].
     #[must_use]
     pub fn get_any(&self, canonical_id: &str) -> Option<Arc<RouteOwnedShallowEntry>> {
+        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+            return None;
+        }
         let result = self.entries.get(canonical_id).map(|entry| entry.clone());
         if let Some(ctx) = crate::request_context::current_request_context() {
             if result.is_some() {
@@ -892,6 +1067,40 @@ impl RouteOwnedShallowDb {
         self.entries.is_empty()
     }
 
+    /// Test-only synthetic-entry inserter used exclusively by
+    /// `cache_invariant_migration` fixtures to verify the cache-cluster
+    /// schema-version eviction invariant.
+    #[cfg(any(test, debug_assertions))]
+    pub fn insert_synthetic_for_schema_test(&self, marker: &str) {
+        use rustc_hash::{FxHashMap, FxHashSet};
+        let canonical: Arc<str> = Arc::from(marker);
+        let analysis = Arc::new(
+            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(),
+        );
+        let shallow = crate::resolver_core::shallow_file_state::ShallowFileState {
+            whole_hash: [0u8; 16],
+            exports: FxHashMap::default(),
+            wildcard_reexports: Vec::new(),
+            symbols: FxHashMap::default(),
+            value_symbols: FxHashMap::default(),
+            import_locals: FxHashSet::default(),
+            import_targets: FxHashMap::default(),
+            analysis: Arc::clone(&analysis),
+        };
+        let entry = Arc::new(RouteOwnedShallowEntry {
+            whole_hash: [0u8; 16],
+            workspace_generation: 0,
+            project_generation: 0,
+            raw_source: Arc::from(""),
+            eval_source: Arc::from(""),
+            cached_parse: None,
+            snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
+            external_type_analysis: analysis,
+            shallow_state: Arc::new(shallow),
+        });
+        self.publish(canonical, entry);
+    }
+
     /// Project each `(canonical_id, &RouteOwnedShallowEntry)` pair through
     /// `f` and collect the results. exposes a stable
     /// iteration surface for `resolver_store::derived_hashes` fact-capture
@@ -915,6 +1124,25 @@ impl RouteOwnedShallowDb {
 impl Default for RouteOwnedShallowDb {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl crate::cache_schema::CacheSchemaVersioned for RouteOwnedShallowDb {
+    fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+
+    fn evict_if_schema_mismatch(&self, current: u32) -> usize {
+        if self.schema_version == current {
+            return 0;
+        }
+        let count = self.entries.len();
+        self.entries.clear();
+        if count > 0 {
+            self.live_counter.fetch_sub(count as u64, Ordering::Relaxed);
+            self.stale_sweeps.fetch_add(count as u64, Ordering::Relaxed);
+        }
+        count
     }
 }
 
@@ -1054,7 +1282,7 @@ impl TypeResolutionContextDb {
 /// that the owned-program storage shape exists with `Arc<OwnedEvalProgram>`
 /// values; future commits remove the legacy `Arc<EvalEnv>` cache once
 /// lowering populates the owned form.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct EvalEnvCacheDb {
     /// 1A storage — owned-program cache (D17). Empty until the lowering
     /// pipeline produces `OwnedEvalProgram` for live parses; tests
@@ -1067,6 +1295,9 @@ pub struct EvalEnvCacheDb {
     legacy_env_entries: parking_lot::Mutex<
         FxHashMap<String, (Hash16, Arc<verter_semantic::analysis::type_eval::EvalEnv>)>,
     >,
+    /// Cache-cluster schema version this Db was constructed under. See
+    /// [`crate::cache_schema`] for the contract.
+    schema_version: u32,
 }
 
 impl EvalEnvCacheDb {
@@ -1075,12 +1306,26 @@ impl EvalEnvCacheDb {
         Self::default()
     }
 
+    /// Test-only constructor that pins a specific schema version on the Db.
+    /// Used by `cache_invariant_migration` fixtures.
+    #[cfg(any(test, debug_assertions))]
+    pub fn new_with_schema_version_for_test(schema_version: u32) -> Self {
+        Self {
+            entries: DashMap::new(),
+            legacy_env_entries: parking_lot::Mutex::new(FxHashMap::default()),
+            schema_version,
+        }
+    }
+
     /// Look up the owned program for the given content-pinned key.
     #[must_use]
     pub fn get(
         &self,
         key: &OwnedArtifactKey,
     ) -> Option<Arc<crate::owned_artifacts::OwnedEvalProgram>> {
+        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+            return None;
+        }
         self.entries.get(key).map(|r| Arc::clone(r.value()))
     }
 
@@ -1184,6 +1429,50 @@ impl EvalEnvCacheDb {
     /// observability tests that need to see the legacy cache size.
     pub fn total_entries(&self) -> usize {
         self.entries.len() + self.legacy_env_entries.lock().len()
+    }
+
+    /// Test-only synthetic-entry inserter used exclusively by
+    /// `cache_invariant_migration` fixtures to verify the cache-cluster
+    /// schema-version eviction invariant. Populates the legacy
+    /// `Arc<EvalEnv>` storage path because constructing a full
+    /// `OwnedEvalProgram` requires lowering through the analyzer pipeline.
+    #[cfg(any(test, debug_assertions))]
+    pub fn insert_synthetic_for_schema_test(&self, marker: &str) {
+        let env = Arc::new(verter_semantic::analysis::type_eval::EvalEnv::default());
+        self.legacy_env_entries
+            .lock()
+            .insert(marker.to_string(), ([0u8; 16], env));
+    }
+}
+
+impl Default for EvalEnvCacheDb {
+    fn default() -> Self {
+        Self {
+            entries: DashMap::new(),
+            legacy_env_entries: parking_lot::Mutex::new(FxHashMap::default()),
+            schema_version: crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
+        }
+    }
+}
+
+impl crate::cache_schema::CacheSchemaVersioned for EvalEnvCacheDb {
+    fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+
+    fn evict_if_schema_mismatch(&self, current: u32) -> usize {
+        if self.schema_version == current {
+            return 0;
+        }
+        let entries_count = self.entries.len();
+        self.entries.clear();
+        let legacy_count = {
+            let mut guard = self.legacy_env_entries.lock();
+            let n = guard.len();
+            guard.clear();
+            n
+        };
+        entries_count + legacy_count
     }
 }
 

@@ -431,3 +431,277 @@ fn materialize_macro_shape_member_type_expr_cycle_short_circuits() {
          (got {prop_names:?})"
     );
 }
+
+// ──────────────────────────────────────────────────────────────────
+// SCHEMA-VERSION COHORT FIXTURES
+//
+// One fixture per Db in the §6 W0.5 cohort. Each fixture:
+//
+//   1. Constructs a Db pinned to the OLD `CACHE_CLUSTER_SCHEMA_VERSION - 1`.
+//   2. Plants a synthetic entry via the `insert_synthetic_for_schema_test`
+//      helper (Db-specific synthetic key + entry).
+//   3. Asserts the entry is present at the storage layer.
+//   4. Calls `evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION)`.
+//   5. Asserts the eviction count > 0 (drained the synthetic entry) and
+//      that the storage layer is now empty.
+//
+// Discriminator: pre-bump tree has neither the `schema_version` field nor
+// the `evict_if_schema_mismatch` method nor the test-only constructor —
+// the test does not compile against a pre-bump tree. Post-bump it
+// compiles AND the eviction returns > 0 (drains real entries).
+//
+// `RefCycleResultDb` is intentionally OUT of the cohort — it caches
+// booleans / cycle identities only. Confirm the absence by inspection.
+
+use verter_session::cache_schema::{CacheSchemaVersioned, CACHE_CLUSTER_SCHEMA_VERSION};
+
+/// Reused across every schema-cohort fixture.
+const STALE_SCHEMA_VERSION: u32 = CACHE_CLUSTER_SCHEMA_VERSION - 1;
+
+#[test]
+fn schema_bump_evicts_indexed_ready_db_stale_entries() {
+    use verter_session::project_type_store::IndexedReadyDb;
+
+    let db = IndexedReadyDb::new_with_schema_version_for_test(STALE_SCHEMA_VERSION);
+    db.insert_synthetic_for_schema_test("/workspace/synthetic.ts");
+
+    assert_eq!(
+        db.len(),
+        1,
+        "IndexedReadyDb fixture: synthetic entry must be present pre-evict"
+    );
+    assert_eq!(db.schema_version(), STALE_SCHEMA_VERSION);
+
+    let evicted = db.evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION);
+    assert_eq!(
+        evicted, 1,
+        "IndexedReadyDb: evict_if_schema_mismatch must drain the stale entry"
+    );
+    assert_eq!(
+        db.len(),
+        0,
+        "IndexedReadyDb: storage must be empty after eviction"
+    );
+}
+
+#[test]
+fn schema_bump_evicts_analysis_ready_db_stale_entries() {
+    use verter_session::project_type_store::AnalysisReadyDb;
+
+    let db = AnalysisReadyDb::new_with_schema_version_for_test(STALE_SCHEMA_VERSION);
+    db.insert_synthetic_for_schema_test("/workspace/synthetic-analysis.ts");
+
+    assert_eq!(db.len(), 1, "AnalysisReadyDb pre-evict count");
+    assert_eq!(db.schema_version(), STALE_SCHEMA_VERSION);
+
+    let evicted = db.evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION);
+    assert_eq!(evicted, 1, "AnalysisReadyDb: must drain stale");
+    assert_eq!(db.len(), 0, "AnalysisReadyDb: empty after evict");
+}
+
+#[test]
+fn schema_bump_evicts_route_owned_shallow_db_stale_entries() {
+    use verter_session::project_type_store::RouteOwnedShallowDb;
+
+    let db = RouteOwnedShallowDb::new_with_schema_version_for_test(STALE_SCHEMA_VERSION);
+    db.insert_synthetic_for_schema_test("/workspace/synthetic-route.ts");
+
+    assert_eq!(db.len(), 1, "RouteOwnedShallowDb pre-evict count");
+    assert_eq!(db.schema_version(), STALE_SCHEMA_VERSION);
+
+    let evicted = db.evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION);
+    assert_eq!(evicted, 1, "RouteOwnedShallowDb: must drain stale");
+    assert_eq!(db.len(), 0, "RouteOwnedShallowDb: empty after evict");
+}
+
+#[test]
+fn schema_bump_evicts_eval_env_cache_db_stale_entries() {
+    use verter_session::project_type_store::EvalEnvCacheDb;
+
+    let db = EvalEnvCacheDb::new_with_schema_version_for_test(STALE_SCHEMA_VERSION);
+    db.insert_synthetic_for_schema_test("/workspace/synthetic-evalenv.ts");
+
+    assert_eq!(
+        db.total_entries(),
+        1,
+        "EvalEnvCacheDb: synthetic legacy env must be present pre-evict"
+    );
+    assert_eq!(db.schema_version(), STALE_SCHEMA_VERSION);
+
+    let evicted = db.evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION);
+    assert_eq!(evicted, 1, "EvalEnvCacheDb: must drain stale legacy env");
+    assert_eq!(
+        db.total_entries(),
+        0,
+        "EvalEnvCacheDb: total empty after evict"
+    );
+}
+
+#[test]
+fn schema_bump_evicts_owner_import_surface_db_stale_entries() {
+    use verter_session::owner_import_surface::OwnerImportSurfaceDb;
+
+    let db = OwnerImportSurfaceDb::new_with_schema_version_for_test(STALE_SCHEMA_VERSION);
+    db.insert_synthetic_for_schema_test("/workspace/synthetic-owner.ts");
+
+    assert_eq!(db.len(), 1, "OwnerImportSurfaceDb pre-evict count");
+    assert_eq!(db.schema_version(), STALE_SCHEMA_VERSION);
+
+    let evicted = db.evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION);
+    assert_eq!(evicted, 1, "OwnerImportSurfaceDb: must drain stale");
+    assert_eq!(db.len(), 0, "OwnerImportSurfaceDb: empty after evict");
+}
+
+#[test]
+fn schema_bump_evicts_component_meta_result_db_stale_entries() {
+    use verter_session::component_meta_result_db::ComponentMetaResultDb;
+
+    // The schema-cohort eviction invariant is independent of the cached
+    // payload type — `ComponentMetaResultDb` is generic over `P`. Use
+    // `()` as the synthetic payload so the fixture does not have to
+    // construct a full `ComponentMetaAnalysis` (which lacks `Default`).
+    let db: ComponentMetaResultDb<()> =
+        ComponentMetaResultDb::new_with_schema_version_for_test(STALE_SCHEMA_VERSION);
+    db.insert_synthetic_for_schema_test_with_payload("/workspace/synthetic-meta.ts", ());
+
+    assert_eq!(db.len(), 1, "ComponentMetaResultDb pre-evict count");
+    assert_eq!(db.schema_version(), STALE_SCHEMA_VERSION);
+
+    let evicted = db.evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION);
+    assert_eq!(evicted, 1, "ComponentMetaResultDb: must drain stale");
+    assert_eq!(db.len(), 0, "ComponentMetaResultDb: empty after evict");
+}
+
+#[test]
+fn schema_bump_evicts_imported_registry_db_stale_entries() {
+    use verter_session::component_meta_caches::ImportedRegistryDb;
+
+    let db = ImportedRegistryDb::new_with_schema_version_for_test(STALE_SCHEMA_VERSION);
+    db.insert_synthetic_for_schema_test("/workspace/synthetic-imported.ts");
+
+    assert_eq!(db.live_count(), 1, "ImportedRegistryDb pre-evict count");
+    assert_eq!(db.schema_version(), STALE_SCHEMA_VERSION);
+
+    let evicted = db.evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION);
+    assert_eq!(evicted, 1, "ImportedRegistryDb: must drain stale");
+    assert_eq!(db.live_count(), 0, "ImportedRegistryDb: empty after evict");
+}
+
+#[test]
+fn schema_bump_evicts_prepared_surface_db_stale_entries() {
+    use verter_session::component_meta_caches::PreparedSurfaceDb;
+
+    let db = PreparedSurfaceDb::new_with_schema_version_for_test(STALE_SCHEMA_VERSION);
+    db.insert_synthetic_for_schema_test("/workspace/synthetic-prepared-surface.ts");
+
+    assert_eq!(db.live_count(), 1, "PreparedSurfaceDb pre-evict count");
+    assert_eq!(db.schema_version(), STALE_SCHEMA_VERSION);
+
+    let evicted = db.evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION);
+    assert_eq!(evicted, 1, "PreparedSurfaceDb: must drain stale");
+    assert_eq!(db.live_count(), 0, "PreparedSurfaceDb: empty after evict");
+}
+
+#[test]
+fn schema_bump_evicts_prepared_member_db_stale_entries() {
+    use verter_session::component_meta_caches::PreparedMemberDb;
+
+    let db = PreparedMemberDb::new_with_schema_version_for_test(STALE_SCHEMA_VERSION);
+    db.insert_synthetic_for_schema_test("/workspace/synthetic-prepared-member.ts");
+
+    assert_eq!(db.live_count(), 1, "PreparedMemberDb pre-evict count");
+    assert_eq!(db.schema_version(), STALE_SCHEMA_VERSION);
+
+    let evicted = db.evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION);
+    assert_eq!(evicted, 1, "PreparedMemberDb: must drain stale");
+    assert_eq!(db.live_count(), 0, "PreparedMemberDb: empty after evict");
+}
+
+#[test]
+fn schema_bump_evicts_prepared_target_db_stale_entries() {
+    use verter_session::component_meta_caches::PreparedTargetDb;
+
+    let db = PreparedTargetDb::new_with_schema_version_for_test(STALE_SCHEMA_VERSION);
+    db.insert_synthetic_for_schema_test("/workspace/synthetic-prepared-target.ts");
+
+    assert_eq!(db.live_count(), 1, "PreparedTargetDb pre-evict count");
+    assert_eq!(db.schema_version(), STALE_SCHEMA_VERSION);
+
+    let evicted = db.evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION);
+    assert_eq!(evicted, 1, "PreparedTargetDb: must drain stale");
+    assert_eq!(db.live_count(), 0, "PreparedTargetDb: empty after evict");
+}
+
+#[test]
+fn schema_bump_evicts_routed_expr_surface_db_stale_entries() {
+    use verter_session::component_meta_caches::RoutedExprSurfaceDb;
+
+    let db = RoutedExprSurfaceDb::new_with_schema_version_for_test(STALE_SCHEMA_VERSION);
+    db.insert_synthetic_for_schema_test("/workspace/synthetic-routed-expr.ts");
+
+    assert_eq!(db.live_count(), 1, "RoutedExprSurfaceDb pre-evict count");
+    assert_eq!(db.schema_version(), STALE_SCHEMA_VERSION);
+
+    let evicted = db.evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION);
+    assert_eq!(evicted, 1, "RoutedExprSurfaceDb: must drain stale");
+    assert_eq!(db.live_count(), 0, "RoutedExprSurfaceDb: empty after evict");
+}
+
+#[test]
+fn schema_bump_evicts_materialize_memo_db_stale_entries() {
+    use verter_session::component_meta_caches::MaterializeMemoDb;
+
+    let db = MaterializeMemoDb::new_with_schema_version_for_test(STALE_SCHEMA_VERSION);
+    db.insert_synthetic_for_schema_test("/workspace/synthetic-materialize-memo.ts");
+
+    assert_eq!(db.live_count(), 1, "MaterializeMemoDb pre-evict count");
+    assert_eq!(db.schema_version(), STALE_SCHEMA_VERSION);
+
+    let evicted = db.evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION);
+    assert_eq!(evicted, 1, "MaterializeMemoDb: must drain stale");
+    assert_eq!(db.live_count(), 0, "MaterializeMemoDb: empty after evict");
+}
+
+#[test]
+fn schema_bump_evicts_materialize_structure_db_stale_entries() {
+    use verter_session::component_meta_caches::MaterializeStructureDb;
+
+    let db = MaterializeStructureDb::new_with_schema_version_for_test(STALE_SCHEMA_VERSION);
+    db.insert_synthetic_for_schema_test("/workspace/synthetic-materialize-structure.ts");
+
+    assert_eq!(db.live_count(), 1, "MaterializeStructureDb pre-evict count");
+    assert_eq!(db.schema_version(), STALE_SCHEMA_VERSION);
+
+    let evicted = db.evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION);
+    assert_eq!(evicted, 1, "MaterializeStructureDb: must drain stale");
+    assert_eq!(
+        db.live_count(),
+        0,
+        "MaterializeStructureDb: empty after evict"
+    );
+}
+
+// Negative-discrimination companion: a Db constructed at the CURRENT
+// schema version must NOT lose its entries when the same eviction call
+// runs. This pins the "no false positive" half of the contract.
+#[test]
+fn evict_if_schema_mismatch_preserves_current_version_entries() {
+    use verter_session::project_type_store::IndexedReadyDb;
+
+    let db = IndexedReadyDb::new();
+    assert_eq!(db.schema_version(), CACHE_CLUSTER_SCHEMA_VERSION);
+    db.insert_synthetic_for_schema_test("/workspace/preserve.ts");
+    assert_eq!(db.len(), 1, "Db must hold the synthetic entry pre-evict");
+
+    let evicted = db.evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION);
+    assert_eq!(
+        evicted, 0,
+        "evict_if_schema_mismatch must NOT drain entries when the Db is \
+         already at the current schema version"
+    );
+    assert_eq!(
+        db.len(),
+        1,
+        "current-version Db must still hold its entry after a no-op evict"
+    );
+}

@@ -3535,6 +3535,12 @@ mod foundations_guards {
         // ─── public modules: cited consumers ────────────────────────
         // tests/audited_request_e2e.rs
         "pub mod audited_request",
+        // Workspace-wide cache-cluster schema-version constant + the
+        // `CacheSchemaVersioned` trait. Public so
+        // `tests/cache_invariant_migration.rs` (the W0.5 fixture cohort)
+        // can read `CACHE_CLUSTER_SCHEMA_VERSION` and call the trait
+        // methods to verify the cohort's eviction invariant.
+        "pub mod cache_schema",
         // verter_lsp::features::hover_provenance,
         // verter_napi::meta, verter_wasm::tests::audit
         "pub mod component_meta_audit",
@@ -3651,13 +3657,17 @@ mod foundations_guards {
         // ─── crate-private modules (already non-public) ─────────────
         "pub(crate) mod completion_fence",
         "pub(crate) mod component_meta_materialize",
-        "pub(crate) mod component_meta_result_db",
+        // tests/cache_invariant_migration.rs — the W0.5 schema-bump
+        // cohort fixture exercises `ComponentMetaResultDb::evict_if_schema_mismatch`.
+        "pub mod component_meta_result_db",
         "pub(crate) mod cooperative_admission",
         "pub(crate) mod host_executor",
         "pub(crate) mod host_test_audit",
         "pub(crate) mod instant",
         "pub(crate) mod intrinsic_registry",
-        "pub(crate) mod owner_import_surface",
+        // tests/cache_invariant_migration.rs — the W0.5 schema-bump
+        // cohort fixture exercises `OwnerImportSurfaceDb::evict_if_schema_mismatch`.
+        "pub mod owner_import_surface",
         "pub(crate) mod project_semantic_dispatch",
         "pub(crate) mod semantic_query_memo",
         "pub(crate) mod session_runtime",
