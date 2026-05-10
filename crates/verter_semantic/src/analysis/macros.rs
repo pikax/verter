@@ -1275,16 +1275,28 @@ fn build_expanded_type_text(fields: &[AnalyzedPropField]) -> String {
 fn build_expanded_type_expr(fields: &[AnalyzedPropField]) -> verter_type_expr::TypeExpr {
     use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
 
+    // The analyzer producer (`extract_fields_from_interface_body_like`,
+    // `try_extract_macro`, etc.) lowers each prop's TS annotation directly
+    // from the OXC `TSType<'_>` AST node and stores the result on
+    // `AnalyzedPropField.type_expr`. Consumers of this helper read the
+    // typed form authoritatively — no source slicing, no string parsing.
+    //
+    // When a producer leaves `type_expr` unset (e.g., it had no `TSType`
+    // node in scope, such as for an inferred-only field) we publish the
+    // raw display text wrapped in `TypeExpr::Unknown { raw }` so display
+    // passthroughs keep the original text.
     let properties = fields
         .iter()
         .map(|field| {
-            let ty = field
-                .type_annotation
-                .as_deref()
-                .map(verter_type_expr_oxc::parse_type_annotation)
-                .unwrap_or(TypeExpr::Unknown {
-                    raw: "unknown".to_string(),
-                });
+            let ty = match &field.type_expr {
+                Some(expr) => expr.clone(),
+                None => TypeExpr::Unknown {
+                    raw: field
+                        .type_annotation
+                        .clone()
+                        .unwrap_or_else(|| "unknown".to_string()),
+                },
+            };
             ObjectMember::Property(ObjectProperty {
                 name: field.name.clone(),
                 ty,

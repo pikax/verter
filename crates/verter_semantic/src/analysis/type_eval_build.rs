@@ -1402,7 +1402,6 @@ where
     >,
 {
     use crate::analysis::type_expand::{ExpandedComponentTypes, ExpandedField};
-    use verter_type_expr_oxc::parse_type_annotation;
 
     let mut result = ExpandedComponentTypes::default();
     let started = Instant::now();
@@ -1419,11 +1418,15 @@ where
     });
 
     for (macro_index, m) in macros.iter().enumerate() {
-        // Expand prop field type annotations
+        // Expand prop field type annotations.
+        //
+        // The analyzer producer (`extract_fields_from_interface_body_like`)
+        // lowers each prop's TS annotation directly from the OXC `TSType<'_>`
+        // AST node and stores the result on `AnalyzedPropField.type_expr`.
+        // Consumers read the typed form authoritatively — no string parsing.
         for field in &m.prop_fields {
-            if let Some(ref type_ann) = field.type_annotation {
-                let parsed = parse_type_annotation(type_ann);
-                if !parsed.is_unknown() {
+            if let Some(ref typed) = field.type_expr {
+                if !typed.is_unknown() {
                     let item_started = Instant::now();
                     let stage_log = ExpandStageLog {
                         macro_index,
@@ -1441,7 +1444,7 @@ where
                             std::sync::Arc::from(field.name.as_str()),
                         )]),
                     };
-                    let expanded = expand_field_expr(ctx, &parsed);
+                    let expanded = expand_field_expr(ctx, typed);
                     log_expand_stage(
                         stage_log,
                         expanded.exactness,
@@ -1452,7 +1455,7 @@ where
                     result.props.push(ExpandedField {
                         name: field.name.clone(),
                         r#type: expanded.value.expr,
-                        raw_type: Some(type_ann.clone()),
+                        raw_type: field.type_annotation.clone(),
                         optional: field.is_optional,
                         exactness: expanded.exactness,
                         execution_status: expanded.execution_status,
@@ -1466,11 +1469,10 @@ where
         // production is owned by the query-engine phase in meta_resolve.rs.
         // This function handles field-level work only.
 
-        // Expand emit payload types
+        // Expand emit payload types via the analyzer-populated typed form.
         for field in &m.emit_fields {
-            if let Some(ref payload) = field.payload_type {
-                let parsed = parse_type_annotation(payload);
-                if !parsed.is_unknown() {
+            if let Some(ref typed) = field.payload_expr {
+                if !typed.is_unknown() {
                     let item_started = Instant::now();
                     let stage_log = ExpandStageLog {
                         macro_index,
@@ -1488,7 +1490,7 @@ where
                             std::sync::Arc::from(field.name.as_str()),
                         )]),
                     };
-                    let expanded = expand_field_expr(ctx, &parsed);
+                    let expanded = expand_field_expr(ctx, typed);
                     log_expand_stage(
                         stage_log,
                         expanded.exactness,
@@ -1499,7 +1501,7 @@ where
                     result.emits.push(ExpandedField {
                         name: field.name.clone(),
                         r#type: expanded.value.expr,
-                        raw_type: Some(payload.clone()),
+                        raw_type: field.payload_type.clone(),
                         optional: false,
                         exactness: expanded.exactness,
                         execution_status: expanded.execution_status,
@@ -1510,12 +1512,14 @@ where
         }
 
         // Slot binding expansion is not needed for fallthrough-only meta.
+        // Read the typed form populated by the analyzer producer in
+        // `extract_slot_bindings_from_oxc_type` (analyzer lowers the OXC
+        // `TSType<'_>` AST node into `binding_expr`).
         if scope == MacroExpansionScope::Full {
             for slot in &m.slot_fields {
                 for binding in &slot.bindings {
-                    if let Some(ref type_ann) = binding.type_annotation {
-                        let parsed = parse_type_annotation(type_ann);
-                        if !parsed.is_unknown() {
+                    if let Some(ref typed) = binding.binding_expr {
+                        if !typed.is_unknown() {
                             let item_started = Instant::now();
                             let slot_binding_target = format!("{}.{}", slot.name, binding.name);
                             let stage_log = ExpandStageLog {
@@ -1537,7 +1541,7 @@ where
                                     )),
                                 ]),
                             };
-                            let expanded = expand_field_expr(ctx, &parsed);
+                            let expanded = expand_field_expr(ctx, typed);
                             log_expand_stage(
                                 stage_log,
                                 expanded.exactness,
@@ -1548,7 +1552,7 @@ where
                             result.slot_bindings.push(ExpandedField {
                                 name: slot_binding_target,
                                 r#type: expanded.value.expr,
-                                raw_type: Some(type_ann.clone()),
+                                raw_type: binding.type_annotation.clone(),
                                 optional: false,
                                 exactness: expanded.exactness,
                                 execution_status: expanded.execution_status,

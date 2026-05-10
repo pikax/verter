@@ -1,5 +1,14 @@
 use super::type_eval::*;
 use super::type_eval_build::parse_and_build_env;
+use crate::analysis::type_eval_build::{
+    expand_macro_types_impl_with_expander, FieldExpansionContext, FieldKind, MacroExpansionScope,
+    PathSegment,
+};
+use crate::analysis::type_expand::{ExpandedNormalizedExpr, ExpansionResult};
+use crate::analysis::types::{
+    AnalyzedEmitField, AnalyzedMacro, AnalyzedMacroKind, AnalyzedPropField, AnalyzedSlotField,
+    AnalyzedSlotFieldBinding, TypeResolutionSource,
+};
 use std::sync::Arc;
 use verter_type_expr::*;
 
@@ -1036,4 +1045,314 @@ export { RouteLocationRaw as Lt, St, vt }
         "RouteLocationRaw should preserve its name-like branch, got {:?}",
         route.body
     );
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// W2.5 — `expand_macro_types_impl_with_expander` reads
+// `field.type_expr` / `field.payload_expr` / `binding.binding_expr`
+// directly, never reparsing `type_annotation` text. The discriminator is
+// to populate every typed field with a structural shape that the matching
+// raw `*_annotation` text does NOT describe — pre-cutover the function
+// would have reparsed the text and produced the WRONG shape; post-cutover
+// it walks the typed form and the closure receives the producer-supplied
+// expression unchanged.
+// ───────────────────────────────────────────────────────────────────────────
+fn passthrough_expander(
+) -> impl FnMut(FieldExpansionContext, &TypeExpr) -> ExpansionResult<ExpandedNormalizedExpr> {
+    |_ctx, expr| ExpansionResult::exact(ExpandedNormalizedExpr { expr: expr.clone() })
+}
+
+fn make_synth_typed_prop(name: &str, typed: TypeExpr) -> AnalyzedPropField {
+    AnalyzedPropField {
+        name: name.to_string(),
+        is_optional: false,
+        span: verter_span::Span::default(),
+        // `type_annotation` text deliberately does NOT describe the typed
+        // shape: pre-cutover reparse would have produced a different
+        // structure, post-cutover the typed form survives.
+        type_annotation: Some("garbage<<<unparseable".to_string()),
+        type_expr: Some(typed),
+        type_expr_scope: Some(TypeExprScope::new("test:fixture")),
+        description: None,
+        tags: Vec::new(),
+        resolution_source: TypeResolutionSource::Rust,
+        resolution_error: None,
+    }
+}
+
+fn make_synth_typed_emit(name: &str, typed: TypeExpr) -> AnalyzedEmitField {
+    AnalyzedEmitField {
+        name: name.to_string(),
+        span: verter_span::Span::default(),
+        payload_type: Some("garbage<<<unparseable".to_string()),
+        payload_expr: Some(typed),
+        payload_expr_scope: Some(TypeExprScope::new("test:fixture")),
+        description: None,
+        tags: Vec::new(),
+    }
+}
+
+fn make_synth_typed_slot(
+    name: &str,
+    binding_name: &str,
+    binding_typed: TypeExpr,
+) -> AnalyzedSlotField {
+    AnalyzedSlotField {
+        name: name.to_string(),
+        is_required: false,
+        span: verter_span::Span::default(),
+        bindings: vec![AnalyzedSlotFieldBinding {
+            name: binding_name.to_string(),
+            type_annotation: Some("garbage<<<unparseable".to_string()),
+            span: verter_span::Span::default(),
+            binding_expr: Some(binding_typed),
+            binding_expr_scope: Some(TypeExprScope::new("test:fixture")),
+        }],
+        return_type: None,
+        description: None,
+        tags: Vec::new(),
+        return_expr: None,
+        return_expr_scope: None,
+    }
+}
+
+fn make_synth_macro(
+    kind: AnalyzedMacroKind,
+    props: Vec<AnalyzedPropField>,
+    emits: Vec<AnalyzedEmitField>,
+    slots: Vec<AnalyzedSlotField>,
+) -> AnalyzedMacro {
+    AnalyzedMacro {
+        kind,
+        is_type_based: true,
+        type_references: Vec::new(),
+        binding_name: None,
+        model_name: None,
+        has_inherit_attrs_false: false,
+        prop_fields: props,
+        emit_fields: emits,
+        slot_fields: slots,
+        default_keys: Vec::new(),
+        default_values: Vec::new(),
+        expose_fields: Vec::new(),
+        resolved_local_types: Vec::new(),
+        parsed_type_argument: None,
+        parsed_type_argument_scope: None,
+        span: verter_span::Span::default(),
+    }
+}
+
+#[test]
+fn expand_macro_types_reads_prop_field_type_expr_directly_without_reparse() {
+    // A shape the producer captured (e.g. via cross-file external
+    // resolution) that text reparsing cannot reproduce.
+    let typed_indexed_access = TypeExpr::IndexedAccess {
+        object: Arc::new(TypeExpr::Ref {
+            name: "ImportedAlias".into(),
+            type_arguments: Vec::<TypeExpr>::new().into(),
+        }),
+        index: Arc::new(TypeExpr::Literal(LiteralValue::String("a".to_string()))),
+    };
+
+    let macros = vec![make_synth_macro(
+        AnalyzedMacroKind::DefineProps,
+        vec![make_synth_typed_prop("foo", typed_indexed_access.clone())],
+        Vec::new(),
+        Vec::new(),
+    )];
+
+    let result = expand_macro_types_impl_with_expander(
+        &macros,
+        None,
+        &[],
+        None,
+        MacroExpansionScope::Full,
+        passthrough_expander(),
+    );
+
+    assert_eq!(
+        result.props.len(),
+        1,
+        "the prop field's typed expression should drive expansion, got {result:?}"
+    );
+    assert_eq!(
+        result.props[0].r#type, typed_indexed_access,
+        "expand_macro_types_impl_with_expander must consume field.type_expr directly, not reparse type_annotation"
+    );
+    assert_eq!(
+        result.props[0].raw_type.as_deref(),
+        Some("garbage<<<unparseable"),
+        "raw_type passthrough should preserve the original annotation text"
+    );
+
+    // Negative discrimination: prove the typed shape differs from what
+    // the text parser would have produced. If they happened to coincide,
+    // the test would not be characterising the typed-read change.
+    let from_text = verter_type_expr_oxc::parse_type_annotation("garbage<<<unparseable");
+    assert_ne!(
+        from_text, typed_indexed_access,
+        "annotation text MUST NOT round-trip back to the typed shape; otherwise the test does not discriminate"
+    );
+}
+
+#[test]
+fn expand_macro_types_reads_emit_payload_expr_directly_without_reparse() {
+    let typed_tuple = TypeExpr::Tuple {
+        elements: vec![TupleElement {
+            label: Some("payload".to_string()),
+            ty: TypeExpr::Ref {
+                name: "ImportedPayload".into(),
+                type_arguments: Vec::<TypeExpr>::new().into(),
+            },
+            optional: false,
+            rest: false,
+        }]
+        .into(),
+        readonly: false,
+    };
+
+    let macros = vec![make_synth_macro(
+        AnalyzedMacroKind::DefineEmits,
+        Vec::new(),
+        vec![make_synth_typed_emit("update", typed_tuple.clone())],
+        Vec::new(),
+    )];
+
+    let result = expand_macro_types_impl_with_expander(
+        &macros,
+        None,
+        &[],
+        None,
+        MacroExpansionScope::Full,
+        passthrough_expander(),
+    );
+
+    assert_eq!(
+        result.emits.len(),
+        1,
+        "emit should expand from payload_expr"
+    );
+    assert_eq!(
+        result.emits[0].r#type, typed_tuple,
+        "expand_macro_types_impl_with_expander must consume field.payload_expr directly"
+    );
+
+    let from_text = verter_type_expr_oxc::parse_type_annotation("garbage<<<unparseable");
+    assert_ne!(from_text, typed_tuple);
+}
+
+#[test]
+fn expand_macro_types_reads_slot_binding_expr_directly_without_reparse() {
+    let typed_indexed_access = TypeExpr::IndexedAccess {
+        object: Arc::new(TypeExpr::Ref {
+            name: "SlotProps".into(),
+            type_arguments: Vec::<TypeExpr>::new().into(),
+        }),
+        index: Arc::new(TypeExpr::Literal(LiteralValue::String("item".to_string()))),
+    };
+
+    let macros = vec![make_synth_macro(
+        AnalyzedMacroKind::DefineSlots,
+        Vec::new(),
+        Vec::new(),
+        vec![make_synth_typed_slot(
+            "default",
+            "item",
+            typed_indexed_access.clone(),
+        )],
+    )];
+
+    let result = expand_macro_types_impl_with_expander(
+        &macros,
+        None,
+        &[],
+        None,
+        MacroExpansionScope::Full,
+        passthrough_expander(),
+    );
+
+    assert_eq!(
+        result.slot_bindings.len(),
+        1,
+        "slot binding should expand from binding_expr"
+    );
+    assert_eq!(result.slot_bindings[0].name, "default.item");
+    assert_eq!(
+        result.slot_bindings[0].r#type, typed_indexed_access,
+        "expand_macro_types_impl_with_expander must consume binding.binding_expr directly"
+    );
+
+    let from_text = verter_type_expr_oxc::parse_type_annotation("garbage<<<unparseable");
+    assert_ne!(from_text, typed_indexed_access);
+}
+
+#[test]
+fn expand_macro_types_skips_field_when_typed_form_is_absent_or_unknown() {
+    // Producer left `type_expr` unset — the function does NOT fall back
+    // to reparsing `type_annotation` text. The expansion vector stays
+    // empty.
+    let macros = vec![make_synth_macro(
+        AnalyzedMacroKind::DefineProps,
+        vec![AnalyzedPropField {
+            name: "foo".to_string(),
+            is_optional: false,
+            span: verter_span::Span::default(),
+            type_annotation: Some("string".to_string()),
+            type_expr: None,
+            type_expr_scope: None,
+            description: None,
+            tags: Vec::new(),
+            resolution_source: TypeResolutionSource::Rust,
+            resolution_error: None,
+        }],
+        Vec::new(),
+        Vec::new(),
+    )];
+
+    let result = expand_macro_types_impl_with_expander(
+        &macros,
+        None,
+        &[],
+        None,
+        MacroExpansionScope::Full,
+        passthrough_expander(),
+    );
+
+    assert!(
+        result.props.is_empty(),
+        "no typed form ⇒ no expansion (would have been non-empty if reparse fallback existed); got {result:?}"
+    );
+}
+
+#[test]
+fn expand_macro_types_threads_field_kind_and_path_through_closure() {
+    let typed_string = TypeExpr::Primitive(PrimitiveName::String);
+    let macros = vec![make_synth_macro(
+        AnalyzedMacroKind::DefineProps,
+        vec![make_synth_typed_prop("alpha", typed_string.clone())],
+        Vec::new(),
+        Vec::new(),
+    )];
+
+    let mut captured: Vec<(FieldKind, Vec<String>)> = Vec::new();
+    let _ = expand_macro_types_impl_with_expander(
+        &macros,
+        None,
+        &[],
+        None,
+        MacroExpansionScope::Full,
+        |ctx, expr| {
+            let path: Vec<String> = ctx
+                .output_path
+                .iter()
+                .map(|seg| match seg {
+                    PathSegment::Member(name) => name.to_string(),
+                })
+                .collect();
+            captured.push((ctx.kind, path));
+            ExpansionResult::exact(ExpandedNormalizedExpr { expr: expr.clone() })
+        },
+    );
+
+    assert_eq!(captured, vec![(FieldKind::Prop, vec!["alpha".to_string()])]);
 }

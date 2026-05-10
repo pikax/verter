@@ -8464,36 +8464,6 @@ mod typed_ir_resolver_guards {
     // -----------------------------------------------------------------------
     const PARSE_TYPE_ANNOTATION_ALLOWLIST: &[(&str, u32, &str)] = &[
         (
-            "crates/verter_semantic/src/analysis/component_meta.rs",
-            27,
-            "parse_type_annotation",
-        ),
-        (
-            "crates/verter_semantic/src/analysis/macros.rs",
-            1284,
-            "parse_type_annotation",
-        ),
-        (
-            "crates/verter_semantic/src/analysis/type_eval_build.rs",
-            1405,
-            "parse_type_annotation",
-        ),
-        (
-            "crates/verter_semantic/src/analysis/type_eval_build.rs",
-            1425,
-            "parse_type_annotation",
-        ),
-        (
-            "crates/verter_semantic/src/analysis/type_eval_build.rs",
-            1472,
-            "parse_type_annotation",
-        ),
-        (
-            "crates/verter_semantic/src/analysis/type_eval_build.rs",
-            1517,
-            "parse_type_annotation",
-        ),
-        (
             "crates/verter_session/src/component_meta_resolution_policy/raw_restoration.rs",
             41,
             "parse_type_annotation",

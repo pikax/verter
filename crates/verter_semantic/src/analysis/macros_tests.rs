@@ -2492,3 +2492,131 @@ mod w1_1_typed_form_regression {
         }
     }
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// W2.5 — `build_expanded_type_expr` consumes the analyzer-populated
+// `AnalyzedPropField.type_expr` directly. The pre-cutover code parsed
+// `type_annotation` text via `parse_type_annotation`, which loses the
+// producer's typed precision and replaces complex shapes with whatever the
+// text parser reconstructs. The discriminator is to construct a synthetic
+// prop field whose `type_expr` shape would NOT round-trip through text:
+// the resulting object property's `ty` must equal the typed input exactly.
+// ───────────────────────────────────────────────────────────────────────────
+#[test]
+fn build_expanded_type_expr_consumes_type_expr_field_directly_without_reparse() {
+    use crate::analysis::types::{AnalyzedPropField, TypeResolutionSource};
+    use std::sync::Arc;
+    use verter_type_expr::{
+        LiteralValue, ObjectExpr, ObjectMember, ObjectProperty, TypeExpr, TypeExprScope,
+    };
+
+    // A shape the producer captured but the text annotation does NOT
+    // describe (the annotation says one thing, the typed form says
+    // another). Pre-cutover `build_expanded_type_expr` would have
+    // discarded the typed form and reparsed the text, producing a
+    // different shape. Post-cutover the typed form survives.
+    let typed_indexed_access = TypeExpr::IndexedAccess {
+        object: Arc::new(TypeExpr::Ref {
+            name: "ImportedAlias".into(),
+            type_arguments: Vec::<TypeExpr>::new().into(),
+        }),
+        index: Arc::new(TypeExpr::Literal(LiteralValue::String("a".to_string()))),
+    };
+
+    let fields = vec![AnalyzedPropField {
+        name: "prop".to_string(),
+        is_optional: false,
+        span: verter_span::Span::default(),
+        type_annotation: Some("Garbage<<<unparseable".to_string()),
+        type_expr: Some(typed_indexed_access.clone()),
+        type_expr_scope: Some(TypeExprScope::new("test:fixture")),
+        description: None,
+        tags: Vec::new(),
+        resolution_source: TypeResolutionSource::Rust,
+        resolution_error: None,
+    }];
+
+    let result = super::build_expanded_type_expr(&fields);
+
+    let expected = TypeExpr::Object(Arc::new(ObjectExpr {
+        properties: vec![ObjectMember::Property(ObjectProperty {
+            name: "prop".to_string(),
+            ty: typed_indexed_access.clone(),
+            optional: false,
+            readonly: false,
+        })],
+    }));
+
+    assert_eq!(
+        result, expected,
+        "build_expanded_type_expr must read field.type_expr directly, not reparse type_annotation"
+    );
+
+    // Negative discrimination: prove the typed shape differs from what
+    // the text parser would have produced. If they happened to coincide
+    // (e.g. via accidental annotation choice), the test would not be
+    // characterising anything.
+    let from_text = verter_type_expr_oxc::parse_type_annotation("Garbage<<<unparseable");
+    assert_ne!(
+        from_text, typed_indexed_access,
+        "the annotation text MUST NOT round-trip back to the typed shape; \
+         otherwise the test does not discriminate the post-W2.5 typed read \
+         from the pre-W2.5 reparse"
+    );
+
+    // Sanity: when type_expr is None the function emits Unknown { raw }
+    // (no string parsing).
+    let fields_no_typed = vec![AnalyzedPropField {
+        name: "prop".to_string(),
+        is_optional: false,
+        span: verter_span::Span::default(),
+        type_annotation: Some("AnythingHere".to_string()),
+        type_expr: None,
+        type_expr_scope: None,
+        description: None,
+        tags: Vec::new(),
+        resolution_source: TypeResolutionSource::Rust,
+        resolution_error: None,
+    }];
+    let result_no_typed = super::build_expanded_type_expr(&fields_no_typed);
+    let expected_no_typed = TypeExpr::Object(Arc::new(ObjectExpr {
+        properties: vec![ObjectMember::Property(ObjectProperty {
+            name: "prop".to_string(),
+            ty: TypeExpr::Unknown {
+                raw: "AnythingHere".to_string(),
+            },
+            optional: false,
+            readonly: false,
+        })],
+    }));
+    assert_eq!(
+        result_no_typed, expected_no_typed,
+        "type_expr=None must yield Unknown {{ raw: type_annotation }} — never a parsed shape"
+    );
+
+    // Floor: type_annotation=None and type_expr=None yields Unknown { raw: \"unknown\" }.
+    let fields_none = vec![AnalyzedPropField {
+        name: "p".to_string(),
+        is_optional: false,
+        span: verter_span::Span::default(),
+        type_annotation: None,
+        type_expr: None,
+        type_expr_scope: None,
+        description: None,
+        tags: Vec::new(),
+        resolution_source: TypeResolutionSource::Rust,
+        resolution_error: None,
+    }];
+    let result_none = super::build_expanded_type_expr(&fields_none);
+    let expected_none = TypeExpr::Object(Arc::new(ObjectExpr {
+        properties: vec![ObjectMember::Property(ObjectProperty {
+            name: "p".to_string(),
+            ty: TypeExpr::Unknown {
+                raw: "unknown".to_string(),
+            },
+            optional: false,
+            readonly: false,
+        })],
+    }));
+    assert_eq!(result_none, expected_none);
+}

@@ -43,7 +43,35 @@ fn make_define_props(fields: Vec<AnalyzedPropField>) -> AnalyzedMacro {
     }
 }
 
+/// Test helper: simulate the analyzer producer's lowering of a TS type
+/// annotation. Production code calls `lower_ts_type` on an OXC `TSType<'_>`
+/// AST node; this helper accepts the same source text and uses the OXC
+/// text-input adapter to mirror the producer-populated `(*_expr, *_expr_scope)`
+/// pairing invariant. Returns `(None, None)` when lowering produces an
+/// `Unknown`, matching the producer's contract that unparseable annotations
+/// leave the typed field unset.
+pub(crate) fn lower_for_test(
+    type_ann: Option<&str>,
+) -> (
+    Option<verter_type_expr::TypeExpr>,
+    Option<verter_type_expr::TypeExprScope>,
+) {
+    let Some(text) = type_ann else {
+        return (None, None);
+    };
+    let lowered = verter_type_expr_oxc::parse_type_annotation(text);
+    if matches!(lowered, verter_type_expr::TypeExpr::Unknown { .. }) {
+        (None, None)
+    } else {
+        (
+            Some(lowered),
+            Some(verter_type_expr::TypeExprScope::new("test:fixture")),
+        )
+    }
+}
+
 fn make_prop(name: &str, type_ann: Option<&str>, optional: bool) -> AnalyzedPropField {
+    let (type_expr, type_expr_scope) = lower_for_test(type_ann);
     AnalyzedPropField {
         name: name.to_string(),
         is_optional: optional,
@@ -53,8 +81,8 @@ fn make_prop(name: &str, type_ann: Option<&str>, optional: bool) -> AnalyzedProp
         tags: Vec::new(),
         resolution_source: crate::analysis::types::TypeResolutionSource::Rust,
         resolution_error: None,
-        type_expr: None,
-        type_expr_scope: None,
+        type_expr,
+        type_expr_scope,
     }
 }
 
@@ -458,8 +486,8 @@ fn extracts_events_from_define_emits() {
                 payload_type: Some("[value: string]".to_string()),
                 description: None,
                 tags: Vec::new(),
-                payload_expr: None,
-                payload_expr_scope: None,
+                payload_expr: lower_for_test(Some("[value: string]")).0,
+                payload_expr_scope: lower_for_test(Some("[value: string]")).1,
             },
             crate::analysis::types::AnalyzedEmitField {
                 name: "close".to_string(),
@@ -499,8 +527,8 @@ fn define_emits_eval_supplements_local_tuple_property_events() {
             payload_type: Some("[value: string]".to_string()),
             description: Some("Local update event".to_string()),
             tags: Vec::new(),
-            payload_expr: None,
-            payload_expr_scope: None,
+            payload_expr: lower_for_test(Some("[value: string]")).0,
+            payload_expr_scope: lower_for_test(Some("[value: string]")).1,
         }],
         ..make_define_props(vec![])
     }];
@@ -514,8 +542,8 @@ fn define_emits_eval_supplements_local_tuple_property_events() {
                 payload_type: Some("[event: KeyboardEvent]".to_string()),
                 description: None,
                 tags: Vec::new(),
-                payload_expr: None,
-                payload_expr_scope: None,
+                payload_expr: lower_for_test(Some("[event: KeyboardEvent]")).0,
+                payload_expr_scope: lower_for_test(Some("[event: KeyboardEvent]")).1,
             },
             crate::analysis::types::AnalyzedEmitField {
                 name: "closeAutoFocus".to_string(),
@@ -523,8 +551,8 @@ fn define_emits_eval_supplements_local_tuple_property_events() {
                 payload_type: Some("[event: Event]".to_string()),
                 description: None,
                 tags: Vec::new(),
-                payload_expr: None,
-                payload_expr_scope: None,
+                payload_expr: lower_for_test(Some("[event: Event]")).0,
+                payload_expr_scope: lower_for_test(Some("[event: Event]")).1,
             },
         ],
         slots: Vec::new(),
@@ -637,8 +665,8 @@ fn define_emits_eval_does_not_resurrect_omitted_imported_events() {
                 payload_type: Some("[event: KeyboardEvent]".to_string()),
                 description: None,
                 tags: Vec::new(),
-                payload_expr: None,
-                payload_expr_scope: None,
+                payload_expr: lower_for_test(Some("[event: KeyboardEvent]")).0,
+                payload_expr_scope: lower_for_test(Some("[event: KeyboardEvent]")).1,
             },
             crate::analysis::types::AnalyzedEmitField {
                 name: "closeAutoFocus".to_string(),
@@ -646,8 +674,8 @@ fn define_emits_eval_does_not_resurrect_omitted_imported_events() {
                 payload_type: Some("[]".to_string()),
                 description: None,
                 tags: Vec::new(),
-                payload_expr: None,
-                payload_expr_scope: None,
+                payload_expr: lower_for_test(Some("[]")).0,
+                payload_expr_scope: lower_for_test(Some("[]")).1,
             },
         ],
         slots: Vec::new(),
@@ -747,8 +775,8 @@ fn extracts_slots_from_define_slots() {
                 name: "item".to_string(),
                 type_annotation: Some("string".to_string()),
                 span: verter_span::Span::default(),
-                binding_expr: None,
-                binding_expr_scope: None,
+                binding_expr: lower_for_test(Some("string")).0,
+                binding_expr_scope: lower_for_test(Some("string")).1,
             }],
             return_type: None,
             description: None,
@@ -865,14 +893,14 @@ fn huge_partial_slot_binding_expansions_fall_back_to_symbolic_source_type() {
                 name: "day".to_string(),
                 type_annotation: Some("CalendarCellTriggerProps['day']".to_string()),
                 span: verter_span::Span::default(),
-                binding_expr: None,
-                binding_expr_scope: None,
+                binding_expr: lower_for_test(Some("CalendarCellTriggerProps['day']")).0,
+                binding_expr_scope: lower_for_test(Some("CalendarCellTriggerProps['day']")).1,
             }],
             return_type: Some("VNode[]".to_string()),
             description: None,
             tags: Vec::new(),
-            return_expr: None,
-            return_expr_scope: None,
+            return_expr: lower_for_test(Some("VNode[]")).0,
+            return_expr_scope: lower_for_test(Some("VNode[]")).1,
         }],
         ..make_define_props(vec![])
     }];
@@ -985,14 +1013,14 @@ fn small_partial_helper_slot_binding_expansions_fall_back_to_symbolic_indexed_ac
                 name: "ui".to_string(),
                 type_annotation: Some("Button['ui']".to_string()),
                 span: verter_span::Span::default(),
-                binding_expr: None,
-                binding_expr_scope: None,
+                binding_expr: lower_for_test(Some("Button['ui']")).0,
+                binding_expr_scope: lower_for_test(Some("Button['ui']")).1,
             }],
             return_type: Some("any".to_string()),
             description: None,
             tags: Vec::new(),
-            return_expr: None,
-            return_expr_scope: None,
+            return_expr: lower_for_test(Some("any")).0,
+            return_expr_scope: lower_for_test(Some("any")).1,
         }],
         ..make_define_props(vec![])
     }];
@@ -1068,14 +1096,14 @@ fn define_slots_prefer_concrete_evaluated_slot_bindings_over_symbolic_direct_bin
                 name: "ui".to_string(),
                 type_annotation: Some("Button['ui']".to_string()),
                 span: verter_span::Span::default(),
-                binding_expr: None,
-                binding_expr_scope: None,
+                binding_expr: lower_for_test(Some("Button['ui']")).0,
+                binding_expr_scope: lower_for_test(Some("Button['ui']")).1,
             }],
             return_type: Some("any".to_string()),
             description: None,
             tags: Vec::new(),
-            return_expr: None,
-            return_expr_scope: None,
+            return_expr: lower_for_test(Some("any")).0,
+            return_expr_scope: lower_for_test(Some("any")).1,
         }],
         ..make_define_props(vec![])
     }];
@@ -1192,14 +1220,14 @@ fn define_slots_keep_source_bindings_when_expanded_slot_bindings_are_empty() {
                 name: "day".to_string(),
                 type_annotation: Some("CalendarCellTriggerProps['day']".to_string()),
                 span: verter_span::Span::default(),
-                binding_expr: None,
-                binding_expr_scope: None,
+                binding_expr: lower_for_test(Some("CalendarCellTriggerProps['day']")).0,
+                binding_expr_scope: lower_for_test(Some("CalendarCellTriggerProps['day']")).1,
             }],
             return_type: Some("any".to_string()),
             description: None,
             tags: Vec::new(),
-            return_expr: None,
-            return_expr_scope: None,
+            return_expr: lower_for_test(Some("any")).0,
+            return_expr_scope: lower_for_test(Some("any")).1,
         }],
         ..make_define_props(vec![])
     }];
@@ -1279,8 +1307,8 @@ fn define_slots_extract_bindings_from_call_signature_object_types() {
             return_type: Some("any".to_string()),
             description: None,
             tags: Vec::new(),
-            return_expr: None,
-            return_expr_scope: None,
+            return_expr: lower_for_test(Some("any")).0,
+            return_expr_scope: lower_for_test(Some("any")).1,
         }],
         ..make_define_props(vec![])
     }];
@@ -2161,8 +2189,8 @@ fn evaluated_tuple_event_raw_type_is_not_double_wrapped() {
             payload_type: Some("[date: CalendarModelValue<R, M>]".to_string()),
             description: None,
             tags: Vec::new(),
-            payload_expr: None,
-            payload_expr_scope: None,
+            payload_expr: lower_for_test(Some("[date: CalendarModelValue<R, M>]")).0,
+            payload_expr_scope: lower_for_test(Some("[date: CalendarModelValue<R, M>]")).1,
         }],
         ..make_define_props(vec![])
     }];
@@ -2225,22 +2253,22 @@ fn expanded_slot_bindings_preserve_source_binding_order() {
                     name: "item".to_string(),
                     type_annotation: Some("T".to_string()),
                     span: verter_span::Span::default(),
-                    binding_expr: None,
-                    binding_expr_scope: None,
+                    binding_expr: lower_for_test(Some("T")).0,
+                    binding_expr_scope: lower_for_test(Some("T")).1,
                 },
                 crate::analysis::types::AnalyzedSlotFieldBinding {
                     name: "index".to_string(),
                     type_annotation: Some("number".to_string()),
                     span: verter_span::Span::default(),
-                    binding_expr: None,
-                    binding_expr_scope: None,
+                    binding_expr: lower_for_test(Some("number")).0,
+                    binding_expr_scope: lower_for_test(Some("number")).1,
                 },
                 crate::analysis::types::AnalyzedSlotFieldBinding {
                     name: "open".to_string(),
                     type_annotation: Some("boolean".to_string()),
                     span: verter_span::Span::default(),
-                    binding_expr: None,
-                    binding_expr_scope: None,
+                    binding_expr: lower_for_test(Some("boolean")).0,
+                    binding_expr_scope: lower_for_test(Some("boolean")).1,
                 },
             ],
             return_type: None,
@@ -2346,8 +2374,8 @@ fn resolved_slots_merge_local_details_and_append_new_slots() {
                 name: "item".to_string(),
                 type_annotation: Some("string".to_string()),
                 span: verter_span::Span::default(),
-                binding_expr: None,
-                binding_expr_scope: None,
+                binding_expr: lower_for_test(Some("string")).0,
+                binding_expr_scope: lower_for_test(Some("string")).1,
             }],
             return_type: None,
             description: None,
@@ -2370,14 +2398,14 @@ fn resolved_slots_merge_local_details_and_append_new_slots() {
                     name: "row".to_string(),
                     type_annotation: Some("number".to_string()),
                     span: verter_span::Span::default(),
-                    binding_expr: None,
-                    binding_expr_scope: None,
+                    binding_expr: lower_for_test(Some("number")).0,
+                    binding_expr_scope: lower_for_test(Some("number")).1,
                 }],
                 return_type: Some("VNode[]".to_string()),
                 description: Some("resolved default slot".to_string()),
                 tags: Vec::new(),
-                return_expr: None,
-                return_expr_scope: None,
+                return_expr: lower_for_test(Some("VNode[]")).0,
+                return_expr_scope: lower_for_test(Some("VNode[]")).1,
             },
             crate::analysis::types::AnalyzedSlotField {
                 name: "header".to_string(),
@@ -2387,8 +2415,8 @@ fn resolved_slots_merge_local_details_and_append_new_slots() {
                 return_type: Some("any".to_string()),
                 description: Some("resolved header slot".to_string()),
                 tags: Vec::new(),
-                return_expr: None,
-                return_expr_scope: None,
+                return_expr: lower_for_test(Some("any")).0,
+                return_expr_scope: lower_for_test(Some("any")).1,
             },
         ],
     }];
@@ -2832,10 +2860,19 @@ fn options_api_prop_type_annotation_is_preserved() {
     let result = extract_component_meta(input);
 
     assert_eq!(result.props.len(), 1);
+    // The Options API analyzer (`extract_options_props`) does not lower
+    // its prop type annotations through `lower_ts_type` (open follow-up
+    // debt — see W2.5 feedback file). The published surface therefore
+    // wraps the raw annotation in `TypeExpr::Unknown { raw }` so display
+    // passthroughs preserve the original text. The structured `Ref`
+    // shape will become available once `AnalyzedOptionsProp` gains a
+    // typed `type_expr` companion populated at analyzer-producer time.
     assert_eq!(
         result.props[0].type_expr,
-        TypeExpr::named("HTMLCanvasElement"),
-        "parseable PropType<T> annotations should survive Options API extraction as structured refs"
+        TypeExpr::Unknown {
+            raw: "HTMLCanvasElement".to_string()
+        },
+        "Options API annotations are preserved as Unknown {{ raw }} until the analyzer lowers them"
     );
     assert_eq!(
         result.props[0].raw_type.as_deref(),

@@ -23,12 +23,18 @@ fn unknown_type(raw: impl Into<String>) -> TypeExpr {
     TypeExpr::Unknown { raw: raw.into() }
 }
 
-fn parse_annotation_or_unknown(raw: &str) -> TypeExpr {
-    let parsed = verter_type_expr_oxc::parse_type_annotation(raw);
-    if parsed.is_unknown() {
-        unknown_type(raw.to_string())
-    } else {
-        parsed
+/// Convert a typed expression option into a concrete `TypeExpr`, falling back
+/// to a raw-preserving `Unknown` sentinel when no typed form is available.
+///
+/// Producers (analyzer in `macros.rs`, cross-file external resolver in
+/// `verter_parser`) populate `*_expr` whenever they have an OXC `TSType<'_>`
+/// in scope. Consumers therefore prefer the typed form and only fall back to
+/// `Unknown { raw }` when the producer could not lower (e.g., raw text from
+/// an Options API path whose lowering was not part of W0.1 schema work).
+fn typed_or_unknown(typed: Option<&TypeExpr>, raw: &str) -> TypeExpr {
+    match typed {
+        Some(expr) => expr.clone(),
+        None => unknown_type(raw.to_string()),
     }
 }
 
@@ -1395,6 +1401,7 @@ fn extract_props_from_macro(
                 );
                 let type_expr = prefer_symbolic_prop_type_expr(
                     &field.ty,
+                    source_field.and_then(|prop| prop.type_expr.as_ref()),
                     raw_type.as_deref(),
                     type_expansion.as_ref(),
                 );
@@ -1474,8 +1481,12 @@ fn extract_props_from_macro(
                     .find(|candidate| candidate.name == field.name)
                     .and_then(|candidate| candidate.raw_type.clone())
             });
+            // Evaluator-only branch: no source AnalyzedPropField in scope, so
+            // no `*_expr` symbolic fallback is available. The heuristic still
+            // runs; when it prefers symbolic, the `evaluated_type` is kept.
             let type_expr = prefer_symbolic_prop_type_expr(
                 &field.ty,
+                None,
                 raw_type.as_deref(),
                 type_expansion.as_ref(),
             );
@@ -1688,16 +1699,15 @@ fn resolve_prop_type(
             );
             let type_expr = prefer_symbolic_prop_type_expr(
                 &ef.r#type,
+                field.type_expr.as_ref(),
                 preferred_raw_type.as_deref(),
                 Some(&metadata),
             );
             return (type_expr, Some(metadata));
         }
     }
-    match &field.type_annotation {
-        Some(raw) => (parse_annotation_or_unknown(raw), None),
-        None => (unknown_type("unknown".to_string()), None),
-    }
+    let raw = field.type_annotation.as_deref().unwrap_or("unknown");
+    (typed_or_unknown(field.type_expr.as_ref(), raw), None)
 }
 
 // ── Events ─────────────────────────────────────────────────────────────────
@@ -1742,8 +1752,24 @@ fn symbolic_type_from_evaluated_and_source(
 
 const LARGE_PARTIAL_PROP_TYPE_NODE_LIMIT: usize = 256;
 
+/// Choose between the evaluator-produced `evaluated_type` and a symbolic
+/// fallback supplied by the caller.
+///
+/// The decision (`should_prefer_symbolic_prop_type_expr`) reads display
+/// strings (`preferred_raw_type`) for shape heuristics — that is purely a
+/// classification of incomplete / placeholder evaluator output. The returned
+/// `TypeExpr` itself comes from typed inputs only:
+///
+/// - When the heuristic falls through, the `evaluated_type` clone is
+///   returned unchanged.
+/// - When the heuristic prefers the symbolic alternative, `symbolic_type`
+///   (the caller's pre-lowered typed form, populated by the analyzer at the
+///   producer site) is returned. If the caller has no typed form available,
+///   the function falls back to `evaluated_type` so no string parsing is
+///   reintroduced.
 fn prefer_symbolic_prop_type_expr(
     evaluated_type: &TypeExpr,
+    symbolic_type: Option<&TypeExpr>,
     preferred_raw_type: Option<&str>,
     metadata: Option<&crate::analysis::type_expand::ExpansionMetadata>,
 ) -> TypeExpr {
@@ -1751,8 +1777,8 @@ fn prefer_symbolic_prop_type_expr(
         return evaluated_type.clone();
     }
 
-    preferred_raw_type
-        .map(parse_annotation_or_unknown)
+    symbolic_type
+        .cloned()
         .unwrap_or_else(|| evaluated_type.clone())
 }
 
@@ -2241,9 +2267,9 @@ fn extract_events_from_macro(
                             .map(|f| (f.r#type.clone(), Some(field_expansion_metadata(f))))
                     })
                 })
-                .unwrap_or_else(|| match &field.payload_type {
-                    Some(raw) => (parse_annotation_or_unknown(raw), None),
-                    None => (unknown_type("unknown".to_string()), None),
+                .unwrap_or_else(|| {
+                    let raw = field.payload_type.as_deref().unwrap_or("unknown");
+                    (typed_or_unknown(field.payload_expr.as_ref(), raw), None)
                 });
             let expanded_raw_signature = event_payload_raw_signature_from_type_expr(&payload);
 
@@ -2275,15 +2301,13 @@ fn extract_events_from_macro(
                 .iter()
                 .find(|f| f.name == field.name)
                 .map(|f| (f.r#type.clone(), Some(field_expansion_metadata(f))))
-                .unwrap_or_else(|| match &field.payload_type {
-                    Some(raw) => (parse_annotation_or_unknown(raw), None),
-                    None => (unknown_type("unknown".to_string()), None),
+                .unwrap_or_else(|| {
+                    let raw = field.payload_type.as_deref().unwrap_or("unknown");
+                    (typed_or_unknown(field.payload_expr.as_ref(), raw), None)
                 })
         } else {
-            match &field.payload_type {
-                Some(raw) => (parse_annotation_or_unknown(raw), None),
-                None => (unknown_type("unknown".to_string()), None),
-            }
+            let raw = field.payload_type.as_deref().unwrap_or("unknown");
+            (typed_or_unknown(field.payload_expr.as_ref(), raw), None)
         };
 
         out.push(EventAnalysis {
@@ -2371,21 +2395,20 @@ fn extract_slots_from_macro(
                             (
                                 prefer_symbolic_prop_type_expr(
                                     &f.r#type,
+                                    b.binding_expr.as_ref(),
                                     raw_type.as_deref(),
                                     Some(&type_expansion),
                                 ),
                                 Some(type_expansion),
                             )
                         })
-                        .unwrap_or_else(|| match &b.type_annotation {
-                            Some(raw) => (parse_annotation_or_unknown(raw), None),
-                            None => (unknown_type("unknown".to_string()), None),
+                        .unwrap_or_else(|| {
+                            let raw = b.type_annotation.as_deref().unwrap_or("unknown");
+                            (typed_or_unknown(b.binding_expr.as_ref(), raw), None)
                         })
                 } else {
-                    match &b.type_annotation {
-                        Some(raw) => (parse_annotation_or_unknown(raw), None),
-                        None => (unknown_type("unknown".to_string()), None),
-                    }
+                    let raw = b.type_annotation.as_deref().unwrap_or("unknown");
+                    (typed_or_unknown(b.binding_expr.as_ref(), raw), None)
                 };
                 SlotBindingAnalysis {
                     name: b.name.clone(),
@@ -2560,8 +2583,14 @@ fn expanded_slot_bindings(
                         .split_once('.')
                         .map(|(_, binding)| binding.to_string())
                         .unwrap_or_else(|| field.name.clone()),
+                    // Evaluator-only branch: source `AnalyzedSlotFieldBinding`
+                    // is not in scope here, so no `binding_expr` symbolic
+                    // fallback is available. The heuristic still runs;
+                    // when it would prefer symbolic, the evaluated type is
+                    // kept.
                     type_expr: prefer_symbolic_prop_type_expr(
                         &field.r#type,
+                        None,
                         field.raw_type.as_deref(),
                         Some(&type_expansion),
                     ),
@@ -2622,15 +2651,14 @@ fn merge_slot_bindings_with_source(
         return source_field
             .bindings
             .iter()
-            .map(|binding| SlotBindingAnalysis {
-                name: binding.name.clone(),
-                type_expr: binding
-                    .type_annotation
-                    .as_deref()
-                    .map(parse_annotation_or_unknown)
-                    .unwrap_or_else(|| unknown_type("unknown".to_string())),
-                type_expansion: None,
-                raw_type: binding.type_annotation.clone(),
+            .map(|binding| {
+                let raw = binding.type_annotation.as_deref().unwrap_or("unknown");
+                SlotBindingAnalysis {
+                    name: binding.name.clone(),
+                    type_expr: typed_or_unknown(binding.binding_expr.as_ref(), raw),
+                    type_expansion: None,
+                    raw_type: binding.type_annotation.clone(),
+                }
             })
             .collect();
     }
@@ -2650,6 +2678,7 @@ fn merge_slot_bindings_with_source(
             );
             binding.type_expr = prefer_symbolic_prop_type_expr(
                 &binding.type_expr,
+                source_binding.binding_expr.as_ref(),
                 raw_type.as_deref(),
                 binding.type_expansion.as_ref(),
             );
@@ -2843,12 +2872,17 @@ fn extract_model_from_macro(
             .map(|f| f.r#type.clone())
             .unwrap_or_else(|| unknown_type("unknown".to_string()))
     } else {
-        // Fall back to prop_fields on the macro itself
+        // Fall back to prop_fields on the macro itself.
+        // Prefer the analyzer-populated `type_expr`; fall back to a
+        // raw-preserving Unknown sentinel when the producer could not
+        // lower (no OXC TSType node was in scope).
         prop_fields
             .iter()
             .find(|f| f.name == name)
-            .and_then(|f| f.type_annotation.as_ref())
-            .map(|raw| parse_annotation_or_unknown(raw))
+            .map(|f| {
+                let raw = f.type_annotation.as_deref().unwrap_or("unknown");
+                typed_or_unknown(f.type_expr.as_ref(), raw)
+            })
             .unwrap_or_else(|| unknown_type("unknown".to_string()))
     };
 
@@ -2880,9 +2914,13 @@ fn synthesize_model_prop_and_event(
     let mut prop_type_expr = evaluated_prop
         .map(|field| field.r#type.clone())
         .or_else(|| {
-            raw_type
-                .as_ref()
-                .map(|raw| parse_annotation_or_unknown(raw))
+            // Prefer the analyzer-populated typed form. Falls back to a
+            // raw-preserving `Unknown` when the producer left `type_expr`
+            // unset (e.g., no OXC TSType in scope).
+            source_prop.map(|field| {
+                let raw = field.type_annotation.as_deref().unwrap_or("unknown");
+                typed_or_unknown(field.type_expr.as_ref(), raw)
+            })
         })
         .unwrap_or_else(|| unknown_type("unknown".to_string()));
 
@@ -3091,10 +3129,16 @@ fn resolve_exposed_type(
             return f.r#type.clone();
         }
     }
-    // Fall back to binding type annotation if available
+    // Fall back to binding type annotation if available.
+    //
+    // `AnalyzedBinding` does not currently carry a typed `type_expr`
+    // companion (W0.1 scope covered macro-side surfaces only — see
+    // feedback file for the follow-up debt). The raw annotation is
+    // preserved on the published `TypeExpr::Unknown { raw }` sentinel so
+    // downstream display passthroughs keep the original text.
     if let Some(binding) = bindings.iter().find(|b| b.name == name) {
         if let Some(ref ann) = binding.type_annotation {
-            return parse_annotation_or_unknown(ann);
+            return unknown_type(ann.clone());
         }
     }
     unknown_type("unknown".to_string())
@@ -3231,10 +3275,17 @@ fn extract_props_from_options(opts: &AnalyzedOptionsApi, out: &mut Vec<PropAnaly
             .or_else(|| prop.type_constructor.clone());
         out.push(PropAnalysis {
             name: prop.name.clone(),
+            // `AnalyzedOptionsProp` does not currently carry a typed
+            // `type_expr` companion (W0.1 scope covered macro-side surfaces
+            // only — see feedback file for the follow-up debt). The raw
+            // annotation is preserved on `TypeExpr::Unknown { raw }`; the
+            // constructor branch maps Vue runtime constructor names
+            // structurally (no string parsing — these are nominal
+            // identifiers, not TS type annotations).
             type_expr: prop
                 .type_annotation
                 .as_ref()
-                .map(|raw| parse_annotation_or_unknown(raw))
+                .map(|raw| unknown_type(raw.clone()))
                 .or_else(|| {
                     prop.type_constructor.as_ref().map(|rt| match rt.as_str() {
                         "String" => TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
@@ -3260,12 +3311,15 @@ fn extract_props_from_options(opts: &AnalyzedOptionsApi, out: &mut Vec<PropAnaly
 
 fn extract_events_from_options(opts: &AnalyzedOptionsApi, out: &mut Vec<EventAnalysis>) {
     for field in &opts.emits {
+        // The Options API analyzer (`extract_options_emits`) does not
+        // currently lower OXC TS types, so `payload_expr` is `None` here
+        // — see feedback file for the follow-up debt. We preserve the
+        // raw payload string on `TypeExpr::Unknown { raw }` and avoid
+        // string-reparsing inside the resolver pipeline.
+        let raw = field.payload_type.as_deref().unwrap_or("unknown");
         out.push(EventAnalysis {
             name: field.name.clone(),
-            payload: match &field.payload_type {
-                Some(raw) => parse_annotation_or_unknown(raw),
-                None => unknown_type("unknown".to_string()),
-            },
+            payload: typed_or_unknown(field.payload_expr.as_ref(), raw),
             payload_expansion: None,
             raw_signature: field.payload_type.clone(),
             description: field.description.clone(),
