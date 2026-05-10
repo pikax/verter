@@ -1,15 +1,14 @@
 /**
- * Phase 4 Test #7 — Audit record emitted exactly once per call.
+ * Audit record emitted exactly once per call.
  *
- * Plan §6.4 row 7: every public host method emits exactly ONE
- * `RequestAuditRecord` per audited call (per §17.1.1). Calling
- * `resolveSymbol` once produces one record; calling it again
- * increments the audit-store record count by one (not zero, not
- * two).
+ * Every public host method emits exactly ONE `RequestAuditRecord`
+ * per audited call. Calling `resolveSymbol` once produces one
+ * record; calling it again increments the audit-store record count
+ * by one (not zero, not two).
  *
- * REGRESSION — discriminates against pre-Phase 4 substrate that did
- * not finalise the registration / publish to the records store
- * exactly once.
+ * REGRESSION — discriminates against a substrate that fails to
+ * finalise the registration / publish to the records store exactly
+ * once.
  */
 
 import { describe, expect, it } from "vitest";

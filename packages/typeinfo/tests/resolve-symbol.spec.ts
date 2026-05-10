@@ -1,7 +1,7 @@
 /**
- * Phase 4 Test #2 — `TypeInfoSession.resolveSymbol`.
+ * `TypeInfoSession.resolveSymbol` mode contract.
  *
- * Mirrors the Phase 3 Rust `resolve_named_symbol_*` tests (§5.2):
+ * Mirrors the Rust `resolve_named_symbol_*` characterisation tests:
  *
  * - Identity mode never unwraps the alias shell.
  * - Generic carrier with `mode = undefined` defaults to Navigate
@@ -9,8 +9,8 @@
  * - Non-generic decl with `mode = undefined` defaults to Expanded
  *   (the alias body materialises in full).
  *
- * REGRESSION classification — discriminates the Phase 4 wiring
- * (resolveSymbolWithAudit + raise + nativeToDescriptor) from a
+ * REGRESSION — discriminates the wired
+ * resolveSymbolWithAudit + raise + nativeToDescriptor stack from a
  * stub.
  */
 

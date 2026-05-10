@@ -1,12 +1,12 @@
 /**
- * Phase 4 Test #6 — Structured `ImportSpec` round-trip.
+ * Structured `ImportSpec` round-trip through `evaluateTypeExpressionWithAudit`.
  *
- * Plan §6.4 row 6: submit a structured import (`{ specifier: 'foo',
- * bindings: [{ kind: 'named', exportedName: 'X', localAlias: 'Y',
- * typeOnly: true }] }`) and verify the resolved expression sees `Y`
- * as an imported alias of `X`.
+ * Submitting a structured import (`{ specifier: 'foo', bindings:
+ * [{ kind: 'named', exportedName: 'X', localAlias: 'Y', typeOnly:
+ * true }] }`) MUST produce a resolved expression that sees `Y` as
+ * an imported alias of `X`.
  *
- * REGRESSION — discriminating against pre-Phase 4 substrate where
+ * REGRESSION — discriminating against a substrate where
  * `evaluateTypeExpressionWithAudit` either does not exist or does
  * not lower structured `ImportSpec` payloads correctly.
  */
@@ -17,8 +17,8 @@ import { TypeInfoSession } from "../src/index.js";
 
 describe("typeinfo evaluate with structured ImportSpec", () => {
   it("named-import with localAlias + typeOnly resolves the renamed symbol", () => {
-    // Mirrors the Rust `evaluate_with_extra_imports` characterisation
-    // test (Phase 3 §5.3). Synthetic scratch URIs cannot follow
+    // Mirrors the Rust `evaluate_with_extra_imports`
+    // characterisation test. Synthetic scratch URIs cannot follow
     // relative-path resolution from the workspace root, so callers
     // pass workspace-rooted specifiers in `extraImports`.
     const session = new TypeInfoSession({ root: "/fixtures" });

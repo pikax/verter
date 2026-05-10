@@ -1,13 +1,13 @@
 /**
- * Phase 4 Test #1 — `TypeInfoSession.listSymbols`.
+ * `TypeInfoSession.listSymbols` invariant.
  *
- * Mirrors the Phase 3 Rust `list_file_symbols_*` characterisation
- * tests (§5.1): a fixture with type aliases + interfaces + enums
- * surfaces every declaration with the right `kind` and `isExported`
- * flag through the JS API.
+ * Mirrors the Rust `list_file_symbols_*` characterisation tests:
+ * a fixture with type aliases + interfaces + enums surfaces every
+ * declaration with the right `kind` and `isExported` flag through
+ * the JS API.
  *
- * REGRESSION classification — fails against any pre-Phase 4
- * substrate that is missing the `listSymbols` NAPI method.
+ * REGRESSION — fails against any substrate missing the `listSymbols`
+ * NAPI method.
  */
 
 import { describe, expect, it } from "vitest";

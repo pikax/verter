@@ -1,14 +1,12 @@
 /**
- * Phase 4 Test #5 — Scratch-cache LRU eviction.
+ * Scratch-cache LRU eviction invariant.
  *
- * Plan §6.4 row 5: configure `evaluateTypeExpressionCacheSize: 3`,
- * run 4 distinct expressions, verify the 1st is no longer cached
- * (re-issuing it produces a cold compute). Discriminating against
- * a no-op LRU stub.
+ * Configure `evaluateTypeExpressionCacheSize: 3`, run 4 distinct
+ * expressions, verify the 1st is no longer cached (re-issuing it
+ * produces a cold compute). Discriminating against a no-op LRU stub.
  *
  * The signal is the audit record's `fromCache` flag — `true` on a
- * warm-cache hit, `false` on a cold compute. The plan §5.3 contract
- * guarantees the flag flips correctly.
+ * warm-cache hit, `false` on a cold compute.
  *
  * REGRESSION classification.
  */

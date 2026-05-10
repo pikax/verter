@@ -1,15 +1,14 @@
 /**
- * Phase 4 Test #4 — Architecture guard.
+ * Architecture guard — typeinfo dependency direction.
  *
- * Plan §6.4 row 4 (Claude P1-13 explicit body): the
- * `@verter/typeinfo` package MUST NOT depend on
+ * The `@verter/typeinfo` package MUST NOT depend on
  * `@verter/component-meta`. The dependency direction is
- * typeinfo (foundation) → component-meta (specialisation), never the
- * other way.
+ * typeinfo (foundation) → component-meta (specialisation), never
+ * the other way.
  *
- * REGRESSION — discriminating: the assertions FAIL pre-cutover
- * (when typeinfo would naturally have inherited from component-meta
- * by re-using its `nativeToDescriptor`) and PASS post-cutover.
+ * REGRESSION — discriminating: the assertions FAIL when typeinfo
+ * inherits from component-meta (e.g. by re-using its
+ * `nativeToDescriptor`).
  */
 
 import { readFileSync } from "node:fs";
