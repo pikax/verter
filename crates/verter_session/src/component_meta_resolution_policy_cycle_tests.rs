@@ -86,6 +86,7 @@ fn prop(name: &str, type_expr: TypeExpr) -> PropAnalysis {
         type_expr,
         type_expansion: None,
         raw_type: None,
+        raw_type_expr: None,
         required: false,
         has_default: false,
         default_value: None,

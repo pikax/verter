@@ -17662,6 +17662,7 @@ fn symbolic_budget_is_not_fatal_when_component_surface_exists() {
             type_expr: TypeExpr::Primitive(PrimitiveName::String),
             type_expansion: None,
             raw_type: Some("string".to_string()),
+            raw_type_expr: None,
             required: true,
             has_default: false,
             default_value: None,

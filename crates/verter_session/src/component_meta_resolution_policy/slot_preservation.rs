@@ -1,50 +1,28 @@
 //! Slot-binding indexed-access symbolic preservation (Issue #1, partial).
 //!
 //! Force the slot binding's `type_expr` back to the symbolic
-//! `IndexedAccess` shape encoded in `raw_type` when the indexed access
-//! transits through an imported declaration. The eager evaluator may
-//! have widened the access through an open `[k: string]: any` index
-//! signature; the navigable member-path contract is the better public
-//! surface.
+//! `IndexedAccess` shape encoded in the source-annotation typed form when
+//! the indexed access transits through an imported declaration. The eager
+//! evaluator may have widened the access through an open
+//! `[k: string]: any` index signature; the navigable member-path contract
+//! is the better public surface.
 
 use verter_type_expr::{LiteralValue, ObjectMember, TypeExpr};
 
 use super::core::{peel_paren, DeclLookup, PolicyCtx};
 
-/// Whether the slot binding's `raw_type` describes an indexed access that
-/// transits through an imported declaration. When true, the caller restores
-/// the symbolic form from `raw_type` and skips the expansion walk.
+/// Whether the slot binding's source-annotation typed form describes an
+/// indexed access that transits through an imported declaration. When
+/// true, the caller restores the symbolic form from the typed annotation
+/// and skips the expansion walk.
 pub(super) fn slot_binding_should_preserve_symbolic_raw_type(
-    raw_type: Option<&str>,
+    raw_type_expr: Option<&TypeExpr>,
     ctx: &mut PolicyCtx<'_, '_>,
 ) -> bool {
-    let Some(raw) = raw_type else {
+    let Some(expr) = raw_type_expr else {
         return false;
     };
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    let parsed = verter_type_expr_oxc::parse_type_annotation(trimmed);
-    raw_indexed_access_root_is_imported(&parsed, ctx)
-}
-
-/// Parse the slot binding's `raw_type` annotation back to a `TypeExpr`.
-/// Returns `None` for empty/missing raw types or when the parsed shape
-/// is not an `IndexedAccess` (only IndexedAccess is restored by the
-/// slot-binding guard).
-pub(super) fn parse_indexed_access_from_raw(raw_type: Option<&str>) -> Option<TypeExpr> {
-    let raw = raw_type?;
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let parsed = verter_type_expr_oxc::parse_type_annotation(trimmed);
-    if matches!(peel_paren(&parsed), TypeExpr::IndexedAccess { .. }) {
-        Some(parsed)
-    } else {
-        None
-    }
+    raw_indexed_access_root_is_imported(expr, ctx)
 }
 
 /// Returns true when `expr` is an `IndexedAccess` whose deref chain

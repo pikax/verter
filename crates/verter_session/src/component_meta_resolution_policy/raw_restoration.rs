@@ -1,4 +1,4 @@
-//! Restore symbolic *Props refs from the raw type annotation when the
+//! Restore symbolic *Props refs from the typed source-annotation when the
 //! evaluator has eagerly resolved them away.
 //!
 //! The deleted `imported_props_like_public_raw_type` helper used the raw
@@ -12,10 +12,12 @@ use verter_type_expr::TypeExpr;
 
 use super::core::{is_props_suffix, PolicyCtx};
 
-/// If the raw type annotation contains imported *Props refs that the
-/// evaluator eagerly resolved into structural shapes (e.g. `ButtonProps[]`
-/// became `Array<Object{href, disabled, label}>`), restore the symbolic
-/// form by parsing the raw type and confirming the parsed shape matches.
+/// If the user's source-annotation typed form contains imported *Props refs
+/// that the evaluator eagerly resolved into structural shapes (e.g.
+/// `ButtonProps[]` became `Array<Object{href, disabled, label}>`), restore
+/// the symbolic form by inspecting the typed annotation directly. The
+/// analyzer has already lowered the source annotation via `lower_ts_type`;
+/// this helper walks the typed form and never reparses text.
 ///
 /// **Only fires for COMPOUND raw types** — bare `Ref(*Props)` raw types
 /// are left to the upstream `merge_evaluated_prop_types_into_meta` policy
@@ -28,26 +30,21 @@ use super::core::{is_props_suffix, PolicyCtx};
 /// Returns `true` if the type_expr was rewritten.
 pub(super) fn restore_props_suffix_from_raw(
     type_expr: &mut TypeExpr,
-    raw_type: Option<&str>,
+    raw_type_expr: Option<&TypeExpr>,
     ctx: &mut PolicyCtx<'_, '_>,
 ) -> bool {
-    let Some(raw) = raw_type else {
+    let Some(parsed) = raw_type_expr else {
         return false;
     };
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    let parsed = verter_type_expr_oxc::parse_type_annotation(trimmed);
 
     // Bare Props-suffix Refs stay deferred to the bare-Ref merge escape
     // hatch — see doc comment.
-    if is_bare_props_suffix_ref(&parsed) {
+    if is_bare_props_suffix_ref(parsed) {
         return false;
     }
 
     let mut props_refs: Vec<(Arc<str>, usize)> = Vec::new();
-    collect_props_suffix_refs(&parsed, &mut props_refs);
+    collect_props_suffix_refs(parsed, &mut props_refs);
     if props_refs.is_empty() {
         return false;
     }
@@ -76,7 +73,7 @@ pub(super) fn restore_props_suffix_from_raw(
         return false;
     }
 
-    *type_expr = parsed;
+    *type_expr = parsed.clone();
     true
 }
 

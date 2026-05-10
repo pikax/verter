@@ -46,9 +46,7 @@ mod slot_preservation;
 
 use self::core::{rewrite_in_place, PolicyCtx, PolicyRegistry};
 use self::raw_restoration::restore_props_suffix_from_raw;
-use self::slot_preservation::{
-    parse_indexed_access_from_raw, slot_binding_should_preserve_symbolic_raw_type,
-};
+use self::slot_preservation::slot_binding_should_preserve_symbolic_raw_type;
 
 /// Apply the publication policy to `analysis`, rewriting public type surfaces
 /// in place per the rules in
@@ -88,7 +86,8 @@ pub fn apply_component_meta_resolution_policy(
         // resolved away. The deleted `imported_props_like_public_raw_type`
         // helper used the raw type annotation as the canonical form for
         // *Props imports — re-instate that contract before the rule walk.
-        if restore_props_suffix_from_raw(&mut prop.type_expr, prop.raw_type.as_deref(), &mut ctx) {
+        if restore_props_suffix_from_raw(&mut prop.type_expr, prop.raw_type_expr.as_ref(), &mut ctx)
+        {
             changed = true;
         }
         if rewrite_in_place(&mut prop.type_expr, &mut ctx) {
@@ -110,11 +109,17 @@ pub fn apply_component_meta_resolution_policy(
             // access through an open `[k: string]: any` index
             // signature; the consumer is better served by the
             // navigable `AppProps['avatar']` member-path contract.
-            if slot_binding_should_preserve_symbolic_raw_type(binding.raw_type.as_deref(), &mut ctx)
-            {
-                if let Some(restored) = parse_indexed_access_from_raw(binding.raw_type.as_deref()) {
-                    if binding.type_expr != restored {
-                        binding.type_expr = restored;
+            if slot_binding_should_preserve_symbolic_raw_type(
+                binding.raw_type_expr.as_ref(),
+                &mut ctx,
+            ) {
+                // The guard already confirmed the typed annotation is an
+                // `IndexedAccess` whose root resolves through an imported
+                // declaration; restore that exact shape onto the public
+                // surface (it's necessarily `Some` here).
+                if let Some(restored) = binding.raw_type_expr.as_ref() {
+                    if &binding.type_expr != restored {
+                        binding.type_expr = restored.clone();
                         changed = true;
                     }
                 }
@@ -122,7 +127,7 @@ pub fn apply_component_meta_resolution_policy(
             }
             if restore_props_suffix_from_raw(
                 &mut binding.type_expr,
-                binding.raw_type.as_deref(),
+                binding.raw_type_expr.as_ref(),
                 &mut ctx,
             ) {
                 changed = true;
@@ -145,7 +150,7 @@ pub fn apply_component_meta_resolution_policy(
     for accepted in analysis.accepted_props.iter_mut() {
         if restore_props_suffix_from_raw(
             &mut accepted.type_expr,
-            accepted.raw_type.as_deref(),
+            accepted.raw_type_expr.as_ref(),
             &mut ctx,
         ) {
             changed = true;

@@ -152,6 +152,13 @@ pub struct PropAnalysis {
     pub type_expansion: Option<crate::analysis::type_expand::ExpansionMetadata>,
     /// Original annotation text from the source.
     pub raw_type: Option<String>,
+    /// Lowered TypeExpr companion of `raw_type` — the typed form of the
+    /// user's source annotation, populated by the analyzer's `lower_ts_type`
+    /// pass. Consumers (e.g. publication policy) walk this directly instead
+    /// of reparsing `raw_type` text. `None` when the chosen `raw_type` came
+    /// from a backend's textual rendering (no typed companion available)
+    /// or when the source had no annotation.
+    pub raw_type_expr: Option<TypeExpr>,
     pub required: bool,
     pub has_default: bool,
     pub default_value: Option<String>,
@@ -189,6 +196,10 @@ pub struct SlotBindingAnalysis {
     pub type_expr: TypeExpr,
     pub type_expansion: Option<crate::analysis::type_expand::ExpansionMetadata>,
     pub raw_type: Option<String>,
+    /// Lowered TypeExpr companion of `raw_type` — the typed form of the
+    /// user's source annotation for this binding. See
+    /// [`PropAnalysis::raw_type_expr`] for the contract.
+    pub raw_type_expr: Option<TypeExpr>,
 }
 
 /// Analyzed model from `defineModel`.
@@ -657,6 +668,10 @@ pub struct AcceptedPropAnalysis {
     pub name: String,
     pub type_expr: TypeExpr,
     pub raw_type: Option<String>,
+    /// Lowered TypeExpr companion of `raw_type` — the typed form of the
+    /// user's source annotation for this accepted prop. See
+    /// [`PropAnalysis::raw_type_expr`] for the contract.
+    pub raw_type_expr: Option<TypeExpr>,
     pub required: bool,
     pub provenance: MemberProvenance,
     pub availability: MemberAvailability,
@@ -1399,6 +1414,11 @@ fn extract_props_from_macro(
                     source_field.and_then(|prop| prop.type_annotation.as_deref()),
                     field.optional,
                 );
+                let raw_type_expr = raw_type_expr_from_source_annotation(
+                    raw_type.as_deref(),
+                    source_field.and_then(|prop| prop.type_annotation.as_deref()),
+                    source_field.and_then(|prop| prop.type_expr.as_ref()),
+                );
                 let type_expr = prefer_symbolic_prop_type_expr(
                     &field.ty,
                     source_field.and_then(|prop| prop.type_expr.as_ref()),
@@ -1414,6 +1434,7 @@ fn extract_props_from_macro(
                     type_expr,
                     type_expansion,
                     raw_type,
+                    raw_type_expr,
                     required: !field.optional && !has_default,
                     has_default,
                     default_value,
@@ -1436,20 +1457,28 @@ fn extract_props_from_macro(
             .get(field.name.as_str())
             .map(|v| v.to_string());
 
+        let raw_type = prop_raw_type_from_evaluated_and_source(
+            evaluated.and_then(|eval| {
+                eval.props
+                    .iter()
+                    .find(|candidate| candidate.name == field.name)
+                    .and_then(|candidate| candidate.raw_type.as_deref())
+            }),
+            field.type_annotation.as_deref(),
+            field.is_optional,
+        );
+        let raw_type_expr = raw_type_expr_from_source_annotation(
+            raw_type.as_deref(),
+            field.type_annotation.as_deref(),
+            field.type_expr.as_ref(),
+        );
+
         out.push(PropAnalysis {
             name: field.name.clone(),
             type_expr,
             type_expansion,
-            raw_type: prop_raw_type_from_evaluated_and_source(
-                evaluated.and_then(|eval| {
-                    eval.props
-                        .iter()
-                        .find(|candidate| candidate.name == field.name)
-                        .and_then(|candidate| candidate.raw_type.as_deref())
-                }),
-                field.type_annotation.as_deref(),
-                field.is_optional,
-            ),
+            raw_type,
+            raw_type_expr,
             required: !field.is_optional && !has_default,
             has_default,
             default_value,
@@ -1494,11 +1523,16 @@ fn extract_props_from_macro(
             let (description, tags) =
                 jsdoc_for_expanded_prop(None, canonical_source, field.name.as_str());
 
+            // No source field reachable from this branch (`source_field`
+            // was None in `jsdoc_for_expanded_prop`); the chosen raw_type
+            // came from the evaluator's textual rendering, which has no
+            // typed companion.
             out.push(PropAnalysis {
                 name: field.name.clone(),
                 type_expr,
                 type_expansion,
                 raw_type,
+                raw_type_expr: None,
                 required: !field.optional && !has_default,
                 has_default,
                 default_value,
@@ -1718,6 +1752,28 @@ fn prop_raw_type_from_evaluated_and_source(
     _is_optional: bool,
 ) -> Option<String> {
     symbolic_type_from_evaluated_and_source(evaluated_raw_type, source_annotation)
+}
+
+/// Compute the typed companion `raw_type_expr` for a `PropAnalysis` /
+/// `SlotBindingAnalysis` / `AcceptedPropAnalysis` when the chosen `raw_type`
+/// text equals the user's source annotation text. The analyzer's
+/// `lower_ts_type` pass already produced the typed form for the source
+/// annotation; consumers walk that directly instead of reparsing the text.
+///
+/// Returns `None` when the chosen `raw_type` came from a backend's textual
+/// rendering (no typed companion available) or when the source had no
+/// typed sidecar populated.
+fn raw_type_expr_from_source_annotation(
+    chosen_raw_type: Option<&str>,
+    source_annotation: Option<&str>,
+    source_type_expr: Option<&TypeExpr>,
+) -> Option<TypeExpr> {
+    let chosen = chosen_raw_type?.trim();
+    let source = source_annotation?.trim();
+    if chosen.is_empty() || source.is_empty() || chosen != source {
+        return None;
+    }
+    source_type_expr.cloned()
 }
 
 fn symbolic_type_from_evaluated_and_source(
@@ -2410,19 +2466,26 @@ fn extract_slots_from_macro(
                     let raw = b.type_annotation.as_deref().unwrap_or("unknown");
                     (typed_or_unknown(b.binding_expr.as_ref(), raw), None)
                 };
+                let raw_type = evaluated
+                    .and_then(|eval| {
+                        let key = format!("{}.{}", field.name, b.name);
+                        eval.slot_bindings
+                            .iter()
+                            .find(|candidate| candidate.name == key)
+                            .and_then(|candidate| candidate.raw_type.clone())
+                    })
+                    .or_else(|| b.type_annotation.clone());
+                let raw_type_expr = raw_type_expr_from_source_annotation(
+                    raw_type.as_deref(),
+                    b.type_annotation.as_deref(),
+                    b.binding_expr.as_ref(),
+                );
                 SlotBindingAnalysis {
                     name: b.name.clone(),
                     type_expr,
                     type_expansion,
-                    raw_type: evaluated
-                        .and_then(|eval| {
-                            let key = format!("{}.{}", field.name, b.name);
-                            eval.slot_bindings
-                                .iter()
-                                .find(|candidate| candidate.name == key)
-                                .and_then(|candidate| candidate.raw_type.clone())
-                        })
-                        .or_else(|| b.type_annotation.clone()),
+                    raw_type,
+                    raw_type_expr,
                 }
             })
             .collect();
@@ -2577,6 +2640,9 @@ fn expanded_slot_bindings(
             .filter(|field| field.name.starts_with(&format!("{slot_name}.")))
             .map(|field| {
                 let type_expansion = field_expansion_metadata(field);
+                // Evaluator-only path: no source-annotation typed companion
+                // is available — the chosen raw_type came from the
+                // backend's textual rendering.
                 SlotBindingAnalysis {
                     name: field
                         .name
@@ -2596,6 +2662,7 @@ fn expanded_slot_bindings(
                     ),
                     type_expansion: Some(type_expansion),
                     raw_type: field.raw_type.clone(),
+                    raw_type_expr: None,
                 }
             })
             .collect()
@@ -2658,6 +2725,7 @@ fn merge_slot_bindings_with_source(
                     type_expr: typed_or_unknown(binding.binding_expr.as_ref(), raw),
                     type_expansion: None,
                     raw_type: binding.type_annotation.clone(),
+                    raw_type_expr: binding.binding_expr.clone(),
                 }
             })
             .collect();
@@ -2780,6 +2848,7 @@ fn collect_slot_bindings_from_object_type(
                     type_expr: prop.ty.clone(),
                     type_expansion: type_expansion.clone(),
                     raw_type: None,
+                    raw_type_expr: None,
                 });
             }
         }
@@ -2944,6 +3013,9 @@ fn synthesize_model_prop_and_event(
         existing_prop.required = !has_default && !is_optional;
         existing_prop.has_default |= has_default;
     } else {
+        // `defineModel` synthesizes the prop from the model declaration —
+        // there is no separate user prop annotation to lower, so the
+        // typed companion is unset.
         props.push(PropAnalysis {
             name: name.clone(),
             type_expr: prop_type_expr.clone(),
@@ -2954,6 +3026,7 @@ fn synthesize_model_prop_and_event(
                     .map(field_expansion_metadata)
             }),
             raw_type: raw_type.clone(),
+            raw_type_expr: None,
             required: !has_default && !is_optional,
             has_default,
             default_value: None,
@@ -3300,6 +3373,10 @@ fn extract_props_from_options(opts: &AnalyzedOptionsApi, out: &mut Vec<PropAnaly
                 .unwrap_or_else(|| unknown_type("unknown".to_string())),
             type_expansion: None,
             raw_type,
+            // Options API path: `AnalyzedOptionsProp` carries only the
+            // text annotation, no typed sidecar — leave the companion
+            // unset.
+            raw_type_expr: None,
             required: prop.is_required,
             has_default: prop.has_default,
             default_value: prop.default_value.clone(),

@@ -8464,21 +8464,6 @@ mod typed_ir_resolver_guards {
     // -----------------------------------------------------------------------
     const PARSE_TYPE_ANNOTATION_ALLOWLIST: &[(&str, u32, &str)] = &[
         (
-            "crates/verter_session/src/component_meta_resolution_policy/raw_restoration.rs",
-            41,
-            "parse_type_annotation",
-        ),
-        (
-            "crates/verter_session/src/component_meta_resolution_policy/slot_preservation.rs",
-            28,
-            "parse_type_annotation",
-        ),
-        (
-            "crates/verter_session/src/component_meta_resolution_policy/slot_preservation.rs",
-            42,
-            "parse_type_annotation",
-        ),
-        (
             "crates/verter_session/src/host_manage/component_meta_extract.rs",
             257,
             "parse_type_annotation",

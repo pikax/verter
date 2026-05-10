@@ -488,6 +488,10 @@ pub fn merge_fallthrough_branches(
                             name: prop.name.clone(),
                             type_expr: prop.type_expr.clone(),
                             raw_type: prop.raw_type.clone(),
+                            // Inherited fallthrough props lose their
+                            // origin source-annotation typed companion;
+                            // they only carry the resolved type_expr.
+                            raw_type_expr: None,
                             required: false,
                             provenance: MemberProvenance::Inherited {
                                 sources: prop.sources.clone(),
@@ -613,6 +617,7 @@ pub fn resolve_fallthrough_surface<H: FallthroughComputeHost>(
             name: prop.name.clone(),
             type_expr: prop.type_expr.clone(),
             raw_type: prop.raw_type.clone(),
+            raw_type_expr: prop.raw_type_expr.clone(),
             required: prop.required,
             provenance: MemberProvenance::Declared,
             availability: MemberAvailability::Always,
@@ -1588,6 +1593,7 @@ mod tests {
                     name: "title".to_string(),
                     type_expr: TypeExpr::primitive(PrimitiveName::String),
                     raw_type: Some("string".to_string()),
+                    raw_type_expr: None,
                     required: false,
                     provenance: MemberProvenance::Declared,
                     availability: MemberAvailability::Always,
@@ -1967,6 +1973,7 @@ mod tests {
                     name: "id".to_string(),
                     type_expr: TypeExpr::primitive(PrimitiveName::String),
                     raw_type: Some("string".to_string()),
+                    raw_type_expr: None,
                     required: false,
                     provenance: MemberProvenance::Declared,
                     availability: MemberAvailability::Always,

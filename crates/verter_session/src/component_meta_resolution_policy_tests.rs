@@ -5,7 +5,7 @@ use std::sync::Arc;
 use verter_semantic::analysis::component_meta::{
     AcceptedSurfaceCompleteness, ComponentMetaAnalysis, ComponentMetaFlags, FallthroughSurface,
     NoFallthroughReason, PropAnalysis, PublicInstanceAnalysis, PublicInstanceCompleteness,
-    ResolvedTypeAnalysis, RootReachability,
+    ResolvedTypeAnalysis, RootReachability, SlotAnalysis, SlotBindingAnalysis,
 };
 use verter_type_expr::{
     LiteralValue, ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr,
@@ -68,6 +68,7 @@ fn prop(name: &str, type_expr: TypeExpr) -> PropAnalysis {
         type_expr,
         type_expansion: None,
         raw_type: None,
+        raw_type_expr: None,
         required: false,
         has_default: false,
         default_value: None,
@@ -387,5 +388,157 @@ fn pass_does_not_touch_public_instance_when_no_rewrite() {
         format!("{:?}", meta.public_instance),
         format!("{:?}", before),
         "no-op policy must not rewrite public_instance"
+    );
+}
+
+// W2.4 discriminating fixtures ───────────────────────────────────────────
+//
+// Locks down the typed-IR-only contract for the two policy helpers
+// `restore_props_suffix_from_raw` and `slot_binding_should_preserve_symbolic_raw_type`.
+// Both helpers consume `Option<&TypeExpr>` (the analyzer's lowered
+// source-annotation typed form) — never the raw text.
+//
+// These tests intentionally pass `raw_type_expr: Some(...)` while
+// leaving `raw_type: None` — that combination would not type-check
+// against the pre-W2.4 signature (`Option<&str>`), so the test FAILS
+// pre-cutover by construction and PASSES post-cutover.
+
+#[test]
+fn w2_4_restore_props_suffix_from_typed_annotation_replaces_eager_object() {
+    // Resolved `type_expr` is the eagerly-expanded Object body (the
+    // evaluator inlined `ButtonProps` into `{ label: string }`); the
+    // typed source annotation is the symbolic `Array<ButtonProps>` the
+    // user wrote. Policy must restore the symbolic form.
+    let mut meta = empty_meta();
+
+    let eager_array = TypeExpr::Array {
+        element: Arc::new(object_with_property(
+            "label",
+            TypeExpr::Primitive(PrimitiveName::String),
+        )),
+        readonly: false,
+    };
+    let symbolic_array = TypeExpr::Array {
+        element: Arc::new(ref_zero("ButtonProps")),
+        readonly: false,
+    };
+
+    meta.props.push(PropAnalysis {
+        name: "actions".to_string(),
+        type_expr: eager_array,
+        type_expansion: None,
+        raw_type: None,
+        // `raw_type_expr` is the typed form of the user's source
+        // annotation, lowered by the analyzer's `lower_ts_type` pass.
+        raw_type_expr: Some(symbolic_array.clone()),
+        required: false,
+        has_default: false,
+        default_value: None,
+        description: None,
+        tags: vec![],
+    });
+
+    // `ButtonProps` lives in an imported file — the policy needs
+    // canonical_source != owner_canonical to fire.
+    let registry = vec![registry_entry(
+        "ButtonProps",
+        object_with_property("label", TypeExpr::Primitive(PrimitiveName::String)),
+    )];
+    let registry_meta = vec![meta_entry("ButtonProps", "/workspace/button.ts")];
+
+    run_policy(&mut meta, &registry, &registry_meta);
+
+    // The resolved `type_expr` was rewritten back to the symbolic
+    // `Array<ButtonProps>` — the policy walked the typed annotation
+    // directly without ever stringifying it.
+    assert_eq!(
+        meta.props[0].type_expr, symbolic_array,
+        "restore_props_suffix_from_raw should rewrite eager Array<{{label}}> back to typed Array<ButtonProps>"
+    );
+    // Negative assertion: the resolved form must not contain a literal
+    // Object body — that would mean the symbolic restore was bypassed.
+    let TypeExpr::Array { element, .. } = &meta.props[0].type_expr else {
+        panic!("expected Array; got {:?}", meta.props[0].type_expr);
+    };
+    assert!(
+        matches!(
+            element.as_ref(),
+            TypeExpr::Ref { name, type_arguments }
+                if name.as_ref() == "ButtonProps" && type_arguments.is_empty()
+        ),
+        "Array element must be the symbolic ButtonProps ref, not an inlined Object; got {:?}",
+        element,
+    );
+}
+
+#[test]
+fn w2_4_slot_binding_preserve_typed_indexed_access_via_imported_root() {
+    // Slot binding's `type_expr` was widened by the evaluator to
+    // `unknown`; the typed source annotation is the symbolic
+    // `AppProps['avatar']`. The root `AppProps` lives in an imported
+    // file and its `avatar` property type contains an imported `Avatar`
+    // ref — the policy guard's "imported root" condition holds. The
+    // typed annotation is restored verbatim.
+    let mut meta = empty_meta();
+
+    let symbolic_indexed = TypeExpr::IndexedAccess {
+        object: Arc::new(ref_zero("AppProps")),
+        index: Arc::new(TypeExpr::Literal(LiteralValue::String(
+            "avatar".to_string(),
+        ))),
+    };
+
+    meta.slots.push(SlotAnalysis {
+        name: "default".to_string(),
+        is_scoped: true,
+        bindings: vec![SlotBindingAnalysis {
+            name: "avatar".to_string(),
+            // Eagerly widened to `unknown` by the evaluator.
+            type_expr: TypeExpr::Unknown {
+                raw: "unknown".to_string(),
+            },
+            type_expansion: None,
+            raw_type: None,
+            // The typed source annotation walks the symbolic indexed
+            // access; the post-W2.4 helper inspects this directly.
+            raw_type_expr: Some(symbolic_indexed.clone()),
+        }],
+        is_required: false,
+        return_type: None,
+        description: None,
+        tags: vec![],
+    });
+
+    // `AppProps.avatar: Avatar`; both `AppProps` and `Avatar` live in
+    // imported files — the guard's imported-root + imported-leaf
+    // condition holds.
+    let registry = vec![
+        registry_entry(
+            "AppProps",
+            object_with_property("avatar", ref_zero("Avatar")),
+        ),
+        registry_entry(
+            "Avatar",
+            object_with_property("url", TypeExpr::Primitive(PrimitiveName::String)),
+        ),
+    ];
+    let registry_meta = vec![
+        meta_entry("AppProps", "/workspace/app.ts"),
+        meta_entry("Avatar", "/workspace/avatar.ts"),
+    ];
+
+    run_policy(&mut meta, &registry, &registry_meta);
+
+    let binding = &meta.slots[0].bindings[0];
+    assert_eq!(
+        binding.type_expr, symbolic_indexed,
+        "slot_binding_should_preserve_symbolic_raw_type should restore the symbolic IndexedAccess from raw_type_expr"
+    );
+    // Negative assertion: the binding must not stay `Unknown` — that
+    // would mean the typed-IR guard never fired.
+    assert!(
+        !matches!(&binding.type_expr, TypeExpr::Unknown { .. }),
+        "binding.type_expr must not remain Unknown after preservation; got {:?}",
+        binding.type_expr,
     );
 }
