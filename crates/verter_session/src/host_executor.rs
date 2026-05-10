@@ -54,7 +54,7 @@ impl SnapshotData for HostSourceData {
 /// are never mutated after construction, so Arc sharing across all `get_analysis()`
 /// calls is safe and avoids repeated cloning.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Fields read in the prior cutoverA get_analysis migration
+#[allow(dead_code)] // Fields are part of the get_analysis surface.
 pub struct AnalysisArcs {
     pub(crate) module_references: Arc<Vec<verter_semantic::analysis::AnalyzedModuleReference>>,
     pub(crate) macros: Arc<Vec<verter_semantic::analysis::AnalyzedMacro>>,
@@ -91,7 +91,7 @@ impl AnalysisArcs {
 /// Contains real script analysis, export signatures, style analyses, and
 /// pre-computed Arc-wrapped analysis fields for cheap sharing.
 #[derive(Debug)]
-#[allow(dead_code)] // arcs field read in the prior cutoverA get_analysis migration
+#[allow(dead_code)] // arcs field is part of the get_analysis surface.
 pub struct HostAnalysisData {
     pub(crate) script_analysis: verter_semantic::analysis::ScriptAnalysisSnapshot,
     pub(crate) export_signatures: Vec<verter_semantic::analysis::ExportSignature>,

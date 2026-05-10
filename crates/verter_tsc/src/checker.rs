@@ -182,8 +182,8 @@ fn generate_all_tsx(vue_files: &[PathBuf], temp_dir: &Path) -> Vec<(PathBuf, Str
 /// Declaration-generation stage: generate minimal TSC declaration output for every `.vue` file in parallel.
 ///
 /// Uses the host-backed public API path so imported macro types resolve the same
-/// way they do in the IDE. Accepts a shared `VerterHost` (files already upserted
-/// in the prior cutover) to avoid duplicate work.
+/// way they do in the IDE. Accepts a shared `VerterHost` whose files have
+/// already been upserted by the caller, to avoid duplicate work.
 /// Returns `(vue_path, tsc_code, tsc_tsx_path)` tuples written to `temp_dir`.
 fn generate_all_tsc(
     host: &VerterHost,

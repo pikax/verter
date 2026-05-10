@@ -173,7 +173,7 @@ pub fn resolved_macro_to_expansion(macro_meta: &ResolvedMacroMeta) -> TypeExpans
 }
 
 // ---------------------------------------------------------------------------
-// Solver-backed type expansion (M6 cutover path)
+// Solver-backed type expansion
 // ---------------------------------------------------------------------------
 
 /// Expand a resolved macro's type annotations through the new native solver.

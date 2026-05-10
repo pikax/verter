@@ -6,10 +6,6 @@
 //! (`verter_session::component_meta_audit::session_vfs_sink::SessionVfsSink`)
 //! registers one sink per audited request and filters events by
 //! `request_id`.
-//!
-//! This replaces the legacy file-based component-meta trace that lived
-//! in `filesystem.rs`. The clean-cut rule requires the legacy trace
-//! to be deleted in the same work-unit that lands the sink registry.
 
 use std::sync::Arc;
 

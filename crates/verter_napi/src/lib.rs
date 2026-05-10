@@ -2717,12 +2717,10 @@ fn build_selector_match_results(
 // =============================================================================
 // host-backed batch compile (NAPI surface)
 //
-// Replaces the previous free-fn `compileBatch` (Rayon-direct,
-// stateless, bypassing VerterHost). The new entry point is the
-// `NapiVerterHost::compile_many` instance method, which routes
-// through the host's scheduler + dispatch + compile_cache and
-// preserves the read/parse/process-once invariant. See sub-plan
-// `D:/tmp/verter-architecture-cutover-.md` §3.4.
+// `NapiVerterHost::compile_many` is the canonical batch-compile
+// entry point. It routes through the host's scheduler + dispatch +
+// compile_cache and preserves the read/parse/process-once
+// invariant.
 // =============================================================================
 
 use verter_session::host_compile;

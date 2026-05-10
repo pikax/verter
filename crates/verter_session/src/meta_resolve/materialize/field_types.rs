@@ -18,13 +18,6 @@
 use crate::instant::Instant;
 
 use super::super::dep_signature::accumulate_dispatch_dep_signature;
-// `request_host` source moved to
-// `host_manage/component_meta_request_impl.rs`. Import rewritten to
-// the new home.
-
-// `component_meta_registry_should_keep_raw_symbolic_non_object_alias`
-// and `preserve_package_backed_symbolic_refs_node` live in the
-// `registry_materialize` sibling.
 use super::super::registry_materialize::preserve_package_backed_symbolic_refs_node;
 
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
@@ -45,23 +38,20 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable(
 
 /// Materialize a `TypeExpr` and return both the result and the
 /// producing `SemanticNodeId` + accumulated dep_signature
-/// ([`MaterializedTypeExpr`]; D31 / D32). Sidecar-capture call sites
-/// (Step 9 surface-id propagation) read `.node_id`; the session merges
-/// `.dep_signature` into `ResolvedComponentMetaState.fact_versions`
-/// before publish (Step 6.6.A).
+/// ([`MaterializedTypeExpr`]). Sidecar-capture call sites read
+/// `.node_id`; the session merges `.dep_signature` into
+/// `ResolvedComponentMetaState.fact_versions` before publish.
 ///
 /// The main entry [`materialize_component_meta_type_expr_until_stable`]
 /// remains for callers that need only the `TypeExpr` shell — it
 /// delegates here and discards `node_id` / `dep_signature`.
 ///
-/// **Body (Step 1.5 final cutover):** the legacy owner-vs-imported
-/// scope reconciliation has been removed. Materialization now flows
-/// entirely through dispatch:
-/// `shallow_lower_type_expr` → `raise_and_reduce(mode)`. Step 1.5
-/// closed the three substitution-parity gaps that previously required
-/// the legacy walker fallback (Pick<X,K>['member'] indexed access,
-/// mapped+conditional `infer P` per-key reduction, and method
-/// signatures used as `IndexedAccess` bases).
+/// Materialization flows entirely through dispatch:
+/// `shallow_lower_type_expr` → `raise_and_reduce(mode)`. The dispatch
+/// covers the substitution-parity surfaces that drive the reducer
+/// (Pick<X,K>['member'] indexed access, mapped+conditional `infer P`
+/// per-key reduction, method signatures used as `IndexedAccess`
+/// bases).
 ///
 /// Per-request memoisation is preserved so repeat queries of the same
 /// `(scope, expr, mode)` triple within one component-meta request

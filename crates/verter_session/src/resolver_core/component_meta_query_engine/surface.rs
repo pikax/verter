@@ -1,11 +1,10 @@
 //! Surface-projection helpers, prepared-substitution machinery, and
-//! arc cache-key constructors extracted from
-//! `component_meta_query_engine/mod.rs` in the prior cutover.2.
+//! arc cache-key constructors used by `ComponentMetaQueryEngine`.
 //!
-//! These helpers are intentionally free functions (not engine methods).
-//! They operate on `TypeExpr` / `ProjectedSurface` values produced by
-//! the engine and dispatch layers and have no engine-state dependencies
-//! beyond a borrowed `VerterHost` reference.
+//! Free functions (not engine methods) that operate on
+//! `TypeExpr` / `ProjectedSurface` values produced by the engine and
+//! dispatch layers; no engine-state dependencies beyond a borrowed
+//! `VerterHost` reference.
 //!
 //! Cross-callers reach the public-API symbols here via the parent
 //! module's `pub(crate) use surface::{...};` re-export at the bottom of

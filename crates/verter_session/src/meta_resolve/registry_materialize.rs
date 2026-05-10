@@ -419,13 +419,11 @@ pub(crate) fn materialize_component_meta_registry_structural_expr(
     inner(expr, scope_canonical_id, engine, &mut active)
 }
 
-/// Graph-native predicate (former TypeExpr
-/// counterpart deleted in). Walks two parallel
-/// `SemanticNodeId` trees (materialised + raw) and, when the raw
-/// surface exposes a package-backed `DeclRef` / `InstantiationRef` at
-/// a given member, overrides the materialised member's value with
-/// the raw graph node so the symbolic Ref is preserved through
-/// materialisation.
+/// Graph-native predicate. Walks two parallel `SemanticNodeId`
+/// trees (materialised + raw) and, when the raw surface exposes a
+/// package-backed `DeclRef` / `InstantiationRef` at a given member,
+/// overrides the materialised member's value with the raw graph
+/// node so the symbolic Ref is preserved through materialisation.
 ///
 /// Mirrors the TypeExpr predicate's branch structure:
 ///

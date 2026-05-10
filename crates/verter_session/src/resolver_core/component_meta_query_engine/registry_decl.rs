@@ -1,11 +1,11 @@
 //! Imported registry symbol resolution, direct prepared declaration
 //! access, fuse/state/debug accessors, and ctx/dispatch entry helpers
-//! extracted from `component_meta_query_engine/mod.rs` in the prior cutover.5.
+//! for `ComponentMetaQueryEngine<'a>`.
 //!
-//! These methods are inherent methods on `ComponentMetaQueryEngine<'a>`
-//! defined in a sibling `impl<'a>` block; they read the engine's
-//! private read-through caches and dispatch to the ctx store, then
-//! return resolved declarations or imported registry symbols.
+//! Inherent methods defined in a sibling `impl<'a>` block; they read
+//! the engine's private read-through caches and dispatch to the ctx
+//! store, then return resolved declarations or imported registry
+//! symbols.
 //!
 //! Visibility:
 //! - `pub fn resolve_imported_registry_symbol`, `pub fn
@@ -134,11 +134,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         })
     }
 
-    /// Graph-native replacement for the deleted
-    /// legacy walker shim. Lowers `expr` to a `SemanticNodeId` via
-    /// Navigate, runs the materialiser, accumulates the dep_signature
-    /// into the per-request thread-local accumulator, and raises the
-    /// materialised node back to TypeExpr.
+    /// Graph-native member-surface materialiser. Lowers `expr` to a
+    /// `SemanticNodeId` via Navigate, runs the materialiser,
+    /// accumulates the dep_signature into the per-request thread-local
+    /// accumulator, and raises the materialised node back to TypeExpr.
     pub(crate) fn materialize_member_surface_expr(
         &mut self,
         scope_canonical_id: &str,
@@ -414,11 +413,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         self.imported_registry_symbols.borrow().len()
     }
 
-    /// The legacy walker's per-request
-    /// `materialized_member_surfaces` mirror is dead. Tests asking
-    /// for the materialiser's cache size now read the ctx-owned
-    /// `MaterializeStructureDb::live_count()` — the final-result
-    /// cache that the new structural materialiser publishes into.
+    /// Cache size for the structural materialiser's final-result
+    /// cache (ctx-owned `MaterializeStructureDb::live_count()`).
     #[cfg(test)]
     pub(crate) fn materialized_member_surface_cache_len(&self) -> usize {
         self.ctx

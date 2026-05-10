@@ -343,9 +343,8 @@ pub(crate) fn component_meta_ref_resolves_to_package_node(
     canonical_resolves_to_package(identity.canonical_id.as_ref())
 }
 
-/// Graph-native predicate (former TypeExpr
-/// counterpart deleted in). Returns `true` when the
-/// input node's shape requires member-route materialisation (i.e., a
+/// Graph-native predicate. Returns `true` when the input node's
+/// shape requires member-route materialisation (i.e., a
 /// non-package-backed reference target that has not been determined
 /// to participate in a transitive cycle).
 ///
@@ -559,12 +558,9 @@ pub(crate) fn node_has_non_object_top_level_surface(
     }
 }
 
-/// Graph-native predicate (former TypeExpr
-/// counterpart, defined inline inside
-/// the legacy macro-shape walker, deleted in
-///). Returns `true` when `node`'s shape allows the
-/// slot binding parameter to remain symbolic without eager
-/// materialisation.
+/// Graph-native predicate. Returns `true` when `node`'s shape
+/// allows the slot binding parameter to remain symbolic without
+/// eager materialisation.
 ///
 /// Mirrors the TypeExpr predicate's branch structure:
 ///
@@ -681,15 +677,14 @@ pub(crate) fn slot_binding_param_can_stay_symbolic_node(
 /// [`slot_binding_param_can_stay_symbolic_node`] to decide whether
 /// a property value warrants a materialisation pass. Mirrors the
 /// invariant that the synthesizer enumerates Object members directly
-/// and the rescue pass should not eagerly expand member values that
-/// the consumer can re-resolve from their symbolic form.
+/// and a materialisation pass should not eagerly expand member values
+/// that the consumer can re-resolve from their symbolic form.
 ///
 /// Depth-fused at 256 like the parent predicate.
 ///
-/// Currently orphaned — the only production call site lived inside
-/// the legacy the legacy macro-shape walker walker
-/// that the §7.1 per-macro projector cutover replaced. Retained
-/// because the helper is exercised by integration-test fixtures.
+/// Reachable only through `slot_binding_param_can_stay_symbolic_node`,
+/// which is exercised by the integration-test fixtures that
+/// characterise the stay-symbolic contract.
 #[allow(dead_code)]
 fn node_value_is_concrete_or_symbolic(
     ctx: &dyn ResolverContext,
@@ -740,16 +735,13 @@ fn node_value_is_concrete_or_symbolic(
     }
 }
 
-/// Graph-native predicate (former TypeExpr
-/// counterpart deleted in). Returns `true` when
-/// `node`'s route root resolves to a `/node_modules/`-rooted decl
-/// identity.
+/// Graph-native predicate. Returns `true` when `node`'s route root
+/// resolves to a `/node_modules/`-rooted decl identity.
 ///
 /// Mirrors the TypeExpr predicate's structural recursion:
 ///
 /// - `DeclRef` / `InstantiationRef` — terminal; checks root identity
-///   via [`component_meta_ref_resolves_to_package_node`] (commit C +
-///   §1.12).
+///   via [`component_meta_ref_resolves_to_package_node`].
 /// - `IndexedAccess { object, .. }` — recurses into `object` (matches
 ///   `TypeExpr::IndexedAccess { object, .. }`).
 /// - `Array { element, .. }` — recurses into `element` (matches
@@ -763,12 +755,10 @@ fn node_value_is_concrete_or_symbolic(
 /// - All other shapes — `false` (matches the TypeExpr `_` arm).
 ///
 /// `depth` is fused at 256 to bound runtime on pathological chains
-/// ( convention; matches
-/// [`has_complex_cycle_guard_surface_node`] etc.). On fuse the
-/// predicate returns `false`, matching the conservative legacy
-/// behaviour: a runaway recursion is treated as "not package-backed"
-/// so the caller does NOT short-circuit through the package-backed
-/// branch.
+/// (matches [`has_complex_cycle_guard_surface_node`] etc.). On fuse
+/// the predicate returns `false`: a runaway recursion is treated as
+/// "not package-backed" so the caller does NOT short-circuit through
+/// the package-backed branch.
 #[allow(dead_code)]
 pub(crate) fn type_node_has_package_backed_root(
     graph: &crate::semantic_query_memo::SemanticGraphStore,
@@ -1048,11 +1038,11 @@ pub(crate) fn bfs_compute_inner(
             // Cycle is reported when:
             //  (a) child == root (transitive cycle back to BFS root), OR
             //  (b) child == current (intermediate self-reference at this
-            //      decl — legacy parity: the legacy walker checked
-            //      `ref_name == name` against the CURRENT decl, not the
-            //      root). This catches fixtures where DotPathKeys's body
-            //      recursively references DotPathKeys via a complex
-            //      helper surface (canonical nuxt-ui DotPathKeys).
+            //      decl — match `ref_name == name` against the
+            //      CURRENT decl, not the root). This catches fixtures
+            //      where DotPathKeys's body recursively references
+            //      DotPathKeys via a complex helper surface (canonical
+            //      nuxt-ui DotPathKeys).
             if cycle_has_complex_signal
                 && (&child_identity == root_identity || child_identity == current_identity)
             {

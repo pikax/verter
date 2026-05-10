@@ -648,17 +648,15 @@ impl VerterHost {
                             expr: parsed.clone(),
                         })
                     } else {
-                        // Plan Step 1 / D1.7: dispatch-projection branch.
-                        // Lower the macro's parent shell once via dispatch
-                        // (using the cache-owned parsed_type_argument), then
-                        // project the closure's output_path off the lowered
-                        // base. On any failure (no parsed_type_argument,
-                        // empty output_path, lowering miss, projection
-                        // unknown, raise failed) emit a structured trace
-                        // event and fall back to symbolic preservation —
-                        // legacy walkers (project_expr_surface_expr /
-                        // lower_and_project_to_expanded) are no longer invoked from
-                        // this closure (their other callers retire in Step 2).
+                        // Dispatch-projection branch. Lower the macro's
+                        // parent shell once via dispatch (using the
+                        // cache-owned parsed_type_argument), then
+                        // project the closure's output_path off the
+                        // lowered base. On any failure (no
+                        // parsed_type_argument, empty output_path,
+                        // lowering miss, projection unknown, raise
+                        // failed) emit a structured trace event and
+                        // fall back to symbolic preservation.
                         use crate::project_semantic_dispatch::ProjectSemanticDispatch;
                         use crate::semantic_query::{
                             PathSegment as SemanticPathSegment, ProjectionMode, QueryResult,

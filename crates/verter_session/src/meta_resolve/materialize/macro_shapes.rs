@@ -1582,9 +1582,9 @@ pub(crate) fn produce_one_macro_object_shape(
             if let Some((def_canonical, def_name)) =
                 classify_named_ref_for_db_projection(query_engine, owner_canonical, name)
             {
-                // bridge the engine method via
-                // the per-engine helper so the §5.14.1 pre-flight
-                // gate sees zero external engine-method callers.
+                // Bridge the engine method via the per-engine helper
+                // so the pre-flight gate sees zero external
+                // engine-method callers.
                 if let Some(shape) = project_type_surface_shape_via_host_threaded(
                     query_engine,
                     &def_canonical,
@@ -1620,9 +1620,9 @@ pub(crate) fn produce_one_macro_object_shape(
             } else {
                 declaration.resolved_name.clone()
             };
-            // bridge the engine method via the
-            // per-engine helper so the §5.14.1 pre-flight gate sees
-            // zero external engine-method callers.
+            // Bridge the engine method via the per-engine helper so
+            // the pre-flight gate sees zero external engine-method
+            // callers.
             project_type_surface_expr_via_host_threaded(
                 query_engine,
                 defining_canonical.as_str(),
@@ -1638,37 +1638,32 @@ pub(crate) fn produce_one_macro_object_shape(
         }
         _ => None,
     };
-    // the retired solver's `owner_engine.solve` is gone.
     // Route through dispatch's surface projection + the dispatch-backed
-    // `deep_resolve_slot_function_refs` on CMQE (replacement for the
-    // retired solver-backed pass), treating the result as an
-    // exact-concrete SolverResult so `solver_result_to_object_expansion`
-    // still derives the expansion.
+    // `deep_resolve_slot_function_refs` on CMQE, treating the result
+    // as an exact-concrete SolverResult so
+    // `solver_result_to_object_expansion` still derives the expansion.
     let solver_result = scoped_solver_result.unwrap_or_else(|| {
-        // dispatch's surface projection is the sole
-        // solve path. Empty-path `ProjectPath` with mode Expanded now
-        // expands terminal DeclAnchors via `Instantiate(anchor, [])`
-        // so non-generic aliases (including namespace-qualified
+        // Dispatch's surface projection is the sole solve path.
+        // Empty-path `ProjectPath` with mode Expanded expands
+        // terminal DeclAnchors via `Instantiate(anchor, [])` so
+        // non-generic aliases (including namespace-qualified
         // `Types.Props` → `Props`) emit their body surface here.
         //
-        // route through `project_expr_class_a_via_dispatch_threaded`
+        // Route through `project_expr_class_a_via_dispatch_threaded`
         // so IndexedAccess chains (`WrappedConfig<Theme>['nested']['palette']`)
         // are decomposed into `(base_expr, [PathSegment::Index(...)])`
         // and dispatched as `ProjectPath { base, path, Expanded }`.
         // PathWalker threads the inner generic-substitution context
         // (`T → Theme`) consistently across hops via per-segment
-        // walking — closing the indexed-paths seed where the engine
-        // method's prepared-decl chain enumerated sibling members at
-        // each intermediate hop instead of following the requested
-        // path.
+        // walking, ensuring intermediate hops resolve the requested
+        // path rather than enumerating sibling members.
         //
         // This multi-macro-kind callsite routes through the bridge
         // helper `project_expr_class_a_via_dispatch_threaded`, which
         // threads `query_engine.ctx` so the request-local fuse +
         // scope-payload state stays load-bearing for `Partial<T>`
-        // optionality propagation across props/emits/slots in the same
-        // request. The bridge
-        // helper is the single production callsite shape per §5.13a.2.
+        // optionality propagation across props/emits/slots in the
+        // same request.
         let projected = project_expr_class_a_via_dispatch_threaded(
             query_engine.ctx,
             Some(query_engine),
@@ -1688,9 +1683,8 @@ pub(crate) fn produce_one_macro_object_shape(
     let rescue_projection =
         solver_count == 0 || expr_needs_projection_rescue(query_engine, owner_canonical, lowered);
     let projected = if rescue_projection {
-        // bridge the engine method via the
-        // per-engine helper so the §5.14.1 pre-flight gate sees zero
-        // external engine-method callers.
+        // Bridge the engine method via the per-engine helper so the
+        // pre-flight gate sees zero external engine-method callers.
         project_expr_surface_shape_via_host_threaded(query_engine, owner_canonical, lowered)
             .and_then(|shape| {
                 shape_is_usable(&shape).then(|| {
@@ -1773,9 +1767,8 @@ pub(crate) fn project_named_ref_prepared_surface_shape(
     let (scope_canonical, resolved_name) =
         resolve_named_ref_prepared_projection_target(query_engine, owner_canonical, name.as_ref())?;
 
-    // bridge the engine method via the per-engine
-    // helper so the §5.14.1 pre-flight gate sees zero external
-    // engine-method callers.
+    // Bridge the engine method via the per-engine helper so the
+    // pre-flight gate sees zero external engine-method callers.
     project_prepared_type_surface_shape_via_host_threaded(
         query_engine,
         scope_canonical.as_str(),
@@ -1804,16 +1797,13 @@ pub(crate) fn named_ref_can_use_prepared_projection(
         declaration.resolved_name.as_str()
     };
 
-    // Issue #11 / delegate the symbolic-vs-materialize
-    // decision to the shared helper. The previous
-    // `if declaration.canonical_source == owner_canonical { return
-    // true; }` short-circuit was an equivalent one-line guard per
-    // §6.5: same-scope refs are always workspace-owned (they live
+    // Delegate the symbolic-vs-materialize decision to the shared
+    // helper. Same-scope refs are always workspace-owned (they live
     // inside the owner SFC), so the helper returns `true` and this
     // predicate returns `true` (allow the prepared-surface
     // projection). Cross-file workspace-owned direct-member
     // interface/class refs flow through the same helper path —
-    // canonical-reuse is shared with the field-rescue site.
+    // canonical-reuse is shared with the field-materialise site.
     let prepared = query_engine
         .ctx()
         .prepared_type_decl(target_scope, resolved_name);
@@ -1943,9 +1933,8 @@ pub(crate) fn project_named_ref_surface_shape(
         declaration.resolved_name.as_str()
     };
 
-    // bridge the engine method via the per-engine
-    // helper so the §5.14.1 pre-flight gate sees zero external
-    // engine-method callers.
+    // Bridge the engine method via the per-engine helper so the
+    // pre-flight gate sees zero external engine-method callers.
     project_type_surface_shape_via_host_threaded(query_engine, defining_canonical, defining_name)
         .and_then(|shape| {
             shape_is_usable(&shape).then(|| {
@@ -1974,9 +1963,8 @@ pub(crate) fn project_named_ref_imported_scope_shape(
         return None;
     }
 
-    // bridge the engine method via the per-engine
-    // helper so the §5.14.1 pre-flight gate sees zero external
-    // engine-method callers.
+    // Bridge the engine method via the per-engine helper so the
+    // pre-flight gate sees zero external engine-method callers.
     project_expr_surface_shape_via_host_threaded(query_engine, defining_canonical, lowered)
         .and_then(|shape| {
             shape_is_usable(&shape).then(|| {

@@ -828,12 +828,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///    yields the binding's lowered type in the caller's mode
     ///    (typically `Expanded` for component-meta).
     ///
-    /// **Why a helper, not a new variant?** Per parent §0 binding
-    /// amendment + §5.12 r15/F11 (sub- worker constraint), the
-    /// slot-binding lowering must compose existing variants and live
-    /// as a non-variant dispatch helper. This mirrors `execute_pick` /
-    /// `execute_omit` / `materialize_surface` / `execute_to_type_expr`
-    /// which are non-variant dispatch helpers added in the prior cutover/5d/5e.
+    /// **Why a helper, not a new variant?** The slot-binding lowering
+    /// composes existing variants and lives as a non-variant dispatch
+    /// helper. Mirrors `execute_pick` / `execute_omit` /
+    /// `materialize_surface` / `execute_to_type_expr`, which are also
+    /// non-variant dispatch helpers.
     ///
     /// **Migration source:** the engine analysis path's
     /// `expand_field_expr` closure used to dispatch a single

@@ -1,16 +1,16 @@
-//! `MacroFieldGraphState` lazy-lowering scaffold + dispatch lower counter.
+//! `MacroFieldGraphState` lazy-lowering helper + dispatch lower counter.
 //!
 //! `MacroFieldGraphState` carries a field's published TypeExpr alongside
 //! lazily-lowered raw / current SemanticNodeId memos. Predicates that
 //! inspect the raw or current shape borrow the lazy-lowered node
 //! without forcing a redundant lower; graph-native rewrites set
 //! `node_rewrite_dirty = true` so `publish()` raises the rewritten
-//! node back to TypeExpr at scope exit. This scaffold is the
-//! structural aid the test suite uses to exercise the per-field
-//! state transitions (lower count ≤ 2 per field invariant).
+//! node back to TypeExpr at scope exit. The structural aid the test
+//! suite uses to exercise the per-field state transitions (lower
+//! count ≤ 2 per field invariant).
 //!
 //! `DISPATCH_LOWER_COUNTER` is incremented every time a `MacroFieldGraphState`
-//! performs a TypeExpr → SemanticNodeId lowering. The TDD test asserts
+//! performs a TypeExpr → SemanticNodeId lowering. The test asserts
 //! this stays ≤ 2 per field.
 //!
 //! `node_rewrite_dirty` distinguishes lazy lowering (for predicate
@@ -50,7 +50,7 @@ fn dispatch_lower_counter_increment() {
 /// for the post-mutation state, and a `node_rewrite_dirty` flag
 /// distinguishing lazy lowering from graph-native rewrites.
 ///
-/// Lifecycle (per K1 / K2 / K3 / §4.10):
+/// Lifecycle:
 ///
 /// 1. Construct from `field.r#type`'s clone — `MacroFieldGraphState::new`.
 /// 2. `raw_node(&raw_expr)` lazy-lowers the field's raw TypeExpr (for
@@ -59,30 +59,30 @@ fn dispatch_lower_counter_increment() {
 ///    predicate inspection. Does NOT set `node_rewrite_dirty`.
 /// 4. `set_current_node_rewrite(node)` records a graph-native rewrite. Sets
 ///    `node_rewrite_dirty = true` so `publish()` will raise on exit.
-/// 5. `set_current_type(ty)` records a TypeExpr-side mutation (legacy paths
-///    that haven't migrated). Invalidates the cached `current_node` and
-///    clears the dirty flag (the new TypeExpr is canonical).
+/// 5. `set_current_type(ty)` records a TypeExpr-side mutation. Invalidates
+///    the cached `current_node` and clears the dirty flag (the new
+///    TypeExpr is canonical).
 /// 6. `publish()` returns the final TypeExpr. When `node_rewrite_dirty`,
 ///    raises `current_node` back to TypeExpr; otherwise returns
 ///    `published_type` unchanged.
 pub(crate) struct MacroFieldGraphState<'a> {
     /// Memoised lowering of the field's raw type (for predicates that
     /// inspect the original raw TypeExpr). Lazy.
-    #[cfg_attr(not(test), allow(dead_code, reason = "K1 scaffold; wired in K2"))]
+    #[cfg_attr(not(test), allow(dead_code, reason = "consumed by raw_node()"))]
     raw_node: Option<crate::semantic_query::SemanticNodeId>,
     /// Memoised lowering of `published_type`. Lazy.
     current_node: Option<crate::semantic_query::SemanticNodeId>,
-    /// P1 #6 — distinct from "current_node was lowered".
-    /// Set TRUE only when a graph-native rewrite (via
-    /// `set_current_node_rewrite`) produced a NEW `current_node`.
-    /// `publish()` raises ONLY when this flag is set; lazy lowering for
-    /// predicate inspection does not flip the flag.
+    /// Distinct from "current_node was lowered". Set TRUE only when a
+    /// graph-native rewrite (via `set_current_node_rewrite`) produced a
+    /// NEW `current_node`. `publish()` raises ONLY when this flag is
+    /// set; lazy lowering for predicate inspection does not flip the
+    /// flag.
     node_rewrite_dirty: bool,
     /// Canonical TypeExpr state. Updated by `set_current_type`; written
     /// back to the field via `publish()` at scope exit.
     published_type: verter_semantic::analysis::type_expr::TypeExpr,
     /// Owner scope used when lowering through dispatch.
-    #[cfg_attr(not(test), allow(dead_code, reason = "K1 scaffold; wired in K2"))]
+    #[cfg_attr(not(test), allow(dead_code, reason = "consumed by raw_node()"))]
     scope: &'a str,
     /// Borrowed dispatch handle for lower / raise calls.
     dispatch: &'a crate::project_semantic_dispatch::ProjectSemanticDispatch<'a>,
@@ -115,7 +115,7 @@ impl<'a> MacroFieldGraphState<'a> {
     /// Lazy-lower the field's raw TypeExpr to a `SemanticNodeId` in
     /// `Navigate` mode. Memoised — lowering happens at most once per state.
     /// Does NOT set `node_rewrite_dirty`.
-    #[cfg_attr(not(test), allow(dead_code, reason = "K1 scaffold; wired in K2"))]
+    #[cfg_attr(not(test), allow(dead_code, reason = "test-only instrumentation"))]
     pub(crate) fn raw_node(
         &mut self,
         raw_expr: &verter_semantic::analysis::type_expr::TypeExpr,
@@ -136,7 +136,7 @@ impl<'a> MacroFieldGraphState<'a> {
     /// mode. Memoised — lowering happens at most once per
     /// `published_type` revision. Does NOT set `node_rewrite_dirty` — this
     /// is purely "lower for predicate inspection" lowering.
-    #[cfg_attr(not(test), allow(dead_code, reason = "K1 scaffold; wired in K2"))]
+    #[cfg_attr(not(test), allow(dead_code, reason = "test-only instrumentation"))]
     pub(crate) fn current_node(&mut self) -> Option<crate::semantic_query::SemanticNodeId> {
         if self.current_node.is_none() {
             #[cfg(test)]
@@ -152,9 +152,9 @@ impl<'a> MacroFieldGraphState<'a> {
 
     /// Record a graph-native rewrite that produced a NEW `current_node`.
     /// Sets `node_rewrite_dirty = true` so `publish()` will raise on
-    /// exit. Used by K2 callers after a graph-native operation produces
-    /// a fresh node id.
-    #[cfg_attr(not(test), allow(dead_code, reason = "Wired in K2"))]
+    /// exit. Used by callers after a graph-native operation produces a
+    /// fresh node id.
+    #[cfg_attr(not(test), allow(dead_code, reason = "test-only instrumentation"))]
     pub(crate) fn set_current_node_rewrite(&mut self, node: crate::semantic_query::SemanticNodeId) {
         self.current_node = Some(node);
         self.node_rewrite_dirty = true;

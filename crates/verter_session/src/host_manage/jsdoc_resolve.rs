@@ -189,7 +189,6 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
             ));
         }
         // Tracked dependencies: snapshot-level candidates + solver-discovered deps.
-        // The legacy walker is no longer used for dependency tracking.
         let mut tracked_dependencies = std::collections::BTreeSet::new();
         tracked_dependencies.extend(
             eval_context

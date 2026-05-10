@@ -1085,9 +1085,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // `Awaited` requires recursive promise unwrapping. Each
             // emits an `Opaque(Miss)` shell anchored to the instantiate
             // identity so the origin walk remains coherent; full
-            // implementation falls out of the path-precise projection
-            // upgrades that land alongside the projection-authority
-            // cutover (D3) and after.
+            // implementation requires path-precise projection upgrades.
             _ => {
                 let result = self.opaque(QueryError::Miss);
                 record_utility_edges(result);

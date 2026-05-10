@@ -421,8 +421,8 @@ impl VerterHost {
 
         // Sync parsed edges to VFS BEFORE smart_invalidate_dependents so the
         // workspace's reverse-dep graph reflects the new edges before
-        // dependents are queried (Commit-3 cutover: workspace is sole
-        // authority for reverse-dep tracking).
+        // dependents are queried. The workspace is sole authority for
+        // reverse-dep tracking.
         self.record_parsed_edges_to_vfs(&canonical_id, &result_data);
 
         self.smart_invalidate_dependents(

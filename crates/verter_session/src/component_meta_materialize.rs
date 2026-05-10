@@ -1,12 +1,9 @@
 #![deny(missing_docs)]
-//! Session-layer structural materialiser.
-//!
-//! Replaces the legacy walker family with a dispatch-driven
-//! materialiser that uses graph-native policy predicates,
-//! cooperative-admission post-compute revalidation for atomic
-//! publish/invalidate, and a content-hash bucketed Weak-ref
-//! `DepSignature` interner for `Arc::ptr_eq` cleanup of the
-//! reverse-index.
+//! Session-layer structural materialiser. Dispatch-driven, with
+//! graph-native policy predicates, cooperative-admission post-compute
+//! revalidation for atomic publish/invalidate, and a content-hash
+//! bucketed Weak-ref `DepSignature` interner for `Arc::ptr_eq` cleanup
+//! of the reverse-index.
 //!
 //! **Foundational types**:
 //! - [`MaterializeOutcome`] — materialiser-local result enum
@@ -17,7 +14,7 @@
 //!   `QueryResult::Recursive` to `MaterializeOutcome::Tainted`.
 //!
 //! **Materialiser entry**:
-//! - [`materialize_component_meta_structure`] — five-phase entry
+//! - [`materialize_component_meta_structure`] — five-stage entry
 //!   pipeline (warm peek → same-key cycle → depth fuse → package /
 //!   function policy gates → cooperative-admission cold build with
 //!   `post_publish` reverse-index registration).
@@ -33,19 +30,14 @@
 //!
 //! **Policy predicates**:
 //! - [`is_package_backed_ref`] — graph-native check that the input
-//!   carrier resolves under `/node_modules/`. Walker behavior:
-//!   keep symbolic at every axis.
-//! - Function-shape skip at Nested — the walker's
-//!   keep-function-bodies-symbolic invariant for Object-property
-//!   positions.
+//!   carrier resolves under `/node_modules/`. Keeps the result
+//!   symbolic at every axis.
+//! - Function-shape skip at Nested — keeps function bodies symbolic
+//!   for Object-property positions.
 //!
-//! Cut over the legacy walker shim to this entry, deleted
-//! the walker's inner body family (cycle-key, scope-iteration, and
-//! visited-set helpers), and deleted the dispatch-iteration module
-//! that hosted the walker's visited-set helper. The static-grep gate
-//! at `tests/no_legacy_walker.rs` enforces the deletion permanently
-//! — see that file's `RETIRED_SYMBOLS` array for the canonical list
-//! of names that must not reappear.
+//! The static-grep gate at `tests/no_legacy_walker.rs` enforces that
+//! retired walker symbols never reappear — see that file's
+//! `RETIRED_SYMBOLS` array for the canonical list of names.
 
 use std::sync::Arc;
 
@@ -735,8 +727,7 @@ pub(crate) fn materialize_component_meta_structure(
         // applies the package-ref + function-skip policies, so
         // function-valued members and package-backed refs are kept
         // symbolic while local refs continue to expand. This is the
-        // load-bearing replacement for the legacy walker's
-        // per-Object-member walk.
+        // sole per-Object-member walk on the materialiser pipeline.
         let object_outcome = if ref_outcome.is_none() {
             if let Some(data) = graph.node_data(key_for_compute.base) {
                 if let crate::semantic_query::SemanticNodeData::Object(surface) = data.as_ref() {
@@ -883,14 +874,14 @@ fn empty_signature() -> DepSignature {
 /// Graph-native package-ref policy predicate.
 /// Returns `true` when `node` is a `DeclRef` or `InstantiationRef`
 /// whose declaration's canonical id resolves under `/node_modules/`.
-/// The walker's pre-cutover policy kept these refs symbolic at every
-/// axis (TopLevel + Nested) — expanding them would publish package
-/// internals into the consumer's component-meta surface.
+/// Package-backed refs stay symbolic at every axis (TopLevel +
+/// Nested) — expanding them would publish package internals into
+/// the consumer's component-meta surface.
 ///
 /// Delegates the canonical-string check to the shared primitive
 /// [`canonical_resolves_to_package`](crate::meta_resolve::canonical_resolves_to_package)
-/// (commit C extracted this so the package check has one source of
-/// truth across graph-node and identity-based callers).
+/// so the package check has one source of truth across graph-node
+/// and identity-based callers.
 pub(crate) fn is_package_backed_ref(ctx: &dyn ResolverContext, node: SemanticNodeId) -> bool {
     let graph = ctx.project_type_store().semantic_graph();
     let Some(data) = graph.node_data(node) else {

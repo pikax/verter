@@ -1,10 +1,9 @@
-//! Predicate and utility helpers extracted from
-//! `component_meta_query_engine/mod.rs` in the prior cutover.3.
+//! Predicate and utility helpers used by `ComponentMetaQueryEngine`
+//! impl methods to classify type expressions, route demands, prepared
+//! type declarations, and registry symbols.
 //!
-//! These helpers are pure free functions used by the engine impl
-//! methods to classify type expressions, route demands, prepared type
-//! declarations, and registry symbols. They have no engine-state
-//! dependencies and access only the parent module's re-exported types
+//! Pure free functions with no engine-state dependencies; they access
+//! only the parent module's re-exported types
 //! (`ResolvedImportedRegistrySymbol`, `RouteDemand`) plus shared
 //! semantic types from `verter_semantic`.
 //!

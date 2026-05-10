@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::instant::Instant;
 
-/// Outer entries to the legacy per-member materialiser.
+/// Outer entries to the macro-member materialiser pass.
 /// One increment per request × per macro member walked.
 pub static MACRO_MEMBER_WALK_OUTER_CALLS: AtomicU64 = AtomicU64::new(0);
 
@@ -78,8 +78,7 @@ pub static FAMILY_MEMO_HITS: AtomicU64 = AtomicU64::new(0);
 pub static FAMILY_MEMO_MISSES: AtomicU64 = AtomicU64::new(0);
 
 /// Maximum (single-call) operator-node count observed for any
-/// TypeExpr passed into
-/// the legacy per-member materialiser.
+/// TypeExpr passed into the macro-member materialiser pass.
 /// Tracked via fetch_max so the value is the high-water mark.
 pub static MAX_TYPE_EXPR_OPERATOR_NODE_COUNT: AtomicU64 = AtomicU64::new(0);
 
@@ -388,19 +387,19 @@ pub static LOWERED_ROOT_CYCLE_FAST_PATH_HITS: AtomicU64 = AtomicU64::new(0);
 // Walk-macro-member-types sub-blocks: per-iteration counters across
 // the outer `for (macro_index, mac) in snapshot.macros.iter()` loop.
 
-/// DefineProps arm — entry checks (`shape_needs_member_rescue` +
-/// `expr_needs_projection_rescue` shape probe).
+/// DefineProps arm — entry checks (member-projection shape probe via
+/// `expr_needs_projection_rescue`).
 pub static WALK_DEFINE_PROPS_CHECKS_CALLS: AtomicU64 = AtomicU64::new(0);
 pub static WALK_DEFINE_PROPS_CHECKS_NS: AtomicU64 = AtomicU64::new(0);
 
-/// DefineProps arm — projection block (only fires when
-/// `lowered_needs_projection_rescue && properties.is_empty()`).
+/// DefineProps arm — projection block (only fires when the member-
+/// projection probe fires AND `properties.is_empty()`).
 pub static WALK_DEFINE_PROPS_PROJECTION_CALLS: AtomicU64 = AtomicU64::new(0);
 pub static WALK_DEFINE_PROPS_PROJECTION_NS: AtomicU64 = AtomicU64::new(0);
 
 /// DefineProps arm — per-property `for property in &mut
-/// define_props.result.value.properties` loop calling
-/// the legacy per-member materialiser.
+/// define_props.result.value.properties` loop calling the
+/// macro-member materialiser pass.
 pub static WALK_DEFINE_PROPS_PROPERTY_LOOP_CALLS: AtomicU64 = AtomicU64::new(0);
 pub static WALK_DEFINE_PROPS_PROPERTY_LOOP_NS: AtomicU64 = AtomicU64::new(0);
 
@@ -409,8 +408,8 @@ pub static WALK_DEFINE_PROPS_PROPERTY_LOOP_NS: AtomicU64 = AtomicU64::new(0);
 pub static WALK_DEFINE_EMITS_ARM_CALLS: AtomicU64 = AtomicU64::new(0);
 pub static WALK_DEFINE_EMITS_ARM_NS: AtomicU64 = AtomicU64::new(0);
 
-/// DefineSlots arm whole (includes slot_member_needs_binding_rescue
-/// scan + projection + per-property loop).
+/// DefineSlots arm whole (slot binding scan + projection +
+/// per-property loop).
 pub static WALK_DEFINE_SLOTS_ARM_CALLS: AtomicU64 = AtomicU64::new(0);
 pub static WALK_DEFINE_SLOTS_ARM_NS: AtomicU64 = AtomicU64::new(0);
 

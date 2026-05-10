@@ -1,9 +1,7 @@
 //! Shallow preservation, imported-route fast paths, and deep slot/type
-//! ref resolution methods extracted from
-//! `component_meta_query_engine/mod.rs` in the prior cutover.4.
+//! ref resolution methods on `ComponentMetaQueryEngine<'a>`.
 //!
-//! These methods are private inherent methods on
-//! `ComponentMetaQueryEngine<'a>`. They classify how shallowly an
+//! Private inherent methods that classify how shallowly an
 //! imported / package-backed type expression should be preserved
 //! (without crossing the import boundary), and resolve transitive
 //! references inside slot / function bodies during deep walks.
@@ -1231,12 +1229,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// dispatch-projected surface (replacement for the
     /// retired `type_eval_build::deep_resolve_slot_function_refs`).
     ///
-    /// Non-Object inputs are returned verbatim — matches the pre-cutover
-    /// contract. Ref resolution routes through
-    /// [`Self::project_expr_surface_expr`] so it uses the same dispatch
-    /// memo (`SemanticGraphStore`) + `instantiate_active` guards as the
-    /// rest of the component-meta pipeline, guaranteeing one cache entry
-    /// per `(scope, expr)` regardless of entry point.
+    /// Non-Object inputs are returned verbatim. Ref resolution routes
+    /// through [`Self::project_expr_surface_expr`] so it uses the same
+    /// dispatch memo (`SemanticGraphStore`) + `instantiate_active`
+    /// guards as the rest of the component-meta pipeline,
+    /// guaranteeing one cache entry per `(scope, expr)` regardless of
+    /// entry point.
     pub fn deep_resolve_slot_function_refs(
         &mut self,
         scope_canonical_id: &str,
