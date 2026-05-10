@@ -8515,17 +8515,7 @@ mod typed_ir_resolver_guards {
         ),
         (
             "crates/verter_session/src/host_manage/component_meta_extract.rs",
-            425,
-            "parse_type_annotation",
-        ),
-        (
-            "crates/verter_session/src/host_manage/component_meta_extract.rs",
-            428,
-            "parse_type_annotation",
-        ),
-        (
-            "crates/verter_session/src/host_manage/component_meta_extract.rs",
-            706,
+            703,
             "parse_type_annotation",
         ),
         (

@@ -421,15 +421,12 @@ fn fill_missing_component_meta_prop_descriptions_from_imported_roots(
             {
                 continue;
             }
-            let local_expr = resolved_local.type_expr.clone().unwrap_or_else(|| {
-                verter_type_expr_oxc::parse_type_annotation(&resolved_local.expanded)
-            });
-            let expanded_expr =
-                verter_type_expr_oxc::parse_type_annotation(&resolved_local.expanded);
-            for dependency in host
-                .imported_symbol_dependencies_for_expr(owner_canonical, &expanded_expr)
-                .into_iter()
-                .chain(host.imported_symbol_dependencies_for_expr(owner_canonical, &local_expr))
+            let local_expr = resolved_local
+                .type_expr
+                .clone()
+                .expect("ResolvedLocalType.type_expr populated by analyzer (W0.2 invariant)");
+            for dependency in
+                host.imported_symbol_dependencies_for_expr(owner_canonical, &local_expr)
             {
                 if !imported_roots.insert((
                     dependency.canonical_id.clone(),
