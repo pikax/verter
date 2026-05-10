@@ -191,6 +191,18 @@ const RETIRED_SYMBOLS: &[&str] = &[
     "dispatch_lower_counter_get",
     "dispatch_lower_counter_reset",
     "dispatch_lower_counter_increment",
+    // Dead graph-native predicate that had no production caller after
+    // member-route-materialisation was deleted in 3b4af1ca / 2bb34a78.
+    // The TypeExpr predecessor `lowered_needs_member_route_materialization`
+    // was already retired in the rescue cascade deletion. This is the
+    // graph-native counterpart that survived as `#[allow(dead_code)]`
+    // scaffolding consumed only by 4 characterization tests; both the
+    // predicate and its tests are deleted.
+    "type_node_needs_member_route_materialization",
+    // Dead future-use test helper. Built for a planned route-union
+    // shape assertion that never landed; CLAUDE.md "Don't add features
+    // beyond what the task requires" forbids carrying it as scaffolding.
+    "assert_route_union_surface",
 ];
 
 const SCAN_DIRS: &[&str] = &["crates", ".claude/skills", "docs"];
