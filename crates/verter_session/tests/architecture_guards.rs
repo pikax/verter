@@ -7899,3 +7899,1064 @@ fn getcomponentmeta_uses_per_macro_projectors() {
 // the legacy walker family is fully deleted. Coverage moves to the
 // `tests/no_legacy_walker.rs` `RETIRED_SYMBOLS` gate which scans
 // the entire workspace, not just `crates/verter_session/src/host_manage/`.
+
+// ---------------------------------------------------------------------------
+// Typed-IR-Only Resolver Rule guards (CLAUDE.md "Typed-IR-Only Resolver Rule")
+// ---------------------------------------------------------------------------
+//
+// The six guards below pin the architectural ban on string-search /
+// reparse / role-inference patterns inside the component-meta /
+// typeinfo type resolver pipeline. Each owns an EXACT
+// `(file, line, pattern)` allowlist tuple set captured against the
+// live tree. The guards are exact-set comparisons in BOTH directions:
+//
+//   * a violation that exists in source but is NOT in the allowlist
+//     fails the test ("Unallowlisted violation introduced");
+//   * an allowlist tuple that no longer matches anything in source
+//     ALSO fails ("Allowlisted entry NOT FOUND").
+//
+// As migration units land they remove their tuples from the
+// allowlist; the W8.2 "everything empty" floor is the cutover end
+// state. Counts are gameable (deleting one site and adding another
+// passes a count check); exact tuples are not.
+
+mod typed_ir_resolver_guards {
+    use std::collections::BTreeSet;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    /// Walk `<repo>/crates/<crate>/src/**` and yield every `.rs` file
+    /// EXCEPT files whose basename matches `<name>_tests.rs` or
+    /// equals `tests.rs`. Those files exist inside `src/` for
+    /// per-CLAUDE.md test-file organisation but are test-only modules.
+    fn collect_production_rs_files() -> Vec<(PathBuf, String)> {
+        let root = super::workspace_root();
+        let crates_dir = root.join("crates");
+        let mut out: Vec<(PathBuf, String)> = Vec::new();
+        let entries = match fs::read_dir(&crates_dir) {
+            Ok(e) => e,
+            Err(err) => panic!("read_dir {}: {err}", crates_dir.display()),
+        };
+        for ent in entries.flatten() {
+            let crate_path = ent.path();
+            if !crate_path.is_dir() {
+                continue;
+            }
+            let src_dir = crate_path.join("src");
+            if !src_dir.is_dir() {
+                continue;
+            }
+            let mut files: Vec<PathBuf> = Vec::new();
+            walk_rs(&src_dir, &mut files);
+            for f in files {
+                let rel = f
+                    .strip_prefix(&root)
+                    .unwrap_or(&f)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if is_test_file(&rel) {
+                    continue;
+                }
+                out.push((f, rel));
+            }
+        }
+        out
+    }
+
+    fn walk_rs(dir: &Path, out: &mut Vec<PathBuf>) {
+        if !dir.is_dir() {
+            return;
+        }
+        for entry in
+            fs::read_dir(dir).unwrap_or_else(|e| panic!("read_dir {}: {}", dir.display(), e))
+        {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let p = entry.path();
+            if p.is_dir() {
+                walk_rs(&p, out);
+            } else if p.extension().and_then(|s| s.to_str()) == Some("rs") {
+                out.push(p);
+            }
+        }
+    }
+
+    fn is_test_file(rel: &str) -> bool {
+        let name = rel.rsplit('/').next().unwrap_or("");
+        name.ends_with("_tests.rs") || name == "tests.rs"
+    }
+
+    /// Replace `//` line comments and `/* ... */` block comments with
+    /// equivalent-length whitespace, preserving newlines so line
+    /// numbers stay stable. Skips comment-like sequences inside
+    /// regular and raw string literals so the strip never invalidates
+    /// real source.
+    fn strip_comments(src: &str) -> String {
+        let bytes = src.as_bytes();
+        let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+        let n = bytes.len();
+        let mut i = 0usize;
+        while i < n {
+            let c = bytes[i];
+            // Raw string: r"..."  /  r#"..."#  /  r##"..."##  ...
+            if c == b'r' {
+                let mut j = i + 1;
+                let mut hashes = 0usize;
+                while j < n && bytes[j] == b'#' {
+                    hashes += 1;
+                    j += 1;
+                }
+                if j < n && bytes[j] == b'"' {
+                    // Copy through the opening `r###"`
+                    out.extend_from_slice(&bytes[i..=j]);
+                    let close: Vec<u8> = std::iter::once(b'"')
+                        .chain(std::iter::repeat_n(b'#', hashes))
+                        .collect();
+                    let mut k = j + 1;
+                    while k + close.len() <= n {
+                        if &bytes[k..k + close.len()] == close.as_slice() {
+                            out.extend_from_slice(&bytes[(j + 1)..(k + close.len())]);
+                            i = k + close.len();
+                            break;
+                        }
+                        out.push(bytes[k]);
+                        k += 1;
+                    }
+                    if k + close.len() > n {
+                        out.extend_from_slice(&bytes[(j + 1)..n]);
+                        i = n;
+                    }
+                    continue;
+                }
+                // Not a raw string — fall through to normal handling.
+            }
+            // Regular string literal "..." (with \"  escape handling)
+            if c == b'"' {
+                out.push(b'"');
+                let mut k = i + 1;
+                while k < n {
+                    if bytes[k] == b'\\' && k + 1 < n {
+                        out.push(bytes[k]);
+                        out.push(bytes[k + 1]);
+                        k += 2;
+                        continue;
+                    }
+                    if bytes[k] == b'"' {
+                        out.push(b'"');
+                        k += 1;
+                        break;
+                    }
+                    out.push(bytes[k]);
+                    k += 1;
+                }
+                i = k;
+                continue;
+            }
+            // Line comment //
+            if c == b'/' && i + 1 < n && bytes[i + 1] == b'/' {
+                let mut k = i;
+                while k < n && bytes[k] != b'\n' {
+                    out.push(b' ');
+                    k += 1;
+                }
+                i = k;
+                continue;
+            }
+            // Block comment /* ... */ with nesting support.
+            if c == b'/' && i + 1 < n && bytes[i + 1] == b'*' {
+                let mut depth = 1u32;
+                out.push(b' ');
+                out.push(b' ');
+                let mut k = i + 2;
+                while k < n && depth > 0 {
+                    if k + 1 < n && bytes[k] == b'/' && bytes[k + 1] == b'*' {
+                        depth += 1;
+                        out.push(b' ');
+                        out.push(b' ');
+                        k += 2;
+                        continue;
+                    }
+                    if k + 1 < n && bytes[k] == b'*' && bytes[k + 1] == b'/' {
+                        depth -= 1;
+                        out.push(b' ');
+                        out.push(b' ');
+                        k += 2;
+                        continue;
+                    }
+                    if bytes[k] == b'\n' {
+                        out.push(b'\n');
+                    } else {
+                        out.push(b' ');
+                    }
+                    k += 1;
+                }
+                i = k;
+                continue;
+            }
+            out.push(c);
+            i += 1;
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    /// Replace the body of every `#[cfg(test)] mod NAME { ... }` block
+    /// with whitespace (newlines preserved). Inline test modules live
+    /// in production source files but are test-only — guard scans
+    /// must NOT classify them as production violations.
+    fn strip_inline_test_modules(src: &str) -> String {
+        let bytes = src.as_bytes();
+        let n = bytes.len();
+        let mut out = bytes.to_vec();
+        let needle = b"#[cfg(test)]";
+        let mut i = 0usize;
+        while i + needle.len() <= n {
+            if &bytes[i..i + needle.len()] == needle {
+                let mut j = i + needle.len();
+                // Walk forward until we find `mod ` (allowing intervening
+                // attributes / whitespace within a small budget).
+                let limit = (i + 200).min(n);
+                while j < limit {
+                    if j + 4 <= n && &bytes[j..j + 4] == b"mod " {
+                        break;
+                    }
+                    j += 1;
+                }
+                if j + 4 <= n && &bytes[j..j + 4] == b"mod " {
+                    // Find `{` after `mod NAME`.
+                    let mut k = j + 4;
+                    while k < n && bytes[k] != b'{' {
+                        k += 1;
+                    }
+                    if k < n {
+                        let mut depth = 1i32;
+                        let mut m = k + 1;
+                        while m < n && depth > 0 {
+                            match bytes[m] {
+                                b'{' => depth += 1,
+                                b'}' => depth -= 1,
+                                _ => {}
+                            }
+                            m += 1;
+                        }
+                        if m > k + 1 {
+                            for slot in &mut out[(k + 1)..(m - 1)] {
+                                if *slot != b'\n' {
+                                    *slot = b' ';
+                                }
+                            }
+                        }
+                        i = m;
+                        continue;
+                    }
+                }
+            }
+            i += 1;
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    fn preprocess(src: &str) -> String {
+        strip_inline_test_modules(&strip_comments(src))
+    }
+
+    fn fmt_match(m: &(String, u32, String)) -> String {
+        format!("({:?}, {}, {:?})", m.0, m.1, m.2)
+    }
+
+    /// Compare actual matches (Vec of (path, line, matched_str)) against
+    /// the allowlist tuples. Fails on EITHER:
+    ///   * a violation present in source without an allowlist tuple
+    ///   * an allowlist tuple that no longer matches anything in source
+    fn assert_exact_allowlist_match(
+        guard_name: &str,
+        actual: &[(String, u32, String)],
+        allowed: &[(&str, u32, &str)],
+    ) {
+        // Normalise to comparable form.
+        let actual_set: BTreeSet<(String, u32, String)> = actual.iter().cloned().collect();
+        let allowed_set: BTreeSet<(String, u32, String)> = allowed
+            .iter()
+            .map(|(p, ln, pat)| (p.to_string(), *ln, pat.to_string()))
+            .collect();
+
+        let unexpected: Vec<_> = actual_set
+            .iter()
+            .filter(|t| !allowed_set.contains(*t))
+            .map(fmt_match)
+            .collect();
+        let stale: Vec<_> = allowed_set
+            .iter()
+            .filter(|t| !actual_set.contains(*t))
+            .map(fmt_match)
+            .collect();
+
+        if unexpected.is_empty() && stale.is_empty() {
+            return;
+        }
+
+        let mut msg = format!("\n\n=== {guard_name} ===\n");
+        if !unexpected.is_empty() {
+            msg.push_str(
+                "\nUnallowlisted violation introduced (add to allowlist if intentional, \
+                 OR — preferred — remove the violation from source):\n",
+            );
+            for entry in &unexpected {
+                msg.push_str("    ");
+                msg.push_str(entry);
+                msg.push('\n');
+            }
+        }
+        if !stale.is_empty() {
+            msg.push_str(
+                "\nAllowlisted entry NOT FOUND in source — remove from allowlist or \
+                 restore the violation; line number may have shifted:\n",
+            );
+            for entry in &stale {
+                msg.push_str("    ");
+                msg.push_str(entry);
+                msg.push('\n');
+            }
+        }
+        msg.push('\n');
+        panic!("{msg}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Guard 1: `path.contains("/node_modules/")` and the Windows-backslash
+    // sibling. The single source of workspace classification truth is
+    // `ResolverContext::workspace_is_workspace_owned` /
+    // `workspace_is_package_backed`. Substring tests on canonical paths
+    // are banned everywhere except the implementation of the workspace
+    // classification API itself.
+    //
+    // Allowlist removed by:
+    //   * W2.2 — cold_resolver.rs (4 entries)
+    //   * W4.1 — component_meta_registry.rs (6 entries) +
+    //            component_meta_query_engine/helpers.rs (4 entries)
+    //   * W4.3 — project_semantic_dispatch/relation.rs (2 entries) +
+    //            project_semantic_dispatch/walk.rs (2 entries)
+    //   * W4.4 — component_meta_resolution_policy/{core,pick_omit}.rs +
+    //            host_manage/component_meta_methods.rs +
+    //            meta_resolve/registry_materialize.rs
+    //   * W4.5 — host_manage.rs (2) + meta_resolve/graph_predicates.rs
+    //
+    // The two entries OUTSIDE `verter_session` are NOT removed by any
+    // migration unit:
+    //   * `verter_lsp/src/server_utils.rs:14` — config-file gate that
+    //     legitimately uses substring on the request URI
+    //     (callable before workspace ownership is published).
+    //   * `verter_workspace/src/resolver.rs:75` — implementation of the
+    //     workspace classification API itself; the substring is the
+    //     primitive that the public `is_workspace_owned` /
+    //     `is_package_backed` accessors are built on.
+    //
+    // These two stay in the allowlist permanently. They are NOT
+    // resolver-pipeline sites.
+    // -----------------------------------------------------------------------
+    const NODE_MODULES_ALLOWLIST: &[(&str, u32, &str)] = &[
+        (
+            "crates/verter_lsp/src/server_utils.rs",
+            14,
+            r#".contains("/node_modules/")"#,
+        ),
+        (
+            "crates/verter_session/src/component_meta_resolution_policy/core.rs",
+            358,
+            r#".contains("/node_modules/")"#,
+        ),
+        (
+            "crates/verter_session/src/component_meta_resolution_policy/pick_omit.rs",
+            49,
+            r#".contains("/node_modules/")"#,
+        ),
+        (
+            "crates/verter_session/src/host_manage/component_meta_methods.rs",
+            1962,
+            r#".contains("/node_modules/")"#,
+        ),
+        (
+            "crates/verter_session/src/host_manage.rs",
+            1625,
+            r#".contains("/node_modules/")"#,
+        ),
+        (
+            "crates/verter_session/src/host_manage.rs",
+            1628,
+            r#".contains("/node_modules/")"#,
+        ),
+        (
+            "crates/verter_session/src/meta_resolve/graph_predicates.rs",
+            304,
+            r#".contains("/node_modules/")"#,
+        ),
+        (
+            "crates/verter_session/src/meta_resolve/registry_materialize.rs",
+            1051,
+            r#".contains("/node_modules/")"#,
+        ),
+        (
+            "crates/verter_session/src/project_semantic_dispatch/relation.rs",
+            273,
+            r#".contains("/node_modules/")"#,
+        ),
+        (
+            "crates/verter_session/src/project_semantic_dispatch/relation.rs",
+            274,
+            r#".contains("\\node_modules\\")"#,
+        ),
+        (
+            "crates/verter_session/src/project_semantic_dispatch/walk.rs",
+            979,
+            r#".contains("/node_modules/")"#,
+        ),
+        (
+            "crates/verter_session/src/project_semantic_dispatch/walk.rs",
+            980,
+            r#".contains("\\node_modules\\")"#,
+        ),
+        (
+            "crates/verter_session/src/resolver_core/component_meta/cold_resolver.rs",
+            282,
+            r#".contains("/node_modules/")"#,
+        ),
+        (
+            "crates/verter_session/src/resolver_core/component_meta/cold_resolver.rs",
+            283,
+            r#".contains("/node_modules/")"#,
+        ),
+        (
+            "crates/verter_session/src/resolver_core/component_meta/cold_resolver.rs",
+            354,
+            r#".contains("/node_modules/")"#,
+        ),
+        (
+            "crates/verter_session/src/resolver_core/component_meta/cold_resolver.rs",
+            355,
+            r#".contains("/node_modules/")"#,
+        ),
+        (
+            "crates/verter_session/src/resolver_core/component_meta_query_engine/helpers.rs",
+            67,
+            r#".contains("/node_modules/")"#,
+        ),
+        (
+            "crates/verter_session/src/resolver_core/component_meta_query_engine/helpers.rs",
+            71,
+            r#".contains("/node_modules/")"#,
+        ),
+        (
+            "crates/verter_session/src/resolver_core/component_meta_query_engine/helpers.rs",
+            71,
+            r#".contains("\\node_modules\\")"#,
+        ),
+        (
+            "crates/verter_session/src/resolver_core/component_meta_query_engine/helpers.rs",
+            148,
+            r#".contains("/node_modules/")"#,
+        ),
+        (
+            "crates/verter_session/src/resolver_core/component_meta_registry.rs",
+            1739,
+            r#".contains("/node_modules/")"#,
+        ),
+        (
+            "crates/verter_session/src/resolver_core/component_meta_registry.rs",
+            1749,
+            r#".contains("/node_modules/")"#,
+        ),
+        (
+            "crates/verter_session/src/resolver_core/component_meta_registry.rs",
+            1753,
+            r#".contains("/node_modules/")"#,
+        ),
+        (
+            "crates/verter_session/src/resolver_core/component_meta_registry.rs",
+            1765,
+            r#".contains("/node_modules/")"#,
+        ),
+        (
+            "crates/verter_session/src/resolver_core/component_meta_registry.rs",
+            1786,
+            r#".contains("/node_modules/")"#,
+        ),
+        (
+            "crates/verter_session/src/resolver_core/component_meta_registry.rs",
+            1790,
+            r#".contains("/node_modules/")"#,
+        ),
+        (
+            "crates/verter_workspace/src/resolver.rs",
+            75,
+            r#".contains("/node_modules/")"#,
+        ),
+    ];
+
+    fn scan_node_modules_substring() -> Vec<(String, u32, String)> {
+        let files = collect_production_rs_files();
+        let mut out: Vec<(String, u32, String)> = Vec::new();
+        for (path, rel) in &files {
+            let src = match fs::read_to_string(path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let stripped = preprocess(&src);
+            for (idx, line) in stripped.split('\n').enumerate() {
+                let line_no = (idx + 1) as u32;
+                if line.contains(r#".contains("/node_modules/")"#) {
+                    out.push((
+                        rel.clone(),
+                        line_no,
+                        r#".contains("/node_modules/")"#.to_string(),
+                    ));
+                }
+                if line.contains(r#".contains("\\node_modules\\")"#) {
+                    out.push((
+                        rel.clone(),
+                        line_no,
+                        r#".contains("\\node_modules\\")"#.to_string(),
+                    ));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn no_node_modules_substring_outside_workspace_api() {
+        let actual = scan_node_modules_substring();
+        assert_exact_allowlist_match(
+            "no_node_modules_substring_outside_workspace_api",
+            &actual,
+            NODE_MODULES_ALLOWLIST,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Guard 2: `parse_type_annotation` reference outside JSDoc.
+    //
+    // The function is the OXC wrap-and-lower convenience parser. After
+    // W5.2 it is renamed `parse_jsdoc_tag_type_payload`, narrowed to
+    // JSDoc-private, and lives in `verter_semantic::analysis::jsdoc`.
+    // The single permitted production caller post-W5.2 is
+    // `host_manage/jsdoc_resolve.rs` — this file is the live exception.
+    //
+    // Allowlist removed across W1.1 (macros.rs / type_eval_build.rs /
+    // component_meta.rs), W2.x (every consumer migration), W5.2 (the
+    // function definition itself moves; the verter_type_expr_oxc/lib.rs
+    // reference disappears). After W5.2 the guard pattern updates to
+    // `parse_jsdoc_tag_type_payload` and the allowlist target shrinks
+    // to the JSDoc helper module + jsdoc_resolve.rs caller.
+    //
+    // The W5.2 unit MUST update the pattern string here when it
+    // renames the function.
+    // -----------------------------------------------------------------------
+    const PARSE_TYPE_ANNOTATION_ALLOWLIST: &[(&str, u32, &str)] = &[
+        (
+            "crates/verter_semantic/src/analysis/component_meta.rs",
+            27,
+            "parse_type_annotation",
+        ),
+        (
+            "crates/verter_semantic/src/analysis/macros.rs",
+            1301,
+            "parse_type_annotation",
+        ),
+        (
+            "crates/verter_semantic/src/analysis/macros.rs",
+            1408,
+            "parse_type_annotation",
+        ),
+        (
+            "crates/verter_semantic/src/analysis/type_eval_build.rs",
+            1405,
+            "parse_type_annotation",
+        ),
+        (
+            "crates/verter_semantic/src/analysis/type_eval_build.rs",
+            1425,
+            "parse_type_annotation",
+        ),
+        (
+            "crates/verter_semantic/src/analysis/type_eval_build.rs",
+            1472,
+            "parse_type_annotation",
+        ),
+        (
+            "crates/verter_semantic/src/analysis/type_eval_build.rs",
+            1517,
+            "parse_type_annotation",
+        ),
+        (
+            "crates/verter_session/src/component_meta_resolution_policy/raw_restoration.rs",
+            41,
+            "parse_type_annotation",
+        ),
+        (
+            "crates/verter_session/src/component_meta_resolution_policy/slot_preservation.rs",
+            28,
+            "parse_type_annotation",
+        ),
+        (
+            "crates/verter_session/src/component_meta_resolution_policy/slot_preservation.rs",
+            42,
+            "parse_type_annotation",
+        ),
+        (
+            "crates/verter_session/src/host_manage/component_meta_extract.rs",
+            257,
+            "parse_type_annotation",
+        ),
+        (
+            "crates/verter_session/src/host_manage/component_meta_extract.rs",
+            425,
+            "parse_type_annotation",
+        ),
+        (
+            "crates/verter_session/src/host_manage/component_meta_extract.rs",
+            428,
+            "parse_type_annotation",
+        ),
+        (
+            "crates/verter_session/src/host_manage/component_meta_extract.rs",
+            706,
+            "parse_type_annotation",
+        ),
+        (
+            "crates/verter_session/src/meta_resolve/macro_member_walk.rs",
+            111,
+            "parse_type_annotation",
+        ),
+        (
+            "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
+            891,
+            "parse_type_annotation",
+        ),
+        (
+            "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
+            1134,
+            "parse_type_annotation",
+        ),
+        (
+            "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
+            1225,
+            "parse_type_annotation",
+        ),
+        (
+            "crates/verter_session/src/meta_resolve/projectors/mod.rs",
+            662,
+            "parse_type_annotation",
+        ),
+        (
+            "crates/verter_session/src/meta_resolve/slot_binding_graph.rs",
+            33,
+            "parse_type_annotation",
+        ),
+        (
+            "crates/verter_session/src/meta_resolve/slot_binding_graph.rs",
+            958,
+            "parse_type_annotation",
+        ),
+        (
+            "crates/verter_session/src/resolver_core/component_meta/cold_resolver.rs",
+            460,
+            "parse_type_annotation",
+        ),
+        (
+            "crates/verter_session/src/resolver_core/component_meta/direct_macro.rs",
+            298,
+            "parse_type_annotation",
+        ),
+        (
+            "crates/verter_session/src/resolver_core/component_meta/direct_macro.rs",
+            317,
+            "parse_type_annotation",
+        ),
+        (
+            "crates/verter_session/src/resolver_core/component_meta/projected_type_expr.rs",
+            26,
+            "parse_type_annotation",
+        ),
+        (
+            "crates/verter_session/src/resolver_core/component_meta/projected_type_expr.rs",
+            42,
+            "parse_type_annotation",
+        ),
+        (
+            "crates/verter_session/src/resolver_core/component_meta/projected_type_expr.rs",
+            76,
+            "parse_type_annotation",
+        ),
+        (
+            "crates/verter_session/src/resolver_core/component_meta_registry.rs",
+            1689,
+            "parse_type_annotation",
+        ),
+        (
+            "crates/verter_type_expr_oxc/src/lib.rs",
+            850,
+            "parse_type_annotation",
+        ),
+    ];
+
+    fn scan_parse_type_annotation() -> Vec<(String, u32, String)> {
+        let files = collect_production_rs_files();
+        let mut out: Vec<(String, u32, String)> = Vec::new();
+        for (path, rel) in &files {
+            // Sole production exception: the JSDoc tag-type resolver
+            // (W5.2 narrows visibility further).
+            if rel == "crates/verter_session/src/host_manage/jsdoc_resolve.rs" {
+                continue;
+            }
+            let src = match fs::read_to_string(path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let stripped = preprocess(&src);
+            for (idx, line) in stripped.split('\n').enumerate() {
+                if line.contains("parse_type_annotation") {
+                    out.push((
+                        rel.clone(),
+                        (idx + 1) as u32,
+                        "parse_type_annotation".to_string(),
+                    ));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn no_parse_type_annotation_outside_jsdoc() {
+        let actual = scan_parse_type_annotation();
+        assert_exact_allowlist_match(
+            "no_parse_type_annotation_outside_jsdoc",
+            &actual,
+            PARSE_TYPE_ANNOTATION_ALLOWLIST,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Guard 3: `format!()` followed by `parse_type_annotation(&_)` or
+    // `parse_type_text(&_)` — the synthesise-then-reparse round-trip.
+    //
+    // We detect the pattern by scanning for `format!` and looking
+    // ahead within the same function body for `parse_type_annotation(&`
+    // or `parse_type_text(&`. The `&` is the discriminator: a real
+    // round-trip references the format! result through a let-bound
+    // variable. (Direct chained `format!(...).parse_type_*()` would
+    // also match.)
+    //
+    // Pre-cutover sites: `slot_field_function_type_expr` in
+    // `meta_resolve/materialize/macro_shapes.rs` (3 `format!` calls
+    // feeding one `parse_type_annotation`) and
+    // `projected_macro_surfaces_to_type_expr` in
+    // `resolver_core/component_meta/projected_type_expr.rs` (3 more).
+    // All removed by W2.1.
+    // -----------------------------------------------------------------------
+    const FORMAT_THEN_REPARSE_ALLOWLIST: &[(&str, u32, &str)] = &[
+        (
+            "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
+            1208,
+            "format!(...).parse_type_annotation",
+        ),
+        (
+            "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
+            1214,
+            "format!(...).parse_type_annotation",
+        ),
+        (
+            "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
+            1222,
+            "format!(...).parse_type_annotation",
+        ),
+        (
+            "crates/verter_session/src/resolver_core/component_meta/projected_type_expr.rs",
+            57,
+            "format!(...).parse_type_annotation",
+        ),
+        (
+            "crates/verter_session/src/resolver_core/component_meta/projected_type_expr.rs",
+            63,
+            "format!(...).parse_type_annotation",
+        ),
+        (
+            "crates/verter_session/src/resolver_core/component_meta/projected_type_expr.rs",
+            71,
+            "format!(...).parse_type_annotation",
+        ),
+    ];
+
+    fn scan_format_then_reparse() -> Vec<(String, u32, String)> {
+        let files = collect_production_rs_files();
+        let mut out: Vec<(String, u32, String)> = Vec::new();
+        for (path, rel) in &files {
+            let src = match fs::read_to_string(path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let stripped = preprocess(&src);
+            let bytes = stripped.as_bytes();
+            let n = bytes.len();
+            let needle_a = b"parse_type_annotation(&";
+            let needle_t = b"parse_type_text(&";
+            let mut i = 0usize;
+            while i + 7 <= n {
+                if &bytes[i..i + 7] == b"format!" {
+                    let start = i;
+                    let window_end = (start + 800).min(n);
+                    let window = &bytes[start..window_end];
+                    let pa = window.windows(needle_a.len()).position(|w| w == needle_a);
+                    let pt = window.windows(needle_t.len()).position(|w| w == needle_t);
+                    let hit = match (pa, pt) {
+                        (Some(a), Some(b)) => Some((a.min(b), a <= b)),
+                        (Some(a), None) => Some((a, true)),
+                        (None, Some(b)) => Some((b, false)),
+                        (None, None) => None,
+                    };
+                    if let Some((off, is_annotation)) = hit {
+                        // Reject if a function boundary appears in
+                        // between (`\n}` at column 0 or a `\nfn ` decl).
+                        let between = &window[..off];
+                        let has_close = between.windows(2).any(|w| w == b"\n}");
+                        let has_fn = between.windows(4).any(|w| w == b"\nfn ");
+                        if !has_close && !has_fn {
+                            let prefix = &bytes[..start];
+                            let line_no =
+                                (prefix.iter().filter(|&&c| c == b'\n').count() + 1) as u32;
+                            let needle_label = if is_annotation {
+                                "format!(...).parse_type_annotation"
+                            } else {
+                                "format!(...).parse_type_text"
+                            };
+                            out.push((rel.clone(), line_no, needle_label.to_string()));
+                        }
+                    }
+                    i += 7;
+                    continue;
+                }
+                i += 1;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn no_format_then_reparse() {
+        let actual = scan_format_then_reparse();
+        assert_exact_allowlist_match(
+            "no_format_then_reparse",
+            &actual,
+            FORMAT_THEN_REPARSE_ALLOWLIST,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Guard 4: `starts_with("Pick<" | "Omit<" | "Required<" | "Partial<")` —
+    // shape-sniffing TS utility-type helpers off the type-text. Built-in
+    // utilities behave identically to a userland implementation;
+    // discriminating them by string prefix is a category error. The
+    // typed `TypeExpr::Ref { name, type_arguments }` already carries the
+    // utility-type identity.
+    //
+    // Removed by W1.1.
+    // -----------------------------------------------------------------------
+    const PICK_OMIT_PREFIX_ALLOWLIST: &[(&str, u32, &str)] = &[
+        (
+            "crates/verter_semantic/src/analysis/macros.rs",
+            2463,
+            r#"starts_with("Pick<")"#,
+        ),
+        (
+            "crates/verter_session/src/resolver_core/surface_projector.rs",
+            348,
+            r#"starts_with("Pick<")"#,
+        ),
+        (
+            "crates/verter_session/src/resolver_core/surface_projector.rs",
+            378,
+            r#"starts_with("Pick<")"#,
+        ),
+    ];
+
+    fn scan_pick_omit_prefix() -> Vec<(String, u32, String)> {
+        let needles: &[&str] = &[
+            r#"starts_with("Pick<")"#,
+            r#"starts_with("Omit<")"#,
+            r#"starts_with("Required<")"#,
+            r#"starts_with("Partial<")"#,
+        ];
+        let files = collect_production_rs_files();
+        let mut out: Vec<(String, u32, String)> = Vec::new();
+        for (path, rel) in &files {
+            let src = match fs::read_to_string(path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let stripped = preprocess(&src);
+            for (idx, line) in stripped.split('\n').enumerate() {
+                let line_no = (idx + 1) as u32;
+                for needle in needles {
+                    if line.contains(needle) {
+                        out.push((rel.clone(), line_no, (*needle).to_string()));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn no_pick_or_omit_string_prefix_check() {
+        let actual = scan_pick_omit_prefix();
+        assert_exact_allowlist_match(
+            "no_pick_or_omit_string_prefix_check",
+            &actual,
+            PICK_OMIT_PREFIX_ALLOWLIST,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Guard 5: role inference from identifier name suffix.
+    // `name.ends_with("Props" | "Emits" | "Events" | "Slots" | "Model")`
+    // (and `*_name` / `identifier` / `*_identifier` / `ident` /
+    // `*_ident` lhs variants). Type-role classification is structural
+    // (a Vue SFC macro consumes the type), NOT nominal (the identifier
+    // ends in "Props"). Scoped to the resolver pipeline crates:
+    // `crates/verter_session/src/**` and
+    // `crates/verter_semantic/src/analysis/**`.
+    //
+    // Removed by W6.1 (`collect_imported_props_like_raw_refs` deletion
+    // + `core.rs` policy predicate replacement).
+    // -----------------------------------------------------------------------
+    const ROLE_NAME_SUFFIX_ALLOWLIST: &[(&str, u32, &str)] = &[
+        (
+            "crates/verter_session/src/component_meta_resolution_policy/core.rs",
+            552,
+            r#".ends_with("Props")"#,
+        ),
+        (
+            "crates/verter_session/src/host_manage/component_meta_extract.rs",
+            228,
+            r#".ends_with("Props")"#,
+        ),
+    ];
+
+    fn scan_role_name_suffix() -> Vec<(String, u32, String)> {
+        let suffixes: &[&str] = &["Props", "Emits", "Events", "Slots", "Model"];
+        let files = collect_production_rs_files();
+        let mut out: Vec<(String, u32, String)> = Vec::new();
+        for (path, rel) in &files {
+            let in_scope = rel.starts_with("crates/verter_session/src/")
+                || rel.starts_with("crates/verter_semantic/src/analysis/");
+            if !in_scope {
+                continue;
+            }
+            let src = match fs::read_to_string(path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let stripped = preprocess(&src);
+            for (idx, line) in stripped.split('\n').enumerate() {
+                let line_no = (idx + 1) as u32;
+                for sfx in suffixes {
+                    let needle = format!(r#".ends_with("{}")"#, sfx);
+                    if let Some(pos) = line.find(&needle) {
+                        // Identifier on the lhs of `.ends_with(...)` —
+                        // must be one of {name, *_name, identifier,
+                        // *_identifier, ident, *_ident}.
+                        let lhs: String = line[..pos]
+                            .chars()
+                            .rev()
+                            .take_while(|c| c.is_alphanumeric() || *c == '_')
+                            .collect::<String>()
+                            .chars()
+                            .rev()
+                            .collect();
+                        if lhs.is_empty() {
+                            continue;
+                        }
+                        let lhs_lower = lhs.to_ascii_lowercase();
+                        let is_name_like = lhs_lower == "name"
+                            || lhs_lower.ends_with("_name")
+                            || lhs_lower == "identifier"
+                            || lhs_lower.ends_with("_identifier")
+                            || lhs_lower == "ident"
+                            || lhs_lower.ends_with("_ident");
+                        if is_name_like {
+                            out.push((rel.clone(), line_no, needle));
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn no_role_inference_from_name_suffix() {
+        let actual = scan_role_name_suffix();
+        assert_exact_allowlist_match(
+            "no_role_inference_from_name_suffix",
+            &actual,
+            ROLE_NAME_SUFFIX_ALLOWLIST,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Guard 6: `parse_checker_text_to_type_expr` — TS checker display
+    // text adapter. The helper does NOT exist pre-W5.3; the allowlist
+    // is empty today and the guard matches nothing. Once W5.3 lands
+    // the helper at `crates/verter_session/src/resolver_core/checker_text_adapter.rs`,
+    // the guard fires anywhere else the symbol is referenced (scope:
+    // every production `.rs` file outside the adapter module itself).
+    //
+    // The "checker_text_adapter.rs" exception is the file basename so
+    // any future relocation that keeps the name still passes; the
+    // bridge consumer in `type_expansion_verter.rs` will be added to
+    // the allowlist by W5.3 when it lands.
+    //
+    // This guard is deliberately distinct from
+    // `no_parse_type_annotation_outside_jsdoc` — JSDoc and
+    // checker-display-text are two different input boundaries.
+    // -----------------------------------------------------------------------
+    const CHECKER_TEXT_ADAPTER_ALLOWLIST: &[(&str, u32, &str)] = &[];
+
+    fn scan_checker_text_adapter() -> Vec<(String, u32, String)> {
+        let files = collect_production_rs_files();
+        let mut out: Vec<(String, u32, String)> = Vec::new();
+        for (path, rel) in &files {
+            let basename = rel.rsplit('/').next().unwrap_or("");
+            if basename == "checker_text_adapter.rs" {
+                continue;
+            }
+            let src = match fs::read_to_string(path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let stripped = preprocess(&src);
+            for (idx, line) in stripped.split('\n').enumerate() {
+                if line.contains("parse_checker_text_to_type_expr") {
+                    out.push((
+                        rel.clone(),
+                        (idx + 1) as u32,
+                        "parse_checker_text_to_type_expr".to_string(),
+                    ));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn no_checker_display_text_parsing_outside_adapter() {
+        let actual = scan_checker_text_adapter();
+        assert_exact_allowlist_match(
+            "no_checker_display_text_parsing_outside_adapter",
+            &actual,
+            CHECKER_TEXT_ADAPTER_ALLOWLIST,
+        );
+    }
+
+}
