@@ -275,11 +275,19 @@ function main() {
   const overridesDir = resolve(testDir, OVERRIDES_SUBDIR);
 
   // Clean regeneration — remove any prior generated files, preserve
-  // overrides/, fixtures/, and README.
+  // overrides/, fixtures/, README, and the hand-written harness.rs.
+  // harness.rs is the cross-component regression capture harness that
+  // lives alongside the generated per-component tests; it is not
+  // generator output and must survive regeneration.
   if (!config.dryRun) {
     try {
       for (const entry of readdirSync(testDir)) {
-        if (entry === OVERRIDES_SUBDIR || entry === FIXTURES_SUBDIR || entry === "README.md") {
+        if (
+          entry === OVERRIDES_SUBDIR ||
+          entry === FIXTURES_SUBDIR ||
+          entry === "README.md" ||
+          entry === "harness.rs"
+        ) {
           continue;
         }
         rmSync(resolve(testDir, entry), { force: true });

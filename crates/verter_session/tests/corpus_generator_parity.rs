@@ -462,3 +462,69 @@ fn commit_7_snapshots_stable_against_current_incidental_event_names_list() {
         "expected at least 6 authored corpus_representatives fixtures (Commit 7), found {count}",
     );
 }
+
+/// The corpus regenerator clears generated test files but MUST preserve
+/// the hand-written `harness.rs`, which lives alongside the generated
+/// per-component tests and provides shared test infrastructure they
+/// depend on (`mod harness;` declarations).
+///
+/// This is a discriminating regression: prior to this guard the
+/// regenerator's preservation list omitted `harness.rs` and every
+/// non-dry-run invocation deleted it, breaking the build on the next
+/// `cargo test --package verter_session`.
+///
+/// The test exercises the actual non-dry-run cleanup path against an
+/// isolated tempdir (the parity test only exercises `--dry-run`, which
+/// skips the destructive cleanup branch).
+#[test]
+fn corpus_regenerator_preserves_harness_rs() {
+    let root = workspace_root();
+    let generator = root.join("scripts/gen-corpus-audit-tests.mjs");
+    assert!(
+        generator.exists(),
+        "generator script missing at {generator:?}"
+    );
+
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let testdir = tempdir.path().join("component_meta_audit_corpus");
+    fs::create_dir_all(&testdir).expect("create tempdir/component_meta_audit_corpus");
+
+    // Pre-populate harness.rs with a sentinel marker so we can detect
+    // either deletion (file missing) or accidental overwrite (sentinel
+    // gone).
+    let harness_path = testdir.join("harness.rs");
+    let sentinel = "// harness preservation sentinel — must survive regeneration\n";
+    fs::write(&harness_path, sentinel).expect("write harness.rs");
+
+    // Also pre-populate a stale generated file, to confirm the cleanup
+    // branch actually ran (otherwise the test would pass trivially even
+    // on a no-op).
+    let stale_generated = testdir.join("corpus_audit_stale_should_be_deleted.rs");
+    fs::write(&stale_generated, "// stale\n").expect("write stale file");
+
+    let status = Command::new("node")
+        .arg(&generator)
+        .arg(format!("--output-dir={}", tempdir.path().display()))
+        .current_dir(&root)
+        .status()
+        .expect("spawn node (is Node.js on PATH?)");
+    assert!(status.success(), "generator exited non-zero: {status:?}");
+
+    // harness.rs must still exist with its original content.
+    assert!(
+        harness_path.exists(),
+        "harness.rs was deleted by the regenerator — preservation list regression",
+    );
+    let contents = fs::read_to_string(&harness_path).expect("read harness.rs");
+    assert_eq!(
+        contents, sentinel,
+        "harness.rs was overwritten by the regenerator — preservation list regression",
+    );
+
+    // Cleanup branch did run: the stale file must be gone.
+    assert!(
+        !stale_generated.exists(),
+        "stale generated file survived — cleanup branch did not actually execute, \
+         making the harness preservation assertion vacuous",
+    );
+}
