@@ -37,25 +37,24 @@ use verter_session::audited_request::AuditedRequest;
 
 const REGISTRY_ROUTE_FIXTURE_VUE: &str = include_str!("fixtures/audit/registry_route_cycle.vue");
 
-/// Registry-route cycle guard observable on a purely-recursive
-/// fixture: `Self = Pick<Self, 'a'>` with `defineProps<{ value: Self }>`.
+/// Recursive-alias `Self = Pick<Self, 'a'>` referenced by
+/// `defineProps<{ value: Self }>` publishes as the bare
+/// `Ref { name: "Self" }` carrier.
 ///
-/// Architectural contract (post-rescue cutover): published prop types
-/// stay shallow when not used. The projector path publishes the bare
-/// `Ref { name: "Self" }` carrier — the cycle guard never fires
-/// because no eager materialisation runs at publication time. This is
-/// the correct shallow contract: consumers re-resolve `Self` through
-/// the registry and the resolver's own cycle guard (the
-/// `ref_root_reaches_transitive_cycle_node` predicate, exercised by
-/// the unit-tests cited in the module docstring) keeps the on-demand
-/// path terminal.
+/// Architectural contract: published prop types stay shallow.
+/// Eager materialisation does not run at publication time, so the
+/// projector path emits the bare carrier and the cycle guard is not
+/// exercised here — the on-demand resolver-side guard
+/// (`ref_root_reaches_transitive_cycle_node`, covered by separate
+/// unit tests) keeps consumer re-resolution terminal.
 ///
 /// Discriminator: the resolved `value` field's `r#type` is the bare
 /// `Ref { name: "Self" }`. The fact that the request succeeds without
-/// hanging proves the projector path itself is bounded — no eager
-/// expansion of `Pick<Self, 'a'>` happens at publication time.
+/// hanging additionally proves the projector path itself is bounded —
+/// no eager expansion of `Pick<Self, 'a'>` happens at publication
+/// time.
 #[test]
-fn registry_route_cycle_guard_keeps_self_pick_terminal() {
+fn recursive_alias_self_pick_publishes_shallow_ref() {
     let result = AuditedRequest::builder()
         .files(vec![(
             "/c.vue".to_string(),

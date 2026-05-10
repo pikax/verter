@@ -1190,8 +1190,10 @@ mod tests {
         }
     }
 
-    // Compile-time: silence dead-code warnings on imports until the
-    // materialiser body lands in the prior cutover/c/d.
+    // Compile-time smoke test: instantiating each imported key /
+    // value type in a never-called function silences dead-code
+    // warnings on the imports while still verifying the imports
+    // remain reachable.
     #[allow(dead_code)]
     fn _construction_smoke_test() {
         let _ = ResolveDeclKey {

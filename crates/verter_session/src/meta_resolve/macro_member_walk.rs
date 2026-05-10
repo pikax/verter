@@ -1,4 +1,4 @@
-//! Helpers used by the per-macro projector decomposition (§7.1):
+//! Helpers used by the per-macro projector decomposition:
 //! `defineProps<T>()` root-name collection and the slot-binding
 //! registry-collection skip predicate. Production routes through
 //! `meta_resolve::projectors::project_evaluated_types`; per-member

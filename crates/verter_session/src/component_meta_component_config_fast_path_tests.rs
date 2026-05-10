@@ -1,19 +1,14 @@
 //! ComponentConfig theme variant projector-path characterisation tests.
 //!
-//! Architectural contract (post-rescue cutover): published prop types
-//! stay shallow when not used. The eager fast-path materialisation
-//! that previously fired on `ComponentConfig<typeof theme, AppConfig,
-//! key>` shapes was retired with the rescue cascade; the projector
-//! path publishes the symbolic indexed-access carriers and consumers
-//! re-resolve through the registry on demand.
+//! Architectural contract: published prop types stay shallow when not
+//! used. For `ComponentConfig<typeof theme, AppConfig, key>` shapes
+//! the projector path publishes the symbolic indexed-access carriers;
+//! consumers re-resolve through the registry on demand.
 //!
-//! These tests now characterise the shallow contract by driving each
+//! These tests characterise the shallow contract by driving each
 //! fixture through the public component-meta surface and asserting
 //! the published props are present (resolution does not panic, names
-//! land on the published surface). The earlier counter-based
-//! fast-path/slow-path discrimination was tied to the rescue
-//! cascade's eager-materialisation observable and is no longer part
-//! of the architectural contract.
+//! land on the published surface).
 
 use std::sync::Arc;
 

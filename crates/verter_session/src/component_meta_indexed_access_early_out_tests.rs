@@ -1,10 +1,9 @@
 //! Indexed-access early-out characterisation tests.
 //!
-//! Architectural contract (post-rescue cutover): published prop types
-//! stay shallow when not used. The projector path publishes the
-//! symbolic carrier (bare `Ref`, `IndexedAccess` chain, or terminal
-//! scalar) without running the eager member-route projection that
-//! the rescue cascade previously drove. These tests characterise the
+//! Architectural contract: published prop types stay shallow when not
+//! used. The projector path publishes the symbolic carrier (bare
+//! `Ref`, `IndexedAccess` chain, or terminal scalar) without running
+//! eager member-route projection. These tests characterise the
 //! shallow contract for indexed-access shapes:
 //!
 //! - Terminal scalar surfaces (`IconProps['name']` where

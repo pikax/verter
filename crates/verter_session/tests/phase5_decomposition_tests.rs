@@ -1,16 +1,14 @@
 //! Per-macro projector decomposition regression tests.
 //!
 //! Each test characterises an invariant of the per-macro projector
-//! decomposition that replaced the legacy walker
-//! the legacy macro-shape walker.
+//! decomposition.
 //!
 //! Test catalogue:
 //!
 //! - **#1** `getcomponentmeta_decomposes_through_dispatch_primitives`
 //!   — the per-macro projector path produces props for every
-//!   component-meta resolution. The legacy walker had been the sole
-//!   source of `evaluated_types.props`; the projector path is now
-//!   load-bearing.
+//!   component-meta resolution. The projector path is the sole
+//!   source of `evaluated_types.props` and is load-bearing.
 //!
 //! - **#2** `getcomponentmeta_100_prop_component_under_5s_cold` — a
 //!   synthetic 100-prop component-meta resolves cold under 5 seconds.
@@ -141,9 +139,7 @@ defineEmits<Emits>()
 /// Hard contract: every published prop/emit must carry a concrete
 /// `TypeExpr` (primitive / object / function — NOT `IndexedAccess`,
 /// `Ref` shell, or `Unknown`). A symbolic / unresolved shape proves
-/// the projector failed to reduce the macro surface natively, which
-/// would have previously been recovered by the (now-deleted) legacy
-/// rescue cascade.
+/// the projector failed to reduce the macro surface natively.
 ///
 /// For a `defineProps<{ message: string; count: number }>` /
 /// `defineEmits<{ click: ...; hover: ... }>` fixture the projector

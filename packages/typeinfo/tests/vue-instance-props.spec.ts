@@ -1,11 +1,9 @@
 /**
- * Phase 4 Test #3 — Vue worked example.
- *
- * Plan §1.1 row 9 / §7.7 #5: a Vue SFC declares its props through
+ * Vue worked example: a Vue SFC declares its props through
  * `defineProps<{ msg: string }>()`; evaluating
  * `InstanceType<typeof default>['$props']` against that SFC's scope
- * via `TypeInfoSession.evaluateTypeExpression` resolves to an Object
- * descriptor carrying a `msg: string` property.
+ * via `TypeInfoSession.evaluateTypeExpression` MUST resolve to an
+ * Object descriptor carrying a `msg: string` property.
  *
  * This test exercises the actual `.vue` SFC pipeline end-to-end:
  * the host parses the script-setup block, the substrate
@@ -13,15 +11,14 @@
  * symbol from the file's type-based macros, and
  * `evaluate_type_expression` inlines the scope's eval-source into
  * the scratch file so `typeof default` resolves to the synthesised
- * Object surface. Without that substrate cutover the result would
- * be `IndexedAccess { object: ..., index: '$props' }` — i.e. the
- * `'$props'` projection would not reduce — and this test would
- * fail.
+ * Object surface.
  *
- * REGRESSION — fails against any pre-cutover substrate where the
- * `.vue` scope's default does not publish `$props` natively, or
- * where the typeinfo scratch file does not inherit the scope's
- * eval-source as a prelude.
+ * REGRESSION — fails if the `.vue` scope's default does not publish
+ * `$props` natively, or if the typeinfo scratch file does not
+ * inherit the scope's eval-source as a prelude. In either case the
+ * `'$props'` projection would not reduce and the result would be
+ * `IndexedAccess { object: ..., index: '$props' }` instead of an
+ * Object descriptor.
  */
 
 import { describe, expect, it } from "vitest";
@@ -54,9 +51,9 @@ describe("TypeInfoSession Vue instance props worked example", () => {
 
     // Discriminating contract: the result MUST be an `object`
     // descriptor whose property list contains `msg: string`. A
-    // pre-cutover substrate would produce an `indexed-access` (or
-    // similar non-object) shape because `default` doesn't resolve
-    // to a concrete surface in the scratch's scope.
+    // regression would produce an `indexed-access` (or similar
+    // non-object) shape because `default` would not resolve to a
+    // concrete surface in the scratch's scope.
     expect(result.type).toBeDefined();
     expect(result.type?.kind).toBe("object");
     if (result.type?.kind === "object") {
