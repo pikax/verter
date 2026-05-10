@@ -1,4 +1,4 @@
-//! Rule: define-macros-order
+﻿//! Rule: define-macros-order
 //!
 //! Enforces consistent ordering of Vue compiler macros in `<script setup>`.
 //! `defineProps` should appear before `defineEmits`, and both before other macros.
@@ -95,6 +95,7 @@ mod tests {
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: Span::new(start, end),
         }
     }

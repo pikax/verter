@@ -1,4 +1,4 @@
-//! Rule: define-props-declaration
+﻿//! Rule: define-props-declaration
 //!
 //! Enforces type-based `defineProps` declarations over runtime declarations.
 
@@ -69,6 +69,7 @@ mod tests {
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: Span::new(10, 40),
         }
     }

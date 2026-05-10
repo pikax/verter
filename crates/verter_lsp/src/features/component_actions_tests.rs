@@ -1,4 +1,4 @@
-use super::*;
+﻿use super::*;
 use crate::documents::line_index::LineIndex;
 use crate::documents::sfc_scanner::scan_sfc_blocks;
 use verter_semantic::analysis::template::{
@@ -111,6 +111,7 @@ fn add_prop_to_type_based_define_props() {
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(24, 56),
         }])
         .into(),
@@ -250,6 +251,7 @@ fn no_action_for_runtime_based_define_props() {
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(15, 35),
         }])
         .into(),

@@ -317,47 +317,7 @@ fn extract_fields_from_interface_body(
     source: &str,
     comments: &[Comment],
 ) -> Vec<AnalyzedPropField> {
-    body.body
-        .iter()
-        .filter_map(|member| {
-            if let TSSignature::TSPropertySignature(prop) = member {
-                let key_name = match &prop.key {
-                    PropertyKey::StaticIdentifier(id) => Some(id.name.to_string()),
-                    PropertyKey::StringLiteral(lit) => Some(lit.value.to_string()),
-                    _ => None,
-                };
-                let type_annotation = prop.type_annotation.as_ref().and_then(|ta| {
-                    let start = ta.type_annotation.span().start as usize;
-                    let end = ta.type_annotation.span().end as usize;
-                    if end <= source.len() {
-                        let text = source[start..end].trim();
-                        if !text.is_empty() {
-                            Some(text.to_string())
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                });
-                let (description, tags) = extract_jsdoc_for(comments, prop.span().start, source);
-                key_name.map(|name| AnalyzedPropField {
-                    name,
-                    is_optional: prop.optional,
-                    span: prop.key.span().into(),
-                    type_annotation,
-                    description,
-                    tags,
-                    resolution_source: TypeResolutionSource::Rust,
-                    resolution_error: None,
-                    type_expr: None,
-                    type_expr_scope: None,
-                })
-            } else {
-                None
-            }
-        })
-        .collect()
+    extract_fields_from_interface_body_like(&body.body, source, comments)
 }
 
 /// Resolve prop fields from a TSType using the local type registry.
@@ -521,20 +481,29 @@ fn extract_fields_from_interface_body_like(
                     PropertyKey::StringLiteral(lit) => Some(lit.value.to_string()),
                     _ => None,
                 };
-                let type_annotation = prop.type_annotation.as_ref().and_then(|ta| {
-                    let start = ta.type_annotation.span().start as usize;
-                    let end = ta.type_annotation.span().end as usize;
-                    if end <= source.len() {
-                        let text = source[start..end].trim();
-                        if !text.is_empty() {
-                            Some(text.to_string())
+                // Lower the OXC `TSType<'_>` AST node directly. Source slicing is
+                // display-only.
+                let (type_annotation, type_expr) = match prop.type_annotation.as_ref() {
+                    Some(ta) => {
+                        let start = ta.type_annotation.span().start as usize;
+                        let end = ta.type_annotation.span().end as usize;
+                        let display = if end <= source.len() {
+                            let text = source[start..end].trim();
+                            (!text.is_empty()).then(|| text.to_string())
                         } else {
                             None
-                        }
-                    } else {
-                        None
+                        };
+                        let expr = verter_type_expr_oxc::lower_ts_type(&ta.type_annotation, source);
+                        (display, Some(expr))
                     }
-                });
+                    None => (None, None),
+                };
+                let type_expr_scope =
+                    type_expr.as_ref().map(|_| verter_type_expr::TypeExprScope::new(""));
+                debug_assert!(
+                    type_expr.is_some() == type_expr_scope.is_some(),
+                    "AnalyzedPropField pairing invariant: type_expr.is_some() == type_expr_scope.is_some()"
+                );
                 let (description, tags) = extract_jsdoc_for(comments, prop.span().start, source);
                 key_name.map(|name| AnalyzedPropField {
                     name,
@@ -545,8 +514,8 @@ fn extract_fields_from_interface_body_like(
                     tags,
                     resolution_source: TypeResolutionSource::Rust,
                     resolution_error: None,
-                    type_expr: None,
-                    type_expr_scope: None,
+                    type_expr,
+                    type_expr_scope,
                 })
             } else {
                 None
@@ -1410,25 +1379,16 @@ fn try_extract_macro(
                         // once during shallow analysis. The host-side
                         // closure consumes this field to drive a
                         // dispatch projection of the macro's fields
-                        // without re-parsing.
-                        let raw_span = first.span();
-                        let start = raw_span.start as usize;
-                        let end = raw_span.end as usize;
-                        let parsed = if start <= end && end <= source.len() {
-                            let text = source[start..end].trim();
-                            if text.is_empty() {
+                        // without re-parsing. Lower the OXC `TSType<'_>`
+                        // AST node directly — no source slicing or
+                        // re-parsing.
+                        let lowered = verter_type_expr_oxc::lower_ts_type(first, source);
+                        let parsed =
+                            if matches!(lowered, verter_type_expr::TypeExpr::Unknown { .. }) {
                                 None
                             } else {
-                                let lowered = verter_type_expr_oxc::parse_type_annotation(text);
-                                if matches!(lowered, verter_type_expr::TypeExpr::Unknown { .. }) {
-                                    None
-                                } else {
-                                    Some(std::sync::Arc::new(lowered))
-                                }
-                            }
-                        } else {
-                            None
-                        };
+                                Some(std::sync::Arc::new(lowered))
+                            };
                         (true, collect_type_references(first), parsed)
                     } else {
                         (true, Vec::new(), None)
@@ -1436,6 +1396,13 @@ fn try_extract_macro(
                 } else {
                     (false, Vec::new(), None)
                 };
+            let parsed_type_argument_scope = parsed_type_argument
+                .as_ref()
+                .map(|_| verter_type_expr::TypeExprScope::new(""));
+            debug_assert!(
+                parsed_type_argument.is_some() == parsed_type_argument_scope.is_some(),
+                "AnalyzedMacro pairing invariant: parsed_type_argument.is_some() == parsed_type_argument_scope.is_some()"
+            );
 
             // Extract model name from defineModel('name') first string argument
             let model_name = if kind == AnalyzedMacroKind::DefineModel {
@@ -1521,6 +1488,7 @@ fn try_extract_macro(
                 default_values,
                 resolved_local_types: Vec::new(),
                 parsed_type_argument,
+                parsed_type_argument_scope,
                 span: call.span.into(),
             })
         }
@@ -1555,6 +1523,14 @@ fn extract_define_model_type(
     }
     let name = model_name.as_deref().unwrap_or("modelValue").to_string();
     let is_optional = !define_model_is_required(call);
+    let type_expr = Some(verter_type_expr_oxc::lower_ts_type(first, source));
+    let type_expr_scope = type_expr
+        .as_ref()
+        .map(|_| verter_type_expr::TypeExprScope::new(""));
+    debug_assert!(
+        type_expr.is_some() == type_expr_scope.is_some(),
+        "AnalyzedPropField pairing invariant: type_expr.is_some() == type_expr_scope.is_some()"
+    );
     vec![AnalyzedPropField {
         name,
         is_optional,
@@ -1564,8 +1540,8 @@ fn extract_define_model_type(
         tags: Vec::new(),
         resolution_source: TypeResolutionSource::Rust,
         resolution_error: None,
-        type_expr: None,
-        type_expr_scope: None,
+        type_expr,
+        type_expr_scope,
     }]
 }
 
@@ -1693,51 +1669,12 @@ fn extract_prop_fields_from_type(
     comments: &[Comment],
 ) -> Vec<AnalyzedPropField> {
     match ts_type {
-        TSType::TSTypeLiteral(literal) => literal
-            .members
-            .iter()
-            .filter_map(|member| {
-                if let TSSignature::TSPropertySignature(prop) = member {
-                    let key_name = match &prop.key {
-                        PropertyKey::StaticIdentifier(id) => Some(id.name.to_string()),
-                        PropertyKey::StringLiteral(lit) => Some(lit.value.to_string()),
-                        _ => None,
-                    };
-                    // Extract type annotation text from source span
-                    let type_annotation = prop.type_annotation.as_ref().and_then(|ta| {
-                        let start = ta.type_annotation.span().start as usize;
-                        let end = ta.type_annotation.span().end as usize;
-                        if end <= source.len() {
-                            let text = source[start..end].trim();
-                            if !text.is_empty() {
-                                Some(text.to_string())
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
-                    });
-                    // Extract JSDoc from leading comment
-                    let (description, tags) =
-                        extract_jsdoc_for(comments, prop.span().start, source);
-                    key_name.map(|name| AnalyzedPropField {
-                        name,
-                        is_optional: prop.optional,
-                        span: prop.key.span().into(),
-                        type_annotation,
-                        description,
-                        tags,
-                        resolution_source: TypeResolutionSource::Rust,
-                        resolution_error: None,
-                        type_expr: None,
-                        type_expr_scope: None,
-                    })
-                } else {
-                    None
-                }
-            })
-            .collect(),
+        // Inline `defineProps<{ count: number; ... }>()` — delegate to the
+        // shared interface-body-like extractor so every prop carries the
+        // typed `*_expr` form lowered via `lower_ts_type`.
+        TSType::TSTypeLiteral(literal) => {
+            extract_fields_from_interface_body_like(&literal.members, source, comments)
+        }
         TSType::TSTypeReference(_) => {
             // Interface reference — can't resolve inline, leave empty
             Vec::new()
@@ -1785,18 +1722,18 @@ fn constructor_to_ts_type(name: &str) -> Option<&'static str> {
 /// - `X as () => T`      → `T` (extracts the return type, not the callable)
 /// - `X as new () => T`  → `T` (extracts the return type, not the constructor)
 /// - Other assertions    → `None` (caller falls back to `constructor_to_ts_type`)
-fn extract_ts_as_type(ts_as: &TSAsExpression<'_>, source: &str) -> Option<String> {
+fn extract_ts_as_type(
+    ts_as: &TSAsExpression<'_>,
+    source: &str,
+) -> Option<verter_type_expr::TypeExpr> {
     match &ts_as.type_annotation {
         TSType::TSTypeReference(type_ref) => {
-            // `X as PropType<T>` → extract T
+            // `X as PropType<T>` → lower T from the OXC AST node directly
             if let TSTypeName::IdentifierReference(id) = &type_ref.type_name {
                 if id.name == "PropType" {
                     if let Some(args) = &type_ref.type_arguments {
                         if let Some(first) = args.params.first() {
-                            let span = first.span();
-                            return Some(
-                                source[span.start as usize..span.end as usize].to_string(),
-                            );
+                            return Some(verter_type_expr_oxc::lower_ts_type(first, source));
                         }
                     }
                 }
@@ -1804,14 +1741,18 @@ fn extract_ts_as_type(ts_as: &TSAsExpression<'_>, source: &str) -> Option<String
             None
         }
         TSType::TSFunctionType(fn_type) => {
-            // `X as () => T` → extract T (the return type, not the callable signature)
-            let span = fn_type.return_type.type_annotation.span();
-            Some(source[span.start as usize..span.end as usize].to_string())
+            // `X as () => T` → lower T (the return type, not the callable signature)
+            Some(verter_type_expr_oxc::lower_ts_type(
+                &fn_type.return_type.type_annotation,
+                source,
+            ))
         }
         TSType::TSConstructorType(ctor_type) => {
-            // `X as new () => T` → extract T (the return type, not the constructor signature)
-            let span = ctor_type.return_type.type_annotation.span();
-            Some(source[span.start as usize..span.end as usize].to_string())
+            // `X as new () => T` → lower T (the return type, not the constructor signature)
+            Some(verter_type_expr_oxc::lower_ts_type(
+                &ctor_type.return_type.type_annotation,
+                source,
+            ))
         }
         _ => None,
     }
@@ -1842,13 +1783,16 @@ fn extract_prop_fields_from_runtime(
                     _ => continue,
                 };
 
-                let mut type_annotation = None;
+                let mut type_annotation: Option<String> = None;
+                let mut type_expr: Option<verter_type_expr::TypeExpr> = None;
                 // Vue semantics: props are optional by default unless `required: true` is set.
                 let mut is_optional = true;
 
                 // Check if value is a constructor (shorthand: `name: String`)
                 if let Expression::Identifier(id) = &p.value {
-                    type_annotation = constructor_to_ts_type(&id.name).map(String::from);
+                    if let Some(ts_text) = constructor_to_ts_type(&id.name) {
+                        type_annotation = Some(ts_text.to_string());
+                    }
                 }
 
                 // Check if value is an expanded object: `name: { type: String, default: 'Hello' }`
@@ -1868,14 +1812,39 @@ fn extract_prop_fields_from_runtime(
                                 // base constructor identifier via `constructor_to_ts_type`.
                                 if let Expression::TSAsExpression(ts_as) = &sp.value {
                                     if let Some(extracted) = extract_ts_as_type(ts_as, source) {
-                                        type_annotation = Some(extracted);
+                                        // Display: slice the source span of the inner type-arg / return-type
+                                        // so the wire payload still carries human-readable text.
+                                        let display_span = match &ts_as.type_annotation {
+                                            TSType::TSTypeReference(tr) => tr
+                                                .type_arguments
+                                                .as_ref()
+                                                .and_then(|args| args.params.first())
+                                                .map(|first| first.span()),
+                                            TSType::TSFunctionType(ft) => {
+                                                Some(ft.return_type.type_annotation.span())
+                                            }
+                                            TSType::TSConstructorType(ct) => {
+                                                Some(ct.return_type.type_annotation.span())
+                                            }
+                                            _ => None,
+                                        };
+                                        type_annotation = display_span.and_then(|sp_| {
+                                            let s = sp_.start as usize;
+                                            let e = sp_.end as usize;
+                                            (e <= source.len())
+                                                .then(|| source[s..e].trim().to_string())
+                                                .filter(|t| !t.is_empty())
+                                        });
+                                        type_expr = Some(extracted);
                                     } else if let Expression::Identifier(id) = &ts_as.expression {
-                                        type_annotation =
-                                            constructor_to_ts_type(&id.name).map(String::from);
+                                        if let Some(ts_text) = constructor_to_ts_type(&id.name) {
+                                            type_annotation = Some(ts_text.to_string());
+                                        }
                                     }
                                 } else if let Expression::Identifier(id) = &sp.value {
-                                    type_annotation =
-                                        constructor_to_ts_type(&id.name).map(String::from);
+                                    if let Some(ts_text) = constructor_to_ts_type(&id.name) {
+                                        type_annotation = Some(ts_text.to_string());
+                                    }
                                 }
                             }
                             "required" => {
@@ -1900,6 +1869,13 @@ fn extract_prop_fields_from_runtime(
 
                 let (description, tags) = extract_jsdoc_for(comments, p.key.span().start, source);
 
+                let type_expr_scope = type_expr
+                    .as_ref()
+                    .map(|_| verter_type_expr::TypeExprScope::new(""));
+                debug_assert!(
+                    type_expr.is_some() == type_expr_scope.is_some(),
+                    "AnalyzedPropField pairing invariant: type_expr.is_some() == type_expr_scope.is_some()"
+                );
                 fields.push(AnalyzedPropField {
                     name: key_name,
                     is_optional,
@@ -1909,8 +1885,8 @@ fn extract_prop_fields_from_runtime(
                     tags,
                     resolution_source: TypeResolutionSource::Rust,
                     resolution_error: None,
-                    type_expr: None,
-                    type_expr_scope: None,
+                    type_expr,
+                    type_expr_scope,
                 });
             }
 
@@ -2024,20 +2000,28 @@ fn extract_emit_fields_from_members(
                     PropertyKey::StringLiteral(lit) => Some(lit.value.to_string()),
                     _ => None,
                 };
-                let payload_type = prop.type_annotation.as_ref().and_then(|ta| {
-                    let start = ta.type_annotation.span().start as usize;
-                    let end = ta.type_annotation.span().end as usize;
-                    if end <= source.len() {
-                        let text = source[start..end].trim();
-                        if !text.is_empty() {
-                            Some(text.to_string())
+                let (payload_type, payload_expr) = match prop.type_annotation.as_ref() {
+                    Some(ta) => {
+                        let start = ta.type_annotation.span().start as usize;
+                        let end = ta.type_annotation.span().end as usize;
+                        let display = if end <= source.len() {
+                            let text = source[start..end].trim();
+                            (!text.is_empty()).then(|| text.to_string())
                         } else {
                             None
-                        }
-                    } else {
-                        None
+                        };
+                        let expr = verter_type_expr_oxc::lower_ts_type(&ta.type_annotation, source);
+                        (display, Some(expr))
                     }
-                });
+                    None => (None, None),
+                };
+                let payload_expr_scope = payload_expr
+                    .as_ref()
+                    .map(|_| verter_type_expr::TypeExprScope::new(""));
+                debug_assert!(
+                    payload_expr.is_some() == payload_expr_scope.is_some(),
+                    "AnalyzedEmitField pairing invariant: payload_expr.is_some() == payload_expr_scope.is_some()"
+                );
                 let (description, tags) = extract_jsdoc_for(comments, prop.span().start, source);
                 key_name.map(|name| AnalyzedEmitField {
                     name,
@@ -2045,8 +2029,8 @@ fn extract_emit_fields_from_members(
                     payload_type,
                     description,
                     tags,
-                    payload_expr: None,
-                    payload_expr_scope: None,
+                    payload_expr,
+                    payload_expr_scope,
                 })
             }
             // Call signature: `(e: 'change', id: number): void`
@@ -2055,24 +2039,70 @@ fn extract_emit_fields_from_members(
                 let type_ann = first_param.type_annotation.as_ref()?;
                 if let TSType::TSLiteralType(lit) = &type_ann.type_annotation {
                     if let TSLiteral::StringLiteral(s) = &lit.literal {
-                        let payload_type = {
-                            let extra_params: Vec<String> = call_sig
-                                .params
-                                .items
-                                .iter()
-                                .skip(1)
-                                .map(|p| {
-                                    let start = p.span().start as usize;
-                                    let end = p.span().end as usize;
-                                    if end <= source.len() {
-                                        source[start..end].to_string()
-                                    } else {
-                                        "unknown".to_string()
+                        // Display: `[id: number]` formed from the source slices of the
+                        // remaining params.
+                        let extra_params_text: Vec<String> = call_sig
+                            .params
+                            .items
+                            .iter()
+                            .skip(1)
+                            .map(|p| {
+                                let start = p.span().start as usize;
+                                let end = p.span().end as usize;
+                                if end <= source.len() {
+                                    source[start..end].to_string()
+                                } else {
+                                    "unknown".to_string()
+                                }
+                            })
+                            .collect();
+                        let payload_type = Some(format!("[{}]", extra_params_text.join(", ")));
+                        // Typed: build a `TypeExpr::Tuple` from the lowered remaining-param types.
+                        // No source-text reparse — each param's `type_annotation` AST node is
+                        // lowered directly via `lower_ts_type`. Params without a type annotation
+                        // become `TypeExpr::Primitive(Unknown)` shells.
+                        let elements: Vec<verter_type_expr::TupleElement> = call_sig
+                            .params
+                            .items
+                            .iter()
+                            .skip(1)
+                            .map(|p| {
+                                let ty = match p.type_annotation.as_ref() {
+                                    Some(ta) => {
+                                        verter_type_expr_oxc::lower_ts_type(
+                                            &ta.type_annotation,
+                                            source,
+                                        )
                                     }
-                                })
-                                .collect();
-                            Some(format!("[{}]", extra_params.join(", ")))
-                        };
+                                    None => verter_type_expr::TypeExpr::Primitive(
+                                        verter_type_expr::PrimitiveName::Unknown,
+                                    ),
+                                };
+                                let label = match &p.pattern {
+                                    BindingPattern::BindingIdentifier(id) => {
+                                        Some(id.name.to_string())
+                                    }
+                                    _ => None,
+                                };
+                                verter_type_expr::TupleElement {
+                                    ty,
+                                    optional: p.optional,
+                                    label,
+                                    rest: false,
+                                }
+                            })
+                            .collect();
+                        let payload_expr = Some(verter_type_expr::TypeExpr::Tuple {
+                            elements: std::sync::Arc::from(elements),
+                            readonly: false,
+                        });
+                        let payload_expr_scope = payload_expr
+                            .as_ref()
+                            .map(|_| verter_type_expr::TypeExprScope::new(""));
+                        debug_assert!(
+                            payload_expr.is_some() == payload_expr_scope.is_some(),
+                            "AnalyzedEmitField pairing invariant: payload_expr.is_some() == payload_expr_scope.is_some()"
+                        );
                         let (description, tags) =
                             extract_jsdoc_for(comments, call_sig.span().start, source);
                         return Some(AnalyzedEmitField {
@@ -2081,8 +2111,8 @@ fn extract_emit_fields_from_members(
                             payload_type,
                             description,
                             tags,
-                            payload_expr: None,
-                            payload_expr_scope: None,
+                            payload_expr,
+                            payload_expr_scope,
                         });
                     }
                 }
@@ -2323,10 +2353,18 @@ fn extract_slot_fields_from_members(
                     .as_ref()
                     .map(|ta| extract_slot_bindings_from_fn_type(&ta.type_annotation, source))
                     .unwrap_or_default();
-                let return_type = prop
+                let (return_type, return_expr) = prop
                     .type_annotation
                     .as_ref()
-                    .and_then(|ta| extract_slot_return_type_from_fn(&ta.type_annotation, source));
+                    .map(|ta| extract_slot_return_from_fn(&ta.type_annotation, source))
+                    .unwrap_or((None, None));
+                let return_expr_scope = return_expr
+                    .as_ref()
+                    .map(|_| verter_type_expr::TypeExprScope::new(""));
+                debug_assert!(
+                    return_expr.is_some() == return_expr_scope.is_some(),
+                    "AnalyzedSlotField pairing invariant: return_expr.is_some() == return_expr_scope.is_some()"
+                );
                 let (description, tags) = extract_jsdoc_for(comments, prop.span().start, source);
                 key_name.map(|name| AnalyzedSlotField {
                     name,
@@ -2336,8 +2374,8 @@ fn extract_slot_fields_from_members(
                     return_type,
                     description,
                     tags,
-                    return_expr: None,
-                    return_expr_scope: None,
+                    return_expr,
+                    return_expr_scope,
                 })
             }
             TSSignature::TSMethodSignature(method) => {
@@ -2347,20 +2385,28 @@ fn extract_slot_fields_from_members(
                     _ => None,
                 };
                 let bindings = extract_slot_bindings_from_params(&method.params, source);
-                let return_type = method.return_type.as_ref().and_then(|rt| {
-                    let start = rt.type_annotation.span().start as usize;
-                    let end = rt.type_annotation.span().end as usize;
-                    if end <= source.len() {
-                        let text = source[start..end].trim();
-                        if !text.is_empty() {
-                            Some(text.to_string())
+                let (return_type, return_expr) = match method.return_type.as_ref() {
+                    Some(rt) => {
+                        let start = rt.type_annotation.span().start as usize;
+                        let end = rt.type_annotation.span().end as usize;
+                        let display = if end <= source.len() {
+                            let text = source[start..end].trim();
+                            (!text.is_empty()).then(|| text.to_string())
                         } else {
                             None
-                        }
-                    } else {
-                        None
+                        };
+                        let expr = verter_type_expr_oxc::lower_ts_type(&rt.type_annotation, source);
+                        (display, Some(expr))
                     }
-                });
+                    None => (None, None),
+                };
+                let return_expr_scope = return_expr
+                    .as_ref()
+                    .map(|_| verter_type_expr::TypeExprScope::new(""));
+                debug_assert!(
+                    return_expr.is_some() == return_expr_scope.is_some(),
+                    "AnalyzedSlotField pairing invariant: return_expr.is_some() == return_expr_scope.is_some()"
+                );
                 let (description, tags) = extract_jsdoc_for(comments, method.span().start, source);
                 key_name.map(|name| AnalyzedSlotField {
                     name,
@@ -2370,8 +2416,8 @@ fn extract_slot_fields_from_members(
                     return_type,
                     description,
                     tags,
-                    return_expr: None,
-                    return_expr_scope: None,
+                    return_expr,
+                    return_expr_scope,
                 })
             }
             _ => None,
@@ -2379,21 +2425,28 @@ fn extract_slot_fields_from_members(
         .collect()
 }
 
-/// Extract the return type text from a `TSFunctionType` annotation.
+/// Extract both the display text AND the lowered `TypeExpr` of a `TSFunctionType`'s
+/// return type. Returns `(None, None)` for non-function-type inputs.
 ///
-/// Handles: `(props: { row: MyItem }) => VNode[]` → `"VNode[]"`
-fn extract_slot_return_type_from_fn(ts_type: &TSType<'_>, source: &str) -> Option<String> {
+/// Handles: `(props: { row: MyItem }) => VNode[]` → (`"VNode[]"`, lowered VNode[]).
+fn extract_slot_return_from_fn(
+    ts_type: &TSType<'_>,
+    source: &str,
+) -> (Option<String>, Option<verter_type_expr::TypeExpr>) {
     if let TSType::TSFunctionType(fn_type) = ts_type {
         let start = fn_type.return_type.type_annotation.span().start as usize;
         let end = fn_type.return_type.type_annotation.span().end as usize;
-        if end <= source.len() {
+        let display = if end <= source.len() {
             let text = source[start..end].trim();
-            if !text.is_empty() {
-                return Some(text.to_string());
-            }
-        }
+            (!text.is_empty()).then(|| text.to_string())
+        } else {
+            None
+        };
+        let expr =
+            verter_type_expr_oxc::lower_ts_type(&fn_type.return_type.type_annotation, source);
+        return (display, Some(expr));
     }
-    None
+    (None, None)
 }
 
 /// Extract binding types from a `TSFunctionType` annotation on a property signature.
@@ -2428,7 +2481,8 @@ fn extract_slot_bindings_from_params(
     if !bindings.is_empty() {
         return bindings;
     }
-    extract_slot_bindings_from_source_type(&ta.type_annotation, source)
+    // Fall back to recovering bindings from a `Pick<Object, Keys>` AST shape.
+    extract_slot_bindings_from_pick_ast(&ta.type_annotation, source)
 }
 
 /// Extract binding names and types from a `TSTypeLiteral` (object type).
@@ -2449,26 +2503,34 @@ fn extract_slot_bindings_from_type_literal(
                     PropertyKey::StringLiteral(lit) => Some(lit.value.to_string()),
                     _ => None,
                 };
-                let type_annotation = prop.type_annotation.as_ref().and_then(|ta| {
-                    let start = ta.type_annotation.span().start as usize;
-                    let end = ta.type_annotation.span().end as usize;
-                    if end <= source.len() {
-                        let text = source[start..end].trim();
-                        if !text.is_empty() {
-                            Some(text.to_string())
+                let (type_annotation, binding_expr) = match prop.type_annotation.as_ref() {
+                    Some(ta) => {
+                        let start = ta.type_annotation.span().start as usize;
+                        let end = ta.type_annotation.span().end as usize;
+                        let display = if end <= source.len() {
+                            let text = source[start..end].trim();
+                            (!text.is_empty()).then(|| text.to_string())
                         } else {
                             None
-                        }
-                    } else {
-                        None
+                        };
+                        let expr = verter_type_expr_oxc::lower_ts_type(&ta.type_annotation, source);
+                        (display, Some(expr))
                     }
-                });
+                    None => (None, None),
+                };
+                let binding_expr_scope = binding_expr
+                    .as_ref()
+                    .map(|_| verter_type_expr::TypeExprScope::new(""));
+                debug_assert!(
+                    binding_expr.is_some() == binding_expr_scope.is_some(),
+                    "AnalyzedSlotFieldBinding pairing invariant: binding_expr.is_some() == binding_expr_scope.is_some()"
+                );
                 key_name.map(|name| AnalyzedSlotFieldBinding {
                     name,
                     type_annotation,
                     span: prop.key.span().into(),
-                    binding_expr: None,
-                    binding_expr_scope: None,
+                    binding_expr,
+                    binding_expr_scope,
                 })
             } else {
                 None
@@ -2477,121 +2539,175 @@ fn extract_slot_bindings_from_type_literal(
         .collect()
 }
 
-fn extract_slot_bindings_from_source_type(
+/// Recover slot bindings from an AST `Pick<Object, Keys>` type reference.
+///
+/// Walks the OXC `TSType` directly — no source slicing, no `parse_type_annotation`.
+/// For each key in the keys union (or a single key reference):
+/// - String-literal keys (`"name"`) emit
+///   `binding_expr = TypeExpr::IndexedAccess { object: lower(args[0]), index: Literal(String("name")) }`.
+/// - Userland alias keys (`type BindingKey = "name" | "value"`) emit
+///   `binding_expr = TypeExpr::IndexedAccess { object: lower(args[0]), index: Ref { name: "BindingKey" } }`.
+///   Alias resolution is NOT analyzer scope — the projector / cross-file resolver
+///   walks the `Ref` to its body lazily via the standard `TypeExpr` path.
+///
+/// Other shapes (non-Pick references, missing arguments, non-literal/non-ref keys)
+/// return an empty vec.
+fn extract_slot_bindings_from_pick_ast(
     ts_type: &TSType<'_>,
     source: &str,
 ) -> Vec<AnalyzedSlotFieldBinding> {
-    let start = ts_type.span().start as usize;
-    let end = ts_type.span().end as usize;
-    if start >= end || end > source.len() {
+    let TSType::TSTypeReference(type_ref) = ts_type else {
+        return Vec::new();
+    };
+    // Match `Pick<...>` by AST shape.
+    let is_pick = matches!(
+        &type_ref.type_name,
+        TSTypeName::IdentifierReference(id) if id.name == "Pick"
+    );
+    if !is_pick {
         return Vec::new();
     }
-
-    extract_slot_bindings_from_type_text(source[start..end].trim())
-}
-
-fn extract_slot_bindings_from_type_text(type_text: &str) -> Vec<AnalyzedSlotFieldBinding> {
-    extract_slot_bindings_from_pick_type(type_text).unwrap_or_default()
-}
-
-fn extract_slot_bindings_from_pick_type(type_text: &str) -> Option<Vec<AnalyzedSlotFieldBinding>> {
-    let text = type_text.trim();
-    if !text.starts_with("Pick<") || !text.ends_with('>') {
-        return None;
+    let Some(type_args) = type_ref.type_arguments.as_ref() else {
+        return Vec::new();
+    };
+    if type_args.params.len() != 2 {
+        return Vec::new();
     }
+    let object_ts = &type_args.params[0];
+    let keys_ts = &type_args.params[1];
 
-    let args = split_top_level_type_segments(&text["Pick<".len()..text.len() - 1], ',');
-    if args.len() != 2 {
-        return None;
-    }
+    // The object is the same for every binding — lower once and clone.
+    let object_expr = std::sync::Arc::new(verter_type_expr_oxc::lower_ts_type(object_ts, source));
 
-    let object = args[0].trim();
-    let keys = split_top_level_type_segments(args[1].trim(), '|');
+    // Collect each key as either a literal-string key, or a userland alias Ref.
     let mut bindings = Vec::new();
-    for key in keys {
-        let key = key.trim();
-        let name = extract_type_string_literal_name(key)?;
-        bindings.push(AnalyzedSlotFieldBinding {
-            name,
-            type_annotation: Some(format!("{object}[{key}]")),
-            span: verter_span::Span::default(),
-            binding_expr: None,
-            binding_expr_scope: None,
-        });
-    }
 
-    (!bindings.is_empty()).then_some(bindings)
-}
-
-fn split_top_level_type_segments(text: &str, separator: char) -> Vec<&str> {
-    let mut parts = Vec::new();
-    let mut start = 0usize;
-    let mut paren_depth = 0i32;
-    let mut bracket_depth = 0i32;
-    let mut brace_depth = 0i32;
-    let mut angle_depth = 0i32;
-    let mut in_string = false;
-    let mut string_delim = '\0';
-    let mut escape = false;
-
-    for (index, ch) in text.char_indices() {
-        if in_string {
-            if escape {
-                escape = false;
-                continue;
+    let push_for_key = |key_ts: &TSType<'_>, bindings: &mut Vec<AnalyzedSlotFieldBinding>| {
+        match key_ts {
+            // Literal string-key: `"name"`
+            TSType::TSLiteralType(lit) => {
+                if let TSLiteral::StringLiteral(s) = &lit.literal {
+                    let key_name = s.value.to_string();
+                    let key_text = {
+                        let span = lit.span();
+                        let st = span.start as usize;
+                        let en = span.end as usize;
+                        if en <= source.len() {
+                            source[st..en].trim().to_string()
+                        } else {
+                            format!("\"{key_name}\"")
+                        }
+                    };
+                    let object_text = {
+                        let span = object_ts.span();
+                        let st = span.start as usize;
+                        let en = span.end as usize;
+                        if en <= source.len() {
+                            source[st..en].trim().to_string()
+                        } else {
+                            String::new()
+                        }
+                    };
+                    let display =
+                        (!object_text.is_empty()).then(|| format!("{object_text}[{key_text}]"));
+                    let index_expr = verter_type_expr::TypeExpr::Literal(
+                        verter_type_expr::LiteralValue::String(key_name.clone()),
+                    );
+                    let binding_expr = Some(verter_type_expr::TypeExpr::IndexedAccess {
+                        object: object_expr.clone(),
+                        index: std::sync::Arc::new(index_expr),
+                    });
+                    let binding_expr_scope = binding_expr
+                        .as_ref()
+                        .map(|_| verter_type_expr::TypeExprScope::new(""));
+                    debug_assert!(
+                        binding_expr.is_some() == binding_expr_scope.is_some(),
+                        "AnalyzedSlotFieldBinding pairing invariant"
+                    );
+                    bindings.push(AnalyzedSlotFieldBinding {
+                        name: key_name,
+                        type_annotation: display,
+                        span: verter_span::Span::default(),
+                        binding_expr,
+                        binding_expr_scope,
+                    });
+                }
             }
-            if ch == '\\' {
-                escape = true;
-                continue;
-            }
-            if ch == string_delim {
-                in_string = false;
-            }
-            continue;
-        }
-
-        match ch {
-            '\'' | '"' | '`' => {
-                in_string = true;
-                string_delim = ch;
-            }
-            '(' => paren_depth += 1,
-            ')' => paren_depth -= 1,
-            '[' => bracket_depth += 1,
-            ']' => bracket_depth -= 1,
-            '{' => brace_depth += 1,
-            '}' => brace_depth -= 1,
-            '<' => angle_depth += 1,
-            '>' => angle_depth -= 1,
-            _ if ch == separator
-                && paren_depth == 0
-                && bracket_depth == 0
-                && brace_depth == 0
-                && angle_depth == 0 =>
-            {
-                parts.push(text[start..index].trim());
-                start = index + ch.len_utf8();
+            // Userland alias: `type BindingKey = "name" | "value"` referenced by name.
+            // Analyzer emits the symbolic shape `IndexedAccess { object, index: Ref { name } }`.
+            // Resolution to the literal-union body happens in the projector / cross-file resolver.
+            TSType::TSTypeReference(key_ref) => {
+                let alias_name = match &key_ref.type_name {
+                    TSTypeName::IdentifierReference(id) => Some(id.name.to_string()),
+                    _ => None,
+                };
+                if let Some(alias_name) = alias_name {
+                    let key_text = {
+                        let span = key_ts.span();
+                        let st = span.start as usize;
+                        let en = span.end as usize;
+                        if en <= source.len() {
+                            source[st..en].trim().to_string()
+                        } else {
+                            alias_name.clone()
+                        }
+                    };
+                    let object_text = {
+                        let span = object_ts.span();
+                        let st = span.start as usize;
+                        let en = span.end as usize;
+                        if en <= source.len() {
+                            source[st..en].trim().to_string()
+                        } else {
+                            String::new()
+                        }
+                    };
+                    let display =
+                        (!object_text.is_empty()).then(|| format!("{object_text}[{key_text}]"));
+                    // Lower the alias-key AST node directly so any type arguments
+                    // (`Pick<X, K<T>>`) are preserved.
+                    let index_expr = verter_type_expr_oxc::lower_ts_type(key_ts, source);
+                    let binding_expr = Some(verter_type_expr::TypeExpr::IndexedAccess {
+                        object: object_expr.clone(),
+                        index: std::sync::Arc::new(index_expr),
+                    });
+                    let binding_expr_scope = binding_expr
+                        .as_ref()
+                        .map(|_| verter_type_expr::TypeExprScope::new(""));
+                    debug_assert!(
+                        binding_expr.is_some() == binding_expr_scope.is_some(),
+                        "AnalyzedSlotFieldBinding pairing invariant"
+                    );
+                    bindings.push(AnalyzedSlotFieldBinding {
+                        // Bare alias reference: at analyzer scope we cannot enumerate
+                        // the underlying literal-union members; the projector / resolver
+                        // walks `Ref { name: alias_name }` and emits a per-binding entry
+                        // for each resolved literal. Use the alias name as the analyzer
+                        // shape's identifier; the consumer overrides downstream.
+                        name: alias_name,
+                        type_annotation: display,
+                        span: verter_span::Span::default(),
+                        binding_expr,
+                        binding_expr_scope,
+                    });
+                }
             }
             _ => {}
         }
+    };
+
+    match keys_ts {
+        // `Pick<X, "a" | "b">` — union of literal keys.
+        TSType::TSUnionType(union) => {
+            for arm in &union.types {
+                push_for_key(arm, &mut bindings);
+            }
+        }
+        // `Pick<X, "a">` or `Pick<X, BindingKey>` — single literal/ref key.
+        single => push_for_key(single, &mut bindings),
     }
 
-    let tail = text[start..].trim();
-    if !tail.is_empty() {
-        parts.push(tail);
-    }
-    parts
-}
-
-fn extract_type_string_literal_name(text: &str) -> Option<String> {
-    let text = text.trim();
-    if text.len() >= 2
-        && ((text.starts_with('\'') && text.ends_with('\''))
-            || (text.starts_with('"') && text.ends_with('"')))
-    {
-        return Some(text[1..text.len() - 1].to_string());
-    }
-    None
+    bindings
 }
 
 /// Check if a `defineOptions()` call has `inheritAttrs: false` in its first object argument.

@@ -1,4 +1,4 @@
-//! Quick fix: convert a runtime `defineProps(...)` to type-based `defineProps<{...}>()`.
+﻿//! Quick fix: convert a runtime `defineProps(...)` to type-based `defineProps<{...}>()`.
 //!
 //! Handles: `define-props-declaration`
 //!
@@ -176,6 +176,7 @@ mod tests {
             default_values: vec![],
             resolved_local_types: vec![],
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span,
         }
     }

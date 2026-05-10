@@ -1,4 +1,4 @@
-//! Rule: valid-define-props
+﻿//! Rule: valid-define-props
 //!
 //! Validates that `defineProps` is used correctly:
 //! - Only one `defineProps` call per component
@@ -74,6 +74,7 @@ mod tests {
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: Span::new(start, end),
         }
     }

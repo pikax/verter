@@ -1,4 +1,4 @@
-//! MCP server definition with tool routing.
+﻿//! MCP server definition with tool routing.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -3684,6 +3684,7 @@ const count = ref(0)
                 default_values: Vec::new(),
                 resolved_local_types: Vec::new(),
                 parsed_type_argument: None,
+                parsed_type_argument_scope: None,
                 span: verter_span::Span::new(0, 100),
             }],
             bindings: vec![],

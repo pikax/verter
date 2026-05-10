@@ -1,4 +1,4 @@
-//! Extraction of semantic facts from analysis snapshots.
+﻿//! Extraction of semantic facts from analysis snapshots.
 //!
 //! Converts `verter_semantic::analysis` types into `verter_semantic` fact types.
 //! This is the bridge between the raw analysis layer and the semantic DB.
@@ -483,6 +483,7 @@ mod tests {
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: Span::new(0, 50),
         }
     }
@@ -717,6 +718,7 @@ mod tests {
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: Span::new(30, 60),
         };
 

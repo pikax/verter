@@ -1,4 +1,4 @@
-//! Rule: define-model-type-required
+﻿//! Rule: define-model-type-required
 //!
 //! When `defineModel()` is called without a type parameter, report a warning.
 //! Type parameters improve type safety for v-model bindings.
@@ -95,6 +95,7 @@ mod tests {
                 default_values: Vec::new(),
                 resolved_local_types: Vec::new(),
                 parsed_type_argument: None,
+                parsed_type_argument_scope: None,
                 span: Span::new(20, 34),
             }],
             is_typescript: true,
@@ -135,6 +136,7 @@ mod tests {
                 default_values: Vec::new(),
                 resolved_local_types: Vec::new(),
                 parsed_type_argument: None,
+                parsed_type_argument_scope: None,
                 span: Span::new(20, 42),
             }],
             is_typescript: true,
@@ -166,6 +168,7 @@ mod tests {
                     default_values: Vec::new(),
                     resolved_local_types: Vec::new(),
                     parsed_type_argument: None,
+                    parsed_type_argument_scope: None,
                     span: Span::new(20, 42),
                 },
                 AnalyzedMacro {
@@ -183,6 +186,7 @@ mod tests {
                     default_values: Vec::new(),
                     resolved_local_types: Vec::new(),
                     parsed_type_argument: None,
+                    parsed_type_argument_scope: None,
                     span: Span::new(50, 72),
                 },
             ],
@@ -215,6 +219,7 @@ mod tests {
                 default_values: Vec::new(),
                 resolved_local_types: Vec::new(),
                 parsed_type_argument: None,
+                parsed_type_argument_scope: None,
                 span: Span::new(20, 40),
             }],
             is_typescript: true,
@@ -249,6 +254,7 @@ mod tests {
                 default_values: Vec::new(),
                 resolved_local_types: Vec::new(),
                 parsed_type_argument: None,
+                parsed_type_argument_scope: None,
                 span: Span::new(20, 34),
             }],
             is_typescript: false,

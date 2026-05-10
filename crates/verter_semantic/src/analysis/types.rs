@@ -1,4 +1,4 @@
-use sha2::{Digest, Sha256};
+﻿use sha2::{Digest, Sha256};
 use verter_span::Span;
 use verter_type_expr::{TypeExpr, TypeExprScope};
 
@@ -1323,6 +1323,13 @@ pub struct AnalyzedMacro {
     /// dispatch lower call clone a single refcount instead of deep-copying
     /// the full expression tree (R6).
     pub parsed_type_argument: Option<std::sync::Arc<verter_type_expr::TypeExpr>>,
+    /// Scope of `parsed_type_argument`: canonical_id of the file whose
+    /// OXC parse produced the typed expression. Pairing invariant:
+    /// `parsed_type_argument.is_some() <=> parsed_type_argument_scope.is_some()`.
+    /// Populated with the local SFC's canonical_id by the analyzer (the
+    /// macro is always parsed in the local SFC's scope, but explicit
+    /// pairing is required for the §3.1 invariant).
+    pub parsed_type_argument_scope: Option<TypeExprScope>,
     /// SFC-absolute byte span of the macro call.
     pub span: Span,
 }
@@ -1339,7 +1346,8 @@ impl serde::Serialize for AnalyzedMacro {
             + usize::from(!self.default_values.is_empty())
             + usize::from(!self.expose_fields.is_empty())
             + usize::from(!self.resolved_local_types.is_empty())
-            + usize::from(self.parsed_type_argument.is_some());
+            + usize::from(self.parsed_type_argument.is_some())
+            + usize::from(self.parsed_type_argument_scope.is_some());
         let mut s = serializer.serialize_struct("AnalyzedMacro", count)?;
         s.serialize_field("kind", &self.kind)?;
         s.serialize_field("isTypeBased", &self.is_type_based)?;
@@ -1378,6 +1386,9 @@ impl serde::Serialize for AnalyzedMacro {
         if let Some(arg) = self.parsed_type_argument.as_ref() {
             let inner: &verter_type_expr::TypeExpr = arg.as_ref();
             s.serialize_field("parsedTypeArgument", inner)?;
+        }
+        if let Some(scope) = self.parsed_type_argument_scope.as_ref() {
+            s.serialize_field("parsedTypeArgumentScope", scope)?;
         }
         s.serialize_field("spanStart", &self.span.start)?;
         s.serialize_field("spanEnd", &self.span.end)?;
@@ -1419,6 +1430,8 @@ impl<'de> serde::Deserialize<'de> for AnalyzedMacro {
             #[serde(default)]
             parsed_type_argument: Option<verter_type_expr::TypeExpr>,
             #[serde(default)]
+            parsed_type_argument_scope: Option<TypeExprScope>,
+            #[serde(default)]
             span_start: u32,
             #[serde(default)]
             span_end: u32,
@@ -1439,6 +1452,7 @@ impl<'de> serde::Deserialize<'de> for AnalyzedMacro {
             expose_fields: w.expose_fields,
             resolved_local_types: w.resolved_local_types,
             parsed_type_argument: w.parsed_type_argument.map(std::sync::Arc::new),
+            parsed_type_argument_scope: w.parsed_type_argument_scope,
             span: Span::new(w.span_start, w.span_end),
         })
     }
@@ -1897,6 +1911,7 @@ mod analyzed_macro_serde_tests {
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: Span::new(0, 0),
         }
     }

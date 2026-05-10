@@ -1,4 +1,4 @@
-//! Rule: require-define-slots
+﻿//! Rule: require-define-slots
 //!
 //! When `$slots` is used in the template but no `defineSlots()` macro is present
 //! in script setup, report a warning. `defineSlots()` declares slot types for
@@ -171,6 +171,7 @@ mod tests {
                 default_values: Vec::new(),
                 resolved_local_types: Vec::new(),
                 parsed_type_argument: None,
+                parsed_type_argument_scope: None,
                 span: Span::new(10, 30),
             }],
             ..Default::default()

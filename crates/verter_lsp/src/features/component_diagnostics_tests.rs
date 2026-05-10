@@ -1,4 +1,4 @@
-use super::*;
+﻿use super::*;
 use verter_semantic::analysis::template::{
     AnalyzedPropDefinition, PropValueConstness, TemplateAnalysisSnapshot, TemplateComponentUsage,
     TemplateComponentVModel, TemplatePropUsage,
@@ -508,6 +508,7 @@ fn make_child_with_models(model_names: &[Option<&str>]) -> FileAnalysisSnapshot 
                 default_values: Vec::new(),
                 resolved_local_types: Vec::new(),
                 parsed_type_argument: None,
+                parsed_type_argument_scope: None,
                 span: verter_span::Span::new(0, 30),
             })
             .collect::<Vec<_>>()
@@ -806,6 +807,7 @@ fn make_child_with_macro_props(prop_names: &[&str]) -> FileAnalysisSnapshot {
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(0, 30),
         }]
         .into(),
@@ -877,6 +879,7 @@ fn macro_fallback_with_defaults_pattern() {
                 default_values: Vec::new(),
                 resolved_local_types: Vec::new(),
                 parsed_type_argument: None,
+                parsed_type_argument_scope: None,
                 span: verter_span::Span::new(0, 50),
             },
             AnalyzedMacro {
@@ -919,6 +922,7 @@ fn macro_fallback_with_defaults_pattern() {
                 default_values: Vec::new(),
                 resolved_local_types: Vec::new(),
                 parsed_type_argument: None,
+                parsed_type_argument_scope: None,
                 span: verter_span::Span::new(10, 40),
             },
         ]
@@ -1030,6 +1034,7 @@ fn make_child_with_required_slots(slot_names: &[(&str, bool)]) -> FileAnalysisSn
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(0, 30),
         }]
         .into(),

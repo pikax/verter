@@ -1,4 +1,4 @@
-use super::*;
+﻿use super::*;
 use crate::resolver_core::declaration_metadata::ResolvedExportTarget;
 use std::collections::BTreeMap;
 use verter_compiler::utils::oxc::vue::resolve_type::{
@@ -369,6 +369,7 @@ fn resolve_component_meta_parts_prefers_combined_imported_macro_surface() {
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: Span::new(0, 20),
         }],
         macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
@@ -438,6 +439,7 @@ fn resolve_component_meta_parts_fallthrough_reuses_combined_imported_macro_surfa
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: Span::new(0, 20),
         }],
         macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
@@ -552,6 +554,7 @@ fn resolve_component_meta_parts_fallthrough_skips_imported_define_emits_when_eva
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: Span::new(0, 20),
         }],
         macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
@@ -645,6 +648,7 @@ defineEmits<Emits>()
                 span: Span::new(0, source.len() as u32),
             }],
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: Span::new(0, source.len() as u32),
         }],
         macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
@@ -739,6 +743,7 @@ fn local_resolved_macro_types_project_into_resolved_macro_surfaces() {
                 span: Span::new(0, 1),
             }],
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: Span::new(0, 1),
         }],
         macro_type_deps: Vec::new(),
@@ -820,6 +825,7 @@ fn projectable_local_emit_roots_fill_resolved_macros_without_resolved_local_type
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: Span::new(0, 1),
         }],
         macro_type_deps: Vec::new(),
@@ -941,6 +947,7 @@ defineSlots<CalendarSlots>()
                 span: Span::new(0, source.len() as u32),
             }],
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: Span::new(0, source.len() as u32),
         }],
         macro_type_deps: Vec::new(),
@@ -1056,6 +1063,7 @@ type LocalItem = {
                 span: Span::new(0, source.len() as u32),
             }],
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: Span::new(0, source.len() as u32),
         }],
         macro_type_deps: vec![
@@ -1207,6 +1215,7 @@ type Props = Pick<ImportedBase, 'href'>
                 span: Span::new(0, source.len() as u32),
             }],
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: Span::new(0, source.len() as u32),
         }],
         macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
@@ -1337,6 +1346,7 @@ type Props = Pick<ImportedBase, 'href'>
                 span: Span::new(0, source.len() as u32),
             }],
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: Span::new(0, source.len() as u32),
         }],
         macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
@@ -1462,6 +1472,7 @@ type Props = {
                 span: Span::new(0, source.len() as u32),
             }],
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: Span::new(0, source.len() as u32),
         }],
         macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
@@ -1588,6 +1599,7 @@ type Props = {
                 span: Span::new(0, source.len() as u32),
             }],
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: Span::new(0, source.len() as u32),
         }],
         macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
@@ -1701,6 +1713,7 @@ type Props = Omit<ImportedBase, 'hidden'>
                 span: Span::new(0, source.len() as u32),
             }],
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: Span::new(0, source.len() as u32),
         }],
         macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
@@ -1815,6 +1828,7 @@ type Props = Omit<ImportedBase, 'hidden'>
                 span: Span::new(0, source.len() as u32),
             }],
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: Span::new(0, source.len() as u32),
         }],
         macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
@@ -1893,6 +1907,7 @@ fn resolve_component_meta_parts_keeps_direct_imported_macro_root_seeded() {
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: Span::new(0, 1),
         }],
         macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
@@ -2006,6 +2021,7 @@ fn resolve_component_meta_parts_seeds_imported_macro_root_when_graph_metadata_un
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: Span::new(0, 1),
         }],
         macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
@@ -2118,6 +2134,7 @@ interface Helper {
                 },
             ],
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: Span::new(0, source.len() as u32),
         }],
         macro_type_deps: Vec::new(),
@@ -2193,6 +2210,7 @@ fn cold_resolver_panics_when_type_expr_missing_for_non_empty_expanded() {
                 span: Span::new(0, 1),
             }],
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: Span::new(0, 1),
         }],
         macro_type_deps: Vec::new(),

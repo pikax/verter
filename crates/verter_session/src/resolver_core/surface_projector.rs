@@ -1,4 +1,5 @@
 use oxc_allocator::Allocator;
+use oxc_span::GetSpan;
 use verter_compiler::utils::oxc::vue::resolve_type::{
     resolve_external_type, ResolvedElements, ResolvedEmitSignature, ResolvedMemberVisibility,
 };
@@ -294,37 +295,69 @@ pub fn extract_slot_info_from_type_text(
         return (Vec::new(), None);
     };
 
-    let return_type = if let Some(arrow_pos) = text.find("=>") {
-        let ret = text[arrow_pos + 2..].trim();
-        if ret.is_empty() {
-            None
-        } else {
-            Some(ret.to_string())
-        }
-    } else if let Some(colon_pos) = text.rfind("):") {
-        let ret = text[colon_pos + 2..].trim();
-        if ret.is_empty() {
-            None
-        } else {
-            Some(ret.to_string())
-        }
-    } else {
-        None
-    };
+    // Parse the slot signature once via OXC and walk the AST. The signature
+    // shape we accept is `(props: T) => R` where T may be a `TSTypeLiteral`
+    // (`{ row: MyItem }`) or a `TSTypeReference` (`Pick<X, K>` / a userland
+    // alias). Bindings are recovered from T directly via the analyzer-side
+    // typed walker (`extract_slot_bindings_from_pick_ast`) plus the synthetic
+    // declaration fallback for non-Pick shapes.
+    let wrapper = format!("type __SlotSig = {text};");
+    let alloc_for_parse = Allocator::new();
+    let parser = oxc_parser::Parser::new(&alloc_for_parse, &wrapper, oxc_span::SourceType::ts());
+    let parsed = parser.parse();
 
-    let Some(binding_type_text) = extract_first_slot_param_type_text(text) else {
+    let mut signature_ast: Option<&oxc_ast::ast::TSType<'_>> = None;
+    for stmt in &parsed.program.body {
+        if let oxc_ast::ast::Statement::TSTypeAliasDeclaration(alias) = stmt {
+            signature_ast = Some(&alias.type_annotation);
+            break;
+        }
+    }
+
+    let mut return_type: Option<String> = None;
+    let mut binding_param_ast: Option<&oxc_ast::ast::TSType<'_>> = None;
+
+    if let Some(oxc_ast::ast::TSType::TSFunctionType(fn_type)) = signature_ast {
+        // Recover the return-type display from the wrapper source span.
+        let rt_span = fn_type.return_type.type_annotation.span();
+        let rt_start = rt_span.start as usize;
+        let rt_end = rt_span.end as usize;
+        if rt_end <= wrapper.len() {
+            let rt_text = wrapper[rt_start..rt_end].trim();
+            if !rt_text.is_empty() {
+                return_type = Some(rt_text.to_string());
+            }
+        }
+        // First-parameter type annotation drives binding extraction.
+        if let Some(first_param) = fn_type.params.items.first() {
+            if let Some(ta) = first_param.type_annotation.as_ref() {
+                binding_param_ast = Some(&ta.type_annotation);
+            }
+        }
+    }
+
+    let Some(binding_ts) = binding_param_ast else {
         return (Vec::new(), return_type);
     };
 
-    let binding_type_text = binding_type_text.trim();
-    if let Some(bindings) = extract_pick_slot_bindings(binding_type_text) {
-        return (bindings, return_type);
+    // Walk `Pick<Object, Keys>` directly — emit `IndexedAccess { object, index }`
+    // for each binding. Falls through to the synthetic-declaration path for
+    // non-Pick shapes (typeRefs, type literals, etc.).
+    let pick_bindings = extract_slot_bindings_from_pick_ast_text(binding_ts, &wrapper);
+    if !pick_bindings.is_empty() {
+        return (pick_bindings, return_type);
     }
 
-    let binding_declaration = if binding_type_text.starts_with('{') {
-        format!("export interface _Bindings {binding_type_text}")
+    // Fallback: produce a synthetic interface containing the binding type and
+    // resolve via the existing parser path. The original source (when
+    // available) is concatenated so the synthetic declaration can reference
+    // local types.
+    let binding_span = binding_ts.span();
+    let binding_text = wrapper[binding_span.start as usize..binding_span.end as usize].trim();
+    let binding_declaration = if binding_text.starts_with('{') {
+        format!("export interface _Bindings {binding_text}")
     } else {
-        format!("export type _Bindings = {binding_type_text}")
+        format!("export type _Bindings = {binding_text}")
     };
     let synthetic = source
         .filter(|source| !source.trim().is_empty())
@@ -341,13 +374,10 @@ pub fn extract_slot_info_from_type_text(
         .iter()
         .filter_map(|prop| {
             let name = prop.key_name.as_ref()?.clone();
-            let type_annotation = if binding_type_text.starts_with('{') {
+            let type_annotation = if binding_text.starts_with('{') {
                 prop.type_text.clone()
             } else {
-                Some(symbolic_slot_binding_type_text(
-                    binding_type_text,
-                    name.as_str(),
-                ))
+                Some(format!("{binding_text}['{name}']"))
             };
             Some(AnalyzedSlotFieldBinding {
                 name,
@@ -362,84 +392,135 @@ pub fn extract_slot_info_from_type_text(
     (bindings, return_type)
 }
 
-fn extract_first_slot_param_type_text(text: &str) -> Option<&str> {
-    let open = text.find('(')?;
-    let close = find_matching_delimiter(text, open, '(', ')')?;
-    let params = split_top_level_segments(&text[open + 1..close], ',');
-    let first = params.first()?.trim();
-    let colon = find_top_level_char(first, ':')?;
-    let ty = first[colon + 1..].trim();
-    (!ty.is_empty()).then_some(ty)
-}
+/// Recover slot bindings from an AST `Pick<Object, Keys>` type reference.
+///
+/// Mirrors the analyzer-side walker in
+/// `verter_semantic::analysis::macros::extract_slot_bindings_from_pick_ast`.
+/// Walks the OXC `TSType` directly — no source slicing for semantic decisions.
+/// For each key in `args[1]`:
+/// - String-literal keys emit
+///   `binding_expr = TypeExpr::IndexedAccess { object: lower(args[0]), index: Literal(String(k)) }`.
+/// - Userland alias keys (TSTypeReference) emit
+///   `binding_expr = TypeExpr::IndexedAccess { object: lower(args[0]), index: Ref { name: "K" } }`.
+///   Alias resolution is NOT analyzer scope — the projector / cross-file
+///   resolver walks the `Ref` lazily.
+fn extract_slot_bindings_from_pick_ast_text(
+    ts_type: &oxc_ast::ast::TSType<'_>,
+    source: &str,
+) -> Vec<AnalyzedSlotFieldBinding> {
+    use oxc_ast::ast::{TSLiteral, TSType, TSTypeName};
 
-fn symbolic_slot_binding_type_text(binding_type_text: &str, binding_name: &str) -> String {
-    simplify_pick_slot_binding_type_text(binding_type_text, binding_name)
-        .unwrap_or_else(|| format!("{binding_type_text}['{binding_name}']"))
-}
-
-fn extract_pick_slot_bindings(binding_type_text: &str) -> Option<Vec<AnalyzedSlotFieldBinding>> {
-    let text = binding_type_text.trim();
-    if !text.starts_with("Pick<") || !text.ends_with('>') {
-        return None;
+    let TSType::TSTypeReference(type_ref) = ts_type else {
+        return Vec::new();
+    };
+    let is_pick = matches!(
+        &type_ref.type_name,
+        TSTypeName::IdentifierReference(id) if id.name == "Pick"
+    );
+    if !is_pick {
+        return Vec::new();
     }
-
-    let args = split_top_level_segments(&text["Pick<".len()..text.len() - 1], ',');
-    if args.len() != 2 {
-        return None;
+    let Some(type_args) = type_ref.type_arguments.as_ref() else {
+        return Vec::new();
+    };
+    if type_args.params.len() != 2 {
+        return Vec::new();
     }
+    let object_ts = &type_args.params[0];
+    let keys_ts = &type_args.params[1];
 
-    let object = args[0].trim();
-    let keys = split_top_level_segments(args[1].trim(), '|');
+    let object_expr = std::sync::Arc::new(verter_type_expr_oxc::lower_ts_type(object_ts, source));
+    let object_text = {
+        let span = object_ts.span();
+        let st = span.start as usize;
+        let en = span.end as usize;
+        if en <= source.len() {
+            source[st..en].trim().to_string()
+        } else {
+            String::new()
+        }
+    };
+
     let mut bindings = Vec::new();
-    for key in keys {
-        let key = key.trim();
-        let name = extract_string_literal_name(key)?;
-        bindings.push(AnalyzedSlotFieldBinding {
-            name,
-            type_annotation: Some(format!("{object}[{key}]")),
-            span: verter_span::Span::default(),
-            binding_expr: None,
-            binding_expr_scope: None,
-        });
+    let push_for_key =
+        |key_ts: &TSType<'_>, bindings: &mut Vec<AnalyzedSlotFieldBinding>| match key_ts {
+            TSType::TSLiteralType(lit) => {
+                if let TSLiteral::StringLiteral(s) = &lit.literal {
+                    let key_name = s.value.to_string();
+                    let key_text = {
+                        let span = lit.span();
+                        let st = span.start as usize;
+                        let en = span.end as usize;
+                        if en <= source.len() {
+                            source[st..en].trim().to_string()
+                        } else {
+                            format!("\"{key_name}\"")
+                        }
+                    };
+                    let display =
+                        (!object_text.is_empty()).then(|| format!("{object_text}[{key_text}]"));
+                    let index_expr =
+                        TypeExpr::Literal(verter_type_expr::LiteralValue::String(key_name.clone()));
+                    let binding_expr = Some(TypeExpr::IndexedAccess {
+                        object: object_expr.clone(),
+                        index: std::sync::Arc::new(index_expr),
+                    });
+                    let binding_expr_scope = binding_expr.as_ref().map(|_| TypeExprScope::new(""));
+                    bindings.push(AnalyzedSlotFieldBinding {
+                        name: key_name,
+                        type_annotation: display,
+                        span: verter_span::Span::default(),
+                        binding_expr,
+                        binding_expr_scope,
+                    });
+                }
+            }
+            TSType::TSTypeReference(key_ref) => {
+                let alias_name = match &key_ref.type_name {
+                    TSTypeName::IdentifierReference(id) => Some(id.name.to_string()),
+                    _ => None,
+                };
+                if let Some(alias_name) = alias_name {
+                    let key_text = {
+                        let span = key_ts.span();
+                        let st = span.start as usize;
+                        let en = span.end as usize;
+                        if en <= source.len() {
+                            source[st..en].trim().to_string()
+                        } else {
+                            alias_name.clone()
+                        }
+                    };
+                    let display =
+                        (!object_text.is_empty()).then(|| format!("{object_text}[{key_text}]"));
+                    let index_expr = verter_type_expr_oxc::lower_ts_type(key_ts, source);
+                    let binding_expr = Some(TypeExpr::IndexedAccess {
+                        object: object_expr.clone(),
+                        index: std::sync::Arc::new(index_expr),
+                    });
+                    let binding_expr_scope = binding_expr.as_ref().map(|_| TypeExprScope::new(""));
+                    bindings.push(AnalyzedSlotFieldBinding {
+                        name: alias_name,
+                        type_annotation: display,
+                        span: verter_span::Span::default(),
+                        binding_expr,
+                        binding_expr_scope,
+                    });
+                }
+            }
+            _ => {}
+        };
+
+    match keys_ts {
+        TSType::TSUnionType(union) => {
+            for arm in &union.types {
+                push_for_key(arm, &mut bindings);
+            }
+        }
+        single => push_for_key(single, &mut bindings),
     }
 
-    (!bindings.is_empty()).then_some(bindings)
-}
-
-fn simplify_pick_slot_binding_type_text(
-    binding_type_text: &str,
-    binding_name: &str,
-) -> Option<String> {
-    let text = binding_type_text.trim();
-    if !text.starts_with("Pick<") || !text.ends_with('>') {
-        return None;
-    }
-
-    let args = split_top_level_segments(&text["Pick<".len()..text.len() - 1], ',');
-    if args.len() != 2 {
-        return None;
-    }
-
-    let object = args[0].trim();
-    let key = args[1].trim();
-    let single_quoted = format!("'{binding_name}'");
-    let double_quoted = format!("\"{binding_name}\"");
-    if key == single_quoted || key == double_quoted {
-        return Some(format!("{object}[{key}]"));
-    }
-
-    None
-}
-
-fn extract_string_literal_name(text: &str) -> Option<String> {
-    let text = text.trim();
-    if text.len() >= 2
-        && ((text.starts_with('\'') && text.ends_with('\''))
-            || (text.starts_with('"') && text.ends_with('"')))
-    {
-        return Some(text[1..text.len() - 1].to_string());
-    }
-    None
+    bindings
 }
 
 fn collect_native_props(elements: &ResolvedElements) -> Vec<ResolvedNativeProp> {
@@ -473,6 +554,11 @@ fn raw_emit_payload_text(
     source: Option<&str>,
     emit: &verter_compiler::utils::oxc::vue::resolve_type::ResolvedEmit,
 ) -> Option<String> {
+    // Display-only formatter. Prefer the raw source-span text (which
+    // preserves any conditional / generic surface text the resolver may
+    // have simplified), falling back to the pre-baked
+    // `params_text` / `tuple_text` carried on `ResolvedEmit.signature`
+    // when the source span is unavailable.
     slice_source_span(source, emit.span)
         .and_then(|text| raw_emit_payload_text_from_source(&text, &emit.signature))
         .or_else(|| match &emit.signature {
@@ -487,24 +573,138 @@ fn raw_emit_payload_text(
         })
 }
 
+/// Display-only formatter for an emit's payload text, given the raw source
+/// span of the signature.
+///
+/// The Tuple branch returns the substring after the first top-level `:`
+/// (the property key colon). The Call branch joins the post-name parameter
+/// slices into a synthetic tuple display.
+///
+/// Walks the source bytes with a minimal state machine — tracks string
+/// quoting and brace/paren/bracket/angle nesting. This is a display
+/// formatter only; semantic decisions live in the typed
+/// `*_expr` consumers.
 fn raw_emit_payload_text_from_source(
     signature_text: &str,
     signature: &ResolvedEmitSignature,
 ) -> Option<String> {
+    fn nesting_aware_split(text: &str, separator: char, first_only: bool) -> Vec<&str> {
+        let mut parts = Vec::new();
+        let mut start = 0usize;
+        let mut paren = 0i32;
+        let mut bracket = 0i32;
+        let mut brace = 0i32;
+        let mut angle = 0i32;
+        let mut in_string = false;
+        let mut string_delim = '\0';
+        let mut escape = false;
+        for (idx, ch) in text.char_indices() {
+            if in_string {
+                if escape {
+                    escape = false;
+                    continue;
+                }
+                if ch == '\\' {
+                    escape = true;
+                    continue;
+                }
+                if ch == string_delim {
+                    in_string = false;
+                }
+                continue;
+            }
+            match ch {
+                '\'' | '"' | '`' => {
+                    in_string = true;
+                    string_delim = ch;
+                }
+                '(' => paren += 1,
+                ')' => paren -= 1,
+                '[' => bracket += 1,
+                ']' => bracket -= 1,
+                '{' => brace += 1,
+                '}' => brace -= 1,
+                '<' => angle += 1,
+                '>' => angle -= 1,
+                _ if ch == separator && paren == 0 && bracket == 0 && brace == 0 && angle == 0 => {
+                    parts.push(&text[start..idx]);
+                    start = idx + ch.len_utf8();
+                    if first_only {
+                        return parts;
+                    }
+                }
+                _ => {}
+            }
+        }
+        parts.push(&text[start..]);
+        parts
+    }
     match signature {
         ResolvedEmitSignature::Tuple { .. } => {
-            let colon = find_top_level_char(signature_text, ':')?;
-            Some(trim_trailing_type_text(&signature_text[colon + 1..]))
+            // First top-level colon separates the property key from the value type.
+            let parts = nesting_aware_split(signature_text, ':', true);
+            // After the colon, the remainder of the signature_text is the value.
+            // `nesting_aware_split` with `first_only` puts only the prefix in `parts`;
+            // the tail is the substring after the colon.
+            let prefix = parts.first()?;
+            let tail_start = prefix.len() + ':'.len_utf8();
+            if tail_start > signature_text.len() {
+                return None;
+            }
+            let tail = signature_text[tail_start..]
+                .trim()
+                .trim_end_matches([';', ','])
+                .trim();
+            (!tail.is_empty()).then(|| tail.to_string())
         }
         ResolvedEmitSignature::Call { .. } => {
             let open = signature_text.find('(')?;
-            let close = find_matching_delimiter(signature_text, open, '(', ')')?;
-            let params = split_top_level_segments(&signature_text[open + 1..close], ',');
+            // Find the matching close-paren accounting for nesting.
+            let bytes = signature_text.as_bytes();
+            let mut depth = 0i32;
+            let mut close = None;
+            let mut in_str = false;
+            let mut delim = b' ';
+            let mut esc = false;
+            for (i, &b) in bytes.iter().enumerate().skip(open) {
+                if in_str {
+                    if esc {
+                        esc = false;
+                        continue;
+                    }
+                    if b == b'\\' {
+                        esc = true;
+                        continue;
+                    }
+                    if b == delim {
+                        in_str = false;
+                    }
+                    continue;
+                }
+                match b {
+                    b'\'' | b'"' | b'`' => {
+                        in_str = true;
+                        delim = b;
+                    }
+                    b'(' => depth += 1,
+                    b')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            close = Some(i);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let close = close?;
+            let inner = &signature_text[open + 1..close];
+            let params = nesting_aware_split(inner, ',', false);
             let payload_params: Vec<_> = params
                 .into_iter()
                 .skip(1)
-                .map(|param| param.trim().to_string())
-                .filter(|param| !param.is_empty())
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())
                 .collect();
             Some(format!("[{}]", payload_params.join(", ")))
         }
@@ -518,172 +718,12 @@ fn slice_source_span(source: Option<&str>, span: verter_span::Span) -> Option<St
     if start >= end || end > source.len() {
         return None;
     }
-    let text = trim_trailing_type_text(&source[start..end]);
+    let text = source[start..end]
+        .trim()
+        .trim_end_matches([';', ','])
+        .trim()
+        .to_string();
     (!text.is_empty()).then_some(text)
-}
-
-fn trim_trailing_type_text(text: &str) -> String {
-    text.trim().trim_end_matches([';', ',']).trim().to_string()
-}
-
-fn find_top_level_char(text: &str, needle: char) -> Option<usize> {
-    let mut paren_depth = 0i32;
-    let mut bracket_depth = 0i32;
-    let mut brace_depth = 0i32;
-    let mut angle_depth = 0i32;
-    let mut in_string = false;
-    let mut string_delim = '\0';
-    let mut escape = false;
-
-    for (index, ch) in text.char_indices() {
-        if in_string {
-            if escape {
-                escape = false;
-                continue;
-            }
-            if ch == '\\' {
-                escape = true;
-                continue;
-            }
-            if ch == string_delim {
-                in_string = false;
-            }
-            continue;
-        }
-
-        match ch {
-            '\'' | '"' | '`' => {
-                in_string = true;
-                string_delim = ch;
-            }
-            '(' => paren_depth += 1,
-            ')' => paren_depth -= 1,
-            '[' => bracket_depth += 1,
-            ']' => bracket_depth -= 1,
-            '{' => brace_depth += 1,
-            '}' => brace_depth -= 1,
-            '<' => angle_depth += 1,
-            '>' => angle_depth -= 1,
-            _ if ch == needle
-                && paren_depth == 0
-                && bracket_depth == 0
-                && brace_depth == 0
-                && angle_depth == 0 =>
-            {
-                return Some(index);
-            }
-            _ => {}
-        }
-    }
-
-    None
-}
-
-fn find_matching_delimiter(
-    text: &str,
-    open_index: usize,
-    open: char,
-    close: char,
-) -> Option<usize> {
-    let mut depth = 0i32;
-    let mut in_string = false;
-    let mut string_delim = '\0';
-    let mut escape = false;
-
-    for (index, ch) in text[open_index..].char_indices() {
-        let absolute = open_index + index;
-        if in_string {
-            if escape {
-                escape = false;
-                continue;
-            }
-            if ch == '\\' {
-                escape = true;
-                continue;
-            }
-            if ch == string_delim {
-                in_string = false;
-            }
-            continue;
-        }
-
-        match ch {
-            '\'' | '"' | '`' => {
-                in_string = true;
-                string_delim = ch;
-            }
-            _ if ch == open => depth += 1,
-            _ if ch == close => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(absolute);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    None
-}
-
-fn split_top_level_segments(text: &str, separator: char) -> Vec<&str> {
-    let mut parts = Vec::new();
-    let mut start = 0usize;
-    let mut paren_depth = 0i32;
-    let mut bracket_depth = 0i32;
-    let mut brace_depth = 0i32;
-    let mut angle_depth = 0i32;
-    let mut in_string = false;
-    let mut string_delim = '\0';
-    let mut escape = false;
-
-    for (index, ch) in text.char_indices() {
-        if in_string {
-            if escape {
-                escape = false;
-                continue;
-            }
-            if ch == '\\' {
-                escape = true;
-                continue;
-            }
-            if ch == string_delim {
-                in_string = false;
-            }
-            continue;
-        }
-
-        match ch {
-            '\'' | '"' | '`' => {
-                in_string = true;
-                string_delim = ch;
-            }
-            '(' => paren_depth += 1,
-            ')' => paren_depth -= 1,
-            '[' => bracket_depth += 1,
-            ']' => bracket_depth -= 1,
-            '{' => brace_depth += 1,
-            '}' => brace_depth -= 1,
-            '<' => angle_depth += 1,
-            '>' => angle_depth -= 1,
-            _ if ch == separator
-                && paren_depth == 0
-                && bracket_depth == 0
-                && brace_depth == 0
-                && angle_depth == 0 =>
-            {
-                parts.push(text[start..index].trim());
-                start = index + ch.len_utf8();
-            }
-            _ => {}
-        }
-    }
-
-    let tail = text[start..].trim();
-    if !tail.is_empty() {
-        parts.push(tail);
-    }
-    parts
 }
 
 fn member_jsdoc(source: Option<&str>, span: verter_span::Span) -> (Option<String>, Vec<JsdocTag>) {

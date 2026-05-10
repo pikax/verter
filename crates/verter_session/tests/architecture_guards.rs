@@ -8470,12 +8470,7 @@ mod typed_ir_resolver_guards {
         ),
         (
             "crates/verter_semantic/src/analysis/macros.rs",
-            1315,
-            "parse_type_annotation",
-        ),
-        (
-            "crates/verter_semantic/src/analysis/macros.rs",
-            1422,
+            1284,
             "parse_type_annotation",
         ),
         (
@@ -8767,23 +8762,7 @@ mod typed_ir_resolver_guards {
     //
     // Removed by W1.1.
     // -----------------------------------------------------------------------
-    const PICK_OMIT_PREFIX_ALLOWLIST: &[(&str, u32, &str)] = &[
-        (
-            "crates/verter_semantic/src/analysis/macros.rs",
-            2499,
-            r#"starts_with("Pick<")"#,
-        ),
-        (
-            "crates/verter_session/src/resolver_core/surface_projector.rs",
-            382,
-            r#"starts_with("Pick<")"#,
-        ),
-        (
-            "crates/verter_session/src/resolver_core/surface_projector.rs",
-            414,
-            r#"starts_with("Pick<")"#,
-        ),
-    ];
+    const PICK_OMIT_PREFIX_ALLOWLIST: &[(&str, u32, &str)] = &[];
 
     fn scan_pick_omit_prefix() -> Vec<(String, u32, String)> {
         let needles: &[&str] = &[

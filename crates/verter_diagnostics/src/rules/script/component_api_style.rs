@@ -1,4 +1,4 @@
-//! Rule: component-api-style
+﻿//! Rule: component-api-style
 //!
 //! Enforce Composition API style. Detects Options API patterns (bindings named
 //! `data`, `computed`, `methods`, `watch`, etc.) when no Composition API macros
@@ -137,6 +137,7 @@ mod tests {
                 default_values: Vec::new(),
                 resolved_local_types: Vec::new(),
                 parsed_type_argument: None,
+                parsed_type_argument_scope: None,
                 span: Span::new(0, 20),
             }],
             ..Default::default()

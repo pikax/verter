@@ -1,4 +1,4 @@
-// Document symbols from SFC structure + verter_session analysis.
+﻿// Document symbols from SFC structure + verter_session analysis.
 
 use tower_lsp_server::ls_types::*;
 use verter_session::FileAnalysisSnapshot;
@@ -554,6 +554,7 @@ mod tests {
                 default_values: Vec::new(),
                 resolved_local_types: Vec::new(),
                 parsed_type_argument: None,
+                parsed_type_argument_scope: None,
                 span: verter_span::Span::new(0, 0),
             }],
         );

@@ -1,4 +1,4 @@
-//! Synthesise the implicit `default` export for a Vue Single File
+﻿//! Synthesise the implicit `default` export for a Vue Single File
 //! Component scope.
 //!
 //! A `<script setup>` block does not contain a literal `export default`
@@ -203,6 +203,7 @@ mod tests {
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: Some(Arc::new(parsed)),
+            parsed_type_argument_scope: Some(verter_type_expr::TypeExprScope::new("")),
             span: Span::new(0, 0),
         }
     }
@@ -223,6 +224,7 @@ mod tests {
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: Span::new(0, 0),
         }
     }

@@ -1,4 +1,4 @@
-//! Rule: no-duplicate-model-modifiers
+﻿//! Rule: no-duplicate-model-modifiers
 //!
 //! Multiple `defineModel()` calls with the same model name are not allowed.
 //! Each model name must be unique within a component.
@@ -115,6 +115,7 @@ mod tests {
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: Span::new(span_start, span_end),
         }
     }
@@ -238,6 +239,7 @@ mod tests {
                 default_values: Vec::new(),
                 resolved_local_types: Vec::new(),
                 parsed_type_argument: None,
+                parsed_type_argument_scope: None,
                 span: Span::new(10, 30),
             }],
             ..Default::default()

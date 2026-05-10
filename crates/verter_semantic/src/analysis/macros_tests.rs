@@ -2128,3 +2128,367 @@ fn resolve_local_slots_intersection_keeps_resolvable_branches_when_utility_branc
         names
     );
 }
+
+// ---------------------------------------------------------------------------
+// W1.1 — discriminating regression tests for typed-form lowering at every
+// macros.rs producer site. Each test would FAIL on the pre-W1.1 tree (where
+// `*_expr` was unconditionally `None`) and PASS post-W1.1.
+// ---------------------------------------------------------------------------
+
+mod w1_1_typed_form_regression {
+    use super::*;
+    use verter_type_expr::{LiteralValue, PrimitiveName, TypeExpr};
+
+    /// Site #1: `extract_fields_from_interface_body_like` — the inline prop
+    /// type literal lowers each property's type annotation directly.
+    #[test]
+    fn inline_prop_type_literal_populates_type_expr_per_field() {
+        let alloc = Allocator::new();
+        let macros = parse_and_extract(
+            &alloc,
+            "defineProps<{ count: number; label: 'a' | 'b' }>();",
+        );
+        let dp = macros
+            .iter()
+            .find(|m| m.kind == AnalyzedMacroKind::DefineProps)
+            .expect("DefineProps macro");
+        let count = dp
+            .prop_fields
+            .iter()
+            .find(|f| f.name == "count")
+            .expect("count field");
+        assert!(
+            matches!(
+                count.type_expr,
+                Some(TypeExpr::Primitive(PrimitiveName::Number))
+            ),
+            "count.type_expr must be Primitive(Number); got {:?}",
+            count.type_expr
+        );
+        assert!(
+            count.type_expr_scope.is_some(),
+            "pairing invariant: type_expr_scope must be Some when type_expr is Some"
+        );
+        let label = dp
+            .prop_fields
+            .iter()
+            .find(|f| f.name == "label")
+            .expect("label field");
+        match &label.type_expr {
+            Some(TypeExpr::Union(arms)) => {
+                assert_eq!(arms.len(), 2, "union arity");
+                assert!(arms
+                    .iter()
+                    .all(|t| matches!(t, TypeExpr::Literal(LiteralValue::String(_)))));
+            }
+            other => panic!("label.type_expr expected Union of string literals; got {other:?}"),
+        }
+    }
+
+    /// Site #2: `try_extract_macro::parsed_type_argument` lowers the macro's
+    /// first type argument directly via `lower_ts_type` and stamps a paired
+    /// scope.
+    #[test]
+    fn macro_parsed_type_argument_lowers_directly() {
+        let alloc = Allocator::new();
+        let macros = parse_and_extract(&alloc, "defineProps<MyProps>();");
+        let dp = macros
+            .iter()
+            .find(|m| m.kind == AnalyzedMacroKind::DefineProps)
+            .expect("DefineProps macro");
+        match dp.parsed_type_argument.as_deref() {
+            Some(TypeExpr::Ref {
+                name,
+                type_arguments,
+            }) => {
+                assert_eq!(name.as_ref(), "MyProps");
+                assert!(type_arguments.is_empty());
+            }
+            other => {
+                panic!("parsed_type_argument expected Ref {{ name: \"MyProps\" }}; got {other:?}")
+            }
+        }
+        assert!(
+            dp.parsed_type_argument_scope.is_some(),
+            "pairing invariant: parsed_type_argument_scope must be Some when parsed_type_argument is Some"
+        );
+    }
+
+    /// Site #3: `extract_define_model_type` lowers the model type annotation
+    /// directly.
+    #[test]
+    fn define_model_type_lowers_directly() {
+        let alloc = Allocator::new();
+        let macros = parse_and_extract(&alloc, "defineModel<string>();");
+        let dm = macros
+            .iter()
+            .find(|m| m.kind == AnalyzedMacroKind::DefineModel)
+            .expect("DefineModel macro");
+        let field = dm
+            .prop_fields
+            .first()
+            .expect("DefineModel produces a single prop field");
+        assert!(
+            matches!(
+                field.type_expr,
+                Some(TypeExpr::Primitive(PrimitiveName::String))
+            ),
+            "defineModel type_expr should be Primitive(String); got {:?}",
+            field.type_expr
+        );
+        assert!(field.type_expr_scope.is_some(), "pairing invariant");
+    }
+
+    /// Site #4: `extract_ts_as_type` returns `Option<TypeExpr>`. The
+    /// `as PropType<T>` form lowers the inner type — NOT a string. The
+    /// runtime-prop caller stores the typed form on the field.
+    #[test]
+    fn as_prop_type_lowers_to_type_expr() {
+        let alloc = Allocator::new();
+        let source =
+            "defineProps({\n  foo: { type: Object as PropType<{ a: string; b: number }> }\n});\n";
+        let macros = parse_and_extract(&alloc, source);
+        let dp = macros
+            .iter()
+            .find(|m| m.kind == AnalyzedMacroKind::DefineProps)
+            .expect("DefineProps macro");
+        let foo = dp
+            .prop_fields
+            .iter()
+            .find(|f| f.name == "foo")
+            .expect("foo field");
+        match &foo.type_expr {
+            Some(TypeExpr::Object(obj)) => {
+                let names: Vec<String> = obj
+                    .properties
+                    .iter()
+                    .filter_map(|m| match m {
+                        verter_type_expr::ObjectMember::Property(p) => Some(p.name.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                assert!(names.contains(&"a".to_string()));
+                assert!(names.contains(&"b".to_string()));
+            }
+            other => {
+                panic!("as PropType<{{a,b}}> expected to lower to TypeExpr::Object; got {other:?}")
+            }
+        }
+        assert!(foo.type_expr_scope.is_some(), "pairing invariant");
+    }
+
+    /// Site #5: emit `payload_type` lowers via `lower_ts_type` for property
+    /// signatures. Tuple-form lowers to `TypeExpr::Tuple`.
+    #[test]
+    fn emit_property_signature_payload_lowers_to_typed_tuple() {
+        let alloc = Allocator::new();
+        let macros = parse_and_extract(
+            &alloc,
+            "defineEmits<{ change: [id: number, label: string] }>();",
+        );
+        let de = macros
+            .iter()
+            .find(|m| m.kind == AnalyzedMacroKind::DefineEmits)
+            .expect("DefineEmits macro");
+        let change = de
+            .emit_fields
+            .iter()
+            .find(|f| f.name == "change")
+            .expect("change emit");
+        match &change.payload_expr {
+            Some(TypeExpr::Tuple { elements, .. }) => {
+                assert_eq!(elements.len(), 2);
+            }
+            other => panic!("emit payload_expr expected Tuple; got {other:?}"),
+        }
+        assert!(change.payload_expr_scope.is_some(), "pairing invariant");
+    }
+
+    /// Site #6: slot `return_expr` lowers via `lower_ts_type`. Property-
+    /// signature slots and method-signature slots both populate.
+    #[test]
+    fn slot_return_type_lowers_to_type_expr() {
+        let alloc = Allocator::new();
+        let source = "defineSlots<{\n    default(props: { item: string }): boolean;\n    header: (props: { count: number }) => void;\n}>();\n";
+        let macros = parse_and_extract(&alloc, source);
+        let ds = macros
+            .iter()
+            .find(|m| m.kind == AnalyzedMacroKind::DefineSlots)
+            .expect("DefineSlots macro");
+        let default_slot = ds
+            .slot_fields
+            .iter()
+            .find(|f| f.name == "default")
+            .expect("default slot");
+        assert!(
+            matches!(
+                default_slot.return_expr,
+                Some(TypeExpr::Primitive(PrimitiveName::Boolean))
+            ),
+            "default slot return_expr should be Primitive(Boolean); got {:?}",
+            default_slot.return_expr
+        );
+        assert!(
+            default_slot.return_expr_scope.is_some(),
+            "pairing invariant"
+        );
+
+        let header = ds
+            .slot_fields
+            .iter()
+            .find(|f| f.name == "header")
+            .expect("header slot");
+        assert!(
+            matches!(
+                header.return_expr,
+                Some(TypeExpr::Primitive(PrimitiveName::Void))
+            ),
+            "header slot return_expr should be Primitive(Void); got {:?}",
+            header.return_expr
+        );
+    }
+
+    /// Site #7 (analyzer-side): Pick AST shape recovery emits the symbolic
+    /// shape `IndexedAccess { object, index }` directly. The analyzer does
+    /// NOT resolve userland alias keys — only emits `Ref { name: alias }`
+    /// inside the IndexedAccess.
+    #[test]
+    fn pick_with_string_literal_keys_emits_indexed_access_with_literal_index() {
+        let alloc = Allocator::new();
+        let source =
+            "defineSlots<{\n    row(props: Pick<RowApi, 'name' | 'value'>): void;\n}>();\n";
+        let macros = parse_and_extract(&alloc, source);
+        let ds = macros
+            .iter()
+            .find(|m| m.kind == AnalyzedMacroKind::DefineSlots)
+            .expect("DefineSlots macro");
+        let row = ds
+            .slot_fields
+            .iter()
+            .find(|f| f.name == "row")
+            .expect("row slot");
+        let mut binding_names: Vec<&str> = row.bindings.iter().map(|b| b.name.as_str()).collect();
+        binding_names.sort();
+        assert_eq!(binding_names, vec!["name", "value"]);
+        for b in &row.bindings {
+            match &b.binding_expr {
+                Some(TypeExpr::IndexedAccess { object, index }) => {
+                    assert!(
+                        matches!(
+                            object.as_ref(),
+                            TypeExpr::Ref { name, .. } if name.as_ref() == "RowApi"
+                        ),
+                        "Pick object should be Ref {{ name: \"RowApi\" }}; got {object:?}"
+                    );
+                    assert!(
+                        matches!(index.as_ref(), TypeExpr::Literal(LiteralValue::String(_))),
+                        "Pick literal-key index should be Literal(String); got {index:?}"
+                    );
+                }
+                other => panic!("binding_expr should be IndexedAccess; got {other:?}"),
+            }
+            assert!(b.binding_expr_scope.is_some(), "pairing invariant");
+        }
+    }
+
+    /// Site #7 — userland alias key form: `Pick<RowApi, BindingKey>`. The
+    /// analyzer emits a SINGLE binding entry whose `binding_expr` is
+    /// `IndexedAccess { object, index: Ref }`. The projector / cross-file
+    /// resolver enumerates the literal-union members downstream.
+    #[test]
+    fn pick_with_userland_alias_key_emits_indexed_access_with_ref_index() {
+        let alloc = Allocator::new();
+        let source = "defineSlots<{\n    row(props: Pick<RowApi, BindingKey>): void;\n}>();\n";
+        let macros = parse_and_extract(&alloc, source);
+        let ds = macros
+            .iter()
+            .find(|m| m.kind == AnalyzedMacroKind::DefineSlots)
+            .expect("DefineSlots macro");
+        let row = ds
+            .slot_fields
+            .iter()
+            .find(|f| f.name == "row")
+            .expect("row slot");
+        assert_eq!(
+            row.bindings.len(),
+            1,
+            "analyzer emits one binding for the alias-key form (resolution is downstream)"
+        );
+        let b = &row.bindings[0];
+        match &b.binding_expr {
+            Some(TypeExpr::IndexedAccess { object, index }) => {
+                assert!(
+                    matches!(
+                        object.as_ref(),
+                        TypeExpr::Ref { name, .. } if name.as_ref() == "RowApi"
+                    ),
+                    "Pick object should be Ref {{ name: \"RowApi\" }}; got {object:?}"
+                );
+                match index.as_ref() {
+                    TypeExpr::Ref {
+                        name,
+                        type_arguments,
+                    } => {
+                        assert_eq!(name.as_ref(), "BindingKey");
+                        assert!(type_arguments.is_empty());
+                    }
+                    other => panic!(
+                        "alias-key index should be Ref {{ name: \"BindingKey\" }}; got {other:?}"
+                    ),
+                }
+            }
+            other => panic!("binding_expr should be IndexedAccess; got {other:?}"),
+        }
+        assert!(b.binding_expr_scope.is_some(), "pairing invariant");
+    }
+
+    /// Pairing invariant: every `*_expr` field is paired with a populated
+    /// `*_expr_scope` (the §3.1 invariant) at every analyzer producer site.
+    #[test]
+    fn analyzer_pairing_invariant_holds_across_all_producer_sites() {
+        let alloc = Allocator::new();
+        let source = "interface Props { count: number; label: 'a' | 'b'; }\ndefineProps<Props>();\ndefineEmits<{ change: [id: number] }>();\ndefineSlots<{ default(props: { item: string }): void }>();\ndefineModel<string>();\n";
+        let macros = parse_and_extract(&alloc, source);
+        for m in &macros {
+            assert_eq!(
+                m.parsed_type_argument.is_some(),
+                m.parsed_type_argument_scope.is_some(),
+                "AnalyzedMacro pairing invariant violated for kind {:?}",
+                m.kind
+            );
+            for f in &m.prop_fields {
+                assert_eq!(
+                    f.type_expr.is_some(),
+                    f.type_expr_scope.is_some(),
+                    "AnalyzedPropField pairing invariant violated for {}",
+                    f.name
+                );
+            }
+            for f in &m.emit_fields {
+                assert_eq!(
+                    f.payload_expr.is_some(),
+                    f.payload_expr_scope.is_some(),
+                    "AnalyzedEmitField pairing invariant violated for {}",
+                    f.name
+                );
+            }
+            for f in &m.slot_fields {
+                assert_eq!(
+                    f.return_expr.is_some(),
+                    f.return_expr_scope.is_some(),
+                    "AnalyzedSlotField pairing invariant violated for {}",
+                    f.name
+                );
+                for b in &f.bindings {
+                    assert_eq!(
+                        b.binding_expr.is_some(),
+                        b.binding_expr_scope.is_some(),
+                        "AnalyzedSlotFieldBinding pairing invariant violated for {} -> {}",
+                        f.name,
+                        b.name
+                    );
+                }
+            }
+        }
+    }
+}

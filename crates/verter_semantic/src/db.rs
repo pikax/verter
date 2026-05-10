@@ -1,4 +1,4 @@
-//! Semantic database — revision-gated query engine.
+﻿//! Semantic database — revision-gated query engine.
 //!
 //! The semantic DB holds cached semantic facts keyed by (canonical_file_id,
 //! query_key, revision). Queries are pure over immutable snapshots — they
@@ -688,6 +688,7 @@ mod tests {
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: Span::new(0, 50),
         }];
 
@@ -750,6 +751,7 @@ mod tests {
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: Span::new(0, 50),
         }];
         let child_surface = extract_component_surface(&child_snap);
@@ -1097,6 +1099,7 @@ mod tests {
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: Span::new(0, 50),
         }];
 

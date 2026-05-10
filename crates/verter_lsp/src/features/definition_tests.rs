@@ -1,4 +1,4 @@
-use super::*;
+﻿use super::*;
 use crate::documents::sfc_scanner::scan_sfc_blocks;
 use verter_semantic::analysis::types::ImportBindingKind;
 use verter_semantic::analysis::*;
@@ -339,6 +339,7 @@ fn test_go_to_macro_binding_from_template() {
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(macro_start, macro_end),
         }],
     );
@@ -2091,6 +2092,7 @@ fn test_go_to_definition_dollar_props() {
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(define_offset as u32, (define_offset + 30) as u32),
         }])
         .into(),
@@ -2156,6 +2158,7 @@ fn test_go_to_definition_dollar_emit() {
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(define_offset as u32, (define_offset + 22) as u32),
         }])
         .into(),
@@ -2280,6 +2283,7 @@ fn definition_prop_field_type_based() {
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(
                 define_props_offset as u32,
                 (define_props_offset + 45) as u32,
@@ -2364,6 +2368,7 @@ fn definition_prop_field_runtime() {
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(
                 define_props_offset as u32,
                 (define_props_offset + 28) as u32,
@@ -2454,6 +2459,7 @@ fn definition_binding_takes_precedence_over_prop_field() {
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(90, 140),
         }],
     );

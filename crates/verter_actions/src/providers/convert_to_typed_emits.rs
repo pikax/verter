@@ -1,4 +1,4 @@
-//! Quick fix: convert a runtime `defineEmits(...)` to type-based `defineEmits<{...}>()`.
+﻿//! Quick fix: convert a runtime `defineEmits(...)` to type-based `defineEmits<{...}>()`.
 //!
 //! Handles: `define-emits-declaration`
 //!
@@ -127,6 +127,7 @@ mod tests {
             default_values: vec![],
             resolved_local_types: vec![],
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span,
         }
     }

@@ -1,4 +1,4 @@
-// Cross-file edit support for code actions.
+﻿// Cross-file edit support for code actions.
 //
 // Provides `ChildComponentContext` — a bundle of resolved child component data
 // (URI, source, analysis, blocks, line_index) with helper methods for generating
@@ -233,6 +233,7 @@ mod tests {
                 default_values: Vec::new(),
                 resolved_local_types: Vec::new(),
                 parsed_type_argument: None,
+                parsed_type_argument_scope: None,
                 span: verter_span::Span::new(24, 60),
             }])
             .into(),
@@ -415,6 +416,7 @@ mod tests {
                 default_values: Vec::new(),
                 resolved_local_types: Vec::new(),
                 parsed_type_argument: None,
+                parsed_type_argument_scope: None,
                 span: verter_span::Span::new(24, 57), // past the closing `)`
             }])
             .into(),
@@ -453,6 +455,7 @@ mod tests {
                 default_values: Vec::new(),
                 resolved_local_types: Vec::new(),
                 parsed_type_argument: None,
+                parsed_type_argument_scope: None,
                 span: verter_span::Span::new(15, 35),
             }])
             .into(),

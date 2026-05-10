@@ -1,4 +1,4 @@
-use super::*;
+﻿use super::*;
 use crate::documents::sfc_scanner::scan_sfc_blocks;
 use verter_semantic::analysis::types::ImportBindingKind;
 use verter_semantic::analysis::*;
@@ -2362,6 +2362,7 @@ fn test_component_prop_completions_from_macros() {
                 default_values: Vec::new(),
                 resolved_local_types: Vec::new(),
                 parsed_type_argument: None,
+                parsed_type_argument_scope: None,
                 span: verter_span::Span::new(0, 0),
             },
             AnalyzedMacro {
@@ -2387,6 +2388,7 @@ fn test_component_prop_completions_from_macros() {
                 default_values: Vec::new(),
                 resolved_local_types: Vec::new(),
                 parsed_type_argument: None,
+                parsed_type_argument_scope: None,
                 span: verter_span::Span::new(0, 0),
             },
         ]),

@@ -1,4 +1,4 @@
-//! Rule: conditional-root-complex
+﻿//! Rule: conditional-root-complex
 //!
 //! Warns when a root `v-if`/`v-else-if` condition is too complex for generic
 //! narrowing. Only active when `conditional_root_narrowing` is enabled in config.
@@ -232,6 +232,7 @@ mod tests {
                 default_values: Vec::new(),
                 resolved_local_types: Vec::new(),
                 parsed_type_argument: None,
+                parsed_type_argument_scope: None,
                 span: Span::new(0, 50),
             }],
             ..Default::default()

@@ -1,4 +1,4 @@
-use super::*;
+﻿use super::*;
 use crate::analysis::types::AnalyzedExposeField;
 use std::sync::Arc;
 use verter_type_expr::PrimitiveName;
@@ -38,6 +38,7 @@ fn make_define_props(fields: Vec<AnalyzedPropField>) -> AnalyzedMacro {
         expose_fields: Vec::new(),
         resolved_local_types: Vec::new(),
         parsed_type_argument: None,
+        parsed_type_argument_scope: None,
         span: verter_span::Span::default(),
     }
 }

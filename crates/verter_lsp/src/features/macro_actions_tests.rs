@@ -1,4 +1,4 @@
-use super::*;
+﻿use super::*;
 use verter_semantic::analysis::template::{
     AnalyzedEmitDefinition, DefinedSlot, TemplateAnalysisSnapshot,
 };
@@ -156,6 +156,7 @@ fn b1_no_action_when_define_slots_exists() {
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(24, 42),
         }],
     );
@@ -285,6 +286,7 @@ fn b2_no_action_when_all_emits_declared() {
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(24, 72),
         }],
     );
@@ -343,6 +345,7 @@ fn b4_add_missing_emit_to_existing_type_based() {
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(24, 72),
         }],
     );
@@ -417,6 +420,7 @@ fn b4_add_missing_emit_to_runtime_array() {
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(24, 57),
         }],
     );
@@ -870,6 +874,7 @@ fn b3_detects_missing_slot() {
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(24, 68),
         }],
     );
@@ -952,6 +957,7 @@ fn b3_no_action_when_all_present() {
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(24, 92),
         }],
     );
@@ -1005,6 +1011,7 @@ fn b5_missing_prop_detected() {
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(24, 80),
         }],
     );
@@ -1061,6 +1068,7 @@ fn b5_no_action_when_props_match() {
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(24, 80),
         }],
     );
@@ -1188,6 +1196,7 @@ fn cursor_on_define_slots_macro_shows_augmentation_actions() {
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(macro_start, macro_end),
         }],
     );

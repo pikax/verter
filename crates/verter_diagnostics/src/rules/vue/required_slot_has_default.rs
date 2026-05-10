@@ -1,4 +1,4 @@
-//! Rule: required-slot-has-default
+﻿//! Rule: required-slot-has-default
 //!
 //! Warns when `defineSlots` marks a slot as required (no `?`) but the
 //! corresponding `<slot>` element has fallback content. A required slot should
@@ -141,6 +141,7 @@ mod tests {
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: Span::new(0, 50),
         }
     }

@@ -1,4 +1,4 @@
-use super::*;
+﻿use super::*;
 use crate::meta::MetaProject;
 use crate::resolver_core::ComponentMetaRequestHost;
 use crate::types::{HostConfig, ProjectionMode};
@@ -4610,6 +4610,7 @@ fn define_props_macro_shape_reuses_expanded_fields_directly() {
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(0, 0),
         }]
         .into(),
@@ -4728,6 +4729,7 @@ fn define_props_macro_shape_prefers_resolved_macro_when_expanded_fields_are_inco
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(0, 0),
         }]
         .into(),
@@ -4856,6 +4858,7 @@ fn define_props_fields_fast_path_allows_direct_object_literals() {
         expose_fields: Vec::new(),
         resolved_local_types: Vec::new(),
         parsed_type_argument: None,
+        parsed_type_argument_scope: None,
         span: verter_span::Span::new(0, 0),
     };
     let lowered = verter_type_expr_oxc::parse_type_annotation("{ title: string }");
@@ -4895,6 +4898,7 @@ fn define_props_fields_fast_path_rejects_complex_heritage_refs() {
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(0, 0),
         }]
         .into(),
@@ -4969,6 +4973,7 @@ fn define_props_fields_fast_path_rejects_multi_surface_macro_candidates() {
         expose_fields: Vec::new(),
         resolved_local_types: Vec::new(),
         parsed_type_argument: None,
+        parsed_type_argument_scope: None,
         span: verter_span::Span::new(0, 0),
     };
     let resolved_macros = vec![
@@ -5240,6 +5245,7 @@ defineProps<Props>()
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(0, 0),
         }]
         .into(),
@@ -5391,6 +5397,7 @@ defineModel<boolean>('open')
                 expose_fields: Vec::new(),
                 resolved_local_types: Vec::new(),
                 parsed_type_argument: None,
+                parsed_type_argument_scope: None,
                 span: verter_span::Span::new(0, 0),
             },
             verter_semantic::analysis::AnalyzedMacro {
@@ -5408,6 +5415,7 @@ defineModel<boolean>('open')
                 expose_fields: Vec::new(),
                 resolved_local_types: Vec::new(),
                 parsed_type_argument: None,
+                parsed_type_argument_scope: None,
                 span: verter_span::Span::new(0, 0),
             },
         ]
@@ -6196,6 +6204,7 @@ defineEmits<Emits>()
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(0, 0),
         }]
         .into(),
@@ -6316,6 +6325,7 @@ defineEmits<Emits>()
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(0, 0),
         }]
         .into(),
@@ -6417,6 +6427,7 @@ defineEmits<Emits>()
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(0, 0),
         }]
         .into(),
@@ -6514,6 +6525,7 @@ defineModel<string>('searchTerm')
                 expose_fields: Vec::new(),
                 resolved_local_types: Vec::new(),
                 parsed_type_argument: None,
+                parsed_type_argument_scope: None,
                 span: verter_span::Span::new(0, 0),
             },
             verter_semantic::analysis::AnalyzedMacro {
@@ -6531,6 +6543,7 @@ defineModel<string>('searchTerm')
                 expose_fields: Vec::new(),
                 resolved_local_types: Vec::new(),
                 parsed_type_argument: None,
+                parsed_type_argument_scope: None,
                 span: verter_span::Span::new(0, 0),
             },
         ]
@@ -6635,6 +6648,7 @@ defineEmits<Emits>()
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(0, 0),
         }]
         .into(),
@@ -6799,6 +6813,7 @@ defineSlots<Slots>()
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(0, 0),
         }]
         .into(),
@@ -6963,6 +6978,7 @@ withDefaults(defineProps<Props>(), {
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(0, 0),
         }]
         .into(),

@@ -1,4 +1,4 @@
-//! Rule: component-definition-name-casing
+﻿//! Rule: component-definition-name-casing
 //!
 //! Component names defined in `defineOptions` should be PascalCase.
 //! For example, `defineOptions({ name: 'my-component' })` should use
@@ -90,6 +90,7 @@ mod tests {
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: Span::new(10, 50),
         }
     }
@@ -156,6 +157,7 @@ mod tests {
                 default_values: Vec::new(),
                 resolved_local_types: Vec::new(),
                 parsed_type_argument: None,
+                parsed_type_argument_scope: None,
                 span: Span::new(10, 50),
             }],
             ..Default::default()

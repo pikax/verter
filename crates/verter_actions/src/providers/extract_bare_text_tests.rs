@@ -1,4 +1,4 @@
-use super::*;
+﻿use super::*;
 use crate::provider::ActionContext;
 use verter_diagnostics::{DiagnosticSet, DiagnosticSpanKind, LintDiagnostic, Severity};
 use verter_semantic::analysis::template::*;
@@ -1004,6 +1004,7 @@ fn make_macro(
         expose_fields: vec![],
         resolved_local_types: Vec::new(),
         parsed_type_argument: None,
+        parsed_type_argument_scope: None,
         span,
     }
 }
