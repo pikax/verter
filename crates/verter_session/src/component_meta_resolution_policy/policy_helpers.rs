@@ -1,30 +1,29 @@
-//! Shared predicate consumed by all three callsites in the
-//! component-meta materialize pipeline that decide between
-//! symbolic preservation vs. canonical materialize for an
-//! imported bare ref:
+//! Shared symbolic-vs-canonical materialization predicate consumed
+//! by the component-meta materialize pipeline's bare-ref decision
+//! sites:
 //!
-//! - the per-field rescue cascade's symbolic-preservation predicate (since retired)
 //! - `resolver_core/component_meta_query_engine/shallow_preserve.rs::should_preserve_imported_bare_ref`
 //! - `meta_resolve/materialize/macro_shapes.rs::named_ref_can_use_prepared_projection`
 //!
-//! Per Issue #11 / §6.5: workspace-owned direct-member
-//! interface/class refs (generic or non-generic) that are not on
-//! the recursion/cycle stack and not in a route-preservation
-//! context MUST materialize canonically — their cache key
-//! `(target_decl_id, normalized_type_args)` is shared across all
-//! callers per CLAUDE.md "generic substitutions are part of
-//! semantic meaning". This contract is mis-expressed at three
-//! sites with three near-equivalent guards on integration; the
-//! helper consolidates it.
+//! # Invariant
+//!
+//! Workspace-owned direct-member interface/class refs (generic or
+//! non-generic) that are not on the recursion/cycle stack and not
+//! in a route-preservation context MUST materialize canonically —
+//! their cache key `(target_decl_id, normalized_type_args)` is
+//! shared across all callers per CLAUDE.md "generic substitutions
+//! are part of semantic meaning". The helper centralises the
+//! contract so the two callers cannot drift.
 //!
 //! Symbolic preservation is reserved for:
+//!
 //! 1. package-backed refs (per `WorkspaceRead::is_package_backed`)
 //! 2. explicit shallow-preservation list entries
 //! 3. recursion / cycle boundaries (target's
 //!    `(DeclId, NormalizedTypeArgs)` already on `active_refs`)
 //! 4. lazy-route expression contexts
-//! 5. slot-binding indexed-access expressions (Issue #1)
-//! 6. terminal indexed-access leaves already published (Issue #5)
+//! 5. slot-binding indexed-access expressions
+//! 6. terminal indexed-access leaves already published
 //!
 //! Path-substring checks on `node_modules` are BANNED — the
 //! helper consumes `WorkspaceRead::is_workspace_owned` /
