@@ -34,7 +34,6 @@ mod dep_signature;
 pub(crate) mod diagnostic_convert;
 mod dispatch_helpers;
 pub(crate) mod exactness;
-mod field_state;
 mod graph_predicates;
 mod macro_member_walk;
 pub(crate) mod materialize;
@@ -72,10 +71,6 @@ pub(crate) use dispatch_helpers::{
 pub(crate) use dispatch_helpers::{
     project_prepared_type_surface_expr_via_host_threaded,
     project_route_surface_expr_via_host_threaded,
-};
-#[cfg(test)]
-pub(crate) use field_state::{
-    dispatch_lower_counter_get, dispatch_lower_counter_reset, MacroFieldGraphState,
 };
 pub(crate) use graph_predicates::{
     build_keys_union_node, canonical_resolves_to_package,

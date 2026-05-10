@@ -180,6 +180,17 @@ const RETIRED_SYMBOLS: &[&str] = &[
     "FIELD_PROPS_ROUTED_SURFACE_NS",
     "MATERIALIZE_FIELD_TYPES_CALLS",
     "MATERIALIZE_FIELD_TYPES_NS",
+    // Dead scaffold deletion: `MacroFieldGraphState` and the
+    // `dispatch_lower_counter_*` test instrumentation never had a
+    // production caller. The struct was added for the rescue-cascade
+    // pipeline that the projector cutover deleted. The only consumers
+    // were 12 scaffold-shape tests that have also been deleted.
+    // Re-introducing any of these names would resurrect a dead
+    // architectural exploration.
+    "MacroFieldGraphState",
+    "dispatch_lower_counter_get",
+    "dispatch_lower_counter_reset",
+    "dispatch_lower_counter_increment",
 ];
 
 const SCAN_DIRS: &[&str] = &["crates", ".claude/skills", "docs"];
