@@ -1419,6 +1419,22 @@ type ShapeResult = verter_semantic::analysis::type_expand::ExpansionResult<
     verter_semantic::analysis::type_expand::ExpandedObjectShape,
 >;
 
+/// Returns `true` when `expr` carries a top-level surface that the
+/// projector's bounded fixed-point reducer should expand further.
+///
+/// For a bare `Ref { name, type_arguments }` the predicate consults
+/// the declaration body via the dispatch primitives and reports
+/// `true` when the body has a non-object top-level surface (i.e. an
+/// alias resolving to a primitive / utility wrapper / operator
+/// shape) or the Ref carries type arguments and the declaration
+/// body is unavailable. For any other shape the predicate returns
+/// `true` when the expression itself has a non-object top-level
+/// surface.
+///
+/// A short-circuit cycle guard
+/// (`lowered_root_reaches_transitive_cycle`) returns `false` for
+/// recursive aliases like `TreeNode` so the reducer cannot loop on
+/// itself.
 pub(crate) fn expr_needs_projection_rescue(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     owner_canonical: &str,

@@ -1,22 +1,21 @@
 //! `MacroFieldGraphState` lazy-lowering scaffold + dispatch lower counter.
 //!
-//! Domain 3.10 / K1 lazy-lowering scaffold +
-//! test-only `DISPATCH_LOWER_COUNTER` instrumentation.
-//!
-//! Historical scaffold from the per-field rescue cascade era:
-//! the macro field-type rewrite path migrated from TypeExpr-walking
-//! predicates to graph-native `_node` predicates. The rescue cascade
-//! itself has been retired; this scaffold remains as a structural
-//! aid for the test suite that exercises the per-field state
-//! transitions (lower count ≤ 2 per field invariant).
+//! `MacroFieldGraphState` carries a field's published TypeExpr alongside
+//! lazily-lowered raw / current SemanticNodeId memos. Predicates that
+//! inspect the raw or current shape borrow the lazy-lowered node
+//! without forcing a redundant lower; graph-native rewrites set
+//! `node_rewrite_dirty = true` so `publish()` raises the rewritten
+//! node back to TypeExpr at scope exit. This scaffold is the
+//! structural aid the test suite uses to exercise the per-field
+//! state transitions (lower count ≤ 2 per field invariant).
 //!
 //! `DISPATCH_LOWER_COUNTER` is incremented every time a `MacroFieldGraphState`
-//! performs a TypeExpr → SemanticNodeId lowering. K3's TDD test asserts this
-//! stays ≤ 2 per field after the predicate-call migration.
+//! performs a TypeExpr → SemanticNodeId lowering. The TDD test asserts
+//! this stays ≤ 2 per field.
 //!
-//! `node_rewrite_dirty` distinguishes lazy-lowering (for predicate inspection)
-//! from graph-native rewrites that produce a NEW current_node. Per §4.10 /
-//! Codex2 P1 #6, `publish()` raises ONLY when dirty=true.
+//! `node_rewrite_dirty` distinguishes lazy lowering (for predicate
+//! inspection) from graph-native rewrites that produce a NEW
+//! current_node — `publish()` raises ONLY when dirty=true.
 
 #[cfg(test)]
 thread_local! {

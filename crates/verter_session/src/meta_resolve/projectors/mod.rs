@@ -121,10 +121,7 @@ fn merge_projected_fields_by_name(
 
 /// Top-level driver that dispatches every type-based macro in the
 /// snapshot through its per-kind projector and writes the resulting
-/// fields into `evaluated_types`.
-///
-/// This is the replacement for the legacy macro-shape walker + per-
-/// field rescue cascade enrichment pipeline. The driver:
+/// fields into `evaluated_types`. The driver:
 ///
 /// 1. For each `defineProps<T>`, calls [`project_props`] and extends
 ///    `evaluated_types.props` with the resulting fields.
@@ -554,10 +551,10 @@ pub(crate) fn surface_member_to_expanded_field(
 ///    `Ref { name, type_arguments }` whose declaration body is itself
 ///    not a non-object surface (i.e. an alias to a primitive / object
 ///    / function shape) AND the body would benefit from projection,
-///    the reducer is rerun against an `IndexedAccess`-on-Ref shell
-///    (matching the rescue's "imported alias body" recovery).
-///    Otherwise the bare Ref is the final shape (consumers re-resolve
-///    by name through the registry).
+///    the reducer is rerun against an `IndexedAccess`-on-Ref shell so
+///    the imported alias body is recovered through the dispatch
+///    primitives. Otherwise the bare Ref is the final shape
+///    (consumers re-resolve by name through the registry).
 ///
 /// Generic substitutions, dep-signature accumulation, fence-validated
 /// publication, and dispatch fence diagnostics all flow through
@@ -585,11 +582,10 @@ pub(crate) fn reduce_field_type_expr(
     // `Conditional`/`Mapped`/`Infer`), or (b) the expression's root
     // is a bare `Ref` whose declaration body would benefit from
     // expansion (utility instantiations like `Pick<X,K>`, aliases
-    // resolving to non-object surfaces, etc). The latter is
-    // detected by `expr_needs_projection_rescue` which inspects the
-    // declaration body via the dispatch primitives — its cycle
-    // guard prevents runaway recursion on recursive aliases like
-    // `TreeNode`. We restrict (b) to bare-`Ref` roots so a Union
+    // resolving to non-object surfaces, etc). `expr_needs_projection_rescue`
+    // inspects the declaration body via the dispatch primitives; its
+    // cycle guard prevents runaway recursion on recursive aliases
+    // like `TreeNode`. We restrict (b) to bare-`Ref` roots so a Union
     // whose individual branches happen to be utility wrappers
     // (`boolean | Omit<X, K>`) keeps the wrapper symbolic — only
     // the Union root's own non-object surface check is consulted,
@@ -615,11 +611,10 @@ pub(crate) fn reduce_field_type_expr(
     );
 
     // Cross-scope retry: if the consumer-scope reduction didn't
-    // produce an improvement, try the imported declaration's scope.
-    // This matches the rescue's `select_imported_materialization_scope`
-    // fallback for routes whose root lives in another file (e.g.
-    // imported alias bodies that reference symbols defined alongside
-    // the alias).
+    // produce an improvement, try the imported declaration's scope
+    // via `select_imported_materialization_scope`. This covers routes
+    // whose root lives in another file (e.g. imported alias bodies
+    // that reference symbols defined alongside the alias).
     if !crate::meta_resolve::compare_type_expr_improvement(&stable, &expr) {
         if let Some(imported_scope) =
             select_imported_materialization_scope(&expr, scope_canonical_id, query_engine)
