@@ -326,6 +326,8 @@ mod tests {
                     tags: vec![],
                     resolution_source: Default::default(),
                     resolution_error: None,
+                    type_expr: None,
+                    type_expr_scope: None,
                 },
                 verter_semantic::analysis::AnalyzedPropField {
                     name: "count".to_string(),
@@ -336,6 +338,8 @@ mod tests {
                     tags: vec![],
                     resolution_source: Default::default(),
                     resolution_error: None,
+                    type_expr: None,
+                    type_expr_scope: None,
                 },
             ],
             emits: vec![],
@@ -514,6 +518,8 @@ export interface Button {
             tags: vec![],
             resolution_source: Default::default(),
             resolution_error: None,
+            type_expr: None,
+            type_expr_scope: None,
         }];
 
         let (result, _trace) = resolved_macro_to_expansion_via_solver(&macro_meta, &host);

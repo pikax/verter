@@ -497,6 +497,8 @@ mod tests {
             tags: Vec::new(),
             resolution_source: TypeResolutionSource::Rust,
             resolution_error: None,
+            type_expr: None,
+            type_expr_scope: None,
         }
     }
 
@@ -542,6 +544,8 @@ mod tests {
                     payload_type: Some("[value: string]".to_string()),
                     description: None,
                     tags: Vec::new(),
+                    payload_expr: None,
+                    payload_expr_scope: None,
                 },
                 AnalyzedEmitField {
                     name: "close".to_string(),
@@ -549,6 +553,8 @@ mod tests {
                     payload_type: None,
                     description: None,
                     tags: Vec::new(),
+                    payload_expr: None,
+                    payload_expr_scope: None,
                 },
             ],
             ..make_props_macro(vec![])
@@ -612,10 +618,14 @@ mod tests {
                     name: "title".to_string(),
                     type_annotation: Some("string".to_string()),
                     span: Span::new(12, 17),
+                    binding_expr: None,
+                    binding_expr_scope: None,
                 }],
                 return_type: None,
                 description: None,
                 tags: Vec::new(),
+                return_expr: None,
+                return_expr_scope: None,
             }],
             ..make_props_macro(vec![])
         };
@@ -737,6 +747,8 @@ mod tests {
                     payload_type: Some("[val: string]".into()),
                     description: None,
                     tags: Vec::new(),
+                    payload_expr: None,
+                    payload_expr_scope: None,
                 },
                 AnalyzedEmitField {
                     name: "submit".into(),
@@ -744,6 +756,8 @@ mod tests {
                     payload_type: None,
                     description: None,
                     tags: Vec::new(),
+                    payload_expr: None,
+                    payload_expr_scope: None,
                 },
             ],
             ..make_props_macro(vec![])

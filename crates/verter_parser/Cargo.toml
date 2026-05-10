@@ -23,6 +23,7 @@ parser_cache_audit = []
 
 [dependencies]
 verter_span = { path = "../verter_span", version = "0.0.1-beta.1" }
+verter_type_expr = { workspace = true }
 hotpath = { version = "0.13", optional = true }
 bitflags = "2"
 memchr = "2.7.6"

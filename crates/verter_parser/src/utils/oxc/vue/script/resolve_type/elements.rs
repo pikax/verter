@@ -115,6 +115,8 @@ pub(super) fn resolve_mapped_type_with_ctx<'ctx, 'a: 'ctx>(
             type_text: type_text.clone(),
             map_local: true,
             span_is_absolute: base_offset != 0,
+            type_expr: None,
+            type_expr_scope: None,
         });
     }
 
@@ -233,6 +235,8 @@ pub(super) fn resolve_property_as_emit(
                 signature: ResolvedEmitSignature::Tuple { tuple_text },
                 map_local: true,
                 span_is_absolute: base_offset != 0,
+                type_expr: None,
+                type_expr_scope: None,
             });
         }
     }
@@ -287,6 +291,8 @@ pub(super) fn resolve_call_signature_as_emit(
                 signature: ResolvedEmitSignature::Call { params_text },
                 map_local: true,
                 span_is_absolute: base_offset != 0,
+                type_expr: None,
+                type_expr_scope: None,
             });
         }
     }
@@ -437,6 +443,8 @@ pub(super) fn resolve_property_signature(
         type_text,
         map_local: true,
         span_is_absolute: base_offset != 0,
+        type_expr: None,
+        type_expr_scope: None,
     })
 }
 
@@ -473,6 +481,8 @@ pub(super) fn resolve_method_signature(
         ),
         map_local: true,
         span_is_absolute: base_offset != 0,
+        type_expr: None,
+        type_expr_scope: None,
     })
 }
 

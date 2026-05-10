@@ -24,6 +24,7 @@ use std::{
 use oxc_ast::ast::*;
 use oxc_span::GetSpan;
 use rustc_hash::{FxHashMap, FxHashSet};
+use verter_type_expr::{TypeExpr, TypeExprScope};
 
 use crate::common::Span;
 
@@ -256,6 +257,17 @@ pub struct ResolvedProp {
     pub map_local: bool,
     /// Whether spans on this prop are already SFC-absolute.
     pub span_is_absolute: bool,
+    /// Lowered typed form of the prop's type annotation. Populated by the
+    /// producer that has the OXC `TSType<'_>` AST node in scope (local-SFC
+    /// inference or cross-file external resolver). Authoritative for
+    /// downstream consumers — `type_text` is display-only.
+    pub type_expr: Option<TypeExpr>,
+    /// Scope of `type_expr`: canonical_id of the file whose OXC parse produced
+    /// the typed expression. For local-SFC parses this is the owner SFC's
+    /// canonical_id; for the external-resolution path this is the external
+    /// file's canonical_id. Pairing invariant:
+    /// `type_expr.is_some() <=> type_expr_scope.is_some()`.
+    pub type_expr_scope: Option<TypeExprScope>,
 }
 
 /// A resolved emit event from defineEmits type parameter.
@@ -286,6 +298,14 @@ pub struct ResolvedEmit {
     pub map_local: bool,
     /// Whether spans on this emit are already SFC-absolute.
     pub span_is_absolute: bool,
+    /// Lowered typed form of the emit's payload type. Populated by the
+    /// producer that has the OXC `TSType<'_>` AST node in scope.
+    /// Authoritative for downstream consumers — `signature` text is display-only.
+    pub type_expr: Option<TypeExpr>,
+    /// Scope of `type_expr`: canonical_id of the file whose OXC parse produced
+    /// the typed expression. Pairing invariant:
+    /// `type_expr.is_some() <=> type_expr_scope.is_some()`.
+    pub type_expr_scope: Option<TypeExprScope>,
 }
 
 /// Resolution surface that a `BlockedType` applies to.

@@ -7,6 +7,7 @@ use verter_semantic::analysis::types::{
     AnalyzedEmitField, AnalyzedMacroKind, AnalyzedPropField, AnalyzedSlotField,
     AnalyzedSlotFieldBinding, JsdocTag,
 };
+use verter_type_expr::{TypeExpr, TypeExprScope};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedNativeProp {
@@ -23,6 +24,25 @@ pub struct ProjectedMacroSurfaces {
     pub props: Vec<AnalyzedPropField>,
     pub emits: Vec<AnalyzedEmitField>,
     pub slots: Vec<AnalyzedSlotField>,
+    /// Lowered typed form of the entire `defineProps` / `withDefaults` /
+    /// `defineModel` macro surface. Authoritative for downstream consumers
+    /// (`projected_macro_surfaces_to_type_expr`, `cold_resolver`,
+    /// `eval_program::project_imported_macro_surfaces`).
+    pub props_expr: Option<TypeExpr>,
+    /// Scope of `props_expr`: canonical_id of the file whose OXC parse
+    /// produced the typed expression. Pairing invariant:
+    /// `props_expr.is_some() <=> props_expr_scope.is_some()`.
+    pub props_expr_scope: Option<TypeExprScope>,
+    /// Lowered typed form of the entire `defineEmits` macro surface.
+    pub emits_expr: Option<TypeExpr>,
+    /// Scope of `emits_expr`. Pairing invariant:
+    /// `emits_expr.is_some() <=> emits_expr_scope.is_some()`.
+    pub emits_expr_scope: Option<TypeExprScope>,
+    /// Lowered typed form of the entire `defineSlots` macro surface.
+    pub slots_expr: Option<TypeExpr>,
+    /// Scope of `slots_expr`. Pairing invariant:
+    /// `slots_expr.is_some() <=> slots_expr_scope.is_some()`.
+    pub slots_expr_scope: Option<TypeExprScope>,
 }
 
 pub fn project_macro_surfaces(
@@ -54,6 +74,8 @@ pub fn project_macro_surfaces(
                         tags,
                         resolution_source: verter_semantic::analysis::TypeResolutionSource::Rust,
                         resolution_error: None,
+                        type_expr: None,
+                        type_expr_scope: None,
                     }
                 })
                 .collect();
@@ -63,6 +85,7 @@ pub fn project_macro_surfaces(
                 props,
                 emits: Vec::new(),
                 slots: Vec::new(),
+                ..Default::default()
             }
         }
         AnalyzedMacroKind::DefineEmits => {
@@ -78,6 +101,8 @@ pub fn project_macro_surfaces(
                         payload_type,
                         description,
                         tags,
+                        payload_expr: None,
+                        payload_expr_scope: None,
                     }
                 })
                 .collect();
@@ -107,6 +132,8 @@ pub fn project_macro_surfaces(
                         payload_type,
                         description,
                         tags,
+                        payload_expr: None,
+                        payload_expr_scope: None,
                     });
                 }
             }
@@ -116,6 +143,7 @@ pub fn project_macro_surfaces(
                 props: Vec::new(),
                 emits,
                 slots: Vec::new(),
+                ..Default::default()
             }
         }
         AnalyzedMacroKind::DefineSlots => {
@@ -149,6 +177,8 @@ pub fn project_macro_surfaces(
                         return_type,
                         description,
                         tags,
+                        return_expr: None,
+                        return_expr_scope: None,
                     })
                 })
                 .collect();
@@ -158,6 +188,7 @@ pub fn project_macro_surfaces(
                 props: Vec::new(),
                 emits: Vec::new(),
                 slots,
+                ..Default::default()
             }
         }
         _ => ProjectedMacroSurfaces {
@@ -165,6 +196,7 @@ pub fn project_macro_surfaces(
             props: Vec::new(),
             emits: Vec::new(),
             slots: Vec::new(),
+            ..Default::default()
         },
     }
 }
@@ -321,6 +353,8 @@ pub fn extract_slot_info_from_type_text(
                 name,
                 type_annotation,
                 span: verter_span::Span::default(),
+                binding_expr: None,
+                binding_expr_scope: None,
             })
         })
         .collect();
@@ -364,6 +398,8 @@ fn extract_pick_slot_bindings(binding_type_text: &str) -> Option<Vec<AnalyzedSlo
             name,
             type_annotation: Some(format!("{object}[{key}]")),
             span: verter_span::Span::default(),
+            binding_expr: None,
+            binding_expr_scope: None,
         });
     }
 
@@ -681,6 +717,8 @@ mod tests {
             type_text: type_text.map(str::to_string),
             map_local: false,
             span_is_absolute: true,
+            type_expr: None,
+            type_expr_scope: None,
         }
     }
 
@@ -704,6 +742,8 @@ mod tests {
             type_text: type_text.map(str::to_string),
             map_local: false,
             span_is_absolute: true,
+            type_expr: None,
+            type_expr_scope: None,
         }
     }
 
@@ -753,6 +793,8 @@ mod tests {
                     },
                     map_local: false,
                     span_is_absolute: true,
+                    type_expr: None,
+                    type_expr_scope: None,
                 },
                 ResolvedEmit {
                     span: verter_span::Span::new(6, 12),
@@ -763,6 +805,8 @@ mod tests {
                     },
                     map_local: false,
                     span_is_absolute: true,
+                    type_expr: None,
+                    type_expr_scope: None,
                 },
             ],
             ..ResolvedElements::default()
@@ -859,6 +903,8 @@ mod tests {
                 },
                 map_local: false,
                 span_is_absolute: true,
+                type_expr: None,
+                type_expr_scope: None,
             }],
             ..ResolvedElements::default()
         };

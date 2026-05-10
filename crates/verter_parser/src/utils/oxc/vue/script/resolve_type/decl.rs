@@ -1023,6 +1023,8 @@ pub(super) fn resolve_class_property_definition(
         type_text,
         map_local: true,
         span_is_absolute: base_offset != 0,
+        type_expr: None,
+        type_expr_scope: None,
     })
 }
 
@@ -1059,6 +1061,8 @@ pub(super) fn resolve_class_method_definition(
         type_text,
         map_local: true,
         span_is_absolute: base_offset != 0,
+        type_expr: None,
+        type_expr_scope: None,
     })
 }
 
@@ -1101,6 +1105,8 @@ pub(super) fn resolve_class_accessor_property(
         type_text,
         map_local: true,
         span_is_absolute: base_offset != 0,
+        type_expr: None,
+        type_expr_scope: None,
     })
 }
 

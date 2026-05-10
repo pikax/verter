@@ -221,6 +221,8 @@ mod tests {
                         tags: vec![],
                         resolution_source: TypeResolutionSource::Rust,
                         resolution_error: None,
+                        type_expr: None,
+                        type_expr_scope: None,
                     })
                     .collect(),
                 emit_fields: vec![],

@@ -3649,6 +3649,8 @@ const count = ref(0)
                         tags: vec![],
                         resolution_source: TypeResolutionSource::Rust,
                         resolution_error: None,
+                        type_expr: None,
+                        type_expr_scope: None,
                     },
                     verter_semantic::analysis::types::AnalyzedPropField {
                         name: "b".into(),
@@ -3659,6 +3661,8 @@ const count = ref(0)
                         tags: vec![],
                         resolution_source: TypeResolutionSource::Rust,
                         resolution_error: None,
+                        type_expr: None,
+                        type_expr_scope: None,
                     },
                     verter_semantic::analysis::types::AnalyzedPropField {
                         name: "c".into(),
@@ -3669,6 +3673,8 @@ const count = ref(0)
                         tags: vec![],
                         resolution_source: TypeResolutionSource::Rust,
                         resolution_error: None,
+                        type_expr: None,
+                        type_expr_scope: None,
                     },
                 ],
                 emit_fields: vec![],

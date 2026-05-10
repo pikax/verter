@@ -274,6 +274,8 @@ fn extract_options_emits(value: &Expression<'_>, source: &str) -> Vec<AnalyzedEm
                         payload_type: None,
                         description: None,
                         tags: Vec::new(),
+                        payload_expr: None,
+                        payload_expr_scope: None,
                     })
                 } else {
                     None
@@ -297,6 +299,8 @@ fn extract_options_emits(value: &Expression<'_>, source: &str) -> Vec<AnalyzedEm
                     payload_type,
                     description: None,
                     tags: Vec::new(),
+                    payload_expr: None,
+                    payload_expr_scope: None,
                 })
             })
             .collect(),

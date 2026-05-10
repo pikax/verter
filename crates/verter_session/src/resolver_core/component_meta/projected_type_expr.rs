@@ -112,22 +112,27 @@ pub(crate) fn project_macro_surfaces_from_expanded_shape(
                     tags: Vec::new(),
                     resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
                     resolution_error: None,
+                    type_expr: None,
+                    type_expr_scope: None,
                 })
                 .collect(),
             emits: Vec::new(),
             slots: Vec::new(),
+            ..Default::default()
         },
         AnalyzedMacroKind::DefineEmits => ProjectedMacroSurfaces {
             native_props: Vec::new(),
             props: Vec::new(),
             emits: projected_emit_fields_from_shape(shape),
             slots: Vec::new(),
+            ..Default::default()
         },
         AnalyzedMacroKind::DefineSlots => ProjectedMacroSurfaces {
             native_props: Vec::new(),
             props: Vec::new(),
             emits: Vec::new(),
             slots: projected_slot_fields_from_shape(shape),
+            ..Default::default()
         },
         AnalyzedMacroKind::DefineExpose | AnalyzedMacroKind::DefineOptions => {
             ProjectedMacroSurfaces::default()
@@ -151,6 +156,8 @@ fn projected_emit_fields_from_shape(
             ),
             description: None,
             tags: Vec::new(),
+            payload_expr: None,
+            payload_expr_scope: None,
         })
         .collect::<Vec<_>>();
 
@@ -184,6 +191,8 @@ fn projected_emit_fields_from_shape(
                     payload_type: payload_type.clone(),
                     description: None,
                     tags: Vec::new(),
+                    payload_expr: None,
+                    payload_expr_scope: None,
                 })
             }
             TypeExpr::Union(types) => {
@@ -197,6 +206,8 @@ fn projected_emit_fields_from_shape(
                         payload_type: payload_type.clone(),
                         description: None,
                         tags: Vec::new(),
+                        payload_expr: None,
+                        payload_expr_scope: None,
                     });
                 }
             }
@@ -233,6 +244,8 @@ fn projected_slot_fields_from_shape(
                 return_type,
                 description: None,
                 tags: Vec::new(),
+                return_expr: None,
+                return_expr_scope: None,
             })
         })
         .collect()

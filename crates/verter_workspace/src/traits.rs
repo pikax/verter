@@ -415,6 +415,49 @@ pub trait WorkspaceAccess: WorkspaceRead {
         Err(crate::error::VfsError::UnsupportedOperation("copy_file"))
     }
 
+    // ── Package-backed types-entry resolution ──
+
+    /// Locate the manifest `types` / `typings` entry for a package-backed
+    /// runtime-script target.
+    ///
+    /// Returns the canonical path of the resolved types entry when
+    /// `canonical_id` is package-backed AND its effective target is a
+    /// runtime script (`.js`, `.cjs`, `.mjs`, `.jsx`). Returns `None` for
+    /// workspace-owned files, for declaration files (`.d.ts`, `.d.cts`,
+    /// `.d.mts`), for TypeScript sources (`.ts`, `.tsx`), and when the
+    /// package manifest declares no `types` / `typings` entry.
+    ///
+    /// Concrete workspaces may override this to add caching. The default
+    /// implementation walks up to the package root (the segment immediately
+    /// after the last `node_modules/` boundary, expanded for scoped packages),
+    /// reads `package.json`, and resolves the `types` or `typings` field
+    /// against the package directory.
+    fn manifest_types_entry_for(&self, canonical_id: &str) -> Option<String> {
+        if !self.is_package_backed(canonical_id) {
+            return None;
+        }
+        if !is_runtime_script_target(canonical_id) {
+            return None;
+        }
+        let package_dir = package_dir_for_resolved_target(canonical_id)?;
+        let package_json_path = format!("{package_dir}/package.json");
+        let manifest = self.read_package_manifest(&package_json_path)?;
+        let type_targets = [manifest.types.clone(), manifest.typings.clone()];
+        type_targets.into_iter().flatten().find_map(|target| {
+            let candidate = if let Some(rest) = target.strip_prefix("./") {
+                format!("{package_dir}/{rest}")
+            } else if target.starts_with('/') {
+                target
+            } else {
+                format!("{package_dir}/{target}")
+            };
+            if !self.file_exists(&candidate) {
+                return None;
+            }
+            Some(self.realpath(&candidate).unwrap_or(candidate))
+        })
+    }
+
     // ── Audit sink registry ──
 
     /// Register a VFS audit sink. The returned handle is deregister-able
@@ -613,6 +656,42 @@ fn workspace_audit_file_entry(canonical_id: &str, role: FileRole) -> FileAudit {
         parse_ms: None,
         lower_ms: None,
     }
+}
+
+/// Whether `canonical_id`'s effective target is a runtime-script extension
+/// (`.js`, `.cjs`, `.mjs`, `.jsx`).
+///
+/// Module-private helper for [`WorkspaceAccess::manifest_types_entry_for`].
+fn is_runtime_script_target(canonical_id: &str) -> bool {
+    canonical_id.ends_with(".js")
+        || canonical_id.ends_with(".jsx")
+        || canonical_id.ends_with(".mjs")
+        || canonical_id.ends_with(".cjs")
+}
+
+/// Locate the package directory for a canonical_id that lives inside
+/// `node_modules/`. Walks back from the last `/node_modules/` boundary
+/// to capture the package segment, expanding scoped packages
+/// (`@scope/name`) into two segments.
+///
+/// Returns `None` if `canonical_id` does not contain a `/node_modules/`
+/// segment.
+///
+/// Module-private helper for [`WorkspaceAccess::manifest_types_entry_for`].
+fn package_dir_for_resolved_target(canonical_id: &str) -> Option<String> {
+    let normalized = canonical_id.replace('\\', "/");
+    let marker = "/node_modules/";
+    let marker_index = normalized.rfind(marker)?;
+    let package_start = marker_index + marker.len();
+    let package_path = &normalized[package_start..];
+    let mut segments = package_path.split('/');
+    let first = segments.next()?;
+    let package_suffix = if first.starts_with('@') {
+        format!("{first}/{}", segments.next()?)
+    } else {
+        first.to_string()
+    };
+    Some(format!("{}{package_suffix}", &normalized[..package_start]))
 }
 
 // ── Scheduler-oriented traits ──

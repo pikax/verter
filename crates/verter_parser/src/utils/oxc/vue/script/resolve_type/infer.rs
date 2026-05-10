@@ -357,6 +357,8 @@ pub(super) fn infer_props_from_object_literal(
             type_text: None,
             map_local: true,
             span_is_absolute: false,
+            type_expr: None,
+            type_expr_scope: None,
         });
     }
 

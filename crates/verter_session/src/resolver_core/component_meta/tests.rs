@@ -285,6 +285,8 @@ impl ComponentMetaResolverHost for CombinedSurfaceTestHost {
                     type_text: Some("string".to_string()),
                     map_local: false,
                     span_is_absolute: true,
+                    type_expr: None,
+                    type_expr_scope: None,
                 }],
                 emits: vec![ResolvedEmit {
                     span: Span::new(0, 24),
@@ -295,6 +297,8 @@ impl ComponentMetaResolverHost for CombinedSurfaceTestHost {
                     },
                     map_local: false,
                     span_is_absolute: true,
+                    type_expr: None,
+                    type_expr_scope: None,
                 }],
                 ..ResolvedElements::default()
             },
@@ -700,9 +704,12 @@ fn local_resolved_macro_types_project_into_resolved_macro_surfaces() {
                     ),
                     description: None,
                     tags: Vec::new(),
+                    payload_expr: None,
+                    payload_expr_scope: None,
                 }],
                 slots: Vec::new(),
                 native_props: Vec::new(),
+                ..Default::default()
             },
         )]),
     };
@@ -787,9 +794,12 @@ fn projectable_local_emit_roots_fill_resolved_macros_without_resolved_local_type
                     payload_type: Some("[value: string]".to_string()),
                     description: None,
                     tags: Vec::new(),
+                    payload_expr: None,
+                    payload_expr_scope: None,
                 }],
                 slots: Vec::new(),
                 native_props: Vec::new(),
+                ..Default::default()
             },
         )]),
     };
@@ -893,12 +903,17 @@ defineSlots<CalendarSlots>()
                         name: "day".to_string(),
                         type_annotation: Some("Date".to_string()),
                         span: Span::default(),
+                        binding_expr: None,
+                        binding_expr_scope: None,
                     }],
                     return_type: Some("any".to_string()),
                     description: None,
                     tags: Vec::new(),
+                    return_expr: None,
+                    return_expr_scope: None,
                 }],
                 native_props: Vec::new(),
+                ..Default::default()
             },
         )]),
     };
@@ -977,6 +992,8 @@ type LocalItem = {
                 type_text: Some("string".to_string()),
                 map_local: false,
                 span_is_absolute: true,
+                type_expr: None,
+                type_expr_scope: None,
             }],
             ..ResolvedElements::default()
         },
@@ -995,6 +1012,8 @@ type LocalItem = {
                 type_text: Some("'href' | 'target'".to_string()),
                 map_local: false,
                 span_is_absolute: true,
+                type_expr: None,
+                type_expr_scope: None,
             }],
             ..ResolvedElements::default()
         },
@@ -1104,6 +1123,8 @@ type Props = Pick<ImportedBase, 'href'>
                     type_text: Some("string".to_string()),
                     map_local: false,
                     span_is_absolute: true,
+                    type_expr: None,
+                    type_expr_scope: None,
                 }],
                 ..ResolvedElements::default()
             },
@@ -1147,10 +1168,13 @@ type Props = Pick<ImportedBase, 'href'>
                     tags: Vec::new(),
                     resolution_source: verter_semantic::analysis::TypeResolutionSource::Rust,
                     resolution_error: None,
+                    type_expr: None,
+                    type_expr_scope: None,
                 }],
                 emits: Vec::new(),
                 slots: Vec::new(),
                 native_props: Vec::new(),
+                ..Default::default()
             },
         )]),
     };
@@ -1243,6 +1267,8 @@ type Props = Pick<ImportedBase, 'href'>
                     type_text: Some("string".to_string()),
                     map_local: false,
                     span_is_absolute: true,
+                    type_expr: None,
+                    type_expr_scope: None,
                 }],
                 ..ResolvedElements::default()
             },
@@ -1261,10 +1287,13 @@ type Props = Pick<ImportedBase, 'href'>
                     tags: Vec::new(),
                     resolution_source: verter_semantic::analysis::TypeResolutionSource::Rust,
                     resolution_error: None,
+                    type_expr: None,
+                    type_expr_scope: None,
                 }],
                 emits: Vec::new(),
                 slots: Vec::new(),
                 native_props: Vec::new(),
+                ..Default::default()
             },
         )]),
     };
@@ -1286,6 +1315,8 @@ type Props = Pick<ImportedBase, 'href'>
                 tags: Vec::new(),
                 resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
                 resolution_error: None,
+                type_expr: None,
+                type_expr_scope: None,
             }],
             emit_fields: Vec::new(),
             slot_fields: Vec::new(),
@@ -1366,6 +1397,8 @@ type Props = {
                     type_text: Some("string".to_string()),
                     map_local: false,
                     span_is_absolute: true,
+                    type_expr: None,
+                    type_expr_scope: None,
                 }],
                 ..ResolvedElements::default()
             },
@@ -1384,10 +1417,13 @@ type Props = {
                     tags: Vec::new(),
                     resolution_source: verter_semantic::analysis::TypeResolutionSource::Rust,
                     resolution_error: None,
+                    type_expr: None,
+                    type_expr_scope: None,
                 }],
                 emits: Vec::new(),
                 slots: Vec::new(),
                 native_props: Vec::new(),
+                ..Default::default()
             },
         )]),
     };
@@ -1490,6 +1526,8 @@ type Props = {
                     type_text: Some("string".to_string()),
                     map_local: false,
                     span_is_absolute: true,
+                    type_expr: None,
+                    type_expr_scope: None,
                 }],
                 ..ResolvedElements::default()
             },
@@ -1508,10 +1546,13 @@ type Props = {
                     tags: Vec::new(),
                     resolution_source: verter_semantic::analysis::TypeResolutionSource::Rust,
                     resolution_error: None,
+                    type_expr: None,
+                    type_expr_scope: None,
                 }],
                 emits: Vec::new(),
                 slots: Vec::new(),
                 native_props: Vec::new(),
+                ..Default::default()
             },
         )]),
     };
@@ -1606,6 +1647,8 @@ type Props = Omit<ImportedBase, 'hidden'>
                     type_text: Some("string".to_string()),
                     map_local: false,
                     span_is_absolute: true,
+                    type_expr: None,
+                    type_expr_scope: None,
                 }],
                 ..ResolvedElements::default()
             },
@@ -1624,10 +1667,13 @@ type Props = Omit<ImportedBase, 'hidden'>
                     tags: Vec::new(),
                     resolution_source: verter_semantic::analysis::TypeResolutionSource::Rust,
                     resolution_error: None,
+                    type_expr: None,
+                    type_expr_scope: None,
                 }],
                 emits: Vec::new(),
                 slots: Vec::new(),
                 native_props: Vec::new(),
+                ..Default::default()
             },
         )]),
     };
@@ -1710,6 +1756,8 @@ type Props = Omit<ImportedBase, 'hidden'>
                     type_text: Some("string".to_string()),
                     map_local: false,
                     span_is_absolute: true,
+                    type_expr: None,
+                    type_expr_scope: None,
                 }],
                 ..ResolvedElements::default()
             },
@@ -1733,10 +1781,13 @@ type Props = Omit<ImportedBase, 'hidden'>
                     tags: Vec::new(),
                     resolution_source: verter_semantic::analysis::TypeResolutionSource::Rust,
                     resolution_error: None,
+                    type_expr: None,
+                    type_expr_scope: None,
                 }],
                 emits: Vec::new(),
                 slots: Vec::new(),
                 native_props: Vec::new(),
+                ..Default::default()
             },
         )]),
     };
@@ -1815,6 +1866,8 @@ fn resolve_component_meta_parts_keeps_direct_imported_macro_root_seeded() {
                     type_text: Some("string".to_string()),
                     map_local: false,
                     span_is_absolute: true,
+                    type_expr: None,
+                    type_expr_scope: None,
                 }],
                 ..ResolvedElements::default()
             },
@@ -1911,6 +1964,8 @@ fn resolve_component_meta_parts_seeds_imported_macro_root_when_graph_metadata_un
                         type_text: Some("object".to_string()),
                         map_local: false,
                         span_is_absolute: true,
+                        type_expr: None,
+                        type_expr_scope: None,
                     },
                     ResolvedProp {
                         span: Span::new(0, 0),
@@ -1923,6 +1978,8 @@ fn resolve_component_meta_parts_seeds_imported_macro_root_when_graph_metadata_un
                         type_text: Some("string".to_string()),
                         map_local: false,
                         span_is_absolute: true,
+                        type_expr: None,
+                        type_expr_scope: None,
                     },
                 ],
                 ..ResolvedElements::default()
@@ -2011,10 +2068,13 @@ interface Helper {
                     tags: Vec::new(),
                     resolution_source: verter_semantic::analysis::TypeResolutionSource::Rust,
                     resolution_error: None,
+                    type_expr: None,
+                    type_expr_scope: None,
                 }],
                 emits: Vec::new(),
                 slots: Vec::new(),
                 native_props: Vec::new(),
+                ..Default::default()
             },
         )]),
     };

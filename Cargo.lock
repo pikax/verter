@@ -3942,6 +3942,7 @@ dependencies = [
  "sha2",
  "smallvec",
  "verter_span",
+ "verter_type_expr",
 ]
 
 [[package]]

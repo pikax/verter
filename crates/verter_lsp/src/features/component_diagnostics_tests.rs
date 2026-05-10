@@ -795,6 +795,8 @@ fn make_child_with_macro_props(prop_names: &[&str]) -> FileAnalysisSnapshot {
                     tags: vec![],
                     resolution_source: TypeResolutionSource::Rust,
                     resolution_error: None,
+                    type_expr: None,
+                    type_expr_scope: None,
                 })
                 .collect(),
             emit_fields: vec![],
@@ -894,6 +896,8 @@ fn macro_fallback_with_defaults_pattern() {
                         tags: vec![],
                         resolution_source: TypeResolutionSource::Rust,
                         resolution_error: None,
+                        type_expr: None,
+                        type_expr_scope: None,
                     },
                     AnalyzedPropField {
                         name: "count".to_string(),
@@ -904,6 +908,8 @@ fn macro_fallback_with_defaults_pattern() {
                         tags: vec![],
                         resolution_source: TypeResolutionSource::Rust,
                         resolution_error: None,
+                        type_expr: None,
+                        type_expr_scope: None,
                     },
                 ],
                 emit_fields: vec![],
@@ -1014,6 +1020,8 @@ fn make_child_with_required_slots(slot_names: &[(&str, bool)]) -> FileAnalysisSn
                         description: None,
                         tags: vec![],
                         return_type: None,
+                        return_expr: None,
+                        return_expr_scope: None,
                     },
                 )
                 .collect(),

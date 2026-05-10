@@ -1,5 +1,6 @@
 use sha2::{Digest, Sha256};
 use verter_span::Span;
+use verter_type_expr::{TypeExpr, TypeExprScope};
 
 /// Truncated SHA-256 hash (first 16 bytes). Used for content-based change detection.
 pub type Hash16 = [u8; 16];
@@ -984,6 +985,19 @@ pub struct AnalyzedPropField {
     /// Only populated for type-based `defineProps` with inline type literals.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub type_annotation: Option<String>,
+    /// Lowered typed form of the prop's type annotation. Populated by the
+    /// producer that has the OXC `TSType<'_>` AST node in scope (analyzer or
+    /// cross-file external resolver). Authoritative for resolver / projector /
+    /// registry / policy / materialiser consumers — `type_annotation` is
+    /// display-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_expr: Option<TypeExpr>,
+    /// Scope of `type_expr`: canonical_id of the file whose OXC parse produced
+    /// the typed expression. Required so consumers walking nested
+    /// `TypeExpr::Ref` nodes resolve them in the file where the annotation was
+    /// written. Pairing invariant: `type_expr.is_some() <=> type_expr_scope.is_some()`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_expr_scope: Option<TypeExprScope>,
     /// JSDoc description extracted from the leading `/** ... */` comment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -1020,6 +1034,17 @@ pub struct AnalyzedEmitField {
     /// `None` for runtime emits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload_type: Option<String>,
+    /// Lowered typed form of the emit's payload type. Populated by the
+    /// producer that has the OXC `TSType<'_>` AST node in scope (analyzer or
+    /// cross-file external resolver). Authoritative for resolver / projector /
+    /// registry / policy / materialiser consumers — `payload_type` is display-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_expr: Option<TypeExpr>,
+    /// Scope of `payload_expr`: canonical_id of the file whose OXC parse
+    /// produced the typed expression. Pairing invariant:
+    /// `payload_expr.is_some() <=> payload_expr_scope.is_some()`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_expr_scope: Option<TypeExprScope>,
     /// JSDoc description extracted from the leading `/** ... */` comment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -1046,6 +1071,17 @@ pub struct AnalyzedSlotField {
     /// Used by strict slots to validate slot children types.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub return_type: Option<String>,
+    /// Lowered typed form of the slot's return type. Populated by the
+    /// producer that has the OXC `TSType<'_>` AST node in scope. Authoritative
+    /// for resolver / projector / registry / policy / materialiser consumers —
+    /// `return_type` is display-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_expr: Option<TypeExpr>,
+    /// Scope of `return_expr`: canonical_id of the file whose OXC parse
+    /// produced the typed expression. Pairing invariant:
+    /// `return_expr.is_some() <=> return_expr_scope.is_some()`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_expr_scope: Option<TypeExprScope>,
     /// JSDoc description extracted from the leading `/** ... */` comment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -1063,6 +1099,18 @@ pub struct AnalyzedSlotFieldBinding {
     /// Type annotation text extracted from source (e.g., `"string"`, `"MyItem"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub type_annotation: Option<String>,
+    /// Lowered typed form of the binding's type. Populated by the producer
+    /// that has the OXC `TSType<'_>` AST node in scope (typically
+    /// `TypeExpr::IndexedAccess` against the slot parameter object).
+    /// Authoritative for resolver / projector / registry / policy /
+    /// materialiser consumers — `type_annotation` is display-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding_expr: Option<TypeExpr>,
+    /// Scope of `binding_expr`: canonical_id of the file whose OXC parse
+    /// produced the typed expression. Pairing invariant:
+    /// `binding_expr.is_some() <=> binding_expr_scope.is_some()`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding_expr_scope: Option<TypeExprScope>,
     /// SFC-absolute byte span of the binding key in `defineSlots` type.
     /// Zero-span fallback for backward compat with older JSON.
     #[serde(default)]

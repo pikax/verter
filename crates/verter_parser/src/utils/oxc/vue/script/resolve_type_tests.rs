@@ -1004,6 +1004,8 @@ interface Props extends Imported {
         type_text: None,
         map_local: true,
         span_is_absolute: false,
+        type_expr: None,
+        type_expr_scope: None,
     });
     with_companion
         .extend_companion_types(&FxHashMap::from_iter([("Imported".to_string(), imported)]));
@@ -1336,6 +1338,8 @@ type Test = Local;"#;
         type_text: None,
         map_local: true,
         span_is_absolute: false,
+        type_expr: None,
+        type_expr_scope: None,
     });
     companions.insert("Base".to_string(), base_resolved);
 
@@ -1405,6 +1409,8 @@ export interface Props extends LocalBase {
         type_text: None,
         map_local: false,
         span_is_absolute: false,
+        type_expr: None,
+        type_expr_scope: None,
     });
     companion_types.insert("LocalBase".to_string(), base);
 
@@ -1450,6 +1456,8 @@ export interface Props extends LocalBase {
         type_text: None,
         map_local: false,
         span_is_absolute: false,
+        type_expr: None,
+        type_expr_scope: None,
     });
     companion_types.insert("LocalBase".to_string(), base);
 
@@ -1482,6 +1490,8 @@ export interface Emits extends BaseEmits {
         },
         map_local: false,
         span_is_absolute: false,
+        type_expr: None,
+        type_expr_scope: None,
     });
     companion_types.insert("BaseEmits".to_string(), base);
 
@@ -2551,6 +2561,8 @@ fn ctx_ref_companion_fallback() {
         type_text: None,
         map_local: false,
         span_is_absolute: false,
+        type_expr: None,
+        type_expr_scope: None,
     });
     companions.insert("CompanionType".to_string(), comp);
 
@@ -2671,6 +2683,8 @@ fn typeof_query_with_companion() {
         type_text: None,
         map_local: false,
         span_is_absolute: false,
+        type_expr: None,
+        type_expr_scope: None,
     });
     companions.insert("myVar".to_string(), comp);
 
@@ -3177,6 +3191,8 @@ export type Outer = Prettify<Inner>
             type_text: None,
             map_local: false,
             span_is_absolute: false,
+            type_expr: None,
+            type_expr_scope: None,
         });
     }
     companion_types.insert("Base".to_string(), base);
@@ -3688,6 +3704,8 @@ fn companion_extends_omit_preserves_inherited_props() {
             type_text: None,
             map_local: false,
             span_is_absolute: false,
+            type_expr: None,
+            type_expr_scope: None,
         });
     }
 
@@ -3820,6 +3838,8 @@ fn companion_extends_omit_preserves_inherited_emits() {
             },
             map_local: false,
             span_is_absolute: false,
+            type_expr: None,
+            type_expr_scope: None,
         });
     }
 

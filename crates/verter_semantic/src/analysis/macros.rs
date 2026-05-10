@@ -350,6 +350,8 @@ fn extract_fields_from_interface_body(
                     tags,
                     resolution_source: TypeResolutionSource::Rust,
                     resolution_error: None,
+                    type_expr: None,
+                    type_expr_scope: None,
                 })
             } else {
                 None
@@ -543,6 +545,8 @@ fn extract_fields_from_interface_body_like(
                     tags,
                     resolution_source: TypeResolutionSource::Rust,
                     resolution_error: None,
+                    type_expr: None,
+                    type_expr_scope: None,
                 })
             } else {
                 None
@@ -1560,6 +1564,8 @@ fn extract_define_model_type(
         tags: Vec::new(),
         resolution_source: TypeResolutionSource::Rust,
         resolution_error: None,
+        type_expr: None,
+        type_expr_scope: None,
     }]
 }
 
@@ -1724,6 +1730,8 @@ fn extract_prop_fields_from_type(
                         tags,
                         resolution_source: TypeResolutionSource::Rust,
                         resolution_error: None,
+                        type_expr: None,
+                        type_expr_scope: None,
                     })
                 } else {
                     None
@@ -1901,6 +1909,8 @@ fn extract_prop_fields_from_runtime(
                     tags,
                     resolution_source: TypeResolutionSource::Rust,
                     resolution_error: None,
+                    type_expr: None,
+                    type_expr_scope: None,
                 });
             }
 
@@ -1926,6 +1936,8 @@ fn extract_prop_fields_from_runtime(
                             tags: Vec::new(),
                             resolution_source: TypeResolutionSource::Rust,
                             resolution_error: None,
+                            type_expr: None,
+                            type_expr_scope: None,
                         })
                     } else {
                         None
@@ -2033,6 +2045,8 @@ fn extract_emit_fields_from_members(
                     payload_type,
                     description,
                     tags,
+                    payload_expr: None,
+                    payload_expr_scope: None,
                 })
             }
             // Call signature: `(e: 'change', id: number): void`
@@ -2067,6 +2081,8 @@ fn extract_emit_fields_from_members(
                             payload_type,
                             description,
                             tags,
+                            payload_expr: None,
+                            payload_expr_scope: None,
                         });
                     }
                 }
@@ -2096,6 +2112,8 @@ fn extract_emit_fields_from_runtime(expr: &Expression<'_>) -> Vec<AnalyzedEmitFi
                         payload_type: None,
                         description: None,
                         tags: Vec::new(),
+                        payload_expr: None,
+                        payload_expr_scope: None,
                     })
                 } else {
                     None
@@ -2113,6 +2131,8 @@ fn extract_emit_fields_from_runtime(expr: &Expression<'_>) -> Vec<AnalyzedEmitFi
                         payload_type: None,
                         description: None,
                         tags: Vec::new(),
+                        payload_expr: None,
+                        payload_expr_scope: None,
                     })
                 } else {
                     None
@@ -2316,6 +2336,8 @@ fn extract_slot_fields_from_members(
                     return_type,
                     description,
                     tags,
+                    return_expr: None,
+                    return_expr_scope: None,
                 })
             }
             TSSignature::TSMethodSignature(method) => {
@@ -2348,6 +2370,8 @@ fn extract_slot_fields_from_members(
                     return_type,
                     description,
                     tags,
+                    return_expr: None,
+                    return_expr_scope: None,
                 })
             }
             _ => None,
@@ -2443,6 +2467,8 @@ fn extract_slot_bindings_from_type_literal(
                     name,
                     type_annotation,
                     span: prop.key.span().into(),
+                    binding_expr: None,
+                    binding_expr_scope: None,
                 })
             } else {
                 None
@@ -2489,6 +2515,8 @@ fn extract_slot_bindings_from_pick_type(type_text: &str) -> Option<Vec<AnalyzedS
             name,
             type_annotation: Some(format!("{object}[{key}]")),
             span: verter_span::Span::default(),
+            binding_expr: None,
+            binding_expr_scope: None,
         });
     }
 

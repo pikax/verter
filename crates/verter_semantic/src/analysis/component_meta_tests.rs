@@ -52,6 +52,8 @@ fn make_prop(name: &str, type_ann: Option<&str>, optional: bool) -> AnalyzedProp
         tags: Vec::new(),
         resolution_source: crate::analysis::types::TypeResolutionSource::Rust,
         resolution_error: None,
+        type_expr: None,
+        type_expr_scope: None,
     }
 }
 
@@ -455,6 +457,8 @@ fn extracts_events_from_define_emits() {
                 payload_type: Some("[value: string]".to_string()),
                 description: None,
                 tags: Vec::new(),
+                payload_expr: None,
+                payload_expr_scope: None,
             },
             crate::analysis::types::AnalyzedEmitField {
                 name: "close".to_string(),
@@ -462,6 +466,8 @@ fn extracts_events_from_define_emits() {
                 payload_type: None,
                 description: None,
                 tags: Vec::new(),
+                payload_expr: None,
+                payload_expr_scope: None,
             },
         ],
         ..make_define_props(vec![])
@@ -492,6 +498,8 @@ fn define_emits_eval_supplements_local_tuple_property_events() {
             payload_type: Some("[value: string]".to_string()),
             description: Some("Local update event".to_string()),
             tags: Vec::new(),
+            payload_expr: None,
+            payload_expr_scope: None,
         }],
         ..make_define_props(vec![])
     }];
@@ -505,6 +513,8 @@ fn define_emits_eval_supplements_local_tuple_property_events() {
                 payload_type: Some("[event: KeyboardEvent]".to_string()),
                 description: None,
                 tags: Vec::new(),
+                payload_expr: None,
+                payload_expr_scope: None,
             },
             crate::analysis::types::AnalyzedEmitField {
                 name: "closeAutoFocus".to_string(),
@@ -512,6 +522,8 @@ fn define_emits_eval_supplements_local_tuple_property_events() {
                 payload_type: Some("[event: Event]".to_string()),
                 description: None,
                 tags: Vec::new(),
+                payload_expr: None,
+                payload_expr_scope: None,
             },
         ],
         slots: Vec::new(),
@@ -624,6 +636,8 @@ fn define_emits_eval_does_not_resurrect_omitted_imported_events() {
                 payload_type: Some("[event: KeyboardEvent]".to_string()),
                 description: None,
                 tags: Vec::new(),
+                payload_expr: None,
+                payload_expr_scope: None,
             },
             crate::analysis::types::AnalyzedEmitField {
                 name: "closeAutoFocus".to_string(),
@@ -631,6 +645,8 @@ fn define_emits_eval_does_not_resurrect_omitted_imported_events() {
                 payload_type: Some("[]".to_string()),
                 description: None,
                 tags: Vec::new(),
+                payload_expr: None,
+                payload_expr_scope: None,
             },
         ],
         slots: Vec::new(),
@@ -730,10 +746,14 @@ fn extracts_slots_from_define_slots() {
                 name: "item".to_string(),
                 type_annotation: Some("string".to_string()),
                 span: verter_span::Span::default(),
+                binding_expr: None,
+                binding_expr_scope: None,
             }],
             return_type: None,
             description: None,
             tags: Vec::new(),
+            return_expr: None,
+            return_expr_scope: None,
         }],
         ..make_define_props(vec![])
     }];
@@ -844,10 +864,14 @@ fn huge_partial_slot_binding_expansions_fall_back_to_symbolic_source_type() {
                 name: "day".to_string(),
                 type_annotation: Some("CalendarCellTriggerProps['day']".to_string()),
                 span: verter_span::Span::default(),
+                binding_expr: None,
+                binding_expr_scope: None,
             }],
             return_type: Some("VNode[]".to_string()),
             description: None,
             tags: Vec::new(),
+            return_expr: None,
+            return_expr_scope: None,
         }],
         ..make_define_props(vec![])
     }];
@@ -960,10 +984,14 @@ fn small_partial_helper_slot_binding_expansions_fall_back_to_symbolic_indexed_ac
                 name: "ui".to_string(),
                 type_annotation: Some("Button['ui']".to_string()),
                 span: verter_span::Span::default(),
+                binding_expr: None,
+                binding_expr_scope: None,
             }],
             return_type: Some("any".to_string()),
             description: None,
             tags: Vec::new(),
+            return_expr: None,
+            return_expr_scope: None,
         }],
         ..make_define_props(vec![])
     }];
@@ -1039,10 +1067,14 @@ fn define_slots_prefer_concrete_evaluated_slot_bindings_over_symbolic_direct_bin
                 name: "ui".to_string(),
                 type_annotation: Some("Button['ui']".to_string()),
                 span: verter_span::Span::default(),
+                binding_expr: None,
+                binding_expr_scope: None,
             }],
             return_type: Some("any".to_string()),
             description: None,
             tags: Vec::new(),
+            return_expr: None,
+            return_expr_scope: None,
         }],
         ..make_define_props(vec![])
     }];
@@ -1159,10 +1191,14 @@ fn define_slots_keep_source_bindings_when_expanded_slot_bindings_are_empty() {
                 name: "day".to_string(),
                 type_annotation: Some("CalendarCellTriggerProps['day']".to_string()),
                 span: verter_span::Span::default(),
+                binding_expr: None,
+                binding_expr_scope: None,
             }],
             return_type: Some("any".to_string()),
             description: None,
             tags: Vec::new(),
+            return_expr: None,
+            return_expr_scope: None,
         }],
         ..make_define_props(vec![])
     }];
@@ -1242,6 +1278,8 @@ fn define_slots_extract_bindings_from_call_signature_object_types() {
             return_type: Some("any".to_string()),
             description: None,
             tags: Vec::new(),
+            return_expr: None,
+            return_expr_scope: None,
         }],
         ..make_define_props(vec![])
     }];
@@ -1953,6 +1991,8 @@ fn source_event_raw_signature_beats_backend_when_backend_widens_macro_payload() 
             ),
             description: None,
             tags: Vec::new(),
+            payload_expr: None,
+            payload_expr_scope: None,
         }],
         ..make_define_props(vec![])
     }];
@@ -2019,6 +2059,8 @@ fn source_backed_update_events_keep_their_raw_emit_payloads() {
                 ),
                 description: None,
                 tags: Vec::new(),
+                payload_expr: None,
+                payload_expr_scope: None,
             }],
             ..make_define_props(vec![])
         },
@@ -2118,6 +2160,8 @@ fn evaluated_tuple_event_raw_type_is_not_double_wrapped() {
             payload_type: Some("[date: CalendarModelValue<R, M>]".to_string()),
             description: None,
             tags: Vec::new(),
+            payload_expr: None,
+            payload_expr_scope: None,
         }],
         ..make_define_props(vec![])
     }];
@@ -2180,21 +2224,29 @@ fn expanded_slot_bindings_preserve_source_binding_order() {
                     name: "item".to_string(),
                     type_annotation: Some("T".to_string()),
                     span: verter_span::Span::default(),
+                    binding_expr: None,
+                    binding_expr_scope: None,
                 },
                 crate::analysis::types::AnalyzedSlotFieldBinding {
                     name: "index".to_string(),
                     type_annotation: Some("number".to_string()),
                     span: verter_span::Span::default(),
+                    binding_expr: None,
+                    binding_expr_scope: None,
                 },
                 crate::analysis::types::AnalyzedSlotFieldBinding {
                     name: "open".to_string(),
                     type_annotation: Some("boolean".to_string()),
                     span: verter_span::Span::default(),
+                    binding_expr: None,
+                    binding_expr_scope: None,
                 },
             ],
             return_type: None,
             description: None,
             tags: Vec::new(),
+            return_expr: None,
+            return_expr_scope: None,
         }],
         ..make_define_props(vec![])
     }];
@@ -2293,10 +2345,14 @@ fn resolved_slots_merge_local_details_and_append_new_slots() {
                 name: "item".to_string(),
                 type_annotation: Some("string".to_string()),
                 span: verter_span::Span::default(),
+                binding_expr: None,
+                binding_expr_scope: None,
             }],
             return_type: None,
             description: None,
             tags: Vec::new(),
+            return_expr: None,
+            return_expr_scope: None,
         }],
         ..make_define_props(vec![])
     }];
@@ -2313,10 +2369,14 @@ fn resolved_slots_merge_local_details_and_append_new_slots() {
                     name: "row".to_string(),
                     type_annotation: Some("number".to_string()),
                     span: verter_span::Span::default(),
+                    binding_expr: None,
+                    binding_expr_scope: None,
                 }],
                 return_type: Some("VNode[]".to_string()),
                 description: Some("resolved default slot".to_string()),
                 tags: Vec::new(),
+                return_expr: None,
+                return_expr_scope: None,
             },
             crate::analysis::types::AnalyzedSlotField {
                 name: "header".to_string(),
@@ -2326,6 +2386,8 @@ fn resolved_slots_merge_local_details_and_append_new_slots() {
                 return_type: Some("any".to_string()),
                 description: Some("resolved header slot".to_string()),
                 tags: Vec::new(),
+                return_expr: None,
+                return_expr_scope: None,
             },
         ],
     }];

@@ -160,6 +160,8 @@ mod tests {
                 return_type: None,
                 description: None,
                 tags: vec![],
+                return_expr: None,
+                return_expr_scope: None,
             }])],
             flags: AnalysisFlags::HAS_DEFINE_SLOTS,
             ..Default::default()
@@ -197,6 +199,8 @@ mod tests {
                 return_type: None,
                 description: None,
                 tags: vec![],
+                return_expr: None,
+                return_expr_scope: None,
             }])],
             flags: AnalysisFlags::HAS_DEFINE_SLOTS,
             ..Default::default()
@@ -230,6 +234,8 @@ mod tests {
                 return_type: None,
                 description: None,
                 tags: vec![],
+                return_expr: None,
+                return_expr_scope: None,
             }])],
             flags: AnalysisFlags::HAS_DEFINE_SLOTS,
             ..Default::default()
@@ -289,6 +295,8 @@ mod tests {
                     return_type: None,
                     description: None,
                     tags: vec![],
+                    return_expr: None,
+                    return_expr_scope: None,
                 },
                 AnalyzedSlotField {
                     name: "footer".to_string(),
@@ -298,6 +306,8 @@ mod tests {
                     return_type: None,
                     description: None,
                     tags: vec![],
+                    return_expr: None,
+                    return_expr_scope: None,
                 },
                 AnalyzedSlotField {
                     name: "sidebar".to_string(),
@@ -307,6 +317,8 @@ mod tests {
                     return_type: None,
                     description: None,
                     tags: vec![],
+                    return_expr: None,
+                    return_expr_scope: None,
                 },
             ])],
             flags: AnalysisFlags::HAS_DEFINE_SLOTS,
