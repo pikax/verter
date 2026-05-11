@@ -758,7 +758,7 @@ fn instantiate_local_generic_ref_via_engine(
         declared_canonical_id.as_str(),
         declared_symbol_name.as_str(),
     );
-    if is_package_source(Some(target_canonical_id.as_str())) {
+    if is_package_source(engine.ctx, Some(target_canonical_id.as_str())) {
         return None;
     }
     let prepared = engine.prepared_type_decl(&target_canonical_id, &target_symbol_name)?;

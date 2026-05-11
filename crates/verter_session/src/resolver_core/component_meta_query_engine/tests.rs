@@ -3859,3 +3859,97 @@ const props = defineProps<AppProps>()
         "omitted member 'locale' must NOT be present, got {member_names:?}",
     );
 }
+
+/// Workspace classification must consult the typed
+/// `ResolverContext::workspace_is_package_backed` accessor — NOT
+/// `path.contains("/node_modules/")`.
+///
+/// Discriminator: a workspace package whose root happens to live
+/// inside `/node_modules/` (legal under pnpm workspace layouts).
+/// Files under that root have:
+///   - `canonical_id.contains("/node_modules/")` == TRUE
+///     (a substring-based body would misclassify as package-backed)
+///   - `ctx.workspace_is_package_backed(canonical_id)` == FALSE
+///     (the project root claims the file → workspace-owned)
+///
+/// This test calls the migrated helpers (`is_package_source`,
+/// `is_package_canonical`) directly and asserts they return
+/// `false` for the workspace-linked-package canonical, matching
+/// the typed accessor's classification. A substring-based body
+/// would return `true` here and fail the assertion.
+#[test]
+fn workspace_classification_helpers_use_typed_accessor_not_substring() {
+    #[allow(deprecated)]
+    let project_graph =
+        verter_workspace::ProjectGraph::from_configs(vec![verter_workspace::VfsProjectConfig {
+            // Project root that itself lives inside `node_modules/` —
+            // a workspace-linked package. The workspace classifier
+            // claims files under this root as workspace-owned
+            // because the suffix between root and file contains no
+            // further `/node_modules/` segment.
+            root: "/workspace/node_modules/@me/inner-pkg".to_string(),
+            rank: verter_workspace::ProjectRank::Explicit,
+            tsconfig_path: Some("/workspace/node_modules/@me/inner-pkg/tsconfig.json".to_string()),
+            root_files: vec![],
+            extensions: vec![],
+            workspace_root: "/workspace/node_modules/@me/inner-pkg".to_string(),
+            workspace_aliases: vec![],
+            compiler_options: verter_workspace::IdeProjectCompilerOptions::default(),
+            references: vec![],
+            membership: verter_workspace::ProjectMembership::MatchAll,
+        }]);
+    let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    workspace.set_project_graph(project_graph);
+    let workspace_linked_canonical = "/workspace/node_modules/@me/inner-pkg/src/types.ts";
+    workspace.inject_file(
+        workspace_linked_canonical.into(),
+        Arc::from("export interface Foo { value: string }"),
+    );
+    let ws_access: Arc<dyn verter_workspace::WorkspaceAccess> = workspace;
+    let host = VerterHost::new(HostConfig::default(), ws_access);
+    host.configure_projects(vec![
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
+            "/workspace/node_modules/@me/inner-pkg".to_string(),
+            "/workspace/node_modules/@me/inner-pkg".to_string(),
+            Some("/workspace/node_modules/@me/inner-pkg/tsconfig.json".to_string()),
+        ),
+    ]);
+    assert!(host.ensure_loaded(workspace_linked_canonical));
+
+    // Sanity: the typed accessor on the host's resolver-context
+    // surface must classify the workspace-linked-package canonical
+    // as workspace-owned (NOT package-backed). The substring check
+    // on the same canonical would return `true` (path contains
+    // `/node_modules/`).
+    let ctx: &dyn super::super::ResolverContext = &host;
+    assert!(
+        ctx.workspace_is_workspace_owned(workspace_linked_canonical),
+        "workspace-linked package must be workspace-owned per typed accessor",
+    );
+    assert!(
+        !ctx.workspace_is_package_backed(workspace_linked_canonical),
+        "workspace-linked package must NOT be package-backed per typed accessor",
+    );
+    assert!(
+        workspace_linked_canonical.contains("/node_modules/"),
+        "fixture sanity: canonical_id must contain `/node_modules/` so the \
+         substring check would have returned true (the bug the migration fixes)",
+    );
+
+    // Exercise the migrated helpers directly. Each must return
+    // `false` (matching the typed accessor), NOT `true` — a
+    // substring-based body would return `true` here (the canonical
+    // contains `/node_modules/`), failing the assertion.
+    assert!(
+        !super::helpers::is_package_canonical(ctx, workspace_linked_canonical),
+        "is_package_canonical must consult ctx.workspace_is_package_backed; a \
+         substring body returns `true` for workspace-linked packages and fails this assertion",
+    );
+    assert!(
+        !super::helpers::is_package_source(ctx, Some(workspace_linked_canonical)),
+        "is_package_source must consult ctx.workspace_is_package_backed; a \
+         substring body returns `true` for workspace-linked packages and fails this assertion",
+    );
+}

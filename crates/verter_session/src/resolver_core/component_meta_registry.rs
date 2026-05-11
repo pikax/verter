@@ -1742,9 +1742,9 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
             })
             || owner_component_meta_registry_import_root(ctx, owner_canonical, snapshot, name)
                 .and_then(|(canonical_id, exported_name)| {
-                    (!canonical_id.is_empty() && !canonical_id.contains("/node_modules/")).then(
-                        || ctx.prepared_type_decl(canonical_id.as_str(), exported_name.as_str()),
-                    )
+                    (!canonical_id.is_empty()
+                        && !ctx.workspace_is_package_backed(canonical_id.as_str()))
+                    .then(|| ctx.prepared_type_decl(canonical_id.as_str(), exported_name.as_str()))
                 })
                 .flatten()
                 .is_some_and(|prepared| {
@@ -1752,11 +1752,14 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
                         && !component_meta_registry_has_explicit_object_surface(&prepared.body)
                 })
             || owner_component_meta_registry_import_root(ctx, owner_canonical, snapshot, name)
-                .is_some_and(|(canonical_id, _)| canonical_id.contains("/node_modules/"))
-            || ctx
-                .resolve_type_declaration_for_dep(owner_canonical, name)
-                .canonical_source
-                .contains("/node_modules/")
+                .is_some_and(|(canonical_id, _)| {
+                    ctx.workspace_is_package_backed(canonical_id.as_str())
+                })
+            || ctx.workspace_is_package_backed(
+                ctx.resolve_type_declaration_for_dep(owner_canonical, name)
+                    .canonical_source
+                    .as_str(),
+            )
     });
     let skip_imported_generic_non_object_ref = component_meta_registry_direct_public_ref(expr)
         .is_some_and(|(name, type_arguments)| {
@@ -1768,7 +1771,7 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
             else {
                 return false;
             };
-            if canonical_id.is_empty() || canonical_id.contains("/node_modules/") {
+            if canonical_id.is_empty() || ctx.workspace_is_package_backed(canonical_id.as_str()) {
                 return false;
             }
             ctx.prepared_type_decl(canonical_id.as_str(), exported_name.as_str())
@@ -1787,13 +1790,13 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
                     });
             let import_root =
                 owner_component_meta_registry_import_root(ctx, owner_canonical, snapshot, name);
-            let package_backed = import_root
-                .as_ref()
-                .is_some_and(|(canonical_id, _)| canonical_id.contains("/node_modules/"))
-                || ctx
-                    .resolve_type_declaration_for_dep(owner_canonical, name)
+            let package_backed = import_root.as_ref().is_some_and(|(canonical_id, _)| {
+                ctx.workspace_is_package_backed(canonical_id.as_str())
+            }) || ctx.workspace_is_package_backed(
+                ctx.resolve_type_declaration_for_dep(owner_canonical, name)
                     .canonical_source
-                    .contains("/node_modules/");
+                    .as_str(),
+            );
             !local_type_parameter && !package_backed
         })
     {

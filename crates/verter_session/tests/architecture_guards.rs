@@ -8307,56 +8307,6 @@ mod typed_ir_resolver_guards {
             r#".contains("/node_modules/")"#,
         ),
         (
-            "crates/verter_session/src/resolver_core/component_meta_query_engine/helpers.rs",
-            67,
-            r#".contains("/node_modules/")"#,
-        ),
-        (
-            "crates/verter_session/src/resolver_core/component_meta_query_engine/helpers.rs",
-            71,
-            r#".contains("/node_modules/")"#,
-        ),
-        (
-            "crates/verter_session/src/resolver_core/component_meta_query_engine/helpers.rs",
-            71,
-            r#".contains("\\node_modules\\")"#,
-        ),
-        (
-            "crates/verter_session/src/resolver_core/component_meta_query_engine/helpers.rs",
-            148,
-            r#".contains("/node_modules/")"#,
-        ),
-        (
-            "crates/verter_session/src/resolver_core/component_meta_registry.rs",
-            1745,
-            r#".contains("/node_modules/")"#,
-        ),
-        (
-            "crates/verter_session/src/resolver_core/component_meta_registry.rs",
-            1755,
-            r#".contains("/node_modules/")"#,
-        ),
-        (
-            "crates/verter_session/src/resolver_core/component_meta_registry.rs",
-            1759,
-            r#".contains("/node_modules/")"#,
-        ),
-        (
-            "crates/verter_session/src/resolver_core/component_meta_registry.rs",
-            1771,
-            r#".contains("/node_modules/")"#,
-        ),
-        (
-            "crates/verter_session/src/resolver_core/component_meta_registry.rs",
-            1792,
-            r#".contains("/node_modules/")"#,
-        ),
-        (
-            "crates/verter_session/src/resolver_core/component_meta_registry.rs",
-            1796,
-            r#".contains("/node_modules/")"#,
-        ),
-        (
             "crates/verter_workspace/src/resolver.rs",
             75,
             r#".contains("/node_modules/")"#,

@@ -420,7 +420,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         self.current_prepared_request_root
             .as_deref()
             .is_some_and(|request_root| request_root != scope_canonical_id)
-            && (!substitutions.is_empty() || is_package_source(Some(scope_canonical_id)))
+            && (!substitutions.is_empty() || is_package_source(self.ctx, Some(scope_canonical_id)))
     }
 
     #[allow(dead_code)] // deletion in 5g per call-graph closure
@@ -449,7 +449,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let projected_ty = match &member.ty {
             TypeExpr::Object(_) => Some(member.ty.clone()),
             _ if prepared_member_body_stays_shallow(&member.ty) => Some(member.ty.clone()),
-            _ if prepared_decl_keeps_raw_symbolic_non_object_alias(prepared, &member.ty) => {
+            _ if prepared_decl_keeps_raw_symbolic_non_object_alias(self.ctx, prepared, &member.ty) => {
                 Some(member.ty.clone())
             }
             _ if crate::meta_resolve::component_meta_registry_should_keep_raw_symbolic_non_object_alias(

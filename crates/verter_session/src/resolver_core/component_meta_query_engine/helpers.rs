@@ -63,12 +63,12 @@ pub(super) fn routed_expr_surface_key_expr(
     }
 }
 
-pub(super) fn is_package_source(source: Option<&str>) -> bool {
-    source.is_some_and(|s| s.contains("/node_modules/"))
+pub(super) fn is_package_source(ctx: &dyn ResolverContext, source: Option<&str>) -> bool {
+    source.is_some_and(|s| ctx.workspace_is_package_backed(s))
 }
 
-pub(super) fn is_package_canonical(canonical_id: &str) -> bool {
-    canonical_id.contains("/node_modules/") || canonical_id.contains("\\node_modules\\")
+pub(super) fn is_package_canonical(ctx: &dyn ResolverContext, canonical_id: &str) -> bool {
+    ctx.workspace_is_package_backed(canonical_id)
 }
 
 pub(super) fn strip_parens_expr(expr: &TypeExpr) -> &TypeExpr {
@@ -128,6 +128,7 @@ pub(super) fn prepared_member_body_stays_shallow(expr: &TypeExpr) -> bool {
 }
 
 pub(super) fn prepared_decl_keeps_raw_symbolic_non_object_alias(
+    ctx: &dyn ResolverContext,
     prepared: &verter_semantic::analysis::type_solver::prepared::PreparedTypeDecl,
     expr: &TypeExpr,
 ) -> bool {
@@ -145,19 +146,19 @@ pub(super) fn prepared_decl_keeps_raw_symbolic_non_object_alias(
             prepared
                 .name_resolution
                 .get(name.as_ref())
-                .is_some_and(|resolved| resolved.canonical_id.contains("/node_modules/"))
-                && type_arguments
-                    .iter()
-                    .all(|arg| prepared_decl_keeps_raw_symbolic_non_object_alias(prepared, arg))
+                .is_some_and(|resolved| ctx.workspace_is_package_backed(&resolved.canonical_id))
+                && type_arguments.iter().all(|arg| {
+                    prepared_decl_keeps_raw_symbolic_non_object_alias(ctx, prepared, arg)
+                })
         }
         TypeExpr::Array { element, .. }
         | TypeExpr::Parenthesized(element)
         | TypeExpr::KeyOf(element)
         | TypeExpr::Rest(element) => {
-            prepared_decl_keeps_raw_symbolic_non_object_alias(prepared, element)
+            prepared_decl_keeps_raw_symbolic_non_object_alias(ctx, prepared, element)
         }
         TypeExpr::Tuple { elements, .. } => elements.iter().all(|element| {
-            prepared_decl_keeps_raw_symbolic_non_object_alias(prepared, &element.ty)
+            prepared_decl_keeps_raw_symbolic_non_object_alias(ctx, prepared, &element.ty)
         }),
         TypeExpr::Union(types)
         | TypeExpr::Intersection(types)
@@ -165,21 +166,19 @@ pub(super) fn prepared_decl_keeps_raw_symbolic_non_object_alias(
             expressions: types, ..
         } => types
             .iter()
-            .all(|ty| prepared_decl_keeps_raw_symbolic_non_object_alias(prepared, ty)),
+            .all(|ty| prepared_decl_keeps_raw_symbolic_non_object_alias(ctx, prepared, ty)),
         TypeExpr::Function(func) => {
-            func.parameters
-                .iter()
-                .all(|param| prepared_decl_keeps_raw_symbolic_non_object_alias(prepared, &param.ty))
-                && func.return_type.as_deref().is_none_or(|return_type| {
-                    prepared_decl_keeps_raw_symbolic_non_object_alias(prepared, return_type)
+            func.parameters.iter().all(|param| {
+                prepared_decl_keeps_raw_symbolic_non_object_alias(ctx, prepared, &param.ty)
+            }) && func.return_type.as_deref().is_none_or(|return_type| {
+                prepared_decl_keeps_raw_symbolic_non_object_alias(ctx, prepared, return_type)
+            }) && func.type_parameters.iter().all(|param| {
+                param.constraint.as_deref().is_none_or(|constraint| {
+                    prepared_decl_keeps_raw_symbolic_non_object_alias(ctx, prepared, constraint)
+                }) && param.default.as_deref().is_none_or(|default| {
+                    prepared_decl_keeps_raw_symbolic_non_object_alias(ctx, prepared, default)
                 })
-                && func.type_parameters.iter().all(|param| {
-                    param.constraint.as_deref().is_none_or(|constraint| {
-                        prepared_decl_keeps_raw_symbolic_non_object_alias(prepared, constraint)
-                    }) && param.default.as_deref().is_none_or(|default| {
-                        prepared_decl_keeps_raw_symbolic_non_object_alias(prepared, default)
-                    })
-                })
+            })
         }
         TypeExpr::Object(object) => object.properties.is_empty(),
         TypeExpr::IndexedAccess { .. }

@@ -411,7 +411,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let Some(root_identity) = self.root_identity_in_scope(scope_canonical_id, name) else {
             return false;
         };
-        is_package_canonical(&root_identity.canonical_id)
+        is_package_canonical(self.ctx, &root_identity.canonical_id)
     }
 
     fn should_preserve_imported_utility_route(
@@ -474,7 +474,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let Some(root_identity) = self.root_identity_in_scope(scope_canonical_id, name) else {
             return false;
         };
-        is_package_canonical(&root_identity.canonical_id)
+        is_package_canonical(self.ctx, &root_identity.canonical_id)
     }
 
     fn should_preserve_transitive_ref(
@@ -491,7 +491,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             "{}::{}",
             root_identity.canonical_id, root_identity.symbol_name
         );
-        if is_package_canonical(&root_identity.canonical_id) {
+        if is_package_canonical(self.ctx, &root_identity.canonical_id) {
             return true;
         }
         if !active_refs.insert(cache_key.clone()) {
@@ -884,7 +884,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 == BareRefOrigin::Imported
             {
                 let root_identity = self.root_identity_in_scope(scope_canonical_id, root_name)?;
-                if is_package_canonical(&root_identity.canonical_id) {
+                if is_package_canonical(self.ctx, &root_identity.canonical_id) {
                     return Some(FastShallowFieldExpr {
                         expr: expr.clone(),
                         exactness: FastShallowFieldExprExactness::Symbolic,
@@ -963,7 +963,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             return None;
         }
         let root_identity = self.root_identity_in_scope(scope_canonical_id, name.as_ref())?;
-        if is_package_canonical(&root_identity.canonical_id) {
+        if is_package_canonical(self.ctx, &root_identity.canonical_id) {
             return None;
         }
         let prepared =
@@ -1146,7 +1146,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     BareRefOrigin::Imported | BareRefOrigin::Local => {
                         let root_identity =
                             self.root_identity_in_scope(scope_canonical_id, name.as_ref())?;
-                        if is_package_canonical(&root_identity.canonical_id) {
+                        if is_package_canonical(self.ctx, &root_identity.canonical_id) {
                             return Some(expr.clone());
                         }
                         let active_key = format!(
