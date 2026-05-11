@@ -8307,26 +8307,6 @@ mod typed_ir_resolver_guards {
             r#".contains("/node_modules/")"#,
         ),
         (
-            "crates/verter_session/src/project_semantic_dispatch/relation.rs",
-            273,
-            r#".contains("/node_modules/")"#,
-        ),
-        (
-            "crates/verter_session/src/project_semantic_dispatch/relation.rs",
-            274,
-            r#".contains("\\node_modules\\")"#,
-        ),
-        (
-            "crates/verter_session/src/project_semantic_dispatch/walk.rs",
-            979,
-            r#".contains("/node_modules/")"#,
-        ),
-        (
-            "crates/verter_session/src/project_semantic_dispatch/walk.rs",
-            980,
-            r#".contains("\\node_modules\\")"#,
-        ),
-        (
             "crates/verter_session/src/resolver_core/component_meta_query_engine/helpers.rs",
             67,
             r#".contains("/node_modules/")"#,

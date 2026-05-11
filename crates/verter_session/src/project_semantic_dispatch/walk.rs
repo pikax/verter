@@ -976,9 +976,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     }
                     self.visited_aliases.push(alias_id);
                 }
-                if canonical_id.contains("/node_modules/")
-                    || canonical_id.contains("\\node_modules\\")
-                {
+                if self.dispatch.ctx.workspace_is_package_backed(canonical_id) {
                     drop(data);
                     results.push(node);
                     return;

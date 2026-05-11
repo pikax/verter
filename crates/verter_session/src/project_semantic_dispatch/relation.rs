@@ -270,9 +270,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 name,
                 whole_hash,
             }) => {
-                if canonical_id.contains("/node_modules/")
-                    || canonical_id.contains("\\node_modules\\")
-                {
+                if self.ctx.workspace_is_package_backed(canonical_id) {
                     return None;
                 }
                 DeclIdentity {
