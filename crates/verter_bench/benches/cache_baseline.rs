@@ -110,7 +110,7 @@ fn build_baseline_host(num_components: usize) -> (Arc<VerterHost>, Vec<String>) 
     let workspace = Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
     workspace.set_project_graph(project_graph);
     for (canonical, content) in &files {
-        workspace.inject_file(canonical.clone().into(), Arc::from(content.as_str()));
+        workspace.inject_file(canonical.clone(), Arc::from(content.as_str()));
     }
     let ws_access: Arc<dyn WorkspaceAccess> = workspace;
     let host = VerterHost::new(HostConfig::default(), ws_access);
