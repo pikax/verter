@@ -1063,28 +1063,6 @@ function preferredCompatPropTypeText(
   return descriptorText;
 }
 
-function preferredCompatTypeText(
-  rawType: string | undefined,
-  descriptor: TypeDescriptor,
-  typeRegistry?: Map<string, TypeDescriptor>,
-): string {
-  const descriptorText = normalizeTypeString(
-    typeDescriptorToCompatDisplay(descriptor, typeRegistry),
-  );
-
-  // Bare ref / indexed-access descriptors render structurally via alias name.
-  if (looksLikeBareTypeReference(descriptor) || looksLikeIndexedAccessType(descriptor)) {
-    return descriptorText;
-  }
-
-  // Display passthrough: source-level annotation when descriptor was expanded.
-  if (rawType !== undefined) {
-    return normalizeTypeString(rawType);
-  }
-
-  return descriptorText;
-}
-
 function normalizeOptionalPropSchema(
   schema: PropertyMetaSchema,
   type: string,
@@ -1484,7 +1462,12 @@ function compatSlotBindingTypeText(
   if (compatUiBinding) {
     return compatUiBinding;
   }
-  return preferredCompatTypeText(binding.rawType, binding.type, typeRegistry);
+  // Typed-IR-Only: render slot-binding display text from `binding.type`
+  // (TypeDescriptor) — never from `binding.rawType`. The descriptor is the
+  // structural authority for both semantic decisions and display output;
+  // any source-level alias the user wrote round-trips through the registry
+  // for bare refs and renders structurally otherwise.
+  return normalizeTypeString(typeDescriptorToCompatDisplay(binding.type, typeRegistry));
 }
 
 function buildCompatUiBindingType(binding: SlotMeta["bindings"][number]): string | undefined {

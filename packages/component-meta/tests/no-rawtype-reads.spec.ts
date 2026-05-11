@@ -39,7 +39,7 @@ const CHECKER_PATH = resolve(__dirname, "../src/compat/checker.ts");
 
 /** Function-name patterns whose bodies MUST NOT read `*.rawType`. */
 const FORBIDDEN_FUNCTION_PATTERN =
-  /^(buildCompat|looksLike|extract|normalize|split|strip|prefer|shouldPrefer|compat[A-Za-z0-9_$]+ToString|repairOpaque|applyRawType)/;
+  /^(buildCompat|looksLike|extract|normalize|split|strip|prefer|shouldPrefer|compat[A-Za-z0-9_$]+ToString|compat[A-Za-z0-9_$]+TypeText|repairOpaque|applyRawType)/;
 
 /** Container identifiers whose `.rawType` member reads are tracked. */
 const TRACKED_OBJECT_NAMES = new Set(["prop", "event", "slot", "expose", "binding", "exposed"]);
@@ -194,10 +194,10 @@ describe("W7.3: no `*.rawType` reads inside semantic-decision functions in compa
  * with a `prop.type` that did NOT carry a `Numberish` ref would still
  * project. Post-W7.3 only the descriptor's kind-tag drives the gate.
  */
-import { mapPropMeta } from "../src/compat/checker.js";
+import { mapPropMeta, mapSlotMeta } from "../src/compat/checker.js";
 import { primitive, ref, union, literal } from "@verter/type-ir";
 import type { TypeDescriptor } from "@verter/type-ir";
-import type { PropMeta } from "../src/types.js";
+import type { PropMeta, SlotMeta } from "../src/types.js";
 
 function makeProp(overrides: Partial<PropMeta> & { type: TypeDescriptor }): PropMeta {
   return {
@@ -373,6 +373,99 @@ describe("W7.3: kind-tag wins over decoy rawType in buildCompat* projections", (
     const result = mapPropMeta(prop);
     // Display passthrough: rawType carries the alias name.
     expect(result.type).toBe('Pick<FullUser, "id">');
+  });
+});
+
+/**
+ * F2: `compatSlotBindingTypeText` must consume `binding.type` (TypeDescriptor)
+ * and render display text from the typed form. `binding.rawType` is forbidden
+ * as input — the static-check regex was widened to `compat\w+TypeText` so any
+ * regression to a rawType read inside a `compat*TypeText` helper fails at lint
+ * time.
+ *
+ * Discriminating runtime test: with a `SlotMeta` whose binding `rawType` is a
+ * decoy that would visibly break parity if used as display text, the compat
+ * layer's slot-bindings text output must reflect the typed descriptor — not
+ * the decoy. Pre-F2 the code read `binding.rawType` through
+ * `preferredCompatTypeText` and would have emitted the decoy. Post-F2 the
+ * descriptor wins unconditionally.
+ */
+describe("F2: kind-tag wins over decoy binding.rawType in mapSlotMeta", () => {
+  it("compatSlotBindingTypeText renders binding.type — decoy binding.rawType never appears in slot type text", () => {
+    const slot: SlotMeta = {
+      name: "default",
+      isScoped: true,
+      bindings: [
+        {
+          name: "item",
+          type: primitive("string"),
+          // Decoy: pre-F2 the helper passed rawType through as display text.
+          // Post-F2 the descriptor (primitive "string") drives display text.
+          rawType: "DECOY_RAWTYPE_TEXT_SHOULD_NEVER_APPEAR",
+        },
+      ],
+      isRequired: true,
+    };
+
+    const result = mapSlotMeta(slot);
+
+    // Post-cutover: descriptor wins → "string".
+    expect(result.type).toBe("{ item: string; }");
+    expect(result.type).not.toContain("DECOY");
+  });
+
+  it("compatSlotBindingTypeText renders binding.type for object descriptor — decoy rawType never appears", () => {
+    const slot: SlotMeta = {
+      name: "default",
+      isScoped: true,
+      bindings: [
+        {
+          name: "user",
+          // Descriptor: structurally an object with two known fields.
+          type: {
+            kind: "object",
+            properties: [
+              { name: "id", type: primitive("number"), optional: false },
+              { name: "name", type: primitive("string"), optional: false },
+            ],
+          },
+          // Decoy: a deliberately wrong rawType that pre-F2 would have leaked
+          // through as the display text.
+          rawType: "DECOY_OBJECT_RAWTYPE_NOT_USED",
+        },
+      ],
+      isRequired: true,
+    };
+
+    const result = mapSlotMeta(slot);
+
+    expect(result.type).not.toContain("DECOY");
+    expect(result.type).toContain("id: number");
+    expect(result.type).toContain("name: string");
+  });
+
+  it("compatSlotBindingTypeText resolves binding.type ref via the typeRegistry — decoy rawType never appears", () => {
+    const slot: SlotMeta = {
+      name: "default",
+      isScoped: true,
+      bindings: [{ name: "item", type: ref("Item"), rawType: "DECOY_REF_RAWTYPE" }],
+      isRequired: true,
+    };
+    const typeRegistry = new Map<string, TypeDescriptor>([
+      [
+        "Item",
+        {
+          kind: "object",
+          properties: [{ name: "label", type: primitive("string"), optional: false }],
+        },
+      ],
+    ]);
+
+    const result = mapSlotMeta(slot, undefined, typeRegistry);
+
+    // Descriptor + registry resolution wins → structural rendering.
+    expect(result.type).toBe("{ item: { label: string; }; }");
+    expect(result.type).not.toContain("DECOY");
   });
 });
 
