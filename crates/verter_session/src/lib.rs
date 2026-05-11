@@ -103,7 +103,9 @@ mod component_meta_terminal_mode_tests;
 pub(crate) mod cooperative_admission;
 pub mod cross_file;
 mod deps;
+pub mod file_artifact_store;
 mod hash;
+pub mod parse_stable_hash;
 pub(crate) mod instant;
 #[cfg(test)]
 mod project_semantic_dispatch_invariants_tests;
