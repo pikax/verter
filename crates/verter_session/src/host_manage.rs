@@ -1565,43 +1565,6 @@ impl VerterHost {
         })
     }
 
-    fn package_dir_for_resolved_target(canonical_id: &str) -> Option<String> {
-        let normalized = canonicalize_id(canonical_id);
-        let normalized = normalized.as_ref();
-        let marker = "/node_modules/";
-        let marker_index = normalized.rfind(marker)?;
-        let package_start = marker_index + marker.len();
-        let package_path = &normalized[package_start..];
-        let mut segments = package_path.split('/');
-        let first = segments.next()?;
-        let package_suffix = if first.starts_with('@') {
-            format!("{first}/{}", segments.next()?)
-        } else {
-            first.to_string()
-        };
-        Some(format!("{}{package_suffix}", &normalized[..package_start]))
-    }
-
-    fn resolve_manifest_types_entry_for_target(
-        &self,
-        resolved_canonical_id: &str,
-    ) -> Option<String> {
-        let package_dir = Self::package_dir_for_resolved_target(resolved_canonical_id)?;
-        let package_json_path = format!("{package_dir}/package.json");
-        let manifest = self.ws().read_package_manifest(&package_json_path)?;
-        let type_targets = [manifest.types.clone(), manifest.typings.clone()];
-        type_targets.into_iter().flatten().find_map(|target| {
-            let candidate = if target.starts_with("./") {
-                format!("{package_dir}/{}", target.trim_start_matches("./"))
-            } else if target.starts_with('/') {
-                target
-            } else {
-                format!("{package_dir}/{target}")
-            };
-            self.resolve_existing_canonical_in_workspace(&candidate)
-        })
-    }
-
     fn derive_type_preferred_exact_target(
         &self,
         resolution: &DependencyResolution,
@@ -1622,10 +1585,12 @@ impl VerterHost {
         if let Some(companion) = self.resolve_declaration_companion_in_workspace(resolved) {
             return Some(companion);
         }
-        if resolved.contains("/node_modules/") && is_runtime_script_target(resolved) {
-            return self.resolve_manifest_types_entry_for_target(resolved);
+        if let Some(entry) = self.ws().manifest_types_entry_for(resolved) {
+            return Some(entry);
         }
-        (!resolved.contains("/node_modules/")).then(|| resolved.to_string())
+        self.ws()
+            .is_workspace_owned(resolved)
+            .then(|| resolved.to_string())
     }
 }
 

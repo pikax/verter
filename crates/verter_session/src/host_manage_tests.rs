@@ -10259,3 +10259,108 @@ mod ambient_fence_validator_tests {
         assert!(!v.validate("/ws/foo.ts", &DepVersion::WholeHash([0u8; 16])));
     }
 }
+
+mod manifest_types_entry_routing_tests {
+    //! `derive_type_preferred_exact_target` MUST route through
+    //! `WorkspaceAccess::manifest_types_entry_for` (workspace-classification
+    //! aware) rather than a `/node_modules/` substring check on the
+    //! resolved canonical id.
+    //!
+    //! Discriminating fixture: a pnpm-hoisted layout where a workspace
+    //! project root sits at `/ws/node_modules/@scope/local-pkg/`. A
+    //! runtime-script (`.js`) target under this root has a canonical id
+    //! that contains `/node_modules/` but `is_workspace_owned` returns
+    //! `true` (because the project root's suffix is empty under itself).
+    //!
+    //! A naive substring router routes this incorrectly: the canonical
+    //! id contains `/node_modules/`, so the `is_runtime_script_target`
+    //! check fires and the manifest-types-entry resolution returns
+    //! `None` for the workspace-owned package, and the fallback then
+    //! short-circuits because the canonical id contains `/node_modules/`.
+    //! Result: `None`.
+    //!
+    //! The `WorkspaceAccess` accessor routes correctly: the workspace
+    //! classifies the target as `is_workspace_owned`, so the path is
+    //! returned verbatim. Result: `Some(resolved)`.
+    //!
+    //! Asserting the correct return path discriminates the two
+    //! implementations.
+    use std::sync::Arc;
+
+    use crate::types::DependencyResolution;
+    use crate::{HostConfig, VerterHost};
+    use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
+
+    fn build_pnpm_hoisted_workspace() -> Arc<MemoryWorkspace> {
+        let ws = Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
+        // Register a project whose root sits INSIDE node_modules/. The
+        // engine's is_workspace_owned + is_package_backed pair classifies
+        // such files as workspace-owned (the suffix between root and
+        // path contains no further /node_modules/ segment).
+        ws.set_project_graph(verter_workspace::ProjectGraph::from_configs(vec![
+            verter_workspace::VfsProjectConfig {
+                root: "/ws/node_modules/@scope/local-pkg".to_string(),
+                rank: verter_workspace::ProjectRank::Explicit,
+                tsconfig_path: Some("/ws/node_modules/@scope/local-pkg/tsconfig.json".to_string()),
+                root_files: vec![],
+                extensions: vec![".ts".into(), ".js".into(), ".vue".into()],
+                workspace_root: "/ws/node_modules/@scope/local-pkg".to_string(),
+                workspace_aliases: vec![],
+                compiler_options: verter_workspace::IdeProjectCompilerOptions::default(),
+                references: vec![],
+                membership: verter_workspace::ProjectMembership::default(),
+            },
+        ]));
+        // Inject a runtime-script target inside the workspace-owned
+        // project. The canonical id contains /node_modules/ but the
+        // workspace classification API returns is_workspace_owned=true.
+        ws.inject_file(
+            "/ws/node_modules/@scope/local-pkg/dist/index.js".to_string(),
+            Arc::<str>::from(""),
+        );
+        ws
+    }
+
+    #[test]
+    fn derive_type_preferred_exact_target_returns_workspace_owned_js_under_node_modules() {
+        let ws = build_pnpm_hoisted_workspace();
+        let access: Arc<dyn WorkspaceAccess> = ws.clone();
+
+        // Sanity-check the discriminating fixture: the canonical id
+        // contains /node_modules/ AND the workspace classifies it as
+        // workspace-owned (NOT package-backed). A naive substring check
+        // confuses these two; the WorkspaceAccess accessor does not.
+        let resolved = "/ws/node_modules/@scope/local-pkg/dist/index.js";
+        assert!(
+            access.is_workspace_owned(resolved),
+            "fixture invariant: resolved must be workspace-owned"
+        );
+        assert!(
+            !access.is_package_backed(resolved),
+            "fixture invariant: resolved must NOT be package-backed"
+        );
+        assert!(
+            access.manifest_types_entry_for(resolved).is_none(),
+            "manifest_types_entry_for must return None for workspace-owned targets"
+        );
+
+        let host = VerterHost::new(HostConfig::default(), access);
+        let resolution = DependencyResolution {
+            specifier: "@scope/local-pkg".to_string(),
+            resolved_canonical_id: Some(resolved.to_string()),
+            possible_canonical_ids: vec![],
+        };
+
+        let derived = host.derive_type_preferred_exact_target(&resolution);
+
+        // The discriminating assertion: the workspace-owned .js path is
+        // returned as-is via the workspace classification accessor. A
+        // substring router would have short-circuited to None here.
+        assert_eq!(
+            derived.as_deref(),
+            Some(resolved),
+            "workspace-owned runtime-script target under /node_modules/ must \
+             pass through the WorkspaceAccess routing path"
+        );
+    }
+}

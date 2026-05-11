@@ -8,8 +8,7 @@
 //!   `extract_pick_omit_route`, `build_keys_union_node`,
 //!   `extract_indexed_access_route`, `collect_string_literal_union_keys_node`
 //!   (route extraction).
-//! - `canonical_resolves_to_package`,
-//!   `component_meta_ref_resolves_to_package_node` (package-ref check).
+//! - `component_meta_ref_resolves_to_package_node` (package-ref check).
 //! - `type_node_has_package_backed_root`,
 //!   `declaration_body_prefers_inline_materialization_node`
 //!   (graph-native predicates the materializer / walker call).
@@ -294,23 +293,17 @@ pub(crate) fn collect_string_literal_union_keys_node(
 // `_node` allow_dead_code annotations and no remaining production
 // callers; deleted to keep the surface minimal.
 
-/// Primitive package-detection check on a canonical
-/// id. Returns `true` when the canonical resolves under
-/// `/node_modules/`. Shared by the graph-native predicate
-/// (`component_meta_ref_resolves_to_package_node`) and the
-/// node-based shape check (`is_package_backed_ref` in the
-/// materialiser).
-pub(crate) fn canonical_resolves_to_package(canonical_id: &str) -> bool {
-    canonical_id.contains("/node_modules/")
-}
-
 /// Graph-native variant of the TypeExpr package-ref
-/// check. Delegates to the primitive
-/// [`canonical_resolves_to_package`] (commit C).
+/// check. Routes the canonical-id classification through the
+/// workspace's `ResolverContext::workspace_is_package_backed` accessor
+/// so symlinked / pnpm-hoisted layouts (canonical path contains
+/// `/node_modules/` but the realpath sits under a workspace project)
+/// are correctly classified as workspace-owned.
 pub(crate) fn component_meta_ref_resolves_to_package_node(
+    ctx: &dyn ResolverContext,
     identity: &crate::semantic_query::DeclIdentity,
 ) -> bool {
-    canonical_resolves_to_package(identity.canonical_id.as_ref())
+    ctx.workspace_is_package_backed(identity.canonical_id.as_ref())
 }
 
 /// Graph-native predicate. Returns `true` when `node`'s route root
@@ -339,7 +332,7 @@ pub(crate) fn component_meta_ref_resolves_to_package_node(
 /// the package-backed branch.
 #[allow(dead_code)]
 pub(crate) fn type_node_has_package_backed_root(
-    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    ctx: &dyn ResolverContext,
     node: crate::semantic_query::SemanticNodeId,
     depth: u32,
 ) -> bool {
@@ -348,31 +341,30 @@ pub(crate) fn type_node_has_package_backed_root(
     if depth > 256 {
         return false;
     }
+    let graph = ctx.project_type_store().semantic_graph();
     let Some(data) = graph.node_data(node) else {
         return false;
     };
     match data.as_ref() {
         SemanticNodeData::DeclRef { identity } => {
-            component_meta_ref_resolves_to_package_node(identity)
+            component_meta_ref_resolves_to_package_node(ctx, identity)
         }
         SemanticNodeData::InstantiationRef { base, .. } => {
-            component_meta_ref_resolves_to_package_node(base)
+            component_meta_ref_resolves_to_package_node(ctx, base)
         }
         SemanticNodeData::IndexedAccess { object, .. } => {
-            type_node_has_package_backed_root(graph, *object, depth + 1)
+            type_node_has_package_backed_root(ctx, *object, depth + 1)
         }
         SemanticNodeData::Array { element, .. } => {
-            type_node_has_package_backed_root(graph, *element, depth + 1)
+            type_node_has_package_backed_root(ctx, *element, depth + 1)
         }
         SemanticNodeData::KeyOf { base } => {
-            type_node_has_package_backed_root(graph, *base, depth + 1)
+            type_node_has_package_backed_root(ctx, *base, depth + 1)
         }
         SemanticNodeData::Tuple { elements, .. } => elements
             .iter()
-            .any(|element| type_node_has_package_backed_root(graph, element.value, depth + 1)),
-        SemanticNodeData::Alias(inner) => {
-            type_node_has_package_backed_root(graph, *inner, depth + 1)
-        }
+            .any(|element| type_node_has_package_backed_root(ctx, element.value, depth + 1)),
+        SemanticNodeData::Alias(inner) => type_node_has_package_backed_root(ctx, *inner, depth + 1),
         _ => false,
     }
 }

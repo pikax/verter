@@ -1159,7 +1159,8 @@ impl VerterHost {
         /// project's dispatch, and returns `true` iff any of those
         /// roots resolves to a package-backed declaration (per the
         /// graph-native `is_package_backed_ref` predicate, which
-        /// delegates to `canonical_resolves_to_package`).
+        /// routes the canonical-id classification through
+        /// `ResolverContext::workspace_is_package_backed`).
         fn callable_param_root_is_package_backed(
             param_ty: &verter_type_expr::TypeExpr,
             ctx: &dyn crate::resolver_core::ResolverContext,

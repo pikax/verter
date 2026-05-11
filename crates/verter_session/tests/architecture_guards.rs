@@ -8283,22 +8283,7 @@ mod typed_ir_resolver_guards {
         ),
         (
             "crates/verter_session/src/host_manage/component_meta_methods.rs",
-            1962,
-            r#".contains("/node_modules/")"#,
-        ),
-        (
-            "crates/verter_session/src/host_manage.rs",
-            1625,
-            r#".contains("/node_modules/")"#,
-        ),
-        (
-            "crates/verter_session/src/host_manage.rs",
-            1628,
-            r#".contains("/node_modules/")"#,
-        ),
-        (
-            "crates/verter_session/src/meta_resolve/graph_predicates.rs",
-            304,
+            1963,
             r#".contains("/node_modules/")"#,
         ),
         (

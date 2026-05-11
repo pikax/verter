@@ -115,10 +115,10 @@ pub(crate) fn materialize_component_meta_registry_structural_expr(
         };
         match data.as_ref() {
             SemanticNodeData::DeclRef { identity } => {
-                component_meta_ref_resolves_to_package_node(identity)
+                component_meta_ref_resolves_to_package_node(ctx, identity)
             }
             SemanticNodeData::InstantiationRef { base, .. } => {
-                component_meta_ref_resolves_to_package_node(base)
+                component_meta_ref_resolves_to_package_node(ctx, base)
             }
             _ => false,
         }
@@ -484,10 +484,10 @@ pub(crate) fn preserve_package_backed_symbolic_refs_node(
                     .as_deref()
                     .map(|d| match d {
                         SemanticNodeData::DeclRef { identity } => {
-                            component_meta_ref_resolves_to_package_node(identity)
+                            component_meta_ref_resolves_to_package_node(ctx, identity)
                         }
                         SemanticNodeData::InstantiationRef { base, .. } => {
-                            component_meta_ref_resolves_to_package_node(base)
+                            component_meta_ref_resolves_to_package_node(ctx, base)
                         }
                         _ => false,
                     })

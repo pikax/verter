@@ -76,9 +76,8 @@ pub(crate) use dispatch_helpers::{
     project_route_surface_expr_via_host_threaded,
 };
 pub(crate) use graph_predicates::{
-    build_keys_union_node, canonical_resolves_to_package,
-    component_meta_ref_resolves_to_package_node, extract_route_root_identity_node,
-    ref_root_reaches_transitive_cycle_node,
+    build_keys_union_node, component_meta_ref_resolves_to_package_node,
+    extract_route_root_identity_node, ref_root_reaches_transitive_cycle_node,
 };
 // / clippy cleanup — these graph-native predicates
 // have no non-test consumers in the landed tree but are exercised by

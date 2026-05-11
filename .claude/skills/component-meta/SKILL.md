@@ -45,8 +45,7 @@ materialiser at
 graph-native policy predicates in `meta_resolve.rs`
 (`extract_route_root_identity_node`,
 `ref_root_reaches_transitive_cycle_node`,
-`component_meta_ref_resolves_to_package_node`,
-`canonical_resolves_to_package`). Benchmark correctness is
+`component_meta_ref_resolves_to_package_node`). Benchmark correctness is
 validated by `packages/benchmark/src/audit-validator.ts` against
 `packages/benchmark/audit-specs/component-meta/*.json`.
 

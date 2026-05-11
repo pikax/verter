@@ -10261,19 +10261,25 @@ mod node_predicates_tests {
         }
     }
 
-    /// `component_meta_ref_resolves_to_package_node` — pure check on the
-    /// canonical id. Must reject local refs and accept `node_modules`.
+    /// `component_meta_ref_resolves_to_package_node` — routes the canonical-id
+    /// classification through `ResolverContext::workspace_is_package_backed`.
+    /// Must reject local refs and accept `node_modules`-rooted refs whose
+    /// realpath is not claimed by any workspace project.
     #[test]
     fn package_ref_predicate_discriminates_local_vs_node_modules() {
+        let project = make_project();
+        let host = project.host();
+        let ctx: &dyn crate::resolver_core::ResolverContext = host;
+
         let local = synthetic_decl_identity("Foo");
         let pkg = package_decl_identity("Bar");
 
         assert!(
-            !component_meta_ref_resolves_to_package_node(&local),
+            !component_meta_ref_resolves_to_package_node(ctx, &local),
             "local /test/local.ts decl must NOT be classified as package-backed"
         );
         assert!(
-            component_meta_ref_resolves_to_package_node(&pkg),
+            component_meta_ref_resolves_to_package_node(ctx, &pkg),
             "node_modules-rooted decl must be classified as package-backed"
         );
     }
@@ -10443,43 +10449,6 @@ defineProps<{ value: Pick<Foo, 'a'> }>()
             .expect("Pick<Foo, 'a'> eval must succeed after E's chain deletion");
     }
 
-    /// Plan §6.5 / D + §6.15 / O — `canonical_resolves_to_package`
-    /// (commit C) is the canonical primitive that classifies a
-    /// canonical id as `/node_modules/`-rooted. With commit O having
-    /// retired the temporary engine adapter, this primitive plus the
-    /// graph-native `component_meta_ref_resolves_to_package_node`
-    /// (which delegates to it) are the only authorities. This test
-    /// discriminates local vs package canonical ids and ensures the
-    /// primitive is not accidentally collapsed.
-    #[test]
-    fn canonical_resolves_to_package_discriminates_local_vs_package() {
-        use crate::meta_resolve::canonical_resolves_to_package;
-
-        // Local files (any path NOT containing `/node_modules/` segment)
-        // resolve to false.
-        assert!(!canonical_resolves_to_package("/local.ts"));
-        assert!(!canonical_resolves_to_package("/src/components/App.vue"));
-        assert!(!canonical_resolves_to_package(""));
-
-        // Files under `/node_modules/` resolve to true.
-        assert!(canonical_resolves_to_package(
-            "/node_modules/foo/index.d.ts"
-        ));
-        assert!(canonical_resolves_to_package(
-            "/project/node_modules/@scope/pkg/types.d.ts"
-        ));
-
-        // Defensive: a path that mentions `node_modules` as a substring
-        // but NOT as a directory boundary must not match. The primitive
-        // should be robust against false positives — required because
-        // `_node` predicates downstream of this primitive treat its
-        // result as the canonical authority for "is this declaration
-        // package-backed".
-        assert!(!canonical_resolves_to_package(
-            "/src/my_node_modules_helper.ts"
-        ));
-    }
-
     /// characterisation: the canonical graph-native
     /// cycle predicate `ref_root_reaches_transitive_cycle_node` detects
     /// generic-helper cycles when reached from a TypeExpr root via the
@@ -10643,6 +10612,7 @@ defineProps<{ value: Foo }>()
         let project = make_project();
         let host = project.host();
         let graph = host.project_type_store().semantic_graph();
+        let ctx: &dyn crate::resolver_core::ResolverContext = host;
 
         let local = synthetic_decl_identity("Local");
         let pkg = package_decl_identity("FromPkg");
@@ -10655,11 +10625,11 @@ defineProps<{ value: Foo }>()
             identity: pkg.clone(),
         });
         assert!(
-            !type_node_has_package_backed_root(graph, local_ref, 0),
+            !type_node_has_package_backed_root(ctx, local_ref, 0),
             "DeclRef -> /test/local.ts must not be flagged package-backed"
         );
         assert!(
-            type_node_has_package_backed_root(graph, pkg_ref, 0),
+            type_node_has_package_backed_root(ctx, pkg_ref, 0),
             "DeclRef -> /node_modules/* must be flagged package-backed"
         );
 
@@ -10669,7 +10639,7 @@ defineProps<{ value: Foo }>()
             args: StdArc::from(vec![local_ref].into_boxed_slice()),
         });
         assert!(
-            type_node_has_package_backed_root(graph, pkg_inst, 0),
+            type_node_has_package_backed_root(ctx, pkg_inst, 0),
             "InstantiationRef base in node_modules must be flagged package-backed"
         );
         let local_inst = graph.intern_node(SemanticNodeData::InstantiationRef {
@@ -10677,7 +10647,7 @@ defineProps<{ value: Foo }>()
             args: StdArc::from(vec![pkg_ref].into_boxed_slice()),
         });
         assert!(
-            !type_node_has_package_backed_root(graph, local_inst, 0),
+            !type_node_has_package_backed_root(ctx, local_inst, 0),
             "InstantiationRef base in local file must NOT be flagged \
              even when args reference a package decl (mirrors TypeExpr semantics — \
              only the root identity counts)"
@@ -10689,7 +10659,7 @@ defineProps<{ value: Foo }>()
             index: IndexKey::String(StdArc::from("foo")),
         });
         assert!(
-            type_node_has_package_backed_root(graph, pkg_indexed, 0),
+            type_node_has_package_backed_root(ctx, pkg_indexed, 0),
             "IndexedAccess(pkg, 'foo') must follow object to detect pkg root"
         );
         let local_indexed_chain = {
@@ -10703,7 +10673,7 @@ defineProps<{ value: Foo }>()
             })
         };
         assert!(
-            !type_node_has_package_backed_root(graph, local_indexed_chain, 0),
+            !type_node_has_package_backed_root(ctx, local_indexed_chain, 0),
             "Two-deep IndexedAccess on local root must NOT trigger"
         );
 
@@ -10713,14 +10683,14 @@ defineProps<{ value: Foo }>()
             readonly: false,
         });
         assert!(
-            type_node_has_package_backed_root(graph, pkg_array, 0),
+            type_node_has_package_backed_root(ctx, pkg_array, 0),
             "Array<pkg> must follow element"
         );
 
         // KeyOf carrier
         let pkg_keyof = graph.intern_node(SemanticNodeData::KeyOf { base: pkg_ref });
         assert!(
-            type_node_has_package_backed_root(graph, pkg_keyof, 0),
+            type_node_has_package_backed_root(ctx, pkg_keyof, 0),
             "keyof pkg must follow base"
         );
 
@@ -10738,7 +10708,7 @@ defineProps<{ value: Foo }>()
             readonly: false,
         });
         assert!(
-            !type_node_has_package_backed_root(graph, local_tuple_only, 0),
+            !type_node_has_package_backed_root(ctx, local_tuple_only, 0),
             "[Local] tuple must NOT be flagged"
         );
         let mixed_tuple = graph.intern_node(SemanticNodeData::Tuple {
@@ -10762,28 +10732,28 @@ defineProps<{ value: Foo }>()
             readonly: false,
         });
         assert!(
-            type_node_has_package_backed_root(graph, mixed_tuple, 0),
+            type_node_has_package_backed_root(ctx, mixed_tuple, 0),
             "[Local, Pkg] tuple must be flagged via the second element"
         );
 
         // Alias passes through to inner
         let alias_pkg = graph.intern_node(SemanticNodeData::Alias(pkg_ref));
         assert!(
-            type_node_has_package_backed_root(graph, alias_pkg, 0),
+            type_node_has_package_backed_root(ctx, alias_pkg, 0),
             "Alias must follow inner"
         );
 
         // Non-route shapes (Object, Primitive) — predicate returns false
         let obj = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![])));
         assert!(
-            !type_node_has_package_backed_root(graph, obj, 0),
+            !type_node_has_package_backed_root(ctx, obj, 0),
             "Plain Object must NOT be flagged (no root identity)"
         );
         let prim = graph.intern_node(SemanticNodeData::Primitive(
             crate::semantic_query::PrimitiveKind::String,
         ));
         assert!(
-            !type_node_has_package_backed_root(graph, prim, 0),
+            !type_node_has_package_backed_root(ctx, prim, 0),
             "Primitive must NOT be flagged"
         );
     }
@@ -10799,6 +10769,7 @@ defineProps<{ value: Foo }>()
         let project = make_project();
         let host = project.host();
         let graph = host.project_type_store().semantic_graph();
+        let ctx: &dyn crate::resolver_core::ResolverContext = host;
 
         // Build an IndexedAccess chain N=300 deep over a local DeclRef
         // root. Should walk fine until depth 256, then fuse-return false.
@@ -10816,7 +10787,7 @@ defineProps<{ value: Foo }>()
         // At depth=0 entry, walking the 300-deep chain to its local
         // root would normally yield false; the fuse just guards against
         // pathological recursion. Either way, must not panic.
-        let _ = type_node_has_package_backed_root(graph, current, 0);
+        let _ = type_node_has_package_backed_root(ctx, current, 0);
     }
 
     /// `preserve_package_backed_symbolic_refs_node`

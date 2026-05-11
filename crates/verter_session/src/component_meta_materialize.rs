@@ -488,6 +488,7 @@ pub(crate) fn materialize_component_meta_structure(
             }
             // Package-ref guard on the actual root.
             if crate::meta_resolve::component_meta_ref_resolves_to_package_node(
+                ctx,
                 &extraction.root_identity,
             ) {
                 crate::host_manage::emit_policy_skip(
@@ -873,15 +874,15 @@ fn empty_signature() -> DepSignature {
 
 /// Graph-native package-ref policy predicate.
 /// Returns `true` when `node` is a `DeclRef` or `InstantiationRef`
-/// whose declaration's canonical id resolves under `/node_modules/`.
+/// whose declaration's canonical id is classified as package-backed
+/// by the workspace (NOT a substring check on the canonical path).
 /// Package-backed refs stay symbolic at every axis (TopLevel +
 /// Nested) — expanding them would publish package internals into
 /// the consumer's component-meta surface.
 ///
-/// Delegates the canonical-string check to the shared primitive
-/// [`canonical_resolves_to_package`](crate::meta_resolve::canonical_resolves_to_package)
-/// so the package check has one source of truth across graph-node
-/// and identity-based callers.
+/// Routes the canonical-id classification through
+/// `ResolverContext::workspace_is_package_backed` so symlinked /
+/// pnpm-hoisted layouts are correctly classified.
 pub(crate) fn is_package_backed_ref(ctx: &dyn ResolverContext, node: SemanticNodeId) -> bool {
     let graph = ctx.project_type_store().semantic_graph();
     let Some(data) = graph.node_data(node) else {
@@ -893,7 +894,7 @@ pub(crate) fn is_package_backed_ref(ctx: &dyn ResolverContext, node: SemanticNod
         SemanticNodeData::InstantiationRef { base, .. } => base.canonical_id.as_ref(),
         _ => return false,
     };
-    crate::meta_resolve::canonical_resolves_to_package(canonical)
+    ctx.workspace_is_package_backed(canonical)
 }
 
 /// Object-shape materialisation. Walk the surface's
