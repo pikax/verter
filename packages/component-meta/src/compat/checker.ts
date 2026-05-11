@@ -106,6 +106,86 @@ function isCompatVisibleSlotName(name: string): boolean {
 }
 
 /**
+ * Returns the union arms of a `TypeDescriptor`, or the descriptor wrapped in a
+ * single-element array if it is not a union. The structural replacement for
+ * top-level `|` text splitting in the compat layer.
+ */
+const unionArms = (t: TypeDescriptor): TypeDescriptor[] => (t.kind === "union" ? t.types : [t]);
+
+/**
+ * Returns the intersection arms of a `TypeDescriptor`, or the descriptor
+ * wrapped in a single-element array if it is not an intersection. The
+ * structural replacement for top-level `&` text splitting in the compat layer.
+ */
+const intersectionArms = (t: TypeDescriptor): TypeDescriptor[] =>
+  t.kind === "intersection" ? t.types : [t];
+
+/** Structural predicate matching `primitive("undefined")`. */
+const isUndefinedPrimitive = (t: TypeDescriptor): boolean =>
+  t.kind === "primitive" && t.name === "undefined";
+
+/**
+ * Returns `t` with any top-level union arm of `primitive("undefined")` removed.
+ * Non-union descriptors and unions that do not include `undefined` pass through
+ * unchanged. The structural authority for "drop the trailing `| undefined`"
+ * decisions in the compat display pipeline.
+ */
+function stripUndefinedArm(t: TypeDescriptor): TypeDescriptor {
+  if (t.kind !== "union") return t;
+  const kept = t.types.filter((arm) => !isUndefinedPrimitive(arm));
+  if (kept.length === t.types.length || kept.length === 0) {
+    return t;
+  }
+  if (kept.length === 1) return kept[0]!;
+  return { kind: "union", types: kept };
+}
+
+/** Structural predicate: does the descriptor's top-level union include `undefined`? */
+const descriptorIncludesTopLevelUndefined = (t: TypeDescriptor): boolean =>
+  t.kind === "union" && t.types.some(isUndefinedPrimitive);
+
+/**
+ * Returns the display text of `descriptor` with any top-level union arm of
+ * `undefined` stripped. The structural replacement for the deleted hand-rolled
+ * top-level `|` text splitter — the descriptor is the semantic authority for
+ * "which arms exist" and `text` is the display authority for "how the residual
+ * type renders".
+ *
+ * When the descriptor is a union that includes `undefined`, the function
+ * renders `stripUndefinedArm(descriptor)` via `typeDescriptorToCompatDisplay`.
+ * When the descriptor does not carry `undefined` (the optional-ness lives on
+ * `prop.required`), the function still walks the text for a top-level
+ * `undefined` arm by checking against the descriptor's text-equivalence — if
+ * the text was extended by `normalizeOptionalCompatTypeText` to append
+ * `| undefined`, the residual `text` minus the trailing `| undefined` is
+ * returned. Otherwise `text` passes through unchanged.
+ */
+function stripTopLevelUndefinedFromCompatType(
+  descriptor: TypeDescriptor,
+  text: string,
+  typeRegistry?: Map<string, TypeDescriptor>,
+): string {
+  if (descriptorIncludesTopLevelUndefined(descriptor)) {
+    return typeDescriptorToCompatDisplay(stripUndefinedArm(descriptor), typeRegistry);
+  }
+  // The descriptor does not carry an `undefined` arm. The text may have one
+  // appended by `normalizeOptionalCompatTypeText` (or the rawType annotation
+  // contains an `undefined` arm that the descriptor does not). Strip a single
+  // trailing ` | undefined` suffix; this is the only shape produced by the
+  // append paths within this layer and does not require a hand-rolled
+  // operator splitter.
+  const trimmed = text.trim();
+  if (trimmed.endsWith("| undefined")) {
+    const stripped = trimmed.slice(0, -"| undefined".length).trimEnd();
+    return stripped;
+  }
+  if (trimmed === "undefined") {
+    return trimmed;
+  }
+  return text;
+}
+
+/**
  * Minimal workspace interface used by the checker.
  * Matches the Workspace class from @verter/native.
  */
@@ -209,7 +289,7 @@ export function mapPropMeta(
   }
 
   const type = preferredCompatPropTypeText(prop, typeRegistry);
-  if (stripTopLevelUndefinedFromTypeString(type).trim() === "Booleanish") {
+  if (stripTopLevelUndefinedFromCompatType(prop.type, type).trim() === "Booleanish") {
     const schemaEntries: string[] = ['"false"', '"true"', "false", "true"];
     if (!prop.required) {
       schemaEntries.push("undefined");
@@ -224,8 +304,10 @@ export function mapPropMeta(
     repairOpaqueCompatSchemaFromRawType(
       applyRawTypeDisplayHintsToSchema(
         typeDescriptorToSchema(prop.type, options, typeRegistry),
+        prop.type,
         prop.rawType,
       ),
+      prop.type,
       prop.rawType,
     ),
     type,
@@ -261,7 +343,7 @@ function buildCompatPropertyMeta(
 
 function buildCompatAnyPropMeta(prop: PropMeta): PropertyMeta | undefined {
   const normalizedRawType = prop.rawType
-    ? stripTopLevelUndefinedFromTypeString(normalizeTypeString(prop.rawType)).trim()
+    ? stripTopLevelUndefinedFromCompatType(prop.type, normalizeTypeString(prop.rawType)).trim()
     : undefined;
   const hasIconifyTag = (prop.tags ?? []).some((tag) => tag.name === "IconifyIcon");
   const descriptorIsAny =
@@ -270,7 +352,7 @@ function buildCompatAnyPropMeta(prop: PropMeta): PropertyMeta | undefined {
       prop.type.types.some((type) => type.kind === "primitive" && type.name === "any"));
   const rawTypeContainsAny =
     normalizedRawType !== undefined &&
-    splitTopLevelTypeUnion(normalizedRawType).some((part) => part.trim() === "any");
+    unionArms(prop.type).some((arm) => arm.kind === "primitive" && arm.name === "any");
   if (
     !hasIconifyTag &&
     normalizedRawType !== "any" &&
@@ -298,7 +380,7 @@ function buildCompatAnyPropMeta(prop: PropMeta): PropertyMeta | undefined {
 function buildCompatNumberishPropMeta(prop: PropMeta): PropertyMeta | undefined {
   const normalizedRawType = prop.rawType ? normalizeTypeString(prop.rawType).trim() : undefined;
   const strippedRawType = normalizedRawType
-    ? stripTopLevelUndefinedFromTypeString(normalizedRawType).trim()
+    ? stripTopLevelUndefinedFromCompatType(prop.type, normalizedRawType).trim()
     : undefined;
   const descriptorIsNumberish =
     (prop.type.kind === "ref" && prop.type.name === "Numberish") ||
@@ -319,7 +401,7 @@ function buildCompatNumberishPropMeta(prop: PropMeta): PropertyMeta | undefined 
 function buildCompatBooleanishPropMeta(prop: PropMeta): PropertyMeta | undefined {
   const normalizedRawType = prop.rawType ? normalizeTypeString(prop.rawType) : undefined;
   const strippedRawType = normalizedRawType
-    ? stripTopLevelUndefinedFromTypeString(normalizedRawType).trim()
+    ? stripTopLevelUndefinedFromCompatType(prop.type, normalizedRawType).trim()
     : undefined;
   const descriptorIsBooleanish =
     (prop.type.kind === "ref" && prop.type.name === "Booleanish") ||
@@ -334,7 +416,7 @@ function buildCompatBooleanishPropMeta(prop: PropMeta): PropertyMeta | undefined
   if (
     strippedRawType !== "Booleanish" &&
     !descriptorIsBooleanish &&
-    stripTopLevelUndefinedFromTypeString(descriptorText).trim() !== "Booleanish"
+    stripTopLevelUndefinedFromCompatType(prop.type, descriptorText).trim() !== "Booleanish"
   ) {
     return undefined;
   }
@@ -400,7 +482,7 @@ function buildCompatSlotsPropMeta(
 function buildCompatReferrerPolicyPropMeta(prop: PropMeta): PropertyMeta | undefined {
   const normalizedRawType = prop.rawType ? normalizeTypeString(prop.rawType).trim() : undefined;
   const strippedRawType = normalizedRawType
-    ? stripTopLevelUndefinedFromTypeString(normalizedRawType).trim()
+    ? stripTopLevelUndefinedFromCompatType(prop.type, normalizedRawType).trim()
     : undefined;
   const descriptorIsReferrerPolicy =
     (prop.type.kind === "ref" && prop.type.name === "HTMLAttributeReferrerPolicy") ||
@@ -428,8 +510,8 @@ function buildCompatFunctionArrayUnionPropMeta(prop: PropMeta): PropertyMeta | u
     return undefined;
   }
 
-  const unionParts = splitTopLevelTypeUnion(stripTopLevelUndefinedFromTypeString(rawType)).map(
-    (part) => normalizeCompatUnionArrayPart(part.trim()),
+  const unionParts = unionArms(stripUndefinedArm(prop.type)).map((arm) =>
+    normalizeCompatUnionArrayPart(normalizeTypeString(typeDescriptorToCompatDisplay(arm)).trim()),
   );
   if (unionParts.length !== 2) {
     return undefined;
@@ -527,13 +609,14 @@ function buildCompatPrefetchOnPropMeta(prop: PropMeta): PropertyMeta | undefined
 function buildCompatNuxtLinkToPropMeta(prop: PropMeta): PropertyMeta | undefined {
   const normalizedRawType = prop.rawType ? normalizeTypeString(prop.rawType).trim() : undefined;
   const strippedRawType = normalizedRawType
-    ? stripTopLevelUndefinedFromTypeString(normalizedRawType).trim()
+    ? stripTopLevelUndefinedFromCompatType(prop.type, normalizedRawType).trim()
     : undefined;
   if (strippedRawType !== 'NuxtLinkProps["to"]' && strippedRawType !== "RouteLocationRaw") {
     return undefined;
   }
 
-  const descriptorText = stripTopLevelUndefinedFromTypeString(
+  const descriptorText = stripTopLevelUndefinedFromCompatType(
+    prop.type,
     normalizeTypeString(typeDescriptorToCompatDisplay(prop.type)),
   ).trim();
   if (descriptorText === "string") {
@@ -560,14 +643,14 @@ function buildCompatHtmlButtonTypePropMeta(prop: PropMeta): PropertyMeta | undef
 
   const normalizedRawType = prop.rawType ? normalizeTypeString(prop.rawType).trim() : undefined;
   const strippedRawType = normalizedRawType
-    ? stripTopLevelUndefinedFromTypeString(normalizedRawType).trim()
+    ? stripTopLevelUndefinedFromCompatType(prop.type, normalizedRawType).trim()
     : undefined;
   const unionParts =
     strippedRawType === 'ButtonHTMLAttributes["type"]'
       ? ['"button"', '"submit"', '"reset"']
       : normalizedRawType
-        ? splitTopLevelTypeUnion(stripTopLevelUndefinedFromTypeString(normalizedRawType)).map(
-            (part) => part.trim(),
+        ? unionArms(stripUndefinedArm(prop.type)).map((arm) =>
+            normalizeTypeString(typeDescriptorToCompatDisplay(arm)).trim(),
           )
         : [];
   const normalizedSet = new Set(unionParts);
@@ -596,8 +679,10 @@ function buildCompatStringBrandUnionPropMeta(prop: PropMeta): PropertyMeta | und
     return undefined;
   }
 
-  const unionParts = splitTopLevelTypeUnion(stripTopLevelUndefinedFromTypeString(normalizedRawType))
-    .map((part) => normalizeCompatUnionArrayPart(part.trim()))
+  const unionParts = unionArms(stripUndefinedArm(prop.type))
+    .map((arm) =>
+      normalizeCompatUnionArrayPart(normalizeTypeString(typeDescriptorToCompatDisplay(arm)).trim()),
+    )
     .filter((part) => part.length > 0);
   if (unionParts.length === 0) {
     return undefined;
@@ -895,11 +980,12 @@ function preferredCompatPropTypeText(
   typeRegistry?: Map<string, TypeDescriptor>,
 ): string {
   const descriptorText = normalizeOptionalCompatTypeText(
+    prop.type,
     normalizeTypeString(typeDescriptorToCompatDisplay(prop.type, typeRegistry)),
     prop.required,
   );
   const rawType = prop.rawType
-    ? normalizeOptionalCompatTypeText(normalizeTypeString(prop.rawType), prop.required)
+    ? normalizeOptionalCompatTypeText(prop.type, normalizeTypeString(prop.rawType), prop.required)
     : undefined;
 
   if (!rawType || compatRawTypeLooksLossy(rawType)) {
@@ -910,7 +996,7 @@ function preferredCompatPropTypeText(
     return rawType;
   }
 
-  if (shouldPreferDescriptorForProp(rawType, descriptorText)) {
+  if (shouldPreferDescriptorForProp(prop.type, rawType, descriptorText)) {
     return descriptorText;
   }
 
@@ -930,7 +1016,7 @@ function preferredCompatTypeText(
   }
 
   const normalizedRawType = normalizeTypeString(rawType);
-  if (shouldPreferDescriptorForProp(normalizedRawType, descriptorText)) {
+  if (shouldPreferDescriptorForProp(descriptor, normalizedRawType, descriptorText)) {
     return descriptorText;
   }
 
@@ -1002,25 +1088,6 @@ function normalizeOptionalPropSchema(
   };
 }
 
-function buildCompatEventSchemaFromTupleType(tupleType: string): PropertyMetaSchema[] {
-  const trimmed = tupleType.trim();
-  if (trimmed === "[]") {
-    return [];
-  }
-
-  const body =
-    trimmed.startsWith("[") && trimmed.endsWith("]") ? trimmed.slice(1, -1).trim() : trimmed;
-  if (!body) {
-    return [];
-  }
-
-  return splitTopLevelCommaList(body).map((entry) => {
-    const normalized = normalizeTypeString(entry.trim()).replace(/^\.\.\./, "");
-    const namedMatch = /^[A-Za-z_$][A-Za-z0-9_$]*\??:\s*([\s\S]+)$/.exec(normalized);
-    return namedMatch ? namedMatch[1]!.trim() : normalized;
-  });
-}
-
 function compatSchemaIncludesTopLevelUndefined(schema: PropertyMetaSchema): boolean {
   if (typeof schema === "string") {
     return schema.trim() === "undefined";
@@ -1034,89 +1101,27 @@ function compatSchemaIncludesTopLevelUndefined(schema: PropertyMetaSchema): bool
   return false;
 }
 
-function normalizeOptionalCompatTypeText(type: string, required: boolean): string {
-  if (required) return type;
-  const stripped = stripTopLevelUndefinedFromTypeString(type).trim();
-  if (stripped === "any") {
+/**
+ * Returns `baseText` extended with `| undefined` when the prop is optional and
+ * the paired descriptor does not already include `undefined` as a top-level
+ * union arm. The structural test ("already includes undefined") runs on the
+ * descriptor; `baseText` is the display passthrough preserved for parity with
+ * `vue-component-meta`.
+ */
+function normalizeOptionalCompatTypeText(
+  descriptor: TypeDescriptor,
+  baseText: string,
+  required: boolean,
+): string {
+  if (required) return baseText;
+  const stripped = stripUndefinedArm(descriptor);
+  if (stripped.kind === "primitive" && stripped.name === "any") {
     return "any";
   }
-  const parts = splitTopLevelTypeUnion(type);
-  if (parts.some((part) => part.replace(/\s+/g, "") === "undefined")) {
-    return type;
+  if (descriptorIncludesTopLevelUndefined(descriptor)) {
+    return baseText;
   }
-  return `${type} | undefined`;
-}
-
-function stripTopLevelUndefinedFromTypeString(type: string): string {
-  const parts = splitTopLevelTypeUnion(type);
-  const kept = parts.filter((part) => part.replace(/\s+/g, "") !== "undefined");
-  if (kept.length === parts.length || kept.length === 0) {
-    return type;
-  }
-  return kept.join(" | ");
-}
-
-function splitTopLevelTypeUnion(type: string): string[] {
-  return splitTopLevelTypeOperator(type, "|");
-}
-
-function splitTopLevelTypeIntersection(type: string): string[] {
-  return splitTopLevelTypeOperator(type, "&");
-}
-
-function splitTopLevelTypeOperator(type: string, operator: "|" | "&"): string[] {
-  const parts: string[] = [];
-  let start = 0;
-  let parenDepth = 0;
-  let bracketDepth = 0;
-  let braceDepth = 0;
-  let angleDepth = 0;
-
-  for (let index = 0; index < type.length; index++) {
-    const ch = type[index];
-    const prev = index > 0 ? type[index - 1] : "";
-    switch (ch) {
-      case "(":
-        parenDepth++;
-        break;
-      case ")":
-        parenDepth--;
-        break;
-      case "[":
-        bracketDepth++;
-        break;
-      case "]":
-        bracketDepth--;
-        break;
-      case "{":
-        braceDepth++;
-        break;
-      case "}":
-        braceDepth--;
-        break;
-      case "<":
-        angleDepth++;
-        break;
-      case ">":
-        // `=>` is an arrow function token, not a generic-depth close.
-        if (prev !== "=") {
-          angleDepth--;
-        }
-        break;
-      case "|":
-      case "&":
-        if (parenDepth === 0 && bracketDepth === 0 && braceDepth === 0 && angleDepth === 0) {
-          if (ch === operator) {
-            parts.push(type.slice(start, index).trim());
-            start = index + 1;
-          }
-        }
-        break;
-    }
-  }
-
-  parts.push(type.slice(start).trim());
-  return parts.filter(Boolean);
+  return `${baseText} | undefined`;
 }
 
 function stripSingleOuterParens(type: string): string {
@@ -1138,41 +1143,50 @@ function stripSingleOuterParens(type: string): string {
   return trimmed.slice(1, -1).trim();
 }
 
-function shouldPreferRawSchemaType(rawType: string, currentType: string | undefined): boolean {
+function shouldPreferRawSchemaType(
+  descriptor: TypeDescriptor,
+  rawType: string,
+  currentType: string | undefined,
+): boolean {
   const normalizedRaw = normalizeTypeString(stripSingleOuterParens(rawType));
   const normalizedCurrent = currentType ? normalizeTypeString(currentType) : "";
   if (!normalizedRaw || normalizedRaw === normalizedCurrent) {
     return false;
   }
-  if (normalizedCurrent && shouldPreferDescriptorForProp(normalizedRaw, normalizedCurrent)) {
+  if (
+    normalizedCurrent &&
+    shouldPreferDescriptorForProp(descriptor, normalizedRaw, normalizedCurrent)
+  ) {
     return false;
   }
   return (
     normalizedRaw.includes("<") ||
     looksLikeIndexedAccessType(normalizedRaw) ||
-    looksLikeBareTypeReference(stripTopLevelUndefinedFromTypeString(normalizedRaw))
+    looksLikeBareTypeReference(stripTopLevelUndefinedFromCompatType(descriptor, normalizedRaw))
   );
 }
 
 function applyRawTypeDisplayHintsToSchema(
   schema: PropertyMetaSchema,
+  descriptor: TypeDescriptor,
   rawType: string | undefined,
 ): PropertyMetaSchema {
   if (!rawType) {
     return schema;
   }
-  return applyRawTypeDisplayHintsToSchemaInner(schema, normalizeTypeString(rawType));
+  return applyRawTypeDisplayHintsToSchemaInner(schema, descriptor, normalizeTypeString(rawType));
 }
 
 function repairOpaqueCompatSchemaFromRawType(
   schema: PropertyMetaSchema,
+  descriptor: TypeDescriptor,
   rawType: string | undefined,
 ): PropertyMetaSchema {
   if (!rawType || !compatSchemaIsOpaqueObject(schema)) {
     return schema;
   }
 
-  return buildCompatSchemaFromRawType(normalizeTypeString(rawType)) ?? schema;
+  return buildCompatSchemaFromRawType(descriptor, normalizeTypeString(rawType)) ?? schema;
 }
 
 function compatSchemaIsOpaqueObject(schema: PropertyMetaSchema): boolean {
@@ -1189,46 +1203,61 @@ function compatSchemaIsOpaqueObject(schema: PropertyMetaSchema): boolean {
 }
 
 /** @deprecated Superseded by origin-walk for generic type derivation paths. */
-function buildCompatSchemaFromRawType(rawType: string): PropertyMetaSchema | undefined {
+function buildCompatSchemaFromRawType(
+  descriptor: TypeDescriptor,
+  rawType: string,
+): PropertyMetaSchema | undefined {
   const raw = stripSingleOuterParens(rawType.trim());
   if (!raw) {
     return undefined;
   }
 
-  const unionParts = splitTopLevelTypeUnion(raw);
-  if (unionParts.length > 1) {
+  const unionParms = unionArms(descriptor);
+  if (unionParms.length > 1) {
+    const armTexts = unionParms.map((arm) =>
+      normalizeTypeString(typeDescriptorToCompatDisplay(arm)),
+    );
     return {
       kind: "enum",
       type: normalizeTypeString(raw),
-      schema: unionParts.map(
-        (part) => buildCompatSchemaFromRawType(part) ?? normalizeTypeString(part),
+      schema: unionParms.map(
+        (arm, index) =>
+          buildCompatSchemaFromRawType(arm, armTexts[index] ?? raw) ??
+          armTexts[index] ??
+          normalizeTypeString(raw),
       ),
     };
   }
 
-  const intersectionParts = splitTopLevelTypeIntersection(raw);
-  if (intersectionParts.length > 1) {
+  const intersectionParms = intersectionArms(descriptor);
+  if (intersectionParms.length > 1) {
+    const armTexts = intersectionParms.map((arm) =>
+      normalizeTypeString(typeDescriptorToCompatDisplay(arm)),
+    );
     return {
       kind: "object",
       type: normalizeTypeString(raw),
-      schema: intersectionParts.map((part) =>
-        buildCompatIntersectionArmSchema(part),
+      schema: intersectionParms.map((arm, index) =>
+        buildCompatIntersectionArmSchema(arm, armTexts[index] ?? raw),
       ) as unknown as Record<string, PropertyMetaSchema>,
     };
   }
 
   if (raw.startsWith("{") && raw.endsWith("}")) {
-    return buildCompatObjectSchemaFromRawType(raw);
+    return buildCompatObjectSchemaFromRawType(descriptor, raw);
   }
 
   return normalizeTypeString(raw);
 }
 
-function buildCompatObjectSchemaFromRawType(rawType: string): PropertyMetaSchema {
+function buildCompatObjectSchemaFromRawType(
+  descriptor: TypeDescriptor,
+  rawType: string,
+): PropertyMetaSchema {
   const raw = normalizeTypeString(rawType.trim());
   const body = raw.slice(1, -1).trim();
   const normalized = formatCompatRawObjectType(body);
-  if (!body) {
+  if (descriptor.kind !== "object" || descriptor.properties.length === 0) {
     return {
       kind: "object",
       type: normalized,
@@ -1237,25 +1266,16 @@ function buildCompatObjectSchemaFromRawType(rawType: string): PropertyMetaSchema
   }
 
   const properties: Record<string, PropertyMeta> = {};
-  for (const entry of splitTopLevelObjectMembers(body)) {
-    const trimmed = entry.trim();
-    if (!trimmed || /^\[.*\]\s*:/.test(trimmed) || /^readonly\s+\[.*\]\s*:/.test(trimmed)) {
-      continue;
-    }
-
-    const match =
-      /^(?:readonly\s+)?(?:["']([^"']+)["']|([A-Za-z_$][A-Za-z0-9_$-]*))(\?)?\s*:\s*([\s\S]+)$/.exec(
-        trimmed,
-      );
-    if (!match) {
-      continue;
-    }
-
-    const name = match[1] ?? match[2];
-    const optional = match[3] === "?";
-    const memberType = normalizeTypeString(match[4]!.trim());
-    const memberSchema = buildCompatSchemaFromRawType(memberType) ?? memberType;
-    properties[name] = buildCompatInlinePropertyMeta(name, memberType, memberSchema, !optional);
+  for (const property of descriptor.properties) {
+    const memberDescriptor = property.type;
+    const memberType = normalizeTypeString(typeDescriptorToCompatDisplay(memberDescriptor));
+    const memberSchema = buildCompatSchemaFromRawType(memberDescriptor, memberType) ?? memberType;
+    properties[property.name] = buildCompatInlinePropertyMeta(
+      property.name,
+      memberType,
+      memberSchema,
+      !property.optional,
+    );
   }
 
   return {
@@ -1265,9 +1285,12 @@ function buildCompatObjectSchemaFromRawType(rawType: string): PropertyMetaSchema
   };
 }
 
-function buildCompatIntersectionArmSchema(rawType: string): PropertyMetaSchema {
+function buildCompatIntersectionArmSchema(
+  descriptor: TypeDescriptor,
+  rawType: string,
+): PropertyMetaSchema {
   const normalized = normalizeTypeString(stripSingleOuterParens(rawType).trim());
-  const schema = buildCompatSchemaFromRawType(normalized);
+  const schema = buildCompatSchemaFromRawType(descriptor, normalized);
   if (typeof schema === "string") {
     return {
       kind: "object",
@@ -1287,6 +1310,7 @@ function formatCompatRawObjectType(body: string): string {
 
 function applyRawTypeDisplayHintsToSchemaInner(
   schema: PropertyMetaSchema,
+  descriptor: TypeDescriptor,
   rawType: string,
 ): PropertyMetaSchema {
   if (typeof schema === "string" || Array.isArray(schema)) {
@@ -1296,32 +1320,50 @@ function applyRawTypeDisplayHintsToSchemaInner(
   const raw = stripSingleOuterParens(rawType);
 
   if (schema.kind === "enum" && Array.isArray(schema.schema)) {
-    const unionParts = splitTopLevelTypeUnion(raw);
-    if (unionParts.length === schema.schema.length) {
+    const armDescriptors = unionArms(descriptor);
+    const armTexts = armDescriptors.map((arm) =>
+      normalizeTypeString(typeDescriptorToCompatDisplay(arm)),
+    );
+    if (armTexts.length === schema.schema.length) {
       return {
         ...schema,
-        ...(shouldPreferRawSchemaType(raw, schema.type) ? { type: normalizeTypeString(raw) } : {}),
+        ...(shouldPreferRawSchemaType(descriptor, raw, schema.type)
+          ? { type: normalizeTypeString(raw) }
+          : {}),
         schema: schema.schema.map((entry, index) =>
-          applyRawTypeDisplayHintsToSchemaInner(entry, unionParts[index] ?? raw),
+          applyRawTypeDisplayHintsToSchemaInner(
+            entry,
+            armDescriptors[index] ?? descriptor,
+            armTexts[index] ?? raw,
+          ),
         ),
       };
     }
   }
 
   if (schema.kind === "object" && Array.isArray(schema.schema)) {
-    const intersectionParts = splitTopLevelTypeIntersection(raw);
-    if (intersectionParts.length === schema.schema.length) {
+    const armDescriptors = intersectionArms(descriptor);
+    const armTexts = armDescriptors.map((arm) =>
+      normalizeTypeString(typeDescriptorToCompatDisplay(arm)),
+    );
+    if (armTexts.length === schema.schema.length) {
       return {
         ...schema,
-        ...(shouldPreferRawSchemaType(raw, schema.type) ? { type: normalizeTypeString(raw) } : {}),
+        ...(shouldPreferRawSchemaType(descriptor, raw, schema.type)
+          ? { type: normalizeTypeString(raw) }
+          : {}),
         schema: schema.schema.map((entry, index) =>
-          applyRawTypeDisplayHintsToSchemaInner(entry, intersectionParts[index] ?? raw),
+          applyRawTypeDisplayHintsToSchemaInner(
+            entry,
+            armDescriptors[index] ?? descriptor,
+            armTexts[index] ?? raw,
+          ),
         ),
       } as unknown as PropertyMetaSchema;
     }
   }
 
-  if ("type" in schema && shouldPreferRawSchemaType(raw, schema.type)) {
+  if ("type" in schema && shouldPreferRawSchemaType(descriptor, raw, schema.type)) {
     return {
       ...schema,
       type: normalizeTypeString(raw),
@@ -1331,11 +1373,15 @@ function applyRawTypeDisplayHintsToSchemaInner(
   return schema;
 }
 
-function shouldPreferDescriptorForProp(rawType: string, descriptorText: string): boolean {
-  const normalizedRawType = stripTopLevelUndefinedFromTypeString(rawType);
+function shouldPreferDescriptorForProp(
+  descriptor: TypeDescriptor,
+  rawType: string,
+  descriptorText: string,
+): boolean {
+  const normalizedRawType = stripTopLevelUndefinedFromCompatType(descriptor, rawType);
   return (
     rawType !== descriptorText &&
-    !compatDescriptorLooksLossy(descriptorText) &&
+    !compatDescriptorLooksLossy(descriptor, descriptorText) &&
     !compatDescriptorLooksOverexpanded(descriptorText) &&
     (looksLikeBareTypeReference(normalizedRawType) || looksLikeIndexedAccessType(normalizedRawType))
   );
@@ -1345,7 +1391,7 @@ function shouldPreferRawAliasForExpandedDescriptor(
   rawType: string,
   descriptor: TypeDescriptor,
 ): boolean {
-  const normalizedRawType = stripTopLevelUndefinedFromTypeString(rawType);
+  const normalizedRawType = stripTopLevelUndefinedFromCompatType(descriptor, rawType);
   if (!looksLikeBareTypeReference(normalizedRawType)) {
     return false;
   }
@@ -1370,12 +1416,12 @@ function shouldPreferRawAliasForExpandedDescriptor(
 /** Heuristic: does the descriptor text contain solver artifacts (`@rec(`, bare
  *  kind keywords, `graphNode()` placeholders) or degenerate unions containing
  *  `any`, indicating the resolved form is less informative than the raw type? */
-function compatDescriptorLooksLossy(descriptorText: string): boolean {
-  const normalized = stripTopLevelUndefinedFromTypeString(descriptorText).trim();
+function compatDescriptorLooksLossy(descriptor: TypeDescriptor, descriptorText: string): boolean {
+  const normalized = stripTopLevelUndefinedFromCompatType(descriptor, descriptorText).trim();
   return (
     compatRawTypeLooksLossy(normalized) ||
     normalized.includes("@rec(") ||
-    splitTopLevelTypeUnion(normalized).some((part) => part.trim() === "any") ||
+    unionArms(descriptor).some((arm) => arm.kind === "primitive" && arm.name === "any") ||
     /^(indexedAccess|unknown|object|function|intersection|union|conditional)$/.test(normalized) ||
     /^graphNode\(\d+\)$/.test(normalized)
   );
@@ -1724,7 +1770,7 @@ function buildEventPayloadType(
   event: EventMeta,
   typeRegistry?: Map<string, TypeDescriptor>,
 ): string {
-  const fromSignature = extractEventTupleType(event.rawSignature);
+  const fromSignature = extractEventTupleType(event.payload, event.rawSignature);
   if (fromSignature) {
     return normalizeTypeString(fromSignature);
   }
@@ -1737,222 +1783,46 @@ function buildEventPayloadType(
   return `[${normalizeTypeString(typeDescriptorToCompatDisplay(event.payload, typeRegistry))}]`;
 }
 
-function extractEventTupleType(rawSignature: string | undefined): string | undefined {
-  if (!rawSignature) {
+/**
+ * Reconstructs the tuple-form text of an emit payload from its descriptor.
+ *
+ * - When the payload is already a tuple, render the descriptor directly.
+ * - When the payload is a function `(event: "name", ...rest) => …`, drop the
+ *   leading event-name string-literal parameter and render the remaining
+ *   parameter types as a tuple.
+ *
+ * The text-shape parser that previously scanned `((…) => …)` strings is
+ * replaced by structural walks on `payload.parameters`. The `rawSignature`
+ * argument is retained for parity passthrough — when the descriptor is a
+ * bare tuple-form raw string (e.g. `[number, string]`) the original text is
+ * preferred, matching `vue-component-meta`'s display contract.
+ */
+function extractEventTupleType(
+  payload: TypeDescriptor,
+  rawSignature: string | undefined,
+): string | undefined {
+  if (rawSignature) {
+    const trimmed = rawSignature.trim();
+    if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+      return trimmed;
+    }
+  }
+  if (payload.kind !== "function") {
     return undefined;
   }
-  const trimmed = rawSignature.trim();
-  if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
-    return trimmed;
-  }
-  const paramsSource = extractFunctionParameterSource(rawSignature);
-  if (paramsSource === undefined) {
-    return undefined;
-  }
-  const params = splitTopLevelCommaList(paramsSource);
+  const params = payload.parameters;
   if (params.length === 0) {
     return "[]";
   }
-  const payloadParams =
-    looksLikeEventNameParameter(params[0] ?? "") && params.length > 0 ? params.slice(1) : params;
-  return `[${payloadParams.join(", ")}]`;
-}
-
-function extractFunctionParameterSource(signature: string): string | undefined {
-  let depth = 0;
-  let start = -1;
-  let quote: "'" | '"' | "`" | null = null;
-
-  for (let index = 0; index < signature.length; index++) {
-    const ch = signature[index];
-    const prev = index > 0 ? signature[index - 1] : "";
-
-    if (quote) {
-      if (ch === quote && prev !== "\\") {
-        quote = null;
-      }
-      continue;
-    }
-
-    if (ch === "'" || ch === '"' || ch === "`") {
-      quote = ch;
-      continue;
-    }
-
-    if (ch === "(") {
-      if (depth === 0) {
-        start = index + 1;
-      }
-      depth++;
-      continue;
-    }
-
-    if (ch === ")") {
-      depth--;
-      if (depth === 0 && start >= 0) {
-        return signature.slice(start, index).trim();
-      }
-    }
-  }
-
-  return undefined;
-}
-
-function splitTopLevelCommaList(source: string): string[] {
-  const parts: string[] = [];
-  let start = 0;
-  let parenDepth = 0;
-  let bracketDepth = 0;
-  let braceDepth = 0;
-  let angleDepth = 0;
-  let quote: "'" | '"' | "`" | null = null;
-
-  for (let index = 0; index < source.length; index++) {
-    const ch = source[index];
-    const prev = index > 0 ? source[index - 1] : "";
-
-    if (quote) {
-      if (ch === quote && prev !== "\\") {
-        quote = null;
-      }
-      continue;
-    }
-
-    if (ch === "'" || ch === '"' || ch === "`") {
-      quote = ch;
-      continue;
-    }
-
-    switch (ch) {
-      case "(":
-        parenDepth++;
-        break;
-      case ")":
-        parenDepth--;
-        break;
-      case "[":
-        bracketDepth++;
-        break;
-      case "]":
-        bracketDepth--;
-        break;
-      case "{":
-        braceDepth++;
-        break;
-      case "}":
-        braceDepth--;
-        break;
-      case "<":
-        angleDepth++;
-        break;
-      case ">":
-        if (prev !== "=") {
-          angleDepth--;
-        }
-        break;
-      case ",":
-        if (parenDepth === 0 && bracketDepth === 0 && braceDepth === 0 && angleDepth === 0) {
-          parts.push(source.slice(start, index).trim());
-          start = index + 1;
-        }
-        break;
-    }
-  }
-
-  parts.push(source.slice(start).trim());
-  return parts.filter(Boolean);
-}
-
-function splitTopLevelObjectMembers(source: string): string[] {
-  const parts: string[] = [];
-  let start = 0;
-  let parenDepth = 0;
-  let bracketDepth = 0;
-  let braceDepth = 0;
-  let angleDepth = 0;
-  let quote: "'" | '"' | "`" | null = null;
-
-  for (let index = 0; index < source.length; index++) {
-    const ch = source[index];
-    const prev = index > 0 ? source[index - 1] : "";
-
-    if (quote) {
-      if (ch === quote && prev !== "\\") {
-        quote = null;
-      }
-      continue;
-    }
-
-    if (ch === "'" || ch === '"' || ch === "`") {
-      quote = ch;
-      continue;
-    }
-
-    switch (ch) {
-      case "(":
-        parenDepth++;
-        break;
-      case ")":
-        parenDepth--;
-        break;
-      case "[":
-        bracketDepth++;
-        break;
-      case "]":
-        bracketDepth--;
-        break;
-      case "{":
-        braceDepth++;
-        break;
-      case "}":
-        braceDepth--;
-        break;
-      case "<":
-        angleDepth++;
-        break;
-      case ">":
-        if (prev !== "=") {
-          angleDepth--;
-        }
-        break;
-      case ",":
-      case ";":
-      case "\n":
-        if (parenDepth === 0 && bracketDepth === 0 && braceDepth === 0 && angleDepth === 0) {
-          parts.push(source.slice(start, index).trim());
-          start = index + 1;
-        }
-        break;
-    }
-  }
-
-  parts.push(source.slice(start).trim());
-  return parts.filter(Boolean);
-}
-
-function normalizeCompatObjectLiteralTypeText(typeText: string): string {
-  const normalized = normalizeTypeString(typeText.trim());
-  if (!normalized.startsWith("{") || !normalized.endsWith("}")) {
-    return normalized;
-  }
-
-  const body = normalized.slice(1, -1).trim();
-  if (!body) {
-    return normalized;
-  }
-
-  const members = splitTopLevelObjectMembers(body)
-    .map((entry) => entry.trim().replace(/[;,]\s*$/, ""))
-    .filter(Boolean);
-  if (members.length === 0) {
-    return normalized;
-  }
-
-  return `{ ${members.join("; ")}; }`;
-}
-
-function looksLikeEventNameParameter(param: string): boolean {
-  return /^[A-Za-z_$][A-Za-z0-9_$]*\s*:\s*["'`]/.test(param.trim());
+  const firstParam = params[0];
+  const firstIsEventName =
+    firstParam !== undefined &&
+    firstParam.type.kind === "literal" &&
+    typeof firstParam.type.value === "string";
+  const payloadParams = firstIsEventName ? params.slice(1) : params;
+  return `[${payloadParams
+    .map((param) => normalizeTypeString(typeDescriptorToCompatDisplay(param.type)))
+    .join(", ")}]`;
 }
 
 /**

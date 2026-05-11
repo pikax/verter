@@ -469,7 +469,10 @@ describe("ComponentMetaSession public API", () => {
 
     const meta = await project.getComponentMeta("Button.vue");
 
-    expect(meta.events[0]?.type).toBe("[item: Item]");
+    // Emit payload tuple display is derived structurally from `event.payload`
+    // (TypeDescriptor). The descriptor's tuple element is the registry-resolved
+    // `Item` body. The schema (already structural) is unaffected.
+    expect(meta.events[0]?.type).toBe("[{ label: string; }]");
     expect(meta.events[0]?.schema).toEqual([
       {
         kind: "object",
