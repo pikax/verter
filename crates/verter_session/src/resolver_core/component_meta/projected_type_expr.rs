@@ -43,9 +43,14 @@ pub fn projected_macro_surfaces_to_type_expr(
                 .props
                 .iter()
                 .map(|prop| {
-                    let ty = prop.type_expr.clone().unwrap_or(TypeExpr::Unknown {
-                        raw: "unknown".to_string(),
-                    });
+                    // W0.2 invariant: AnalyzedPropField.type_expr is populated
+                    // by the analyzer / surface projector. A None here is a
+                    // producer-chain bug; panic loudly rather than corrupting
+                    // the published surface with TypeExpr::Unknown.
+                    let ty = prop
+                        .type_expr
+                        .clone()
+                        .expect("AnalyzedPropField.type_expr populated by analyzer (W0.2 invariant)");
                     ObjectMember::Property(ObjectProperty {
                         name: prop.name.clone(),
                         ty,
@@ -64,9 +69,10 @@ pub fn projected_macro_surfaces_to_type_expr(
                 .emits
                 .iter()
                 .map(|emit| {
-                    let ty = emit.payload_expr.clone().unwrap_or(TypeExpr::Unknown {
-                        raw: "unknown".to_string(),
-                    });
+                    let ty = emit
+                        .payload_expr
+                        .clone()
+                        .expect("AnalyzedEmitField.payload_expr populated by analyzer (W0.2 invariant)");
                     ObjectMember::Property(ObjectProperty {
                         name: emit.name.clone(),
                         ty,
@@ -85,16 +91,18 @@ pub fn projected_macro_surfaces_to_type_expr(
                 .slots
                 .iter()
                 .map(|slot| {
-                    let return_ty = slot.return_expr.clone().unwrap_or(TypeExpr::Unknown {
-                        raw: "any".to_string(),
-                    });
+                    let return_ty = slot
+                        .return_expr
+                        .clone()
+                        .expect("AnalyzedSlotField.return_expr populated by analyzer (W0.2 invariant)");
                     let binding_props = slot
                         .bindings
                         .iter()
                         .map(|binding| {
-                            let ty = binding.binding_expr.clone().unwrap_or(TypeExpr::Unknown {
-                                raw: "unknown".to_string(),
-                            });
+                            let ty = binding
+                                .binding_expr
+                                .clone()
+                                .expect("AnalyzedSlotFieldBinding.binding_expr populated by analyzer (W0.2 invariant)");
                             ObjectMember::Property(ObjectProperty {
                                 name: binding.name.clone(),
                                 ty,

@@ -114,10 +114,15 @@ pub fn resolved_macro_to_members(macro_meta: &ResolvedMacroMeta) -> Vec<Expanded
     let mut members = Vec::new();
 
     for prop in &macro_meta.props {
+        // W0.2 invariant: AnalyzedPropField.type_expr is populated by the
+        // analyzer whenever an OXC TSType<'_> is in scope. A None here is a
+        // producer-chain bug (the projector / external resolver failed to
+        // lower the annotation); panic loudly rather than silently corrupting
+        // downstream component-meta with TypeExpr::Unknown.
         let type_expr = prop
             .type_expr
             .clone()
-            .unwrap_or_else(|| TypeExpr::primitive(PrimitiveName::Unknown));
+            .expect("AnalyzedPropField.type_expr populated by analyzer (W0.2 invariant)");
         members.push(ExpandedMember {
             name: prop.name.clone(),
             type_expr,
@@ -131,7 +136,7 @@ pub fn resolved_macro_to_members(macro_meta: &ResolvedMacroMeta) -> Vec<Expanded
         let type_expr = emit
             .payload_expr
             .clone()
-            .unwrap_or_else(|| TypeExpr::primitive(PrimitiveName::Unknown));
+            .expect("AnalyzedEmitField.payload_expr populated by analyzer (W0.2 invariant)");
         members.push(ExpandedMember {
             name: emit.name.clone(),
             type_expr,
@@ -142,9 +147,17 @@ pub fn resolved_macro_to_members(macro_meta: &ResolvedMacroMeta) -> Vec<Expanded
     }
 
     for slot in &macro_meta.slots {
+        // Read slot.return_expr (the typed function return type lowered by
+        // the analyzer). Mirrors the prop/emit branches structurally — the
+        // previous hardcoded TypeExpr::Unknown discarded the typed form even
+        // when the analyzer had populated it.
+        let type_expr = slot
+            .return_expr
+            .clone()
+            .expect("AnalyzedSlotField.return_expr populated by analyzer (W0.2 invariant)");
         members.push(ExpandedMember {
             name: slot.name.clone(),
-            type_expr: TypeExpr::primitive(PrimitiveName::Unknown),
+            type_expr,
             raw_type: slot.return_type.clone(),
             optional: !slot.is_required,
             description: slot.description.clone(),
@@ -225,11 +238,11 @@ pub(crate) fn resolved_macro_to_expansion_via_solver(
     let mut members = Vec::new();
 
     for prop in &macro_meta.props {
-        let type_expr = prop
-            .type_expr
-            .clone()
-            .map(solve_via_dispatch)
-            .unwrap_or_else(|| TypeExpr::primitive(PrimitiveName::Unknown));
+        let type_expr = solve_via_dispatch(
+            prop.type_expr
+                .clone()
+                .expect("AnalyzedPropField.type_expr populated by analyzer (W0.2 invariant)"),
+        );
 
         members.push(ExpandedMember {
             name: prop.name.clone(),
@@ -241,11 +254,11 @@ pub(crate) fn resolved_macro_to_expansion_via_solver(
     }
 
     for emit in &macro_meta.emits {
-        let type_expr = emit
-            .payload_expr
-            .clone()
-            .map(solve_via_dispatch)
-            .unwrap_or_else(|| TypeExpr::primitive(PrimitiveName::Unknown));
+        let type_expr = solve_via_dispatch(
+            emit.payload_expr
+                .clone()
+                .expect("AnalyzedEmitField.payload_expr populated by analyzer (W0.2 invariant)"),
+        );
 
         members.push(ExpandedMember {
             name: emit.name.clone(),
@@ -257,9 +270,16 @@ pub(crate) fn resolved_macro_to_expansion_via_solver(
     }
 
     for slot in &macro_meta.slots {
+        // Mirrors the production path in `resolved_macro_to_members` — read
+        // the typed return expression rather than silently substituting Unknown.
+        let type_expr = solve_via_dispatch(
+            slot.return_expr
+                .clone()
+                .expect("AnalyzedSlotField.return_expr populated by analyzer (W0.2 invariant)"),
+        );
         members.push(ExpandedMember {
             name: slot.name.clone(),
-            type_expr: TypeExpr::primitive(PrimitiveName::Unknown),
+            type_expr,
             raw_type: slot.return_type.clone(),
             optional: !slot.is_required,
             description: slot.description.clone(),
@@ -373,6 +393,97 @@ mod tests {
                 m.name
             );
         }
+    }
+
+    /// Characterisation: pin the invariant that `AnalyzedPropField.type_expr`
+    /// MUST be populated by the analyzer. The consumer panics deterministically
+    /// via `.expect(...)` rather than silently substituting Unknown.
+    ///
+    /// Pre-H2 fix: `unwrap_or_else(TypeExpr::Unknown)` silently masked the
+    /// producer-chain bug, this test would NOT panic.
+    /// Post-H2 fix: the consumer's `.expect(...)` fires, the panic with the
+    /// stable message matches, and `should_panic` PASSES.
+    #[test]
+    #[should_panic(expected = "AnalyzedPropField.type_expr populated by analyzer")]
+    fn resolved_macro_to_members_panics_on_missing_prop_type_expr() {
+        let mut macro_meta = make_resolved_macro();
+        // Synthetic invariant violation — clear `type_expr` on the first prop.
+        // Production producers (analyzer + surface projector) always populate
+        // this; the fixture mints the violating shape directly.
+        macro_meta.props[0].type_expr = None;
+        let _ = resolved_macro_to_members(&macro_meta);
+    }
+
+    /// Sibling characterisation for the emit branch — `payload_expr` must be
+    /// populated whenever an OXC TSType is in scope.
+    #[test]
+    #[should_panic(expected = "AnalyzedEmitField.payload_expr populated by analyzer")]
+    fn resolved_macro_to_members_panics_on_missing_emit_payload_expr() {
+        let mut macro_meta = make_resolved_macro();
+        macro_meta.props.clear();
+        macro_meta.emits = vec![verter_semantic::analysis::AnalyzedEmitField {
+            name: "change".to_string(),
+            span: Span::new(60, 80),
+            payload_type: Some("[value: string]".to_string()),
+            payload_expr: None,
+            payload_expr_scope: None,
+            description: None,
+            tags: vec![],
+        }];
+        let _ = resolved_macro_to_members(&macro_meta);
+    }
+
+    /// Sibling characterisation for the slot branch — `return_expr` must be
+    /// populated. Pre-H2 fix the slot branch hardcoded `TypeExpr::Unknown`,
+    /// silently discarding the analyzer's typed return form even when it
+    /// was populated. Post-H2 fix the slot branch mirrors the prop/emit
+    /// branches structurally and panics on a None violation.
+    #[test]
+    #[should_panic(expected = "AnalyzedSlotField.return_expr populated by analyzer")]
+    fn resolved_macro_to_members_panics_on_missing_slot_return_expr() {
+        let mut macro_meta = make_resolved_macro();
+        macro_meta.props.clear();
+        macro_meta.slots = vec![verter_semantic::analysis::AnalyzedSlotField {
+            name: "default".to_string(),
+            is_required: true,
+            span: Span::new(100, 120),
+            bindings: vec![],
+            return_type: Some("Element".to_string()),
+            return_expr: None,
+            return_expr_scope: None,
+            description: None,
+            tags: vec![],
+        }];
+        let _ = resolved_macro_to_members(&macro_meta);
+    }
+
+    /// Positive characterisation: when the analyzer DOES populate `return_expr`,
+    /// the consumer surfaces it (rather than the hardcoded Unknown the
+    /// pre-H2-fix slot branch produced). This proves the slot branch now
+    /// reads from the typed form like the prop and emit branches.
+    #[test]
+    fn resolved_macro_to_members_uses_slot_return_expr_when_populated() {
+        let mut macro_meta = make_resolved_macro();
+        macro_meta.props.clear();
+        let typed_return = TypeExpr::named("Element");
+        macro_meta.slots = vec![verter_semantic::analysis::AnalyzedSlotField {
+            name: "default".to_string(),
+            is_required: true,
+            span: Span::new(100, 120),
+            bindings: vec![],
+            return_type: Some("Element".to_string()),
+            return_expr: Some(typed_return.clone()),
+            return_expr_scope: None,
+            description: None,
+            tags: vec![],
+        }];
+        let members = resolved_macro_to_members(&macro_meta);
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].name, "default");
+        assert_eq!(
+            members[0].type_expr, typed_return,
+            "slot type_expr must be the analyzer-populated return_expr, not a hardcoded Unknown",
+        );
     }
 
     #[test]

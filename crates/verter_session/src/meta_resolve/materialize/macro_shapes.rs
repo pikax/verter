@@ -1219,14 +1219,16 @@ pub(crate) fn slot_field_function_type_expr(
 ) -> verter_type_expr::TypeExpr {
     use std::sync::Arc;
     use verter_type_expr::{
-        FunctionExpr, FunctionParam, ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName,
-        TypeExpr,
+        FunctionExpr, FunctionParam, ObjectExpr, ObjectMember, ObjectProperty, TypeExpr,
     };
 
+    // W0.2 invariant: the analyzer populates AnalyzedSlotField.return_expr
+    // whenever an OXC return-type TSType<'_> is in scope. A None here is a
+    // producer-chain bug; panic loudly rather than silently substituting Any.
     let return_type = slot
         .return_expr
         .clone()
-        .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any));
+        .expect("AnalyzedSlotField.return_expr populated by analyzer (W0.2 invariant)");
 
     let parameters = if slot.bindings.is_empty() {
         Vec::new()
@@ -1238,7 +1240,7 @@ pub(crate) fn slot_field_function_type_expr(
                 let ty = binding
                     .binding_expr
                     .clone()
-                    .unwrap_or(TypeExpr::Primitive(PrimitiveName::Unknown));
+                    .expect("AnalyzedSlotFieldBinding.binding_expr populated by analyzer (W0.2 invariant)");
                 ObjectMember::Property(ObjectProperty {
                     name: binding.name.clone(),
                     ty,
