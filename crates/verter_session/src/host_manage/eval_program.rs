@@ -480,9 +480,26 @@ impl VerterHost {
             &rustc_hash::FxHashMap::default(),
             dep_canonical,
         )?;
+        // Boundary assertion: the external resolver MUST populate the
+        // typed-form pairing invariant (`*_expr.is_some() <=> *_expr_scope.is_some()`).
+        // Mirrors the parser-boundary assertion in
+        // `verter_parser::utils::oxc::vue::script::resolve_type::mod::ResolvedElements::assert_typed_form_populated`.
+        debug_assert!(
+            resolved.assert_typed_form_populated().is_ok(),
+            "ResolvedElements from external resolver for `{}` violates typed-form pairing invariant: {:?}",
+            dep_canonical,
+            resolved.assert_typed_form_populated().err()
+        );
+        // Pass `Some(dep_canonical)` as owner so the projector can stamp the
+        // aggregate `props_expr_scope` / `emits_expr_scope` / `slots_expr_scope`
+        // for cross-file imported macros. Without this, downstream consumers
+        // (`projected_macro_surfaces_to_type_expr`) short-circuit on
+        // `*_expr_scope = None` for cross-file imported macros — even though
+        // the per-field `type_expr_scope` carries the external file's canonical_id.
         Some(
-            crate::resolver_core::surface_projector::project_macro_surfaces(
+            crate::resolver_core::surface_projector::project_macro_surfaces_with_owner(
                 Some(inputs.eval_source.as_ref()),
+                Some(dep_canonical),
                 macro_kind,
                 &resolved,
             ),
