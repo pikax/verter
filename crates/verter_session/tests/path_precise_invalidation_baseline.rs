@@ -56,8 +56,7 @@ fn read_expected_json(name: &str) -> serde_json::Value {
     let path = fixture_path(name);
     let raw =
         fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
-    serde_json::from_str(&raw)
-        .unwrap_or_else(|e| panic!("parse {}: {}", path.display(), e))
+    serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse {}: {}", path.display(), e))
 }
 
 /// CHARACTERISATION — every archetype's expected.json carries a complete
@@ -173,7 +172,10 @@ fn pick_literal_key_today_invalidates_on_unselected_sibling_edit() {
          is no longer building a discriminating test against this corpus."
     );
 
-    let rule = edit_foo_b.get("rule").and_then(|v| v.as_str()).unwrap_or("");
+    let rule = edit_foo_b
+        .get("rule")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     assert!(
         rule.contains("R14") || rule.contains("R28"),
         "The pick_literal_key edit-Foo.b row must cite R14 or R28 in its rule field: got `{rule}`"

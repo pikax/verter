@@ -257,16 +257,21 @@ fn run_baseline_measurement() -> BaselineSnapshot {
         av_excluded: false,
         pre_stage1_notes: vec![
             "fact_validation_warm_hit_count == 0 because no fact-based cache exists yet \
-             (Stage 3 introduces facts; Stage 6d wires validation).".to_string(),
+             (Stage 3 introduces facts; Stage 6d wires validation)."
+                .to_string(),
             "fact_validation_miss_count records the cold-pass count (every component \
-             missed because no fact-validated cache existed at query time).".to_string(),
+             missed because no fact-validated cache existed at query time)."
+                .to_string(),
             "materialise_cardinality_per_owner == N today (one MaterializeStructureDb \
-             entry per owner-instance of the shared dep); Stage 5 inverts to == 1.".to_string(),
+             entry per owner-instance of the shared dep); Stage 5 inverts to == 1."
+                .to_string(),
             "candidate_set_size_histogram has only the \"1\" bin populated today; Stage 5 \
-             multi-candidate storage grows the histogram up to the R20 cap = 4.".to_string(),
+             multi-candidate storage grows the histogram up to the R20 cap = 4."
+                .to_string(),
             "p50 / p95 / p99 are wall-clock cold-pass milliseconds against the \
              hermetic 16-component fixture in build_baseline_host. The Stage 7 canary \
-             measures warm-pass against the same fixture and the same SHA pin.".to_string(),
+             measures warm-pass against the same fixture and the same SHA pin."
+                .to_string(),
         ],
         components: timings,
         aggregates,

@@ -157,10 +157,7 @@ fn inventory_drained_dbs() -> BTreeSet<(String, String)> {
         .expect("databases_drained array");
     let mut out: BTreeSet<(String, String)> = BTreeSet::new();
     for entry in entries {
-        let field = entry
-            .get("field")
-            .and_then(|v| v.as_str())
-            .expect("field");
+        let field = entry.get("field").and_then(|v| v.as_str()).expect("field");
         let method = entry
             .get("method")
             .and_then(|v| v.as_str())
@@ -273,26 +270,29 @@ fn evict_canonical_cascade_contains_load_bearing_dbs_today() {
 /// pre-Stage-4d invariant is "the CAS path WRITES to the host."
 #[test]
 fn overlay_path_today_calls_host_upsert_from_query_path() {
-    let session_runtime_src =
-        read_workspace_file("crates/verter_session/src/session_runtime.rs");
+    let session_runtime_src = read_workspace_file("crates/verter_session/src/session_runtime.rs");
     let meta_src = read_workspace_file("crates/verter_session/src/meta.rs");
 
     // The three methods documented in plan §"Legacy Deletions" under
     // Stage 4d.
-    let must_call_upsert = ["apply_own_overlays", "revert_other_session_overlays", "reapply_overlay_target"];
+    let must_call_upsert = [
+        "apply_own_overlays",
+        "revert_other_session_overlays",
+        "reapply_overlay_target",
+    ];
 
     for method in must_call_upsert {
-        let body = extract_method_body(&session_runtime_src, method)
-            .unwrap_or_else(|| {
-                panic!(
-                    "Stage-0 baseline: SessionRuntime::{} must exist on the audited base SHA \
+        let body = extract_method_body(&session_runtime_src, method).unwrap_or_else(|| {
+            panic!(
+                "Stage-0 baseline: SessionRuntime::{} must exist on the audited base SHA \
                      so Stage 4d can delete it as documented in the Legacy Deletions table.",
-                    method
-                )
-            });
+                method
+            )
+        });
         let body_stripped = strip_comments(&body);
         assert!(
-            body_stripped.contains("self.host().upsert(") || body_stripped.contains("self.host().remove("),
+            body_stripped.contains("self.host().upsert(")
+                || body_stripped.contains("self.host().remove("),
             "Stage-0 baseline: SessionRuntime::{} must invoke self.host().upsert(...) or \
              self.host().remove(...) from a query-path codepath today (the CAS swap loop \
              documented in tests/fixtures/cache_baseline/multi_candidate_proxy.md). Stage 4d \
@@ -540,13 +540,12 @@ fn extract_drained_dbs_picks_up_realistic_drain_calls() {
         "semantic_graph".to_string(),
         "invalidate_canonical".to_string()
     )));
-    assert!(extracted.contains(&(
-        "semantic_db".to_string(),
-        "lock().invalidate".to_string()
-    )));
+    assert!(extracted.contains(&("semantic_db".to_string(), "lock().invalidate".to_string())));
     // The line-commented and block-commented `self.unrelated.…` references
     // must NOT be picked up.
-    let has_unrelated = extracted.iter().any(|(f, _)| f == "unrelated" || f == "also_unrelated");
+    let has_unrelated = extracted
+        .iter()
+        .any(|(f, _)| f == "unrelated" || f == "also_unrelated");
     assert!(
         !has_unrelated,
         "strip_comments must hide `self.X.Y(...)` inside line/block comments — \
@@ -576,7 +575,8 @@ fn evict_canonical_body_locator_finds_the_correct_function() {
 #[test]
 fn extract_method_body_locates_session_runtime_apply_own_overlays() {
     let src = read_workspace_file("crates/verter_session/src/session_runtime.rs");
-    let body = extract_method_body(&src, "apply_own_overlays").expect("apply_own_overlays must exist");
+    let body =
+        extract_method_body(&src, "apply_own_overlays").expect("apply_own_overlays must exist");
     assert!(
         body.contains("self.host()"),
         "apply_own_overlays must reference self.host()"
@@ -632,9 +632,7 @@ fn committed_baseline_json_declares_pre_stage1_counter_shape() {
 
     let fixture_block = json.get("fixture").expect("fixture block present");
     assert_eq!(
-        fixture_block
-            .get("num_components")
-            .and_then(|v| v.as_u64()),
+        fixture_block.get("num_components").and_then(|v| v.as_u64()),
         Some(16),
         "baseline.json must pin num_components = 16 (the bench fixture's constant)"
     );
