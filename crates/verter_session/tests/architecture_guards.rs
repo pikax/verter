@@ -8686,6 +8686,102 @@ mod typed_ir_resolver_guards {
     // -----------------------------------------------------------------------
     const ROLE_NAME_SUFFIX_ALLOWLIST: &[(&str, u32, &str)] = &[];
 
+    /// Walk a method-chain LHS to find the root identifier.
+    ///
+    /// Given a line slice ending immediately before `.ends_with("...")`, walk
+    /// backwards through chained `.method(arg, arg)` / `.field` segments to
+    /// find the underlying identifier. Examples:
+    ///
+    /// - `name`                              -> "name"
+    /// - `name.as_ref()`                     -> "name"
+    /// - `name.as_str().trim()`              -> "name"
+    /// - `prop.key_name.as_deref().unwrap()` -> "key_name"
+    /// - `foo.bar()`                          -> "bar" (method tail before LHS)
+    ///
+    /// For the role-suffix guard, we walk through `.as_ref()` / `.as_str()` /
+    /// `.as_deref()` / `.borrow()` / `.unwrap()` / `.unwrap_or_*()` /
+    /// `.clone()` / `.to_string()` / `.trim()` etc. and continue until we
+    /// reach a base identifier. Any base identifier matching `name` / `*_name`
+    /// / `identifier` / `*_identifier` / `ident` / `*_ident` is flagged.
+    fn walk_method_chain_lhs(prefix: &str) -> Option<String> {
+        // Walk backwards from end. Skip whitespace, then peel method-call
+        // suffixes (`.method(args)` with balanced parens) and field accesses
+        // (`.field`) until we reach a base word.
+        let bytes: Vec<char> = prefix.chars().collect();
+        let mut i = bytes.len();
+
+        loop {
+            // Trim trailing whitespace.
+            while i > 0 && bytes[i - 1].is_whitespace() {
+                i -= 1;
+            }
+            if i == 0 {
+                return None;
+            }
+            // Case 1: trailing balanced `(...)` — peel a method-call suffix.
+            if bytes[i - 1] == ')' {
+                let mut depth = 0i32;
+                let mut j = i;
+                while j > 0 {
+                    j -= 1;
+                    match bytes[j] {
+                        ')' => depth += 1,
+                        '(' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if depth != 0 {
+                    // Unbalanced — bail.
+                    return None;
+                }
+                i = j; // Now points at the `(`.
+                // Continue: there must be a method name (word) before, and a `.`.
+                let word_end = i;
+                while i > 0 && (bytes[i - 1].is_alphanumeric() || bytes[i - 1] == '_') {
+                    i -= 1;
+                }
+                if i == word_end {
+                    // No method name before `(` — bail.
+                    return None;
+                }
+                // Skip optional `::` segment after a turbofish (rare in this scope).
+                // Now expect a `.` to continue chain, or this is the start of the
+                // chain (e.g. `foo(`).
+                while i > 0 && bytes[i - 1].is_whitespace() {
+                    i -= 1;
+                }
+                if i == 0 || bytes[i - 1] != '.' {
+                    // Not a method chain — this is e.g. `foo(args).ends_with(...)`.
+                    // The base call (`foo(...)`) is the "root" but we ignore it; only
+                    // a plain identifier base counts as name-like.
+                    return None;
+                }
+                i -= 1; // Skip `.`.
+            } else if bytes[i - 1].is_alphanumeric() || bytes[i - 1] == '_' {
+                // Base identifier. Collect it.
+                let word_end = i;
+                while i > 0 && (bytes[i - 1].is_alphanumeric() || bytes[i - 1] == '_') {
+                    i -= 1;
+                }
+                let ident: String = bytes[i..word_end].iter().collect();
+                // If preceded by `.`, this is a field/method on something — keep walking
+                // (the FIELD identifier IS what we want to test, not the receiver).
+                // Actually: for `prop.key_name.as_ref().ends_with("Props")`, we want
+                // "key_name" (the immediate field on `prop`), not "prop". So return
+                // this identifier — it's the closest identifier to the .ends_with call.
+                return Some(ident);
+            } else {
+                // Unknown character (operator, etc.) — bail.
+                return None;
+            }
+        }
+    }
+
     fn scan_role_name_suffix() -> Vec<(String, u32, String)> {
         let suffixes: &[&str] = &["Props", "Emits", "Events", "Slots", "Model"];
         let files = collect_production_rs_files();
@@ -8706,17 +8802,15 @@ mod typed_ir_resolver_guards {
                 for sfx in suffixes {
                     let needle = format!(r#".ends_with("{}")"#, sfx);
                     if let Some(pos) = line.find(&needle) {
-                        // Identifier on the lhs of `.ends_with(...)` —
-                        // must be one of {name, *_name, identifier,
-                        // *_identifier, ident, *_ident}.
-                        let lhs: String = line[..pos]
-                            .chars()
-                            .rev()
-                            .take_while(|c| c.is_alphanumeric() || *c == '_')
-                            .collect::<String>()
-                            .chars()
-                            .rev()
-                            .collect();
+                        // Walk the LHS — including method-chain peeling so
+                        // `name.as_ref().ends_with("Props")` resolves to "name"
+                        // (and is correctly flagged). Without chain walking,
+                        // the LHS would be "ref" (the last word) and the
+                        // violation would slip through.
+                        let lhs = match walk_method_chain_lhs(&line[..pos]) {
+                            Some(s) => s,
+                            None => continue,
+                        };
                         if lhs.is_empty() {
                             continue;
                         }
@@ -8744,6 +8838,90 @@ mod typed_ir_resolver_guards {
             "no_role_inference_from_name_suffix",
             &actual,
             ROLE_NAME_SUFFIX_ALLOWLIST,
+        );
+    }
+
+    /// Discriminating test for the strengthened Guard 5 scanner.
+    ///
+    /// Pre-H3 fix: `scan_role_name_suffix` took only the immediate
+    /// alphanumeric-suffix LHS, so `name.as_ref().ends_with("Props")`
+    /// resolved to "ref" — failing the name-like check and slipping
+    /// through. A real production violation was masked.
+    ///
+    /// Post-H3 fix: `walk_method_chain_lhs` peels `.as_ref()` (and any
+    /// other method-chain suffix) to find the underlying identifier, so
+    /// "name" is correctly recognized and flagged.
+    ///
+    /// This test verifies the helper directly against a set of synthetic
+    /// inputs covering bare identifiers, simple method chains, deep
+    /// chains, and field/method mixes.
+    #[test]
+    fn walk_method_chain_lhs_resolves_to_root_identifier() {
+        // Base identifier.
+        assert_eq!(
+            walk_method_chain_lhs("name").as_deref(),
+            Some("name"),
+            "bare identifier should resolve to itself",
+        );
+        // Method-call suffix.
+        assert_eq!(
+            walk_method_chain_lhs("name.as_ref()").as_deref(),
+            Some("name"),
+            "`.as_ref()` chain must peel to root identifier",
+        );
+        // Deeper chain.
+        assert_eq!(
+            walk_method_chain_lhs("name.as_str().trim()").as_deref(),
+            Some("name"),
+            "`.as_str().trim()` deep chain must peel to root identifier",
+        );
+        // Field access chain.
+        assert_eq!(
+            walk_method_chain_lhs("prop.key_name.as_deref().unwrap()").as_deref(),
+            Some("key_name"),
+            "`prop.key_name.as_deref().unwrap()` resolves to the immediate field `key_name` (the receiver of the call closest to `.ends_with`)",
+        );
+        // Identifier in a `match` context (the existing scanner passed this).
+        assert_eq!(
+            walk_method_chain_lhs("        name").as_deref(),
+            Some("name"),
+            "leading whitespace must be stripped",
+        );
+    }
+
+    /// End-to-end discriminating test for the strengthened Guard 5
+    /// scanner. Synthesise a production-source-like buffer with a
+    /// `name.as_ref().ends_with("Props")` violation, run the scanner's
+    /// LHS-resolution logic on it, and assert the violation is flagged.
+    ///
+    /// Pre-fix: the LHS would have been "ref" (last contiguous word),
+    /// `is_name_like` would have returned false, and the violation
+    /// would have been silently allowed.
+    /// Post-fix: the LHS resolves to "name", `is_name_like` returns
+    /// true, and the violation is recorded.
+    #[test]
+    fn scan_role_name_suffix_flags_method_chain_lhs() {
+        // Replicate the LHS extraction + name-like check that
+        // `scan_role_name_suffix` performs, against a synthetic line.
+        let synthetic = r#"                if name.as_ref().ends_with("Props") {"#;
+        let needle = r#".ends_with("Props")"#;
+        let pos = synthetic.find(needle).expect("needle must be present");
+        let lhs = walk_method_chain_lhs(&synthetic[..pos]).expect("LHS must resolve");
+        assert_eq!(
+            lhs.to_ascii_lowercase(),
+            "name",
+            "strengthened LHS resolution must recover `name` from `name.as_ref()`",
+        );
+        let lhs_lower = lhs.to_ascii_lowercase();
+        let is_name_like = lhs_lower == "name"
+            || lhs_lower.ends_with("_name")
+            || lhs_lower == "identifier"
+            || lhs_lower.ends_with("_identifier")
+            || lhs_lower == "ident"
+            || lhs_lower.ends_with("_ident");
+        assert!(
+            is_name_like,
+            "name-like check must fire for chain-peeled `name`",
         );
     }
 

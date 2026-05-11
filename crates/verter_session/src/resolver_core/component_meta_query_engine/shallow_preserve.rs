@@ -622,40 +622,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             }
         }
 
-        fn fast_symbolic_imported_bare_ref_route(
-            engine: &mut ComponentMetaQueryEngine<'_>,
-            scope_canonical_id: &str,
-            expr: &TypeExpr,
-        ) -> bool {
-            match strip_parens_expr(expr) {
-                TypeExpr::Ref {
-                    name,
-                    type_arguments,
-                } if type_arguments.is_empty()
-                    && engine.bare_ref_origin_in_scope(scope_canonical_id, name.as_ref())
-                        == BareRefOrigin::Imported
-                    && name.as_ref().ends_with("Props") =>
-                {
-                    true
-                }
-                TypeExpr::Array { element, .. }
-                | TypeExpr::KeyOf(element)
-                | TypeExpr::Rest(element)
-                | TypeExpr::Parenthesized(element) => {
-                    fast_symbolic_imported_bare_ref_route(engine, scope_canonical_id, element)
-                }
-                TypeExpr::Tuple { elements, .. } => elements.iter().any(|element| {
-                    fast_symbolic_imported_bare_ref_route(engine, scope_canonical_id, &element.ty)
-                }),
-                TypeExpr::Union(members) | TypeExpr::Intersection(members) => {
-                    members.iter().any(|member| {
-                        fast_symbolic_imported_bare_ref_route(engine, scope_canonical_id, member)
-                    })
-                }
-                _ => false,
-            }
-        }
-
         fn collapse_same_file_imported_alias_chain(
             engine: &mut ComponentMetaQueryEngine<'_>,
             canonical_id: &str,
@@ -855,12 +821,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             });
         }
 
-        if fast_symbolic_imported_bare_ref_route(self, scope_canonical_id, expr) {
-            return Some(FastShallowFieldExpr {
-                expr: expr.clone(),
-                exactness: FastShallowFieldExprExactness::Symbolic,
-            });
-        }
+        // Note: a prior `fast_symbolic_imported_bare_ref_route` branch lived
+        // here and short-circuited bare imported Refs whose name ended with
+        // "Props". That predicate was a nominal heuristic — the Typed-IR-Only
+        // Resolver Rule (CLAUDE.md §3.4) bans suffix-based role classification.
+        // The standard projector path below handles bare imported Refs
+        // correctly without the shortcut.
 
         if let TypeExpr::Ref {
             name,
