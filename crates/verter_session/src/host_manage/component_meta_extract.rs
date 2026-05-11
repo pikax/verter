@@ -1065,7 +1065,8 @@ fn build_public_instance_slot_type(
                 .collect(),
         }));
     // Typed-IR-only: read the analyzer-populated `return_expr` directly.
-    // `return_type` is display-only after W2.3b; we never reparse it.
+    // `return_type` is display-only; we never reparse it. See the
+    // Typed-IR-Only Resolver Rule in CLAUDE.md.
     let return_type = slot
         .return_expr
         .clone()
@@ -1445,11 +1446,12 @@ pub(in crate::host_manage) fn resolve_ref_to_root_identity_for_test(
 }
 
 /// Test-only entry point that exercises
-/// `build_macro_participating_identities` for the positive macro-
-/// participation characterisation test. Pre-cutover, the parallel
-/// `collect_imported_props_like_raw_refs` walker filtered raw refs by
-/// `.ends_with("Props")`. The discriminator: a participating identity
-/// without a `Props` suffix must surface here.
+/// `build_macro_participating_identities`. Pins the structural macro-
+/// participation contract: a type is a participant because a Vue SFC
+/// macro (`defineProps`, `defineEmits`, ...) consumes its declaration
+/// — NOT because its identifier suffix is `Props` / `Emits` / etc.
+/// See the Typed-IR-Only Resolver Rule in CLAUDE.md and the
+/// `/component-meta` skill.
 #[cfg(test)]
 pub(in crate::host_manage) fn build_macro_participating_identities_for_test(
     host: &VerterHost,
@@ -1478,12 +1480,10 @@ pub(in crate::host_manage) fn collect_imported_macro_participating_refs_for_test
     collect_imported_macro_participating_refs(host, owner_canonical, expr, participating)
 }
 
-/// Test-only entry point that exercises `build_public_instance_slot_type`
-/// for the W2.3b discriminating test that pins the contract: the
-/// `return_expr` typed companion wins over the `return_type` display
-/// string. Pre-W2.3b, the deleted `parse_annotation_or_unknown_for_public_instance`
-/// helper reparsed `return_type` and silently overrode any typed value
-/// derived from `return_expr`.
+/// Test-only entry point that exercises `build_public_instance_slot_type`.
+/// Pins the typed-IR contract: `SlotAnalysis.return_expr` (typed) is the
+/// authority — `SlotAnalysis.return_type` (display string) MUST NOT feed
+/// semantic decisions. See the Typed-IR-Only Resolver Rule in CLAUDE.md.
 #[cfg(test)]
 pub(in crate::host_manage) fn build_public_instance_slot_type_for_test(
     slot: &verter_semantic::analysis::component_meta::SlotAnalysis,

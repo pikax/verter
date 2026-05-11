@@ -45,12 +45,13 @@ fn make_project() -> Arc<MetaProject> {
 /// classification MUST surface `MyButton` as a macro participant
 /// because `defineProps` consumes its declaration.
 ///
-/// Discriminator: the deleted `collect_imported_props_like_raw_refs`
-/// filtered raw refs by `.ends_with("Props")`. For this fixture it
-/// returned an EMPTY set — `MyButton` does not end in `Props`, so it
-/// was silently dropped from the participation set despite being the
-/// macro's actual type argument. The classification was nominal, not
-/// structural.
+/// Discriminator: a nominal classifier that filters raw refs by
+/// `.ends_with("Props")` would return an EMPTY set for this fixture
+/// — `MyButton` does not end in `Props`, so a suffix-based filter
+/// drops it despite being the macro's actual type argument. The
+/// correct classification is STRUCTURAL: a type is a participant
+/// because a Vue SFC macro consumes its declaration, regardless of
+/// identifier suffix.
 ///
 /// Asserted contract: `build_macro_participating_identities` +
 /// `collect_imported_macro_participating_refs` return the imported
@@ -370,22 +371,19 @@ defineProps<Helper>()
     );
 }
 
-/// W2.3b discriminating regression — `build_public_instance_slot_type`
+/// Discriminating regression — `build_public_instance_slot_type`
 /// MUST consume `SlotAnalysis.return_expr` (typed) and ignore
 /// `SlotAnalysis.return_type` (display-only) for semantic decisions.
+/// This is the Typed-IR-Only Resolver Rule (CLAUDE.md): raw / display
+/// strings are passthrough; a consumer that reparses them is the bug.
 ///
-/// Pre-W2.3b the function called `parse_annotation_or_unknown_for_public_instance(raw)`
-/// on `slot.return_type` — a forbidden text-reparse per the Typed-IR-only
-/// resolver rule. The discriminator: construct a slot whose typed
-/// `return_expr` is `Primitive(Boolean)` while the display `return_type`
-/// string lowers to a different type (`"VNode[]"` -> `Array<Ref { name: "VNode" }>`).
-///
-/// On pre-W2.3b code, the consumer reparses `"VNode[]"` and surfaces an
-/// `Array<Ref { name: "VNode" }>` in the public-instance slot signature,
-/// so the assertion that the return type equals `Primitive(Boolean)`
-/// FAILS. On post-W2.3b code, the consumer reads `return_expr` directly
-/// and the assertion PASSES. The two trees give observably different
-/// answers — the test is discriminating.
+/// The discriminator: construct a slot whose typed `return_expr` is
+/// `Primitive(Boolean)` while the display `return_type` string lowers
+/// to a DIFFERENT shape (`"VNode[]"` -> `Array<Ref { name: "VNode" }>`).
+/// A correct implementation reads `return_expr` and surfaces
+/// `Primitive(Boolean)`; an incorrect (reparse-driven) implementation
+/// reparses `"VNode[]"` and surfaces the array shape. The two trees
+/// give observably different answers — the test is discriminating.
 #[test]
 fn build_public_instance_slot_type_consumes_return_expr_not_return_type() {
     use verter_semantic::analysis::component_meta::SlotAnalysis;
@@ -396,8 +394,10 @@ fn build_public_instance_slot_type_consumes_return_expr_not_return_type() {
     let typed_return = TypeExpr::Primitive(PrimitiveName::Boolean);
 
     // The display string lowers to `Array<Ref { name: "VNode" }>` — a
-    // different shape from the typed primitive above. Pre-W2.3b the
-    // consumer reparses this and silently overrides `return_expr`.
+    // different shape from the typed primitive above. An incorrect
+    // (reparse-driven) implementation parses this and silently
+    // overrides `return_expr`; the correct typed-IR consumer ignores
+    // it.
     let display_return_type = "VNode[]".to_string();
 
     let slot = SlotAnalysis {
@@ -428,7 +428,10 @@ fn build_public_instance_slot_type_consumes_return_expr_not_return_type() {
 
     assert_eq!(
         *return_type, typed_return,
-        "build_public_instance_slot_type MUST read `slot.return_expr`          directly. If this assertion fails on the post-W2.3b tree, the          consumer has regressed to reparsing `slot.return_type`."
+        "build_public_instance_slot_type MUST read `slot.return_expr` \
+         directly. If this assertion fails, the consumer has regressed \
+         to reparsing `slot.return_type` (display string), violating the \
+         Typed-IR-Only Resolver Rule."
     );
 
     // Negative: the built return type MUST NOT be the lowered form of

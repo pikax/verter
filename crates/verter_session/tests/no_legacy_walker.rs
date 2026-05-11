@@ -1,18 +1,28 @@
-//! LEGACY_GATE_SELF — static-grep gate (plan §11.4).
+//! LEGACY_GATE_SELF — static-grep gate.
 //!
-//! Guards against re-introduction of the legacy walker family. The
-//! walker's outer shim and entire inner body family
-//! (`walker_cycle_key_node`,
-//! `expand_generic_ref_via_scope_iteration`, and the visited-set
-//! helper variant) no longer exist, along with the
-//! `component_meta_dispatch_iteration` module that hosted the
-//! walker's visited-set helper. The `RETIRED_SYMBOLS` constant below
-//! holds the canonical list this gate enforces.
+//! Guards against re-introduction of retired implementation symbols.
+//! The `RETIRED_SYMBOLS` constant below holds the canonical list of
+//! identifiers that must not appear in production source. The scanner
+//! follows the architecture-guard discipline:
+//!
+//!  - it scans ONLY `crates/*/src/**/*.rs` (production source),
+//!  - it skips `_tests.rs` / `tests.rs` / files under a `tests/` segment,
+//!  - it strips line, block, and `#[cfg(test)] mod` modules before
+//!    matching (so doc comments and inline tests do not trip the gate),
+//!  - it matches each symbol at identifier boundaries (so `foo` does
+//!    NOT match `foo_node` or `lowered_foo`).
+//!
+//! Architecture documentation (`CLAUDE.md`, `.claude/skills/*`,
+//! `docs/`), test files (`crates/*/tests/**`, `_tests.rs` siblings,
+//! and inline `#[cfg(test)]` modules), benches, examples, and
+//! generated artifacts are intentionally out of scope: a forbidden
+//! identifier appearing in those contexts is description, not live
+//! source.
 //!
 //! Self-exclusion: the first 5 lines of this file contain
 //! `LEGACY_GATE_SELF` so the recursive walk skips this file.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const RETIRED_SYMBOLS: &[&str] = &[
     // Phase 9 cutover (plan §11.2): the inner walker helpers are
@@ -203,11 +213,63 @@ const RETIRED_SYMBOLS: &[&str] = &[
     // shape assertion that never landed; CLAUDE.md "Don't add features
     // beyond what the task requires" forbids carrying it as scaffolding.
     "assert_route_union_surface",
+    // String-resolver eradication cutover (see
+    // D:/tmp/eradicate-string-resolver-paths.md §8): the typed-IR-only
+    // resolver rule deletes every hand-rolled type-text splitter,
+    // source-slicing helper, `parse_type_annotation` reparse fallback,
+    // and node_modules substring router from the analyzer / projector /
+    // registry / policy / materialiser / compat pipeline. Re-introduction
+    // at any production site is forbidden.
+    "extract_slot_bindings_from_pick_type",
+    "extract_slot_bindings_from_type_text",
+    "split_top_level_type_segments",
+    "extract_type_string_literal_name",
+    "parse_annotation_or_unknown",
+    "parse_annotation_or_unknown_for_public_instance",
+    "collect_imported_props_like_raw_refs",
+    "extract_pick_slot_bindings",
+    "simplify_pick_slot_binding_type_text",
+    "extract_string_literal_name",
+    "trim_trailing_type_text",
+    "find_top_level_char",
+    // NOTE: `find_matching_delimiter` is intentionally OMITTED from
+    // this list. The retired surface_projector helper of that name is
+    // deleted, but `verter_lsp::features::hover::find_matching_delimiter`
+    // is a live, unrelated LSP hover-preview helper that legitimately
+    // owns the same identifier. The architecture guard
+    // `no_text_based_macro_surface_projection_helpers` in
+    // `architecture_guards.rs` covers re-introduction inside
+    // `surface_projector.rs` specifically — a tighter and more
+    // architecturally meaningful enforcement than a name collision
+    // would provide here.
+    "split_top_level_segments",
+    "extract_first_slot_param_type_text",
+    "slice_declaration_text",
+    "extract_named_declaration_text",
+    "extract_declaration_details",
+    "canonical_resolves_to_package",
+    "parse_indexed_access_from_raw",
+    // The OLD name `parse_type_annotation` must NEVER reappear in
+    // production source (the function was renamed to
+    // `parse_jsdoc_tag_type_payload` and narrowed to JSDoc tag-type
+    // payloads). This entry is a belt-and-braces companion to the
+    // dedicated `no_old_parse_type_annotation_name_in_production`
+    // architecture guard.
+    "parse_type_annotation",
+    // The retired `resolver_core::type_text_parser` module. The
+    // checker-text adapter (`parse_checker_text_to_type_expr`) now
+    // wraps OXC directly; the hand-written recursive-descent parser
+    // it replaced is DELETED. The scanner's identifier-boundary
+    // match treats the module name identically to a function name,
+    // so re-introduction at any site is forbidden here too.
+    "type_text_parser",
 ];
 
-const SCAN_DIRS: &[&str] = &["crates", ".claude/skills", "docs"];
-
-const SCAN_FILES: &[&str] = &["CLAUDE.md", "AGENTS.md", "MEMORY.md"];
+/// File names whose presence at the head of the path should make us
+/// self-exclude (the gate file itself plus the sibling
+/// `architecture_guards.rs`, which carries literal needle strings in
+/// its assertions and would otherwise self-trip).
+const SELF_EXCLUDED_FILE_NAMES: &[&str] = &["no_legacy_walker.rs", "architecture_guards.rs"];
 
 fn workspace_root() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -224,106 +286,290 @@ fn workspace_root() -> PathBuf {
     }
 }
 
-fn is_self_excluded(path: &std::path::Path) -> bool {
-    let Ok(text) = std::fs::read_to_string(path) else {
+/// True for files whose contents are test-only (siblings named
+/// `*_tests.rs` or `tests.rs`, or anything inside a `tests/` segment
+/// of the path). Mirrors the discipline used by
+/// `architecture_guards::*::is_test_file`.
+fn is_test_file(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    if name == "tests.rs" || name.ends_with("_tests.rs") {
+        return true;
+    }
+    path.components()
+        .any(|c| c.as_os_str().to_str() == Some("tests"))
+}
+
+fn is_self_excluded(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
         return false;
     };
-    text.lines().take(5).any(|l| l.contains("LEGACY_GATE_SELF"))
+    SELF_EXCLUDED_FILE_NAMES.contains(&name)
 }
 
-fn is_changelog(path: &std::path::Path) -> bool {
-    path.file_name()
-        .and_then(|n| n.to_str())
-        .map(|n| n.eq_ignore_ascii_case("CHANGELOG.md"))
-        .unwrap_or(false)
-}
-
-fn collect_text_files(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+/// Walk a `crates/*/src/` tree and collect every `.rs` file that is
+/// production source (NOT a test file and NOT self-excluded).
+fn collect_production_rs(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            // Skip target/ and node_modules/ — these don't contain hand-authored source.
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if name == "target" || name == "node_modules" || name == ".git" {
                 continue;
             }
-            collect_text_files(&path, out);
-        } else if path.is_file() {
-            let ext_ok = matches!(
-                path.extension().and_then(|e| e.to_str()),
-                Some("rs" | "ts" | "tsx" | "js" | "vue" | "md")
-            );
-            if ext_ok && !is_self_excluded(&path) && !is_changelog(&path) {
-                out.push(path);
-            }
+            collect_production_rs(&path, out);
+        } else if path.is_file()
+            && path.extension().and_then(|e| e.to_str()) == Some("rs")
+            && !is_test_file(&path)
+            && !is_self_excluded(&path)
+        {
+            out.push(path);
         }
     }
 }
 
-#[test]
-fn no_legacy_walker_inner_helpers_outside_their_definitions() {
-    let root = workspace_root();
-    let mut files: Vec<PathBuf> = Vec::new();
-    for dir in SCAN_DIRS {
-        let p = root.join(dir);
-        if p.exists() {
-            collect_text_files(&p, &mut files);
+/// Replace `//` line comments and `/* ... */` block comments with
+/// equivalent-length whitespace, preserving newlines so line numbers
+/// stay stable. Skips comment-like sequences inside regular and raw
+/// string literals so the strip never invalidates real source.
+fn strip_comments(src: &str) -> String {
+    let bytes = src.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let n = bytes.len();
+    let mut i = 0usize;
+    while i < n {
+        let c = bytes[i];
+        // Raw string: r"..."  /  r#"..."#  /  r##"..."##  ...
+        if c == b'r' {
+            let mut j = i + 1;
+            let mut hashes = 0usize;
+            while j < n && bytes[j] == b'#' {
+                hashes += 1;
+                j += 1;
+            }
+            if j < n && bytes[j] == b'"' {
+                out.extend_from_slice(&bytes[i..=j]);
+                let close: Vec<u8> = std::iter::once(b'"')
+                    .chain(std::iter::repeat_n(b'#', hashes))
+                    .collect();
+                let mut k = j + 1;
+                while k + close.len() <= n {
+                    if &bytes[k..k + close.len()] == close.as_slice() {
+                        out.extend_from_slice(&bytes[(j + 1)..(k + close.len())]);
+                        i = k + close.len();
+                        break;
+                    }
+                    out.push(bytes[k]);
+                    k += 1;
+                }
+                if k + close.len() > n {
+                    out.extend_from_slice(&bytes[(j + 1)..n]);
+                    i = n;
+                }
+                continue;
+            }
+            // Not a raw string — fall through to normal handling.
         }
-    }
-    for file in SCAN_FILES {
-        let p = root.join(file);
-        if p.exists() && !is_self_excluded(&p) {
-            files.push(p);
+        // Regular string literal "..." (with \"  escape handling)
+        if c == b'"' {
+            out.push(b'"');
+            let mut k = i + 1;
+            while k < n {
+                if bytes[k] == b'\\' && k + 1 < n {
+                    out.push(bytes[k]);
+                    out.push(bytes[k + 1]);
+                    k += 2;
+                    continue;
+                }
+                if bytes[k] == b'"' {
+                    out.push(b'"');
+                    k += 1;
+                    break;
+                }
+                out.push(bytes[k]);
+                k += 1;
+            }
+            i = k;
+            continue;
         }
+        // Line comment //
+        if c == b'/' && i + 1 < n && bytes[i + 1] == b'/' {
+            let mut k = i;
+            while k < n && bytes[k] != b'\n' {
+                out.push(b' ');
+                k += 1;
+            }
+            i = k;
+            continue;
+        }
+        // Block comment /* ... */ with nesting support.
+        if c == b'/' && i + 1 < n && bytes[i + 1] == b'*' {
+            let mut depth = 1u32;
+            out.push(b' ');
+            out.push(b' ');
+            let mut k = i + 2;
+            while k < n && depth > 0 {
+                if k + 1 < n && bytes[k] == b'/' && bytes[k + 1] == b'*' {
+                    depth += 1;
+                    out.push(b' ');
+                    out.push(b' ');
+                    k += 2;
+                    continue;
+                }
+                if k + 1 < n && bytes[k] == b'*' && bytes[k + 1] == b'/' {
+                    depth -= 1;
+                    out.push(b' ');
+                    out.push(b' ');
+                    k += 2;
+                    continue;
+                }
+                if bytes[k] == b'\n' {
+                    out.push(b'\n');
+                } else {
+                    out.push(b' ');
+                }
+                k += 1;
+            }
+            i = k;
+            continue;
+        }
+        out.push(c);
+        i += 1;
     }
+    String::from_utf8_lossy(&out).into_owned()
+}
 
-    // Tight scan: each retired symbol must appear AT MOST in its own
-    // definition site (`fn <name>(`) — a re-introduction at another
-    // site would mean the symbol has more than one definition + 1 call.
-    // Pre-cutover the inner helpers had ~10+ call sites; post-cutover
-    // they have ZERO callers (their bodies are unused, gated by
-    // `#[allow(dead_code)]`).
-    //
-    // Plan §6.10 sub-task 3 — identifier-boundary matcher: a retired
-    // symbol matches ONLY when its occurrence is bounded by characters
-    // that can NOT extend an identifier (i.e., not [A-Za-z0-9_]).
-    // This prevents false positives like
-    // `component_meta_ref_resolves_to_package` matching the kept
-    // `_node` variant `component_meta_ref_resolves_to_package_node`,
-    // and `walk_component_meta_member_surface_expr` matching the
-    // already-retired `_with_visited` variant.
-    fn line_contains_identifier(line: &str, ident: &str) -> bool {
-        let bytes = line.as_bytes();
-        let needle = ident.as_bytes();
-        let n = needle.len();
-        if n == 0 || bytes.len() < n {
-            return false;
-        }
-        let is_ident_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
-        let mut i = 0usize;
-        while i + n <= bytes.len() {
-            if &bytes[i..i + n] == needle {
-                let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
-                let after_ok = i + n == bytes.len() || !is_ident_char(bytes[i + n]);
-                if before_ok && after_ok {
-                    return true;
+/// Replace the body of every `#[cfg(test)] mod NAME { ... }` block
+/// with whitespace (newlines preserved). Inline test modules live
+/// inside production source files but are test-only — guard scans
+/// must NOT classify them as production violations.
+fn strip_inline_test_modules(src: &str) -> String {
+    let bytes = src.as_bytes();
+    let n = bytes.len();
+    let mut out = bytes.to_vec();
+    let needle = b"#[cfg(test)]";
+    let mut i = 0usize;
+    while i + needle.len() <= n {
+        if &bytes[i..i + needle.len()] == needle {
+            let mut j = i + needle.len();
+            // Walk forward until we find `mod ` (allowing intervening
+            // attributes / whitespace within a small budget).
+            let limit = (i + 200).min(n);
+            while j < limit {
+                if j + 4 <= n && &bytes[j..j + 4] == b"mod " {
+                    break;
+                }
+                j += 1;
+            }
+            if j + 4 <= n && &bytes[j..j + 4] == b"mod " {
+                // Find `{` after `mod NAME`. If the next token is
+                // `;` instead, this is an out-of-line module
+                // declaration (`#[cfg(test)] mod NAME;`) which has
+                // no body to strip — let the next iteration advance.
+                let mut k = j + 4;
+                while k < n && bytes[k] != b'{' && bytes[k] != b';' {
+                    k += 1;
+                }
+                if k < n && bytes[k] == b'{' {
+                    let mut depth = 1i32;
+                    let mut m = k + 1;
+                    while m < n && depth > 0 {
+                        match bytes[m] {
+                            b'{' => depth += 1,
+                            b'}' => depth -= 1,
+                            _ => {}
+                        }
+                        m += 1;
+                    }
+                    if m > k + 1 {
+                        for slot in &mut out[(k + 1)..(m - 1)] {
+                            if *slot != b'\n' {
+                                *slot = b' ';
+                            }
+                        }
+                    }
+                    i = m;
+                    continue;
                 }
             }
-            i += 1;
         }
-        false
+        i += 1;
     }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn preprocess(src: &str) -> String {
+    strip_inline_test_modules(&strip_comments(src))
+}
+
+/// Identifier-boundary matcher: a retired symbol matches ONLY when
+/// its occurrence is bounded by characters that can NOT extend an
+/// identifier (i.e., not [A-Za-z0-9_]). This prevents false
+/// positives like `component_meta_ref_resolves_to_package` matching
+/// the kept `_node` variant
+/// `component_meta_ref_resolves_to_package_node`.
+fn line_contains_identifier(line: &str, ident: &str) -> bool {
+    let bytes = line.as_bytes();
+    let needle = ident.as_bytes();
+    let n = needle.len();
+    if n == 0 || bytes.len() < n {
+        return false;
+    }
+    let is_ident_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut i = 0usize;
+    while i + n <= bytes.len() {
+        if &bytes[i..i + n] == needle {
+            let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
+            let after_ok = i + n == bytes.len() || !is_ident_char(bytes[i + n]);
+            if before_ok && after_ok {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Collect every production `.rs` file under `crates/*/src/` plus
+/// the optional self-exclusion list.
+fn collect_production_sources() -> Vec<PathBuf> {
+    let root = workspace_root();
+    let mut files: Vec<PathBuf> = Vec::new();
+    let crates_dir = root.join("crates");
+    let Ok(crates) = std::fs::read_dir(&crates_dir) else {
+        return files;
+    };
+    for entry in crates.flatten() {
+        let crate_dir = entry.path();
+        if !crate_dir.is_dir() {
+            continue;
+        }
+        let src = crate_dir.join("src");
+        if !src.is_dir() {
+            continue;
+        }
+        collect_production_rs(&src, &mut files);
+    }
+    files
+}
+
+#[test]
+fn retired_symbols_absent_from_production_source() {
+    let files = collect_production_sources();
 
     for symbol in RETIRED_SYMBOLS {
-        let mut hit_files: Vec<(PathBuf, Vec<usize>)> = Vec::new();
+        let mut hits: Vec<(PathBuf, Vec<usize>)> = Vec::new();
         for file in &files {
             let Ok(text) = std::fs::read_to_string(file) else {
                 continue;
             };
-            let lines: Vec<usize> = text
+            let processed = preprocess(&text);
+            let lines: Vec<usize> = processed
                 .lines()
                 .enumerate()
                 .filter_map(|(i, l)| {
@@ -335,24 +581,116 @@ fn no_legacy_walker_inner_helpers_outside_their_definitions() {
                 })
                 .collect();
             if !lines.is_empty() {
-                hit_files.push((file.clone(), lines));
+                hits.push((file.clone(), lines));
             }
         }
-        // Post-cutover the inner walker helpers are DELETED — the
-        // only allowed references are in historical architecture
-        // documentation (`docs/arch/debt-closure/`).
-        for (file, lines) in &hit_files {
-            let path_str = file.to_string_lossy();
-            let is_allowed = path_str.contains("docs/arch/debt-closure/")
-                || path_str.contains("docs\\arch\\debt-closure\\");
-            assert!(
-                is_allowed,
-                "Phase 9 static-grep gate (plan §11.4): retired walker-family \
-                 symbol `{symbol}` reintroduced at {file:?} lines {lines:?}. \
-                 Post-cutover the inner walker family is DELETED — the only \
-                 allowed references are historical docs under \
-                 `docs/arch/debt-closure/`."
-            );
-        }
+        assert!(
+            hits.is_empty(),
+            "retired symbol `{symbol}` reintroduced in production source. \
+             RETIRED_SYMBOLS guards against revival of deleted helpers; \
+             remove the offending site or, if the symbol is legitimately \
+             back in use as a new construct, justify and delete its entry \
+             from RETIRED_SYMBOLS.\nHits:\n{hits:#?}"
+        );
     }
+}
+
+// ===== Discriminating tests for the scanner's restriction discipline =====
+//
+// The two tests below pin the scanner's discipline contract:
+//
+//  * `scanner_ignores_test_files_and_inline_test_modules` constructs
+//    a synthetic fixture tree where a retired identifier appears
+//    inside (a) a `*_tests.rs` sibling, (b) a `tests/` subdirectory,
+//    (c) a doc comment, and (d) an inline `#[cfg(test)] mod tests`
+//    block — and asserts every variant is IGNORED by `preprocess` +
+//    `is_test_file`.
+//
+//  * `scanner_detects_retired_identifier_in_production_source`
+//    constructs a synthetic production file with a live reference to
+//    a retired identifier and asserts the scanner FINDS it.
+//
+// Together they discriminate the W8.1-fix upgrade: on the pre-fix
+// scanner (which scanned `.md` files, comments, and test files
+// indiscriminately) the first test fails. On the post-fix scanner
+// both tests pass.
+
+#[test]
+fn scanner_ignores_test_files_and_inline_test_modules() {
+    // (a) `_tests.rs` sibling — `is_test_file` must return true.
+    let tests_sibling = PathBuf::from("crates/example/src/foo_tests.rs");
+    assert!(
+        is_test_file(&tests_sibling),
+        "_tests.rs sibling must be classified as a test file"
+    );
+
+    // (b) `tests/` subdirectory — `is_test_file` must return true.
+    let tests_subdir = PathBuf::from("crates/example/src/tests/regress.rs");
+    assert!(
+        is_test_file(&tests_subdir),
+        "file under a tests/ segment must be classified as a test file"
+    );
+
+    // (c) Doc-comment references must be erased by `preprocess`.
+    let source_with_doc = "\
+/// This doc comment mentions parse_type_annotation as historical context.\n\
+//! Module-level doc mentions canonical_resolves_to_package too.\n\
+pub fn foo() {}\n";
+    let processed = preprocess(source_with_doc);
+    assert!(
+        !line_contains_identifier(&processed, "parse_type_annotation"),
+        "preprocess must erase /// doc-comment references"
+    );
+    assert!(
+        !line_contains_identifier(&processed, "canonical_resolves_to_package"),
+        "preprocess must erase //! module-doc references"
+    );
+
+    // (d) Inline `#[cfg(test)] mod tests { ... }` blocks must be
+    // erased by `preprocess` — references inside are test-only.
+    let source_with_inline_tests = "\
+pub fn live() {}\n\
+\n\
+#[cfg(test)]\n\
+mod tests {\n\
+    fn touch() {\n\
+        let _ = parse_type_annotation();\n\
+    }\n\
+}\n";
+    let processed = preprocess(source_with_inline_tests);
+    assert!(
+        !line_contains_identifier(&processed, "parse_type_annotation"),
+        "preprocess must erase #[cfg(test)] mod tests {{ ... }} bodies"
+    );
+}
+
+#[test]
+fn scanner_detects_retired_identifier_in_production_source() {
+    // Synthetic production fixture: a live reference to a retired
+    // identifier OUTSIDE comments, OUTSIDE strings, and OUTSIDE a
+    // `#[cfg(test)]` module. `preprocess` must keep it intact and
+    // `line_contains_identifier` must find it.
+    let live_production = "\
+pub fn live_caller() {\n\
+    let _ = parse_type_annotation(input);\n\
+}\n";
+    let processed = preprocess(live_production);
+    assert!(
+        processed
+            .lines()
+            .any(|l| line_contains_identifier(l, "parse_type_annotation")),
+        "scanner must detect live retired identifier in production source"
+    );
+
+    // Identifier-boundary discipline: `parse_type_annotation_v2` is
+    // NOT a hit on `parse_type_annotation` because the byte after the
+    // needle (`_`) extends the identifier.
+    let unrelated = "let _ = parse_type_annotation_v2();\n";
+    let processed2 = preprocess(unrelated);
+    assert!(
+        !processed2
+            .lines()
+            .any(|l| line_contains_identifier(l, "parse_type_annotation")),
+        "identifier-boundary matcher must not match `parse_type_annotation_v2`"
+    );
 }
