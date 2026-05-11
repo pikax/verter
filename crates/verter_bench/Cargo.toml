@@ -91,6 +91,10 @@ harness = false
 name = "new_impl_comparison"
 harness = false
 
+[[bench]]
+name = "checker_text_adapter"
+harness = false
+
 
 [[example]]
 name = "expression_validator"

@@ -104,14 +104,19 @@ impl TypeExpander for VerterTypeExpander {
 }
 
 /// Convert a resolved macro's props to `ExpandedMember` entries.
+///
+/// Reads the producer-populated `type_expr` / `payload_expr` fields directly.
+/// The producer (`resolver_core::surface_projector::project_macro_surfaces` and
+/// the cross-file external resolver) lowers OXC `TSType<'_>` AST nodes via
+/// `verter_type_expr_oxc::lower_ts_type` once at construction time; downstream
+/// consumers walk the typed form rather than reparsing the display string.
 pub fn resolved_macro_to_members(macro_meta: &ResolvedMacroMeta) -> Vec<ExpandedMember> {
     let mut members = Vec::new();
 
     for prop in &macro_meta.props {
         let type_expr = prop
-            .type_annotation
-            .as_deref()
-            .map(crate::resolver_core::type_text_parser::parse_type_text)
+            .type_expr
+            .clone()
             .unwrap_or_else(|| TypeExpr::primitive(PrimitiveName::Unknown));
         members.push(ExpandedMember {
             name: prop.name.clone(),
@@ -124,9 +129,8 @@ pub fn resolved_macro_to_members(macro_meta: &ResolvedMacroMeta) -> Vec<Expanded
 
     for emit in &macro_meta.emits {
         let type_expr = emit
-            .payload_type
-            .as_deref()
-            .map(crate::resolver_core::type_text_parser::parse_type_text)
+            .payload_expr
+            .clone()
             .unwrap_or_else(|| TypeExpr::primitive(PrimitiveName::Unknown));
         members.push(ExpandedMember {
             name: emit.name.clone(),
@@ -208,10 +212,9 @@ pub(crate) fn resolved_macro_to_expansion_via_solver(
     } else {
         macro_meta.declaration.canonical_source.as_str()
     };
-    // both
-    // Class A sites here are migrated to the shared dispatch helper.
-    let solve_via_dispatch = |text: &str| -> TypeExpr {
-        let parsed = crate::resolver_core::type_text_parser::parse_type_text(text);
+    // Shared dispatch helper: takes a producer-typed `TypeExpr` and routes it
+    // through the cross-file Class-A projector when a scope is known.
+    let solve_via_dispatch = |parsed: TypeExpr| -> TypeExpr {
         if scope.is_empty() {
             return parsed;
         }
@@ -223,8 +226,8 @@ pub(crate) fn resolved_macro_to_expansion_via_solver(
 
     for prop in &macro_meta.props {
         let type_expr = prop
-            .type_annotation
-            .as_deref()
+            .type_expr
+            .clone()
             .map(solve_via_dispatch)
             .unwrap_or_else(|| TypeExpr::primitive(PrimitiveName::Unknown));
 
@@ -239,8 +242,8 @@ pub(crate) fn resolved_macro_to_expansion_via_solver(
 
     for emit in &macro_meta.emits {
         let type_expr = emit
-            .payload_type
-            .as_deref()
+            .payload_expr
+            .clone()
             .map(solve_via_dispatch)
             .unwrap_or_else(|| TypeExpr::primitive(PrimitiveName::Unknown));
 
@@ -326,7 +329,7 @@ mod tests {
                     tags: vec![],
                     resolution_source: Default::default(),
                     resolution_error: None,
-                    type_expr: None,
+                    type_expr: Some(TypeExpr::primitive(PrimitiveName::String)),
                     type_expr_scope: None,
                 },
                 verter_semantic::analysis::AnalyzedPropField {
@@ -338,7 +341,7 @@ mod tests {
                     tags: vec![],
                     resolution_source: Default::default(),
                     resolution_error: None,
-                    type_expr: None,
+                    type_expr: Some(TypeExpr::primitive(PrimitiveName::Number)),
                     type_expr_scope: None,
                 },
             ],
@@ -518,7 +521,7 @@ export interface Button {
             tags: vec![],
             resolution_source: Default::default(),
             resolution_error: None,
-            type_expr: None,
+            type_expr: Some(TypeExpr::named("Button")),
             type_expr_scope: None,
         }];
 

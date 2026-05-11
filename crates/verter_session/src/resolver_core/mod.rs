@@ -30,8 +30,9 @@ pub mod symbol_resolver;
 pub mod type_expansion;
 pub mod type_expansion_host;
 pub mod type_expansion_verter;
-pub mod type_text_parser;
 pub mod vue_default_synth;
+
+pub mod checker_text_adapter;
 
 pub mod fuses;
 pub mod imported_root_db;
