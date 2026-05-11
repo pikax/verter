@@ -3383,36 +3383,35 @@ fn extract_props_from_options(opts: &AnalyzedOptionsApi, out: &mut Vec<PropAnaly
             .type_annotation
             .clone()
             .or_else(|| prop.type_constructor.clone());
+        // Prefer the analyzer-populated typed sidecar (`type_expr`) when
+        // available. The Options API analyzer now lowers `PropType<T>` AST
+        // nodes directly via `verter_type_expr_oxc::lower_ts_type`, so the
+        // structured form is authoritative for downstream consumers.
+        // Fall back to the constructor mapping only when no `PropType<T>`
+        // annotation was present.
+        let type_expr = if let Some(typed) = prop.type_expr.clone() {
+            typed
+        } else if let Some(rt) = prop.type_constructor.as_ref() {
+            match rt.as_str() {
+                "String" => TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+                "Number" => TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+                "Boolean" => TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
+                "Function" => unknown_type("Function".to_string()),
+                "Array" => unknown_type("Array".to_string()),
+                "Object" => unknown_type("Object".to_string()),
+                other => unknown_type(other.to_string()),
+            }
+        } else {
+            unknown_type("unknown".to_string())
+        };
         out.push(PropAnalysis {
             name: prop.name.clone(),
-            // `AnalyzedOptionsProp` does not currently carry a typed
-            // `type_expr` companion (W0.1 scope covered macro-side surfaces
-            // only — see feedback file for the follow-up debt). The raw
-            // annotation is preserved on `TypeExpr::Unknown { raw }`; the
-            // constructor branch maps Vue runtime constructor names
-            // structurally (no string parsing — these are nominal
-            // identifiers, not TS type annotations).
-            type_expr: prop
-                .type_annotation
-                .as_ref()
-                .map(|raw| unknown_type(raw.clone()))
-                .or_else(|| {
-                    prop.type_constructor.as_ref().map(|rt| match rt.as_str() {
-                        "String" => TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
-                        "Number" => TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
-                        "Boolean" => TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
-                        "Function" => unknown_type("Function".to_string()),
-                        "Array" => unknown_type("Array".to_string()),
-                        "Object" => unknown_type("Object".to_string()),
-                        other => unknown_type(other.to_string()),
-                    })
-                })
-                .unwrap_or_else(|| unknown_type("unknown".to_string())),
+            type_expr,
             type_expansion: None,
             raw_type,
-            // Options API path: `AnalyzedOptionsProp` carries only the
-            // text annotation, no typed sidecar — leave the companion
-            // unset.
+            // Options API path: `raw_type_expr` is for resolver-level typed
+            // companion to the raw_type text. The typed form is already on
+            // `type_expr` above; leave this unset.
             raw_type_expr: None,
             required: prop.is_required,
             has_default: prop.has_default,

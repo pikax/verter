@@ -2830,6 +2830,8 @@ fn options_api_props_used_when_no_composition_props() {
             has_default: true,
             default_value: None,
             type_annotation: None,
+            type_expr: None,
+            type_expr_scope: None,
             description: None,
             tags: Vec::new(),
             span: verter_span::Span::default(),
@@ -2876,6 +2878,12 @@ fn options_api_prop_type_annotation_is_preserved() {
             has_default: false,
             default_value: None,
             type_annotation: Some("HTMLCanvasElement".to_string()),
+            // Post-M5 fix: the Options API analyzer lowers PropType<T> AST
+            // nodes directly via `verter_type_expr_oxc::lower_ts_type` at
+            // the producer site. The fixture mints the typed sidecar here
+            // to mirror the analyzer-producer output.
+            type_expr: Some(TypeExpr::named("HTMLCanvasElement")),
+            type_expr_scope: Some(verter_type_expr::TypeExprScope::new("")),
             description: None,
             tags: Vec::new(),
             span: verter_span::Span::default(),
@@ -2902,19 +2910,17 @@ fn options_api_prop_type_annotation_is_preserved() {
     let result = extract_component_meta(input);
 
     assert_eq!(result.props.len(), 1);
-    // The Options API analyzer (`extract_options_props`) does not lower
-    // its prop type annotations through `lower_ts_type` (open follow-up
-    // debt — see W2.5 feedback file). The published surface therefore
-    // wraps the raw annotation in `TypeExpr::Unknown { raw }` so display
-    // passthroughs preserve the original text. The structured `Ref`
-    // shape will become available once `AnalyzedOptionsProp` gains a
-    // typed `type_expr` companion populated at analyzer-producer time.
+    // Post-M5 fix: the Options API path now surfaces the typed `Ref` shape
+    // because `extract_options_props` lowers `PropType<T>` AST nodes via
+    // `lower_ts_type` directly at the analyzer-producer site. The published
+    // `PropAnalysis.type_expr` is the structured `Ref { name: "HTMLCanvasElement" }`
+    // — NOT the previous `Unknown { raw: "..." }` fallback that masked the
+    // producer-chain gap.
     assert_eq!(
         result.props[0].type_expr,
-        TypeExpr::Unknown {
-            raw: "HTMLCanvasElement".to_string()
-        },
-        "Options API annotations are preserved as Unknown {{ raw }} until the analyzer lowers them"
+        TypeExpr::named("HTMLCanvasElement"),
+        "Options API PropType<T> must surface as the typed Ref form, NOT Unknown {{ raw }} — \
+         pre-M5 fix the analyzer didn't lower PropType<T> AST nodes",
     );
     assert_eq!(
         result.props[0].raw_type.as_deref(),

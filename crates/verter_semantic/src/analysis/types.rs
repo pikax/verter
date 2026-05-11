@@ -1178,8 +1178,21 @@ pub struct AnalyzedOptionsProp {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_value: Option<String>,
     /// Type annotation from `PropType<T>` (e.g., `"HTMLCanvasElement"`).
+    /// Display-only — typed consumers MUST read `type_expr` (typed sidecar).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub type_annotation: Option<String>,
+    /// Lowered typed form of the `PropType<T>` annotation. Populated by the
+    /// analyzer when an OXC `TSType<'_>` for `T` is in scope (i.e., the prop
+    /// is defined as `{ type: <ctor> as PropType<T> }`). Authoritative for
+    /// resolver / projector / registry / policy / materialiser consumers —
+    /// `type_annotation` is display-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_expr: Option<TypeExpr>,
+    /// Scope of `type_expr`: canonical_id of the file whose OXC parse
+    /// produced the typed expression. Pairing invariant:
+    /// `type_expr.is_some() <=> type_expr_scope.is_some()`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_expr_scope: Option<TypeExprScope>,
     /// JSDoc description (e.g., `"The display label"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,

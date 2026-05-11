@@ -137,6 +137,8 @@ fn extract_options_props(
                         has_default: false,
                         default_value: None,
                         type_annotation: None,
+                        type_expr: None,
+                        type_expr_scope: None,
                         description: None,
                         tags: Vec::new(),
                     })
@@ -168,13 +170,16 @@ fn extract_options_props(
                         has_default: false,
                         default_value: None,
                         type_annotation: None,
+                        type_expr: None,
+                        type_expr_scope: None,
                         description,
                         tags,
                     }),
                     // Full object: `foo: { type: String, required: true, default: 'x' }`
                     Expression::ObjectExpression(sub_obj) => {
                         let mut type_constructor = None;
-                        let mut type_annotation = None;
+                        let mut type_annotation: Option<String> = None;
+                        let mut type_expr: Option<verter_type_expr::TypeExpr> = None;
                         let mut is_required = false;
                         let mut has_default = false;
                         let mut default_value = None;
@@ -191,11 +196,17 @@ fn extract_options_props(
                                     // Unwrap `X as PropType<T>` to get the base identifier
                                     let expr = match &sp.value {
                                         Expression::TSAsExpression(ts_as) => {
-                                            // Extract PropType<T> type argument
-                                            type_annotation = extract_prop_type_annotation(
-                                                &ts_as.type_annotation,
-                                                source,
-                                            );
+                                            // Extract PropType<T> type argument as
+                                            // (display string, lowered typed form).
+                                            if let Some((text, lowered)) =
+                                                extract_prop_type_annotation(
+                                                    &ts_as.type_annotation,
+                                                    source,
+                                                )
+                                            {
+                                                type_annotation = Some(text);
+                                                type_expr = Some(lowered);
+                                            }
                                             &ts_as.expression
                                         }
                                         other => other,
@@ -215,6 +226,28 @@ fn extract_options_props(
                             }
                         }
 
+                        // Pairing invariant: when `type_expr` is populated, the
+                        // `type_expr_scope` must also be populated. The Options
+                        // API path always parses the prop in the local SFC's
+                        // OXC arena, so the scope is the local SFC's canonical
+                        // ID. The analyzer-producer doesn't thread the file
+                        // canonical_id (the existing macros.rs analyzer
+                        // follows the same convention — see
+                        // `parsed_type_argument_scope` populated with
+                        // `TypeExprScope::new("")` at the producer site,
+                        // re-stamped to the owner canonical by downstream
+                        // projector consumers). Use the same empty-string
+                        // sentinel so the pairing invariant holds; downstream
+                        // consumers stamp the real owner canonical when they
+                        // surface the typed form.
+                        let type_expr_scope = type_expr
+                            .as_ref()
+                            .map(|_| verter_type_expr::TypeExprScope::new(""));
+                        debug_assert!(
+                            type_expr.is_some() == type_expr_scope.is_some(),
+                            "AnalyzedOptionsProp pairing invariant: type_expr.is_some() == type_expr_scope.is_some()",
+                        );
+
                         Some(AnalyzedOptionsProp {
                             name,
                             span,
@@ -223,6 +256,8 @@ fn extract_options_props(
                             has_default,
                             default_value,
                             type_annotation,
+                            type_expr,
+                            type_expr_scope,
                             description,
                             tags,
                         })
@@ -236,6 +271,8 @@ fn extract_options_props(
                         has_default: false,
                         default_value: None,
                         type_annotation: None,
+                        type_expr: None,
+                        type_expr_scope: None,
                         description,
                         tags,
                     }),
@@ -247,6 +284,8 @@ fn extract_options_props(
                         has_default: false,
                         default_value: None,
                         type_annotation: None,
+                        type_expr: None,
+                        type_expr_scope: None,
                         description,
                         tags,
                     }),
@@ -597,8 +636,19 @@ fn extract_default_value(expr: &Expression<'_>, source: &str) -> Option<String> 
     }
 }
 
-/// Extract the type argument from `PropType<T>` in a TSAsExpression.
-fn extract_prop_type_annotation(ts_type: &TSType<'_>, source: &str) -> Option<String> {
+/// Extract the type argument from `PropType<T>` in a TSAsExpression as both
+/// a display string AND a typed `TypeExpr` lowered directly from the OXC
+/// `TSType<'_>` AST node.
+///
+/// Typed-IR-Only Resolver Rule (CLAUDE.md): the analyzer is the producer-side
+/// site that has the OXC AST in scope. The previous string-only return value
+/// forced downstream consumers to wrap the raw text in `TypeExpr::Unknown
+/// { raw }`, silently masking a producer-chain gap (W2.5 follow-up debt).
+/// Lower here so the published surface carries the structured form.
+fn extract_prop_type_annotation(
+    ts_type: &TSType<'_>,
+    source: &str,
+) -> Option<(String, verter_type_expr::TypeExpr)> {
     if let TSType::TSTypeReference(ref_type) = ts_type {
         let name = match &ref_type.type_name {
             TSTypeName::IdentifierReference(id) => id.name.as_str(),
@@ -610,7 +660,13 @@ fn extract_prop_type_annotation(ts_type: &TSType<'_>, source: &str) -> Option<St
                     let start = first.span().start as usize;
                     let end = first.span().end as usize;
                     if end <= source.len() {
-                        return Some(source[start..end].to_string());
+                        let text = source[start..end].to_string();
+                        // Lower the OXC TSType<'_> directly via the
+                        // analyzer-producer lowering entry point. The
+                        // borrowed arena is dropped here; the resulting
+                        // owned TypeExpr survives.
+                        let lowered = verter_type_expr_oxc::lower_ts_type(first, source);
+                        return Some((text, lowered));
                     }
                 }
             }

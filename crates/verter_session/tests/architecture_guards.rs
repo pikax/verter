@@ -3840,6 +3840,14 @@ mod foundations_guards {
             "crates/verter_session/src/component_meta_materialize.rs",
             "crates/verter_session/src/host_manage.rs",
             "crates/verter_session/src/host_manage/analysis_io.rs",
+            // Macro-participation classification + cross-file dep
+            // discovery + structural rep walkers. Two iterative
+            // exhaustive TypeExpr walkers (collect /
+            // expr_contains_root_identity) per the W6.1 walker contract
+            // — splitting them across files would either duplicate the
+            // walker logic or force a shared helper crate, neither of
+            // which is cleaner than a co-located walker module.
+            "crates/verter_session/src/host_manage/component_meta_extract.rs",
             "crates/verter_session/src/host_manage/component_meta_methods.rs",
             "crates/verter_session/src/host_resolve.rs",
             "crates/verter_session/src/meta_resolve/materialize/field_types.rs",
