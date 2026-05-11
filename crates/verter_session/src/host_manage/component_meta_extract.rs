@@ -203,105 +203,128 @@ fn merge_evaluated_prop_types_into_meta(
     host: &VerterHost,
     owner_canonical: &str,
     meta: &mut verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    snapshot: &FileAnalysisSnapshot,
     evaluated_types: Option<&verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
 ) {
+    use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
+    use verter_semantic::analysis::AnalyzedMacroKind;
+
     let Some(evaluated_types) = evaluated_types else {
         return;
     };
-    fn collect_imported_props_like_raw_refs(
+
+    // Macro kinds whose type arguments contribute to the "props-like"
+    // surface: `defineProps`, `withDefaults` (which wraps defineProps),
+    // and `defineModel` (whose declared type joins the props surface).
+    // The same helper is reused for emit (`&[DefineEmits]`), slot
+    // (`&[DefineSlots]`), and model (`&[DefineModel]`) callers.
+    let prop_macro_kinds: &[AnalyzedMacroKind] = &[
+        AnalyzedMacroKind::DefineProps,
+        AnalyzedMacroKind::WithDefaults,
+        AnalyzedMacroKind::DefineModel,
+    ];
+
+    // Build the macro-participation index ONCE per call by reading
+    // analyzer-published facts (`AnalyzedMacro.type_references`,
+    // `parsed_type_argument`'s pre-recorded refs, and the
+    // `resolved_local_types[i].type_expr` closure). The set keys by
+    // `ResolvedRootIdentity` so the same name declared in two scopes
+    // is not collapsed. Type-role classification is structural — see
+    // the Typed-IR-Only Resolver Rule in CLAUDE.md.
+    let macro_participating_identities =
+        build_macro_participating_identities(host, owner_canonical, snapshot, prop_macro_kinds);
+
+    fn expr_contains_root_identity(
+        expr: &verter_type_expr::TypeExpr,
         host: &VerterHost,
         owner_canonical: &str,
-        raw_type: Option<&str>,
-    ) -> rustc_hash::FxHashSet<(String, usize)> {
-        fn collect(
-            expr: &verter_type_expr::TypeExpr,
-            refs: &mut rustc_hash::FxHashSet<(String, usize)>,
-        ) {
-            use verter_type_expr::TypeExpr;
-
-            match expr {
-                TypeExpr::Parenthesized(inner) => collect(inner, refs),
-                TypeExpr::Ref {
-                    name,
-                    type_arguments,
-                } => {
-                    if name.ends_with("Props") {
-                        refs.insert((name.to_string(), type_arguments.len()));
-                    }
-                    for arg in type_arguments.iter() {
-                        collect(arg, refs);
-                    }
-                }
-                TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
-                    for ty in types.iter() {
-                        collect(ty, refs);
-                    }
-                }
-                TypeExpr::Array { element, .. } => collect(element, refs),
-                TypeExpr::Tuple { elements, .. } => {
-                    for element in elements.iter() {
-                        collect(&element.ty, refs);
-                    }
-                }
-                TypeExpr::IndexedAccess { object, index } => {
-                    collect(object, refs);
-                    collect(index, refs);
-                }
-                _ => {}
-            }
-        }
-
-        let Some(raw_type) = raw_type else {
-            return rustc_hash::FxHashSet::default();
-        };
-        let parsed = verter_type_expr_oxc::parse_type_annotation(raw_type);
-        let mut refs = rustc_hash::FxHashSet::default();
-        collect(&parsed, &mut refs);
-        refs.retain(|(name, _)| {
-            host.resolve_local_import_symbol_target(owner_canonical, name)
-                .is_some()
-                || {
-                    let declaration =
-                        crate::meta_resolve::resolve_type_declaration(host, owner_canonical, name);
-                    !declaration.canonical_source.is_empty()
-                        && declaration.canonical_source != owner_canonical
-                }
-        });
-        refs
-    }
-
-    fn expr_contains_public_ref(
-        expr: &verter_type_expr::TypeExpr,
-        name: &str,
+        target: &ResolvedRootIdentity,
         type_argument_arity: usize,
+        visited_exprs: &mut rustc_hash::FxHashSet<*const verter_type_expr::TypeExpr>,
     ) -> bool {
         use verter_type_expr::TypeExpr;
 
+        if !visited_exprs.insert(expr as *const TypeExpr) {
+            return false;
+        }
+
         match expr {
-            TypeExpr::Parenthesized(inner) => {
-                expr_contains_public_ref(inner, name, type_argument_arity)
-            }
+            TypeExpr::Parenthesized(inner) => expr_contains_root_identity(
+                inner,
+                host,
+                owner_canonical,
+                target,
+                type_argument_arity,
+                visited_exprs,
+            ),
             TypeExpr::Ref {
-                name: current_name,
+                name,
                 type_arguments,
             } => {
-                (current_name.as_ref() == name && type_arguments.len() == type_argument_arity)
-                    || type_arguments
-                        .iter()
-                        .any(|arg| expr_contains_public_ref(arg, name, type_argument_arity))
+                if type_arguments.len() == type_argument_arity {
+                    if let Some(identity) =
+                        resolve_ref_to_root_identity(host, owner_canonical, name.as_ref())
+                    {
+                        if identity == *target {
+                            return true;
+                        }
+                    }
+                }
+                type_arguments.iter().any(|arg| {
+                    expr_contains_root_identity(
+                        arg,
+                        host,
+                        owner_canonical,
+                        target,
+                        type_argument_arity,
+                        visited_exprs,
+                    )
+                })
             }
-            TypeExpr::Union(types) | TypeExpr::Intersection(types) => types
-                .iter()
-                .any(|ty| expr_contains_public_ref(ty, name, type_argument_arity)),
-            TypeExpr::Array { element, .. } => {
-                expr_contains_public_ref(element, name, type_argument_arity)
-            }
-            TypeExpr::Tuple { elements, .. } => elements
-                .iter()
-                .any(|element| expr_contains_public_ref(&element.ty, name, type_argument_arity)),
+            TypeExpr::Union(types) | TypeExpr::Intersection(types) => types.iter().any(|ty| {
+                expr_contains_root_identity(
+                    ty,
+                    host,
+                    owner_canonical,
+                    target,
+                    type_argument_arity,
+                    visited_exprs,
+                )
+            }),
+            TypeExpr::Array { element, .. } => expr_contains_root_identity(
+                element,
+                host,
+                owner_canonical,
+                target,
+                type_argument_arity,
+                visited_exprs,
+            ),
+            TypeExpr::Tuple { elements, .. } => elements.iter().any(|element| {
+                expr_contains_root_identity(
+                    &element.ty,
+                    host,
+                    owner_canonical,
+                    target,
+                    type_argument_arity,
+                    visited_exprs,
+                )
+            }),
             TypeExpr::IndexedAccess { object, index } => {
-                expr_contains_public_ref(object, name, type_argument_arity)
-                    || expr_contains_public_ref(index, name, type_argument_arity)
+                expr_contains_root_identity(
+                    object,
+                    host,
+                    owner_canonical,
+                    target,
+                    type_argument_arity,
+                    visited_exprs,
+                ) || expr_contains_root_identity(
+                    index,
+                    host,
+                    owner_canonical,
+                    target,
+                    type_argument_arity,
+                    visited_exprs,
+                )
             }
             _ => false,
         }
@@ -317,13 +340,25 @@ fn merge_evaluated_prop_types_into_meta(
         let Some(evaluated) = evaluated_by_name.get(prop.name.as_str()) else {
             continue;
         };
-        let imported_props_like_refs =
-            collect_imported_props_like_raw_refs(host, owner_canonical, prop.raw_type.as_deref());
-        if !imported_props_like_refs.is_empty()
-            && !imported_props_like_refs
+        let imported_macro_participating_refs = collect_imported_macro_participating_refs(
+            host,
+            owner_canonical,
+            &prop.type_expr,
+            &macro_participating_identities,
+        );
+        if !imported_macro_participating_refs.is_empty()
+            && !imported_macro_participating_refs
                 .iter()
-                .all(|(name, type_argument_arity)| {
-                    expr_contains_public_ref(evaluated, name, *type_argument_arity)
+                .all(|(identity, type_argument_arity)| {
+                    let mut visited_exprs = rustc_hash::FxHashSet::default();
+                    expr_contains_root_identity(
+                        evaluated,
+                        host,
+                        owner_canonical,
+                        identity,
+                        *type_argument_arity,
+                        &mut visited_exprs,
+                    )
                 })
         {
             // Allow the merge when the evaluated type is a materialized Object
@@ -354,6 +389,318 @@ fn merge_evaluated_prop_types_into_meta(
             prop.type_expr = (*evaluated).clone();
         }
     }
+}
+
+/// Resolve a bare type-name reference in the owner file's scope to its
+/// canonical `ResolvedRootIdentity` (defining file + symbol name).
+///
+/// Scope-aware: handles local declarations (returning
+/// `ResolvedRootIdentity { canonical_id: owner_canonical, .. }`) and
+/// imported names (returning the import target's canonical_id +
+/// imported name). Local declarations take precedence over imports per
+/// JavaScript module scoping (a local `Helper` shadows
+/// `import type { Helper } from "./b"`).
+///
+/// Cross-file resolution goes through `host.resolve_local_import_symbol_target`
+/// (cache-backed). No fresh resolver; no duplicate route discovery.
+fn resolve_ref_to_root_identity(
+    host: &VerterHost,
+    owner_canonical: &str,
+    name: &str,
+) -> Option<verter_semantic::analysis::type_solver::host::ResolvedRootIdentity> {
+    use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
+
+    if host
+        .local_type_declaration_id(owner_canonical, name)
+        .is_some()
+    {
+        return Some(ResolvedRootIdentity::new(owner_canonical, name));
+    }
+    host.resolve_local_import_symbol_target(owner_canonical, name)
+        .map(|(canonical_id, exported_name)| ResolvedRootIdentity::new(canonical_id, exported_name))
+}
+
+/// Build the set of macro-participating `ResolvedRootIdentity` values
+/// for an owner file's analysis snapshot, restricted to macros whose
+/// `kind` matches `macro_kinds`.
+///
+/// Reads ONLY analyzer-published facts:
+/// - `AnalyzedMacro.type_references` — names directly declared in the
+///   macro's `<Type>` argument.
+/// - `AnalyzedMacro.parsed_type_argument` — the macro's typed argument
+///   (`Arc<TypeExpr>`); the walker harvests every `Ref` name in the
+///   subtree.
+/// - `AnalyzedMacro.resolved_local_types[i].type_expr` — local-scope
+///   type expansions the analyzer already linked to the macro chain;
+///   every `Ref` name in the subtree contributes.
+///
+/// Names resolve to identities through `resolve_ref_to_root_identity`
+/// (scope-aware). Each identity is added once regardless of how many
+/// times its name appears.
+///
+/// Per the walker contract: this is an INDEX over analyzer-published
+/// facts. The walker does NOT recurse into alias bodies, does NOT walk
+/// the cross-file declaration graph, and does NOT trigger semantic
+/// expansion. Shallow-by-default holds; semantic expansion remains the
+/// consumer's lazy concern at the projector layer.
+fn build_macro_participating_identities(
+    host: &VerterHost,
+    owner_canonical: &str,
+    snapshot: &FileAnalysisSnapshot,
+    macro_kinds: &[verter_semantic::analysis::AnalyzedMacroKind],
+) -> rustc_hash::FxHashSet<verter_semantic::analysis::type_solver::host::ResolvedRootIdentity> {
+    let mut identities = rustc_hash::FxHashSet::default();
+
+    // Per-walk visited set for raw names so a recursive type alias
+    // (`type Foo = { next: Foo | null }`) is harvested exactly once
+    // even when both the name and the macro chain reach it from
+    // multiple anchors.
+    let mut visited_names: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
+
+    let record_name = |name: &str,
+                       identities: &mut rustc_hash::FxHashSet<_>,
+                       visited_names: &mut rustc_hash::FxHashSet<String>| {
+        if !visited_names.insert(name.to_string()) {
+            return;
+        }
+        if let Some(identity) = resolve_ref_to_root_identity(host, owner_canonical, name) {
+            identities.insert(identity);
+        }
+    };
+
+    for mac in snapshot.macros.iter() {
+        if !macro_kinds.contains(&mac.kind) {
+            continue;
+        }
+
+        for type_name in mac.type_references.iter() {
+            record_name(type_name.as_str(), &mut identities, &mut visited_names);
+        }
+
+        if let Some(parsed_arg) = mac.parsed_type_argument.as_ref() {
+            harvest_ref_names_iterative(parsed_arg.as_ref(), |name| {
+                record_name(name, &mut identities, &mut visited_names);
+            });
+        }
+
+        for resolved_local in mac.resolved_local_types.iter() {
+            // The local-type name itself participates (it is by
+            // definition a macro chain participant — the analyzer
+            // linked it).
+            record_name(
+                resolved_local.name.as_str(),
+                &mut identities,
+                &mut visited_names,
+            );
+            if let Some(local_expr) = resolved_local.type_expr.as_ref() {
+                harvest_ref_names_iterative(local_expr, |name| {
+                    record_name(name, &mut identities, &mut visited_names);
+                });
+            }
+        }
+    }
+
+    identities
+}
+
+/// Iterative `TypeExpr` walk collecting every `Ref` name in the
+/// subtree. Stack-overflow safe for deeply nested object/intersection
+/// types — the dedicated termination test exercises a programmatic
+/// 100-level nest.
+///
+/// Visited pointer-set guards against shared sub-expression revisits
+/// when the same `TypeExpr` node appears under multiple parents in a
+/// shared `Arc`-rooted tree.
+fn harvest_ref_names_iterative<F: FnMut(&str)>(root: &verter_type_expr::TypeExpr, mut sink: F) {
+    use verter_type_expr::TypeExpr;
+
+    let mut visited: rustc_hash::FxHashSet<*const TypeExpr> = rustc_hash::FxHashSet::default();
+    let mut worklist: Vec<&TypeExpr> = vec![root];
+
+    while let Some(expr) = worklist.pop() {
+        if !visited.insert(expr as *const TypeExpr) {
+            continue;
+        }
+        match expr {
+            TypeExpr::Parenthesized(inner) => worklist.push(inner),
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } => {
+                sink(name.as_ref());
+                for arg in type_arguments.iter() {
+                    worklist.push(arg);
+                }
+            }
+            TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
+                for ty in types.iter() {
+                    worklist.push(ty);
+                }
+            }
+            TypeExpr::Array { element, .. } => worklist.push(element),
+            TypeExpr::Tuple { elements, .. } => {
+                for element in elements.iter() {
+                    worklist.push(&element.ty);
+                }
+            }
+            TypeExpr::IndexedAccess { object, index } => {
+                worklist.push(object);
+                worklist.push(index);
+            }
+            TypeExpr::Object(obj) => {
+                for member in obj.properties.iter() {
+                    match member {
+                        verter_type_expr::ObjectMember::Property(prop) => worklist.push(&prop.ty),
+                        verter_type_expr::ObjectMember::Method(method) => {
+                            for param in method.function.parameters.iter() {
+                                worklist.push(&param.ty);
+                            }
+                            if let Some(ret) = method.function.return_type.as_ref() {
+                                worklist.push(ret.as_ref());
+                            }
+                        }
+                        verter_type_expr::ObjectMember::IndexSignature(idx) => {
+                            worklist.push(&idx.key_type);
+                            worklist.push(&idx.value_type);
+                        }
+                        verter_type_expr::ObjectMember::CallSignature(func)
+                        | verter_type_expr::ObjectMember::ConstructSignature(func) => {
+                            for param in func.parameters.iter() {
+                                worklist.push(&param.ty);
+                            }
+                            if let Some(ret) = func.return_type.as_ref() {
+                                worklist.push(ret.as_ref());
+                            }
+                        }
+                    }
+                }
+            }
+            TypeExpr::Function(func) => {
+                for param in func.parameters.iter() {
+                    worklist.push(&param.ty);
+                }
+                if let Some(ret) = func.return_type.as_ref() {
+                    worklist.push(ret.as_ref());
+                }
+            }
+            TypeExpr::Conditional {
+                check,
+                extends,
+                true_type,
+                false_type,
+            } => {
+                worklist.push(check);
+                worklist.push(extends);
+                worklist.push(true_type);
+                worklist.push(false_type);
+            }
+            TypeExpr::Mapped {
+                source,
+                value,
+                name_type,
+                ..
+            } => {
+                worklist.push(source);
+                worklist.push(value);
+                if let Some(nt) = name_type.as_ref() {
+                    worklist.push(nt.as_ref());
+                }
+            }
+            TypeExpr::KeyOf(inner) => worklist.push(inner),
+            TypeExpr::Rest(inner) => worklist.push(inner),
+            TypeExpr::RecursiveRef {
+                name,
+                type_arguments,
+                ..
+            } => {
+                sink(name.as_ref());
+                for arg in type_arguments.iter() {
+                    worklist.push(arg);
+                }
+            }
+            TypeExpr::TemplateLiteral { expressions, .. } => {
+                for ty in expressions.iter() {
+                    worklist.push(ty);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Walk `expr` (typed) collecting every `Ref` name with arity that
+/// resolves to a macro-participating identity in `participating`.
+///
+/// The walker is iterative (worklist-based) to avoid stack overflow on
+/// deeply nested types — see W6.1 deep-nesting termination test.
+/// Visited pointer-set prevents re-resolving the same `TypeExpr` node,
+/// and visited identity-set deduplicates the result set per call.
+///
+/// Cross-file resolution lookups (`resolve_ref_to_root_identity`) hit
+/// the shared host cache; no fresh resolver instance is constructed.
+fn collect_imported_macro_participating_refs(
+    host: &VerterHost,
+    owner_canonical: &str,
+    expr: &verter_type_expr::TypeExpr,
+    participating: &rustc_hash::FxHashSet<
+        verter_semantic::analysis::type_solver::host::ResolvedRootIdentity,
+    >,
+) -> rustc_hash::FxHashSet<(
+    verter_semantic::analysis::type_solver::host::ResolvedRootIdentity,
+    usize,
+)> {
+    use verter_type_expr::TypeExpr;
+
+    let mut out = rustc_hash::FxHashSet::default();
+    if participating.is_empty() {
+        return out;
+    }
+
+    let mut visited: rustc_hash::FxHashSet<*const TypeExpr> = rustc_hash::FxHashSet::default();
+    let mut worklist: Vec<&TypeExpr> = vec![expr];
+
+    while let Some(node) = worklist.pop() {
+        if !visited.insert(node as *const TypeExpr) {
+            continue;
+        }
+        match node {
+            TypeExpr::Parenthesized(inner) => worklist.push(inner),
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } => {
+                if let Some(identity) =
+                    resolve_ref_to_root_identity(host, owner_canonical, name.as_ref())
+                {
+                    if participating.contains(&identity) && identity.canonical_id != owner_canonical
+                    {
+                        out.insert((identity, type_arguments.len()));
+                    }
+                }
+                for arg in type_arguments.iter() {
+                    worklist.push(arg);
+                }
+            }
+            TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
+                for ty in types.iter() {
+                    worklist.push(ty);
+                }
+            }
+            TypeExpr::Array { element, .. } => worklist.push(element),
+            TypeExpr::Tuple { elements, .. } => {
+                for element in elements.iter() {
+                    worklist.push(&element.ty);
+                }
+            }
+            TypeExpr::IndexedAccess { object, index } => {
+                worklist.push(object);
+                worklist.push(index);
+            }
+            _ => {}
+        }
+    }
+
+    out
 }
 
 fn fill_missing_component_meta_prop_descriptions_from_imported_roots(
@@ -981,6 +1328,7 @@ pub(crate) fn extract_component_meta_from_resolved(
         host,
         canonical.as_str(),
         &mut meta,
+        &resolved.snapshot,
         resolved.evaluated_types.as_ref(),
     );
     if fill_missing_component_meta_prop_descriptions_from_imported_roots(
@@ -1055,6 +1403,7 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
         host,
         canonical.as_str(),
         &mut meta,
+        &resolved.snapshot,
         resolved.evaluated_types.as_ref(),
     );
     let mut visiting = rustc_hash::FxHashSet::default();
@@ -1082,3 +1431,63 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
     );
     (meta, fallthrough_facts)
 }
+
+/// Test-only entry point that exercises `harvest_ref_names_iterative`
+/// without requiring host state. Used by the deep-nesting termination
+/// characterisation test.
+#[cfg(test)]
+pub(in crate::host_manage) fn harvest_ref_names_for_test<F: FnMut(&str)>(
+    root: &verter_type_expr::TypeExpr,
+    sink: F,
+) {
+    harvest_ref_names_iterative(root, sink)
+}
+
+/// Test-only entry point that exercises `resolve_ref_to_root_identity`
+/// for the scope-correctness characterisation test.
+#[cfg(test)]
+pub(in crate::host_manage) fn resolve_ref_to_root_identity_for_test(
+    host: &VerterHost,
+    owner_canonical: &str,
+    name: &str,
+) -> Option<verter_semantic::analysis::type_solver::host::ResolvedRootIdentity> {
+    resolve_ref_to_root_identity(host, owner_canonical, name)
+}
+
+/// Test-only entry point that exercises
+/// `build_macro_participating_identities` for the positive macro-
+/// participation characterisation test. Pre-cutover, the parallel
+/// `collect_imported_props_like_raw_refs` walker filtered raw refs by
+/// `.ends_with("Props")`. The discriminator: a participating identity
+/// without a `Props` suffix must surface here.
+#[cfg(test)]
+pub(in crate::host_manage) fn build_macro_participating_identities_for_test(
+    host: &VerterHost,
+    owner_canonical: &str,
+    snapshot: &FileAnalysisSnapshot,
+    macro_kinds: &[verter_semantic::analysis::AnalyzedMacroKind],
+) -> rustc_hash::FxHashSet<verter_semantic::analysis::type_solver::host::ResolvedRootIdentity> {
+    build_macro_participating_identities(host, owner_canonical, snapshot, macro_kinds)
+}
+
+/// Test-only entry point that exercises
+/// `collect_imported_macro_participating_refs` for the positive
+/// macro-participation characterisation test.
+#[cfg(test)]
+pub(in crate::host_manage) fn collect_imported_macro_participating_refs_for_test(
+    host: &VerterHost,
+    owner_canonical: &str,
+    expr: &verter_type_expr::TypeExpr,
+    participating: &rustc_hash::FxHashSet<
+        verter_semantic::analysis::type_solver::host::ResolvedRootIdentity,
+    >,
+) -> rustc_hash::FxHashSet<(
+    verter_semantic::analysis::type_solver::host::ResolvedRootIdentity,
+    usize,
+)> {
+    collect_imported_macro_participating_refs(host, owner_canonical, expr, participating)
+}
+
+#[cfg(test)]
+#[path = "component_meta_extract_tests.rs"]
+mod component_meta_extract_tests;

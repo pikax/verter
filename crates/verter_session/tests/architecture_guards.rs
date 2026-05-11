@@ -8360,12 +8360,7 @@ mod typed_ir_resolver_guards {
     const PARSE_TYPE_ANNOTATION_ALLOWLIST: &[(&str, u32, &str)] = &[
         (
             "crates/verter_session/src/host_manage/component_meta_extract.rs",
-            257,
-            "parse_type_annotation",
-        ),
-        (
-            "crates/verter_session/src/host_manage/component_meta_extract.rs",
-            703,
+            1050,
             "parse_type_annotation",
         ),
         (
@@ -8555,21 +8550,18 @@ mod typed_ir_resolver_guards {
     // `crates/verter_session/src/**` and
     // `crates/verter_semantic/src/analysis/**`.
     //
-    // Removed by W6.1 (`collect_imported_props_like_raw_refs` deletion
-    // + `core.rs` policy predicate replacement).
+    // Cleared by W6.1 (`collect_imported_props_like_raw_refs` deletion +
+    // typed-IR macro-participation walker). The remaining entry in
+    // `core.rs` (the `is_props_suffix` policy predicate) is in
+    // W2.4/W4.4 policy territory and falls to a separate unit per the
+    // file-ownership rules; the allowlist reaches 0 once that unit
+    // lands.
     // -----------------------------------------------------------------------
-    const ROLE_NAME_SUFFIX_ALLOWLIST: &[(&str, u32, &str)] = &[
-        (
-            "crates/verter_session/src/component_meta_resolution_policy/core.rs",
-            552,
-            r#".ends_with("Props")"#,
-        ),
-        (
-            "crates/verter_session/src/host_manage/component_meta_extract.rs",
-            228,
-            r#".ends_with("Props")"#,
-        ),
-    ];
+    const ROLE_NAME_SUFFIX_ALLOWLIST: &[(&str, u32, &str)] = &[(
+        "crates/verter_session/src/component_meta_resolution_policy/core.rs",
+        552,
+        r#".ends_with("Props")"#,
+    )];
 
     fn scan_role_name_suffix() -> Vec<(String, u32, String)> {
         let suffixes: &[&str] = &["Props", "Emits", "Events", "Slots", "Model"];
