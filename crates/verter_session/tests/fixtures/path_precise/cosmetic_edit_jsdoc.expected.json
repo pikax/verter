@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "archetype": "cosmetic_edit_jsdoc",
+  "edit_kind": "jsdoc_edit",
+  "discrimination": {
+    "semantic_lane": {
+      "parse_stable_hash_invariant": true,
+      "MemberSemanticFactStore_recomputes": false,
+      "consumer_semantic_lane_invalidates": false
+    },
+    "display_lane": {
+      "content_hash_changes": true,
+      "MemberDisplayFactStore_recomputes": true,
+      "consumer_display_lane_invalidates": "only if display lane was observed"
+    }
+  },
+  "fact_dep_signature_observed_by_consumer": [
+    "Export(\"Props\", Type)",
+    "Export(\"Foo\", Type)",
+    "MemberShape(Foo, Type)",
+    "MemberPresence(Foo, \"a\", Type)",
+    "MemberPresence(Foo, \"b\", Type)"
+  ],
+  "invalidation_matrix": [
+    {
+      "edit": "rewrite JSDoc of Foo.a (no structural change)",
+      "stage_0_today_invalidates_consumer": true,
+      "stage_6d_target_invalidates_consumer": false,
+      "rule": "R13: semantic lane invariant; display lane recomputes but consumer didn't observe it"
+    }
+  ]
+}

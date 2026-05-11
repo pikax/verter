@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "archetype": "module_augmentation_relative",
+  "augmentation_target_kind": "ResolvedRelativeCanonical",
+  "augmentation_target_resolution_relative_to": "module_augmentation_relative.ts canonical path",
+  "augmented_member": { "name": "extension", "type": "string" },
+  "project_isolation_guarantee": "AugmentationTargetKey carries project_identity + resolve_env_hash; same syntactic `./local` in two projects produces two distinct keys",
+  "fact_dep_signature_observed_by_consumer": [
+    "ResolvedRelativeCanonical(\"./local\" resolved against augmenter_canonical)",
+    "ModuleAugmentationIndexShape(target=ResolvedRelativeCanonical(...))"
+  ]
+}

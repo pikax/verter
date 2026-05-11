@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "archetype": "keyof_full_surface",
+  "consumer_published_surface": {
+    "kind": "union",
+    "members": [
+      { "name": "a" },
+      { "name": "b" },
+      { "name": "c" }
+    ]
+  },
+  "fact_dep_signature_observed_by_consumer": [
+    "Export(\"Keys\", Type)",
+    "Export(\"Foo\", Type)",
+    "MemberShape(Foo, Type)"
+  ],
+  "invalidation_matrix": [
+    {
+      "edit": "edit Foo.a body",
+      "stage_0_today_invalidates_consumer": true,
+      "stage_6d_target_invalidates_consumer": false,
+      "rule": "R28: MemberShape unchanged when only a member's body type changes; keyof reads names+kinds only"
+    },
+    {
+      "edit": "add Foo.d",
+      "stage_0_today_invalidates_consumer": true,
+      "stage_6d_target_invalidates_consumer": true,
+      "rule": "R28: MemberShape gains a new (name, kind) entry"
+    },
+    {
+      "edit": "remove Foo.a",
+      "stage_0_today_invalidates_consumer": true,
+      "stage_6d_target_invalidates_consumer": true,
+      "rule": "R28: MemberShape loses an entry"
+    },
+    {
+      "edit": "rename Foo.a to Foo.aa",
+      "stage_0_today_invalidates_consumer": true,
+      "stage_6d_target_invalidates_consumer": true,
+      "rule": "R28: MemberShape changes (name set differs)"
+    }
+  ]
+}

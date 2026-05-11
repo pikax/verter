@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "archetype": "intersection_selection",
+  "consumer_published_surface": {
+    "kind": "intersection",
+    "selected_key": "x",
+    "members": [
+      { "name": "fooX", "from": "Foo" },
+      { "name": "barX", "from": "Bar" }
+    ]
+  },
+  "fact_dep_signature_observed_by_consumer": [
+    "Export(\"Selected\", Type)",
+    "Export(\"Foo\", Type)",
+    "Export(\"Bar\", Type)",
+    "MemberPresence(Foo, \"x\", Type)",
+    "MemberPresence(Bar, \"x\", Type)",
+    "Member(Foo, \"x\", Type)",
+    "Member(Bar, \"x\", Type)"
+  ],
+  "invalidation_matrix": [
+    {
+      "edit": "edit Foo.x body",
+      "stage_0_today_invalidates_consumer": true,
+      "stage_6d_target_invalidates_consumer": true,
+      "rule": "R14: Member(Foo, \"x\") observed by intersection arm"
+    },
+    {
+      "edit": "edit Bar.x body",
+      "stage_0_today_invalidates_consumer": true,
+      "stage_6d_target_invalidates_consumer": true,
+      "rule": "R14: Member(Bar, \"x\") observed by intersection arm"
+    },
+    {
+      "edit": "edit Foo.y body",
+      "stage_0_today_invalidates_consumer": true,
+      "stage_6d_target_invalidates_consumer": false,
+      "rule": "R14: Foo's non-contributing field; consumer never observed Member(Foo, \"y\")"
+    },
+    {
+      "edit": "edit Bar.y body",
+      "stage_0_today_invalidates_consumer": true,
+      "stage_6d_target_invalidates_consumer": false,
+      "rule": "R14: Bar's non-contributing field"
+    }
+  ]
+}
