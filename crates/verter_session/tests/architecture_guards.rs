@@ -8246,11 +8246,39 @@ mod typed_ir_resolver_guards {
 
     // -----------------------------------------------------------------------
     // Guard 1: `path.contains("/node_modules/")` and the Windows-backslash
-    // sibling. The single source of workspace classification truth is
-    // `ResolverContext::workspace_is_workspace_owned` /
-    // `workspace_is_package_backed`. Substring tests on canonical paths
-    // are banned everywhere except the implementation of the workspace
-    // classification API itself.
+    // sibling.
+    //
+    // Rule scope: the **typed-IR resolver pipeline** —
+    //   analyzer → projector → registry → policy → materialiser, plus
+    //   the JS compat layer in `@verter/component-meta/compat`. Within
+    //   that scope the single source of workspace classification truth
+    //   is `ResolverContext::workspace_is_workspace_owned` /
+    //   `workspace_is_package_backed`. Substring tests on canonical
+    //   paths are banned. The producer crates (`verter_session`,
+    //   `verter_semantic`) MUST route every workspace-membership
+    //   decision through `WorkspaceAccess`.
+    //
+    // Rule out of scope (and excluded from the allowlist on principle,
+    // not pending migration):
+    //   1. The implementation of the workspace classification API
+    //      itself. `verter_workspace::Project::matches_file` and the
+    //      sibling accessors on `Engine`, `FilesystemWorkspace`,
+    //      `MemoryWorkspace` are the primitives the public
+    //      `is_workspace_owned` / `is_package_backed` are built on.
+    //      Calling the public API from within its own implementation
+    //      would be circular.
+    //   2. Filesystem-event handlers that fire BELOW the workspace
+    //      registry — i.e. before any workspace snapshot has been
+    //      published, when `WorkspaceAccess::is_package_backed` is
+    //      definitionally `false` for every path (see engine.rs:
+    //      "Returns `false` before the workspace publishes its first
+    //      snapshot."). The LSP `is_config_file` watcher gate fires
+    //      on raw `DidChangeWatchedFilesParams` URIs and must filter
+    //      `node_modules/` config changes regardless of registry
+    //      readiness; switching it to the typed API would either
+    //      regress (rebuild on every node_modules change before first
+    //      snapshot) or require ordering that the LSP spec does not
+    //      guarantee.
     //
     // Allowlist removed by:
     //   * W2.2 — cold_resolver.rs (4 entries)
@@ -8263,28 +8291,26 @@ mod typed_ir_resolver_guards {
     //            meta_resolve/registry_materialize.rs
     //   * W4.5 — host_manage.rs (2) + meta_resolve/graph_predicates.rs
     //
-    // The two entries OUTSIDE `verter_session` are NOT removed by any
-    // migration unit:
-    //   * `verter_lsp/src/server_utils.rs:14` — config-file gate that
-    //     legitimately uses substring on the request URI
-    //     (callable before workspace ownership is published).
-    //   * `verter_workspace/src/resolver.rs:75` — implementation of the
-    //     workspace classification API itself; the substring is the
-    //     primitive that the public `is_workspace_owned` /
-    //     `is_package_backed` accessors are built on.
+    // Permanent exception entries (per the rule-scope clauses above):
+    //   * `verter_workspace/src/resolver.rs:84` — exception class (1):
+    //     the workspace classification API's own primitive.
+    //   * `verter_lsp/src/server_utils.rs:22` — exception class (2):
+    //     filesystem-event handler running below the workspace
+    //     registry. The LSP `did_change_watched_files` gate.
     //
-    // These two stay in the allowlist permanently. They are NOT
-    // resolver-pipeline sites.
+    // These two stay in the allowlist permanently. Neither is a
+    // resolver-pipeline site. The matching call sites carry pointer
+    // comments back to this rule-scope block.
     // -----------------------------------------------------------------------
     const NODE_MODULES_ALLOWLIST: &[(&str, u32, &str)] = &[
         (
             "crates/verter_lsp/src/server_utils.rs",
-            14,
+            22,
             r#".contains("/node_modules/")"#,
         ),
         (
             "crates/verter_workspace/src/resolver.rs",
-            75,
+            84,
             r#".contains("/node_modules/")"#,
         ),
     ];
@@ -8326,6 +8352,62 @@ mod typed_ir_resolver_guards {
             "no_node_modules_substring_outside_workspace_api",
             &actual,
             NODE_MODULES_ALLOWLIST,
+        );
+    }
+
+    /// The two permanent allowlist sites MUST carry pointer comments
+    /// back to this rule-scope block. The test reads the source of each
+    /// allowlisted file and asserts the function carrying the substring
+    /// is annotated with the rule scope. This is the negative half of
+    /// the guard: it would FAIL pre-F3 (the call sites had only a
+    /// one-line "// No config file inside node_modules..." comment and
+    /// no `matches_file` doc-comment) and PASSES post-F3 once the
+    /// pointer comments are in place.
+    #[test]
+    fn node_modules_allowlist_sites_carry_rule_scope_pointers() {
+        // Site 1 — LSP filesystem-event handler.
+        let lsp_src = super::read_workspace_file("crates/verter_lsp/src/server_utils.rs");
+        assert!(
+            lsp_src.contains("Architecture-guard exception")
+                && lsp_src.contains("DidChangeWatchedFilesParams")
+                && lsp_src.contains("no_node_modules_substring_outside_workspace_api"),
+            "verter_lsp::server_utils::is_config_file must carry a rule-scope \
+             pointer comment naming the architecture guard and the \
+             filesystem-event-handler exception class. Restore the \
+             docstring or remove the allowlist entry.",
+        );
+
+        // Site 2 — workspace API primitive.
+        let ws_src = super::read_workspace_file("crates/verter_workspace/src/resolver.rs");
+        assert!(
+            ws_src.contains("Architecture-guard exception")
+                && ws_src.contains("WorkspaceAccess::is_workspace_owned")
+                && ws_src.contains("no_node_modules_substring_outside_workspace_api"),
+            "verter_workspace::Project::matches_file must carry a rule-scope \
+             pointer comment naming the architecture guard and the \
+             workspace-API-primitive exception class. Restore the \
+             docstring or remove the allowlist entry.",
+        );
+
+        // The rule-scope block in this file MUST also carry the
+        // post-F3 exception-class language. Locks the docstring against
+        // silent weakening.
+        let guard_src =
+            super::read_workspace_file("crates/verter_session/tests/architecture_guards.rs");
+        assert!(
+            guard_src.contains("Rule scope: the **typed-IR resolver pipeline**"),
+            "the no_node_modules_substring_outside_workspace_api \
+             rule-scope block must state its scope explicitly.",
+        );
+        assert!(
+            guard_src.contains("Calling the public API from within its own implementation"),
+            "exception class (1) — workspace-API primitive — must be \
+             documented at the rule-scope block.",
+        );
+        assert!(
+            guard_src.contains("Filesystem-event handlers that fire BELOW the workspace"),
+            "exception class (2) — filesystem-event handler — must be \
+             documented at the rule-scope block.",
         );
     }
 

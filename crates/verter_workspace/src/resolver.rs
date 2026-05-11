@@ -70,6 +70,15 @@ impl IdeProjectConfig {
         }
     }
 
+    /// Whether `file_id` is a member of this project.
+    ///
+    /// Architecture-guard exception: the `/node_modules/` substring check
+    /// below IS the primitive that the public `WorkspaceAccess::is_workspace_owned`
+    /// and `is_package_backed` accessors are built on (see
+    /// `Engine::is_workspace_owned` in engine.rs). Calling the typed API from
+    /// inside its own implementation would be circular. See exception
+    /// class (1) in `crates/verter_session/tests/architecture_guards.rs` →
+    /// `no_node_modules_substring_outside_workspace_api`.
     pub fn matches_file(&self, file_id: &str) -> bool {
         let normalized_file = normalize_canonical_id(file_id);
         if normalized_file.contains("/node_modules/") {

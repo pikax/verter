@@ -9,6 +9,14 @@ use super::*;
 /// that should trigger a project registry rebuild when changed on disk.
 ///
 /// Matches: `tsconfig*.json`, `.verterrc.json`, `vite.config.{ts,js,...}`, `package.json`.
+///
+/// Architecture-guard exception: this is a filesystem-event handler. It
+/// fires on `DidChangeWatchedFilesParams` URIs before the workspace
+/// registry may have published a snapshot, so it cannot consult
+/// `WorkspaceAccess::is_package_backed` (which returns `false` for every
+/// path until the first publish). See exception class (2) in
+/// `crates/verter_session/tests/architecture_guards.rs` →
+/// `no_node_modules_substring_outside_workspace_api`.
 pub(super) fn is_config_file(path: &str) -> bool {
     // No config file inside node_modules should trigger a registry rebuild.
     if path.contains("/node_modules/") {
