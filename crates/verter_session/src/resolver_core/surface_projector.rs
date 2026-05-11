@@ -603,7 +603,7 @@ pub fn find_heritage_type_imports_in_source(
 ///
 /// The caller supplies the slot prop's `type_expr` (lowered once during
 /// shallow analysis); the walker reads typed IR only — no source slicing,
-/// no `parse_type_annotation`, no hand-rolled type-text splitters.
+/// no text-mode reparse, no hand-rolled type-text splitters.
 ///
 /// Walks the typed form:
 /// - Iteratively unwraps `TypeExpr::Parenthesized` (bounded).

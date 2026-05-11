@@ -7,9 +7,10 @@
 //! Typed-IR-Only Resolver Rule (see CLAUDE.md) makes structural rather
 //! than text-driven. The discriminator in every test is the absence
 //! of a source-text reparse: each test is engineered to FAIL if a
-//! future change reintroduces `parse_type_annotation(raw_text)` or
-//! `format!(...).parse_type_annotation(...)` round-trips inside the
-//! projector / materialiser pipeline.
+//! future change reintroduces text-mode reparse such as
+//! `parse_jsdoc_tag_type_payload(raw_text)` or
+//! `format!(...).parse_jsdoc_tag_type_payload(...)` round-trips inside
+//! the projector / materialiser pipeline.
 
 use std::sync::Arc;
 
@@ -25,8 +26,8 @@ use super::materialize::slot_field_function_type_expr;
 //
 // The function constructs `TypeExpr::Function` directly from
 // `AnalyzedSlotField.return_expr` and `AnalyzedSlotFieldBinding.binding_expr`.
-// No `format!()` of synthetic source text and no `parse_type_annotation`
-// round-trip.
+// No `format!()` of synthetic source text and no text-mode reparse
+// (e.g. `parse_jsdoc_tag_type_payload`) round-trip.
 //
 // Discriminator: this test supplies `binding_expr` typed forms WITHOUT
 // `type_annotation` text. A reparse path keyed off `type_annotation`
@@ -166,7 +167,8 @@ fn contains_unknown(expr: &TypeExpr) -> bool {
 // analyzer at OXC visit time — when the post-expansion `r#type`
 // strictly underperforms the typed sidecar. A regression that
 // reintroduced source-text reparse would also produce a passing
-// result, but the architecture guard `no_parse_type_annotation_outside_jsdoc`
+// result, but the architecture guard
+// `no_parse_jsdoc_tag_type_payload_outside_jsdoc`
 // blocks that escape hatch; together this fixture and the guard pin
 // the typed-IR-only contract.
 // ---------------------------------------------------------------------------

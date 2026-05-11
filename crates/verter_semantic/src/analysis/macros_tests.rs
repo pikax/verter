@@ -2496,7 +2496,7 @@ mod w1_1_typed_form_regression {
 // ───────────────────────────────────────────────────────────────────────────
 // W2.5 — `build_expanded_type_expr` consumes the analyzer-populated
 // `AnalyzedPropField.type_expr` directly. The pre-cutover code parsed
-// `type_annotation` text via `parse_type_annotation`, which loses the
+// `type_annotation` text via `parse_jsdoc_tag_type_payload`, which loses the
 // producer's typed precision and replaces complex shapes with whatever the
 // text parser reconstructs. The discriminator is to construct a synthetic
 // prop field whose `type_expr` shape would NOT round-trip through text:
@@ -2556,7 +2556,7 @@ fn build_expanded_type_expr_consumes_type_expr_field_directly_without_reparse() 
     // the text parser would have produced. If they happened to coincide
     // (e.g. via accidental annotation choice), the test would not be
     // characterising anything.
-    let from_text = verter_type_expr_oxc::parse_type_annotation("Garbage<<<unparseable");
+    let from_text = crate::analysis::jsdoc::parse_jsdoc_tag_type_payload("Garbage<<<unparseable");
     assert_ne!(
         from_text, typed_indexed_access,
         "the annotation text MUST NOT round-trip back to the typed shape; \

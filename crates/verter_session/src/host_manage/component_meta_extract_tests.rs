@@ -432,9 +432,10 @@ fn build_public_instance_slot_type_consumes_return_expr_not_return_type() {
     );
 
     // Negative: the built return type MUST NOT be the lowered form of
-    // the display string. This guards against a parse_type_annotation
+    // the display string. This guards against a text-mode reparse
     // fallback re-entering the consumer.
-    let lowered_from_display = verter_type_expr_oxc::parse_type_annotation("VNode[]");
+    let lowered_from_display =
+        verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("VNode[]");
     assert_ne!(
         *return_type, lowered_from_display,
         "build_public_instance_slot_type MUST NOT reparse `slot.return_type`          when `slot.return_expr` is present."

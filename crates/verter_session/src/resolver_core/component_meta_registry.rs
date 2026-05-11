@@ -2329,7 +2329,9 @@ mod tests {
 
     #[test]
     fn indexed_access_route_preserves_full_member_path() {
-        let expr = verter_type_expr_oxc::parse_type_annotation("Button['variants']['color']");
+        let expr = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(
+            "Button['variants']['color']",
+        );
 
         assert_eq!(
             component_meta_registry_public_indexed_access_route(&expr),
@@ -2342,7 +2344,7 @@ mod tests {
 
     #[test]
     fn collect_registry_refs_preserves_indexed_access_member_path() {
-        let expr = verter_type_expr_oxc::parse_type_annotation("Button['ui']");
+        let expr = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("Button['ui']");
         let published_names = rustc_hash::FxHashSet::default();
         let mut queued_names = rustc_hash::FxHashSet::default();
         let mut output = VecDeque::new();
@@ -2481,7 +2483,9 @@ mod tests {
 
     #[test]
     fn field_expr_actionable_route_recognizes_direct_generic_refs() {
-        let expr = verter_type_expr_oxc::parse_type_annotation("GetModelValue<T, VK, true>");
+        let expr = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(
+            "GetModelValue<T, VK, true>",
+        );
 
         assert!(
             component_meta_registry_field_expr_has_actionable_route(&expr),

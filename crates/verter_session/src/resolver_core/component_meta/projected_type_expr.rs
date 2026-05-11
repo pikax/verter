@@ -513,7 +513,7 @@ mod tests {
     ///
     /// The aggregate `slots_expr` is left `None` so the per-field
     /// fallback path runs (i.e. the path the cutover deletes its
-    /// `parse_type_annotation` calls from). This is the discriminator.
+    /// text-reparse calls from). This is the discriminator.
     #[test]
     fn projected_slot_function_reads_typed_sidecars_not_synthesised_text() {
         let projected = ProjectedMacroSurfaces {

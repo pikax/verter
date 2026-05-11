@@ -1,30 +1,33 @@
 //! Parity test: `lower_ts_type` (direct OXC AST visit) vs.
-//! `parse_type_annotation` (wrap-and-lower convenience helper).
+//! `parse_jsdoc_tag_type_payload` (JSDoc-private wrap-and-lower helper).
 //!
 //! Both code paths must produce equivalent `TypeExpr` for every fixture
-//! in the curated corpus. This is the W0.7 contract from the
-//! "eradicate-string-resolver-paths" plan: the resolver pipeline only
-//! ever lowers `TSType<'_>` AST nodes — never source-slice + reparse
-//! them — and the convenience helper for raw-text input must agree
-//! with the direct AST path bit-for-bit.
+//! in the curated corpus. The helper lives in
+//! `verter_semantic::analysis::jsdoc` (post-W5.2 rename); it is the
+//! single permitted text-input boundary for the typed-IR resolver
+//! pipeline. Every other producer-side caller lowers from a
+//! `TSType<'_>` AST node via `verter_type_expr_oxc::lower_ts_type`
+//! directly.
 //!
 //! Path A: parse `type __T = INPUT;` via OXC, walk to the
 //! `TSTypeAliasDeclaration` named `__T`, read its `.type_annotation`,
 //! and call `lower_ts_type(&type_annotation, &wrapped_source)`.
 //!
-//! Path B: call `parse_type_annotation(INPUT)` — the public
-//! wrap-and-lower helper exposed by `verter_type_expr_oxc`.
+//! Path B: call `parse_jsdoc_tag_type_payload(INPUT)` — the
+//! JSDoc-private wrap-and-lower helper exposed by `verter_semantic`.
 //!
 //! Both go through the canonical OXC parser; neither bypasses the
 //! lowering routines. A divergence indicates a real bug in the
-//! lowering layer, not a test artefact — the corpus is the contract.
+//! lowering layer or in the helper, not a test artefact — the corpus
+//! is the contract.
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::Statement;
 use oxc_parser::Parser;
 use oxc_span::SourceType;
+use verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload;
 use verter_type_expr::TypeExpr;
-use verter_type_expr_oxc::{lower_ts_type, parse_type_annotation};
+use verter_type_expr_oxc::lower_ts_type;
 
 /// Curated corpus exercising every `TSType` variant the resolver hits.
 ///
@@ -153,13 +156,13 @@ fn lower_via_ast(input: &str) -> TypeExpr {
     );
 }
 
-/// Path B — call the public wrap-and-lower convenience helper.
-fn lower_via_parse_helper(input: &str) -> TypeExpr {
-    parse_type_annotation(input)
+/// Path B — call the JSDoc-private wrap-and-lower helper.
+fn lower_via_jsdoc_helper(input: &str) -> TypeExpr {
+    parse_jsdoc_tag_type_payload(input)
 }
 
 #[test]
-fn lower_ts_type_and_parse_type_annotation_agree_on_corpus() {
+fn lower_ts_type_and_parse_jsdoc_tag_type_payload_agree_on_corpus() {
     // Sanity: cross-check the corpus length against the §6 W0.7
     // categorical breakdown so a mis-edit can't silently shrink the
     // gate. 12 + 8 + 6 + 9 + 11 + 25 + 2 + 1 + 1 + 1 = 76.
@@ -174,7 +177,7 @@ fn lower_ts_type_and_parse_type_annotation_agree_on_corpus() {
 
     for fixture in PARITY_CORPUS {
         let a = lower_via_ast(fixture);
-        let b = lower_via_parse_helper(fixture);
+        let b = lower_via_jsdoc_helper(fixture);
         if a != b {
             divergences.push(((*fixture).to_string(), format!("{a:#?}"), format!("{b:#?}")));
         }

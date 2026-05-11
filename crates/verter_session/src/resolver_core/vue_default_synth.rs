@@ -187,7 +187,7 @@ mod tests {
     use verter_type_expr::TypeExpr;
 
     fn type_based_macro(kind: AnalyzedMacroKind, type_text: &str) -> AnalyzedMacro {
-        let parsed = verter_type_expr_oxc::parse_type_annotation(type_text);
+        let parsed = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(type_text);
         AnalyzedMacro {
             kind,
             is_type_based: true,

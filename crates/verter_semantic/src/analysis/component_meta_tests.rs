@@ -59,7 +59,7 @@ pub(crate) fn lower_for_test(
     let Some(text) = type_ann else {
         return (None, None);
     };
-    let lowered = verter_type_expr_oxc::parse_type_annotation(text);
+    let lowered = crate::analysis::jsdoc::parse_jsdoc_tag_type_payload(text);
     if matches!(lowered, verter_type_expr::TypeExpr::Unknown { .. }) {
         (None, None)
     } else {

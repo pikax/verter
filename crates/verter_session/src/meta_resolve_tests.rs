@@ -4868,7 +4868,8 @@ fn define_props_fields_fast_path_allows_direct_object_literals() {
         parsed_type_argument_scope: None,
         span: verter_span::Span::new(0, 0),
     };
-    let lowered = verter_type_expr_oxc::parse_type_annotation("{ title: string }");
+    let lowered =
+        verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("{ title: string }");
 
     assert!(
         define_props_fields_fast_path_allowed(&mac, 0, &[], Some(&lowered)),
@@ -4946,7 +4947,7 @@ fn define_props_fields_fast_path_rejects_complex_heritage_refs() {
         slots: Vec::new(),
         jsdoc: None,
     }];
-    let lowered = verter_type_expr_oxc::parse_type_annotation("LinkProps");
+    let lowered = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("LinkProps");
 
     assert!(
         !define_props_fields_fast_path_allowed(
@@ -5049,7 +5050,7 @@ fn define_props_fields_fast_path_rejects_multi_surface_macro_candidates() {
             jsdoc: None,
         },
     ];
-    let lowered = verter_type_expr_oxc::parse_type_annotation("LinkProps");
+    let lowered = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("LinkProps");
 
     assert!(
         !define_props_fields_fast_path_allowed(&mac, 0, &resolved_macros, Some(&lowered)),
@@ -5122,7 +5123,7 @@ defineProps<Props>()
     let host = project.host();
     let _store_view = host.resolver_store_view();
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
-    let lowered = verter_type_expr_oxc::parse_type_annotation("Props");
+    let lowered = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("Props");
 
     let (shape, source) = produce_one_macro_object_shape(
         &mut query_engine,
@@ -5175,7 +5176,7 @@ defineProps<Props>()
     let host = project.host();
     let _store_view = host.resolver_store_view();
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
-    let lowered = verter_type_expr_oxc::parse_type_annotation("Props");
+    let lowered = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("Props");
 
     let (shape, source) = produce_one_macro_object_shape(
         &mut query_engine,
@@ -6353,7 +6354,9 @@ defineEmits<Emits>()
         emits: vec![
             verter_semantic::analysis::type_expand::ExpandedField {
                 name: "save".to_string(),
-                r#type: verter_type_expr_oxc::parse_type_annotation("[id: number]"),
+                r#type: verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(
+                    "[id: number]",
+                ),
                 raw_type: Some("[id: number]".to_string()),
                 optional: false,
                 exactness:
@@ -6366,7 +6369,9 @@ defineEmits<Emits>()
             },
             verter_semantic::analysis::type_expand::ExpandedField {
                 name: "update:open".to_string(),
-                r#type: verter_type_expr_oxc::parse_type_annotation("[value: boolean]"),
+                r#type: verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(
+                    "[value: boolean]",
+                ),
                 raw_type: Some("[value: boolean]".to_string()),
                 optional: false,
                 exactness:
@@ -6464,13 +6469,17 @@ defineEmits<Emits>()
                         properties: vec![
                             verter_semantic::analysis::type_expand::ExpandedProperty {
                                 name: "save".to_string(),
-                                ty: verter_type_expr_oxc::parse_type_annotation("[id: number]"),
+                                ty: verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(
+                                    "[id: number]",
+                                ),
                                 optional: false,
                                 readonly: false,
                             },
                             verter_semantic::analysis::type_expand::ExpandedProperty {
                                 name: "update:open".to_string(),
-                                ty: verter_type_expr_oxc::parse_type_annotation("[value: boolean]"),
+                                ty: verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(
+                                    "[value: boolean]",
+                                ),
                                 optional: false,
                                 readonly: false,
                             },
@@ -6576,7 +6585,9 @@ defineModel<string>('searchTerm')
         emits: vec![
             verter_semantic::analysis::type_expand::ExpandedField {
                 name: "save".to_string(),
-                r#type: verter_type_expr_oxc::parse_type_annotation("[id: number]"),
+                r#type: verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(
+                    "[id: number]",
+                ),
                 raw_type: Some("[id: number]".to_string()),
                 optional: false,
                 exactness:
@@ -6589,7 +6600,9 @@ defineModel<string>('searchTerm')
             },
             verter_semantic::analysis::type_expand::ExpandedField {
                 name: "update:open".to_string(),
-                r#type: verter_type_expr_oxc::parse_type_annotation("[value: boolean]"),
+                r#type: verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(
+                    "[value: boolean]",
+                ),
                 raw_type: Some("[value: boolean]".to_string()),
                 optional: false,
                 exactness:
@@ -6749,7 +6762,9 @@ defineEmits<Emits>()
         emits: vec![
             verter_semantic::analysis::type_expand::ExpandedField {
                 name: "save".to_string(),
-                r#type: verter_type_expr_oxc::parse_type_annotation("[id: number]"),
+                r#type: verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(
+                    "[id: number]",
+                ),
                 raw_type: Some("[id: number]".to_string()),
                 optional: false,
                 exactness:
@@ -6762,7 +6777,9 @@ defineEmits<Emits>()
             },
             verter_semantic::analysis::type_expand::ExpandedField {
                 name: "update:open".to_string(),
-                r#type: verter_type_expr_oxc::parse_type_annotation("[value: boolean]"),
+                r#type: verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(
+                    "[value: boolean]",
+                ),
                 raw_type: Some("[value: boolean]".to_string()),
                 optional: false,
                 exactness:
@@ -7247,7 +7264,7 @@ defineProps<Props<T>>()
     let host = project.host();
     let _store_view = host.resolver_store_view();
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
-    let lowered = verter_type_expr_oxc::parse_type_annotation("Props<T>");
+    let lowered = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("Props<T>");
 
     let (shape, source) = produce_one_macro_object_shape(
         &mut query_engine,
@@ -7349,7 +7366,8 @@ defineProps<ColorModeSelectProps>()
     let host = project.host();
     let _store_view = host.resolver_store_view();
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
-    let lowered = verter_type_expr_oxc::parse_type_annotation("ColorModeSelectProps");
+    let lowered =
+        verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("ColorModeSelectProps");
 
     let (shape, source) = produce_one_macro_object_shape(
         &mut query_engine,
@@ -7437,7 +7455,7 @@ defineProps<Props>()
     let host = project.host();
     let _store_view = host.resolver_store_view();
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
-    let lowered = verter_type_expr_oxc::parse_type_annotation("Props");
+    let lowered = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("Props");
 
     let (shape, source) = produce_one_macro_object_shape(
         &mut query_engine,
@@ -7660,7 +7678,8 @@ defineProps<ColorModeSelectProps>()
     );
 
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
-    let lowered = verter_type_expr_oxc::parse_type_annotation("ColorModeSelectProps");
+    let lowered =
+        verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("ColorModeSelectProps");
 
     let (shape, source) = produce_one_macro_object_shape(
         &mut query_engine,
@@ -7983,7 +8002,8 @@ defineProps<ColorModeSelectProps>()
         has_prop_shape_surface(&prepared_overlay_shape),
         "overlay-backed prepared root surface should still expose props after registry append",
     );
-    let lowered = verter_type_expr_oxc::parse_type_annotation("ColorModeSelectProps");
+    let lowered =
+        verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("ColorModeSelectProps");
     let direct_solves_before = 0u32;
     let (direct_shape, direct_source) = produce_one_macro_object_shape(
         &mut query_engine,
@@ -8330,7 +8350,7 @@ defineProps<{ ui?: Button['ui'] }>()
     let host = project.host();
     let _store_view = host.resolver_store_view();
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
-    let expr = verter_type_expr_oxc::parse_type_annotation("Button['ui']");
+    let expr = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("Button['ui']");
 
     let first = query_engine.materialize_member_surface_expr("/src/button-types.ts", &expr, true);
     let cache_len_after_first = query_engine.materialized_member_surface_cache_len();
@@ -8379,7 +8399,9 @@ defineProps<{ first: Inner; second: Inner }>()
     let host = project.host();
     let _store_view = host.resolver_store_view();
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
-    let expr = verter_type_expr_oxc::parse_type_annotation("{ first: Inner; second: Inner }");
+    let expr = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(
+        "{ first: Inner; second: Inner }",
+    );
 
     let first = query_engine.materialize_member_surface_expr("/src/types.ts", &expr, true);
     let cache_len_after_first = query_engine.materialized_member_surface_cache_len();

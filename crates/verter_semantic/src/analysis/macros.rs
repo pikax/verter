@@ -2553,7 +2553,7 @@ fn extract_slot_bindings_from_type_literal(
 
 /// Recover slot bindings from an AST `Pick<Object, Keys>` type reference.
 ///
-/// Walks the OXC `TSType` directly — no source slicing, no `parse_type_annotation`.
+/// Walks the OXC `TSType` directly — no source slicing, no text-mode reparse.
 /// For each key in the keys union (or a single key reference):
 /// - String-literal keys (`"name"`) emit
 ///   `binding_expr = TypeExpr::IndexedAccess { object: lower(args[0]), index: Literal(String("name")) }`.

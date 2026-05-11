@@ -838,38 +838,3 @@ fn span_text(source: &str, span: oxc_span::Span) -> String {
         String::new()
     }
 }
-
-// ---------------------------------------------------------------------------
-// Public convenience: parse a type annotation string into TypeExpr
-// ---------------------------------------------------------------------------
-
-/// Parse a standalone TypeScript type annotation string into a `TypeExpr`.
-///
-/// Uses OXC to parse `type __T = <input>` and extracts the resulting type.
-/// Returns `TypeExpr::Unknown` if parsing fails.
-pub fn parse_type_annotation(input: &str) -> TypeExpr {
-    use oxc_allocator::Allocator;
-    use oxc_parser::Parser;
-    use oxc_span::SourceType;
-
-    if input.trim().is_empty() {
-        return TypeExpr::Unknown {
-            raw: input.to_string(),
-        };
-    }
-
-    let wrapper = format!("type __T = {input}");
-    let allocator = Allocator::default();
-    let source_type = SourceType::ts();
-    let ret = Parser::new(&allocator, &wrapper, source_type).parse();
-
-    for stmt in &ret.program.body {
-        if let oxc_ast::ast::Statement::TSTypeAliasDeclaration(alias) = stmt {
-            return lower_ts_type(&alias.type_annotation, &wrapper);
-        }
-    }
-
-    TypeExpr::Unknown {
-        raw: input.to_string(),
-    }
-}

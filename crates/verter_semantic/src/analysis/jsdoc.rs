@@ -1,6 +1,50 @@
 use oxc_ast::{Comment, CommentContent};
 
+use verter_type_expr::TypeExpr;
+
 use crate::analysis::types::JsdocTag;
+
+/// Parse a JSDoc `{Type}` tag-type payload string into a [`TypeExpr`].
+///
+/// This is the **single permitted text-input boundary** for the typed-IR
+/// resolver: JSDoc tag payloads are inherently text (a `@param {Foo}` tag
+/// carries `Foo` as a string from the parser), so they must be lowered
+/// through a wrap-and-lower OXC parse here. Every other producer-side
+/// caller in the resolver / projector / registry / policy / materialiser
+/// pipeline operates on a `TSType<'_>` AST node and goes through
+/// [`verter_type_expr_oxc::lower_ts_type`] directly — see the
+/// "Typed-IR-Only Resolver Rule" in CLAUDE.md.
+///
+/// Wraps `input` in `type __T = <input>`, parses via OXC, and lowers the
+/// resulting `TSType` node via `lower_ts_type`. Returns
+/// [`TypeExpr::Unknown`] if the input is empty or the wrapper parse does
+/// not produce a `TSTypeAliasDeclaration`.
+pub fn parse_jsdoc_tag_type_payload(input: &str) -> TypeExpr {
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    if input.trim().is_empty() {
+        return TypeExpr::Unknown {
+            raw: input.to_string(),
+        };
+    }
+
+    let wrapper = format!("type __T = {input}");
+    let allocator = Allocator::default();
+    let source_type = SourceType::ts();
+    let ret = Parser::new(&allocator, &wrapper, source_type).parse();
+
+    for stmt in &ret.program.body {
+        if let oxc_ast::ast::Statement::TSTypeAliasDeclaration(alias) = stmt {
+            return verter_type_expr_oxc::lower_ts_type(&alias.type_annotation, &wrapper);
+        }
+    }
+
+    TypeExpr::Unknown {
+        raw: input.to_string(),
+    }
+}
 
 fn find_leading_jsdoc_from_comments<'a>(
     comments: &[Comment],
@@ -260,7 +304,58 @@ fn is_identifier_continue(byte: u8) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::extract_jsdoc_near_offset;
+    use super::{extract_jsdoc_near_offset, parse_jsdoc_tag_type_payload};
+    use verter_type_expr::{PrimitiveName, TypeExpr};
+
+    #[test]
+    fn parse_jsdoc_tag_type_payload_lowers_primitive_keyword() {
+        let expr = parse_jsdoc_tag_type_payload("string");
+        assert_eq!(
+            expr,
+            TypeExpr::Primitive(PrimitiveName::String),
+            "primitive JSDoc payload should lower to the matching TypeExpr primitive"
+        );
+    }
+
+    #[test]
+    fn parse_jsdoc_tag_type_payload_lowers_array_with_element_type() {
+        // OXC lowers `Array<number>` to `TypeExpr::Array { element }`,
+        // not a `Ref<Array, [number]>`. The lowering is canonical: any
+        // `Array<T>` / `T[]` / `ReadonlyArray<T>` collapses into `Array`.
+        let expr = parse_jsdoc_tag_type_payload("Array<number>");
+        match expr {
+            TypeExpr::Array { element, .. } => {
+                assert_eq!(&*element, &TypeExpr::Primitive(PrimitiveName::Number));
+            }
+            other => panic!("expected Array<number>, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_jsdoc_tag_type_payload_lowers_union() {
+        let expr = parse_jsdoc_tag_type_payload("string | number");
+        match expr {
+            TypeExpr::Union(members) => {
+                assert_eq!(members.len(), 2, "union must lower with two members");
+                assert!(members
+                    .iter()
+                    .any(|m| matches!(m, TypeExpr::Primitive(PrimitiveName::String))));
+                assert!(members
+                    .iter()
+                    .any(|m| matches!(m, TypeExpr::Primitive(PrimitiveName::Number))));
+            }
+            other => panic!("expected Union, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_jsdoc_tag_type_payload_unknown_for_empty_input() {
+        let expr = parse_jsdoc_tag_type_payload("");
+        match expr {
+            TypeExpr::Unknown { raw } => assert_eq!(raw, "", "empty input keeps empty raw"),
+            other => panic!("expected Unknown for empty payload, got {other:?}"),
+        }
+    }
 
     #[test]
     fn extract_jsdoc_near_offset_skips_export_modifier_tokens() {

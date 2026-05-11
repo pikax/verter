@@ -8330,39 +8330,87 @@ mod typed_ir_resolver_guards {
     }
 
     // -----------------------------------------------------------------------
-    // Guard 2: `parse_type_annotation` reference outside JSDoc.
+    // Guard 2: `parse_jsdoc_tag_type_payload` reference outside JSDoc.
     //
-    // The function is the OXC wrap-and-lower convenience parser. After
-    // W5.2 it is renamed `parse_jsdoc_tag_type_payload`, narrowed to
-    // JSDoc-private, and lives in `verter_semantic::analysis::jsdoc`.
-    // The single permitted production caller post-W5.2 is
-    // `host_manage/jsdoc_resolve.rs` — this file is the live exception.
+    // The function is the JSDoc tag-type wrap-and-lower helper. It is
+    // the sole text-input boundary in the typed-IR resolver pipeline —
+    // every other producer-side caller in the resolver / projector /
+    // registry / policy / materialiser lowers from a `TSType<'_>` AST
+    // node via `verter_type_expr_oxc::lower_ts_type` directly.
     //
-    // Allowlist removed across W1.1 (macros.rs / type_eval_build.rs /
-    // component_meta.rs), W2.x (every consumer migration), W5.2 (the
-    // function definition itself moves; the verter_type_expr_oxc/lib.rs
-    // reference disappears). After W5.2 the guard pattern updates to
-    // `parse_jsdoc_tag_type_payload` and the allowlist target shrinks
-    // to the JSDoc helper module + jsdoc_resolve.rs caller.
+    // Pre-W5.2 the function was named `parse_type_annotation` and
+    // lived in `verter_type_expr_oxc::lib.rs`. W5.2 renamed it to
+    // `parse_jsdoc_tag_type_payload` and moved it to
+    // `verter_semantic::analysis::jsdoc`, narrowing visibility so only
+    // the JSDoc resolver in `verter_session::host_manage::jsdoc_resolve`
+    // calls it from production code.
     //
-    // The W5.2 unit MUST update the pattern string here when it
-    // renames the function.
+    // The two production touchpoints are inherent and skipped via
+    // explicit `continue` filters below — no allowlist entries needed:
+    //   * `crates/verter_semantic/src/analysis/jsdoc.rs` — function
+    //     definition site (the helper itself).
+    //   * `crates/verter_session/src/host_manage/jsdoc_resolve.rs` —
+    //     the single production caller.
+    //
+    // Any future caller anywhere else in `crates/*/src/**` MUST go
+    // through the typed `TSType<'_>` AST path. If a new requirement
+    // appears to need text manipulation, fix the producer (lower the
+    // right OXC node, store the right typed field, extend
+    // `verter_type_expr` with a missing variant) rather than reparsing.
     // -----------------------------------------------------------------------
-    const PARSE_TYPE_ANNOTATION_ALLOWLIST: &[(&str, u32, &str)] = &[(
-        "crates/verter_type_expr_oxc/src/lib.rs",
-        850,
-        "parse_type_annotation",
-    )];
+    const PARSE_TYPE_ANNOTATION_ALLOWLIST: &[(&str, u32, &str)] = &[];
 
     fn scan_parse_type_annotation() -> Vec<(String, u32, String)> {
         let files = collect_production_rs_files();
         let mut out: Vec<(String, u32, String)> = Vec::new();
         for (path, rel) in &files {
-            // Sole production exception: the JSDoc tag-type resolver
-            // (W5.2 narrows visibility further).
-            if rel == "crates/verter_session/src/host_manage/jsdoc_resolve.rs" {
+            // Inherent production touchpoints: the JSDoc helper
+            // definition site and its sole production caller.
+            if rel == "crates/verter_semantic/src/analysis/jsdoc.rs"
+                || rel == "crates/verter_session/src/host_manage/jsdoc_resolve.rs"
+            {
                 continue;
             }
+            let src = match fs::read_to_string(path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let stripped = preprocess(&src);
+            for (idx, line) in stripped.split('\n').enumerate() {
+                if line.contains("parse_jsdoc_tag_type_payload") {
+                    out.push((
+                        rel.clone(),
+                        (idx + 1) as u32,
+                        "parse_jsdoc_tag_type_payload".to_string(),
+                    ));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn no_parse_jsdoc_tag_type_payload_outside_jsdoc() {
+        let actual = scan_parse_type_annotation();
+        assert_exact_allowlist_match(
+            "no_parse_jsdoc_tag_type_payload_outside_jsdoc",
+            &actual,
+            PARSE_TYPE_ANNOTATION_ALLOWLIST,
+        );
+    }
+
+    // Bonus belt-and-braces gate: the OLD name `parse_type_annotation`
+    // must not reappear anywhere in production source after the W5.2
+    // rename. A reintroduction would mean someone re-introduced the
+    // wrap-and-lower helper under its old identifier; the rename's
+    // entire point is to make every JSDoc-private call site grep-able
+    // by its semantic role rather than a generic "parse" verb.
+    const OLD_PARSE_TYPE_ANNOTATION_ALLOWLIST: &[(&str, u32, &str)] = &[];
+
+    fn scan_old_parse_type_annotation() -> Vec<(String, u32, String)> {
+        let files = collect_production_rs_files();
+        let mut out: Vec<(String, u32, String)> = Vec::new();
+        for (path, rel) in &files {
             let src = match fs::read_to_string(path) {
                 Ok(s) => s,
                 Err(_) => continue,
@@ -8382,25 +8430,29 @@ mod typed_ir_resolver_guards {
     }
 
     #[test]
-    fn no_parse_type_annotation_outside_jsdoc() {
-        let actual = scan_parse_type_annotation();
+    fn no_old_parse_type_annotation_name_in_production() {
+        let actual = scan_old_parse_type_annotation();
         assert_exact_allowlist_match(
-            "no_parse_type_annotation_outside_jsdoc",
+            "no_old_parse_type_annotation_name_in_production",
             &actual,
-            PARSE_TYPE_ANNOTATION_ALLOWLIST,
+            OLD_PARSE_TYPE_ANNOTATION_ALLOWLIST,
         );
     }
 
     // -----------------------------------------------------------------------
-    // Guard 3: `format!()` followed by `parse_type_annotation(&_)` or
-    // `parse_type_text(&_)` — the synthesise-then-reparse round-trip.
+    // Guard 3: `format!()` followed by `parse_jsdoc_tag_type_payload(&_)`,
+    // `parse_type_annotation(&_)`, or `parse_type_text(&_)` — the
+    // synthesise-then-reparse round-trip.
     //
     // We detect the pattern by scanning for `format!` and looking
-    // ahead within the same function body for `parse_type_annotation(&`
-    // or `parse_type_text(&`. The `&` is the discriminator: a real
-    // round-trip references the format! result through a let-bound
-    // variable. (Direct chained `format!(...).parse_type_*()` would
-    // also match.)
+    // ahead within the same function body for any of:
+    //   - `parse_jsdoc_tag_type_payload(&` (post-W5.2 helper name)
+    //   - `parse_type_annotation(&` (pre-W5.2 helper name; should never
+    //     reappear in production but guarded belt-and-braces)
+    //   - `parse_type_text(&`
+    // The `&` is the discriminator: a real round-trip references the
+    // format! result through a let-bound variable. (Direct chained
+    // `format!(...).parse_*()` would also match.)
     //
     // Pre-cutover sites: `slot_field_function_type_expr` in
     // `meta_resolve/materialize/macro_shapes.rs` (3 `format!` calls
@@ -8422,6 +8474,11 @@ mod typed_ir_resolver_guards {
             let stripped = preprocess(&src);
             let bytes = stripped.as_bytes();
             let n = bytes.len();
+            // The three reparse needles we treat as a synthesise-then-reparse:
+            //   * `parse_jsdoc_tag_type_payload(&` — post-W5.2 JSDoc helper.
+            //   * `parse_type_annotation(&` — pre-W5.2 helper (belt-and-braces).
+            //   * `parse_type_text(&` — checker-text adapter.
+            let needle_jsdoc = b"parse_jsdoc_tag_type_payload(&";
             let needle_a = b"parse_type_annotation(&";
             let needle_t = b"parse_type_text(&";
             let mut i = 0usize;
@@ -8430,15 +8487,23 @@ mod typed_ir_resolver_guards {
                     let start = i;
                     let window_end = (start + 800).min(n);
                     let window = &bytes[start..window_end];
+                    let pj = window
+                        .windows(needle_jsdoc.len())
+                        .position(|w| w == needle_jsdoc);
                     let pa = window.windows(needle_a.len()).position(|w| w == needle_a);
                     let pt = window.windows(needle_t.len()).position(|w| w == needle_t);
-                    let hit = match (pa, pt) {
-                        (Some(a), Some(b)) => Some((a.min(b), a <= b)),
-                        (Some(a), None) => Some((a, true)),
-                        (None, Some(b)) => Some((b, false)),
-                        (None, None) => None,
-                    };
-                    if let Some((off, is_annotation)) = hit {
+                    // Pick the earliest hit and label by needle kind.
+                    let candidates = [
+                        pj.map(|off| (off, "format!(...).parse_jsdoc_tag_type_payload")),
+                        pa.map(|off| (off, "format!(...).parse_type_annotation")),
+                        pt.map(|off| (off, "format!(...).parse_type_text")),
+                    ];
+                    let hit = candidates
+                        .iter()
+                        .filter_map(|c| c.as_ref())
+                        .min_by_key(|(off, _)| *off)
+                        .copied();
+                    if let Some((off, label)) = hit {
                         // Reject if a function boundary appears in
                         // between (`\n}` at column 0 or a `\nfn ` decl).
                         let between = &window[..off];
@@ -8448,12 +8513,7 @@ mod typed_ir_resolver_guards {
                             let prefix = &bytes[..start];
                             let line_no =
                                 (prefix.iter().filter(|&&c| c == b'\n').count() + 1) as u32;
-                            let needle_label = if is_annotation {
-                                "format!(...).parse_type_annotation"
-                            } else {
-                                "format!(...).parse_type_text"
-                            };
-                            out.push((rel.clone(), line_no, needle_label.to_string()));
+                            out.push((rel.clone(), line_no, label.to_string()));
                         }
                     }
                     i += 7;

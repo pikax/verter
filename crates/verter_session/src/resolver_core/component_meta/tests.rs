@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 use crate::resolver_core::declaration_metadata::ResolvedExportTarget;
 use std::collections::BTreeMap;
 use verter_compiler::utils::oxc::vue::resolve_type::{
@@ -650,9 +650,11 @@ defineEmits<Emits>()
             resolved_local_types: vec![ResolvedLocalType {
                 name: "Emits".to_string(),
                 expanded: "interface Emits extends RootEmits {}".to_string(),
-                type_expr: Some(verter_type_expr_oxc::parse_type_annotation(
-                    "interface Emits extends RootEmits {}",
-                )),
+                type_expr: Some(
+                    verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(
+                        "interface Emits extends RootEmits {}",
+                    ),
+                ),
                 span: Span::new(0, source.len() as u32),
             }],
             parsed_type_argument: None,
@@ -745,7 +747,7 @@ fn local_resolved_macro_types_project_into_resolved_macro_surfaces() {
                 expanded:
                     "{ 'update:modelValue': [value: (T extends 'single' ? string : string[]) | undefined] }"
                         .to_string(),
-                type_expr: Some(verter_type_expr_oxc::parse_type_annotation(
+                type_expr: Some(verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(
                     "{ 'update:modelValue': [value: (T extends 'single' ? string : string[]) | undefined] }",
                 )),
                 span: Span::new(0, 1),
@@ -932,9 +934,11 @@ defineSlots<CalendarSlots>()
             resolved_local_types: vec![ResolvedLocalType {
                 name: "CalendarSlots".to_string(),
                 expanded: "{ day?: (props: { day: Date }) => any }".to_string(),
-                type_expr: Some(verter_type_expr_oxc::parse_type_annotation(
-                    "{ day?: (props: { day: Date }) => any }",
-                )),
+                type_expr: Some(
+                    verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(
+                        "{ day?: (props: { day: Date }) => any }",
+                    ),
+                ),
                 span: Span::new(0, source.len() as u32),
             }],
             parsed_type_argument: None,
@@ -1698,9 +1702,11 @@ type Props = Omit<ImportedBase, 'hidden'>
             resolved_local_types: vec![ResolvedLocalType {
                 name: "Props".to_string(),
                 expanded: "Omit<ImportedBase, 'hidden'>".to_string(),
-                type_expr: Some(verter_type_expr_oxc::parse_type_annotation(
-                    "Omit<ImportedBase, 'hidden'>",
-                )),
+                type_expr: Some(
+                    verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(
+                        "Omit<ImportedBase, 'hidden'>",
+                    ),
+                ),
                 span: Span::new(0, source.len() as u32),
             }],
             parsed_type_argument: None,
@@ -2159,7 +2165,7 @@ interface Helper {
 /// message.
 ///
 /// Pre-W0.2 the consumer fell back through
-/// `parse_type_annotation(&resolved.expanded)` and silently
+/// text-mode reparse of `resolved.expanded` and silently
 /// recovered, so this fixture would not panic and `should_panic`
 /// would FAIL. Post-W0.2 the consumer asserts the invariant via
 /// `.expect(...)`, the panic fires, and `should_panic` PASSES.
