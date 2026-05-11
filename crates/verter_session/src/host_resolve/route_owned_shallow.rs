@@ -182,7 +182,7 @@ impl VerterHost {
                     return Err(());
                 }
 
-                // If a parallel materialisation populated `IndexedReadyDb` while
+                // If a parallel materialisation populated `FileArtifactStore` while
                 // we were reading, prefer that authoritative shape — same
                 // shortcut the pre-migration body had at host_resolve.rs:2257.
                 if let Some(facts) = self.project_type_store.indexed().get_any(canonical_id) {

@@ -1,4 +1,4 @@
-//! Stage 1 — `FileArtifactStore` unit tests.
+//! `FileArtifactStore` unit tests.
 
 use std::sync::Arc;
 

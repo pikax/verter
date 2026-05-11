@@ -2,7 +2,7 @@
 //!
 //! Contains the [`VerterHost::seed_indexed_ready_for_test`] entry point
 //! used by hermetic tests to populate the canonical post-parse artifact
-//! into [`IndexedReadyDb`](crate::project_type_store::IndexedReadyDb)
+//! into [`FileArtifactStore`](crate::file_artifact_store::FileArtifactStore)
 //! plus the resolver runtime's prepared-decl bundles.
 //!
 //! Gated behind `#[cfg(test)]` so the helper is absent from production
@@ -17,7 +17,7 @@ use crate::VerterHost;
 
 #[cfg(test)]
 impl VerterHost {
-    /// Seed `IndexedReadyDb` with pre-built data for tests.
+    /// Seed `FileArtifactStore` with pre-built data for tests.
     pub(crate) fn seed_indexed_ready_for_test(
         &self,
         canonical_id: &str,
@@ -105,7 +105,7 @@ impl VerterHost {
             .has_resolvable_surface()
             .then(|| crate::resolver_store::hash_route_surface(shallow_state.as_ref()));
 
-        // Publish the canonical post-parse artifact into IndexedReadyDb. This
+        // Publish the canonical post-parse artifact into FileArtifactStore. This
         // is the single authoritative cache consumers read from.
         let indexed = crate::project_type_store::IndexedReady {
             whole_hash: effective_whole_hash,

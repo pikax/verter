@@ -60,7 +60,7 @@ the lib + ambient corpus.
 
 | Layer | Family | Key | Validation |
 |---|---|---|---|
-| `FileArtifactStore` (replaces `IndexedReadyDb`) | Content-addressed | `(canonical, content_hash, parse_env_hash, parser_version)` | Content-addressed; never invalidated |
+| `FileArtifactStore` | Content-addressed | `(canonical, content_hash, parse_env_hash, parser_version)` | Content-addressed; never invalidated |
 | `ModuleAugmentationIndex` (on `FileArtifactStore`) | Content-addressed | `AugmentationTargetKey { project_identity, resolve_env_hash, lib_env_hash, target }` | Content-addressed; incrementally populated |
 | `ResolvedImportFacts` | Content-addressed | `(canonical, content_hash, parse_env_hash, resolve_env_hash, resolver_version)` — **no `lib_env_hash`** (R21) | Content + resolve-env addressed |
 | Typed-IR resolve | Content-addressed | `(canonical, content_hash, parse_env_hash, type_env_hash, lib_env_hash, parser_version)` | Content + type-env + lib addressed |

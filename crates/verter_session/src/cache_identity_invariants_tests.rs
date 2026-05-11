@@ -506,14 +506,14 @@ fn route_owned_shallow_cache_field_absent_from_verter_host() {
     );
 }
 
-// ─── T3 — route_owned_shallow does not pollute IndexedReadyDb ────────────
+// ─── T3 — route_owned_shallow does not pollute FileArtifactStore ────────────
 //
 // Per host_manage_tests.rs:1518 invariant: route-only shallow targets must
-// stay off `IndexedReadyDb::get_any`. Discrimination: the new
+// stay off `FileArtifactStore::get_any`. Discrimination: the new
 // `route_owned_shallow()` accessor doesn't exist pre-migration, so this
 // test can't compile against parent. Post-migration it asserts both:
 // (a) materialising a route-only entry populates `route_owned_shallow`,
-// (b) the same canonical is absent from `IndexedReadyDb`.
+// (b) the same canonical is absent from `FileArtifactStore`.
 #[test]
 fn route_owned_shallow_does_not_pollute_indexed_ready() {
     let canonical = "/types/types.ts";
@@ -531,13 +531,13 @@ fn route_owned_shallow_does_not_pollute_indexed_ready() {
         store.route_owned_shallow().get_any(canonical).is_some(),
         "POST: route_owned_shallow must hold the materialised entry",
     );
-    // POST: IndexedReadyDb stays clean — the route-only path must NOT
+    // POST: FileArtifactStore stays clean — the route-only path must NOT
     // promote into IndexedReady (preserves the
     // `route_owned_imported_vue_snapshot_reuses_cached_snapshot_state`
     // invariant at host_manage_tests.rs:1518).
     assert!(
         store.indexed().get_any(canonical).is_none(),
-        "POST: route-only materialisation must NOT promote into IndexedReadyDb",
+        "POST: route-only materialisation must NOT promote into FileArtifactStore",
     );
 }
 
@@ -675,7 +675,7 @@ fn route_owned_shallow_concurrent_cold_callers_read_once_and_collapse() {
 
     // (b) read-once: the leader paid I/O exactly once.
     // CountingWs.read_count counts WorkspaceAccess::read_file invocations.
-    // The host's `read_analysis_source` may also consult `IndexedReadyDb`
+    // The host's `read_analysis_source` may also consult `FileArtifactStore`
     // (clean miss for route-only files) and the scheduler — neither hits
     // CountingWs.read_file on miss. The materialiser's STEP 4 is the only
     // path that reads from the workspace.
@@ -929,7 +929,7 @@ fn host_notify_close_evicts_route_owned_shallow() {
 // `route_owned_shallow.remove(canonical)` (extension landed in 6b.D1
 // at `project_type_store.rs:1176`), an upsert that triggers the
 // content-hash-changed cascade must evict route_owned_shallow entries
-// for the upserted canonical alongside IndexedReadyDb.
+// for the upserted canonical alongside FileArtifactStore.
 //
 // REGRESSION classification — only post-migration green required.
 #[test]

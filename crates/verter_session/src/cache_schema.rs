@@ -35,7 +35,7 @@
 //!
 //! | Db | File |
 //! |----|------|
-//! | `IndexedReadyDb`           | `project_type_store.rs`         |
+//! | `FileArtifactStore`           | `project_type_store.rs`         |
 //! | `AnalysisReadyDb`          | `project_type_store.rs`         |
 //! | `RouteOwnedShallowDb`      | `project_type_store.rs`         |
 //! | `EvalEnvCacheDb`           | `project_type_store.rs`         |
@@ -62,7 +62,7 @@
 /// `ResolvedEmit`.
 ///
 /// History:
-/// - `1` — original cohort (`IndexedReadyDb`, `AnalysisReadyDb`,
+/// - `1` — original cohort (`FileArtifactStore`, `AnalysisReadyDb`,
 ///   `ComponentMetaResultDb`, etc.) without per-Db schema gating; entries had
 ///   no embedded typed fields.
 /// - `2` — typed-IR cutover. Adds `*_expr` / `*_expr_scope` on the

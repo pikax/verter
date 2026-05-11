@@ -125,7 +125,7 @@ impl HostStoreView {
 
         // WASM-only: scheduler is unavailable on web; see CLAUDE.md "Scheduler as Sole Compile Authority".
 
-        // Snapshot IndexedReadyDb entries into the store view.
+        // Snapshot FileArtifactStore entries into the store view.
         for (canonical_id, indexed) in host.project_type_store.indexed().snapshot_all() {
             let canonical_str = canonical_id.as_ref().to_owned();
             view.whole_hashes

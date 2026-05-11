@@ -545,7 +545,7 @@ impl VerterHost {
     /// Replaces the pattern `current_eval_state(&candidate).is_some()`
     /// — which materialized raw source + parse + eval state to answer the
     /// predicate — with a live-host `get_whole_hash` lookup (itself a cheap
-    /// `compile_cache` + `IndexedReadyDb` lookup, no parse, no disk read).
+    /// `compile_cache` + `FileArtifactStore` lookup, no parse, no disk read).
     ///
     /// Per §4.3 Sub-task B this is the canonical shallow-probe API. Candidate
     /// paths that are not already loaded return `false`; probing does not

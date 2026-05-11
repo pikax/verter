@@ -9,7 +9,7 @@ description: "LSP host integration: TypeProvider (TSGO/tsserver), workspace mana
 
 `VerterHost` owns one `Arc<ProjectTypeStore>` per loaded project, exposed via `.project_type_store()`. The store is the single shared cache graph for component-meta and cross-file type resolution:
 
-- `IndexedReadyDb` — canonical post-parse artifacts.
+- `FileArtifactStore` — canonical post-parse artifacts.
 - `AnalysisReadyDb` — scope-parameterised analysis augmentation.
 - `RouteDb` (rehomed) — barrel / route surface cache.
 - `OwnerImportSurfaceDb` — direct-owner-imports cache. Reached via `VerterHost::owner_import_surface` / `resolve_owner_direct_import`.
@@ -267,9 +267,9 @@ The request-view era (`RequestStoreView`, `CURRENT_REQUEST_VIEW` thread-local, `
 
 Key rules:
 
-- Resolver-path helpers read state directly from the host and `ProjectTypeStore`. There is no request-private extension store — canonicals loaded mid-request via `ensure_loaded` publish to `ProjectTypeStore` / `IndexedReadyDb` and become visible to all readers.
+- Resolver-path helpers read state directly from the host and `ProjectTypeStore`. There is no request-private extension store — canonicals loaded mid-request via `ensure_loaded` publish to `ProjectTypeStore` / `FileArtifactStore` and become visible to all readers.
 - `VerterHost::is_evalable(canonical)` is the canonical shallow-probe API; it calls `get_whole_hash(canonical).is_some()` directly.
-- `ensure_loaded` publishes to the scheduler + `IndexedReadyDb`; there is no extension-store plumbing.
+- `ensure_loaded` publishes to the scheduler + `FileArtifactStore`; there is no extension-store plumbing.
 - Cache-validation staleness is enforced by `HostFenceValidator` + dep-signatures on `ValidatedFactCache` entries. Warm hits revalidate every recorded fact before returning; stale entries miss and force a cold rebuild.
 - Host-scoped caches (final `ComponentMetaResultDb`, `OwnerImportSurfaceDb`, `SemanticGraphStore`) validate through dep-signatures; transient `TypeSurfaceDb` writes only happen through `publish_with_facts` which attaches dep-signatures.
 

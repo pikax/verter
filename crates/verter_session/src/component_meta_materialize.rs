@@ -2338,7 +2338,7 @@ export type C<T> = A<T>
 
         // Insert a synthetic entry whose dep_signature is stale (refs
         // a canonical that does not exist in the host's
-        // IndexedReadyDb). peek's slow-path will reject and remove.
+        // FileArtifactStore). peek's slow-path will reject and remove.
         let stale_signature: crate::semantic_query::DepSignature = std::sync::Arc::from(
             vec![(
                 std::sync::Arc::<str>::from("/nonexistent.ts"),

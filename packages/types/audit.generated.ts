@@ -162,7 +162,7 @@ export type BundlerKindTag = "Vite" | "Webpack" | "Rollup" | "Esbuild" | "Rolldo
  */
 export type CacheLayerBreakdown = { 
 /**
- * `IndexedReadyDb` — canonical post-parse artifact cache.
+ * `FileArtifactStore` — canonical post-parse artifact cache.
  */
 indexed: CacheLayerHitMiss, 
 /**

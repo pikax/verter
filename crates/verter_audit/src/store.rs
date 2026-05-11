@@ -42,7 +42,7 @@ pub struct CacheLayerHitMiss {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub struct CacheLayerBreakdown {
-    /// `IndexedReadyDb` — canonical post-parse artifact cache.
+    /// `FileArtifactStore` — canonical post-parse artifact cache.
     pub indexed: CacheLayerHitMiss,
     /// `AnalysisReadyDb` — analysis-stage artifact cache.
     pub analysis: CacheLayerHitMiss,

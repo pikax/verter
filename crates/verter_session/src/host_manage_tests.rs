@@ -938,12 +938,12 @@ fn prepared_type_decl_reuses_route_owned_package_shallow_state_without_indexed_r
     assert!(
         host.project_type_store.indexed().get_any("/workspace/node_modules/pkg/dist/index.d.ts")
             .is_none(),
-        "provider barrels should stay off IndexedReadyDb on the prepared package declaration fast path",
+        "provider barrels should stay off FileArtifactStore on the prepared package declaration fast path",
     );
     assert!(
         host.project_type_store.indexed().get_any("/workspace/node_modules/pkg/dist/index3.d.ts")
             .is_none(),
-        "active package targets should stay off IndexedReadyDb on the prepared package declaration fast path",
+        "active package targets should stay off FileArtifactStore on the prepared package declaration fast path",
     );
     assert!(
         host.project_type_store.indexed().get_any("/workspace/node_modules/pkg/dist/payload.d.ts")
@@ -4765,14 +4765,14 @@ fn resolve_eval_dependency_canonical_prefers_declaration_companion_shallowly() {
     );
 
     // In the new IndexedReady DB, ensure_indexed_ready eagerly materializes.
-    // Verify that the IndexedReadyDb was NOT populated by the shallow
+    // Verify that the FileArtifactStore was NOT populated by the shallow
     // resolve_eval_dependency_canonical call itself.
     assert!(
         host.project_type_store
             .indexed()
             .get_any("/workspace/node_modules/pkg/dist/index.js")
             .is_none(),
-        "shallow companion selection should not cache .js facts in the IndexedReadyDb",
+        "shallow companion selection should not cache .js facts in the FileArtifactStore",
     );
     assert!(
         host.project_type_store.indexed().get_any("/workspace/node_modules/pkg/dist/index.d.ts").is_none(),
@@ -7075,28 +7075,28 @@ export interface UnusedProps {
             .indexed()
             .get_any("/src/Accordion.vue")
             .is_none(),
-        "late wildcard imported-root proof should keep earlier Vue siblings off IndexedReadyDb",
+        "late wildcard imported-root proof should keep earlier Vue siblings off FileArtifactStore",
     );
     assert!(
         host.project_type_store
             .indexed()
             .get_any("/src/Alert.vue")
             .is_none(),
-        "late wildcard imported-root proof should keep earlier Vue siblings off IndexedReadyDb",
+        "late wildcard imported-root proof should keep earlier Vue siblings off FileArtifactStore",
     );
     assert!(
         host.project_type_store
             .indexed()
             .get_any("/src/AuthForm.vue")
             .is_none(),
-        "late wildcard imported-root proof should keep earlier Vue siblings off IndexedReadyDb",
+        "late wildcard imported-root proof should keep earlier Vue siblings off FileArtifactStore",
     );
     assert!(
         host.project_type_store
             .indexed()
             .get_any("/src/Avatar.vue")
             .is_none(),
-        "late wildcard imported-root proof should keep earlier Vue siblings off IndexedReadyDb",
+        "late wildcard imported-root proof should keep earlier Vue siblings off FileArtifactStore",
     );
     assert!(
         host.project_type_store.indexed().get_any("/src/Checkbox.vue")
@@ -7162,7 +7162,7 @@ export interface AccordionEmits {
             .indexed()
             .get_any("/src/Accordion.vue")
             .is_none(),
-        "route-owned reuse should stay off IndexedReadyDb for the matched Vue child",
+        "route-owned reuse should stay off FileArtifactStore for the matched Vue child",
     );
 }
 
@@ -7353,7 +7353,7 @@ export interface UnusedProps {
     assert!(
         host.project_type_store.indexed().get_any("/src/Unused.vue")
             .is_none(),
-        "route-only frontier discovery should keep unrelated same-layer siblings off IndexedReadyDb",
+        "route-only frontier discovery should keep unrelated same-layer siblings off FileArtifactStore",
     );
 
     let _final_view = host.resolver_store_view();
@@ -7368,7 +7368,7 @@ export interface UnusedProps {
     assert!(
         host.project_type_store.indexed().get_any("/src/Unused.vue")
             .is_none(),
-        "fact-version capture must not promote a shallow-only tracked barrel sibling into IndexedReadyDb",
+        "fact-version capture must not promote a shallow-only tracked barrel sibling into FileArtifactStore",
     );
 }
 
@@ -7497,21 +7497,21 @@ export interface UnusedProps {
             .indexed()
             .get_any("/src/Accordion.vue")
             .is_none(),
-        "unrelated wildcard siblings should stay off IndexedReadyDb",
+        "unrelated wildcard siblings should stay off FileArtifactStore",
     );
     assert!(
         host.project_type_store
             .indexed()
             .get_any("/src/Alert.vue")
             .is_none(),
-        "unrelated wildcard siblings should stay off IndexedReadyDb",
+        "unrelated wildcard siblings should stay off FileArtifactStore",
     );
     assert!(
         host.project_type_store
             .indexed()
             .get_any("/src/Unused.vue")
             .is_none(),
-        "unrelated wildcard siblings should stay off IndexedReadyDb",
+        "unrelated wildcard siblings should stay off FileArtifactStore",
     );
 }
 
@@ -7618,7 +7618,7 @@ export interface IconProps {
             .indexed()
             .get_any("/src/Avatar.vue")
             .is_none(),
-        "symbolic imported object props should stay off IndexedReadyDb",
+        "symbolic imported object props should stay off FileArtifactStore",
     );
 }
 
@@ -7855,14 +7855,14 @@ const emit = defineEmits<PackageEmits>()
     assert!(
         host.project_type_store.indexed().get_any("/workspace/node_modules/pkg/dist/index.d.ts")
             .is_none(),
-        "package provider barrels should stay off IndexedReadyDb on the current component-meta path",
+        "package provider barrels should stay off FileArtifactStore on the current component-meta path",
     );
     assert!(
         host.project_type_store
             .indexed()
             .get_any("/workspace/node_modules/pkg/dist/index3.d.ts")
             .is_none(),
-        "package targets should stay off IndexedReadyDb on the current component-meta path",
+        "package targets should stay off FileArtifactStore on the current component-meta path",
     );
     assert!(
         host.resolved_type_cache().is_empty(),
@@ -8309,7 +8309,7 @@ export interface UnusedProps {
     assert!(
         host.project_type_store.indexed().get_any("/src/types.ts")
             .is_none(),
-        "imported-root route proof should keep the provider barrel shallow-only and off IndexedReadyDb",
+        "imported-root route proof should keep the provider barrel shallow-only and off FileArtifactStore",
     );
 }
 
@@ -8508,7 +8508,7 @@ export interface UnusedProps {
     assert!(
         host.project_type_store.indexed().get_any("/src/Unused.vue")
             .is_none(),
-        "component-meta expansion should keep shallow-only same-layer barrel siblings off IndexedReadyDb",
+        "component-meta expansion should keep shallow-only same-layer barrel siblings off FileArtifactStore",
     );
 }
 
@@ -9622,8 +9622,8 @@ fn archived_indexed_ready_rejected_when_workspace_dep_changes_content() {
     let hash_v1 = facts_v1.whole_hash;
 
     // Step 2: remove the cached IndexedReady entry so subsequent reads
-    // re-materialize from the scheduler. The retired `IndexedReadyDb` used
-    // to archive soft-invalidated entries; `IndexedReadyDb` validates by
+    // re-materialize from the scheduler. The retired `FileArtifactStore` used
+    // to archive soft-invalidated entries; `FileArtifactStore` validates by
     // whole_hash instead, so `remove` is the correct replacement.
     host.project_type_store().indexed().remove("/src/dep.ts");
 
@@ -9748,7 +9748,7 @@ fn workspace_vfs_source_kind_includes_layer_detail_when_present() {
 #[test]
 fn external_type_analysis_repeated_lookup_collapses_onto_host_cache() {
     // Phase 4 replaced the per-request `external_inputs_memo` with
-    // lookups against the project-global `IndexedReadyDb`. Repeated
+    // lookups against the project-global `FileArtifactStore`. Repeated
     // resolutions for the same canonical now go through that host-owned
     // cache directly — no extra per-request lookup memo layer.
     //

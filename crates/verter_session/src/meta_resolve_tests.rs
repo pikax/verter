@@ -1994,7 +1994,7 @@ fn registry_decl_materialization_skips_raw_snapshot_fallback_for_snapshotless_im
 
     assert_eq!(
         materialized, decl.body,
-        "registry decl projection should reuse cached prepared state from IndexedReadyDb",
+        "registry decl projection should reuse cached prepared state from FileArtifactStore",
     );
 }
 

@@ -54,7 +54,7 @@ impl crate::resolver_core::FrontierHost for HostFrontierAdapter<'_> {
             );
         }
 
-        // IndexedReadyDb fast path.
+        // FileArtifactStore fast path.
         if let Some(facts) = self
             .host
             .project_type_store

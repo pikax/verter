@@ -1,7 +1,7 @@
-//! Stage 1 — `FileArtifactStore`: the canonical per-file artifact cache.
+//! `FileArtifactStore`: the canonical per-file artifact cache.
 //!
 //! `FileArtifactStore` is the **authoritative** post-parse cache. It replaces
-//! the legacy `IndexedReadyDb` type as the single per-file storage layer on
+//! the legacy `FileArtifactStore` type as the single per-file storage layer on
 //! [`crate::project_type_store::ProjectTypeStore`].
 //!
 //! The store is **content-addressed**: keys carry the file's canonical path
@@ -16,19 +16,20 @@
 //! - [`AugmentationTargetKey`] / [`AugmenterSet`] — the inverse-lookup index
 //!   for module augmentations (R29).
 //! - [`FileFacts`] — placeholder; per-file fact registry payload (populated
-//!   at Stage 3).
+//!   by the fact-emission walk).
 //! - [`ParsedEdges`] — content-addressed import-edge facts published per
-//!   file version (populated at Stage 9 when the workspace-edge map becomes
+//!   file version (populated when the workspace-edge map becomes
+//!   idempotent on the env-hash quintuple when the workspace-edge map becomes
 //!   idempotent on the env-hash quintuple).
 //! - [`ModuleAugmentationFact`] — per-file syntactic augmentation fact
-//!   (populated at Stage 3; Stage 1 leaves the vector empty).
+//!   (populated by the fact-emission walk; left empty until then).
 //!
 //! ## Two API surfaces
 //!
 //! The store exposes both:
 //!
 //! 1. **Canonical-keyed legacy surface** — matches the retired
-//!    `IndexedReadyDb` shape (`get(canonical, hash)`, `insert(canonical,
+//!    `FileArtifactStore` shape (`get(canonical, hash)`, `insert(canonical,
 //!    indexed)`, etc.) returning `Arc<IndexedReady>` directly. Existing
 //!    callers see no signature break across the rename.
 //! 2. **`FileArtifactKey`-keyed canonical surface** — `get_artifacts(&key)`,
@@ -49,11 +50,11 @@
 //! - **Eviction is memory-bound (R22):** there is no `invalidate_canonical`
 //!   on `FileArtifactStore`. The existing `ProjectTypeStore::evict_canonical`
 //!   cascade calls `remove_canonical(canonical_id)` to drain all versions
-//!   under a canonical (this path is retired at Stage 7).
+//!   under a canonical (this path is the canonical-keyed legacy retirement target).
 //! - **`parse_stable_hash`:** alpha-normalised structural hash over the
 //!   file's post-shallow-analysis decl skeleton. Invariant under cosmetic
 //!   edits.
-//! - **`augmentation_index` populated lazily at Stage 6c:** Stage 1 owns
+//! - **`augmentation_index` populated lazily on first augmentation-sensitive query:** This module owns
 //!   the skeleton + accessor API.
 //!
 //! See `/type-cache-architecture` skill for the full rule set.
@@ -81,7 +82,7 @@ pub struct ProjectIdentity(pub Hash16);
 // ── Interned strings ──
 
 /// An interned module-specifier string (e.g. `"vue"`, `"./local"`,
-/// `"*.css"`). Stage 1 wraps an `Arc<str>` so the type is movable into
+/// `"*.css"`). Wraps an `Arc<str>` so the type is movable into
 /// data structures without back-references; later stages can swap in a
 /// crate-wide interner if profiling shows hot-path duplication.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -171,14 +172,14 @@ pub const LEGACY_PARSE_ENV_HASH: Hash16 = [0u8; 16];
 
 /// Per-file fact registry payload.
 ///
-/// Stage 1 placeholder: holds an empty registry. Stage 3 populates this
+/// Empty registry placeholder. The fact-emission walk will populate this
 /// with the parse-domain facts (`Export`, `LocalDecl`, `MemberShape`,
 /// `MemberPresence`, `SyntacticExportSet`, `MacroSurface`, `TemplateRoot`,
 /// `ImportRef`, `SyntacticReexportRef`, `ModuleAugmentation`) emitted
 /// during shallow analysis (R10–R16, R28, R29).
 #[derive(Debug, Default, Clone)]
 pub struct FileFacts {
-    // Stage 3 populates a FactKey-indexed registry here.
+    // A FactKey-indexed registry is populated here once fact-emission lands.
     _stage1_placeholder: (),
 }
 
@@ -193,7 +194,7 @@ impl FileFacts {
 
 /// Content-addressed parsed import-edge facts for a single file version.
 ///
-/// Stage 1 placeholder: Stage 9 makes the workspace-edge map idempotent
+/// Empty placeholder. The workspace-edge map becomes idempotent
 /// on the env-hash quintuple, at which point this type holds the
 /// authoritative content-addressed edge facts directly.
 #[derive(Debug, Default, Clone)]
@@ -213,8 +214,8 @@ impl ParsedEdges {
 /// A single `declare module "<specifier>" { ... }` block emitted by the
 /// parser during shallow analysis.
 ///
-/// Stage 1 defines the type; Stage 3 populates it from the shallow walk.
-/// Stage 6c stitches the augmenting declarations into the consumer's
+/// The type is defined here; the shallow walk populates it.
+/// Augmenting declarations are stitched into the consumer's
 /// `EffectiveExportSet` for that specifier.
 ///
 /// Fields:
@@ -223,7 +224,7 @@ impl ParsedEdges {
 /// - `augmented_name` — the name of an augmented binding inside the block.
 /// - `space` — which symbol space the augmented binding occupies.
 /// - `augmented_member_shape_fingerprint` — alpha-normalised fingerprint
-///   over the augmenting block's member set; used by Stage 6c to detect
+///   over the augmenting block's member set; used to detect
 ///   when an augmenter's contribution to the effective surface changes
 ///   without changing the augmenter set itself.
 #[derive(Debug, Clone)]
@@ -293,8 +294,8 @@ pub struct AugmenterSet {
 /// The per-file payload stored under [`FileArtifactKey`].
 ///
 /// Owns the canonical `IndexedReady` artifact along with the placeholder
-/// fact-registry / parsed-edges / augmentation containers that Stage 3 +
-/// Stage 9 will populate.
+/// fact-registry / parsed-edges / augmentation containers thby the fact-emission walk +
+/// later fact-emission + workspace-edge work will populate.
 #[derive(Debug, Clone)]
 pub struct FileArtifacts {
     pub indexed: Arc<IndexedReady>,
@@ -323,7 +324,7 @@ impl FileArtifacts {
 
 /// The per-host content-addressed file-artifact cache.
 ///
-/// Replaces the retired `IndexedReadyDb` type as the authoritative
+/// Replaces the retired `FileArtifactStore` type as the authoritative
 /// per-file storage layer. The same struct serves both the legacy
 /// canonical-keyed surface (`get(canonical, hash) -> Arc<IndexedReady>`)
 /// and the new content-addressed surface (`get_artifacts(&key) ->
@@ -413,7 +414,7 @@ impl FileArtifactStore {
         }
     }
 
-    /// Install the host-level test audit hook (legacy `IndexedReadyDb`
+    /// Install the host-level test audit hook (legacy `FileArtifactStore`
     /// equivalent).
     #[cfg(test)]
     pub(crate) fn install_test_audit_hook(
@@ -424,7 +425,7 @@ impl FileArtifactStore {
     }
 
     // ──────────────────────────────────────────────────────────────────
-    // Legacy `IndexedReadyDb` API surface
+    // Legacy `FileArtifactStore` API surface
     //
     // These methods preserve the retired type's signatures so existing
     // call sites compile across the rename. They map onto the
@@ -544,7 +545,7 @@ impl FileArtifactStore {
     }
 
     /// Snapshot every live entry for auditing / diagnostics, in
-    /// `(canonical, indexed)` shape (matches the legacy `IndexedReadyDb`
+    /// `(canonical, indexed)` shape (matches the legacy `FileArtifactStore`
     /// API).
     #[must_use]
     pub fn snapshot_all(&self) -> Vec<(Arc<str>, Arc<IndexedReady>)> {
@@ -560,7 +561,7 @@ impl FileArtifactStore {
     }
 
     /// Insert or replace the entry for `canonical_id`. Older versions for
-    /// the same canonical are overwritten — the legacy `IndexedReadyDb`
+    /// the same canonical are overwritten — the legacy `FileArtifactStore`
     /// guaranteed exactly one entry per canonical regardless of
     /// content_hash, so this method preserves that semantics by draining
     /// every other version of the same canonical before inserting the
@@ -599,7 +600,7 @@ impl FileArtifactStore {
         } else {
             self.live_counter.fetch_add(1, Ordering::Relaxed);
             // Audit event fires on FRESH inserts only (matches retired
-            // IndexedReadyDb::insert behaviour).
+            // FileArtifactStore::insert behaviour).
             crate::component_meta_audit::record_indexed_ready_built(
                 Arc::clone(&canonical_for_event),
                 whole_hash,
@@ -612,7 +613,7 @@ impl FileArtifactStore {
     }
 
     /// Remove every entry for `canonical_id` regardless of content hash
-    /// (legacy `IndexedReadyDb::remove` semantics).
+    /// (legacy `FileArtifactStore::remove` semantics).
     pub fn remove(&self, canonical_id: &str) {
         let to_remove: Vec<FileArtifactKey> = self
             .artifacts
@@ -657,7 +658,7 @@ impl FileArtifactStore {
     // ──────────────────────────────────────────────────────────────────
     // New `FileArtifactKey`-keyed canonical API surface.
     //
-    // Later stages (Stage 2 `upsert` no-op, Stage 3 fact emission, Stage
+    // Later layers (upsert no-op, fact emission, multi-version
     // 6c augmentation stitching, etc.) write through these methods.
     // ──────────────────────────────────────────────────────────────────
 
@@ -763,7 +764,7 @@ impl FileArtifactStore {
     }
 
     /// Install (or replace) the augmenter set under `key`. Used by
-    /// Stage 6c during index population.
+    /// the index-population path.
     pub fn populate_augmenter_set(
         &self,
         key: AugmentationTargetKey,

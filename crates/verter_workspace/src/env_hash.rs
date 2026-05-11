@@ -1,4 +1,4 @@
-//! Stage 1 — 5-way env hash split (R21).
+//! 5-way env hash split (R21).
 //!
 //! Verter's cache substrate keys cache entries on **five orthogonal env
 //! dimensions**, each derived from a strict subset of the project + host

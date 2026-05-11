@@ -361,7 +361,7 @@ impl VerterHost {
         }
 
         let normalized_canonical_id = self.normalized_analysis_canonical(canonical_id);
-        // The uncached path already hits the project-global `IndexedReadyDb`
+        // The uncached path already hits the project-global `FileArtifactStore`
         // for repeated probes, so no per-request memo layer is needed.
         self.current_eval_state_uncached(normalized_canonical_id.as_ref())
     }
@@ -376,7 +376,7 @@ impl VerterHost {
     )> {
         component_meta_trace_custom!("current_eval_state", format!("owner={}", canonical_id),);
 
-        // IndexedReadyDb fast path — live-host probe.
+        // FileArtifactStore fast path — live-host probe.
         let cached_facts = self.project_type_store.indexed().get_any(canonical_id);
         if let Some(facts) = cached_facts {
             // Live-host staleness gate: the project-global cache is validated
@@ -393,7 +393,7 @@ impl VerterHost {
         }
 
         // Scheduler source path for files loaded via `ensure_loaded` but not
-        // yet materialized into `IndexedReadyDb`. The scheduler is the sole
+        // yet materialized into `FileArtifactStore`. The scheduler is the sole
         // source authority; on miss, call `ensure_loaded` once.
         if let Some(state) = self.effective_file_state(canonical_id, None) {
             return Some((state.source, state.cached_parse, state.whole_hash));

@@ -229,7 +229,7 @@ fn evict_canonical_cascade_contains_load_bearing_dbs_today() {
     // These are the specific drains the plan calls out by name in its
     // "Legacy Deletions" table under Stage 7.
     let must_be_present: &[(&str, &str)] = &[
-        // R5 → FileArtifactStore replaces IndexedReadyDb at Stage 1
+        // R5 → FileArtifactStore is the per-file storage type
         ("indexed", "remove"),
         // R7 → MaterializeStructureDb rekey at Stage 5 Sub-task D
         ("materialize_structure_db", "invalidate_for_canonical"),

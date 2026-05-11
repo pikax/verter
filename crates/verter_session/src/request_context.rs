@@ -199,7 +199,7 @@ impl HitMiss {
 /// per-request hit/miss attribution.
 #[derive(Debug, Default)]
 pub struct PerRequestCacheCounters {
-    /// `IndexedReadyDb` — canonical post-parse artifact cache.
+    /// `FileArtifactStore` — canonical post-parse artifact cache.
     pub indexed: HitMiss,
     /// `AnalysisReadyDb` — analysis-stage artifact cache.
     pub analysis: HitMiss,

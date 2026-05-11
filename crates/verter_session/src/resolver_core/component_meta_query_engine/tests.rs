@@ -373,14 +373,14 @@ export interface Wrapper extends PackageProps {}
             .indexed()
             .get_any("/workspace/node_modules/pkg/dist/index.d.ts")
             .is_none(),
-        "prepared package projection should keep the provider barrel off IndexedReadyDb",
+        "prepared package projection should keep the provider barrel off FileArtifactStore",
     );
     assert!(
         host.project_type_store
             .indexed()
             .get_any("/workspace/node_modules/pkg/dist/index3.d.ts")
             .is_none(),
-        "prepared package projection should keep the routed package target off IndexedReadyDb",
+        "prepared package projection should keep the routed package target off FileArtifactStore",
     );
     assert!(
         host.project_type_store

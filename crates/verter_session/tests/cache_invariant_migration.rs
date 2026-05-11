@@ -460,27 +460,27 @@ const STALE_SCHEMA_VERSION: u32 = CACHE_CLUSTER_SCHEMA_VERSION - 1;
 
 #[test]
 fn schema_bump_evicts_indexed_ready_db_stale_entries() {
-    use verter_session::project_type_store::IndexedReadyDb;
+    use verter_session::file_artifact_store::FileArtifactStore;
 
-    let db = IndexedReadyDb::new_with_schema_version_for_test(STALE_SCHEMA_VERSION);
+    let db = FileArtifactStore::new_with_schema_version_for_test(STALE_SCHEMA_VERSION);
     db.insert_synthetic_for_schema_test("/workspace/synthetic.ts");
 
     assert_eq!(
         db.len(),
         1,
-        "IndexedReadyDb fixture: synthetic entry must be present pre-evict"
+        "FileArtifactStore fixture: synthetic entry must be present pre-evict"
     );
     assert_eq!(db.schema_version(), STALE_SCHEMA_VERSION);
 
     let evicted = db.evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION);
     assert_eq!(
         evicted, 1,
-        "IndexedReadyDb: evict_if_schema_mismatch must drain the stale entry"
+        "FileArtifactStore: evict_if_schema_mismatch must drain the stale entry"
     );
     assert_eq!(
         db.len(),
         0,
-        "IndexedReadyDb: storage must be empty after eviction"
+        "FileArtifactStore: storage must be empty after eviction"
     );
 }
 
@@ -686,9 +686,9 @@ fn schema_bump_evicts_materialize_structure_db_stale_entries() {
 // runs. This pins the "no false positive" half of the contract.
 #[test]
 fn evict_if_schema_mismatch_preserves_current_version_entries() {
-    use verter_session::project_type_store::IndexedReadyDb;
+    use verter_session::file_artifact_store::FileArtifactStore;
 
-    let db = IndexedReadyDb::new();
+    let db = FileArtifactStore::new();
     assert_eq!(db.schema_version(), CACHE_CLUSTER_SCHEMA_VERSION);
     db.insert_synthetic_for_schema_test("/workspace/preserve.ts");
     assert_eq!(db.len(), 1, "Db must hold the synthetic entry pre-evict");

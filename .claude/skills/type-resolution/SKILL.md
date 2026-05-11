@@ -9,7 +9,7 @@ description: "Cross-file type resolution: type solver, ShallowFileState, Externa
 
 `VerterHost` owns one `ProjectTypeStore` accessed via `.project_type_store()`. The store holds:
 
-- `IndexedReadyDb` — the single canonical post-parse artifact per `(canonical_id, whole_hash)` (the former `ModuleFactsDb` has been retired).
+- `FileArtifactStore` — the single canonical post-parse artifact per `(canonical_id, whole_hash)` (the former `ModuleFactsDb` has been retired).
 - `AnalysisReadyDb` — scope-parameterised analysis augmentation with bitflag-based satisfaction (`find_satisfying`).
 - `RouteDb` — rehomed barrel/route surface cache, validated against live host facts.
 - `OwnerImportSurfaceDb` — direct-owner-imports cache keyed by `(owner_canonical, owner_whole_hash)`. `VerterHost::owner_import_surface(...)` builds-or-fetches the surface; `resolve_owner_direct_import(owner, local_name)` is the single-call lookup that every direct-owner-import caller now uses.
@@ -337,7 +337,7 @@ Cross-file type resolution for macros (`defineProps<T>()`, component-meta, etc.)
 - `symbols` (all locally-declared type symbols with raw body, type params, local deps, external deps)
 - `import_locals` / `import_targets` (import classification for closure)
 
-Populated once through the shared host ensure-path and cached in `IndexedReadyDb`. Invalidated when the file's whole-hash changes.
+Populated once through the shared host ensure-path and cached in `FileArtifactStore`. Invalidated when the file's whole-hash changes.
 
 **ExternalTypeFrontier** (`external_type_frontier.rs`) is the single BFS engine for all cross-file type deepening. Level-by-level traversal:
 1. Seed with initial `(canonical_id, exported_name)` pairs
@@ -357,7 +357,7 @@ Populated once through the shared host ensure-path and cached in `IndexedReadyDb
 
 When a budget trips, the system returns a structured `BudgetExceededFailure` with domain, limit, actual count, and context -- never silently normalizes.
 
-**Host integration**: `HostFrontierAdapter` (`host_resolve.rs`) bridges the frontier to the real `VerterHost`, resolving through `IndexedReadyDb` for per-file facts, `RouteDb`/`ImportedRootDb` for cross-file routing, and workspace fallback for cold misses. Route discovery runs exclusively through the frontier/final-target path; once the defining symbol is selected, the shared source-body evaluator materializes the final `ResolvedElements`.
+**Host integration**: `HostFrontierAdapter` (`host_resolve.rs`) bridges the frontier to the real `VerterHost`, resolving through `FileArtifactStore` for per-file facts, `RouteDb`/`ImportedRootDb` for cross-file routing, and workspace fallback for cold misses. Route discovery runs exclusively through the frontier/final-target path; once the defining symbol is selected, the shared source-body evaluator materializes the final `ResolvedElements`.
 
 **Key files:**
 

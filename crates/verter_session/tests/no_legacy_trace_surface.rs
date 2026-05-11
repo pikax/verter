@@ -313,21 +313,23 @@ fn component_meta_trace_structured_macro_does_not_write_to_file_or_stderr_trace(
 }
 
 /// `IndexedReadyBuilt` fires exactly once per fresh `(canonical, whole_hash)`
-/// insert into `IndexedReadyDb`.
+/// insert into `FileArtifactStore`.
 #[test]
 fn indexed_ready_built_event_fires_once_per_fresh_whole_hash() {
     use std::sync::Arc;
     use verter_session::component_meta_audit::{
         accumulator::RequestFootprintAccumulator, StructuredAuditEvent,
     };
-    use verter_session::project_type_store::{IndexedReady, IndexedReadyDb};
     use verter_session::request_context::{RequestContext, RequestContextGuard};
+    use verter_session::{
+        file_artifact_store::FileArtifactStore, project_type_store::IndexedReady,
+    };
 
     let acc = Arc::new(RequestFootprintAccumulator::new());
     let ctx = RequestContext::new(1, Arc::from("/owner"), true, Some(Arc::clone(&acc)));
     let _guard = RequestContextGuard::install(ctx);
 
-    let db = IndexedReadyDb::new();
+    let db = FileArtifactStore::new();
     let mut whole_hash = [0u8; 16];
     whole_hash[0] = 0xAB;
 
@@ -355,10 +357,12 @@ fn indexed_ready_built_event_not_fired_on_overwrite() {
     use verter_session::component_meta_audit::{
         accumulator::RequestFootprintAccumulator, StructuredAuditEvent,
     };
-    use verter_session::project_type_store::{IndexedReady, IndexedReadyDb};
     use verter_session::request_context::{RequestContext, RequestContextGuard};
+    use verter_session::{
+        file_artifact_store::FileArtifactStore, project_type_store::IndexedReady,
+    };
 
-    let db = IndexedReadyDb::new();
+    let db = FileArtifactStore::new();
     let mut whole_hash_a = [0u8; 16];
     whole_hash_a[0] = 0x01;
     let ir_a = Arc::new(IndexedReady::new_for_test(whole_hash_a));

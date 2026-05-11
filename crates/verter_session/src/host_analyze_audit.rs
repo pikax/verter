@@ -19,7 +19,7 @@
 //!    - `Active` → real [`RequestContextGuard`].
 //!    - `Noop` → [`verter_audit::install_noop_observer`].
 //! 3. Detect "fresh build vs warm-cache reuse" by probing
-//!    [`crate::project_type_store::IndexedReadyDb::get_any`] BEFORE
+//!    [`crate::file_artifact_store::FileArtifactStore::get_any`] BEFORE
 //!    invoking [`VerterHost::ensure_indexed_ready`]. The probe is
 //!    cheap (a single DashMap lookup) and provides a discriminating
 //!    signal independent of the producer's internal state machine —

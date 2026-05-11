@@ -564,14 +564,14 @@ fn bump_project_generation_evicts_all_three_sub_shapes() {
 //     (D119 tunable absent).
 //   - `evict_canonical` does not invalidate `semantic_db`
 //     (rehoming-doc §3.3 test #4).
-//   - `IndexedReadyDb::keys` and `evict_lru` do not exist (D40 LRU
+//   - `FileArtifactStore::keys` and `evict_lru` do not exist (D40 LRU
 //     floor absent).
 //
 // PASS post-1C-γ: each sub-test asserts one of the above invariants
 // directly. None of them can pass against the pre-1C-γ tree.
 // ─────────────────────────────────────────────────────────────────────
 
-/// Helper — seed `IndexedReadyDb` with N synthetic entries, returning
+/// Helper — seed `FileArtifactStore` with N synthetic entries, returning
 /// the live publish set (every `(canonical, content_hash)` pair).
 #[cfg(not(target_arch = "wasm32"))]
 fn seed_indexed_ready(
@@ -604,7 +604,7 @@ fn seed_indexed_ready(
 /// `evict_unreachable_indexed_ready` did not exist; the only
 /// cache-eviction primitives were `evict_canonical` (drops the
 /// entry unconditionally) and `bump_project_generation_and_evict`
-/// (clears `IndexedReadyDb` indirectly via `evict_canonical_for`).
+/// (clears `FileArtifactStore` indirectly via `evict_canonical_for`).
 /// Post-1C-γ the new method preserves entries whose pair is in
 /// `live_publish_set`.
 #[cfg(not(target_arch = "wasm32"))]

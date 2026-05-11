@@ -85,7 +85,7 @@ The `AuditedRequest` builder (`crates/verter_session/src/audited_request.rs`) wr
 
 ### Semantic Analysis
 
-`VerterHost::analyze_with_audit(canonical_id) -> (Option<AnalysisReady>, Option<RequestAuditRecord>)`. Probes the `IndexedReadyDb` cache before constructing the registration so the observed `from_cache` state is unaffected by the audit work itself. Audit-disabled fast path runs `materialize_analysis_ready` with no `RequestContextGuard` installed.
+`VerterHost::analyze_with_audit(canonical_id) -> (Option<AnalysisReady>, Option<RequestAuditRecord>)`. Probes the `FileArtifactStore` cache before constructing the registration so the observed `from_cache` state is unaffected by the audit work itself. Audit-disabled fast path runs `materialize_analysis_ready` with no `RequestContextGuard` installed.
 
 ### Type Resolution
 

@@ -256,7 +256,7 @@ impl VerterHost {
     /// cache hit with a valid `dep_signature`, the cached
     /// `ResolutionTemplate` rehydrates a per-request
     /// `ResolvedComponentMetaState` (snapshot reloaded from
-    /// `IndexedReadyDb`) and a synthesized `RequestAuditRecord` with
+    /// `FileArtifactStore`) and a synthesized `RequestAuditRecord` with
     /// `from_cache = true`, `total_ms = 0.0` is finalised through the
     /// registration so audit consumers via
     /// `take_audit_record(resolution.request_id)` work uniformly.
@@ -447,7 +447,7 @@ impl VerterHost {
         // `take_audit_record(resolution.request_id)` get uniform
         // observability. Snapshot per-request cache counters from
         // the active TLS context — the warm path consulted
-        // `ComponentMetaResultDb::get` and `IndexedReadyDb::get`
+        // `ComponentMetaResultDb::get` and `FileArtifactStore::get`
         // through `shallow_file_state`, both of which bumped
         // hits/misses on this request's `cache_counters`. The
         // joiner-accounting contract requires the snapshot to

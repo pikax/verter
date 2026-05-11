@@ -27,9 +27,9 @@ fn make_ctx() -> Arc<RequestContext> {
 #[test]
 fn layer_indexed_get_misses_increment_per_request_counter() {
     use verter_semantic::analysis::Hash16;
-    use verter_session::project_type_store::IndexedReadyDb;
+    use verter_session::file_artifact_store::FileArtifactStore;
 
-    let db = IndexedReadyDb::new();
+    let db = FileArtifactStore::new();
     let ctx = make_ctx();
     let _g = RequestContextGuard::install(Arc::clone(&ctx));
 
@@ -199,9 +199,9 @@ fn no_request_context_means_no_bump() {
     // fetch_add — verified by the compile-time presence of the
     // bump code-path.
     use verter_semantic::analysis::Hash16;
-    use verter_session::project_type_store::IndexedReadyDb;
+    use verter_session::file_artifact_store::FileArtifactStore;
 
-    let db = IndexedReadyDb::new();
+    let db = FileArtifactStore::new();
     let _ = db.get("/missing", Hash16::default());
     let _ = db.get_any("/missing-any");
     // Reaching this point without panic is the assertion.
@@ -210,9 +210,9 @@ fn no_request_context_means_no_bump() {
 #[test]
 fn cross_layer_non_leakage_indexed_to_analysis() {
     use verter_semantic::analysis::Hash16;
-    use verter_session::project_type_store::IndexedReadyDb;
+    use verter_session::file_artifact_store::FileArtifactStore;
 
-    let db = IndexedReadyDb::new();
+    let db = FileArtifactStore::new();
     let ctx = make_ctx();
     let _g = RequestContextGuard::install(Arc::clone(&ctx));
 

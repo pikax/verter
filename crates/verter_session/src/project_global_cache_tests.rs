@@ -19,7 +19,7 @@
 //!   mutate the previous entry in place.
 //! - E. `ProjectTypeStore::bump_project_generation` is monotonic and
 //!   observable through the accessor.
-//! - F. `IndexedReadyDb` lookups reject stale whole-hashes at the key level.
+//! - F. `FileArtifactStore` lookups reject stale whole-hashes at the key level.
 //!
 //! Phase 0c tests that depend on the semantic query graph
 //! (`semantic_query::SemanticQueryApi::execute`) dedup rules live in the
@@ -68,7 +68,7 @@ fn upsert_vue(host: &VerterHost, id: &str, source: &str) {
 
 /// Force IndexedReady materialization for a canonical. Consumers normally
 /// trigger this implicitly through a query; tests need an explicit hook
-/// because the upsert path evicts on content change and `IndexedReadyDb`
+/// because the upsert path evicts on content change and `FileArtifactStore`
 /// is lazily re-materialized on first demand.
 fn ensure_facts(host: &VerterHost, canonical_id: &str) -> [u8; 16] {
     let indexed = host
@@ -194,7 +194,7 @@ fn project_generation_bump_is_monotonic_from_host() {
     assert_eq!(store.project_generation(), g2);
 }
 
-/// F. `IndexedReadyDb` lookups reject stale whole-hashes at the key level
+/// F. `FileArtifactStore` lookups reject stale whole-hashes at the key level
 /// without requiring the caller to know about request-view identity.
 #[test]
 fn indexed_lookup_rejects_stale_hash_without_a_request_view() {
@@ -234,7 +234,7 @@ fn vue_sfc_upsert_publishes_indexed_ready() {
     assert_ne!(hash, [0u8; 16]);
 }
 
-/// The project-global `IndexedReadyDb` accessor returns the same `Arc`
+/// The project-global `FileArtifactStore` accessor returns the same `Arc`
 /// instance across repeated lookups — so concurrent warm readers never
 /// clone the payload.
 #[test]
@@ -738,7 +738,7 @@ fn dep_version_for_whole_hash_returns_whole_hash_variant() {
     }
 }
 
-/// The `IndexedReadyDb::find_satisfying`-flavoured lookups on
+/// The `FileArtifactStore::find_satisfying`-flavoured lookups on
 /// `AnalysisReadyDb` use bitflag containment, not scope ordinal. A BUILD
 /// cached entry satisfies any narrower flag subset.
 #[test]

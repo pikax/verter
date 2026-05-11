@@ -2430,7 +2430,7 @@ impl VerterHost {
     ///
     /// For owner files in the scheduler, reads the scheduler's latest analysis
     /// (which reflects post-recompile state). For imported deps and non-scheduler
-    /// files, reads from `IndexedReadyDb` (materializing on miss). Both paths enrich
+    /// files, reads from `FileArtifactStore` (materializing on miss). Both paths enrich
     /// the snapshot with resolved imports, destructured bindings, and template
     /// analysis.
     pub(crate) fn get_raw_analysis_snapshot(
@@ -2475,7 +2475,7 @@ impl VerterHost {
 
             // Scheduler-first path for owner files: the scheduler has the
             // latest analysis after recompile, including updated import
-            // routes for newly-added dependencies. IndexedReadyDb may hold
+            // routes for newly-added dependencies. FileArtifactStore may hold
             // stale import routes for owner files whose deps changed after
             // materialization.
             if let Some(snapshot) = self.build_snapshot_from_scheduler(canonical) {
@@ -2572,7 +2572,7 @@ impl VerterHost {
             }
         }
 
-        // IndexedReadyDb path: covers imported deps and non-scheduler files.
+        // FileArtifactStore path: covers imported deps and non-scheduler files.
         let facts = self.ensure_indexed_ready(canonical)?;
         let mut snapshot = (*facts.snapshot).clone();
         self.resolve_snapshot_imports(canonical, &mut snapshot);

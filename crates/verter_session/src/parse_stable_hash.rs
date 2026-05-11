@@ -1,4 +1,4 @@
-//! Stage 1 — `parse_stable_hash` computation.
+//! `parse_stable_hash` computation.
 //!
 //! `parse_stable_hash` is a structural hash over a file's post-shallow-analysis
 //! decl skeleton. It is **invariant under cosmetic edits**:
@@ -6,8 +6,8 @@
 //! - whitespace changes
 //! - comment additions / deletions
 //! - JSDoc edits
-//! - generic param identifier rename (`T` ↔ `U`) — applies once Stage 3
-//!   lowers typed parameter lists; Stage 1 hashes the shallow symbol
+//! - generic param identifier rename (`T` ↔ `U`) — applies once the fact-emission walk
+//!   lowers typed parameter lists; today, hashes the shallow symbol
 //!   inventory only, which does NOT include parameter identifiers, so the
 //!   property already holds.
 //!
@@ -25,20 +25,20 @@
 //! The hash walks the [`ShallowFileState`] symbol inventory in a stable
 //! order. The inventory captures only top-level declarations (the post-
 //! shallow-analysis decl skeleton); deep member bodies live in
-//! `Member`/`MemberShape` facts emitted by Stage 3.
+//! `Member`/`MemberShape` facts emitted by the fact-emission walk.
 //!
 //! 1. Sort symbol names per kind so order is independent of the parse's
 //!    declaration order. (Decl reorders within a file are cosmetic for the
-//!    SHALLOW skeleton — Stage 1's parse_stable_hash is invariant under
+//!    SHALLOW skeleton — the parse_stable_hash is invariant under
 //!    reorder.)
 //! 2. For each symbol, emit `(kind, name)` and (for type symbols with
 //!    members) the sorted member name list.
 //! 3. For exports, emit `(exported_name, target_kind)`.
 //! 4. Hash the serialised tuple stream with xxh3.
 //!
-//! Stage 3 may extend the walk with typed-IR-derived alpha-normalisation
+//! A future extension may the walk with typed-IR-derived alpha-normalisation
 //! (e.g., to make the body of a `type Foo<T> = T[]` stable under
-//! `T` ↔ `U` rename). The Stage-1 skeleton does NOT inspect bodies.
+//! `T` ↔ `U` rename). The current skeleton does NOT inspect bodies.
 
 use verter_semantic::analysis::Hash16;
 use xxhash_rust::xxh3::xxh3_128;
@@ -68,7 +68,7 @@ pub fn compute_parse_stable_hash(indexed: &IndexedReady) -> Hash16 {
         let symbol = &shallow.symbols[name];
         write_decl(&mut buf, kind_str_type(&symbol.kind), name);
         // Emit member skeleton (member name set only — bodies live in
-        // Stage-3 `Member` facts).
+        // `Member` facts from the fact-emission walk).
         let mut members: Vec<&String> = symbol.member_deps.keys().collect();
         members.sort();
         for m in members {
@@ -122,7 +122,7 @@ pub fn compute_parse_stable_hash(indexed: &IndexedReady) -> Hash16 {
 
     // ── Section: import targets (specifier + binding, NOT resolved canonical) ──
     // R12: parse-domain emits import shape only — resolved targets live in
-    // the resolve-domain (Stage 6a). The shallow state today carries the
+    // the resolve-domain. The shallow state today carries the
     // resolved canonical alongside, but `parse_stable_hash` reads only the
     // specifier + binding so a resolve-config change (paths edit) does not
     // ripple through this hash.

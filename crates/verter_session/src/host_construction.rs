@@ -107,7 +107,7 @@ impl VerterHost {
         // store exposes.
         let routes_handle = project_type_store.routes_handle();
         let imported_roots_handle = project_type_store.imported_roots_handle();
-        // Install the host-level test audit hook on the IndexedReadyDb so
+        // Install the host-level test audit hook on the FileArtifactStore so
         // fresh `insert`s bump `total_shallow_processes` + `loaded_files`
         // cumulatively across requests on this host. Test-only;
         // production builds compile without this block.

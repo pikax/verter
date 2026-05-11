@@ -256,7 +256,7 @@ where
     }
 
     /// Soft-invalidate artifacts for a canonical file (e.g. after import
-    /// route change where file content is unchanged). The `IndexedReadyDb`
+    /// route change where file content is unchanged). The `FileArtifactStore`
     /// is keyed by `(canonical_id, whole_hash)` and is invalidated at the
     /// project-store level by `evict_canonical`; this runtime-level helper
     /// only clears subsystem caches that live outside the project store.

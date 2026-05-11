@@ -1,4 +1,4 @@
-//! Stage 1 — env hash 5-way split discriminating tests (R21).
+//! Env hash 5-way split discriminating tests (R21).
 //!
 //! These tests assert that each of the five orthogonal env-hash dimensions
 //! (`parse_env_hash` / `resolve_env_hash` / `type_env_hash` / `lib_env_hash` /

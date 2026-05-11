@@ -198,7 +198,7 @@ impl VerterHost {
                     // supplement §5.D.0 r17 — fresh load,
                     // count for the host-level test audit. Fresh
                     // means we missed both `get_source` and
-                    // `IndexedReadyDb::get_any` before reaching here.
+                    // `FileArtifactStore::get_any` before reaching here.
                     #[cfg(test)]
                     self.test_audit.record_read(canonical_id);
                     return Some(source);
@@ -389,7 +389,7 @@ impl VerterHost {
         let canonical_id = normalized_canonical_id.as_ref();
 
         // The per-request `external_inputs_memo` was.
-        // The project-global `IndexedReadyDb` already returns cached state,
+        // The project-global `FileArtifactStore` already returns cached state,
         // so the old memo was just a redundant lookup memo layered over a
         // host-owned cache.
         let cached_facts = self.project_type_store.indexed().get_any(canonical_id);

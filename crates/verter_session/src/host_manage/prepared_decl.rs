@@ -596,7 +596,7 @@ impl VerterHost {
 
     /// Get or build the canonical shallow type file state for an imported
     /// dependency.  The state is populated through the shared host ensure-path
-    /// and cached in `IndexedReadyDb`.
+    /// and cached in `FileArtifactStore`.
     ///
     /// Consumed by the frontier engine (production cache-warming pass in
     /// `resolve_external_type_from_loaded_files`) and integration tests.
@@ -608,7 +608,7 @@ impl VerterHost {
             .resolve_eval_dependency_canonical(canonical_id)
             .unwrap_or_else(|| canonical_id.to_string());
 
-        // IndexedReadyDb fast path (cache read only — no materialization to avoid recursion).
+        // FileArtifactStore fast path (cache read only — no materialization to avoid recursion).
         let cached_facts = self
             .project_type_store
             .indexed()
@@ -628,7 +628,7 @@ impl VerterHost {
     ///
     /// On cache hit, returns the cached `IndexedReady` without any I/O.
     /// On miss, reads the file, parses, builds analysis/snapshot/eval, constructs
-    /// `ShallowFileState`, and publishes to `IndexedReadyDb`.
+    /// `ShallowFileState`, and publishes to `FileArtifactStore`.
     pub(crate) fn ensure_indexed_ready(
         &self,
         canonical_id: &str,
@@ -636,7 +636,7 @@ impl VerterHost {
         let normalized_canonical_id = self.normalized_analysis_canonical(canonical_id);
         let canonical_id = normalized_canonical_id.as_ref();
 
-        // Fast path: check IndexedReadyDb through the project-global cache.
+        // Fast path: check FileArtifactStore through the project-global cache.
         let cached = self.project_type_store.indexed().get_any(canonical_id);
         if let Some(indexed) = cached {
             // Staleness gate: the ambient-or-explicit store view governs hash
@@ -925,7 +925,7 @@ impl VerterHost {
                 .has_resolvable_surface()
                 .then(|| crate::resolver_store::hash_route_surface(shallow_state.as_ref()));
 
-            // Publish the canonical post-parse artifact into IndexedReadyDb.
+            // Publish the canonical post-parse artifact into FileArtifactStore.
             // This is the single authoritative cache consumers read from.
             let indexed = Arc::new(crate::project_type_store::IndexedReady {
                 whole_hash,

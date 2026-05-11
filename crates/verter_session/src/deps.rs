@@ -324,7 +324,7 @@ pub(crate) fn should_invalidate_dependent_view(
 #[allow(clippy::too_many_arguments)]
 /// Returns the set of owner canonical IDs that were actually invalidated
 /// (compile slots cleared). Callers can use this to evict other caches
-/// (e.g., `IndexedReadyDb`) only for affected dependents.
+/// (e.g., `FileArtifactStore`) only for affected dependents.
 pub(crate) fn smart_invalidate_dependents_via_scheduler(
     host: &crate::VerterHost,
     owners: BTreeSet<String>,

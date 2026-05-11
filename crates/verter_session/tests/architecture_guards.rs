@@ -4939,7 +4939,7 @@ fn guard8_predicate_rejects_unregistered_db_field() {
     // the offending field.
     let fixture_src = r#"
         pub struct FakeProjectTypeStore {
-            pub indexed: IndexedReadyDb,
+            pub indexed: FileArtifactStore,
             pub analysis: AnalysisReadyDb,
             pub forgotten_field: ForgottenStore,
         }
@@ -4962,7 +4962,7 @@ fn guard8_predicate_passes_when_inventory_is_complete() {
     // The predicate must return an empty Vec.
     let fixture_src = r#"
         pub struct FakeProjectTypeStore {
-            pub indexed: IndexedReadyDb,
+            pub indexed: FileArtifactStore,
             pub analysis: AnalysisReadyDb,
         }
     "#;
@@ -4983,7 +4983,7 @@ fn guard8_predicate_passes_when_inventory_is_complete() {
 //
 // Source-structure guard. Walks the struct via `syn::parse_file` and
 // extracts the head identifier of each DB-shape field's type
-// (`IndexedReadyDb`, `AnalysisReadyDb`, `RouteDb`, ...). For every
+// (`FileArtifactStore`, `AnalysisReadyDb`, `RouteDb`, ...). For every
 // such head identifier, asserts that at least one source file under
 // `crates/verter_session/src/` contains an
 // `impl ... InvalidationByCanonical for <Head>` block.
@@ -5149,12 +5149,6 @@ fn guard9_predicate_rejects_missing_invalidation_by_canonical_impl() {
 fn guard9_predicate_passes_for_known_implementor() {
     // Sanity counter-fixture: `FileArtifactStore` IS implemented in the
     // workspace. The detector must report `true`.
-    //
-    // `FileArtifactStore` is the renamed-from-IndexedReadyDb type; the
-    // legacy `IndexedReadyDb` name remains as a `pub use` alias on
-    // `project_type_store` so existing callers compile across the
-    // rename, but the actual `impl InvalidationByCanonical` block
-    // targets the canonical `FileArtifactStore` type.
     let crate_root = workspace_path("crates/verter_session/src");
     assert!(
         invalidation_by_canonical_impl_exists(&crate_root, "FileArtifactStore"),

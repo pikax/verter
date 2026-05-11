@@ -114,7 +114,7 @@ fn cold_request_records_indexed_misses_warm_request_records_indexed_hits() {
         .expect("cold resolve");
     assert!(
         cold.store.cache_layers.indexed.misses >= 1,
-        "cold record must observe at least one IndexedReadyDb miss, got hits={}, misses={}",
+        "cold record must observe at least one FileArtifactStore miss, got hits={}, misses={}",
         cold.store.cache_layers.indexed.hits,
         cold.store.cache_layers.indexed.misses,
     );

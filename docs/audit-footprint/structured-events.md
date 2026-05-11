@@ -58,7 +58,7 @@ just component-meta:
   cooperative joins.
 - **Cache layer hit/miss.** `record_cache_event(layer, hit)` on the
   `AuditObserver` populates `RequestStoreAudit::cache_layers` —
-  every host-owned cache (`IndexedReadyDb`,
+  every host-owned cache (`FileArtifactStore`,
   `ComponentMetaResultDb`, `MaterializeStructureDb`,
   `RefCycleResultDb`, `OwnerImportSurfaceDb`, `SemanticGraphStore`)
   routes through this hook.
