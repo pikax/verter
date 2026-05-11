@@ -259,20 +259,21 @@ pub fn template_literal_as_key() -> SnapshotView {
 }
 
 // ── Recursive type alias — `{ root: Tree }` where Tree references itself ────
-//   Per CLAUDE.md "type navigation must stay narrower than expansion:
-//   walking `A['c']['full']['bar']` should navigate intermediate hops
-//   and expand only the terminal requested projection." The `root`
-//   prop is the terminal projection and is therefore expanded one
-//   level. Verter's `RecursiveRef` placeholder breaks the recursion
-//   at `Tree.children: Tree[]`, surfacing
-//   `{ children?: /*recursive*/ Tree[]; label: string }`. This is
-//   the rule-correct shape (one-level expansion + RecursiveRef
-//   guard). TS spec §3.7 + Verter rule.
+//   §3.4 Typed-IR-Only Resolver Rule + Component-Meta Shallow-By-Default
+//   Rule (CLAUDE.md): the policy's structural macro-participation
+//   classifier recognises `Tree` as a role-bearing root (consumed by
+//   `defineProps<{ root: Tree }>`) and keeps the published ref
+//   symbolic. The derivation note
+//   (`tests/correctness/derivation_notes/recursive_alias_via_typeof.md`)
+//   names this as the canonical behavior: "the renderer surfaces the
+//   top-level reference rather than the (potentially infinite)
+//   expansion". TS spec §3.7 + Verter rule. Replaces the legacy
+//   one-level eager-expansion behavior that surfaced
+//   `{ children?: /*recursive*/ Tree[]; label: string }` — that was
+//   the pre-F1 nominal-classifier output and contradicted the
+//   shallow-by-default contract.
 pub fn recursive_alias_via_typeof() -> SnapshotView {
-    shell(vec![required_prop(
-        "root",
-        "{ children?: /*recursive*/ Tree[]; label: string }",
-    )])
+    shell(vec![required_prop("root", "Tree")])
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

@@ -3,7 +3,7 @@
   "props": [
     {
       "name": "items",
-      "type_signature": "{ disabled?: boolean; id?: string; label: string }[]",
+      "type_signature": "TabItem[]",
       "required": true,
       "has_default": false,
       "default_signature": null,

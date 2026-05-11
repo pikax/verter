@@ -8,11 +8,13 @@ use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_semantic::analysis::component_meta::ResolvedTypeAnalysis;
+use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
 use verter_type_expr::{
     FunctionExpr, FunctionParam, IndexSignature, MethodSignature, ObjectExpr, ObjectMember,
     ObjectProperty, TupleElement, TypeExpr,
 };
 
+use crate::host_manage::component_meta_extract::resolve_ref_to_root_identity;
 use crate::resolver_core::component_meta::ResolvedTypeRegistryMeta;
 use crate::resolver_core::{ComponentMetaQueryEngine, ResolverContext};
 use crate::semantic_query::DeclIdentity;
@@ -78,6 +80,26 @@ pub(super) struct PolicyCtx<'a, 'h> {
     pub(super) engine: &'a mut ComponentMetaQueryEngine<'h>,
     pub(super) owner_canonical: &'a str,
     pub(super) host: &'a VerterHost,
+    /// Set of `ResolvedRootIdentity` values that participate in
+    /// type-role-bearing Vue SFC macros (`defineProps`, `defineEmits`,
+    /// `defineModel`, `defineSlots`, `withDefaults`) on the owner SFC.
+    ///
+    /// A type Ref is classified "role-bearing" — and thus kept symbolic
+    /// per Rules 2 / 4 + the raw-restoration helpers — IFF its resolved
+    /// root identity appears in this set. This is the §3.4
+    /// (Typed-IR-Only Resolver Rule) structural macro-participation
+    /// classifier: type-role is conferred by macro consumption, not by
+    /// nominal name suffix.
+    ///
+    /// Built once per `apply_component_meta_resolution_policy` call by
+    /// `build_policy_macro_role_identities` reading
+    /// `AnalyzedMacro.parsed_type_argument` (skeleton-only walk) and
+    /// `AnalyzedMacro.resolved_local_types[i].name` /
+    /// `.type_expr` (full-body walk for named alias closures). Names
+    /// resolve through `resolve_ref_to_root_identity` (scope-aware:
+    /// local declarations shadow imports, imports route through
+    /// `resolve_local_import_symbol_target`).
+    pub(super) macro_participating_idents: &'a FxHashSet<ResolvedRootIdentity>,
     /// Cycle-guard active set keyed on `(DeclIdentity, NormalizedTypeArgs)`
     /// per Invariant #20. Bare-name keying is forbidden because:
     /// * Two `Foo`s in different files would collide under name keying.
@@ -167,6 +189,49 @@ impl<'a, 'h> PolicyCtx<'a, 'h> {
             decl_name: Arc::from(name),
         }
     }
+
+    /// §3.4 structural macro-participation predicate.
+    ///
+    /// Resolves the bare-name reference `name` to its
+    /// `ResolvedRootIdentity` and checks whether that identity is in
+    /// the macro-participating set built by
+    /// `apply_component_meta_resolution_policy`.
+    ///
+    /// Two resolution paths are consulted, in order:
+    ///
+    /// 1. **Host scope resolution** (production path):
+    ///    `resolve_ref_to_root_identity` consults the host's local-type
+    ///    declarations and the cached import-target resolver. This is
+    ///    the path that pairs with the set-construction path in
+    ///    `build_policy_macro_role_identities`, so warm host hits
+    ///    always agree.
+    /// 2. **Registry fallback** (unit-test path): when host state has
+    ///    not been seeded, derive the identity from the policy
+    ///    registry's `canonical_source_by_name`. The registry's
+    ///    canonical_source is the file declaring the type — the same
+    ///    identity host resolution would have computed had the file
+    ///    been loaded.
+    ///
+    /// Returns `true` if `name` resolves to a type consumed by one of
+    /// the owner's type-role-bearing macros (`defineProps`,
+    /// `defineEmits`, `defineModel`, `defineSlots`, `withDefaults`).
+    ///
+    /// Replaces the legacy nominal `is_props_suffix(name) =
+    /// name.ends_with("Props")` check — type-role classification is
+    /// structural, not nominal.
+    pub(super) fn is_macro_participating(&self, name: &str) -> bool {
+        if let Some(identity) = resolve_ref_to_root_identity(self.host, self.owner_canonical, name)
+        {
+            if self.macro_participating_idents.contains(&identity) {
+                return true;
+            }
+        }
+        if let Some(canonical) = self.registry.canonical_source(name) {
+            let identity = ResolvedRootIdentity::new(canonical, name);
+            return self.macro_participating_idents.contains(&identity);
+        }
+        false
+    }
 }
 
 pub(super) struct DeclLookup {
@@ -194,8 +259,11 @@ pub(super) fn rewrite_expr(expr: &TypeExpr, ctx: &mut PolicyCtx<'_, '_>) -> Opti
         } => rewrite_ref(name.as_ref(), type_arguments.as_ref(), ctx),
 
         TypeExpr::IndexedAccess { object, index } => {
-            // Rule 2: member-path-on-Props stays symbolic.
-            if indexed_access_targets_props_suffix(object) {
+            // Rule 2: member-path on a macro-participating type stays
+            // symbolic (e.g. `MyProps['avatar']`). Structural §3.4
+            // classification — the root must resolve to an identity
+            // consumed by one of the owner's role-bearing macros.
+            if indexed_access_targets_macro_participating(object, ctx) {
                 return None;
             }
             // Rule 5: recurse into both arms.
@@ -324,9 +392,13 @@ fn rewrite_ref(
     type_arguments: &[TypeExpr],
     ctx: &mut PolicyCtx<'_, '_>,
 ) -> Option<TypeExpr> {
-    // Rule 4: Props-suffix bare alias / generic stays symbolic — name-only
-    // check, no declaration lookup needed.
-    if is_props_suffix(name) {
+    // Rule 4: macro-participating bare alias / generic stays symbolic.
+    // Type-role classification is structural (the ref resolves to a type
+    // consumed by one of the owner's `defineProps` / `defineEmits` /
+    // `defineModel` / `defineSlots` / `withDefaults` macros), NOT
+    // nominal (the identifier ends in `"Props"`). See §3.4 of the
+    // Typed-IR-Only Resolver Rule.
+    if ctx.is_macro_participating(name) {
         return rewrite_type_arguments(name, type_arguments, ctx, /*recurse*/ false);
     }
 
@@ -407,7 +479,7 @@ fn rewrite_ref_body_with_guard(
 ) -> Option<TypeExpr> {
     // Rule 3: project-local non-Props with empty type_arguments → chase to
     // body if the body is structurally resolvable (not just another Ref).
-    if type_arguments.is_empty() && body_is_resolvable(body) {
+    if type_arguments.is_empty() && body_is_resolvable(body, ctx) {
         // The body itself may contain other Refs that need policy treatment
         // (e.g. an Object whose property is `Ref(OtherImported)`). Apply
         // the policy to the body before publishing.
@@ -548,19 +620,22 @@ fn rewrite_function(func: &FunctionExpr, ctx: &mut PolicyCtx<'_, '_>) -> Option<
 // Predicates
 // ---------------------------------------------------------------------------
 
-pub(super) fn is_props_suffix(name: &str) -> bool {
-    name.ends_with("Props")
-}
-
-/// Walk through `Parenthesized` / Union / Intersection wrappers; return true
-/// if any leaf is a Ref-with-Props-suffix-name.
-fn indexed_access_targets_props_suffix(object: &TypeExpr) -> bool {
+/// Walk through `Parenthesized` / Union / Intersection wrappers; return
+/// true if any leaf is a Ref whose resolved root identity participates
+/// in one of the owner's type-role-bearing Vue SFC macros.
+///
+/// Structural §3.4 classification — replaces the legacy nominal
+/// `name.ends_with("Props")` filter.
+pub(super) fn indexed_access_targets_macro_participating(
+    object: &TypeExpr,
+    ctx: &PolicyCtx<'_, '_>,
+) -> bool {
     match object {
-        TypeExpr::Parenthesized(inner) => indexed_access_targets_props_suffix(inner),
-        TypeExpr::Ref { name, .. } => is_props_suffix(name.as_ref()),
-        TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
-            types.iter().any(indexed_access_targets_props_suffix)
-        }
+        TypeExpr::Parenthesized(inner) => indexed_access_targets_macro_participating(inner, ctx),
+        TypeExpr::Ref { name, .. } => ctx.is_macro_participating(name.as_ref()),
+        TypeExpr::Union(types) | TypeExpr::Intersection(types) => types
+            .iter()
+            .any(|ty| indexed_access_targets_macro_participating(ty, ctx)),
         _ => false,
     }
 }
@@ -570,14 +645,16 @@ fn indexed_access_targets_props_suffix(object: &TypeExpr) -> bool {
 /// Conditional / Mapped / TemplateLiteral / KeyOf / etc.) — anything other
 /// than a bare Ref (which would just chase to another symbolic).
 ///
-/// Bodies that are themselves IndexedAccess on a *Props alias should NOT
-/// resolve eagerly — they are kept symbolic because that is the registry
-/// authoritative form.
-fn body_is_resolvable(body: &TypeExpr) -> bool {
+/// Bodies that are themselves IndexedAccess on a macro-participating
+/// alias should NOT resolve eagerly — they are kept symbolic because
+/// that is the registry authoritative form.
+pub(super) fn body_is_resolvable(body: &TypeExpr, ctx: &PolicyCtx<'_, '_>) -> bool {
     match body {
-        TypeExpr::Parenthesized(inner) => body_is_resolvable(inner),
+        TypeExpr::Parenthesized(inner) => body_is_resolvable(inner, ctx),
         TypeExpr::Ref { .. } => false,
-        TypeExpr::IndexedAccess { object, .. } => !indexed_access_targets_props_suffix(object),
+        TypeExpr::IndexedAccess { object, .. } => {
+            !indexed_access_targets_macro_participating(object, ctx)
+        }
         TypeExpr::Unknown { .. } | TypeExpr::Infer { .. } | TypeExpr::TypeParameter(_) => false,
         TypeExpr::Primitive(_)
         | TypeExpr::Literal(_)

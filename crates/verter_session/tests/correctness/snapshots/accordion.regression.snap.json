@@ -3,7 +3,7 @@
   "props": [
     {
       "name": "items",
-      "type_signature": "{ content: string; disabled?: boolean; label: string }[]",
+      "type_signature": "AccordionItem[]",
       "required": true,
       "has_default": false,
       "default_signature": null,

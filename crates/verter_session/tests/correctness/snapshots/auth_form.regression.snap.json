@@ -3,7 +3,7 @@
   "props": [
     {
       "name": "fields",
-      "type_signature": "{ label: string; name: string; required?: boolean; type: \"text\" | \"email\" | \"password\" }[]",
+      "type_signature": "AuthFormField[]",
       "required": true,
       "has_default": false,
       "default_signature": null,
@@ -11,7 +11,7 @@
     },
     {
       "name": "submit",
-      "type_signature": "{ label: string; loading?: boolean }",
+      "type_signature": "AuthFormSubmit",
       "required": true,
       "has_default": false,
       "default_signature": null,

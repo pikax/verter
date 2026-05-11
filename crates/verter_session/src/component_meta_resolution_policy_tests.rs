@@ -27,7 +27,69 @@ fn run_policy(
     registry_meta: &[ResolvedTypeRegistryMeta],
 ) {
     let host = empty_host();
-    apply_component_meta_resolution_policy(meta, registry, registry_meta, &host, "/owner.vue");
+    apply_component_meta_resolution_policy(
+        meta,
+        registry,
+        registry_meta,
+        &host,
+        "/owner.vue",
+        None,
+    );
+}
+
+/// Run the policy with a pre-built macro-participation set whose
+/// identities are derived from the registry's canonical_source for
+/// each entry in `macro_participating_names`. This is the §3.4
+/// structural macro-participation classifier hook: any name in the
+/// list will resolve to a `ResolvedRootIdentity` that the policy
+/// treats as role-bearing (kept symbolic per Rules 2 / 4 + the
+/// raw-restoration helpers).
+///
+/// Tests that previously relied on the legacy
+/// `name.ends_with("Props")` nominal classifier now opt into the
+/// structural classifier by listing the participating names here.
+///
+/// Production code paths build the set from `snapshot.macros` via
+/// `build_policy_macro_role_identities` — see
+/// `apply_component_meta_resolution_policy`. The
+/// `_with_participation` entry point exists for unit tests that don't
+/// stand up host shallow state but still want to exercise §3.4
+/// structural classification.
+fn run_policy_with_macro_participation(
+    meta: &mut ComponentMetaAnalysis,
+    registry: &[ResolvedTypeAnalysis],
+    registry_meta: &[ResolvedTypeRegistryMeta],
+    macro_participating_names: &[&str],
+) {
+    use rustc_hash::FxHashSet;
+    use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
+
+    let host = empty_host();
+    let mut participating: FxHashSet<ResolvedRootIdentity> = FxHashSet::default();
+    for name in macro_participating_names.iter() {
+        // Derive the identity the same way the policy's registry-fallback
+        // resolver derives it: the canonical_source from registry_meta is
+        // the file declaring the type.
+        if let Some(rm) = registry_meta.iter().find(|m| m.name == *name) {
+            participating.insert(ResolvedRootIdentity::new(
+                rm.declaration.canonical_source.as_str(),
+                *name,
+            ));
+        } else {
+            // No registry meta entry — treat as owner-local (the policy's
+            // host path would resolve a locally-declared name to the
+            // owner_canonical).
+            participating.insert(ResolvedRootIdentity::new("/owner.vue", *name));
+        }
+    }
+    crate::component_meta_resolution_policy::apply_component_meta_resolution_policy_with_participation(
+        meta,
+        registry,
+        registry_meta,
+        &host,
+        "/owner.vue",
+        &participating,
+    );
 }
 
 fn empty_meta() -> ComponentMetaAnalysis {
@@ -156,18 +218,22 @@ fn rule3_resolves_project_local_alias_union_literal() {
 }
 
 #[test]
-fn rule4_keeps_props_suffix_ref_symbolic() {
+fn rule4_keeps_macro_participating_ref_symbolic() {
+    // §3.4 structural classifier: `AvatarProps` is macro-participating
+    // because a `defineProps<AvatarProps>()` call in the owner SFC
+    // consumes it. Rule 4 keeps the ref symbolic.
     let mut meta = empty_meta();
     meta.props.push(prop("avatar", ref_zero("AvatarProps")));
 
-    // Even with a registry body present, *Props stays symbolic.
+    // Even with a registry body present, macro-participating refs
+    // stay symbolic.
     let registry = vec![registry_entry(
         "AvatarProps",
         object_with_property("size", TypeExpr::Primitive(PrimitiveName::Number)),
     )];
     let registry_meta = vec![meta_entry("AvatarProps", "/workspace/avatar.ts")];
 
-    run_policy(&mut meta, &registry, &registry_meta);
+    run_policy_with_macro_participation(&mut meta, &registry, &registry_meta, &["AvatarProps"]);
 
     assert!(
         matches!(
@@ -175,13 +241,134 @@ fn rule4_keeps_props_suffix_ref_symbolic() {
             TypeExpr::Ref { name, type_arguments }
                 if name.as_ref() == "AvatarProps" && type_arguments.is_empty()
         ),
-        "Rule 4 should keep *Props refs symbolic; got {:?}",
+        "Rule 4 should keep macro-participating refs symbolic; got {:?}",
+        meta.props[0].type_expr,
+    );
+}
+
+/// §3.4 negative discriminator (regression-grade fixture #2):
+///
+/// `XyzProps` ends in `Props` but is NEVER consumed by any owner SFC
+/// macro. Under the legacy nominal classifier (`name.ends_with("Props")`),
+/// Rule 4 would have kept it symbolic. Under the §3.4 structural
+/// classifier, the type is NOT macro-participating, so Rule 4 does
+/// NOT fire and Rule 3 expands the type to its registry body.
+///
+/// Pre-migration assertion: published surface keeps `XyzProps` as
+/// `Ref { name: "XyzProps" }`.
+///
+/// Post-migration assertion: published surface expands to the
+/// registry's `{ value: number }` Object body.
+#[test]
+fn fixture_non_participating_props_suffix_name_gets_expanded() {
+    let mut meta = empty_meta();
+    meta.props.push(prop("xyz", ref_zero("XyzProps")));
+
+    let xyz_body = object_with_property("value", TypeExpr::Primitive(PrimitiveName::Number));
+    let registry = vec![registry_entry("XyzProps", xyz_body.clone())];
+    let registry_meta = vec![meta_entry("XyzProps", "/workspace/xyz.ts")];
+
+    // Empty participation set — XyzProps is NOT consumed by any macro.
+    run_policy_with_macro_participation(&mut meta, &registry, &registry_meta, &[]);
+
+    assert_eq!(
+        meta.props[0].type_expr, xyz_body,
+        "§3.4: a *Props-suffixed type NOT consumed by any macro must be \
+         expanded by Rule 3 (the legacy nominal classifier would have \
+         kept it symbolic, which is the §3.4 violation this fixture \
+         discriminates against). got: {:?}",
+        meta.props[0].type_expr,
+    );
+
+    // Negative assertion: the type_expr must not remain a bare Ref.
+    assert!(
+        !matches!(
+            &meta.props[0].type_expr,
+            TypeExpr::Ref { name, .. } if name.as_ref() == "XyzProps"
+        ),
+        "§3.4: XyzProps must not remain symbolic when no macro consumes \
+         it; got {:?}",
+        meta.props[0].type_expr,
+    );
+}
+
+/// §3.4 positive discriminator (regression-grade fixture #1):
+///
+/// `MyButton` does NOT end in `Props` but IS consumed by a
+/// `defineProps<MyButton>()` call in the owner SFC. Under the legacy
+/// nominal classifier (`name.ends_with("Props")`), Rule 4 would NOT
+/// have fired and Rule 3 would have expanded `MyButton`. Under the
+/// §3.4 structural classifier, the type IS macro-participating, so
+/// Rule 4 keeps it symbolic.
+///
+/// Pre-migration: published surface expands to the registry body
+/// (legacy nominal classifier incorrectly drops non-Props names).
+///
+/// Post-migration: published surface contains the shallow
+/// `Ref { name: "MyButton" }`.
+#[test]
+fn fixture_macro_participating_non_props_suffix_name_stays_symbolic() {
+    let mut meta = empty_meta();
+    meta.props.push(prop("button", ref_zero("MyButton")));
+
+    let registry = vec![registry_entry(
+        "MyButton",
+        object_with_property("label", TypeExpr::Primitive(PrimitiveName::String)),
+    )];
+    let registry_meta = vec![meta_entry("MyButton", "/workspace/button.ts")];
+
+    run_policy_with_macro_participation(&mut meta, &registry, &registry_meta, &["MyButton"]);
+
+    assert!(
+        matches!(
+            &meta.props[0].type_expr,
+            TypeExpr::Ref { name, type_arguments }
+                if name.as_ref() == "MyButton" && type_arguments.is_empty()
+        ),
+        "§3.4: MyButton (no Props suffix) consumed by defineProps must \
+         stay symbolic — the legacy nominal classifier would have \
+         expanded it. got: {:?}",
+        meta.props[0].type_expr,
+    );
+}
+
+/// §3.4 baseline preservation (regression-grade fixture #3):
+///
+/// `MyComponentProps` IS consumed by `defineProps<MyComponentProps>()`.
+/// Both classifiers agree: keep symbolic. This is the baseline that
+/// must not regress.
+#[test]
+fn fixture_macro_participating_props_suffix_baseline_stays_symbolic() {
+    let mut meta = empty_meta();
+    meta.props.push(prop("comp", ref_zero("MyComponentProps")));
+
+    let registry = vec![registry_entry(
+        "MyComponentProps",
+        object_with_property("size", TypeExpr::Primitive(PrimitiveName::Number)),
+    )];
+    let registry_meta = vec![meta_entry("MyComponentProps", "/workspace/my-component.ts")];
+
+    run_policy_with_macro_participation(
+        &mut meta,
+        &registry,
+        &registry_meta,
+        &["MyComponentProps"],
+    );
+
+    assert!(
+        matches!(
+            &meta.props[0].type_expr,
+            TypeExpr::Ref { name, type_arguments }
+                if name.as_ref() == "MyComponentProps" && type_arguments.is_empty()
+        ),
+        "baseline: macro-participating Props-suffixed name must stay \
+         symbolic. got: {:?}",
         meta.props[0].type_expr,
     );
 }
 
 #[test]
-fn rule4_keeps_array_of_props_symbolic() {
+fn rule4_keeps_array_of_macro_participating_symbolic() {
     let mut meta = empty_meta();
     meta.props.push(prop(
         "actions",
@@ -197,7 +384,7 @@ fn rule4_keeps_array_of_props_symbolic() {
     )];
     let registry_meta = vec![meta_entry("ButtonProps", "/workspace/button.ts")];
 
-    run_policy(&mut meta, &registry, &registry_meta);
+    run_policy_with_macro_participation(&mut meta, &registry, &registry_meta, &["ButtonProps"]);
 
     assert!(
         matches!(
@@ -209,13 +396,14 @@ fn rule4_keeps_array_of_props_symbolic() {
                         if name.as_ref() == "ButtonProps" && type_arguments.is_empty()
                 )
         ),
-        "Rule 4 + 5: Array<*Props> recurses but leaves the *Props leaf symbolic; got {:?}",
+        "Rule 4 + 5: Array<macro-participating-ref> recurses but leaves the \
+         macro-participating leaf symbolic; got {:?}",
         meta.props[0].type_expr,
     );
 }
 
 #[test]
-fn rule2_keeps_indexed_access_on_props_suffix_symbolic() {
+fn rule2_keeps_indexed_access_on_non_participating_symbolic() {
     let mut meta = empty_meta();
     let indexed = TypeExpr::IndexedAccess {
         object: Arc::new(ref_zero("Button")),
@@ -225,19 +413,20 @@ fn rule2_keeps_indexed_access_on_props_suffix_symbolic() {
 
     run_policy(&mut meta, &[], &[]);
 
-    // Note: Button (no Props suffix) — the IndexedAccess should still be
-    // recursed via Rule 5 but Button itself has no registry body, so Rule 1
-    // doesn't fire and Rule 4 doesn't apply (no Props suffix). Net: unchanged.
+    // Note: Button is not macro-participating — the IndexedAccess should
+    // still be recursed via Rule 5 but Button itself has no registry
+    // body, so Rule 1 doesn't fire and Rule 4 doesn't apply. Net: unchanged.
     assert_eq!(
         meta.props[0].type_expr, indexed,
-        "IndexedAccess unchanged when no registry body and not Props-suffix"
+        "IndexedAccess unchanged when no registry body and not macro-participating"
     );
 }
 
 #[test]
-fn rule2_button_props_indexed_access_stays_symbolic() {
+fn rule2_indexed_access_on_macro_participating_stays_symbolic() {
     let mut meta = empty_meta();
-    // ButtonProps['ui'] — Rule 2 keeps member-path-on-Props symbolic.
+    // ButtonProps['ui'] — Rule 2 keeps member-path-on-macro-participating
+    // root symbolic per §3.4 structural classification.
     let indexed = TypeExpr::IndexedAccess {
         object: Arc::new(ref_zero("ButtonProps")),
         index: Arc::new(TypeExpr::Literal(LiteralValue::String("ui".to_string()))),
@@ -253,12 +442,12 @@ fn rule2_button_props_indexed_access_stays_symbolic() {
     )];
     let registry_meta = vec![meta_entry("ButtonProps", "/workspace/button.ts")];
 
-    run_policy(&mut meta, &registry, &registry_meta);
+    run_policy_with_macro_participation(&mut meta, &registry, &registry_meta, &["ButtonProps"]);
 
     assert!(
         matches!(&meta.props[0].type_expr, TypeExpr::IndexedAccess { object, .. }
             if matches!(object.as_ref(), TypeExpr::Ref { name, .. } if name.as_ref() == "ButtonProps")),
-        "Rule 2: IndexedAccess on *Props stays symbolic; got {:?}",
+        "Rule 2: IndexedAccess on macro-participating root stays symbolic; got {:?}",
         meta.props[0].type_expr,
     );
 }
@@ -404,11 +593,14 @@ fn pass_does_not_touch_public_instance_when_no_rewrite() {
 // pre-cutover by construction and PASSES post-cutover.
 
 #[test]
-fn w2_4_restore_props_suffix_from_typed_annotation_replaces_eager_object() {
+fn w2_4_restore_macro_participating_from_typed_annotation_replaces_eager_object() {
     // Resolved `type_expr` is the eagerly-expanded Object body (the
     // evaluator inlined `ButtonProps` into `{ label: string }`); the
     // typed source annotation is the symbolic `Array<ButtonProps>` the
-    // user wrote. Policy must restore the symbolic form.
+    // user wrote. Policy must restore the symbolic form because
+    // `ButtonProps` is macro-participating (§3.4 structural
+    // classification — it's consumed by `defineProps<ButtonProps[]>()`
+    // in the owner SFC).
     let mut meta = empty_meta();
 
     let eager_array = TypeExpr::Array {
@@ -446,7 +638,7 @@ fn w2_4_restore_props_suffix_from_typed_annotation_replaces_eager_object() {
     )];
     let registry_meta = vec![meta_entry("ButtonProps", "/workspace/button.ts")];
 
-    run_policy(&mut meta, &registry, &registry_meta);
+    run_policy_with_macro_participation(&mut meta, &registry, &registry_meta, &["ButtonProps"]);
 
     // The resolved `type_expr` was rewritten back to the symbolic
     // `Array<ButtonProps>` — the policy walked the typed annotation
@@ -529,7 +721,7 @@ fn w2_4_slot_binding_preserve_typed_indexed_access_via_imported_root() {
         meta_entry("Avatar", "/workspace/avatar.ts"),
     ];
 
-    run_policy(&mut meta, &registry, &registry_meta);
+    run_policy_with_macro_participation(&mut meta, &registry, &registry_meta, &["AppProps"]);
 
     let binding = &meta.slots[0].bindings[0];
     assert_eq!(

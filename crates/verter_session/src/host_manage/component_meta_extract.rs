@@ -403,7 +403,7 @@ fn merge_evaluated_prop_types_into_meta(
 ///
 /// Cross-file resolution goes through `host.resolve_local_import_symbol_target`
 /// (cache-backed). No fresh resolver; no duplicate route discovery.
-fn resolve_ref_to_root_identity(
+pub(crate) fn resolve_ref_to_root_identity(
     host: &VerterHost,
     owner_canonical: &str,
     name: &str,
@@ -443,7 +443,7 @@ fn resolve_ref_to_root_identity(
 /// the cross-file declaration graph, and does NOT trigger semantic
 /// expansion. Shallow-by-default holds; semantic expansion remains the
 /// consumer's lazy concern at the projector layer.
-fn build_macro_participating_identities(
+pub(crate) fn build_macro_participating_identities(
     host: &VerterHost,
     owner_canonical: &str,
     snapshot: &FileAnalysisSnapshot,
@@ -1344,15 +1344,16 @@ pub(crate) fn extract_component_meta_from_resolved(
             meta.fallthrough_surface = resolution.fallthrough_surface;
         }
     }
-    // apply the publication policy that commit `624b14d2` deleted.
-    // The pass is PURE over (resolved_type_registry, resolved_type_registry_meta);
-    // see docs/arch/debt-closure/06-step4b-consumer-surface.md.
+    // apply the publication policy over (resolved_type_registry,
+    // resolved_type_registry_meta) + snapshot.macros (§3.4 structural
+    // classification); see docs/arch/debt-closure/06-step4b-consumer-surface.md.
     crate::component_meta_resolution_policy::apply_component_meta_resolution_policy(
         &mut meta,
         &resolved.resolved_type_registry,
         &resolved.resolved_type_registry_meta,
         host,
         canonical.as_str(),
+        Some(&resolved.snapshot),
     );
     // Merge graph-native slot-binding synthesis diagnostics into the
     // analysis-wide envelope so consumers see one canonical
@@ -1411,14 +1412,17 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
         None
     };
     // apply the publication policy AFTER fallthrough merge so the
-    // pass operates on the final accepted_props/events. PURE over
-    // (resolved_type_registry, resolved_type_registry_meta).
+    // pass operates on the final accepted_props/events. Walks
+    // (resolved_type_registry, resolved_type_registry_meta) plus the
+    // snapshot's macros (for §3.4 structural macro-participation
+    // classification).
     crate::component_meta_resolution_policy::apply_component_meta_resolution_policy(
         &mut meta,
         &resolved.resolved_type_registry,
         &resolved.resolved_type_registry_meta,
         host,
         canonical.as_str(),
+        Some(&resolved.snapshot),
     );
     (meta, fallthrough_facts)
 }

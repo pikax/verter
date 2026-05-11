@@ -3,7 +3,7 @@
   "props": [
     {
       "name": "root",
-      "type_signature": "{ children?: /*recursive*/ Tree[]; label: string }",
+      "type_signature": "Tree",
       "required": true,
       "has_default": false,
       "default_signature": null,

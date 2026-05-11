@@ -5254,11 +5254,17 @@ defineProps<{
         "evaluate_types should keep imported object-like fields symbolic in expanded evaluated types, got {:?}",
         evaluated_prop_type(&first, "user")
     );
-    // Phase 4B (architectural-debt-closure rev 11.3): the publication policy
-    // resolves project-local non-Props refs (Rule 3). `ImportedUser` is a
-    // workspace-local interface, so the public meta carries the resolved
-    // Object body. Adapter consumers (zod/json-schema/storybook/histoire)
-    // require the Object schema to render concrete output.
+    // §3.4 structural classification: `ImportedUser` is consumed by the
+    // owner SFC's `defineProps<{ user: ImportedUser }>()` macro (it
+    // appears as the value type of the `user` property in the inline
+    // Object macro arg). Per the structural macro-participation
+    // classifier, the policy keeps imported macro-participating refs
+    // symbolic — the published surface preserves the `Ref { name:
+    // "ImportedUser" }` shape, consistent with the shallow-by-default
+    // contract for plain alias references (CLAUDE.md Component-Meta
+    // Shallow-By-Default Rule). Consumers (zod/json-schema/storybook/
+    // histoire adapters, compat layer) re-resolve the alias through
+    // the registry on demand rather than seeing it inlined here.
     match &first_meta
         .props
         .iter()
@@ -5266,18 +5272,14 @@ defineProps<{
         .expect("component meta should keep the imported user prop")
         .type_expr
     {
-        TypeExpr::Object(obj) => {
-            let names: Vec<&str> = obj
-                .properties
-                .iter()
-                .filter_map(|member| match member {
-                    ObjectMember::Property(prop) => Some(prop.name.as_str()),
-                    _ => None,
-                })
-                .collect();
-            assert_eq!(names, vec!["id"]);
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => {
+            assert_eq!(name.as_ref(), "ImportedUser");
+            assert!(type_arguments.is_empty());
         }
-        other => panic!("expected imported interface to resolve to an object, got {other:?}"),
+        other => panic!("§3.4: imported macro-participating ref must stay symbolic, got {other:?}"),
     }
 
     session
@@ -5316,9 +5318,12 @@ defineProps<{
         "evaluate_types should keep imported object-like fields symbolic after cache invalidation too, got {:?}",
         evaluated_prop_type(&second, "user")
     );
-    // after dep change, the resolved Object body picks up the new
-    // `label` member. Cache invalidation contract verified by the
-    // `!Arc::ptr_eq(first_cache, second_cache)` assertion above.
+    // §3.4: after dep change, the published surface still carries the
+    // symbolic `Ref { name: "ImportedUser" }`. The cache invalidation
+    // contract is verified by the `!Arc::ptr_eq(first_cache,
+    // second_cache)` assertion above; the registry's body has been
+    // updated to include the new `label` member, which consumers
+    // observe by re-resolving the alias on demand.
     match &second_meta
         .props
         .iter()
@@ -5326,19 +5331,16 @@ defineProps<{
         .expect("component meta should keep the imported user prop after invalidation")
         .type_expr
     {
-        TypeExpr::Object(obj) => {
-            let names: Vec<&str> = obj
-                .properties
-                .iter()
-                .filter_map(|member| match member {
-                    ObjectMember::Property(prop) => Some(prop.name.as_str()),
-                    _ => None,
-                })
-                .collect();
-            assert!(names.contains(&"id"));
-            assert!(names.contains(&"label"));
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => {
+            assert_eq!(name.as_ref(), "ImportedUser");
+            assert!(type_arguments.is_empty());
         }
-        other => panic!("expected imported interface to resolve to an object, got {other:?}"),
+        other => panic!(
+            "§3.4: imported macro-participating ref must stay symbolic after cache invalidation, got {other:?}"
+        ),
     }
 }
 

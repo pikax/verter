@@ -19,7 +19,7 @@
     },
     {
       "name": "variant",
-      "type_signature": "\"info\" | \"success\" | \"warning\" | \"error\"",
+      "type_signature": "AlertVariant",
       "required": false,
       "has_default": false,
       "default_signature": null,

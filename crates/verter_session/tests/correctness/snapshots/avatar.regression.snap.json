@@ -11,7 +11,7 @@
     },
     {
       "name": "shape",
-      "type_signature": "\"circle\" | \"square\" | \"rounded\"",
+      "type_signature": "AvatarShape",
       "required": false,
       "has_default": false,
       "default_signature": null,
@@ -19,7 +19,7 @@
     },
     {
       "name": "size",
-      "type_signature": "\"xs\" | \"sm\" | \"md\" | \"lg\" | \"xl\"",
+      "type_signature": "AvatarSize",
       "required": false,
       "has_default": false,
       "default_signature": null,

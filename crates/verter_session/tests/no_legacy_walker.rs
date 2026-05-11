@@ -263,6 +263,14 @@ const RETIRED_SYMBOLS: &[&str] = &[
     // match treats the module name identically to a function name,
     // so re-introduction at any site is forbidden here too.
     "type_text_parser",
+    // F1 cutover (eradicate-string-resolver follow-up F1) — the
+    // component-meta policy's nominal `name.ends_with("Props")`
+    // classifier is DELETED. The structural §3.4 macro-participation
+    // predicate (`PolicyCtx::is_macro_participating`) is the sole
+    // authority for role-bearing-ref classification. Reintroducing
+    // `is_props_suffix` at any production site would resurrect
+    // nominal classification.
+    "is_props_suffix",
 ];
 
 /// File names whose presence at the head of the path should make us

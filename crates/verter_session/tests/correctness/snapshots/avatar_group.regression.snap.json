@@ -3,7 +3,7 @@
   "props": [
     {
       "name": "items",
-      "type_signature": "{ alt?: string; src: string }[]",
+      "type_signature": "AvatarGroupItem[]",
       "required": true,
       "has_default": false,
       "default_signature": null,
@@ -19,7 +19,7 @@
     },
     {
       "name": "size",
-      "type_signature": "\"xs\" | \"sm\" | \"md\" | \"lg\" | \"xl\"",
+      "type_signature": "AvatarSize",
       "required": false,
       "has_default": false,
       "default_signature": null,

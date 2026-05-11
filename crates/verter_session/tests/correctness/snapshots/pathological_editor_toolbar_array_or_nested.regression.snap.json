@@ -3,7 +3,7 @@
   "props": [
     {
       "name": "items",
-      "type_signature": "({ icon?: string; id: string; label: string } | { icon?: string; id: string; label: string }[])[]",
+      "type_signature": "ToolbarItemOrGroup[]",
       "required": true,
       "has_default": false,
       "default_signature": null,
