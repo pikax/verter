@@ -81,21 +81,31 @@ describe("W7.1: operator splitters consume TypeDescriptor (not prop.rawType)", (
 
   describe("intersection arm extraction (replaces splitTopLevelTypeIntersection / splitTopLevelTypeOperator '&')", () => {
     it("buildCompatStringBrandUnionPropMeta: extracts arms from descriptor structure, with arm count matching descriptor not rawType", () => {
-      // Decoy descriptor: 3 distinct union arms structurally (no brand arm rendered as `string & {}`
-      // in this case — we use `ref("UnknownBrand")` to keep the rendering simple). The pre-W7.1
-      // splitter would have parsed `rawType` text and produced its arm count from text. Post-W7.1
-      // the arm count is derived structurally from `prop.type`.
+      // Descriptor: union with 2 literal arms + a `string & {}` branded arm
+      // (the structural gate for the function after W7.3) + `undefined`.
+      // Pre-W7.1 the splitter would have parsed `rawType` text and produced
+      // its arm count from text. Post-W7.3 the structural gate is descriptor-
+      // based: the branded `intersection(string, {})` arm triggers projection
+      // AND the arm count is derived from `prop.type`.
+      const brandedArm: TypeDescriptor = {
+        kind: "intersection",
+        types: [primitive("string"), { kind: "object", properties: [] }],
+      };
       const prop = makeProp({
         name: "rel",
-        type: union([literal("noopener"), literal("noreferrer"), primitive("undefined")]),
-        // Decoy rawType with `(string & {})` to satisfy the function's gate, but containing
-        // a different arm count than the descriptor.
+        type: union([
+          literal("noopener"),
+          literal("noreferrer"),
+          brandedArm,
+          primitive("undefined"),
+        ]),
+        // Decoy rawType with a different arm set than the descriptor.
         rawType: '"a" | "b" | "c" | "d" | (string & {}) | undefined',
         required: false,
       });
       const result = mapPropMeta(prop);
       // Post-cutover: the arm set in the rendered type comes from prop.type
-      // (3 arms minus undefined), NOT from the 5-arm rawType.
+      // (3 non-undefined arms), NOT from the 5-arm rawType.
       expect(result.type).toContain('"noopener"');
       expect(result.type).toContain('"noreferrer"');
       expect(result.type).not.toContain('"a"');

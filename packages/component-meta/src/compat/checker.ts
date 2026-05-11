@@ -78,9 +78,6 @@ const COMPAT_BLOCKED_SLOT_NAMES = new Set([
   "appContext",
 ]);
 
-/** Maximum descriptor text length before the compat layer considers it
- *  over-expanded and falls back to the raw type string. */
-const COMPAT_MAX_RESOLVED_PROP_DISPLAY_LENGTH = 512;
 /** Maximum depth for recursive registry ref resolution in compat display.
  *  Kept at 1 to preserve the shallow-resolution invariant. */
 const COMPAT_MAX_REGISTRY_DISPLAY_DEPTH = 1;
@@ -330,15 +327,7 @@ export function mapPropMeta(
     });
   }
   const schema = normalizeOptionalPropSchema(
-    repairOpaqueCompatSchemaFromRawType(
-      applyRawTypeDisplayHintsToSchema(
-        typeDescriptorToSchema(prop.type, options, typeRegistry),
-        prop.type,
-        prop.rawType,
-      ),
-      prop.type,
-      prop.rawType,
-    ),
+    typeDescriptorToSchema(prop.type, options, typeRegistry),
     type,
     prop.required,
   );
@@ -371,23 +360,14 @@ function buildCompatPropertyMeta(
 }
 
 function buildCompatAnyPropMeta(prop: PropMeta): PropertyMeta | undefined {
-  const normalizedRawType = prop.rawType
-    ? stripTopLevelUndefinedFromCompatType(prop.type, normalizeTypeString(prop.rawType)).trim()
-    : undefined;
   const hasIconifyTag = (prop.tags ?? []).some((tag) => tag.name === "IconifyIcon");
-  const descriptorIsAny =
-    (prop.type.kind === "primitive" && prop.type.name === "any") ||
-    (prop.type.kind === "union" &&
-      prop.type.types.some((type) => type.kind === "primitive" && type.name === "any"));
-  const rawTypeContainsAny =
-    normalizedRawType !== undefined &&
-    unionArms(prop.type).some((arm) => arm.kind === "primitive" && arm.name === "any");
-  if (
-    !hasIconifyTag &&
-    normalizedRawType !== "any" &&
-    !rawTypeContainsAny &&
-    (!descriptorIsAny || normalizedRawType !== undefined)
-  ) {
+  // Structural authority: descriptor carries `any` either at the top level or
+  // inside any union arm. The typed-IR-only rule replaces the prior rawType
+  // text gate ("rawType === 'any'") with `descriptor.kind`-based matching.
+  const descriptorCarriesAny = unionArms(prop.type).some(
+    (arm) => arm.kind === "primitive" && arm.name === "any",
+  );
+  if (!hasIconifyTag && !descriptorCarriesAny) {
     return undefined;
   }
 
@@ -407,15 +387,12 @@ function buildCompatAnyPropMeta(prop: PropMeta): PropertyMeta | undefined {
 }
 
 function buildCompatNumberishPropMeta(prop: PropMeta): PropertyMeta | undefined {
-  const normalizedRawType = prop.rawType ? normalizeTypeString(prop.rawType).trim() : undefined;
-  const strippedRawType = normalizedRawType
-    ? stripTopLevelUndefinedFromCompatType(prop.type, normalizedRawType).trim()
-    : undefined;
+  // Structural gate: descriptor IS or contains a `Numberish` ref.
   const descriptorIsNumberish =
     (prop.type.kind === "ref" && prop.type.name === "Numberish") ||
     (prop.type.kind === "union" &&
       prop.type.types.some((type) => type.kind === "ref" && type.name === "Numberish"));
-  if (strippedRawType !== "Numberish" && !descriptorIsNumberish) {
+  if (!descriptorIsNumberish) {
     return undefined;
   }
 
@@ -428,10 +405,10 @@ function buildCompatNumberishPropMeta(prop: PropMeta): PropertyMeta | undefined 
 }
 
 function buildCompatBooleanishPropMeta(prop: PropMeta): PropertyMeta | undefined {
-  const normalizedRawType = prop.rawType ? normalizeTypeString(prop.rawType) : undefined;
-  const strippedRawType = normalizedRawType
-    ? stripTopLevelUndefinedFromCompatType(prop.type, normalizedRawType).trim()
-    : undefined;
+  // Structural gate: descriptor IS a `Booleanish` ref, OR a union whose arms
+  // are only `Booleanish` refs and (optionally) `undefined`. The display-text
+  // fall-through is preserved as a structural test on the descriptor's own
+  // rendering (not on `prop.rawType`).
   const descriptorIsBooleanish =
     (prop.type.kind === "ref" && prop.type.name === "Booleanish") ||
     (prop.type.kind === "union" &&
@@ -443,7 +420,6 @@ function buildCompatBooleanishPropMeta(prop: PropMeta): PropertyMeta | undefined
       ));
   const descriptorText = normalizeTypeString(typeDescriptorToString(prop.type));
   if (
-    strippedRawType !== "Booleanish" &&
     !descriptorIsBooleanish &&
     stripTopLevelUndefinedFromCompatType(prop.type, descriptorText).trim() !== "Booleanish"
   ) {
@@ -506,17 +482,14 @@ function buildCompatSlotsPropMeta(
 }
 
 function buildCompatReferrerPolicyPropMeta(prop: PropMeta): PropertyMeta | undefined {
-  const normalizedRawType = prop.rawType ? normalizeTypeString(prop.rawType).trim() : undefined;
-  const strippedRawType = normalizedRawType
-    ? stripTopLevelUndefinedFromCompatType(prop.type, normalizedRawType).trim()
-    : undefined;
+  // Structural gate: descriptor IS or contains an `HTMLAttributeReferrerPolicy` ref.
   const descriptorIsReferrerPolicy =
     (prop.type.kind === "ref" && prop.type.name === "HTMLAttributeReferrerPolicy") ||
     (prop.type.kind === "union" &&
       prop.type.types.some(
         (type) => type.kind === "ref" && type.name === "HTMLAttributeReferrerPolicy",
       ));
-  if (strippedRawType !== "HTMLAttributeReferrerPolicy" && !descriptorIsReferrerPolicy) {
+  if (!descriptorIsReferrerPolicy) {
     return undefined;
   }
 
@@ -531,11 +504,6 @@ function buildCompatReferrerPolicyPropMeta(prop: PropMeta): PropertyMeta | undef
 }
 
 function buildCompatFunctionArrayUnionPropMeta(prop: PropMeta): PropertyMeta | undefined {
-  const rawType = prop.rawType?.trim();
-  if (!rawType) {
-    return undefined;
-  }
-
   const unionParts = unionArms(stripUndefinedArm(prop.type)).map((arm) =>
     normalizeCompatUnionArrayPart(normalizeTypeString(typeDescriptorToCompatDisplay(arm)).trim()),
   );
@@ -607,13 +575,32 @@ function normalizeCompatEventFunctionType(functionType: string): string | undefi
 }
 
 function buildCompatPrefetchOnPropMeta(prop: PropMeta): PropertyMeta | undefined {
-  const normalizedRawType = prop.rawType ? normalizeTypeString(prop.rawType).trim() : undefined;
-  if (
-    !normalizedRawType ||
-    !normalizedRawType.includes("Partial<{") ||
-    !normalizedRawType.includes("visibility: boolean") ||
-    !normalizedRawType.includes("interaction: boolean")
-  ) {
+  // Structural gate: descriptor is a union whose arms include literal
+  // `"visibility"` / `"interaction"` AND a `Partial<{ visibility: boolean;
+  // interaction: boolean }>` ref. The typed-IR-only rule replaces the prior
+  // rawType `.includes("Partial<{")` text gate.
+  const arms = unionArms(stripUndefinedArm(prop.type));
+  const hasVisibilityLiteral = arms.some(
+    (arm) => arm.kind === "literal" && arm.value === "visibility",
+  );
+  const hasInteractionLiteral = arms.some(
+    (arm) => arm.kind === "literal" && arm.value === "interaction",
+  );
+  const hasPartialBoolPair = arms.some((arm) => {
+    if (arm.kind !== "ref" || arm.name !== "Partial") return false;
+    const target = arm.typeArguments?.[0];
+    if (!target || target.kind !== "object") return false;
+    const props = target.properties;
+    const visibility = props.find((p) => p.name === "visibility");
+    const interaction = props.find((p) => p.name === "interaction");
+    return (
+      visibility?.type.kind === "primitive" &&
+      visibility.type.name === "boolean" &&
+      interaction?.type.kind === "primitive" &&
+      interaction.type.name === "boolean"
+    );
+  });
+  if (!hasVisibilityLiteral || !hasInteractionLiteral || !hasPartialBoolPair) {
     return undefined;
   }
 
@@ -633,14 +620,24 @@ function buildCompatPrefetchOnPropMeta(prop: PropMeta): PropertyMeta | undefined
 }
 
 function buildCompatNuxtLinkToPropMeta(prop: PropMeta): PropertyMeta | undefined {
-  const normalizedRawType = prop.rawType ? normalizeTypeString(prop.rawType).trim() : undefined;
-  const strippedRawType = normalizedRawType
-    ? stripTopLevelUndefinedFromCompatType(prop.type, normalizedRawType).trim()
-    : undefined;
-  if (strippedRawType !== 'NuxtLinkProps["to"]' && strippedRawType !== "RouteLocationRaw") {
+  // Structural gate: descriptor (with optional undefined stripped) is an
+  // `IndexedAccessType` rooted at `NuxtLinkProps['to']` OR a bare ref to
+  // `RouteLocationRaw`. The typed-IR-only rule replaces the prior rawType
+  // string-equality gate.
+  const stripped = stripUndefinedArm(prop.type);
+  const isNuxtLinkToIndexed =
+    stripped.kind === "indexedAccess" &&
+    stripped.objectType.kind === "ref" &&
+    stripped.objectType.name === "NuxtLinkProps" &&
+    stripped.indexType.kind === "literal" &&
+    stripped.indexType.value === "to";
+  const isRouteLocationRawRef = stripped.kind === "ref" && stripped.name === "RouteLocationRaw";
+  if (!isNuxtLinkToIndexed && !isRouteLocationRawRef) {
     return undefined;
   }
 
+  // Decline if the descriptor's actual rendering reduces to plain "string"
+  // (e.g., a build configuration expanded the alias).
   const descriptorText = stripTopLevelUndefinedFromCompatType(
     prop.type,
     normalizeTypeString(typeDescriptorToCompatDisplay(prop.type)),
@@ -667,18 +664,21 @@ function buildCompatHtmlButtonTypePropMeta(prop: PropMeta): PropertyMeta | undef
     return undefined;
   }
 
-  const normalizedRawType = prop.rawType ? normalizeTypeString(prop.rawType).trim() : undefined;
-  const strippedRawType = normalizedRawType
-    ? stripTopLevelUndefinedFromCompatType(prop.type, normalizedRawType).trim()
-    : undefined;
-  const unionParts =
-    strippedRawType === 'ButtonHTMLAttributes["type"]'
-      ? ['"button"', '"submit"', '"reset"']
-      : normalizedRawType
-        ? unionArms(stripUndefinedArm(prop.type)).map((arm) =>
-            normalizeTypeString(typeDescriptorToCompatDisplay(arm)).trim(),
-          )
-        : [];
+  // Structural gate: descriptor is an indexedAccess `ButtonHTMLAttributes["type"]`
+  // OR a union whose arms render to literally `"button"`, `"submit"`, `"reset"`.
+  // The typed-IR-only rule replaces the prior rawType-string gate.
+  const stripped = stripUndefinedArm(prop.type);
+  const isButtonAttrsIndexed =
+    stripped.kind === "indexedAccess" &&
+    stripped.objectType.kind === "ref" &&
+    stripped.objectType.name === "ButtonHTMLAttributes" &&
+    stripped.indexType.kind === "literal" &&
+    stripped.indexType.value === "type";
+  const unionParts = isButtonAttrsIndexed
+    ? ['"button"', '"submit"', '"reset"']
+    : unionArms(stripped).map((arm) =>
+        normalizeTypeString(typeDescriptorToCompatDisplay(arm)).trim(),
+      );
   const normalizedSet = new Set(unionParts);
   if (
     normalizedSet.size !== 3 ||
@@ -700,12 +700,30 @@ function buildCompatHtmlButtonTypePropMeta(prop: PropMeta): PropertyMeta | undef
 }
 
 function buildCompatStringBrandUnionPropMeta(prop: PropMeta): PropertyMeta | undefined {
-  const normalizedRawType = prop.rawType ? normalizeTypeString(prop.rawType).trim() : undefined;
-  if (!normalizedRawType || !normalizedRawType.includes("(string & {})")) {
+  // Structural gate: descriptor's top-level union (with optional `undefined`
+  // stripped) contains a `string & {}` branded arm — an `intersection` of
+  // `primitive("string")` and an empty object. The W7.2 typed-IR rule
+  // replaces the prior rawType `.includes("(string & {})")` text gate.
+  const stripped = stripUndefinedArm(prop.type);
+  const arms = unionArms(stripped);
+  const hasBrandedStringArm = arms.some(
+    (arm) =>
+      arm.kind === "intersection" &&
+      arm.types.some((entry) => entry.kind === "primitive" && entry.name === "string") &&
+      arm.types.some(
+        (entry) =>
+          entry.kind === "object" &&
+          entry.properties.length === 0 &&
+          (entry.indexSignatures?.length ?? 0) === 0 &&
+          (entry.callSignatures?.length ?? 0) === 0 &&
+          (entry.constructSignatures?.length ?? 0) === 0,
+      ),
+  );
+  if (!hasBrandedStringArm) {
     return undefined;
   }
 
-  const unionParts = unionArms(stripUndefinedArm(prop.type))
+  const unionParts = arms
     .map((arm) =>
       normalizeCompatUnionArrayPart(normalizeTypeString(typeDescriptorToCompatDisplay(arm)).trim()),
     )
@@ -1020,23 +1038,29 @@ function preferredCompatPropTypeText(
     normalizeTypeString(typeDescriptorToCompatDisplay(prop.type, typeRegistry)),
     prop.required,
   );
-  const rawType = prop.rawType
-    ? normalizeOptionalCompatTypeText(prop.type, normalizeTypeString(prop.rawType), prop.required)
-    : undefined;
 
-  if (!rawType || compatRawTypeLooksLossy(rawType)) {
+  // Bare ref / indexed-access descriptors render structurally via their alias
+  // name (`Foo` / `Foo['bar']`). Descriptor wins for these shapes — the raw
+  // source text would render the same alias name.
+  if (looksLikeBareTypeReference(prop.type) || looksLikeIndexedAccessType(prop.type)) {
     return descriptorText;
   }
 
-  if (shouldPreferRawAliasForExpandedDescriptor(rawType, prop.type)) {
-    return rawType;
+  // Other shapes: the descriptor has been expanded/concretized away from any
+  // source-level alias the user wrote. Copy `prop.rawType` through as the
+  // display passthrough into `PropertyMeta.type` — the descriptor remains the
+  // structural authority for every semantic decision elsewhere.
+  // rawType-allowlist: display-passthrough
+  if (prop.rawType !== undefined) {
+    return normalizeOptionalCompatTypeText(
+      prop.type,
+      // rawType-allowlist: display-passthrough
+      normalizeTypeString(prop.rawType),
+      prop.required,
+    );
   }
 
-  if (shouldPreferDescriptorForProp(prop.type, rawType, descriptorText)) {
-    return descriptorText;
-  }
-
-  return rawType;
+  return descriptorText;
 }
 
 function preferredCompatTypeText(
@@ -1047,29 +1071,18 @@ function preferredCompatTypeText(
   const descriptorText = normalizeTypeString(
     typeDescriptorToCompatDisplay(descriptor, typeRegistry),
   );
-  if (!rawType || compatRawTypeLooksLossy(rawType)) {
+
+  // Bare ref / indexed-access descriptors render structurally via alias name.
+  if (looksLikeBareTypeReference(descriptor) || looksLikeIndexedAccessType(descriptor)) {
     return descriptorText;
   }
 
-  const normalizedRawType = normalizeTypeString(rawType);
-  if (shouldPreferDescriptorForProp(descriptor, normalizedRawType, descriptorText)) {
-    return descriptorText;
+  // Display passthrough: source-level annotation when descriptor was expanded.
+  if (rawType !== undefined) {
+    return normalizeTypeString(rawType);
   }
 
-  return normalizedRawType;
-}
-
-/** Heuristic: does the raw type string look like it lost structural detail
- *  (e.g. truncated code blocks, ellipsis, bare `object`)? */
-function compatRawTypeLooksLossy(rawType: string): boolean {
-  const normalized = rawType.trim();
-  return (
-    normalized.startsWith("```") ||
-    normalized.includes("...") ||
-    normalized.includes("/*") ||
-    normalized.includes("*/") ||
-    normalized === "object"
-  );
+  return descriptorText;
 }
 
 function normalizeOptionalPropSchema(
@@ -1177,311 +1190,6 @@ function stripSingleOuterParens(type: string): string {
   }
 
   return trimmed.slice(1, -1).trim();
-}
-
-function shouldPreferRawSchemaType(
-  descriptor: TypeDescriptor,
-  rawType: string,
-  currentType: string | undefined,
-): boolean {
-  const normalizedRaw = normalizeTypeString(stripSingleOuterParens(rawType));
-  const normalizedCurrent = currentType ? normalizeTypeString(currentType) : "";
-  if (!normalizedRaw || normalizedRaw === normalizedCurrent) {
-    return false;
-  }
-  if (
-    normalizedCurrent &&
-    shouldPreferDescriptorForProp(descriptor, normalizedRaw, normalizedCurrent)
-  ) {
-    return false;
-  }
-  return (
-    normalizedRaw.includes("<") ||
-    looksLikeIndexedAccessType(descriptor) ||
-    looksLikeBareTypeReference(descriptor)
-  );
-}
-
-function applyRawTypeDisplayHintsToSchema(
-  schema: PropertyMetaSchema,
-  descriptor: TypeDescriptor,
-  rawType: string | undefined,
-): PropertyMetaSchema {
-  if (!rawType) {
-    return schema;
-  }
-  return applyRawTypeDisplayHintsToSchemaInner(schema, descriptor, normalizeTypeString(rawType));
-}
-
-function repairOpaqueCompatSchemaFromRawType(
-  schema: PropertyMetaSchema,
-  descriptor: TypeDescriptor,
-  rawType: string | undefined,
-): PropertyMetaSchema {
-  if (!rawType || !compatSchemaIsOpaqueObject(schema)) {
-    return schema;
-  }
-
-  return buildCompatSchemaFromRawType(descriptor, normalizeTypeString(rawType)) ?? schema;
-}
-
-function compatSchemaIsOpaqueObject(schema: PropertyMetaSchema): boolean {
-  return (
-    typeof schema === "object" &&
-    !Array.isArray(schema) &&
-    schema !== null &&
-    schema.kind === "object" &&
-    typeof schema.schema === "object" &&
-    schema.schema !== null &&
-    !Array.isArray(schema.schema) &&
-    Object.keys(schema.schema).length === 0
-  );
-}
-
-/** @deprecated Superseded by origin-walk for generic type derivation paths. */
-function buildCompatSchemaFromRawType(
-  descriptor: TypeDescriptor,
-  rawType: string,
-): PropertyMetaSchema | undefined {
-  const raw = stripSingleOuterParens(rawType.trim());
-  if (!raw) {
-    return undefined;
-  }
-
-  const unionParms = unionArms(descriptor);
-  if (unionParms.length > 1) {
-    const armTexts = unionParms.map((arm) =>
-      normalizeTypeString(typeDescriptorToCompatDisplay(arm)),
-    );
-    return {
-      kind: "enum",
-      type: normalizeTypeString(raw),
-      schema: unionParms.map(
-        (arm, index) =>
-          buildCompatSchemaFromRawType(arm, armTexts[index] ?? raw) ??
-          armTexts[index] ??
-          normalizeTypeString(raw),
-      ),
-    };
-  }
-
-  const intersectionParms = intersectionArms(descriptor);
-  if (intersectionParms.length > 1) {
-    const armTexts = intersectionParms.map((arm) =>
-      normalizeTypeString(typeDescriptorToCompatDisplay(arm)),
-    );
-    return {
-      kind: "object",
-      type: normalizeTypeString(raw),
-      schema: intersectionParms.map((arm, index) =>
-        buildCompatIntersectionArmSchema(arm, armTexts[index] ?? raw),
-      ) as unknown as Record<string, PropertyMetaSchema>,
-    };
-  }
-
-  if (raw.startsWith("{") && raw.endsWith("}")) {
-    return buildCompatObjectSchemaFromRawType(descriptor, raw);
-  }
-
-  return normalizeTypeString(raw);
-}
-
-function buildCompatObjectSchemaFromRawType(
-  descriptor: TypeDescriptor,
-  rawType: string,
-): PropertyMetaSchema {
-  const raw = normalizeTypeString(rawType.trim());
-  const body = raw.slice(1, -1).trim();
-  const normalized = formatCompatRawObjectType(body);
-  if (descriptor.kind !== "object" || descriptor.properties.length === 0) {
-    return {
-      kind: "object",
-      type: normalized,
-      schema: {},
-    };
-  }
-
-  const properties: Record<string, PropertyMeta> = {};
-  for (const property of descriptor.properties) {
-    const memberDescriptor = property.type;
-    const memberType = normalizeTypeString(typeDescriptorToCompatDisplay(memberDescriptor));
-    const memberSchema = buildCompatSchemaFromRawType(memberDescriptor, memberType) ?? memberType;
-    properties[property.name] = buildCompatInlinePropertyMeta(
-      property.name,
-      memberType,
-      memberSchema,
-      !property.optional,
-    );
-  }
-
-  return {
-    kind: "object",
-    type: normalized,
-    schema: properties,
-  };
-}
-
-function buildCompatIntersectionArmSchema(
-  descriptor: TypeDescriptor,
-  rawType: string,
-): PropertyMetaSchema {
-  const normalized = normalizeTypeString(stripSingleOuterParens(rawType).trim());
-  const schema = buildCompatSchemaFromRawType(descriptor, normalized);
-  if (typeof schema === "string") {
-    return {
-      kind: "object",
-      type: normalized,
-      schema: {},
-    };
-  }
-  return schema ?? normalized;
-}
-
-function formatCompatRawObjectType(body: string): string {
-  const trimmedBody = body.trim();
-  const needsTrailingSemicolon =
-    /^\[.*\]\s*:/.test(trimmedBody) || /^readonly\s+\[.*\]\s*:/.test(trimmedBody);
-  return `{ ${trimmedBody}${needsTrailingSemicolon ? ";" : ""} }`;
-}
-
-function applyRawTypeDisplayHintsToSchemaInner(
-  schema: PropertyMetaSchema,
-  descriptor: TypeDescriptor,
-  rawType: string,
-): PropertyMetaSchema {
-  if (typeof schema === "string" || Array.isArray(schema)) {
-    return schema;
-  }
-
-  const raw = stripSingleOuterParens(rawType);
-
-  if (schema.kind === "enum" && Array.isArray(schema.schema)) {
-    const armDescriptors = unionArms(descriptor);
-    const armTexts = armDescriptors.map((arm) =>
-      normalizeTypeString(typeDescriptorToCompatDisplay(arm)),
-    );
-    if (armTexts.length === schema.schema.length) {
-      return {
-        ...schema,
-        ...(shouldPreferRawSchemaType(descriptor, raw, schema.type)
-          ? { type: normalizeTypeString(raw) }
-          : {}),
-        schema: schema.schema.map((entry, index) =>
-          applyRawTypeDisplayHintsToSchemaInner(
-            entry,
-            armDescriptors[index] ?? descriptor,
-            armTexts[index] ?? raw,
-          ),
-        ),
-      };
-    }
-  }
-
-  if (schema.kind === "object" && Array.isArray(schema.schema)) {
-    const armDescriptors = intersectionArms(descriptor);
-    const armTexts = armDescriptors.map((arm) =>
-      normalizeTypeString(typeDescriptorToCompatDisplay(arm)),
-    );
-    if (armTexts.length === schema.schema.length) {
-      return {
-        ...schema,
-        ...(shouldPreferRawSchemaType(descriptor, raw, schema.type)
-          ? { type: normalizeTypeString(raw) }
-          : {}),
-        schema: schema.schema.map((entry, index) =>
-          applyRawTypeDisplayHintsToSchemaInner(
-            entry,
-            armDescriptors[index] ?? descriptor,
-            armTexts[index] ?? raw,
-          ),
-        ),
-      } as unknown as PropertyMetaSchema;
-    }
-  }
-
-  if ("type" in schema && shouldPreferRawSchemaType(descriptor, raw, schema.type)) {
-    return {
-      ...schema,
-      type: normalizeTypeString(raw),
-    };
-  }
-
-  return schema;
-}
-
-function shouldPreferDescriptorForProp(
-  descriptor: TypeDescriptor,
-  rawType: string,
-  descriptorText: string,
-): boolean {
-  return (
-    rawType !== descriptorText &&
-    !compatDescriptorLooksLossy(descriptor, descriptorText) &&
-    !compatDescriptorLooksOverexpanded(descriptorText) &&
-    (looksLikeBareTypeReference(descriptor) || looksLikeIndexedAccessType(descriptor))
-  );
-}
-
-function shouldPreferRawAliasForExpandedDescriptor(
-  rawType: string,
-  descriptor: TypeDescriptor,
-): boolean {
-  if (!looksLikeBareTypeReference(descriptor)) {
-    return false;
-  }
-
-  const types =
-    descriptor.kind === "union"
-      ? descriptor.types.filter(
-          (entry) => !(entry.kind === "primitive" && entry.name === "undefined"),
-        )
-      : [descriptor];
-
-  return (
-    types.length > 0 &&
-    types.every(
-      (entry) =>
-        entry.kind === "literal" ||
-        (entry.kind === "primitive" && (entry.name === "null" || entry.name === "undefined")),
-    )
-  );
-}
-
-/** Heuristic: does the descriptor text contain solver artifacts (`@rec(`, bare
- *  kind keywords, `graphNode()` placeholders) or degenerate unions containing
- *  `any`, indicating the resolved form is less informative than the raw type? */
-function compatDescriptorLooksLossy(descriptor: TypeDescriptor, descriptorText: string): boolean {
-  const normalized = stripTopLevelUndefinedFromCompatType(descriptor, descriptorText).trim();
-  return (
-    compatRawTypeLooksLossy(normalized) ||
-    normalized.includes("@rec(") ||
-    unionArms(descriptor).some((arm) => arm.kind === "primitive" && arm.name === "any") ||
-    /^(indexedAccess|unknown|object|function|intersection|union|conditional)$/.test(normalized) ||
-    /^graphNode\(\d+\)$/.test(normalized)
-  );
-}
-
-/** Heuristic: does the descriptor text look like the solver over-expanded it
- *  (too long, or excessive identifier repetition indicating recursive inlining)? */
-function compatDescriptorLooksOverexpanded(descriptorText: string): boolean {
-  if (descriptorText.length > COMPAT_MAX_RESOLVED_PROP_DISPLAY_LENGTH) {
-    return true;
-  }
-
-  if (!descriptorText.includes("{")) {
-    return false;
-  }
-
-  const identifiers = descriptorText.match(/\b[A-Za-z_$][A-Za-z0-9_$]*\b/g) ?? [];
-  const counts = new Map<string, number>();
-  let maxRepeats = 0;
-  for (const identifier of identifiers) {
-    const next = (counts.get(identifier) ?? 0) + 1;
-    counts.set(identifier, next);
-    maxRepeats = Math.max(maxRepeats, next);
-  }
-
-  return maxRepeats >= 6;
 }
 
 /**
