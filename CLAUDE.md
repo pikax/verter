@@ -6,7 +6,7 @@ The project is a hybrid Rust + TypeScript monorepo: Rust crates handle template 
 
 ## Architecture
 
-Detailed module reference, key files, and implementation specifics are available in domain skills: `/type-resolution`, `/component-meta`, `/compiler-codegen`, `/host-session`, `/architecture`.
+Detailed module reference, key files, and implementation specifics are available in domain skills: `/type-resolution`, `/type-cache-architecture`, `/component-meta`, `/compiler-codegen`, `/host-session`, `/architecture`.
 
 ### Shared Optimized Codebase (CRITICAL)
 
@@ -98,6 +98,16 @@ Architectural target for the project-global cache cutover:
 Host-backed type/import resolution must treat the canonical file ID as the cache identity. Load and parse each dependency at most once per canonical ID per workspace content generation. Cache the parsed state, eval env, symbol/export tables, and prepared declarations together. Later lookups hit cached maps — never rewalk the AST. VFS is the authority for file-change invalidation. Concurrent cold requests to the same file must collapse onto one materialization path. Architectural changes land as one clean cutover with no dual-path shims.
 
 See `/type-resolution` skill for the full rule set (invalidation semantics, route caches, prepared declarations, cross-owner reuse, negative caching, and the concrete performance contract).
+
+### Cache Architecture (CRITICAL)
+
+The fact-based cache architecture splits cache keys across five orthogonal env-hash dimensions (`parse_env_hash`, `resolve_env_hash`, `type_env_hash`, `lib_env_hash`, `project_identity`). Each cache layer keys only on the dimensions it actually depends on (R21 scoping rule — a single bundled `project_config_hash` is forbidden). `lib_env_hash` enters a cache key only when the cached value depends on lib data: `ResolvedImportFacts` does NOT include it; `RouteDb`, typed-IR resolve, `MaterializeStructureDb`, `RefCycleResultDb`, `SemanticGraphStore`, `ComponentMetaResultDb` DO include it.
+
+Caches divide into two families: **content-addressed artifact caches** (`FileArtifactStore`, `ResolvedImportFacts`, typed-IR resolve, `MemberSemanticFactStore`, `MemberDisplayFactStore`, `ModuleAugmentationIndex`) carry `content_hash` or `parse_stable_hash` in the key; **query-identity caches** (`RouteDb`, `MaterializeStructureDb`, `RefCycleResultDb`, `SemanticGraphStore` query nodes, `ComponentMetaResultDb`) exclude version hashes from the key — concurrent variants coexist as candidates inside one slot, with version rooting (`VersionedDeclIdentity` + `fact_dep_signature`) on the cached value. Cache keys never include `fact_dep_signature`.
+
+`FileArtifactStore` replaces the retired `IndexedReadyDb` as the authoritative per-file storage layer. The store is keyed by `(canonical, content_hash, parse_env_hash, parser_version)` and stores `IndexedReady`, `FileFacts`, `ParsedEdges`, `parse_stable_hash`, `augmentations`. The `augmentation_index` skeleton on the same store provides inverse-lookup for module augmentation under `AugmentationTargetKey { project_identity, resolve_env_hash, lib_env_hash, target }` — project + env isolation prevents cross-project poisoning (Codex P0.1). `parse_stable_hash` is a structural hash over the post-shallow-analysis decl skeleton, invariant under cosmetic edits.
+
+See `/type-cache-architecture` skill for the full rule set (R1–R29, two-fact `MemberPresence`/`Member` model, multi-candidate substrate, signature-overflow contract, module augmentation completeness) and `docs/arch/fact-based-cache.md` for the per-field audit table + per-cache-layer key composition.
 
 ### Macro Type Traversal Rule (CRITICAL)
 
@@ -443,6 +453,7 @@ Detailed reference material is available as on-demand skills (loaded automatical
 | Skill                    | Use When                                                                                         |
 | ------------------------ | ------------------------------------------------------------------------------------------------ |
 | `/type-resolution`       | Type solver, cross-file types, ShallowFileState, frontier engine, cache rules, macro traversal   |
+| `/type-cache-architecture` | Fact-based cache architecture, env hash split (R21), `FileArtifactStore`, R1–R29 rules, module augmentation, multi-candidate storage |
 | `/component-meta`        | Component metadata extraction, native/compat boundary, fallthrough, root inheritance             |
 | `/compiler-codegen`      | Template codegen (VDOM/IDE), CodeTransform, cached directives, strict slots, style preprocessing |
 | `/host-session`          | TypeProvider (TSGO/tsserver), workspace management, async scheduler, LSP host integration        |

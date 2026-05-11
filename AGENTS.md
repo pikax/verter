@@ -10,6 +10,8 @@ Use this file as the neutral entry point. Reuse the shared sources below instead
   - Canonical high-level reference for architecture principles, critical invariants, build commands, testing rules, agent implementation rules, and commit conventions.
 - `.claude/skills/type-resolution/SKILL.md`
   - Type solver, ShallowFileState, ExternalTypeFrontier, canonical cache rules, macro traversal, prepared declarations.
+- `.claude/skills/type-cache-architecture/SKILL.md`
+  - Fact-based cache architecture, 5-way env hash split (R21), `FileArtifactStore`, R1–R29 architectural rules, module augmentation, multi-candidate storage, `parse_stable_hash`.
 - `.claude/skills/component-meta/SKILL.md`
   - Component-meta native/compat boundary, fallthrough/root inheritance, resolver rules, cache-owned hydration.
 - `.claude/skills/compiler-codegen/SKILL.md`
@@ -60,6 +62,7 @@ Use this file as the neutral entry point. Reuse the shared sources below instead
 
 - Architecture principles or ownership questions: start with `CLAUDE.md`.
 - Type resolution, solver, cross-file types, macro traversal: load `/type-resolution`.
+- Cache layer keys, env hash split, fact-based cache rules, `FileArtifactStore`, module augmentation: load `/type-cache-architecture`.
 - Component-meta, fallthrough, compat layer: load `/component-meta`.
 - Compiler, codegen, template, style, CodeTransform: load `/compiler-codegen`.
 - LSP host, TypeProvider, workspace, scheduler: load `/host-session`.

@@ -5,7 +5,7 @@ description: "Verter codebase architecture: high-level module map, TypeScript pa
 
 # Verter Architecture Reference
 
-For domain-specific detail, see: `/type-resolution`, `/component-meta`, `/compiler-codegen`, `/host-session`.
+For domain-specific detail, see: `/type-resolution`, `/type-cache-architecture`, `/component-meta`, `/compiler-codegen`, `/host-session`.
 
 ## Shared Substrate Principle
 
