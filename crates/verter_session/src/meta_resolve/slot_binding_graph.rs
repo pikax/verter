@@ -30,7 +30,6 @@ use verter_semantic::analysis::type_expand::{
 };
 use verter_semantic::analysis::AnalyzedMacroKind;
 use verter_type_expr::TypeExpr;
-use verter_type_expr_oxc::parse_type_annotation;
 
 use super::dep_signature::accumulate_dispatch_dep_signature;
 use super::diagnostic_convert::shallow_diagnostics_to_macro_expansion;
@@ -955,12 +954,10 @@ pub(crate) fn publish_merged_bindings(
             continue;
         }
         let raw_type = pb.type_annotation.clone();
-        let parsed_type = raw_type
-            .as_deref()
-            .map(parse_type_annotation)
-            .unwrap_or_else(|| TypeExpr::Unknown {
-                raw: "unknown".to_string(),
-            });
+        // Typed-IR-Only Resolver Rule: `binding.binding_expr` is the
+        // authoritative typed form populated by the analyzer at OXC
+        // visit time. W1.1c closed the producer gap for inline slot
+        // bindings. No reparse of `type_annotation`.
         let shallow_type_expr = pb.binding_expr.clone();
         let shallow_type_expr_scope = pb.binding_expr_scope.clone();
         debug_assert_eq!(
@@ -969,6 +966,9 @@ pub(crate) fn publish_merged_bindings(
             "ExpandedField (parser-only slot binding) shallow_type_expr/shallow_type_expr_scope pairing violated for binding `{}`",
             field_name
         );
+        let parsed_type = shallow_type_expr.clone().unwrap_or(TypeExpr::Unknown {
+            raw: "unknown".to_string(),
+        });
         expanded.slot_bindings.push(ExpandedField {
             name: field_name,
             r#type: parsed_type,

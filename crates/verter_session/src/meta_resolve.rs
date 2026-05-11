@@ -48,6 +48,9 @@ mod scoring;
 pub(crate) mod slot_binding_graph;
 #[cfg(test)]
 mod slot_binding_graph_tests;
+#[cfg(test)]
+#[path = "meta_resolve/typed_ir_consumer_tests.rs"]
+mod typed_ir_consumer_tests;
 pub(crate) use dep_signature::{
     accumulate_dispatch_dep_signature, drain_dispatch_dep_signature_accumulator,
     reset_dispatch_dep_signature_accumulator,

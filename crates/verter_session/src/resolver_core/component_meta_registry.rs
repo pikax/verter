@@ -1681,25 +1681,31 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
     output: &mut VecDeque<PendingComponentMetaRegistryRef>,
     source_hint: Option<&str>,
 ) {
-    let parsed_raw = (!component_meta_registry_field_expr_has_actionable_route(&field.r#type))
-        .then(|| {
-            field
-                .raw_type
-                .as_deref()
-                .map(verter_type_expr_oxc::parse_type_annotation)
-        })
-        .flatten()
-        .filter(|raw| {
-            let deep_indexed_path = component_meta_registry_public_indexed_access_route(raw)
+    // Typed-IR-Only Resolver Rule: when the post-expansion
+    // `field.r#type` carries no actionable route (no `IndexedAccess`,
+    // `Pick`, etc. shape the registry can route on), fall back to the
+    // analyzer-populated shallow form — the bare annotation the user
+    // wrote, e.g. `TypeExpr::Ref { name: "Props" }` or
+    // `TypeExpr::IndexedAccess { object: Ref { name: "Props" }, … }`.
+    // No reparse of `raw_type`.
+    let shallow_recovery =
+        (!component_meta_registry_field_expr_has_actionable_route(&field.r#type))
+            .then_some(field.shallow_type_expr.as_ref())
+            .flatten()
+            .filter(|shallow| {
+                let deep_indexed_path = component_meta_registry_public_indexed_access_route(
+                    shallow,
+                )
                 .is_some_and(|(_, route)| {
                     matches!(
                         route,
                         RouteDemand::MemberPath(ref path) if path.len() > 1,
                     )
                 });
-            !deep_indexed_path || component_meta_registry_has_explicit_object_surface(&field.r#type)
-        });
-    let expr = parsed_raw.as_ref().unwrap_or(&field.r#type);
+                !deep_indexed_path
+                    || component_meta_registry_has_explicit_object_surface(&field.r#type)
+            });
+    let expr = shallow_recovery.unwrap_or(&field.r#type);
 
     // Issue #7 / owner-local ComponentConfig alias rewrite.
     // When the indexed-access or utility route's root resolves to an

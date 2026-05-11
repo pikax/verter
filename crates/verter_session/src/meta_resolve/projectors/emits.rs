@@ -71,19 +71,30 @@ pub(crate) fn project_emits(
         members
             .into_iter()
             .map(|member| {
-                let raw_type = mac
+                let analyzed = mac
                     .emit_fields
                     .iter()
-                    .find(|e| e.name == member.name.as_ref())
-                    .and_then(|e| e.payload_type.clone());
-                (member, raw_type)
+                    .find(|e| e.name == member.name.as_ref());
+                let raw_type = analyzed.and_then(|e| e.payload_type.clone());
+                let shallow_type_expr = analyzed.and_then(|e| e.payload_expr.clone());
+                let shallow_type_expr_scope = analyzed.and_then(|e| e.payload_expr_scope.clone());
+                (member, raw_type, shallow_type_expr, shallow_type_expr_scope)
             })
             .collect::<Vec<_>>()
     };
     members_with_raw
         .into_iter()
-        .map(|(member, raw_type)| {
-            surface_member_to_expanded_field(query_engine, file, &member, raw_type)
-        })
+        .map(
+            |(member, raw_type, shallow_type_expr, shallow_type_expr_scope)| {
+                surface_member_to_expanded_field(
+                    query_engine,
+                    file,
+                    &member,
+                    raw_type,
+                    shallow_type_expr,
+                    shallow_type_expr_scope,
+                )
+            },
+        )
         .collect()
 }

@@ -8348,32 +8348,32 @@ mod typed_ir_resolver_guards {
         ),
         (
             "crates/verter_session/src/resolver_core/component_meta_registry.rs",
-            1739,
+            1745,
             r#".contains("/node_modules/")"#,
         ),
         (
             "crates/verter_session/src/resolver_core/component_meta_registry.rs",
-            1749,
+            1755,
             r#".contains("/node_modules/")"#,
         ),
         (
             "crates/verter_session/src/resolver_core/component_meta_registry.rs",
-            1753,
+            1759,
             r#".contains("/node_modules/")"#,
         ),
         (
             "crates/verter_session/src/resolver_core/component_meta_registry.rs",
-            1765,
+            1771,
             r#".contains("/node_modules/")"#,
         ),
         (
             "crates/verter_session/src/resolver_core/component_meta_registry.rs",
-            1786,
+            1792,
             r#".contains("/node_modules/")"#,
         ),
         (
             "crates/verter_session/src/resolver_core/component_meta_registry.rs",
-            1790,
+            1796,
             r#".contains("/node_modules/")"#,
         ),
         (
@@ -8454,46 +8454,6 @@ mod typed_ir_resolver_guards {
             "parse_type_annotation",
         ),
         (
-            "crates/verter_session/src/meta_resolve/macro_member_walk.rs",
-            111,
-            "parse_type_annotation",
-        ),
-        (
-            "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
-            891,
-            "parse_type_annotation",
-        ),
-        (
-            "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
-            1134,
-            "parse_type_annotation",
-        ),
-        (
-            "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
-            1225,
-            "parse_type_annotation",
-        ),
-        (
-            "crates/verter_session/src/meta_resolve/projectors/mod.rs",
-            664,
-            "parse_type_annotation",
-        ),
-        (
-            "crates/verter_session/src/meta_resolve/slot_binding_graph.rs",
-            33,
-            "parse_type_annotation",
-        ),
-        (
-            "crates/verter_session/src/meta_resolve/slot_binding_graph.rs",
-            960,
-            "parse_type_annotation",
-        ),
-        (
-            "crates/verter_session/src/resolver_core/component_meta_registry.rs",
-            1689,
-            "parse_type_annotation",
-        ),
-        (
             "crates/verter_type_expr_oxc/src/lib.rs",
             850,
             "parse_type_annotation",
@@ -8555,23 +8515,7 @@ mod typed_ir_resolver_guards {
     // `resolver_core/component_meta/projected_type_expr.rs` (3 more).
     // All removed by W2.1.
     // -----------------------------------------------------------------------
-    const FORMAT_THEN_REPARSE_ALLOWLIST: &[(&str, u32, &str)] = &[
-        (
-            "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
-            1208,
-            "format!(...).parse_type_annotation",
-        ),
-        (
-            "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
-            1214,
-            "format!(...).parse_type_annotation",
-        ),
-        (
-            "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
-            1222,
-            "format!(...).parse_type_annotation",
-        ),
-    ];
+    const FORMAT_THEN_REPARSE_ALLOWLIST: &[(&str, u32, &str)] = &[];
 
     fn scan_format_then_reparse() -> Vec<(String, u32, String)> {
         let files = collect_production_rs_files();

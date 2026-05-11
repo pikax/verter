@@ -45,5 +45,6 @@ pub(crate) use macro_shapes::has_prop_shape_surface;
 pub(crate) use macro_shapes::{
     define_props_fields_fast_path_allowed, produce_macro_object_shapes,
     produce_one_macro_object_shape, registry_entry_to_expanded_shape,
-    synthesize_define_props_shape_from_known_surface_with_authority, MacroShapeSource,
+    slot_field_function_type_expr, synthesize_define_props_shape_from_known_surface_with_authority,
+    MacroShapeSource,
 };

@@ -885,11 +885,13 @@ pub(crate) fn synthesize_define_props_shape_from_known_surface_with_authority(
                 continue;
             }
 
+            // Typed-IR-Only Resolver Rule: `ResolvedProp.type_expr` is
+            // the authoritative typed form, lowered by the parser at
+            // OXC visit time. No reparse of `type_annotation`.
             let ty = prop
-                .type_annotation
-                .as_deref()
-                .map(verter_type_expr_oxc::parse_type_annotation)
-                .unwrap_or_else(|| verter_type_expr::TypeExpr::Unknown {
+                .type_expr
+                .clone()
+                .unwrap_or(verter_type_expr::TypeExpr::Unknown {
                     raw: "unknown".to_string(),
                 });
             properties.push(ExpandedProperty {
@@ -1128,11 +1130,14 @@ pub(crate) fn synthesize_define_emits_shape_from_known_surface(
                 continue;
             }
 
+            // Typed-IR-Only Resolver Rule: `ResolvedEmit.payload_expr`
+            // is the authoritative typed form. W1.1e closed the
+            // producer gap for cross-file `interface extends` emits.
+            // No reparse of `payload_type`.
             let ty = emit
-                .payload_type
-                .as_deref()
-                .map(verter_type_expr_oxc::parse_type_annotation)
-                .unwrap_or_else(|| verter_type_expr::TypeExpr::Unknown {
+                .payload_expr
+                .clone()
+                .unwrap_or(verter_type_expr::TypeExpr::Unknown {
                     raw: "unknown".to_string(),
                 });
             properties.push(ExpandedProperty {
@@ -1200,29 +1205,62 @@ pub(crate) fn synthesize_define_slots_shape_from_known_surface(
     ))
 }
 
+/// Construct the typed `(props: { ... }) => RT` function expression for a
+/// resolved slot directly from the analyzer-populated typed sidecars
+/// (`AnalyzedSlotFieldBinding.binding_expr` and
+/// `AnalyzedSlotField.return_expr`). No source-text reparse.
+///
+/// Empty-bindings slots produce `() => RT` (no `props` parameter).
+/// Missing typed sources fall back to `TypeExpr::Primitive(any)` for the
+/// return type and `TypeExpr::Primitive(unknown)` for each binding —
+/// matching the analyzer's display-only `"any"` / `"unknown"` defaults.
 pub(crate) fn slot_field_function_type_expr(
     slot: &verter_semantic::analysis::AnalyzedSlotField,
 ) -> verter_type_expr::TypeExpr {
-    let return_type = slot.return_type.as_deref().unwrap_or("any");
-    let signature = if slot.bindings.is_empty() {
-        format!("() => {return_type}")
+    use std::sync::Arc;
+    use verter_type_expr::{
+        FunctionExpr, FunctionParam, ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName,
+        TypeExpr,
+    };
+
+    let return_type = slot
+        .return_expr
+        .clone()
+        .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any));
+
+    let parameters = if slot.bindings.is_empty() {
+        Vec::new()
     } else {
-        let bindings = slot
+        let properties = slot
             .bindings
             .iter()
             .map(|binding| {
-                format!(
-                    "{}: {}",
-                    binding.name,
-                    binding.type_annotation.as_deref().unwrap_or("unknown")
-                )
+                let ty = binding
+                    .binding_expr
+                    .clone()
+                    .unwrap_or(TypeExpr::Primitive(PrimitiveName::Unknown));
+                ObjectMember::Property(ObjectProperty {
+                    name: binding.name.clone(),
+                    ty,
+                    optional: false,
+                    readonly: false,
+                })
             })
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!("(props: {{ {bindings} }}) => {return_type}")
+            .collect();
+        let props_object = TypeExpr::Object(Arc::new(ObjectExpr { properties }));
+        vec![FunctionParam {
+            name: Some("props".to_string()),
+            ty: props_object,
+            optional: false,
+            rest: false,
+        }]
     };
 
-    verter_type_expr_oxc::parse_type_annotation(&signature)
+    TypeExpr::Function(Arc::new(FunctionExpr {
+        parameters,
+        return_type: Some(Arc::new(return_type)),
+        type_parameters: Vec::new(),
+    }))
 }
 
 pub(crate) fn reuse_expanded_define_props_shape(

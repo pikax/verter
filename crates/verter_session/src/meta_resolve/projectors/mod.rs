@@ -498,6 +498,8 @@ pub(crate) fn surface_member_to_expanded_field(
     scope_canonical_id: &str,
     member: &SurfaceMember,
     raw_type: Option<String>,
+    shallow_type_expr: Option<TypeExpr>,
+    shallow_type_expr_scope: Option<verter_type_expr::TypeExprScope>,
 ) -> ExpandedField {
     let ctx: &dyn ResolverContext = query_engine.ctx;
     let (raised, exactness) = {
@@ -510,6 +512,12 @@ pub(crate) fn surface_member_to_expanded_field(
         (raised, exactness)
     };
     let r#type = reduce_field_type_expr(query_engine, scope_canonical_id, raised);
+    debug_assert_eq!(
+        shallow_type_expr.is_some(),
+        shallow_type_expr_scope.is_some(),
+        "ExpandedField (surface member `{}`) shallow_type_expr/shallow_type_expr_scope pairing violated",
+        member.name.as_ref(),
+    );
     ExpandedField {
         name: member.name.as_ref().to_string(),
         r#type,
@@ -518,8 +526,8 @@ pub(crate) fn surface_member_to_expanded_field(
         exactness,
         execution_status: ExpansionExecutionStatus::Completed,
         diagnostics: Vec::new(),
-        shallow_type_expr: None,
-        shallow_type_expr_scope: None,
+        shallow_type_expr,
+        shallow_type_expr_scope,
     }
 }
 
@@ -650,25 +658,25 @@ pub(crate) fn reduce_published_field_types(
 
     let mut finalized_prop_types: FxHashMap<String, TypeExpr> = FxHashMap::default();
     for field in evaluated_types.props.iter_mut() {
+        // Typed-IR-Only Resolver Rule: when the raised value-node form
+        // reduces to an unresolved shape (e.g. `Mapped { source: Unknown }`
+        // from a `Partial<X>` / `Required<X>` expansion where the
+        // semantic graph could not lift the mapped operator), prefer
+        // the analyzer-populated `shallow_type_expr` — the bare per-prop
+        // typed form lowered at OXC visit time. The typed sidecar
+        // replaces the legacy raw-annotation reparse fallback; no
+        // source-text reparse runs at this site.
         let raised = std::mem::replace(&mut field.r#type, TypeExpr::Unknown { raw: String::new() });
-        let mut reduced = reduce_field_type_expr(query_engine, scope_canonical_id, raised.clone());
+        let mut reduced = reduce_field_type_expr(query_engine, scope_canonical_id, raised);
 
-        // Raw-annotation fallback: when the published surface is the
-        // raised value-node form and that form is strictly worse than
-        // the parser-side `raw_type` annotation (e.g. an unresolved
-        // `Mapped { source: Unknown }` shell from a Partial/Required
-        // expansion), parse the annotation and prefer it. The
-        // annotation text is the authoritative per-prop string the
-        // analyzer surfaced through the macro-shape path.
-        if let Some(raw_text) = field.raw_type.as_deref() {
-            let raw_parsed = verter_type_expr_oxc::parse_type_annotation(raw_text);
-            if !matches!(raw_parsed, TypeExpr::Unknown { .. })
-                && compare_type_expr_improvement(&raw_parsed, &reduced)
+        if let Some(shallow) = field.shallow_type_expr.as_ref() {
+            if !matches!(shallow, TypeExpr::Unknown { .. })
+                && compare_type_expr_improvement(shallow, &reduced)
             {
-                let raw_reduced =
-                    reduce_field_type_expr(query_engine, scope_canonical_id, raw_parsed);
-                if compare_type_expr_improvement(&raw_reduced, &reduced) {
-                    reduced = raw_reduced;
+                let shallow_reduced =
+                    reduce_field_type_expr(query_engine, scope_canonical_id, shallow.clone());
+                if compare_type_expr_improvement(&shallow_reduced, &reduced) {
+                    reduced = shallow_reduced;
                 }
             }
         }

@@ -81,6 +81,8 @@ pub(crate) fn project_slots(
     // structure via its own slot_fields traversal.
     members
         .into_iter()
-        .map(|member| surface_member_to_expanded_field(query_engine, file, &member, None))
+        .map(|member| {
+            surface_member_to_expanded_field(query_engine, file, &member, None, None, None)
+        })
         .collect()
 }

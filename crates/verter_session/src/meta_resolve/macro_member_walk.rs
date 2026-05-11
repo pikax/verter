@@ -101,15 +101,12 @@ pub(crate) fn slot_binding_targets_define_props_root(
         return false;
     }
 
-    // Mirror the `expr` selection in
-    // `collect_component_meta_registry_public_field_refs`: prefer the
-    // parsed `raw_type` when present, otherwise fall back to the
-    // (already-expanded) `r#type`.
-    let parsed_raw = field
-        .raw_type
-        .as_deref()
-        .map(verter_type_expr_oxc::parse_type_annotation);
-    let expr: &TypeExpr = parsed_raw.as_ref().unwrap_or(&field.r#type);
+    // Typed-IR-Only Resolver Rule: prefer the shallow typed form when
+    // the analyzer populated it (the bare annotation the user wrote,
+    // e.g. `TypeExpr::Ref { name: "Props" }` or
+    // `TypeExpr::IndexedAccess { object: Ref { name: "Props" }, … }`),
+    // otherwise consume the post-expansion `r#type`. No source reparse.
+    let expr: &TypeExpr = field.shallow_type_expr.as_ref().unwrap_or(&field.r#type);
 
     fn unwrap_paren(ty: &TypeExpr) -> &TypeExpr {
         match ty {
