@@ -1960,7 +1960,9 @@ impl VerterHost {
             if matches!(pending_route, crate::resolver_core::RouteDemand::Whole)
                 && imported_owner_route
                     .as_ref()
-                    .is_some_and(|(canonical_id, _)| canonical_id.contains("/node_modules/"))
+                    .is_some_and(|(canonical_id, _)| {
+                        query_engine.ctx.workspace_is_package_backed(canonical_id)
+                    })
             {
                 continue;
             }

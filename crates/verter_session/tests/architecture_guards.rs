@@ -8272,26 +8272,6 @@ mod typed_ir_resolver_guards {
             r#".contains("/node_modules/")"#,
         ),
         (
-            "crates/verter_session/src/component_meta_resolution_policy/core.rs",
-            358,
-            r#".contains("/node_modules/")"#,
-        ),
-        (
-            "crates/verter_session/src/component_meta_resolution_policy/pick_omit.rs",
-            49,
-            r#".contains("/node_modules/")"#,
-        ),
-        (
-            "crates/verter_session/src/host_manage/component_meta_methods.rs",
-            1963,
-            r#".contains("/node_modules/")"#,
-        ),
-        (
-            "crates/verter_session/src/meta_resolve/registry_materialize.rs",
-            1051,
-            r#".contains("/node_modules/")"#,
-        ),
-        (
             "crates/verter_workspace/src/resolver.rs",
             75,
             r#".contains("/node_modules/")"#,

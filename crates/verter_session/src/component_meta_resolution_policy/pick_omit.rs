@@ -8,6 +8,8 @@
 
 use verter_type_expr::{LiteralValue, TypeExpr};
 
+use crate::resolver_core::ResolverContext;
+
 use super::core::{peel_paren, DeclLookup, PolicyCtx};
 
 /// Selective `Pick` / symbolic `Omit` handling when the target
@@ -46,7 +48,7 @@ pub(super) fn rewrite_pick_or_omit_for_package_backed(
         canonical_source,
         body,
     } = ctx.locate_declaration(target_name.as_ref())?;
-    if !canonical_source.contains("/node_modules/") {
+    if !ctx.host.workspace_is_package_backed(&canonical_source) {
         // Workspace-owned target: defer to the canonical reuse path.
         return None;
     }

@@ -1046,10 +1046,13 @@ pub(crate) fn component_meta_registry_should_keep_raw_symbolic_non_object_alias(
         {
             return false;
         }
+        let Some(resolved) = engine.resolve_imported_registry_symbol(scope_canonical_id, name)
+        else {
+            return true;
+        };
         engine
-            .resolve_imported_registry_symbol(scope_canonical_id, name)
-            .map(|resolved| resolved.canonical_id.contains("/node_modules/"))
-            .unwrap_or(true)
+            .ctx
+            .workspace_is_package_backed(&resolved.canonical_id)
     }
 
     match expr {

@@ -14,7 +14,7 @@ use verter_type_expr::{
 };
 
 use crate::resolver_core::component_meta::ResolvedTypeRegistryMeta;
-use crate::resolver_core::ComponentMetaQueryEngine;
+use crate::resolver_core::{ComponentMetaQueryEngine, ResolverContext};
 use crate::semantic_query::DeclIdentity;
 use crate::VerterHost;
 
@@ -355,7 +355,7 @@ fn rewrite_ref(
     };
 
     // Rule 1: package-backed Refs stay symbolic.
-    if canonical_source.contains("/node_modules/") {
+    if ctx.host.workspace_is_package_backed(&canonical_source) {
         return rewrite_type_arguments(name, type_arguments, ctx, /*recurse*/ false);
     }
 
