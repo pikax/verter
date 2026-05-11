@@ -32,6 +32,7 @@ use crate::component_meta_caches::{
     PreparedMemberDb, PreparedSurfaceDb, PreparedTargetDb, ResolvabilityDb, RoutedExprSurfaceDb,
 };
 use crate::component_meta_result_db::ComponentMetaResultDb;
+use crate::file_artifact_store::FileArtifactStore;
 use crate::intrinsic_registry::IntrinsicRegistry;
 use crate::owner_import_surface::OwnerImportSurfaceDb;
 use crate::resolver_core::imported_root_db::ImportedRootDb;
@@ -221,11 +222,30 @@ pub struct AnalysisReady {
 // Concrete backing caches
 // ──────────────────────────────────────────────────────────────────────────
 
-/// Host-owned cache of canonical [`IndexedReady`] artifacts. Keyed by
-/// canonical file id; the entry carries the whole-hash so stale keys can be
-/// rejected without rerunning a live lookup.
-pub struct IndexedReadyDb {
-    entries: DashMap<Arc<str>, Arc<IndexedReady>>,
+// ── IndexedReadyDb retired — replaced by FileArtifactStore (Stage 1) ──
+//
+// The standalone `IndexedReadyDb` storage type has been removed. The
+// canonical per-file cache is now
+// [`crate::file_artifact_store::FileArtifactStore`], which owns the
+// content-addressed `(canonical, content_hash, parse_env_hash,
+// parser_version)`-keyed surface PLUS the legacy canonical-keyed
+// API surface (preserved verbatim so existing call sites compile
+// across the rename) and the augmentation-index skeleton.
+//
+// Existing references to `IndexedReadyDb` resolve to `FileArtifactStore`
+// via this re-export. New code SHOULD use `FileArtifactStore` directly.
+// Per the fact-based cache architecture (R5 / R6 / R28 / R29 — see
+// `/type-cache-architecture` skill): the standalone storage type is
+// gone — this is a type alias, not a wrapper / shim.
+pub use crate::file_artifact_store::FileArtifactStore as IndexedReadyDb;
+
+// Removed code follows (struct + impls), kept as comment for review
+// continuity, omitted at compile time.
+#[cfg(any())]
+mod _removed_indexed_ready_db {
+    use super::*;
+    pub struct _IndexedReadyDb {
+        entries: DashMap<Arc<str>, Arc<IndexedReady>>,
     /// Per-canonical last-access tick (monotonically increasing). Used
     /// by [`Self::evict_lru`] under explicit memory pressure to drop
     /// the oldest entries down to a configured floor. Updated on
@@ -570,14 +590,12 @@ impl crate::invalidation_domain::ParticipatesInInvalidation for IndexedReadyDb {
     }
 }
 
-impl crate::invalidation_domain::InvalidationByCanonical for IndexedReadyDb {
-    fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
-        let before = self.len();
-        self.remove(canonical_id);
-        let after = self.len();
-        before.saturating_sub(after)
+impl _IndexedReadyDb {
+    fn _placeholder_invalidate(&self, _canonical_id: &str) -> usize {
+        0
     }
 }
+} // end mod _removed_indexed_ready_db
 
 /// Host-owned cache of per-file [`AnalysisReady`] artifacts.
 pub struct AnalysisReadyDb {
@@ -1977,7 +1995,7 @@ pub struct ProjectTypeStoreCounterSnapshot {
 pub struct ProjectTypeStore {
     project_generation: AtomicU64,
     /// Canonical [`IndexedReady`] cache.
-    indexed: IndexedReadyDb,
+    indexed: FileArtifactStore,
     /// Analysis augmentation cache keyed by `AnalysisScope`.
     analysis: AnalysisReadyDb,
     /// Rehomed routing-surface cache. `RouteDb` survives as the shared
@@ -2130,7 +2148,7 @@ impl ProjectTypeStore {
         let counters = ProjectTypeStoreCounters::default();
         // Each backing DB holds the same `Arc<AtomicU64>` counters as
         // `counters` so the `snapshot()` method sees in-place updates.
-        let indexed = IndexedReadyDb::with_counters(
+        let indexed = FileArtifactStore::with_counters(
             Arc::clone(&counters.indexed_live),
             Arc::clone(&counters.indexed_stale_sweeps),
         );
@@ -2244,7 +2262,16 @@ impl ProjectTypeStore {
         self.project_generation.fetch_add(1, Ordering::AcqRel) + 1
     }
 
-    pub fn indexed(&self) -> &IndexedReadyDb {
+    pub fn indexed(&self) -> &FileArtifactStore {
+        &self.indexed
+    }
+
+    /// Canonical accessor for the post-parse file artifact cache.
+    ///
+    /// Returns the same `FileArtifactStore` that the legacy [`Self::indexed`]
+    /// accessor returns; new code should prefer this name. The two are
+    /// kept in step until [`Self::indexed`] is retired.
+    pub fn file_artifacts(&self) -> &FileArtifactStore {
         &self.indexed
     }
 

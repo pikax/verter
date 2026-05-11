@@ -3575,6 +3575,11 @@ mod foundations_guards {
         "pub mod host_resolve_type_audit",
         // verter_ffi::convert (host::cross_file::CrossFileResult)
         "pub mod cross_file",
+        // Fact-based cache architecture (R5, R6, R28, R29) — new
+        // content-addressed file artifact store + per-file structural
+        // hash, both consumed by tests and by future-stage host paths.
+        "pub mod file_artifact_store",
+        "pub mod parse_stable_hash",
         // tests/semantic_analysis_audit_e2e.rs +
         // tests/semantic_analysis_audit_tls_propagation.rs — public
         // audited entry-point that wires
@@ -5142,13 +5147,19 @@ fn guard9_predicate_rejects_missing_invalidation_by_canonical_impl() {
 
 #[test]
 fn guard9_predicate_passes_for_known_implementor() {
-    // Sanity counter-fixture: `IndexedReadyDb` IS implemented in the
+    // Sanity counter-fixture: `FileArtifactStore` IS implemented in the
     // workspace. The detector must report `true`.
+    //
+    // `FileArtifactStore` is the renamed-from-IndexedReadyDb type; the
+    // legacy `IndexedReadyDb` name remains as a `pub use` alias on
+    // `project_type_store` so existing callers compile across the
+    // rename, but the actual `impl InvalidationByCanonical` block
+    // targets the canonical `FileArtifactStore` type.
     let crate_root = workspace_path("crates/verter_session/src");
     assert!(
-        invalidation_by_canonical_impl_exists(&crate_root, "IndexedReadyDb"),
+        invalidation_by_canonical_impl_exists(&crate_root, "FileArtifactStore"),
         "guard 9 predicate must report `true` for a known \
-         InvalidationByCanonical implementor (IndexedReadyDb)",
+         InvalidationByCanonical implementor (FileArtifactStore)",
     );
 }
 

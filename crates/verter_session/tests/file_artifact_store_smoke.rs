@@ -30,13 +30,16 @@ fn insert_get_remove_round_trip() {
     let store = FileArtifactStore::new();
     let key = make_key("/x.ts", 1, 2);
     let payload = make_artifacts(0xab);
-    assert!(store.get(&key).is_none());
-    store.insert(key.clone(), Arc::clone(&payload));
-    let got = store.get(&key).expect("post-insert get MUST succeed");
+    assert!(store.get_artifacts(&key).is_none());
+    store.insert_artifacts(key.clone(), Arc::clone(&payload));
+    let got = store.get_artifacts(&key).expect("post-insert get MUST succeed");
     assert!(Arc::ptr_eq(&got, &payload));
-    let removed = store.remove(&key).expect("remove MUST return prior");
+    let removed = store.remove_artifacts(&key).expect("remove MUST return prior");
     assert!(Arc::ptr_eq(&removed, &payload));
-    assert!(store.get(&key).is_none(), "post-remove get MUST be None");
+    assert!(
+        store.get_artifacts(&key).is_none(),
+        "post-remove get MUST be None"
+    );
 }
 
 #[test]
@@ -44,11 +47,11 @@ fn two_envs_coexist_for_same_canonical() {
     let store = FileArtifactStore::new();
     let key_env_a = make_key("/shared.ts", 1, 10);
     let key_env_b = make_key("/shared.ts", 1, 20);
-    store.insert(key_env_a.clone(), make_artifacts(0xa));
-    store.insert(key_env_b.clone(), make_artifacts(0xb));
+    store.insert_artifacts(key_env_a.clone(), make_artifacts(0xa));
+    store.insert_artifacts(key_env_b.clone(), make_artifacts(0xb));
     assert_eq!(store.len(), 2);
-    assert!(store.get(&key_env_a).is_some());
-    assert!(store.get(&key_env_b).is_some());
+    assert!(store.get_artifacts(&key_env_a).is_some());
+    assert!(store.get_artifacts(&key_env_b).is_some());
 }
 
 #[test]
@@ -56,8 +59,8 @@ fn file_artifacts_carry_indexed_facts_edges_augmentations() {
     let store = FileArtifactStore::new();
     let key = make_key("/m.ts", 7, 7);
     let payload = make_artifacts(0xcc);
-    store.insert(key.clone(), payload);
-    let got = store.get(&key).expect("entry MUST exist");
+    store.insert_artifacts(key.clone(), payload);
+    let got = store.get_artifacts(&key).expect("entry MUST exist");
     // Stage 1 invariant: every FileArtifacts has the four placeholder
     // sub-fields wired (facts, parsed_edges, augmentations, plus
     // parse_stable_hash) along with the canonical IndexedReady.
@@ -82,9 +85,9 @@ fn keys_iteration_observes_every_entry() {
         .map(|i| make_key(&format!("/f{i}.ts"), i as u8, 1))
         .collect();
     for k in &keys {
-        store.insert(k.clone(), make_artifacts(0));
+        store.insert_artifacts(k.clone(), make_artifacts(0));
     }
-    let observed = store.keys();
+    let observed = store.artifact_keys();
     assert_eq!(observed.len(), 5);
     for k in &keys {
         assert!(observed.contains(k));
