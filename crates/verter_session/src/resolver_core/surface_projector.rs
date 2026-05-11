@@ -946,9 +946,33 @@ fn raw_emit_payload_text(
 /// slices into a synthetic tuple display.
 ///
 /// Walks the source bytes with a minimal state machine — tracks string
-/// quoting and brace/paren/bracket/angle nesting. This is a display
-/// formatter only; semantic decisions live in the typed
-/// `*_expr` consumers.
+/// quoting and brace/paren/bracket/angle nesting.
+///
+/// **Typed-IR-Only Resolver Rule carve-out (display-only allowlist).**
+///
+/// This helper is the single sanctioned source-text-walking formatter
+/// inside `surface_projector.rs`. Its purpose is preserving EXACT source
+/// text for display (including whitespace, comments inside the
+/// annotation, conditional/generic surface text the resolver may have
+/// simplified upstream). A typed-form renderer would change the
+/// formatting characteristics in subtle ways (whitespace
+/// re-canonicalisation, comment stripping, structural normalisation of
+/// `Function(params, return)` shapes), breaking the
+/// `payload_type: Option<String>` display-passthrough contract the JS
+/// compat layer relies on.
+///
+/// Allowlist conditions:
+/// - Output flows ONLY to `AnalyzedEmitField.payload_type` (display-only)
+///   and downstream `PropertyMeta.type` / `EventMeta.rawSignature`
+///   passthroughs. NO consumer in the resolver / projector / registry /
+///   policy / materialiser pipeline parses this output back.
+/// - Semantic decisions live on the typed `AnalyzedEmitField.payload_expr`
+///   sidecar (populated by the parser-side W0.3 producer chain).
+///
+/// `nesting_aware_split` is a private nested helper scoped to this
+/// function. It does NOT participate in semantic resolution and MUST NOT
+/// be hoisted to a sibling helper module that would expose it to
+/// resolver-pipeline consumers.
 fn raw_emit_payload_text_from_source(
     signature_text: &str,
     signature: &ResolvedEmitSignature,

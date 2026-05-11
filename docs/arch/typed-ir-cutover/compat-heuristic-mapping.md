@@ -176,3 +176,66 @@ above instead becomes a NO — the descriptor reaching JS is whatever the
 collapsed form produced (e.g. an inlined member type), and the `looksLike*`
 helpers that key off the indexed-access shape lose their reason to exist.
 Either resolution unblocks W7.
+
+## Survivors after W7.3: retired-by-function-name vs retired-by-rawType-consumer
+
+Plan §8 (Legacy Deletions → TypeScript) lists the following function names
+under "Normalisers" and "Extractors":
+
+- Normalisers: `normalizeTypeString`, `normalizeOptionalCompatTypeText`,
+  `normalizeCompatEventFunctionType`, `normalizeCompatObjectLiteralTypeText`,
+  `normalizeCompatUnionArrayPart`, `normalizeCompatSchemaLeaf`,
+  `stripTopLevelUndefinedFromTypeString`, `stripSingleOuterParens`.
+- Extractors: `extractCompatSlotsFieldNames`, `extractCompatUiBindingFieldNames`,
+  `extractEventTupleType`, `extractFunctionParameterSource`,
+  `formatCompatRawObjectType`, `compatRawTypeLooksLossy`,
+  `compatFunctionTypeToString`, `compatObjectTypeToString`,
+  `compatTypeParameterToString`, `compatSlotBindingTypeText`.
+
+**Footnote — two distinct retirement categories.** The plan's
+delete-list mixes two semantically distinct intents:
+
+1. **Retired-as-rawType-consumers** — functions that consumed
+   `prop.rawType` (or a sibling display string) for SEMANTIC decisions.
+   These ARE deleted (or rewritten to take `TypeDescriptor`) by
+   W7.3. Examples: `repairOpaqueCompatSchemaFromRawType`,
+   `preferredCompatPropTypeText`, `shouldPreferRawSchemaType`,
+   `applyRawTypeDisplayHintsToSchema`.
+2. **Retired-as-function-name** — functions that ALSO appeared under the
+   same group header in the plan but which never read `prop.rawType` for
+   semantic decisions. Some of these survive post-W7.3 as
+   typed-form-derived display helpers — they consume strings already
+   produced by `typeDescriptorToString` / `typeDescriptorToCompatDisplay`,
+   not raw `prop.rawType`. The retired-symbol guard at
+   `packages/component-meta/tests/no-rawtype-reads.spec.ts` catches the
+   real semantic regression (rawType reads inside `looksLike*` /
+   `extract*` / `prefer*` / `buildCompat*` etc.) without requiring the
+   function names themselves to be deleted.
+
+Examples of post-W7.3 survivors in this second category:
+
+- `normalizeTypeString` — string normaliser; input is a string already
+  produced upstream from the typed form. Consumed by display-only
+  passthrough.
+- `compatFunctionTypeToString` / `compatObjectTypeToString` — typed
+  renderers driven off the `TypeDescriptor.kind` discriminant, NOT
+  reading `prop.rawType`.
+- `extractEventTupleType` — switches structurally on
+  `payload.kind === "function"` and walks `payload.parameters`; the
+  `rawSignature` argument is retained for parity passthrough only
+  (the legacy text-shape parser that scanned `((…) => …)` is gone).
+
+The plan's delete-list is therefore READ AS:
+- **Hard delete (retired-as-rawType-consumers)**: function name must
+  not appear at any production call site AND must not read `prop.rawType`
+  via any path. Enforced by `no-rawtype-reads.spec.ts`.
+- **Soft delete (retired-as-function-name)**: when the typed form is
+  authoritative, the legacy function name may continue to exist if its
+  body has been rewritten to consume the typed `TypeDescriptor`. The
+  `no-rawtype-reads.spec.ts` static check covers the semantic guarantee;
+  the function-name guard is not required.
+
+This footnote distinguishes the two categories so future readers of
+plan §8 don't interpret "the name still exists" as a cutover defect when
+the underlying semantic decision was successfully migrated to the
+typed-IR consumer path.

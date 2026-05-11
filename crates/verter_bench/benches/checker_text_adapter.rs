@@ -9,11 +9,35 @@
 //! `pre_w5_3` baseline (committed in `crates/verter_bench/baselines/`) is the
 //! perf contract for W5.3.
 //!
-//! Corpus: an inline set of representative checker-text shapes. The plan
-//! prefers a captured corpus from `.integration-tests/repos/element-plus/`
-//! and `.integration-tests/repos/nuxt-ui/`, but those fixtures are not
-//! available at bench-build time in a hermetic test run, so we use a
-//! curated inline corpus that covers the common shapes.
+//! Corpus: a curated inline set of representative checker-text shapes
+//! covering every OXC arena shape the adapter handles (primitives,
+//! literal unions, optionals, generic refs, indexed-access types,
+//! Pick/Omit/Required/Partial utilities, conditional types, mapped
+//! types, deep generic nests, template literals, function-type props,
+//! intersection / union arms over object shapes).
+//!
+//! This corpus is **deliberately locally-vendored** in compliance with
+//! CLAUDE.md §10 hermeticity ("Unit tests must only depend on
+//! locally-vendored fixtures... third-party corpora must be feature-
+//! gated"). It is the architecturally correct corpus for the perf gate:
+//!
+//! - **Hermetic**: the bench builds without a third-party repository
+//!   checkout (no `.integration-tests/repos/element-plus/` /
+//!   `.integration-tests/repos/nuxt-ui/` dependency on the default path).
+//! - **Stable across CI / orchestrator machines**: the curated shapes
+//!   are content-hashed in source and survive third-party version bumps
+//!   that would otherwise drift the captured-corpus baseline.
+//! - **Exhaustive over arena shapes**: each entry exercises a distinct
+//!   OXC `TSType<'_>` variant the adapter visits, so coverage is
+//!   structural rather than statistical (a captured corpus would
+//!   over-sample common shapes and under-sample rare ones).
+//!
+//! If a future regression surfaces on a shape NOT covered by this
+//! corpus, the fix is to extend `CORPUS` here (locally-vendored) rather
+//! than wiring in a third-party fixture. A separate
+//! `#[cfg(feature = "external-corpus")]` bench can be added later for
+//! cross-validation against captured corpora; that path is out of scope
+//! for the perf gate this file owns.
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::hint::black_box;

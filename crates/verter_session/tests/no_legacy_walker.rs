@@ -263,6 +263,13 @@ const RETIRED_SYMBOLS: &[&str] = &[
     // match treats the module name identically to a function name,
     // so re-introduction at any site is forbidden here too.
     "type_text_parser",
+    // The retired `type_text_parser::parse_type_text` entry function.
+    // Companion to `type_text_parser` (the module name) — covers the
+    // case where someone re-introduces just the public entry as a
+    // free function in a different module. The checker-text adapter
+    // (`parse_checker_text_to_type_expr`) is the only sanctioned
+    // checker-display-text parser.
+    "parse_type_text",
     // F1 cutover (eradicate-string-resolver follow-up F1) — the
     // component-meta policy's nominal `name.ends_with("Props")`
     // classifier is DELETED. The structural §3.4 macro-participation
