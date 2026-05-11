@@ -108,16 +108,21 @@ describe("W7.1: operator splitters consume TypeDescriptor (not prop.rawType)", (
       // Descriptor is structurally `string | undefined` (NOT Numberish). Pre-W7.1 the
       // function would have stripped `prop.rawType` text via the deleted splitter, found
       // the stripped form equal to "Numberish", and constructed a Numberish compat result.
-      // Post-W7.1 `stripTopLevelUndefinedFromCompatType` walks the descriptor structurally,
-      // produces "string", and the Numberish gate declines.
+      // Post-W7.1+W7.2 the Numberish projection gate reads the descriptor's typed kind
+      // (no Booleanish/Numberish ref arm) and DECLINES the Numberish projection — the
+      // schema does NOT carry the Numberish enum entries.
       const prop = makeProp({
         type: union([primitive("string"), primitive("undefined")]),
         rawType: "Numberish | undefined",
         required: false,
       });
       const result = mapPropMeta(prop);
-      // Post-cutover: descriptor wins → not a Numberish projection.
-      expect(result.type).not.toBe("Numberish | undefined");
+      // Post-cutover: the schema is NOT the Numberish enum projection — the
+      // Numberish-specific schema entries (`"\"true\""`, `"true"`, etc.) are
+      // absent, demonstrating the gate declined irrespective of the rawType
+      // display passthrough.
+      expect(JSON.stringify(result.schema)).not.toContain('"true"');
+      expect(JSON.stringify(result.schema)).not.toContain('"1"');
     });
   });
 

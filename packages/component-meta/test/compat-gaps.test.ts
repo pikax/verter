@@ -131,8 +131,15 @@ describe("P3: Default Values", () => {
   test("JS options API: should extract default value from defineProps options", async () => {
     const prop = await getProp("P3a-JSDefaults.vue", "size");
     expect(prop).toBeDefined();
+    // Post-W7.2 the descriptor-over-rawType swap is structural: only `Ref`-shaped
+    // descriptors (or `IndexedAccessType`) prefer their descriptor display over the
+    // user-authored rawType passthrough. The runtime constructor `String` surfaces
+    // as the rawType "String | undefined" rather than the lowercase primitive
+    // expansion "string | undefined". The default-value extraction (and string-
+    // compatible JSON-stringification of unquoted defaults) remains driven by the
+    // descriptor's typed `kind` walk.
     expect(prop).toMatchObject({
-      type: "string | undefined",
+      type: "String | undefined",
       default: '"md"',
     });
   });

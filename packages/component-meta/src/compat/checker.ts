@@ -145,6 +145,35 @@ const descriptorIncludesTopLevelUndefined = (t: TypeDescriptor): boolean =>
   t.kind === "union" && t.types.some(isUndefinedPrimitive);
 
 /**
+ * Structural predicate: does `t` (recursing into top-level union /
+ * intersection arms) contain an `IndexedAccessType` whose `indexType` is a
+ * string literal equal to `key`, OR a `RefType` named `ComponentSlots` /
+ * `ComponentUI` when `key` is `"slots"` / `"ui"`?
+ *
+ * Used by `looksLikeSlotsHelperRawType` (`key = "slots"`) and
+ * `looksLikeUiHelperRawType` (`key = "ui"`) — the slots-helper and
+ * UI-helper projections gate on the structural marker rather than parsing
+ * `prop.rawType` / `binding.rawType` text.
+ */
+function descriptorCarriesIndexedAccessOnLiteralKey(
+  t: TypeDescriptor,
+  key: "slots" | "ui",
+): boolean {
+  if (t.kind === "indexedAccess") {
+    return t.indexType.kind === "literal" && t.indexType.value === key;
+  }
+  if (t.kind === "ref") {
+    return (
+      (key === "slots" && t.name === "ComponentSlots") || (key === "ui" && t.name === "ComponentUI")
+    );
+  }
+  if (t.kind === "union" || t.kind === "intersection") {
+    return t.types.some((arm) => descriptorCarriesIndexedAccessOnLiteralKey(arm, key));
+  }
+  return false;
+}
+
+/**
  * Returns the display text of `descriptor` with any top-level union arm of
  * `undefined` stripped. The structural replacement for the deleted hand-rolled
  * top-level `|` text splitter — the descriptor is the semantic authority for
@@ -335,7 +364,7 @@ function buildCompatPropertyMeta(
     type,
     required: prop.required,
     global: false,
-    default: normalizeDefaultForCompat(type, evaluateDefault(prop.default)),
+    default: normalizeDefaultForCompat(prop.type, evaluateDefault(prop.default)),
     tags: overrides?.tags ?? normalizeCompatTags(prop.tags),
     schema,
   };
@@ -368,7 +397,7 @@ function buildCompatAnyPropMeta(prop: PropMeta): PropertyMeta | undefined {
     type: "any",
     required: prop.required,
     global: false,
-    default: normalizeDefaultForCompat("any", evaluateDefault(prop.default)),
+    default: normalizeDefaultForCompat(prop.type, evaluateDefault(prop.default)),
     tags: (prop.tags ?? []).map((t) => ({
       name: t.name,
       ...(t.text != null && { text: t.text }),
@@ -438,7 +467,7 @@ function buildCompatBooleanishPropMeta(prop: PropMeta): PropertyMeta | undefined
     type,
     required: prop.required,
     global: false,
-    default: normalizeDefaultForCompat(type, evaluateDefault(prop.default)),
+    default: normalizeDefaultForCompat(prop.type, evaluateDefault(prop.default)),
     tags: normalizeCompatTags(prop.tags),
     schema: {
       kind: "enum",
@@ -451,10 +480,7 @@ function buildCompatBooleanishPropMeta(prop: PropMeta): PropertyMeta | undefined
 function buildCompatSlotsPropMeta(
   prop: PropMeta,
 ): { type: string; schema: PropertyMetaSchema } | undefined {
-  if (
-    !looksLikeSlotsHelperRawType(prop.rawType) ||
-    !compatSlotsDescriptorNeedsProjection(prop.type)
-  ) {
+  if (!looksLikeSlotsHelperRawType(prop.type) || !compatSlotsDescriptorNeedsProjection(prop.type)) {
     return undefined;
   }
 
@@ -901,8 +927,18 @@ function buildCompatInlinePropertyMeta(
   };
 }
 
-function looksLikeSlotsHelperRawType(rawType: string | undefined): boolean {
-  return typeof rawType === "string" && /\[(["'])slots\1\]\s*$/.test(rawType.trim());
+/**
+ * Structural test: does `t` carry the slots-helper indexed-access marker
+ * (`Foo['slots']` or `ComponentSlots<…>`)?
+ *
+ * Switches on the `IndexedAccessType` / `RefType` kind tags instead of
+ * regex-matching `prop.rawType`. The walker recurses through unions/
+ * intersections so `Foo['slots'] | undefined` and resolved-then-collapsed
+ * compound forms continue to match while any arm preserves the structural
+ * marker.
+ */
+function looksLikeSlotsHelperRawType(t: TypeDescriptor): boolean {
+  return descriptorCarriesIndexedAccessOnLiteralKey(t, "slots");
 }
 
 function compatSlotsDescriptorNeedsProjection(type: TypeDescriptor): boolean {
@@ -1161,8 +1197,8 @@ function shouldPreferRawSchemaType(
   }
   return (
     normalizedRaw.includes("<") ||
-    looksLikeIndexedAccessType(normalizedRaw) ||
-    looksLikeBareTypeReference(stripTopLevelUndefinedFromCompatType(descriptor, normalizedRaw))
+    looksLikeIndexedAccessType(descriptor) ||
+    looksLikeBareTypeReference(descriptor)
   );
 }
 
@@ -1378,12 +1414,11 @@ function shouldPreferDescriptorForProp(
   rawType: string,
   descriptorText: string,
 ): boolean {
-  const normalizedRawType = stripTopLevelUndefinedFromCompatType(descriptor, rawType);
   return (
     rawType !== descriptorText &&
     !compatDescriptorLooksLossy(descriptor, descriptorText) &&
     !compatDescriptorLooksOverexpanded(descriptorText) &&
-    (looksLikeBareTypeReference(normalizedRawType) || looksLikeIndexedAccessType(normalizedRawType))
+    (looksLikeBareTypeReference(descriptor) || looksLikeIndexedAccessType(descriptor))
   );
 }
 
@@ -1391,8 +1426,7 @@ function shouldPreferRawAliasForExpandedDescriptor(
   rawType: string,
   descriptor: TypeDescriptor,
 ): boolean {
-  const normalizedRawType = stripTopLevelUndefinedFromCompatType(descriptor, rawType);
-  if (!looksLikeBareTypeReference(normalizedRawType)) {
+  if (!looksLikeBareTypeReference(descriptor)) {
     return false;
   }
 
@@ -1450,15 +1484,37 @@ function compatDescriptorLooksOverexpanded(descriptorText: string): boolean {
   return maxRepeats >= 6;
 }
 
-function looksLikeBareTypeReference(type: string): boolean {
-  return /^[A-Za-z_$][A-Za-z0-9_$]*(\.[A-Za-z_$][A-Za-z0-9_$]*)*$/.test(type);
+/**
+ * Structural test: is `t` a bare type reference (a `ref` with no
+ * `typeArguments`)?
+ *
+ * Switches on `TypeDescriptor.kind` instead of regex-matching `rawType`. A
+ * top-level union containing `undefined` is reduced via `stripUndefinedArm`
+ * before the kind tag check so `Foo | undefined` matches when `Foo` itself is
+ * a bare `Ref`.
+ */
+function looksLikeBareTypeReference(t: TypeDescriptor): boolean {
+  const stripped = stripUndefinedArm(t);
+  return stripped.kind === "ref" && stripped.typeArguments === undefined;
 }
 
-function looksLikeIndexedAccessType(type: string): boolean {
-  return /^[A-Za-z_$][A-Za-z0-9_$.<>, ]*(\[[^\]]+\])+$/.test(type.trim());
+/**
+ * Structural test: is `t` an indexed-access type (`Foo['bar']` /
+ * `Foo[Bar]`)?
+ *
+ * Switches on the `IndexedAccessType` variant added in W0.6. A top-level
+ * union containing `undefined` is reduced via `stripUndefinedArm` before the
+ * kind tag check so `Foo['bar'] | undefined` matches.
+ */
+function looksLikeIndexedAccessType(t: TypeDescriptor): boolean {
+  const stripped = stripUndefinedArm(t);
+  return stripped.kind === "indexedAccess";
 }
 
-function normalizeDefaultForCompat(type: string, value: string | undefined): string | undefined {
+function normalizeDefaultForCompat(
+  descriptor: TypeDescriptor,
+  value: string | undefined,
+): string | undefined {
   if (value === undefined) return undefined;
   const trimmed = value.trim();
   if (
@@ -1476,19 +1532,47 @@ function normalizeDefaultForCompat(type: string, value: string | undefined): str
   ) {
     return value;
   }
-  if (looksLikeStringCompatibleType(type)) {
+  if (looksLikeStringCompatibleType(descriptor)) {
     return JSON.stringify(trimmed);
   }
   return value;
 }
 
-function looksLikeStringCompatibleType(type: string): boolean {
-  return (
-    type === "any" ||
-    type.includes("string") ||
-    type.includes('"') ||
-    type.includes("(string & {})")
-  );
+/**
+ * Structural test: does `t` accept a string value?
+ *
+ * Walks the descriptor recursively over union/intersection arms (the
+ * structural equivalents of `|` / `&` text splitting). Returns true when any
+ * reachable arm is `primitive("any")` / `primitive("string")`, a string-valued
+ * `literal`, or an `enum` carrying any string-valued member. Object /
+ * function / array / tuple / ref / indexedAccess / recursiveRef / typeParameter
+ * arms do not qualify — the gate concerns the prop's top-level value shape, not
+ * the shapes of nested fields.
+ */
+function looksLikeStringCompatibleType(t: TypeDescriptor): boolean {
+  switch (t.kind) {
+    case "primitive":
+      return t.name === "any" || t.name === "string";
+    case "literal":
+      return typeof t.value === "string";
+    case "union":
+      return t.types.some(looksLikeStringCompatibleType);
+    case "intersection":
+      return t.types.some(looksLikeStringCompatibleType);
+    case "enum":
+      return t.members.some((member) => typeof member.value === "string");
+    case "unknown":
+      // The bridge emits `UnknownType` with `rawType` carrying the only
+      // structural signal available when the type-graph could not deepen the
+      // node. That `rawType` is INTERNAL to the descriptor (the typed-IR's
+      // self-describing fallback), distinct from the prop-level display
+      // passthrough `PropMeta.rawType`. Read it here to preserve string-
+      // compatibility detection for runtime-constructor props whose Rust
+      // analysis surfaces `unknown("string")` instead of `primitive("string")`.
+      return t.rawType === "string" || t.rawType === "any";
+    default:
+      return false;
+  }
 }
 
 function typeDescriptorToCompatDisplay(
@@ -1559,11 +1643,10 @@ function typeDescriptorToCompatDisplay(
     case "recursiveRef":
       return typeDescriptorToString(descriptor);
     case "indexedAccess":
-      // TODO(W7.2): the `indexedAccess` variant exists structurally for
-      // the W7.2 rewrite of looksLikeIndexedAccessType /
-      // looksLikeSlotsHelperRawType / looksLikeUiHelperRawType. Until
-      // W7.2 lands, the display formatter falls back to the structural
-      // `obj[idx]` rendering so the exhaustive switch compiles.
+      // `IndexedAccessType` is structurally surfaced for the typed shape
+      // heuristics (`looksLikeIndexedAccessType` / `looksLikeSlotsHelperRawType`
+      // / `looksLikeUiHelperRawType`). Display rendering falls back to the
+      // shared `obj[idx]` form.
       return typeDescriptorToString(descriptor);
   }
 }
@@ -1697,7 +1780,7 @@ function compatSlotBindingTypeText(
 }
 
 function buildCompatUiBindingType(binding: SlotMeta["bindings"][number]): string | undefined {
-  if (!looksLikeUiHelperRawType(binding.rawType)) {
+  if (!looksLikeUiHelperRawType(binding.type)) {
     return undefined;
   }
 
@@ -1711,16 +1794,46 @@ function buildCompatUiBindingType(binding: SlotMeta["bindings"][number]): string
     .join("; ")}; }`;
 }
 
-function looksLikeUiHelperRawType(rawType: string | undefined): boolean {
-  return typeof rawType === "string" && /\[(["'])ui\1\]\s*$/.test(rawType.trim());
+/**
+ * Structural test: does `t` carry the UI-helper indexed-access marker
+ * (`Foo['ui']` or `ComponentUI<…>`)?
+ *
+ * Switches on the `IndexedAccessType` / `RefType` kind tags instead of
+ * regex-matching `binding.rawType`. The walker recurses through unions /
+ * intersections so the marker survives optional / decoy wrappings.
+ */
+function looksLikeUiHelperRawType(t: TypeDescriptor): boolean {
+  return descriptorCarriesIndexedAccessOnLiteralKey(t, "ui");
 }
 
 function extractCompatUiBindingFieldNames(type: TypeDescriptor): string[] | undefined {
+  const object = unwrapComponentUiDescriptor(type);
+  if (!object) {
+    return undefined;
+  }
+  const fields = object.properties.filter((property) => property.type.kind === "function");
+  return fields.length === object.properties.length
+    ? fields.map((property) => property.name)
+    : undefined;
+}
+
+function unwrapComponentUiDescriptor(
+  type: TypeDescriptor,
+): Extract<TypeDescriptor, { kind: "object" }> | undefined {
   if (type.kind === "object") {
-    const fields = type.properties.filter((property) => property.type.kind === "function");
-    return fields.length === type.properties.length
-      ? fields.map((property) => property.name)
-      : undefined;
+    return type;
+  }
+  if (
+    type.kind === "ref" &&
+    type.name === "ComponentUI" &&
+    type.typeArguments?.[0]?.kind === "object"
+  ) {
+    const slotsProperty = type.typeArguments[0].properties.find(
+      (property) => property.name === "slots",
+    );
+    if (slotsProperty?.type.kind === "object") {
+      return slotsProperty.type;
+    }
   }
   return undefined;
 }
