@@ -42,9 +42,7 @@ fn insert_then_get_returns_payload() {
     let key = synth_key("/a.ts", [1u8; 16], [2u8; 16]);
     let payload = synth_artifacts(0xaa);
     store.insert_artifacts(key.clone(), Arc::clone(&payload));
-    let got = store
-        .get_artifacts(&key)
-        .expect("entry MUST exist");
+    let got = store.get_artifacts(&key).expect("entry MUST exist");
     assert!(Arc::ptr_eq(&got, &payload), "MUST return the inserted Arc");
     assert_eq!(store.len(), 1);
 }

@@ -113,10 +113,7 @@ fn lib_env_change_does_change_augmentation_target_key() {
     updated.ambient_corpus_fingerprint = 0xfeed;
     let lib_b = cfg.lib_env_hash(&updated);
 
-    assert_ne!(
-        lib_a, lib_b,
-        "lib data change MUST change lib_env_hash"
-    );
+    assert_ne!(lib_a, lib_b, "lib data change MUST change lib_env_hash");
 
     let identity = ProjectIdentity(cfg.project_identity());
     let resolve_env_hash = cfg.resolve_env_hash(&baseline);
@@ -151,8 +148,14 @@ fn paths_edit_changes_augmentation_target_key_but_not_file_artifact_key() {
     cfg.compiler_options.paths = vec![("@/*".to_string(), vec!["lib/*".to_string()])];
     let parse_b = cfg.parse_env_hash(&inputs);
     let resolve_b = cfg.resolve_env_hash(&inputs);
-    assert_eq!(parse_a, parse_b, "paths edit MUST NOT change parse_env_hash");
-    assert_ne!(resolve_a, resolve_b, "paths edit MUST change resolve_env_hash");
+    assert_eq!(
+        parse_a, parse_b,
+        "paths edit MUST NOT change parse_env_hash"
+    );
+    assert_ne!(
+        resolve_a, resolve_b,
+        "paths edit MUST change resolve_env_hash"
+    );
 
     let canonical: std::sync::Arc<str> = std::sync::Arc::from("/ws/proj/src/foo.ts");
     let content_hash = [0u8; 16];

@@ -22,17 +22,27 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use verter_session::parse_stable_hash::compute_parse_stable_hash;
 use verter_session::project_type_store::IndexedReady;
 
-fn empty_external() -> Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>
-{
+fn empty_external(
+) -> Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource> {
     Arc::new(verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default())
 }
 
 fn build_indexed(
-    type_symbols: Vec<(&str, verter_semantic::analysis::type_eval::TypeDeclKind, Vec<&str>)>,
+    type_symbols: Vec<(
+        &str,
+        verter_semantic::analysis::type_eval::TypeDeclKind,
+        Vec<&str>,
+    )>,
     value_symbols: Vec<(&str, verter_semantic::analysis::type_eval::ValueDeclKind)>,
-    exports: Vec<(&str, verter_session::resolver_core::shallow_file_state::ExportTarget)>,
+    exports: Vec<(
+        &str,
+        verter_session::resolver_core::shallow_file_state::ExportTarget,
+    )>,
 ) -> Arc<IndexedReady> {
-    let mut symbols: FxHashMap<String, verter_session::resolver_core::shallow_file_state::ShallowTypeSymbol> = FxHashMap::default();
+    let mut symbols: FxHashMap<
+        String,
+        verter_session::resolver_core::shallow_file_state::ShallowTypeSymbol,
+    > = FxHashMap::default();
     for (name, kind, members) in type_symbols {
         let mut member_deps: FxHashMap<String, Vec<String>> = FxHashMap::default();
         for m in members {
@@ -42,9 +52,7 @@ fn build_indexed(
             name.to_string(),
             verter_session::resolver_core::shallow_file_state::ShallowTypeSymbol {
                 kind,
-                raw_body: verter_type_expr::TypeExpr::Unknown {
-                    raw: String::new(),
-                },
+                raw_body: verter_type_expr::TypeExpr::Unknown { raw: String::new() },
                 type_parameters: Vec::new(),
                 local_deps: Vec::new(),
                 external_deps: Vec::new(),
@@ -52,7 +60,10 @@ fn build_indexed(
             },
         );
     }
-    let mut value_symbols_map: FxHashMap<String, verter_session::resolver_core::shallow_file_state::ShallowValueSymbol> = FxHashMap::default();
+    let mut value_symbols_map: FxHashMap<
+        String,
+        verter_session::resolver_core::shallow_file_state::ShallowValueSymbol,
+    > = FxHashMap::default();
     for (name, kind) in value_symbols {
         value_symbols_map.insert(
             name.to_string(),
@@ -65,7 +76,10 @@ fn build_indexed(
             },
         );
     }
-    let mut exports_map: FxHashMap<String, verter_session::resolver_core::shallow_file_state::ExportTarget> = FxHashMap::default();
+    let mut exports_map: FxHashMap<
+        String,
+        verter_session::resolver_core::shallow_file_state::ExportTarget,
+    > = FxHashMap::default();
     for (name, target) in exports {
         exports_map.insert(name.to_string(), target);
     }

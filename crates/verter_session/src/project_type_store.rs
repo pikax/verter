@@ -246,355 +246,356 @@ mod _removed_indexed_ready_db {
     use super::*;
     pub struct _IndexedReadyDb {
         entries: DashMap<Arc<str>, Arc<IndexedReady>>,
-    /// Per-canonical last-access tick (monotonically increasing). Used
-    /// by [`Self::evict_lru`] under explicit memory pressure to drop
-    /// the oldest entries down to a configured floor. Updated on
-    /// every `get` / `insert`. The sidecar shape avoids changing the
-    /// `DashMap<_, Arc<IndexedReady>>` value type and keeps the
-    /// pointer-equality invariants on cached `IndexedReady` entries.
-    last_access: DashMap<Arc<str>, u64>,
-    /// Monotonic counter for `last_access` ticks.
-    access_tick: AtomicU64,
-    /// Live entry counter — bumped on insert of a new canonical key,
-    /// decremented on remove. Replacement (insert with existing key) does
-    /// not change the count.
-    live_counter: Arc<AtomicU64>,
-    /// Stale-sweep counter — bumped when [`Self::remove`] evicts an
-    /// existing entry or a replacement supersedes a prior whole-hash.
-    stale_sweeps: Arc<AtomicU64>,
-    /// Cache-cluster schema version this Db was constructed under. See
-    /// [`crate::cache_schema`] for the contract.
-    schema_version: u32,
-    /// Test-only host-level audit hook. Installed by
-    /// [`crate::VerterHost::new_with_scheduler_config`] post-construction.
-    /// On every fresh `insert`, the hook (if present) bumps the host's
-    /// `total_shallow_processes` counter and records the canonical.
-    /// Supplement §5.D.0 r17.
-    #[cfg(test)]
-    test_audit_hook: parking_lot::Mutex<Option<Arc<crate::host_test_audit::HostTestAuditState>>>,
-}
-
-impl IndexedReadyDb {
-    pub fn new() -> Self {
-        Self::with_counters(Default::default(), Default::default())
-    }
-
-    pub(crate) fn with_counters(live: Arc<AtomicU64>, stale: Arc<AtomicU64>) -> Self {
-        Self::with_counters_and_schema_version(
-            live,
-            stale,
-            crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
-        )
-    }
-
-    /// Test-only constructor that pins a specific schema version on the Db.
-    /// Used by `cache_invariant_migration` fixtures.
-    #[cfg(any(test, debug_assertions))]
-    pub fn new_with_schema_version_for_test(schema_version: u32) -> Self {
-        Self::with_counters_and_schema_version(
-            Default::default(),
-            Default::default(),
-            schema_version,
-        )
-    }
-
-    fn with_counters_and_schema_version(
-        live: Arc<AtomicU64>,
-        stale: Arc<AtomicU64>,
+        /// Per-canonical last-access tick (monotonically increasing). Used
+        /// by [`Self::evict_lru`] under explicit memory pressure to drop
+        /// the oldest entries down to a configured floor. Updated on
+        /// every `get` / `insert`. The sidecar shape avoids changing the
+        /// `DashMap<_, Arc<IndexedReady>>` value type and keeps the
+        /// pointer-equality invariants on cached `IndexedReady` entries.
+        last_access: DashMap<Arc<str>, u64>,
+        /// Monotonic counter for `last_access` ticks.
+        access_tick: AtomicU64,
+        /// Live entry counter — bumped on insert of a new canonical key,
+        /// decremented on remove. Replacement (insert with existing key) does
+        /// not change the count.
+        live_counter: Arc<AtomicU64>,
+        /// Stale-sweep counter — bumped when [`Self::remove`] evicts an
+        /// existing entry or a replacement supersedes a prior whole-hash.
+        stale_sweeps: Arc<AtomicU64>,
+        /// Cache-cluster schema version this Db was constructed under. See
+        /// [`crate::cache_schema`] for the contract.
         schema_version: u32,
-    ) -> Self {
-        Self {
-            entries: DashMap::new(),
-            last_access: DashMap::new(),
-            access_tick: AtomicU64::new(0),
-            live_counter: live,
-            stale_sweeps: stale,
-            schema_version,
-            #[cfg(test)]
-            test_audit_hook: parking_lot::Mutex::new(None),
-        }
+        /// Test-only host-level audit hook. Installed by
+        /// [`crate::VerterHost::new_with_scheduler_config`] post-construction.
+        /// On every fresh `insert`, the hook (if present) bumps the host's
+        /// `total_shallow_processes` counter and records the canonical.
+        /// Supplement §5.D.0 r17.
+        #[cfg(test)]
+        test_audit_hook:
+            parking_lot::Mutex<Option<Arc<crate::host_test_audit::HostTestAuditState>>>,
     }
 
-    /// Install the host-level test audit hook (supplement
-    /// §5.D.0 r17). Called by `VerterHost::new_with_scheduler_config`
-    /// once the test-audit `Arc` is allocated. The hook fires on every
-    /// fresh `insert` and bumps `total_shallow_processes` plus the
-    /// `loaded_files` set on the host's [`HostTestAuditState`].
-    #[cfg(test)]
-    pub(crate) fn install_test_audit_hook(
-        &self,
-        state: Arc<crate::host_test_audit::HostTestAuditState>,
-    ) {
-        *self.test_audit_hook.lock() = Some(state);
-    }
-
-    /// Look up the indexed artifact for `canonical_id` if the cached entry
-    /// matches `expected_whole_hash`. Stale entries are ignored; callers
-    /// materialize through the scheduler and re-populate.
-    ///
-    /// Lookups against a Db whose `schema_version` does not match the current
-    /// [`crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION`] return `None`
-    /// without consulting the entry map.
-    #[must_use]
-    pub fn get(
-        &self,
-        canonical_id: &str,
-        expected_whole_hash: Hash16,
-    ) -> Option<Arc<IndexedReady>> {
-        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
-            return None;
+    impl IndexedReadyDb {
+        pub fn new() -> Self {
+            Self::with_counters(Default::default(), Default::default())
         }
-        let result = match self.entries.get(canonical_id) {
-            Some(entry) if entry.whole_hash == expected_whole_hash => {
+
+        pub(crate) fn with_counters(live: Arc<AtomicU64>, stale: Arc<AtomicU64>) -> Self {
+            Self::with_counters_and_schema_version(
+                live,
+                stale,
+                crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
+            )
+        }
+
+        /// Test-only constructor that pins a specific schema version on the Db.
+        /// Used by `cache_invariant_migration` fixtures.
+        #[cfg(any(test, debug_assertions))]
+        pub fn new_with_schema_version_for_test(schema_version: u32) -> Self {
+            Self::with_counters_and_schema_version(
+                Default::default(),
+                Default::default(),
+                schema_version,
+            )
+        }
+
+        fn with_counters_and_schema_version(
+            live: Arc<AtomicU64>,
+            stale: Arc<AtomicU64>,
+            schema_version: u32,
+        ) -> Self {
+            Self {
+                entries: DashMap::new(),
+                last_access: DashMap::new(),
+                access_tick: AtomicU64::new(0),
+                live_counter: live,
+                stale_sweeps: stale,
+                schema_version,
+                #[cfg(test)]
+                test_audit_hook: parking_lot::Mutex::new(None),
+            }
+        }
+
+        /// Install the host-level test audit hook (supplement
+        /// §5.D.0 r17). Called by `VerterHost::new_with_scheduler_config`
+        /// once the test-audit `Arc` is allocated. The hook fires on every
+        /// fresh `insert` and bumps `total_shallow_processes` plus the
+        /// `loaded_files` set on the host's [`HostTestAuditState`].
+        #[cfg(test)]
+        pub(crate) fn install_test_audit_hook(
+            &self,
+            state: Arc<crate::host_test_audit::HostTestAuditState>,
+        ) {
+            *self.test_audit_hook.lock() = Some(state);
+        }
+
+        /// Look up the indexed artifact for `canonical_id` if the cached entry
+        /// matches `expected_whole_hash`. Stale entries are ignored; callers
+        /// materialize through the scheduler and re-populate.
+        ///
+        /// Lookups against a Db whose `schema_version` does not match the current
+        /// [`crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION`] return `None`
+        /// without consulting the entry map.
+        #[must_use]
+        pub fn get(
+            &self,
+            canonical_id: &str,
+            expected_whole_hash: Hash16,
+        ) -> Option<Arc<IndexedReady>> {
+            if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+                return None;
+            }
+            let result = match self.entries.get(canonical_id) {
+                Some(entry) if entry.whole_hash == expected_whole_hash => {
+                    self.bump_access_tick(canonical_id);
+                    Some(entry.clone())
+                }
+                _ => None,
+            };
+            if let Some(ctx) = crate::request_context::current_request_context() {
+                if result.is_some() {
+                    ctx.cache_counters
+                        .indexed
+                        .hits
+                        .fetch_add(1, Ordering::Relaxed);
+                } else {
+                    ctx.cache_counters
+                        .indexed
+                        .misses
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            result
+        }
+
+        /// Look up the cached artifact for `canonical_id` without hash check.
+        ///
+        /// Returned whenever an entry exists in the store. Callers must validate
+        /// against their expected `whole_hash` if they need a strict match; this
+        /// hook is the drop-in replacement for the retired
+        /// `IndexedReadyDb::get_any` access pattern.
+        #[must_use]
+        pub fn get_any(&self, canonical_id: &str) -> Option<Arc<IndexedReady>> {
+            if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+                return None;
+            }
+            let result = self.entries.get(canonical_id).map(|entry| entry.clone());
+            if result.is_some() {
                 self.bump_access_tick(canonical_id);
-                Some(entry.clone())
             }
-            _ => None,
-        };
-        if let Some(ctx) = crate::request_context::current_request_context() {
-            if result.is_some() {
-                ctx.cache_counters
-                    .indexed
-                    .hits
-                    .fetch_add(1, Ordering::Relaxed);
+            if let Some(ctx) = crate::request_context::current_request_context() {
+                if result.is_some() {
+                    ctx.cache_counters
+                        .indexed
+                        .hits
+                        .fetch_add(1, Ordering::Relaxed);
+                } else {
+                    ctx.cache_counters
+                        .indexed
+                        .misses
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            result
+        }
+
+        /// Bump the per-canonical last-access tick. Used by [`Self::evict_lru`]
+        /// under explicit memory pressure to drop the oldest entries down to a
+        /// configured floor.
+        fn bump_access_tick(&self, canonical_id: &str) {
+            let tick = self.access_tick.fetch_add(1, Ordering::Relaxed) + 1;
+            self.last_access.insert(Arc::from(canonical_id), tick);
+        }
+
+        /// Snapshot every `(canonical_id, content_hash)` key in the cache.
+        ///
+        /// Callers that need to compute a live-publish-set complement
+        /// against the cache should iterate this snapshot — every returned
+        /// pair is a live cache entry at the call's point-in-time.
+        /// Concurrent inserts/removes after the snapshot are observed by
+        /// the next call.
+        #[must_use]
+        pub fn keys(&self) -> Vec<(Arc<str>, Hash16)> {
+            self.entries
+                .iter()
+                .map(|entry| (entry.key().clone(), entry.value().whole_hash))
+                .collect()
+        }
+
+        /// LRU floor — drop entries down to `min_floor` by oldest-access
+        /// order.
+        ///
+        /// Per D40 + D119 this path is **only** invoked from
+        /// [`ProjectTypeStore::evict_unreachable_indexed_ready`] when the
+        /// caller explicitly passes `memory_pressure: true`. The default
+        /// build never enters it (`HostConfig::eviction_policy.memory_pressure_threshold`
+        /// is `usize::MAX`); the LRU code path is preserved as an unused
+        /// capability.
+        ///
+        /// When fewer than `min_floor` entries are cached, this is a
+        /// no-op. Otherwise, entries are sorted ascending by their
+        /// last-access tick (oldest first) and the front of the list is
+        /// dropped until exactly `min_floor` entries remain. Entries
+        /// without a recorded tick (e.g., never accessed since insert)
+        /// are treated as having tick `0` and are evicted first.
+        pub fn evict_lru(&self, min_floor: usize) {
+            let len = self.entries.len();
+            if len <= min_floor {
+                return;
+            }
+            let drop_count = len - min_floor;
+            // Snapshot keys with their ticks. `last_access` is keyed by
+            // the same `Arc<str>` as `entries`; pairs without a recorded
+            // tick are treated as tick `0` and evicted first.
+            let mut tick_pairs: Vec<(Arc<str>, u64)> = self
+                .entries
+                .iter()
+                .map(|entry| {
+                    let canonical = entry.key().clone();
+                    let tick = self
+                        .last_access
+                        .get(&canonical)
+                        .map(|t| *t.value())
+                        .unwrap_or(0);
+                    (canonical, tick)
+                })
+                .collect();
+            tick_pairs.sort_by_key(|(_, tick)| *tick);
+            for (canonical, _) in tick_pairs.into_iter().take(drop_count) {
+                if self.entries.remove(canonical.as_ref()).is_some() {
+                    self.live_counter.fetch_sub(1, Ordering::Relaxed);
+                    self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
+                }
+                self.last_access.remove(canonical.as_ref());
+            }
+        }
+
+        /// Snapshot every live entry for auditing / diagnostics.
+        #[must_use]
+        pub fn snapshot_all(&self) -> Vec<(Arc<str>, Arc<IndexedReady>)> {
+            self.entries
+                .iter()
+                .map(|entry| (entry.key().clone(), entry.value().clone()))
+                .collect()
+        }
+
+        /// Insert or replace the entry for `canonical_id`. Older versions for the
+        /// same canonical are overwritten — strong-consistency lookup is the
+        /// responsibility of the caller via `expected_whole_hash`. A replacement
+        /// increments the stale-sweep counter so downstream telemetry can see
+        /// how often stale entries are superseded.
+        pub fn insert(&self, canonical_id: Arc<str>, indexed: Arc<IndexedReady>) {
+            let whole_hash = indexed.whole_hash;
+            let canonical_for_event = Arc::clone(&canonical_id);
+            // Bump last-access tick so the LRU floor sees this canonical
+            // as the most-recently-accessed entry.
+            let tick = self.access_tick.fetch_add(1, Ordering::Relaxed) + 1;
+            self.last_access.insert(Arc::clone(&canonical_id), tick);
+            let prev = self.entries.insert(canonical_id, indexed);
+            if prev.is_some() {
+                self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
             } else {
-                ctx.cache_counters
-                    .indexed
-                    .misses
-                    .fetch_add(1, Ordering::Relaxed);
+                self.live_counter.fetch_add(1, Ordering::Relaxed);
+                // / §3.A.E: push an
+                // `IndexedReadyBuilt` typed structured event into the
+                // active request's accumulator on every FRESH insert.
+                // Gate on fresh-insert (prev.is_none()) so overwrites
+                // after a stale-sweep do not double-emit. Also feeds
+                // `RequestFootprintAudit.indexed_ready_builds` via
+                // the miner.
+                crate::component_meta_audit::record_indexed_ready_built(
+                    Arc::clone(&canonical_for_event),
+                    whole_hash,
+                );
+                // Supplement §5.D.0 r17 — host-level test audit
+                // hook. Bumps `total_shallow_processes` and adds the
+                // canonical to `loaded_files` so §5.D.2 read-once tests
+                // can sample cumulative counters across requests.
+                #[cfg(test)]
+                if let Some(state) = self.test_audit_hook.lock().as_ref() {
+                    state.record_shallow_process(canonical_for_event.as_ref());
+                }
             }
         }
-        result
-    }
 
-    /// Look up the cached artifact for `canonical_id` without hash check.
-    ///
-    /// Returned whenever an entry exists in the store. Callers must validate
-    /// against their expected `whole_hash` if they need a strict match; this
-    /// hook is the drop-in replacement for the retired
-    /// `IndexedReadyDb::get_any` access pattern.
-    #[must_use]
-    pub fn get_any(&self, canonical_id: &str) -> Option<Arc<IndexedReady>> {
-        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
-            return None;
-        }
-        let result = self.entries.get(canonical_id).map(|entry| entry.clone());
-        if result.is_some() {
-            self.bump_access_tick(canonical_id);
-        }
-        if let Some(ctx) = crate::request_context::current_request_context() {
-            if result.is_some() {
-                ctx.cache_counters
-                    .indexed
-                    .hits
-                    .fetch_add(1, Ordering::Relaxed);
-            } else {
-                ctx.cache_counters
-                    .indexed
-                    .misses
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-        }
-        result
-    }
-
-    /// Bump the per-canonical last-access tick. Used by [`Self::evict_lru`]
-    /// under explicit memory pressure to drop the oldest entries down to a
-    /// configured floor.
-    fn bump_access_tick(&self, canonical_id: &str) {
-        let tick = self.access_tick.fetch_add(1, Ordering::Relaxed) + 1;
-        self.last_access.insert(Arc::from(canonical_id), tick);
-    }
-
-    /// Snapshot every `(canonical_id, content_hash)` key in the cache.
-    ///
-    /// Callers that need to compute a live-publish-set complement
-    /// against the cache should iterate this snapshot — every returned
-    /// pair is a live cache entry at the call's point-in-time.
-    /// Concurrent inserts/removes after the snapshot are observed by
-    /// the next call.
-    #[must_use]
-    pub fn keys(&self) -> Vec<(Arc<str>, Hash16)> {
-        self.entries
-            .iter()
-            .map(|entry| (entry.key().clone(), entry.value().whole_hash))
-            .collect()
-    }
-
-    /// LRU floor — drop entries down to `min_floor` by oldest-access
-    /// order.
-    ///
-    /// Per D40 + D119 this path is **only** invoked from
-    /// [`ProjectTypeStore::evict_unreachable_indexed_ready`] when the
-    /// caller explicitly passes `memory_pressure: true`. The default
-    /// build never enters it (`HostConfig::eviction_policy.memory_pressure_threshold`
-    /// is `usize::MAX`); the LRU code path is preserved as an unused
-    /// capability.
-    ///
-    /// When fewer than `min_floor` entries are cached, this is a
-    /// no-op. Otherwise, entries are sorted ascending by their
-    /// last-access tick (oldest first) and the front of the list is
-    /// dropped until exactly `min_floor` entries remain. Entries
-    /// without a recorded tick (e.g., never accessed since insert)
-    /// are treated as having tick `0` and are evicted first.
-    pub fn evict_lru(&self, min_floor: usize) {
-        let len = self.entries.len();
-        if len <= min_floor {
-            return;
-        }
-        let drop_count = len - min_floor;
-        // Snapshot keys with their ticks. `last_access` is keyed by
-        // the same `Arc<str>` as `entries`; pairs without a recorded
-        // tick are treated as tick `0` and evicted first.
-        let mut tick_pairs: Vec<(Arc<str>, u64)> = self
-            .entries
-            .iter()
-            .map(|entry| {
-                let canonical = entry.key().clone();
-                let tick = self
-                    .last_access
-                    .get(&canonical)
-                    .map(|t| *t.value())
-                    .unwrap_or(0);
-                (canonical, tick)
-            })
-            .collect();
-        tick_pairs.sort_by_key(|(_, tick)| *tick);
-        for (canonical, _) in tick_pairs.into_iter().take(drop_count) {
-            if self.entries.remove(canonical.as_ref()).is_some() {
+        /// Remove an entry outright (e.g. from an explicit file close).
+        pub fn remove(&self, canonical_id: &str) {
+            if self.entries.remove(canonical_id).is_some() {
                 self.live_counter.fetch_sub(1, Ordering::Relaxed);
                 self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
             }
-            self.last_access.remove(canonical.as_ref());
+            self.last_access.remove(canonical_id);
         }
-    }
 
-    /// Snapshot every live entry for auditing / diagnostics.
-    #[must_use]
-    pub fn snapshot_all(&self) -> Vec<(Arc<str>, Arc<IndexedReady>)> {
-        self.entries
-            .iter()
-            .map(|entry| (entry.key().clone(), entry.value().clone()))
-            .collect()
-    }
+        /// Number of live entries. Primarily intended for per-layer debug
+        /// counters / cache stats.
+        #[must_use]
+        pub fn len(&self) -> usize {
+            self.entries.len()
+        }
 
-    /// Insert or replace the entry for `canonical_id`. Older versions for the
-    /// same canonical are overwritten — strong-consistency lookup is the
-    /// responsibility of the caller via `expected_whole_hash`. A replacement
-    /// increments the stale-sweep counter so downstream telemetry can see
-    /// how often stale entries are superseded.
-    pub fn insert(&self, canonical_id: Arc<str>, indexed: Arc<IndexedReady>) {
-        let whole_hash = indexed.whole_hash;
-        let canonical_for_event = Arc::clone(&canonical_id);
-        // Bump last-access tick so the LRU floor sees this canonical
-        // as the most-recently-accessed entry.
-        let tick = self.access_tick.fetch_add(1, Ordering::Relaxed) + 1;
-        self.last_access.insert(Arc::clone(&canonical_id), tick);
-        let prev = self.entries.insert(canonical_id, indexed);
-        if prev.is_some() {
-            self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
-        } else {
-            self.live_counter.fetch_add(1, Ordering::Relaxed);
-            // / §3.A.E: push an
-            // `IndexedReadyBuilt` typed structured event into the
-            // active request's accumulator on every FRESH insert.
-            // Gate on fresh-insert (prev.is_none()) so overwrites
-            // after a stale-sweep do not double-emit. Also feeds
-            // `RequestFootprintAudit.indexed_ready_builds` via
-            // the miner.
-            crate::component_meta_audit::record_indexed_ready_built(
-                Arc::clone(&canonical_for_event),
-                whole_hash,
-            );
-            // Supplement §5.D.0 r17 — host-level test audit
-            // hook. Bumps `total_shallow_processes` and adds the
-            // canonical to `loaded_files` so §5.D.2 read-once tests
-            // can sample cumulative counters across requests.
-            #[cfg(test)]
-            if let Some(state) = self.test_audit_hook.lock().as_ref() {
-                state.record_shallow_process(canonical_for_event.as_ref());
+        #[must_use]
+        pub fn is_empty(&self) -> bool {
+            self.entries.is_empty()
+        }
+
+        /// Test-only synthetic-entry inserter used exclusively by
+        /// `cache_invariant_migration` fixtures to verify the cache-cluster
+        /// schema-version eviction invariant.
+        #[cfg(any(test, debug_assertions))]
+        pub fn insert_synthetic_for_schema_test(&self, marker: &str) {
+            let canonical: Arc<str> = Arc::from(marker);
+            let entry = Arc::new(IndexedReady::new_for_test([0u8; 16]));
+            let prev = self.entries.insert(Arc::clone(&canonical), entry);
+            if prev.is_none() {
+                self.live_counter.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
 
-    /// Remove an entry outright (e.g. from an explicit file close).
-    pub fn remove(&self, canonical_id: &str) {
-        if self.entries.remove(canonical_id).is_some() {
-            self.live_counter.fetch_sub(1, Ordering::Relaxed);
-            self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
-        }
-        self.last_access.remove(canonical_id);
-    }
-
-    /// Number of live entries. Primarily intended for per-layer debug
-    /// counters / cache stats.
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    /// Test-only synthetic-entry inserter used exclusively by
-    /// `cache_invariant_migration` fixtures to verify the cache-cluster
-    /// schema-version eviction invariant.
-    #[cfg(any(test, debug_assertions))]
-    pub fn insert_synthetic_for_schema_test(&self, marker: &str) {
-        let canonical: Arc<str> = Arc::from(marker);
-        let entry = Arc::new(IndexedReady::new_for_test([0u8; 16]));
-        let prev = self.entries.insert(Arc::clone(&canonical), entry);
-        if prev.is_none() {
-            self.live_counter.fetch_add(1, Ordering::Relaxed);
+    impl Default for IndexedReadyDb {
+        fn default() -> Self {
+            Self::new()
         }
     }
-}
 
-impl Default for IndexedReadyDb {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl crate::cache_schema::CacheSchemaVersioned for IndexedReadyDb {
-    fn schema_version(&self) -> u32 {
-        self.schema_version
-    }
-
-    fn evict_if_schema_mismatch(&self, current: u32) -> usize {
-        if self.schema_version == current {
-            return 0;
+    impl crate::cache_schema::CacheSchemaVersioned for IndexedReadyDb {
+        fn schema_version(&self) -> u32 {
+            self.schema_version
         }
-        let count = self.entries.len();
-        self.entries.clear();
-        self.last_access.clear();
-        if count > 0 {
-            self.live_counter.fetch_sub(count as u64, Ordering::Relaxed);
-            self.stale_sweeps.fetch_add(count as u64, Ordering::Relaxed);
+
+        fn evict_if_schema_mismatch(&self, current: u32) -> usize {
+            if self.schema_version == current {
+                return 0;
+            }
+            let count = self.entries.len();
+            self.entries.clear();
+            self.last_access.clear();
+            if count > 0 {
+                self.live_counter.fetch_sub(count as u64, Ordering::Relaxed);
+                self.stale_sweeps.fetch_add(count as u64, Ordering::Relaxed);
+            }
+            count
         }
-        count
     }
-}
 
-impl crate::invalidation_domain::ParticipatesInInvalidation for IndexedReadyDb {
-    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
-        use crate::invalidation_domain::InvalidationDomain::*;
-        &[FileContent]
+    impl crate::invalidation_domain::ParticipatesInInvalidation for IndexedReadyDb {
+        fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
+            use crate::invalidation_domain::InvalidationDomain::*;
+            &[FileContent]
+        }
+        fn invalidate(&self, _domain: crate::invalidation_domain::InvalidationDomain) {
+            // IndexedReady survives project-generation bumps (whole_hash is
+            // sufficient identity); per-canonical eviction is the only
+            // invalidation mode.
+        }
     }
-    fn invalidate(&self, _domain: crate::invalidation_domain::InvalidationDomain) {
-        // IndexedReady survives project-generation bumps (whole_hash is
-        // sufficient identity); per-canonical eviction is the only
-        // invalidation mode.
-    }
-}
 
-impl _IndexedReadyDb {
-    fn _placeholder_invalidate(&self, _canonical_id: &str) -> usize {
-        0
+    impl _IndexedReadyDb {
+        fn _placeholder_invalidate(&self, _canonical_id: &str) -> usize {
+            0
+        }
     }
-}
 } // end mod _removed_indexed_ready_db
 
 /// Host-owned cache of per-file [`AnalysisReady`] artifacts.

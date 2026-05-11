@@ -70,6 +70,7 @@ pub mod changes;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod config;
 pub(crate) mod dir_index;
+pub mod env_hash;
 pub mod error;
 pub mod exact_resolution;
 pub mod filesystem;
@@ -88,7 +89,6 @@ pub(crate) mod project_graph;
 pub mod project_key;
 pub mod published_state;
 pub mod relative_path;
-pub mod env_hash;
 pub mod resolver;
 pub mod snapshot_builder;
 pub mod traits;

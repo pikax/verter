@@ -136,7 +136,10 @@ fn resolve_env_hash_changes_when_workspace_aliases_changes() {
         replacement: "/ws/proj/test/".to_string(),
     });
     let h1 = cfg.resolve_env_hash(&inputs);
-    assert_ne!(h0, h1, "workspace_aliases edit MUST change resolve_env_hash");
+    assert_ne!(
+        h0, h1,
+        "workspace_aliases edit MUST change resolve_env_hash"
+    );
 }
 
 #[test]
@@ -158,7 +161,10 @@ fn resolve_env_hash_changes_when_references_changes() {
     cfg.references
         .push("/ws/proj/tsconfig.extra.json".to_string());
     let h1 = cfg.resolve_env_hash(&inputs);
-    assert_ne!(h0, h1, "project references edit MUST change resolve_env_hash");
+    assert_ne!(
+        h0, h1,
+        "project references edit MUST change resolve_env_hash"
+    );
 }
 
 // ── type_env_hash discrimination ──

@@ -105,8 +105,8 @@ pub mod cross_file;
 mod deps;
 pub mod file_artifact_store;
 mod hash;
-pub mod parse_stable_hash;
 pub(crate) mod instant;
+pub mod parse_stable_hash;
 #[cfg(test)]
 mod project_semantic_dispatch_invariants_tests;
 // `host_compile` is the host-backed parallel SFC batch compile module.

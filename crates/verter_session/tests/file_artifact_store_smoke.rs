@@ -5,9 +5,7 @@
 
 use std::sync::Arc;
 
-use verter_session::file_artifact_store::{
-    FileArtifactKey, FileArtifactStore, FileArtifacts,
-};
+use verter_session::file_artifact_store::{FileArtifactKey, FileArtifactStore, FileArtifacts};
 use verter_session::project_type_store::IndexedReady;
 
 fn make_artifacts(hash_marker: u8) -> Arc<FileArtifacts> {
@@ -32,9 +30,13 @@ fn insert_get_remove_round_trip() {
     let payload = make_artifacts(0xab);
     assert!(store.get_artifacts(&key).is_none());
     store.insert_artifacts(key.clone(), Arc::clone(&payload));
-    let got = store.get_artifacts(&key).expect("post-insert get MUST succeed");
+    let got = store
+        .get_artifacts(&key)
+        .expect("post-insert get MUST succeed");
     assert!(Arc::ptr_eq(&got, &payload));
-    let removed = store.remove_artifacts(&key).expect("remove MUST return prior");
+    let removed = store
+        .remove_artifacts(&key)
+        .expect("remove MUST return prior");
     assert!(Arc::ptr_eq(&removed, &payload));
     assert!(
         store.get_artifacts(&key).is_none(),

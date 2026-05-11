@@ -351,8 +351,7 @@ pub struct FileArtifactStore {
     augmentation_index: DashMap<AugmentationTargetKey, Arc<AugmenterSet>>,
     /// Test-only host-level audit hook.
     #[cfg(test)]
-    test_audit_hook:
-        parking_lot::Mutex<Option<Arc<crate::host_test_audit::HostTestAuditState>>>,
+    test_audit_hook: parking_lot::Mutex<Option<Arc<crate::host_test_audit::HostTestAuditState>>>,
 }
 
 impl std::fmt::Debug for FileArtifactStore {

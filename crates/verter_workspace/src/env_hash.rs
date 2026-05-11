@@ -88,7 +88,7 @@ pub struct EnvHashInputs<'a> {
     /// module-augmentation declarations visible to this project).
     ///
     /// Producers compute this from the workspace ambient registration table
-    /// + the active TS SDK; consumers pass it through unchanged. Any
+    /// plus the active TS SDK; consumers pass it through unchanged. Any
     /// observable change to the ambient surface MUST change this
     /// fingerprint.
     pub ambient_corpus_fingerprint: u64,
