@@ -1,1 +1,58 @@
+# Line-ending enforcement (Windows-safe content addressing for fact-based cache).
+# Verter's cache hashes content directly; CRLF/BOM/path drift silently invalidates
+# content_hash / parse_stable_hash / fact semantic_hash. All text sources are LF.
+
+# Source code
+*.rs        text eol=lf
+*.ts        text eol=lf
+*.tsx       text eol=lf
+*.js        text eol=lf
+*.mjs       text eol=lf
+*.cjs       text eol=lf
+*.jsx       text eol=lf
+*.vue       text eol=lf
+
+# Data / config
+*.json      text eol=lf
+*.toml      text eol=lf
+*.yaml      text eol=lf
+*.yml       text eol=lf
+*.md        text eol=lf
+*.txt       text eol=lf
+*.css       text eol=lf
+*.scss      text eol=lf
+*.sass      text eol=lf
+*.less      text eol=lf
+*.html      text eol=lf
+*.htm       text eol=lf
+*.svg       text eol=lf
+
+# Fixtures are part of the cache identity — strict LF
+tests/fixtures/**           text eol=lf
+crates/*/tests/fixtures/**  text eol=lf
+packages/*/tests/fixtures/** text eol=lf
+.integration-tests/**       text eol=lf
+
+# Binary outputs (never normalize)
+*.node      binary
+*.wasm      binary
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.ico       binary
+*.woff      binary
+*.woff2     binary
+*.ttf       binary
+*.eot       binary
+*.pdf       binary
+*.zip       binary
+*.gz        binary
+*.tar       binary
+*.exe       binary
+*.dll       binary
+*.so        binary
+*.dylib     binary
+
+# Pre-existing rule (preserved)
 .github/workflows/*.lock.yml linguist-generated=true merge=ours
