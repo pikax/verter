@@ -95,6 +95,10 @@ harness = false
 name = "checker_text_adapter"
 harness = false
 
+[[bench]]
+name = "cache_baseline"
+harness = false
+
 
 [[example]]
 name = "expression_validator"

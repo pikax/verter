@@ -589,6 +589,7 @@ fn fixture_paths_resolve_to_real_files() {
         "tests/fixtures/cache_baseline/cycle_safety_failure_mode.md",
         "tests/fixtures/cache_baseline/evict_canonical_inventory.json",
         "tests/fixtures/cache_baseline/multi_candidate_proxy.md",
+        "tests/fixtures/cache_baseline/baseline.json",
     ];
     for rel in baseline_paths {
         let p: &Path = &fixture(rel);
@@ -598,4 +599,95 @@ fn fixture_paths_resolve_to_real_files() {
             p.display()
         );
     }
+}
+
+/// CHARACTERISATION 8 — the committed Stage-0 baseline JSON declares the
+/// pre-Stage-1 counter shape Stage 7 canary diffs against.
+///
+/// The structural fields are deterministic (component count, miss
+/// count, materialise cardinality, candidate set histogram) and are
+/// pinned here. The timing fields are intentionally `null` in the
+/// committed snapshot — they vary per host and are measured locally
+/// at canary time.
+#[test]
+fn committed_baseline_json_declares_pre_stage1_counter_shape() {
+    let path = fixture("tests/fixtures/cache_baseline/baseline.json");
+    let raw = fs::read_to_string(&path).expect("read baseline.json");
+    let json: serde_json::Value = serde_json::from_str(&raw).expect("parse baseline.json");
+
+    assert_eq!(
+        json.get("schema_version").and_then(|v| v.as_u64()),
+        Some(1),
+        "baseline.json schema_version must be 1 on Stage 0"
+    );
+
+    let sha = json
+        .get("captured_at_sha")
+        .and_then(|v| v.as_str())
+        .expect("captured_at_sha");
+    assert_eq!(
+        sha, "ccc0522309091c532d6fba756da392598eab059c",
+        "baseline.json captured_at_sha must match the Stage-0 base SHA"
+    );
+
+    let fixture_block = json.get("fixture").expect("fixture block present");
+    assert_eq!(
+        fixture_block
+            .get("num_components")
+            .and_then(|v| v.as_u64()),
+        Some(16),
+        "baseline.json must pin num_components = 16 (the bench fixture's constant)"
+    );
+
+    let aggregates = json.get("aggregates").expect("aggregates block");
+    assert_eq!(
+        aggregates
+            .get("fact_validation_warm_hit_count")
+            .and_then(|v| v.as_u64()),
+        Some(0),
+        "Pre-Stage-1: fact_validation_warm_hit_count must be 0 (no fact-based cache yet)"
+    );
+    assert_eq!(
+        aggregates
+            .get("fact_validation_miss_count")
+            .and_then(|v| v.as_u64()),
+        Some(16),
+        "Pre-Stage-1: fact_validation_miss_count == num_components on cold pass"
+    );
+    assert_eq!(
+        aggregates
+            .get("materialise_cardinality_per_owner")
+            .and_then(|v| v.as_f64()),
+        Some(16.0),
+        "Pre-Stage-5: materialise_cardinality_per_owner == N (one entry per owner-instance \
+         of the shared dep); Stage 5 inverts to 1.0"
+    );
+
+    let histogram = aggregates
+        .get("candidate_set_size_histogram")
+        .expect("candidate_set_size_histogram");
+    assert_eq!(
+        histogram.get("1").and_then(|v| v.as_u64()),
+        Some(16),
+        "Pre-Stage-5: only the \"1\" bin is populated; every slot has exactly one entry"
+    );
+    // The histogram MUST NOT carry any other bins on the pre-change tree.
+    let histogram_keys: Vec<&String> = histogram
+        .as_object()
+        .map(|m| m.keys().collect())
+        .unwrap_or_default();
+    assert_eq!(
+        histogram_keys.len(),
+        1,
+        "Pre-Stage-5: candidate_set_size_histogram has exactly one bin (\"1\"); the test \
+         catches a regression that pre-populates bins 2..4 before Stage 5 lands."
+    );
+
+    // The canary contract block must enumerate the Stage 7 thresholds the
+    // canary commit will check against this snapshot.
+    let canary = json
+        .get("canary_diff_contract")
+        .expect("canary_diff_contract block present");
+    assert!(canary.get("stage_6d_must_change").is_some());
+    assert!(canary.get("stage_7_canary_thresholds").is_some());
 }
