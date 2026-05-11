@@ -95,30 +95,14 @@ fn resolve_local_symbol_details<R: DeclarationMetadataResolver>(
     canonical_source: &str,
     resolved_name: &str,
     fallback_span: verter_span::Span,
-    source: Option<&str>,
 ) -> (ResolvedDeclarationKind, verter_span::Span, Option<String>) {
     if let Some(symbol) =
         resolver.resolve_local_type_symbol_metadata(canonical_source, resolved_name)
     {
-        if let Some(source) = source {
-            let (_, derived_span, derived_text) =
-                extract_declaration_details(source, symbol.span, resolved_name);
-            if derived_text.is_some() {
-                let _ = derived_span;
-                return (symbol.kind, symbol.span, derived_text);
-            }
-            return (
-                symbol.kind,
-                symbol.span,
-                slice_declaration_text(source, symbol.span),
-            );
-        }
         return (symbol.kind, symbol.span, None);
     }
 
-    source
-        .map(|source| extract_declaration_details(source, fallback_span, resolved_name))
-        .unwrap_or((ResolvedDeclarationKind::Unknown, fallback_span, None))
+    (ResolvedDeclarationKind::Unknown, fallback_span, None)
 }
 
 pub fn resolve_type_declaration<R: DeclarationMetadataResolver>(
@@ -179,16 +163,14 @@ pub fn resolve_type_declaration<R: DeclarationMetadataResolver>(
     let export_span = resolver
         .get_export_span_follow_reexports(dep_canonical, requested_name)
         .unwrap_or_default();
-    // source-text reparse path retired. The graph
-    // surface (`resolve_local_type_symbol_metadata`) is the
-    // authoritative kind/span carrier; declaration text is no longer
+    // The graph surface (`resolve_local_type_symbol_metadata`) is the
+    // authoritative kind/span carrier; declaration text is not
     // populated by the resolver.
     let (kind, span, text) = resolve_local_symbol_details(
         resolver,
         canonical_source.as_str(),
         resolved_name.as_str(),
         export_span,
-        None,
     );
     let declaration_id =
         resolver.type_declaration_id(canonical_source.as_str(), resolved_name.as_str());
@@ -206,7 +188,6 @@ pub fn resolve_type_declaration<R: DeclarationMetadataResolver>(
                 canonical_source.as_str(),
                 local_name.as_str(),
                 export_span,
-                None,
             );
             if followed_details.0 != ResolvedDeclarationKind::Unknown
                 || followed_details.2.is_some()
@@ -260,17 +241,15 @@ pub fn resolve_type_declaration<R: DeclarationMetadataResolver>(
             follow_direct_type_reexport_chain(resolver, dep_canonical, requested_name)
         {
             if followed_canonical != canonical_source || followed_name != resolved_name {
-                // source-text reparse path retired.
                 // The leaf graph metadata
                 // (`resolve_local_type_symbol_metadata`) is the
                 // authoritative kind/span carrier when the chain
-                // moves; the leaf source is no longer reread.
+                // moves; the leaf source is not reread.
                 let followed_details = resolve_local_symbol_details(
                     resolver,
                     followed_canonical.as_str(),
                     followed_name.as_str(),
                     export_span,
-                    None,
                 );
                 if followed_details.0 != ResolvedDeclarationKind::Unknown
                     || followed_details.2.is_some()
@@ -309,12 +288,11 @@ pub fn resolve_local_type_declaration<R: DeclarationMetadataResolver>(
     resolved_name: &str,
     span: verter_span::Span,
 ) -> ResolvedTypeDeclaration {
-    // source-text reparse path retired. The graph
-    // metadata (`resolve_local_type_symbol_metadata`) is the
-    // authoritative kind/span carrier. When metadata is available
+    // The graph metadata (`resolve_local_type_symbol_metadata`) is
+    // the authoritative kind/span carrier. When metadata is available
     // its `kind` and `span` are preferred; otherwise the caller's
     // `span` is preserved and `kind` is `Unknown`. Declaration text
-    // is no longer populated by the resolver.
+    // is not populated by the resolver.
     let (kind, resolved_span) = resolver
         .resolve_local_type_symbol_metadata(canonical_source, resolved_name)
         .map(|metadata| (metadata.kind, metadata.span))
@@ -378,172 +356,6 @@ fn follow_local_import_symbol_target<R: DeclarationMetadataResolver>(
     resolved_name: &str,
 ) -> Option<(String, String)> {
     resolver.resolve_local_import_symbol_target(dep_canonical, resolved_name)
-}
-
-fn extract_declaration_details(
-    source: &str,
-    span: verter_span::Span,
-    resolved_name: &str,
-) -> (ResolvedDeclarationKind, verter_span::Span, Option<String>) {
-    if let Some((kind, start)) = find_named_declaration_start(source, span, resolved_name) {
-        if let Some((declaration_span, text)) = extract_named_declaration_text(source, start, kind)
-        {
-            return (kind, declaration_span, Some(text));
-        }
-    }
-
-    if span.end > span.start {
-        let start = span.start as usize;
-        let end = span.end as usize;
-        if start < source.len() && end <= source.len() {
-            return (
-                ResolvedDeclarationKind::Unknown,
-                span,
-                source.get(start..end).map(|text| text.trim().to_string()),
-            );
-        }
-    }
-
-    (ResolvedDeclarationKind::Unknown, span, None)
-}
-
-fn slice_declaration_text(source: &str, span: verter_span::Span) -> Option<String> {
-    let start = span.start as usize;
-    let end = span.end as usize;
-    (start < end && end <= source.len()).then(|| source[start..end].trim().to_string())
-}
-
-fn find_named_declaration_start(
-    source: &str,
-    span: verter_span::Span,
-    resolved_name: &str,
-) -> Option<(ResolvedDeclarationKind, usize)> {
-    let search_end = if span.start == 0 && span.end == 0 {
-        source.len()
-    } else {
-        (span.end as usize).min(source.len())
-    };
-    let haystack = source.get(..search_end).unwrap_or(source);
-    let patterns = [
-        (
-            ResolvedDeclarationKind::Interface,
-            format!("interface {resolved_name}"),
-        ),
-        (
-            ResolvedDeclarationKind::TypeAlias,
-            format!("type {resolved_name}"),
-        ),
-        (
-            ResolvedDeclarationKind::Class,
-            format!("class {resolved_name}"),
-        ),
-    ];
-
-    patterns
-        .into_iter()
-        .filter_map(|(kind, needle)| {
-            haystack.rfind(&needle).and_then(|start| {
-                let after = start + needle.len();
-                if after < haystack.len() {
-                    let next = haystack.as_bytes()[after];
-                    if next.is_ascii_alphanumeric() || next == b'_' {
-                        return None;
-                    }
-                }
-                Some((kind, start))
-            })
-        })
-        .max_by_key(|(_, start)| *start)
-}
-
-fn extract_named_declaration_text(
-    source: &str,
-    keyword_start: usize,
-    kind: ResolvedDeclarationKind,
-) -> Option<(verter_span::Span, String)> {
-    let line_start = source[..keyword_start]
-        .rfind('\n')
-        .map(|idx| idx + 1)
-        .unwrap_or(0);
-
-    let end = match kind {
-        ResolvedDeclarationKind::Interface | ResolvedDeclarationKind::Class => {
-            let brace_start = source.get(keyword_start..)?.find('{')? + keyword_start;
-            find_matching_brace(source, brace_start).map(|idx| idx + 1)
-        }
-        ResolvedDeclarationKind::TypeAlias => find_top_level_semicolon(source, keyword_start)
-            .map(|idx| idx + 1)
-            .or_else(|| {
-                source[keyword_start..]
-                    .find('\n')
-                    .map(|idx| keyword_start + idx)
-            }),
-        ResolvedDeclarationKind::Unknown => None,
-    }?;
-
-    source.get(line_start..end).map(|text| {
-        (
-            verter_span::Span::new(line_start as u32, end as u32),
-            text.trim().to_string(),
-        )
-    })
-}
-
-fn find_matching_brace(source: &str, brace_start: usize) -> Option<usize> {
-    let bytes = source.get(brace_start..)?.as_bytes();
-    let mut depth = 0u32;
-    let mut i = 0;
-    while i < bytes.len() {
-        let ch = bytes[i];
-        match ch {
-            b'\'' | b'"' | b'`' => {
-                i += 1;
-                while i < bytes.len() && bytes[i] != ch {
-                    if bytes[i] == b'\\' {
-                        i += 1;
-                    }
-                    i += 1;
-                }
-            }
-            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
-                i += 2;
-                while i < bytes.len() && bytes[i] != b'\n' {
-                    i += 1;
-                }
-            }
-            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
-                i += 2;
-                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-                    i += 1;
-                }
-                i += 1;
-            }
-            b'{' => depth += 1,
-            b'}' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    return Some(brace_start + i);
-                }
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    None
-}
-
-fn find_top_level_semicolon(source: &str, start: usize) -> Option<usize> {
-    let bytes = source.get(start..)?.as_bytes();
-    let mut depth = 0u32;
-    for (i, &ch) in bytes.iter().enumerate() {
-        match ch {
-            b'{' => depth += 1,
-            b'}' => depth = depth.saturating_sub(1),
-            b';' if depth == 0 => return Some(start + i),
-            _ => {}
-        }
-    }
-    None
 }
 
 #[cfg(test)]
@@ -646,39 +458,6 @@ mod tests {
     }
 
     #[test]
-    fn declaration_text_does_not_match_substring_names() {
-        let source = r#"
-interface PropsExtended { a: string }
-interface Props { b: number }
-"#;
-        let span = verter_span::Span::new(0, source.len() as u32);
-
-        let (_, _, text) = extract_declaration_details(source, span, "Props");
-
-        assert_eq!(text.as_deref(), Some("interface Props { b: number }"));
-    }
-
-    #[test]
-    fn declaration_text_handles_braces_inside_string_literals() {
-        let source = r#"
-type Props = {
-  label: "{not a brace}";
-  nested: { ok: true };
-};
-"#;
-        let span = verter_span::Span::new(0, source.len() as u32);
-
-        let (_, _, text) = extract_declaration_details(source, span, "Props");
-
-        assert!(text
-            .as_deref()
-            .is_some_and(|text| text.contains("\"{not a brace}\"")));
-        assert!(text
-            .as_deref()
-            .is_some_and(|text| text.contains("nested: { ok: true }")));
-    }
-
-    #[test]
     fn resolve_type_declaration_follows_direct_reexport_chain_when_entry_lacks_decl() {
         let mut resolver = FakeResolver::default();
         resolver.spans.insert(
@@ -740,20 +519,11 @@ type Props = {
         assert_eq!(resolved.resolved_name, "RouteLocationRaw");
         assert_eq!(resolved.declaration_id, Some(11));
         assert_eq!(resolved.kind, ResolvedDeclarationKind::TypeAlias);
-        // source-text reparse retired. The
-        // local_export symbol target rerouting still resolves the
-        // declaration via graph metadata; only the `text` field is
-        // no longer populated.
+        // The local_export symbol target rerouting resolves the
+        // declaration via graph metadata; the `text` field stays
+        // unpopulated because the resolver consumes graph data only.
         assert_eq!(resolved.text, None);
     }
-
-    // `resolve_type_declaration_uses_cached_*_without_reparsing_source`
-    // were negative tests asserting that cached reexport / local-import
-    // routes did NOT trigger source reparsing for the original (barrel /
-    // owner) canonical id. Under the graph-only resolver, the
-    // resolver no longer reads source at all (the trait method is
-    // deleted), so these "did not reread" assertions are now
-    // trivially satisfied. The tests are obsolete and removed.
 
     #[test]
     fn resolve_type_declaration_prefers_cached_local_symbol_metadata_for_text() {
@@ -774,31 +544,28 @@ type Props = {
             resolved.span,
             verter_span::Span::new(0, source.len() as u32)
         );
-        // graph metadata is the kind/span carrier;
-        // declaration text is no longer populated.
+        // Graph metadata is the kind/span carrier; declaration text
+        // is not populated by the resolver.
         assert_eq!(resolved.text, None);
     }
 
     // ----------------------------------------------------------------------
-    // graph-only decoupling tests for the three
-    // production source-reading callsites (former lines 184, 261, 308).
-    // Each test seeds graph metadata and asserts the resolver returns
-    // graph kind/span/declaration_id while `declaration.text` is `None`
-    // — the architectural contract that resolver-core consumes only
-    // graph data, not raw source text.
-    //
-    // : the source-reparse path populated `text` from the
-    // sources map → these tests would have FAILED with `Some(_)`.
-    // : the production path no longer threads source
-    // text through → tests PASS with `text == None`.
+    // Graph-only decoupling tests for the three production
+    // source-reading call sites. Each test seeds graph metadata and
+    // asserts the resolver returns graph kind/span/declaration_id
+    // while `declaration.text` is `None` — the architectural contract
+    // that resolver-core consumes only graph data, not raw source
+    // text. A regression that re-introduces a source-reading path
+    // would populate `text` to `Some(...)` and fail the negative
+    // assertion below.
 
     #[test]
     fn declaration_metadata_resolves_local_symbol_via_graph_only() {
         // Discrimination test for the local-symbol resolution path.
         // The graph metadata (`local_type_symbol_metadata`) is seeded;
-        // the resolver returns kind/span/declaration_id from the graph
-        // and leaves `text` None — there is no source-reading
-        // fallback. A regression that re-introduces a source-reparse
+        // the resolver returns kind/span/declaration_id from the
+        // graph and leaves `text` None — there is no source-reading
+        // fallback. A regression that re-introduces a source-reading
         // path would populate `text` to `Some(...)` and fail this
         // assertion.
         let mut resolver = FakeResolver::default();
@@ -823,8 +590,8 @@ type Props = {
         assert_eq!(resolved.span, verter_span::Span::new(0, source_len));
         assert_eq!(resolved.declaration_id, Some(42));
 
-        // Negative assertion: text MUST be None — proves the source-
-        // reparse path is gone.
+        // Negative assertion: text MUST be None — proves no
+        // source-reading path is wired.
         assert_eq!(
             resolved.text, None,
             "resolve_type_declaration must NOT thread source \
@@ -834,15 +601,14 @@ type Props = {
 
     #[test]
     fn declaration_metadata_follows_reexport_chain_via_graph_only() {
-        // discrimination test for the reexport-
-        // following path (former callsite at
-        // declaration_metadata.rs:261). A barrel (`/types.ts`) re-
-        // exports `Props` from `/inner.ts` via `direct_reexports`;
-        // graph metadata at the leaf (`/inner.ts`) provides
-        // kind/span. The resolver follows the chain and returns the
-        // leaf's graph fields with `text == None`. Pre-deletion,
-        // the leaf source-reparse arm populated `text` to
-        // `Some(...)` and failed the negative assertion.
+        // Discrimination test for the reexport-following path. A
+        // barrel (`/types.ts`) re-exports `Props` from `/inner.ts`
+        // via `direct_reexports`; graph metadata at the leaf
+        // (`/inner.ts`) provides kind/span. The resolver follows the
+        // chain and returns the leaf's graph fields with
+        // `text == None`. A source-reading regression at the leaf
+        // would populate `text` to `Some(...)` and fail the negative
+        // assertion below.
         let mut resolver = FakeResolver::default();
         resolver.direct_reexports.insert(
             ("/types.ts".to_string(), "Props".to_string()),
@@ -871,7 +637,7 @@ type Props = {
         assert_eq!(resolved.declaration_id, Some(7));
 
         // Negative assertion: text MUST be None — proves the leaf
-        // source-reparse arm at line 261 no longer runs.
+        // resolution path consumes graph metadata only.
         assert_eq!(
             resolved.text, None,
             "reexport-chain following must NOT re-read leaf \
@@ -881,13 +647,11 @@ type Props = {
 
     #[test]
     fn declaration_metadata_extracts_details_via_graph_only() {
-        // discrimination test for
-        // `resolve_local_type_declaration` (former callsite at
-        // declaration_metadata.rs:308). The graph metadata
-        // (`local_type_symbol_metadata`) provides kind/span; the
-        // resolver returns those plus `text == None`. Pre-deletion,
-        // the source-reparse path populated `text` to `Some(...)`
-        // and failed the negative assertion.
+        // Discrimination test for `resolve_local_type_declaration`.
+        // The graph metadata (`local_type_symbol_metadata`) provides
+        // kind/span; the resolver returns those plus `text == None`.
+        // A source-reading regression would populate `text` to
+        // `Some(...)` and fail the negative assertion below.
         let mut resolver = FakeResolver::default();
         let source_len = "interface Props { label: string }".len() as u32;
         let graph_span = verter_span::Span::new(0, source_len);
@@ -912,7 +676,7 @@ type Props = {
         assert_eq!(resolved.declaration_id, Some(11));
 
         // Negative assertion: text MUST be None — proves
-        // resolve_local_type_declaration no longer reads source text.
+        // resolve_local_type_declaration consumes graph data only.
         assert_eq!(
             resolved.text, None,
             "resolve_local_type_declaration must NOT thread \

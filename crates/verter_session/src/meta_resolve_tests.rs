@@ -4244,18 +4244,6 @@ export interface Props { a: string; b: number }"#,
 }
 
 // ===========================================================================
-// Phase 4b §4b.3 — `declaration_text_does_not_match_substring_names`
-// and `declaration_text_handles_braces_inside_string_literals` were
-// integration tests for the source-text reparse path
-// (extract_declaration_details / find_named_declaration_start). Under
-// the graph-only resolver the resolver no longer extracts declaration
-// text from source — the underlying helpers are still tested at the
-// unit level in `resolver_core::declaration_metadata::tests` against
-// synthetic resolvers, but exercising them through the full
-// `resolve_component_meta` pipeline no longer makes sense.
-// ===========================================================================
-
-// ===========================================================================
 // Edge case: type alias with mapped type (inner semicolons)
 // ===========================================================================
 
