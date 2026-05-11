@@ -444,3 +444,235 @@ fn build_public_instance_slot_type_consumes_return_expr_not_return_type() {
         "build_public_instance_slot_type MUST NOT reparse `slot.return_type`          when `slot.return_expr` is present."
     );
 }
+
+
+/// Discriminating coverage for M1/M2/M4 — the macro-participation walker
+/// must traverse Object / Function / Conditional / Mapped / KeyOf /
+/// RecursiveRef / TemplateLiteral nodes when searching for participating
+/// refs.
+///
+/// Pre-fix coverage: `collect_imported_macro_participating_refs` matched
+/// only Parenthesized / Ref / Union / Intersection / Array / Tuple /
+/// IndexedAccess. A participating Ref nested inside ANY of the missing
+/// branches would be silently dropped — a false negative that the
+/// structural-classifier contract forbade.
+///
+/// Each test constructs a synthetic `TypeExpr` placing a participating
+/// Ref deep inside one of the missing-branch shapes, runs the walker,
+/// and asserts the Ref surfaces. Pre-fix the assertion FAILS; post-fix
+/// it PASSES.
+#[cfg(test)]
+mod walker_coverage_tests {
+    use super::*;
+    use rustc_hash::FxHashSet;
+    use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
+    use verter_type_expr::{
+        FunctionExpr, FunctionParam, ObjectExpr, ObjectMember, ObjectProperty, TypeExpr,
+    };
+
+    fn participating_ref() -> TypeExpr {
+        TypeExpr::Ref {
+            name: Arc::from("Target"),
+            type_arguments: Arc::from(Vec::new().as_slice()),
+        }
+    }
+
+    fn fixture_project_with_target() -> Arc<MetaProject> {
+        let project = make_project();
+        project
+            .upsert_base(
+                "/src/target.ts",
+                "export interface Target { x: number }\n",
+            )
+            .unwrap();
+        project
+            .upsert_base(
+                "/src/App.vue",
+                "<script setup lang=\"ts\">\nimport type { Target } from './target'\ndefineProps<Target>()\n</script>\n<template><div /></template>",
+            )
+            .unwrap();
+        // Establish host state.
+        let session = project.open_session_batch().unwrap();
+        let _ = session.get_component_meta("/src/App.vue").unwrap();
+        project
+    }
+
+    fn participating_set() -> FxHashSet<ResolvedRootIdentity> {
+        let mut set = FxHashSet::default();
+        set.insert(ResolvedRootIdentity::new("/src/target.ts", "Target"));
+        set
+    }
+
+    /// Embed the participating Ref deep inside a 100-level Object chain
+    /// (`{ a: { a: { a: ... Target } } }`). Pre-fix walker terminates at
+    /// the first Object and silently drops Target.
+    #[test]
+    fn walker_traverses_deep_object_chain() {
+        let project = fixture_project_with_target();
+        let participating = participating_set();
+
+        let mut node = participating_ref();
+        for _ in 0..100 {
+            let obj = ObjectExpr {
+                properties: vec![ObjectMember::Property(ObjectProperty {
+                    name: "a".to_string(),
+                    ty: node,
+                    optional: false,
+                    readonly: false,
+                })],
+            };
+            node = TypeExpr::Object(Arc::new(obj));
+        }
+
+        let collected = super::super::collect_imported_macro_participating_refs_for_test(
+            project.host(),
+            "/src/App.vue",
+            &node,
+            &participating,
+        );
+
+        assert!(
+            collected.contains(&(
+                ResolvedRootIdentity::new("/src/target.ts", "Target"),
+                0
+            )),
+            "100-deep Object chain must not terminate the walker — Target should surface. Got: {collected:?}"
+        );
+    }
+
+    /// Embed the participating Ref inside a Conditional ladder.
+    /// Pre-fix walker terminates at the Conditional and drops Target.
+    #[test]
+    fn walker_traverses_deep_conditional_ladder() {
+        let project = fixture_project_with_target();
+        let participating = participating_set();
+
+        // Build `T0 extends T1 ? T2 extends T3 ? ... ? Target : never : never`
+        let mut node = participating_ref();
+        for _ in 0..50 {
+            node = TypeExpr::Conditional {
+                check: Arc::new(TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)),
+                extends: Arc::new(TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)),
+                true_type: Arc::new(node),
+                false_type: Arc::new(TypeExpr::Primitive(
+                    verter_type_expr::PrimitiveName::Never,
+                )),
+            };
+        }
+
+        let collected = super::super::collect_imported_macro_participating_refs_for_test(
+            project.host(),
+            "/src/App.vue",
+            &node,
+            &participating,
+        );
+
+        assert!(
+            collected.contains(&(
+                ResolvedRootIdentity::new("/src/target.ts", "Target"),
+                0
+            )),
+            "deep Conditional ladder must not terminate the walker — Target should surface. Got: {collected:?}"
+        );
+    }
+
+    /// Embed the participating Ref inside a Function return_type wrapping
+    /// an Object. Pre-fix walker terminates at Function/Object combo.
+    #[test]
+    fn walker_traverses_function_return_wrapping_object() {
+        let project = fixture_project_with_target();
+        let participating = participating_set();
+
+        // `() => { wrapped: Target }`
+        let object = TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![ObjectMember::Property(ObjectProperty {
+                name: "wrapped".to_string(),
+                ty: participating_ref(),
+                optional: false,
+                readonly: false,
+            })],
+        }));
+        let function = TypeExpr::Function(Arc::new(FunctionExpr {
+            parameters: Vec::new(),
+            return_type: Some(Arc::new(object)),
+            type_parameters: Vec::new(),
+        }));
+
+        let collected = super::super::collect_imported_macro_participating_refs_for_test(
+            project.host(),
+            "/src/App.vue",
+            &function,
+            &participating,
+        );
+
+        assert!(
+            collected.contains(&(
+                ResolvedRootIdentity::new("/src/target.ts", "Target"),
+                0
+            )),
+            "Function return_type wrapping Object must not terminate the walker. Got: {collected:?}"
+        );
+    }
+
+    /// Embed the participating Ref inside Function parameters.
+    /// Pre-fix walker did not traverse Function parameters either.
+    #[test]
+    fn walker_traverses_function_parameters() {
+        let project = fixture_project_with_target();
+        let participating = participating_set();
+
+        // `(arg: Target) => void`
+        let function = TypeExpr::Function(Arc::new(FunctionExpr {
+            parameters: vec![FunctionParam {
+                name: Some("arg".to_string()),
+                ty: participating_ref(),
+                optional: false,
+                rest: false,
+            }],
+            return_type: Some(Arc::new(TypeExpr::Primitive(
+                verter_type_expr::PrimitiveName::Void,
+            ))),
+            type_parameters: Vec::new(),
+        }));
+
+        let collected = super::super::collect_imported_macro_participating_refs_for_test(
+            project.host(),
+            "/src/App.vue",
+            &function,
+            &participating,
+        );
+
+        assert!(
+            collected.contains(&(
+                ResolvedRootIdentity::new("/src/target.ts", "Target"),
+                0
+            )),
+            "Function parameter type must not terminate the walker. Got: {collected:?}"
+        );
+    }
+
+    /// Embed the participating Ref inside KeyOf. Pre-fix walker did not
+    /// traverse KeyOf.
+    #[test]
+    fn walker_traverses_keyof() {
+        let project = fixture_project_with_target();
+        let participating = participating_set();
+
+        let keyof = TypeExpr::KeyOf(Arc::new(participating_ref()));
+
+        let collected = super::super::collect_imported_macro_participating_refs_for_test(
+            project.host(),
+            "/src/App.vue",
+            &keyof,
+            &participating,
+        );
+
+        assert!(
+            collected.contains(&(
+                ResolvedRootIdentity::new("/src/target.ts", "Target"),
+                0
+            )),
+            "KeyOf wrapper must not terminate the walker. Got: {collected:?}"
+        );
+    }
+}

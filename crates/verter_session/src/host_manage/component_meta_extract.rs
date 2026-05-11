@@ -234,100 +234,160 @@ fn merge_evaluated_prop_types_into_meta(
     let macro_participating_identities =
         build_macro_participating_identities(host, owner_canonical, snapshot, prop_macro_kinds);
 
+    /// Iterative worklist walk over a `TypeExpr` checking whether any node
+    /// resolves to `target` at the requested arity.
+    ///
+    /// W6.1 contract: the walker MUST be iterative (no recursion — stack
+    /// overflow is a real failure mode on deeply nested types like 100-level
+    /// `Object` chains, deep `Conditional` ladders, Pinia/strict tuple
+    /// builders) AND exhaustive over every `TypeExpr` variant that can
+    /// transitively reach a `Ref`. The previous recursive walker covered
+    /// only Parenthesized / Ref / Union / Intersection / Array / Tuple /
+    /// IndexedAccess — Object / Function / Conditional / Mapped / KeyOf /
+    /// RecursiveRef / TemplateLiteral nodes silently terminated the walk
+    /// and produced false negatives.
     fn expr_contains_root_identity(
-        expr: &verter_type_expr::TypeExpr,
+        root: &verter_type_expr::TypeExpr,
         host: &VerterHost,
         owner_canonical: &str,
         target: &ResolvedRootIdentity,
         type_argument_arity: usize,
-        visited_exprs: &mut rustc_hash::FxHashSet<*const verter_type_expr::TypeExpr>,
     ) -> bool {
         use verter_type_expr::TypeExpr;
 
-        if !visited_exprs.insert(expr as *const TypeExpr) {
-            return false;
-        }
+        let mut visited: rustc_hash::FxHashSet<*const TypeExpr> =
+            rustc_hash::FxHashSet::default();
+        let mut worklist: Vec<&TypeExpr> = vec![root];
 
-        match expr {
-            TypeExpr::Parenthesized(inner) => expr_contains_root_identity(
-                inner,
-                host,
-                owner_canonical,
-                target,
-                type_argument_arity,
-                visited_exprs,
-            ),
-            TypeExpr::Ref {
-                name,
-                type_arguments,
-            } => {
-                if type_arguments.len() == type_argument_arity {
-                    if let Some(identity) =
-                        resolve_ref_to_root_identity(host, owner_canonical, name.as_ref())
-                    {
-                        if identity == *target {
-                            return true;
+        while let Some(node) = worklist.pop() {
+            if !visited.insert(node as *const TypeExpr) {
+                continue;
+            }
+            match node {
+                TypeExpr::Parenthesized(inner) => worklist.push(inner),
+                TypeExpr::Ref {
+                    name,
+                    type_arguments,
+                } => {
+                    if type_arguments.len() == type_argument_arity {
+                        if let Some(identity) =
+                            resolve_ref_to_root_identity(host, owner_canonical, name.as_ref())
+                        {
+                            if identity == *target {
+                                return true;
+                            }
+                        }
+                    }
+                    for arg in type_arguments.iter() {
+                        worklist.push(arg);
+                    }
+                }
+                TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
+                    for ty in types.iter() {
+                        worklist.push(ty);
+                    }
+                }
+                TypeExpr::Array { element, .. } => worklist.push(element),
+                TypeExpr::Tuple { elements, .. } => {
+                    for element in elements.iter() {
+                        worklist.push(&element.ty);
+                    }
+                }
+                TypeExpr::IndexedAccess { object, index } => {
+                    worklist.push(object);
+                    worklist.push(index);
+                }
+                TypeExpr::Object(obj) => {
+                    for member in obj.properties.iter() {
+                        match member {
+                            verter_type_expr::ObjectMember::Property(prop) => {
+                                worklist.push(&prop.ty)
+                            }
+                            verter_type_expr::ObjectMember::Method(method) => {
+                                for param in method.function.parameters.iter() {
+                                    worklist.push(&param.ty);
+                                }
+                                if let Some(ret) = method.function.return_type.as_ref() {
+                                    worklist.push(ret.as_ref());
+                                }
+                            }
+                            verter_type_expr::ObjectMember::IndexSignature(idx) => {
+                                worklist.push(&idx.key_type);
+                                worklist.push(&idx.value_type);
+                            }
+                            verter_type_expr::ObjectMember::CallSignature(func)
+                            | verter_type_expr::ObjectMember::ConstructSignature(func) => {
+                                for param in func.parameters.iter() {
+                                    worklist.push(&param.ty);
+                                }
+                                if let Some(ret) = func.return_type.as_ref() {
+                                    worklist.push(ret.as_ref());
+                                }
+                            }
                         }
                     }
                 }
-                type_arguments.iter().any(|arg| {
-                    expr_contains_root_identity(
-                        arg,
-                        host,
-                        owner_canonical,
-                        target,
-                        type_argument_arity,
-                        visited_exprs,
-                    )
-                })
+                TypeExpr::Function(func) => {
+                    for param in func.parameters.iter() {
+                        worklist.push(&param.ty);
+                    }
+                    if let Some(ret) = func.return_type.as_ref() {
+                        worklist.push(ret.as_ref());
+                    }
+                }
+                TypeExpr::Conditional {
+                    check,
+                    extends,
+                    true_type,
+                    false_type,
+                } => {
+                    worklist.push(check);
+                    worklist.push(extends);
+                    worklist.push(true_type);
+                    worklist.push(false_type);
+                }
+                TypeExpr::Mapped {
+                    source,
+                    value,
+                    name_type,
+                    ..
+                } => {
+                    worklist.push(source);
+                    worklist.push(value);
+                    if let Some(nt) = name_type.as_ref() {
+                        worklist.push(nt.as_ref());
+                    }
+                }
+                TypeExpr::KeyOf(inner) => worklist.push(inner),
+                TypeExpr::Rest(inner) => worklist.push(inner),
+                TypeExpr::RecursiveRef {
+                    name,
+                    type_arguments,
+                    ..
+                } => {
+                    if type_arguments.len() == type_argument_arity {
+                        if let Some(identity) =
+                            resolve_ref_to_root_identity(host, owner_canonical, name.as_ref())
+                        {
+                            if identity == *target {
+                                return true;
+                            }
+                        }
+                    }
+                    for arg in type_arguments.iter() {
+                        worklist.push(arg);
+                    }
+                }
+                TypeExpr::TemplateLiteral { expressions, .. } => {
+                    for ty in expressions.iter() {
+                        worklist.push(ty);
+                    }
+                }
+                _ => {}
             }
-            TypeExpr::Union(types) | TypeExpr::Intersection(types) => types.iter().any(|ty| {
-                expr_contains_root_identity(
-                    ty,
-                    host,
-                    owner_canonical,
-                    target,
-                    type_argument_arity,
-                    visited_exprs,
-                )
-            }),
-            TypeExpr::Array { element, .. } => expr_contains_root_identity(
-                element,
-                host,
-                owner_canonical,
-                target,
-                type_argument_arity,
-                visited_exprs,
-            ),
-            TypeExpr::Tuple { elements, .. } => elements.iter().any(|element| {
-                expr_contains_root_identity(
-                    &element.ty,
-                    host,
-                    owner_canonical,
-                    target,
-                    type_argument_arity,
-                    visited_exprs,
-                )
-            }),
-            TypeExpr::IndexedAccess { object, index } => {
-                expr_contains_root_identity(
-                    object,
-                    host,
-                    owner_canonical,
-                    target,
-                    type_argument_arity,
-                    visited_exprs,
-                ) || expr_contains_root_identity(
-                    index,
-                    host,
-                    owner_canonical,
-                    target,
-                    type_argument_arity,
-                    visited_exprs,
-                )
-            }
-            _ => false,
         }
+
+        false
     }
 
     let evaluated_by_name = evaluated_types
@@ -350,14 +410,12 @@ fn merge_evaluated_prop_types_into_meta(
             && !imported_macro_participating_refs
                 .iter()
                 .all(|(identity, type_argument_arity)| {
-                    let mut visited_exprs = rustc_hash::FxHashSet::default();
                     expr_contains_root_identity(
                         evaluated,
                         host,
                         owner_canonical,
                         identity,
                         *type_argument_arity,
-                        &mut visited_exprs,
                     )
                 })
         {
@@ -695,6 +753,89 @@ fn collect_imported_macro_participating_refs(
             TypeExpr::IndexedAccess { object, index } => {
                 worklist.push(object);
                 worklist.push(index);
+            }
+            TypeExpr::Object(obj) => {
+                for member in obj.properties.iter() {
+                    match member {
+                        verter_type_expr::ObjectMember::Property(prop) => worklist.push(&prop.ty),
+                        verter_type_expr::ObjectMember::Method(method) => {
+                            for param in method.function.parameters.iter() {
+                                worklist.push(&param.ty);
+                            }
+                            if let Some(ret) = method.function.return_type.as_ref() {
+                                worklist.push(ret.as_ref());
+                            }
+                        }
+                        verter_type_expr::ObjectMember::IndexSignature(idx) => {
+                            worklist.push(&idx.key_type);
+                            worklist.push(&idx.value_type);
+                        }
+                        verter_type_expr::ObjectMember::CallSignature(func)
+                        | verter_type_expr::ObjectMember::ConstructSignature(func) => {
+                            for param in func.parameters.iter() {
+                                worklist.push(&param.ty);
+                            }
+                            if let Some(ret) = func.return_type.as_ref() {
+                                worklist.push(ret.as_ref());
+                            }
+                        }
+                    }
+                }
+            }
+            TypeExpr::Function(func) => {
+                for param in func.parameters.iter() {
+                    worklist.push(&param.ty);
+                }
+                if let Some(ret) = func.return_type.as_ref() {
+                    worklist.push(ret.as_ref());
+                }
+            }
+            TypeExpr::Conditional {
+                check,
+                extends,
+                true_type,
+                false_type,
+            } => {
+                worklist.push(check);
+                worklist.push(extends);
+                worklist.push(true_type);
+                worklist.push(false_type);
+            }
+            TypeExpr::Mapped {
+                source,
+                value,
+                name_type,
+                ..
+            } => {
+                worklist.push(source);
+                worklist.push(value);
+                if let Some(nt) = name_type.as_ref() {
+                    worklist.push(nt.as_ref());
+                }
+            }
+            TypeExpr::KeyOf(inner) => worklist.push(inner),
+            TypeExpr::Rest(inner) => worklist.push(inner),
+            TypeExpr::RecursiveRef {
+                name,
+                type_arguments,
+                ..
+            } => {
+                if let Some(identity) =
+                    resolve_ref_to_root_identity(host, owner_canonical, name.as_ref())
+                {
+                    if participating.contains(&identity) && identity.canonical_id != owner_canonical
+                    {
+                        out.insert((identity, type_arguments.len()));
+                    }
+                }
+                for arg in type_arguments.iter() {
+                    worklist.push(arg);
+                }
+            }
+            TypeExpr::TemplateLiteral { expressions, .. } => {
+                for ty in expressions.iter() {
+                    worklist.push(ty);
+                }
             }
             _ => {}
         }
