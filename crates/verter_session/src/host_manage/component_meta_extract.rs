@@ -255,8 +255,7 @@ fn merge_evaluated_prop_types_into_meta(
     ) -> bool {
         use verter_type_expr::TypeExpr;
 
-        let mut visited: rustc_hash::FxHashSet<*const TypeExpr> =
-            rustc_hash::FxHashSet::default();
+        let mut visited: rustc_hash::FxHashSet<*const TypeExpr> = rustc_hash::FxHashSet::default();
         let mut worklist: Vec<&TypeExpr> = vec![root];
 
         while let Some(node) = worklist.pop() {

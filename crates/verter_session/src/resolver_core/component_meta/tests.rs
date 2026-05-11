@@ -720,7 +720,10 @@ fn local_resolved_macro_types_project_into_resolved_macro_surfaces() {
                     ),
                     description: None,
                     tags: Vec::new(),
-                    payload_expr: Some(TypeExpr::Unknown { raw: "[value: (T extends 'single' ? string : string[]) | undefined]".to_string() }),
+                    payload_expr: Some(TypeExpr::Unknown {
+                        raw: "[value: (T extends 'single' ? string : string[]) | undefined]"
+                            .to_string(),
+                    }),
                     payload_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
                 }],
                 slots: Vec::new(),
@@ -811,7 +814,9 @@ fn projectable_local_emit_roots_fill_resolved_macros_without_resolved_local_type
                     payload_type: Some("[value: string]".to_string()),
                     description: None,
                     tags: Vec::new(),
-                    payload_expr: Some(TypeExpr::Unknown { raw: "[value: string]".to_string() }),
+                    payload_expr: Some(TypeExpr::Unknown {
+                        raw: "[value: string]".to_string(),
+                    }),
                     payload_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
                 }],
                 slots: Vec::new(),
@@ -1020,7 +1025,9 @@ type LocalItem = {
                 type_text: Some("'href' | 'target'".to_string()),
                 map_local: false,
                 span_is_absolute: true,
-                type_expr: Some(TypeExpr::Unknown { raw: "'href' | 'target'".to_string() }),
+                type_expr: Some(TypeExpr::Unknown {
+                    raw: "'href' | 'target'".to_string(),
+                }),
                 type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
             }],
             ..ResolvedElements::default()
@@ -1428,7 +1435,9 @@ type Props = {
                     tags: Vec::new(),
                     resolution_source: verter_semantic::analysis::TypeResolutionSource::Rust,
                     resolution_error: None,
-                    type_expr: Some(TypeExpr::Unknown { raw: "ImportedBase['href']".to_string() }),
+                    type_expr: Some(TypeExpr::Unknown {
+                        raw: "ImportedBase['href']".to_string(),
+                    }),
                     type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
                 }],
                 emits: Vec::new(),
@@ -1558,7 +1567,9 @@ type Props = {
                     tags: Vec::new(),
                     resolution_source: verter_semantic::analysis::TypeResolutionSource::Rust,
                     resolution_error: None,
-                    type_expr: Some(TypeExpr::Unknown { raw: "ImportedBase".to_string() }),
+                    type_expr: Some(TypeExpr::Unknown {
+                        raw: "ImportedBase".to_string(),
+                    }),
                     type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
                 }],
                 emits: Vec::new(),

@@ -445,7 +445,6 @@ fn build_public_instance_slot_type_consumes_return_expr_not_return_type() {
     );
 }
 
-
 /// Discriminating coverage for M1/M2/M4 — the macro-participation walker
 /// must traverse Object / Function / Conditional / Mapped / KeyOf /
 /// RecursiveRef / TemplateLiteral nodes when searching for participating
@@ -480,10 +479,7 @@ mod walker_coverage_tests {
     fn fixture_project_with_target() -> Arc<MetaProject> {
         let project = make_project();
         project
-            .upsert_base(
-                "/src/target.ts",
-                "export interface Target { x: number }\n",
-            )
+            .upsert_base("/src/target.ts", "export interface Target { x: number }\n")
             .unwrap();
         project
             .upsert_base(
@@ -554,9 +550,7 @@ mod walker_coverage_tests {
                 check: Arc::new(TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)),
                 extends: Arc::new(TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)),
                 true_type: Arc::new(node),
-                false_type: Arc::new(TypeExpr::Primitive(
-                    verter_type_expr::PrimitiveName::Never,
-                )),
+                false_type: Arc::new(TypeExpr::Primitive(verter_type_expr::PrimitiveName::Never)),
             };
         }
 
@@ -643,10 +637,7 @@ mod walker_coverage_tests {
         );
 
         assert!(
-            collected.contains(&(
-                ResolvedRootIdentity::new("/src/target.ts", "Target"),
-                0
-            )),
+            collected.contains(&(ResolvedRootIdentity::new("/src/target.ts", "Target"), 0)),
             "Function parameter type must not terminate the walker. Got: {collected:?}"
         );
     }
@@ -668,10 +659,7 @@ mod walker_coverage_tests {
         );
 
         assert!(
-            collected.contains(&(
-                ResolvedRootIdentity::new("/src/target.ts", "Target"),
-                0
-            )),
+            collected.contains(&(ResolvedRootIdentity::new("/src/target.ts", "Target"), 0)),
             "KeyOf wrapper must not terminate the walker. Got: {collected:?}"
         );
     }

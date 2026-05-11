@@ -1237,10 +1237,9 @@ pub(crate) fn slot_field_function_type_expr(
             .bindings
             .iter()
             .map(|binding| {
-                let ty = binding
-                    .binding_expr
-                    .clone()
-                    .expect("AnalyzedSlotFieldBinding.binding_expr populated by analyzer (W0.2 invariant)");
+                let ty = binding.binding_expr.clone().expect(
+                    "AnalyzedSlotFieldBinding.binding_expr populated by analyzer (W0.2 invariant)",
+                );
                 ObjectMember::Property(ObjectProperty {
                     name: binding.name.clone(),
                     ty,

@@ -8748,7 +8748,7 @@ mod typed_ir_resolver_guards {
                     return None;
                 }
                 i = j; // Now points at the `(`.
-                // Continue: there must be a method name (word) before, and a `.`.
+                       // Continue: there must be a method name (word) before, and a `.`.
                 let word_end = i;
                 while i > 0 && (bytes[i - 1].is_alphanumeric() || bytes[i - 1] == '_') {
                     i -= 1;

@@ -6720,7 +6720,9 @@ defineEmits<Emits>()
                 payload_type: Some("[id: number]".to_string()),
                 description: None,
                 tags: Vec::new(),
-                payload_expr: Some(TypeExpr::Unknown { raw: "[id: number]".to_string() }),
+                payload_expr: Some(TypeExpr::Unknown {
+                    raw: "[id: number]".to_string(),
+                }),
                 payload_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
             }],
             slots: Vec::new(),
@@ -6752,7 +6754,9 @@ defineEmits<Emits>()
                 payload_type: Some("[value: boolean]".to_string()),
                 description: None,
                 tags: Vec::new(),
-                payload_expr: Some(TypeExpr::Unknown { raw: "[value: boolean]".to_string() }),
+                payload_expr: Some(TypeExpr::Unknown {
+                    raw: "[value: boolean]".to_string(),
+                }),
                 payload_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
             }],
             slots: Vec::new(),
