@@ -856,34 +856,17 @@ fn projectable_local_emit_roots_fill_resolved_macros_without_resolved_local_type
 
 #[test]
 fn local_resolved_slot_types_project_resolved_pick_bindings() {
-    // slot binding type-annotations are now the resolved
-    // leaf, not the symbolic indexed-access form.
+    // Slot binding type-annotations surface the resolved leaf, not the
+    // symbolic indexed-access form. Owner-local resolved-type projection
+    // runs through the graph-native owner-local macro surface API, which
+    // produces the leaf `Date` for the binding's type-annotation (`Pick`
+    // is already resolved to `{ day: Date }` in the expanded shape).
     //
-    // + : this test asserted the symbolic
-    // form `Some("CalendarCellTriggerProps['day']")`. The pre-
-    // change pipeline read the owner source via the host source-
-    // text reader and ran the source-typed projector against it;
-    // that walked the owner source (where
-    // `Pick<CalendarCellTriggerProps, 'day'>` is still symbolic)
-    // and `extract_slot_info_from_type_text` reduced
-    // `Pick<X, K>` down to the symbolic `X[K]` form
-    // `CalendarCellTriggerProps['day']`.
-    //
-    // + + : the
-    // source-text reparse path is gone (both the host source-
-    // text reader and the source-typed projector are deleted).
-    // Owner-local resolved-type projection runs through the
-    // graph-native owner-local macro surface API, which produces
-    // the leaf `Date` for the binding's type-annotation
-    // (`Pick` is already resolved to `{ day: Date }` in the
-    // expanded shape).
-    //
-    // The resolved leaf is the architecturally correct contract
-    // for post-engine component-meta: `Pick<X,K>` is a source-
-    // text construct that the type system reduces; surfacing
-    // the reduction is what consumers (LSP, MCP, codegen) want.
-    // The symbolic form was an artefact of the old source-text
-    // reparse pathway, not a property the architecture targets.
+    // The resolved leaf is the architecturally correct contract for
+    // post-engine component-meta: `Pick<X,K>` is a source-text construct
+    // that the type system reduces; surfacing the reduction is what
+    // consumers (LSP, MCP, codegen) want. The symbolic `X[K]` display
+    // form was an artefact of the legacy source-text reparse pathway.
     let source = r#"
 interface CalendarCellTriggerProps {
   day: Date

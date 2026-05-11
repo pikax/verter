@@ -110,8 +110,7 @@ pub use shallow_file_state::{
     ShallowValueSymbol, WildcardReexport,
 };
 pub use surface_projector::{
-    extract_slot_info_from_type_text, project_macro_surfaces, ProjectedMacroSurfaces,
-    ResolvedNativeProp,
+    project_macro_surfaces, slot_info_from_type_expr, ProjectedMacroSurfaces, ResolvedNativeProp,
 };
 
 /// Lane-identity token for singleflight deduplication.

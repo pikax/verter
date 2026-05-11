@@ -229,16 +229,60 @@ fn project_define_emits_prefers_raw_source_tuple_payload_text() {
     );
 }
 
+/// Build a `TypeExpr::Function` representing `(props: { props_obj }) => return_ty`
+/// for slot-test fixtures.
+fn slot_function_type(props: Vec<ObjectMember>, return_ty: TypeExpr) -> TypeExpr {
+    TypeExpr::Function(std::sync::Arc::new(FunctionExpr {
+        parameters: vec![FunctionParam {
+            name: Some("props".to_string()),
+            ty: TypeExpr::Object(std::sync::Arc::new(ObjectExpr { properties: props })),
+            optional: false,
+            rest: false,
+        }],
+        return_type: Some(std::sync::Arc::new(return_ty)),
+        type_parameters: Vec::new(),
+    }))
+}
+
+fn slot_object_property(name: &str, optional: bool, ty: TypeExpr) -> ObjectMember {
+    ObjectMember::Property(ObjectProperty {
+        name: name.to_string(),
+        ty,
+        optional,
+        readonly: false,
+    })
+}
+
 #[test]
 fn project_define_slots_extracts_bindings_and_return_type() {
+    // W3.2 typed-IR-only: slot info derives from the prop's lowered
+    // `TypeExpr::Function` form. The pre-W3.2 path read the source-text
+    // and reparsed via OXC; that source-walker is deleted.
+    let return_ty = TypeExpr::Array {
+        element: std::sync::Arc::new(TypeExpr::Ref {
+            name: std::sync::Arc::from("VNode"),
+            type_arguments: std::sync::Arc::from(Vec::<TypeExpr>::new()),
+        }),
+        readonly: false,
+    };
+    let function_ty = slot_function_type(
+        vec![
+            slot_object_property(
+                "foo",
+                false,
+                TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+            ),
+            slot_object_property(
+                "bar",
+                true,
+                TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+            ),
+        ],
+        return_ty,
+    );
+    let slot_prop = typed_prop("default", false, function_ty, "/sfc/Slots.vue");
     let elements = ResolvedElements {
-        props: vec![prop(
-            "default",
-            false,
-            ResolvedMemberVisibility::Public,
-            Some("(props: { foo: string; bar?: number }) => VNode[]"),
-            0,
-        )],
+        props: vec![slot_prop],
         ..ResolvedElements::default()
     };
 
@@ -249,29 +293,62 @@ fn project_define_slots_extracts_bindings_and_return_type() {
     assert_eq!(projected.slots[0].bindings.len(), 2);
     assert_eq!(projected.slots[0].bindings[0].name, "foo");
     assert_eq!(projected.slots[0].bindings[1].name, "bar");
+    // Display: rendered from typed return-type (`Ref<VNode>[]`).
     assert_eq!(projected.slots[0].return_type.as_deref(), Some("VNode[]"));
+    // Discriminator: pre-W3.2 the source-walker filled `binding_expr: None`
+    // for the synthetic-declaration path; post-W3.2 the typed walker emits
+    // `binding_expr: Some(<typed value>)` for every binding.
+    assert_eq!(
+        projected.slots[0].bindings[0].binding_expr.as_ref(),
+        Some(&TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::String
+        ))
+    );
+    assert_eq!(
+        projected.slots[0].bindings[1].binding_expr.as_ref(),
+        Some(&TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::Number
+        ))
+    );
 }
 
 #[test]
 fn project_define_slots_preserves_symbolic_binding_types_for_pick_params() {
-    let source = r#"
-type CalendarCellTriggerProps = { day: string; month: number }
-export interface Slots {
-  day?: (props: Pick<CalendarCellTriggerProps, 'day'>) => any
-}
-"#;
+    // W3.2 typed-IR-only: `Pick<X, K>` arrives as
+    // `TypeExpr::Ref { name: "Pick", type_arguments: [Ref<X>, Literal::String("K")] }`
+    // — no source-text walk. The typed walker emits one binding per key,
+    // with `binding_expr = IndexedAccess { object: Ref<X>, index: Literal::String("K") }`
+    // and a symbolic `X['K']` display string for parity.
+    let calendar_ref = TypeExpr::Ref {
+        name: std::sync::Arc::from("CalendarCellTriggerProps"),
+        type_arguments: std::sync::Arc::from(Vec::<TypeExpr>::new()),
+    };
+    let pick_ty = TypeExpr::Ref {
+        name: std::sync::Arc::from("Pick"),
+        type_arguments: std::sync::Arc::from(vec![
+            calendar_ref.clone(),
+            TypeExpr::Literal(verter_type_expr::LiteralValue::String("day".to_string())),
+        ]),
+    };
+    let function_ty = TypeExpr::Function(std::sync::Arc::new(FunctionExpr {
+        parameters: vec![FunctionParam {
+            name: Some("props".to_string()),
+            ty: pick_ty,
+            optional: false,
+            rest: false,
+        }],
+        return_type: Some(std::sync::Arc::new(TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::Any,
+        ))),
+        type_parameters: Vec::new(),
+    }));
+    let slot_prop = typed_prop("day", true, function_ty, "/sfc/Calendar.vue");
     let elements = ResolvedElements {
-        props: vec![prop(
-            "day",
-            true,
-            ResolvedMemberVisibility::Public,
-            Some("(props: Pick<CalendarCellTriggerProps, 'day'>) => any"),
-            0,
-        )],
+        props: vec![slot_prop],
         ..ResolvedElements::default()
     };
 
-    let projected = project_macro_surfaces(Some(source), AnalyzedMacroKind::DefineSlots, &elements);
+    let projected = project_macro_surfaces(None, AnalyzedMacroKind::DefineSlots, &elements);
 
     assert_eq!(projected.slots.len(), 1);
     assert_eq!(projected.slots[0].bindings.len(), 1);
@@ -279,6 +356,19 @@ export interface Slots {
     assert_eq!(
         projected.slots[0].bindings[0].type_annotation.as_deref(),
         Some("CalendarCellTriggerProps['day']")
+    );
+    // Discriminator: the typed walker must emit an `IndexedAccess` typed
+    // form so consumers can navigate without re-parsing the symbolic
+    // display string.
+    let expected_binding_expr = TypeExpr::IndexedAccess {
+        object: std::sync::Arc::new(calendar_ref.clone()),
+        index: std::sync::Arc::new(TypeExpr::Literal(verter_type_expr::LiteralValue::String(
+            "day".to_string(),
+        ))),
+    };
+    assert_eq!(
+        projected.slots[0].bindings[0].binding_expr.as_ref(),
+        Some(&expected_binding_expr)
     );
 }
 
@@ -292,29 +382,57 @@ export interface Slots {
 
 #[test]
 fn project_define_slots_ignores_non_callable_helper_members() {
+    // W3.2: only typed function shapes survive as slots. Non-callable
+    // helper members (plain `TypeExpr::Object`) leave `bindings: empty`
+    // and `return_type: None`; the `resolved_as_slot` flag (driven by
+    // `RuntimeType::Function`) gates the second-level filter. Helper
+    // members with neither typed function form nor `RuntimeType::Function`
+    // are dropped.
+    let default_function_ty = slot_function_type(
+        vec![slot_object_property(
+            "item",
+            false,
+            TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        )],
+        TypeExpr::Primitive(verter_type_expr::PrimitiveName::Any),
+    );
+    let app_config_object_ty = TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
+        properties: vec![slot_object_property(
+            "ui",
+            true,
+            TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
+                properties: vec![slot_object_property(
+                    "variant",
+                    false,
+                    TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+                )],
+            })),
+        )],
+    }));
+    let slots_object_ty = TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
+        properties: vec![
+            slot_object_property(
+                "leading",
+                true,
+                TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+            ),
+            slot_object_property(
+                "trailing",
+                true,
+                TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+            ),
+        ],
+    }));
     let elements = ResolvedElements {
         props: vec![
-            prop(
-                "default",
-                false,
-                ResolvedMemberVisibility::Public,
-                Some("(props: { item: string }) => any"),
-                0,
-            ),
-            prop(
-                "appConfig",
-                false,
-                ResolvedMemberVisibility::Public,
-                Some("{ ui?: { variant: string } }"),
-                0,
-            ),
-            prop(
-                "slots",
-                false,
-                ResolvedMemberVisibility::Public,
-                Some("{ leading?: string; trailing?: string }"),
-                0,
-            ),
+            {
+                let mut p = typed_prop("default", false, default_function_ty, "/sfc/Helpers.vue");
+                p.types =
+                    vec![verter_compiler::utils::oxc::vue::resolve_type::RuntimeType::Function];
+                p
+            },
+            typed_prop("appConfig", false, app_config_object_ty, "/sfc/Helpers.vue"),
+            typed_prop("slots", false, slots_object_ty, "/sfc/Helpers.vue"),
         ],
         ..ResolvedElements::default()
     };
@@ -628,14 +746,13 @@ fn project_define_slots_bridges_return_expr_from_function_type() {
     );
 }
 
-// ── W1.1c: inline slot bindings bridge from typed function param ──
+// ── Inline slot bindings derive from the slot prop's typed function param ──
 //
 // The slot prop is typed as `(props: { x: number; y: string }) => R`. The
-// projector must walk the function's first param's typed `Object { properties }`
-// and populate each `AnalyzedSlotFieldBinding.binding_expr` (+ paired scope)
-// from the matching property's typed value. Discriminator: pre-W1.1c bindings
-// produced by `extract_slot_info_from_type_text`'s synthetic-declaration
-// fallback have `binding_expr: None`.
+// projector walks the function's first param's typed `Object { properties }`
+// and populates each `AnalyzedSlotFieldBinding.binding_expr` (+ paired scope)
+// from the matching property's typed value. W3.2 made this the single source
+// of truth for inline slot bindings — there is no source-text reparse path.
 
 #[test]
 fn project_define_slots_populates_inline_binding_exprs_from_typed_function_param() {
@@ -671,11 +788,6 @@ fn project_define_slots_populates_inline_binding_exprs_from_typed_function_param
         type_parameters: Vec::new(),
     }));
     let mut slot_prop = typed_prop("default", false, function_ty, "/sfc/E.vue");
-    // Trigger the synthetic-declaration path inside
-    // `extract_slot_info_from_type_text` by passing a `type_text` whose
-    // binding param is an inline object literal (the Pick AST walker
-    // bails out for non-Pick shapes, returning `binding_expr: None`).
-    slot_prop.type_text = Some("(props: { x: number; y: string }) => any".to_string());
     slot_prop.types = vec![verter_compiler::utils::oxc::vue::resolve_type::RuntimeType::Function];
     let elements = ResolvedElements {
         props: vec![slot_prop],
@@ -690,11 +802,13 @@ fn project_define_slots_populates_inline_binding_exprs_from_typed_function_param
     assert_eq!(
         names,
         vec!["x", "y"],
-        "slot bindings should be extracted from the inline object literal type"
+        "slot bindings should be extracted from the typed function param's object literal"
     );
-    // Discriminator: pre-W1.1c the synthetic-declaration fallback path
-    // leaves `binding_expr: None`; post-W1.1c the typed function-param
-    // walk fills each binding with the matching typed value.
+    // Discriminator: every binding's `binding_expr` must mirror the
+    // matching `ObjectProperty.ty`. Pre-W3.2 the source-walker would
+    // reparse the type-text and produce `binding_expr: None` for
+    // non-Pick shapes; post-W3.2 the typed walker emits the typed value
+    // directly.
     assert_eq!(
         slot.bindings[0].binding_expr.as_ref(),
         Some(&item_ty),
@@ -722,10 +836,19 @@ fn project_define_slots_populates_inline_binding_exprs_from_typed_function_param
 }
 
 #[test]
-fn project_define_slots_leaves_binding_exprs_none_when_prop_lacks_typed_function_form() {
-    // The slot prop has `type_expr: None` (e.g. the Options-API path,
-    // where no OXC `TSType` was lowered). The bridge gracefully leaves
-    // each binding's `binding_expr` as None — no fabrication, no scope.
+fn project_define_slots_emits_no_bindings_when_prop_lacks_typed_function_form() {
+    // W3.2 typed-IR-only: the projector relies entirely on the slot
+    // prop's lowered `type_expr` for binding extraction. When the parser
+    // side leaves `type_expr: None` (e.g. an Options-API path where no
+    // OXC `TSType` was lowered), no bindings are emitted — the
+    // architecture rejects source-text reparse fallbacks.
+    //
+    // The slot itself still surfaces because `resolved_as_slot` (driven
+    // by `RuntimeType::Function`) gates slot emission independently.
+    // Discriminator: pre-W3.2 the source-walker reparsed
+    // `"(props: { x: number }) => any"` from `type_text` and emitted the
+    // `x` binding with `binding_expr: None`; post-W3.2 no bindings are
+    // emitted at all.
     let mut slot_prop = prop(
         "default",
         false,
@@ -733,7 +856,6 @@ fn project_define_slots_leaves_binding_exprs_none_when_prop_lacks_typed_function
         Some("(props: { x: number }) => any"),
         0,
     );
-    // Explicitly: no typed function form on the parser side.
     slot_prop.type_expr = None;
     slot_prop.type_expr_scope = None;
     slot_prop.types = vec![verter_compiler::utils::oxc::vue::resolve_type::RuntimeType::Function];
@@ -746,15 +868,12 @@ fn project_define_slots_leaves_binding_exprs_none_when_prop_lacks_typed_function
 
     assert_eq!(projected.slots.len(), 1);
     let slot = &projected.slots[0];
-    assert_eq!(slot.bindings.len(), 1);
-    assert_eq!(slot.bindings[0].name, "x");
-    // No typed function ⇒ no binding_expr (the bridge is graceful).
     assert!(
-        slot.bindings[0].binding_expr.is_none(),
-        "binding_expr must stay None when the slot prop has no typed function form"
+        slot.bindings.is_empty(),
+        "no bindings should be emitted when the slot prop has no typed function form"
     );
     assert!(
-        slot.bindings[0].binding_expr_scope.is_none(),
-        "binding_expr_scope must stay None to satisfy the pairing invariant"
+        slot.return_type.is_none(),
+        "no display return type without a typed function form"
     );
 }

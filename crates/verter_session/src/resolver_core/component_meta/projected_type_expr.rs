@@ -305,12 +305,11 @@ fn projected_slot_fields_from_shape(
         .properties
         .iter()
         .filter_map(|property| {
-            let rendered = render_type_expr_for_projected_surface(&property.ty);
+            // Typed-IR-only: walk `property.ty` directly. Each expanded
+            // shape's property carries the lowered typed form for a
+            // slot's function signature.
             let (bindings, return_type) =
-                crate::resolver_core::surface_projector::extract_slot_info_from_type_text(
-                    None,
-                    rendered.as_deref(),
-                );
+                crate::resolver_core::surface_projector::slot_info_from_type_expr(&property.ty);
             if bindings.is_empty() && return_type.is_none() {
                 return None;
             }

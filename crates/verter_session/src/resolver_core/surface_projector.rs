@@ -1,7 +1,6 @@
 use oxc_allocator::Allocator;
-use oxc_span::GetSpan;
 use verter_compiler::utils::oxc::vue::resolve_type::{
-    resolve_external_type, ResolvedElements, ResolvedEmitSignature, ResolvedMemberVisibility,
+    ResolvedElements, ResolvedEmitSignature, ResolvedMemberVisibility,
 };
 use verter_semantic::analysis::jsdoc::extract_jsdoc_near_offset;
 use verter_semantic::analysis::types::{
@@ -218,9 +217,16 @@ pub fn project_macro_surfaces_with_owner(
                         .clone()
                         .unwrap_or_else(|| "unknown".to_string());
                     let (description, tags) = member_jsdoc(source, prop.span);
-                    let raw_type_text = raw_prop_type_text(source, prop);
-                    let (mut bindings, return_type) =
-                        extract_slot_info_from_type_text(source, raw_type_text.as_deref());
+                    // Slot info is derived from the prop's typed function
+                    // form. No source slicing, no `raw_type_text` reparse.
+                    // Missing `type_expr` → no bindings and no return type
+                    // (the `resolved_as_slot` flag still gates slot
+                    // emission).
+                    let (mut bindings, return_type) = prop
+                        .type_expr
+                        .as_ref()
+                        .map(slot_info_from_type_expr)
+                        .unwrap_or_else(|| (Vec::new(), None));
                     let resolved_as_slot = prop.types.iter().any(|runtime| {
                         matches!(
                             runtime,
@@ -248,21 +254,14 @@ pub fn project_macro_surfaces_with_owner(
                         "AnalyzedSlotField return_expr/return_expr_scope pairing violated for slot `{}`",
                         name
                     );
-                    // Populate each binding's `binding_expr` from the slot
-                    // prop's typed function form. The Pick AST walker already
-                    // populates `binding_expr` for the Pick-shaped path; the
-                    // synthetic-declaration fallback in
-                    // `extract_slot_info_from_type_text` leaves
-                    // `binding_expr: None`. Walk the first function param's
-                    // typed `Object { properties }` and look up each binding
-                    // by name to fill the gap. The scope is the slot prop's
-                    // own `type_expr_scope` — the function signature, its
-                    // first param, and the bindings live in the same file.
-                    populate_binding_exprs_from_function_param(
-                        prop.type_expr.as_ref(),
-                        prop.type_expr_scope.as_ref(),
-                        &mut bindings,
-                    );
+                    // Stamp each binding's `binding_expr_scope` from the slot
+                    // prop's own `type_expr_scope` — the function signature,
+                    // its first param, and the bindings all live in the file
+                    // where the slot prop's typed form was produced.
+                    // `slot_info_from_type_expr` populates `binding_expr` but
+                    // leaves `binding_expr_scope` as `None` (the walker has
+                    // no scope information).
+                    stamp_binding_scopes(prop.type_expr_scope.as_ref(), &mut bindings);
                     Some(AnalyzedSlotField {
                         name,
                         is_required: !prop.optional,
@@ -324,115 +323,46 @@ fn slot_return_expr_from_function_type(prop_type: &TypeExpr) -> Option<TypeExpr>
     None
 }
 
-/// Unwrap the first parameter's typed value out of a `TypeExpr::Function`.
+/// Stamp the slot prop's `type_expr_scope` onto every binding that carries a
+/// populated `binding_expr`. `slot_info_from_type_expr` produces bindings with
+/// `binding_expr: Some(...)` but `binding_expr_scope: None` — the walker has
+/// no scope information. The slot prop's own `type_expr_scope` is the file
+/// where the function signature was parsed, which is also where each binding's
+/// typed value originated.
 ///
-/// Mirrors `slot_return_expr_from_function_type`: iterative parenthesis
-/// unwrap, bounded by `MAX_PAREN_UNWRAP`. Returns `None` for non-function
-/// shapes, and for functions without a first parameter.
-fn slot_first_param_ty_from_function_type(prop_type: &TypeExpr) -> Option<TypeExpr> {
-    const MAX_PAREN_UNWRAP: usize = 32;
-    let mut current = prop_type;
-    for _ in 0..MAX_PAREN_UNWRAP {
-        match current {
-            TypeExpr::Function(function) => {
-                return function.parameters.first().map(|p| p.ty.clone());
-            }
-            TypeExpr::Parenthesized(inner) => current = inner.as_ref(),
-            _ => return None,
-        }
-    }
-    None
-}
-
-/// Walk the slot prop's typed function form and populate each binding's
-/// `binding_expr` (and paired scope) from the first param's typed value.
-///
-/// The slot prop is typically typed as
-/// `TypeExpr::Function { params: [{ ty: TypeExpr::Object { properties: [bindings] }, ... }], return_type, ... }`.
-/// For each binding name, find the matching `ObjectProperty.name == binding.name`
-/// in the function's first param's object body. The property's `ty` is the
-/// binding's typed value.
-///
-/// Bindings that already carry `binding_expr: Some(...)` (e.g. the Pick AST
-/// walker's output, which encodes
-/// `IndexedAccess { object, index: Literal(String(k)) }`) are left untouched —
-/// those entries already satisfy the producer-chain typed contract.
-///
-/// The scope of every populated `binding_expr` is the slot prop's own
-/// `type_expr_scope` (the function signature, its first param, and the
-/// bindings all live in the file where the slot prop's typed form was
-/// produced). Pairing invariant:
-/// `binding_expr.is_some() <=> binding_expr_scope.is_some()` — debug-asserted
-/// per binding.
-fn populate_binding_exprs_from_function_param(
-    prop_type_expr: Option<&TypeExpr>,
+/// Pairing invariant:
+/// `binding_expr.is_some() <=> binding_expr_scope.is_some()` — if the slot
+/// prop's scope is missing the binding's `binding_expr` is cleared so the
+/// pair stays valid (rather than emitting an unscoped expr).
+fn stamp_binding_scopes(
     prop_type_expr_scope: Option<&TypeExprScope>,
     bindings: &mut [AnalyzedSlotFieldBinding],
 ) {
-    let Some(prop_type) = prop_type_expr else {
-        return;
-    };
-    let Some(first_param_ty) = slot_first_param_ty_from_function_type(prop_type) else {
-        return;
-    };
-    // Iterative parenthesis unwrap on the first param's value before pattern
-    // match — `(props: ({ x: number }))` should still resolve to an Object.
-    // Bounded by `MAX_PAREN_UNWRAP` to satisfy the resolver-core
-    // no-unbounded-recursion guard.
-    const MAX_PAREN_UNWRAP: usize = 32;
-    let mut current = &first_param_ty;
-    let mut object_expr: Option<std::sync::Arc<ObjectExpr>> = None;
-    for _ in 0..MAX_PAREN_UNWRAP {
-        match current {
-            TypeExpr::Object(obj) => {
-                object_expr = Some(obj.clone());
-                break;
-            }
-            TypeExpr::Parenthesized(inner) => current = inner.as_ref(),
-            _ => break,
-        }
-    }
-    let Some(object_expr) = object_expr else {
-        return;
-    };
     for binding in bindings.iter_mut() {
-        if binding.binding_expr.is_some() {
+        if binding.binding_expr.is_none() {
             debug_assert!(
-                binding.binding_expr_scope.is_some(),
-                "AnalyzedSlotFieldBinding binding_expr/binding_expr_scope pairing violated for binding `{}`",
+                binding.binding_expr_scope.is_none(),
+                "AnalyzedSlotFieldBinding binding_expr/binding_expr_scope pairing violated (None expr with Some scope) for binding `{}`",
                 binding.name
             );
             continue;
         }
-        let found = object_expr
-            .properties
-            .iter()
-            .find_map(|member| match member {
-                ObjectMember::Property(ObjectProperty { name, ty, .. })
-                    if name == &binding.name =>
-                {
-                    Some(ty.clone())
-                }
-                _ => None,
-            });
-        if let Some(ty) = found {
-            let scope = prop_type_expr_scope.cloned();
-            // Producer-chain pairing invariant: a populated typed form must
-            // travel with its scope. The scope is the slot prop's own
-            // `type_expr_scope`; if that's missing we cannot publish a valid
-            // pair, so we skip rather than emit an unscoped expr.
-            if scope.is_none() {
-                continue;
+        match prop_type_expr_scope {
+            Some(scope) => binding.binding_expr_scope = Some(scope.clone()),
+            None => {
+                // No scope to stamp — drop the `binding_expr` so the pairing
+                // invariant stays satisfied. Display `type_annotation` is
+                // unaffected.
+                binding.binding_expr = None;
+                binding.binding_expr_scope = None;
             }
-            binding.binding_expr = Some(ty);
-            binding.binding_expr_scope = scope;
-            debug_assert_eq!(
-                binding.binding_expr.is_some(),
-                binding.binding_expr_scope.is_some(),
-                "AnalyzedSlotFieldBinding binding_expr/binding_expr_scope pairing violated post-populate for binding `{}`",
-                binding.name
-            );
         }
+        debug_assert_eq!(
+            binding.binding_expr.is_some(),
+            binding.binding_expr_scope.is_some(),
+            "AnalyzedSlotFieldBinding binding_expr/binding_expr_scope pairing violated post-stamp for binding `{}`",
+            binding.name
+        );
     }
 }
 
@@ -668,240 +598,294 @@ pub fn find_heritage_type_imports_in_source(
         .collect()
 }
 
-pub fn extract_slot_info_from_type_text(
-    source: Option<&str>,
-    type_text: Option<&str>,
+/// Extract slot binding fields and a display return-type from a slot prop's
+/// typed function form `(props: T) => R`.
+///
+/// The caller supplies the slot prop's `type_expr` (lowered once during
+/// shallow analysis); the walker reads typed IR only — no source slicing,
+/// no `parse_type_annotation`, no hand-rolled type-text splitters.
+///
+/// Walks the typed form:
+/// - Iteratively unwraps `TypeExpr::Parenthesized` (bounded).
+/// - For `TypeExpr::Function`, pulls the first parameter's `ty` and the
+///   `return_type`.
+/// - The first-param `ty` is walked to produce bindings:
+///   * `TypeExpr::Object` — one binding per `ObjectMember::Property` with
+///     `binding_expr` set to the property's typed value.
+///   * `TypeExpr::Ref { name: "Pick", type_arguments: [obj, keys] }` —
+///     one binding per key, with
+///     `binding_expr = IndexedAccess { object: obj, index: key }`. Mirrors
+///     the analyzer-side Pick walker contract. The displayed
+///     `type_annotation` is the symbolic `Object[Key]` form so downstream
+///     consumers can still see the requested member path.
+///   * Anything else — no bindings emitted.
+/// - The return-type display string is rendered from the typed return-type
+///   via the inline `render_type_expr_display` helper (display-only).
+///
+/// Non-function shapes (e.g. plain object literals used as helper members)
+/// return `(Vec::new(), None)`. The caller's `resolved_as_slot` flag still
+/// decides whether to emit a slot at all.
+///
+/// The produced `AnalyzedSlotFieldBinding.binding_expr_scope` is `None` — the
+/// walker does not know the slot prop's scope; the caller stamps the scope
+/// from the slot prop's own `type_expr_scope` post-walk.
+pub fn slot_info_from_type_expr(
+    expr: &TypeExpr,
 ) -> (Vec<AnalyzedSlotFieldBinding>, Option<String>) {
-    let Some(text) = type_text else {
+    let Some(function) = unwrap_function_type(expr) else {
         return (Vec::new(), None);
     };
 
-    // Parse the slot signature once via OXC and walk the AST. The signature
-    // shape we accept is `(props: T) => R` where T may be a `TSTypeLiteral`
-    // (`{ row: MyItem }`) or a `TSTypeReference` (`Pick<X, K>` / a userland
-    // alias). Bindings are recovered from T directly via the analyzer-side
-    // typed walker (`extract_slot_bindings_from_pick_ast`) plus the synthetic
-    // declaration fallback for non-Pick shapes.
-    let wrapper = format!("type __SlotSig = {text};");
-    let alloc_for_parse = Allocator::new();
-    let parser = oxc_parser::Parser::new(&alloc_for_parse, &wrapper, oxc_span::SourceType::ts());
-    let parsed = parser.parse();
+    let return_type = function
+        .return_type
+        .as_ref()
+        .and_then(|rt| render_type_expr_display(rt));
 
-    let mut signature_ast: Option<&oxc_ast::ast::TSType<'_>> = None;
-    for stmt in &parsed.program.body {
-        if let oxc_ast::ast::Statement::TSTypeAliasDeclaration(alias) = stmt {
-            signature_ast = Some(&alias.type_annotation);
-            break;
-        }
-    }
-
-    let mut return_type: Option<String> = None;
-    let mut binding_param_ast: Option<&oxc_ast::ast::TSType<'_>> = None;
-
-    if let Some(oxc_ast::ast::TSType::TSFunctionType(fn_type)) = signature_ast {
-        // Recover the return-type display from the wrapper source span.
-        let rt_span = fn_type.return_type.type_annotation.span();
-        let rt_start = rt_span.start as usize;
-        let rt_end = rt_span.end as usize;
-        if rt_end <= wrapper.len() {
-            let rt_text = wrapper[rt_start..rt_end].trim();
-            if !rt_text.is_empty() {
-                return_type = Some(rt_text.to_string());
-            }
-        }
-        // First-parameter type annotation drives binding extraction.
-        if let Some(first_param) = fn_type.params.items.first() {
-            if let Some(ta) = first_param.type_annotation.as_ref() {
-                binding_param_ast = Some(&ta.type_annotation);
-            }
-        }
-    }
-
-    let Some(binding_ts) = binding_param_ast else {
+    let Some(first_param) = function.parameters.first() else {
         return (Vec::new(), return_type);
     };
 
-    // Walk `Pick<Object, Keys>` directly — emit `IndexedAccess { object, index }`
-    // for each binding. Falls through to the synthetic-declaration path for
-    // non-Pick shapes (typeRefs, type literals, etc.).
-    let pick_bindings = extract_slot_bindings_from_pick_ast_text(binding_ts, &wrapper);
-    if !pick_bindings.is_empty() {
-        return (pick_bindings, return_type);
-    }
-
-    // Fallback: produce a synthetic interface containing the binding type and
-    // resolve via the existing parser path. The original source (when
-    // available) is concatenated so the synthetic declaration can reference
-    // local types.
-    let binding_span = binding_ts.span();
-    let binding_text = wrapper[binding_span.start as usize..binding_span.end as usize].trim();
-    let binding_declaration = if binding_text.starts_with('{') {
-        format!("export interface _Bindings {binding_text}")
-    } else {
-        format!("export type _Bindings = {binding_text}")
-    };
-    let synthetic = source
-        .filter(|source| !source.trim().is_empty())
-        .map(|source| format!("{source}\n{binding_declaration}"))
-        .unwrap_or(binding_declaration);
-
-    let alloc = Allocator::new();
-    let Some(resolved) = resolve_external_type("_Bindings", &synthetic, &alloc) else {
-        return (Vec::new(), return_type);
-    };
-
-    let bindings = resolved
-        .props
-        .iter()
-        .filter_map(|prop| {
-            let name = prop.key_name.as_ref()?.clone();
-            let type_annotation = if binding_text.starts_with('{') {
-                prop.type_text.clone()
-            } else {
-                Some(format!("{binding_text}['{name}']"))
-            };
-            Some(AnalyzedSlotFieldBinding {
-                name,
-                type_annotation,
-                span: verter_span::Span::default(),
-                binding_expr: None,
-                binding_expr_scope: None,
-            })
-        })
-        .collect();
-
+    let bindings = bindings_from_first_param_ty(&first_param.ty);
     (bindings, return_type)
 }
 
-/// Recover slot bindings from an AST `Pick<Object, Keys>` type reference.
-///
-/// Mirrors the analyzer-side walker in
-/// `verter_semantic::analysis::macros::extract_slot_bindings_from_pick_ast`.
-/// Walks the OXC `TSType` directly — no source slicing for semantic decisions.
-/// For each key in `args[1]`:
-/// - String-literal keys emit
-///   `binding_expr = TypeExpr::IndexedAccess { object: lower(args[0]), index: Literal(String(k)) }`.
-/// - Userland alias keys (TSTypeReference) emit
-///   `binding_expr = TypeExpr::IndexedAccess { object: lower(args[0]), index: Ref { name: "K" } }`.
-///   Alias resolution is NOT analyzer scope — the projector / cross-file
-///   resolver walks the `Ref` lazily.
-fn extract_slot_bindings_from_pick_ast_text(
-    ts_type: &oxc_ast::ast::TSType<'_>,
-    source: &str,
+/// Iteratively unwrap `TypeExpr::Parenthesized` and return the underlying
+/// `FunctionExpr` if present. Bounded by `MAX_PAREN_UNWRAP` to satisfy the
+/// resolver-core no-unbounded-recursion guard.
+fn unwrap_function_type(expr: &TypeExpr) -> Option<&FunctionExpr> {
+    const MAX_PAREN_UNWRAP: usize = 32;
+    let mut current = expr;
+    for _ in 0..MAX_PAREN_UNWRAP {
+        match current {
+            TypeExpr::Function(function) => return Some(function.as_ref()),
+            TypeExpr::Parenthesized(inner) => current = inner.as_ref(),
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// Walk the first-parameter `ty` of a slot's function type and emit one
+/// `AnalyzedSlotFieldBinding` per binding key. See `slot_info_from_type_expr`
+/// for the contract.
+fn bindings_from_first_param_ty(ty: &TypeExpr) -> Vec<AnalyzedSlotFieldBinding> {
+    const MAX_PAREN_UNWRAP: usize = 32;
+    let mut current = ty;
+    for _ in 0..MAX_PAREN_UNWRAP {
+        match current {
+            TypeExpr::Object(object) => {
+                return bindings_from_object_expr(object.as_ref());
+            }
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } if name.as_ref() == "Pick" && type_arguments.len() == 2 => {
+                return bindings_from_pick_args(&type_arguments[0], &type_arguments[1]);
+            }
+            TypeExpr::Parenthesized(inner) => current = inner.as_ref(),
+            _ => return Vec::new(),
+        }
+    }
+    Vec::new()
+}
+
+/// Emit one binding per `ObjectMember::Property` in `object`. Each binding's
+/// `binding_expr` is the property's typed value. `type_annotation` renders the
+/// typed value to a display string.
+fn bindings_from_object_expr(object: &ObjectExpr) -> Vec<AnalyzedSlotFieldBinding> {
+    object
+        .properties
+        .iter()
+        .filter_map(|member| match member {
+            ObjectMember::Property(property) => {
+                let display = render_type_expr_display(&property.ty);
+                Some(AnalyzedSlotFieldBinding {
+                    name: property.name.clone(),
+                    type_annotation: display,
+                    span: verter_span::Span::default(),
+                    binding_expr: Some(property.ty.clone()),
+                    // Scope is filled in by the caller from the slot prop's
+                    // own `type_expr_scope` — the walker does not know it.
+                    binding_expr_scope: None,
+                })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Emit one binding per key in a `Pick<Object, Keys>` reference. The
+/// `binding_expr` for each binding is
+/// `TypeExpr::IndexedAccess { object, index }` so consumers can navigate
+/// against the resolved `Object` without re-deriving the slot membership.
+/// The displayed `type_annotation` is the symbolic `Object[Key]` form (e.g.
+/// `CalendarCellTriggerProps['day']`).
+fn bindings_from_pick_args(
+    object_ty: &TypeExpr,
+    keys_ty: &TypeExpr,
 ) -> Vec<AnalyzedSlotFieldBinding> {
-    use oxc_ast::ast::{TSLiteral, TSType, TSTypeName};
-
-    let TSType::TSTypeReference(type_ref) = ts_type else {
-        return Vec::new();
-    };
-    let is_pick = matches!(
-        &type_ref.type_name,
-        TSTypeName::IdentifierReference(id) if id.name == "Pick"
-    );
-    if !is_pick {
-        return Vec::new();
-    }
-    let Some(type_args) = type_ref.type_arguments.as_ref() else {
-        return Vec::new();
-    };
-    if type_args.params.len() != 2 {
-        return Vec::new();
-    }
-    let object_ts = &type_args.params[0];
-    let keys_ts = &type_args.params[1];
-
-    let object_expr = std::sync::Arc::new(verter_type_expr_oxc::lower_ts_type(object_ts, source));
-    let object_text = {
-        let span = object_ts.span();
-        let st = span.start as usize;
-        let en = span.end as usize;
-        if en <= source.len() {
-            source[st..en].trim().to_string()
-        } else {
-            String::new()
-        }
-    };
-
-    let mut bindings = Vec::new();
-    let push_for_key =
-        |key_ts: &TSType<'_>, bindings: &mut Vec<AnalyzedSlotFieldBinding>| match key_ts {
-            TSType::TSLiteralType(lit) => {
-                if let TSLiteral::StringLiteral(s) = &lit.literal {
-                    let key_name = s.value.to_string();
-                    let key_text = {
-                        let span = lit.span();
-                        let st = span.start as usize;
-                        let en = span.end as usize;
-                        if en <= source.len() {
-                            source[st..en].trim().to_string()
-                        } else {
-                            format!("\"{key_name}\"")
-                        }
-                    };
-                    let display =
-                        (!object_text.is_empty()).then(|| format!("{object_text}[{key_text}]"));
-                    let index_expr =
-                        TypeExpr::Literal(verter_type_expr::LiteralValue::String(key_name.clone()));
-                    let binding_expr = Some(TypeExpr::IndexedAccess {
-                        object: object_expr.clone(),
-                        index: std::sync::Arc::new(index_expr),
-                    });
-                    let binding_expr_scope = binding_expr.as_ref().map(|_| TypeExprScope::new(""));
-                    bindings.push(AnalyzedSlotFieldBinding {
-                        name: key_name,
-                        type_annotation: display,
-                        span: verter_span::Span::default(),
-                        binding_expr,
-                        binding_expr_scope,
-                    });
-                }
+    let object_arc = std::sync::Arc::new(object_ty.clone());
+    let object_display = render_type_expr_display(object_ty);
+    let mut bindings: Vec<AnalyzedSlotFieldBinding> = Vec::new();
+    let mut push_for_key = |key_expr: &TypeExpr| {
+        let (binding_name, key_display) = match key_expr {
+            TypeExpr::Literal(verter_type_expr::LiteralValue::String(value)) => {
+                (value.clone(), format!("'{value}'"))
             }
-            TSType::TSTypeReference(key_ref) => {
-                let alias_name = match &key_ref.type_name {
-                    TSTypeName::IdentifierReference(id) => Some(id.name.to_string()),
-                    _ => None,
-                };
-                if let Some(alias_name) = alias_name {
-                    let key_text = {
-                        let span = key_ts.span();
-                        let st = span.start as usize;
-                        let en = span.end as usize;
-                        if en <= source.len() {
-                            source[st..en].trim().to_string()
-                        } else {
-                            alias_name.clone()
-                        }
-                    };
-                    let display =
-                        (!object_text.is_empty()).then(|| format!("{object_text}[{key_text}]"));
-                    let index_expr = verter_type_expr_oxc::lower_ts_type(key_ts, source);
-                    let binding_expr = Some(TypeExpr::IndexedAccess {
-                        object: object_expr.clone(),
-                        index: std::sync::Arc::new(index_expr),
-                    });
-                    let binding_expr_scope = binding_expr.as_ref().map(|_| TypeExprScope::new(""));
-                    bindings.push(AnalyzedSlotFieldBinding {
-                        name: alias_name,
-                        type_annotation: display,
-                        span: verter_span::Span::default(),
-                        binding_expr,
-                        binding_expr_scope,
-                    });
-                }
-            }
-            _ => {}
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } if type_arguments.is_empty() => (name.to_string(), name.to_string()),
+            _ => return,
         };
+        let display = object_display
+            .as_ref()
+            .map(|obj| format!("{obj}[{key_display}]"));
+        let index_arc = std::sync::Arc::new(key_expr.clone());
+        let binding_expr = TypeExpr::IndexedAccess {
+            object: object_arc.clone(),
+            index: index_arc,
+        };
+        bindings.push(AnalyzedSlotFieldBinding {
+            name: binding_name,
+            type_annotation: display,
+            span: verter_span::Span::default(),
+            binding_expr: Some(binding_expr),
+            binding_expr_scope: None,
+        });
+    };
 
-    match keys_ts {
-        TSType::TSUnionType(union) => {
-            for arm in &union.types {
-                push_for_key(arm, &mut bindings);
+    match keys_ty {
+        TypeExpr::Union(arms) => {
+            for arm in arms.iter() {
+                push_for_key(arm);
             }
         }
-        single => push_for_key(single, &mut bindings),
+        single => push_for_key(single),
     }
-
     bindings
+}
+
+/// Render a `TypeExpr` to a display string for `AnalyzedSlotFieldBinding`
+/// and `AnalyzedSlotField.return_type`. Display-only; semantic decisions
+/// must read the typed form. Returns `None` for shapes the renderer cannot
+/// surface as a single inline display fragment.
+///
+/// Bounded by `MAX_DISPLAY_DEPTH` to satisfy the resolver-core
+/// no-unbounded-recursion guard. The `depth_budget` decrements on each
+/// nested call; when it hits zero the renderer returns `None` (the caller
+/// surfaces `type_annotation: None`, and the typed `binding_expr` /
+/// `return_expr` remains authoritative).
+fn render_type_expr_display(expr: &TypeExpr) -> Option<String> {
+    const MAX_DISPLAY_DEPTH: usize = 64;
+    render_type_expr_display_inner(expr, MAX_DISPLAY_DEPTH)
+}
+
+fn render_type_expr_display_inner(expr: &TypeExpr, depth_budget: usize) -> Option<String> {
+    use verter_type_expr::{LiteralValue, PrimitiveName};
+
+    if depth_budget == 0 {
+        return None;
+    }
+    let next = depth_budget - 1;
+
+    match expr {
+        TypeExpr::Primitive(name) => Some(match name {
+            PrimitiveName::String => "string".to_string(),
+            PrimitiveName::Number => "number".to_string(),
+            PrimitiveName::Boolean => "boolean".to_string(),
+            PrimitiveName::BigInt => "bigint".to_string(),
+            PrimitiveName::Symbol => "symbol".to_string(),
+            PrimitiveName::Null => "null".to_string(),
+            PrimitiveName::Undefined => "undefined".to_string(),
+            PrimitiveName::Void => "void".to_string(),
+            PrimitiveName::Any => "any".to_string(),
+            PrimitiveName::Unknown => "unknown".to_string(),
+            PrimitiveName::Never => "never".to_string(),
+            PrimitiveName::Object => "object".to_string(),
+        }),
+        // TS convention: string literals render with single quotes
+        // (matching `'foo'` in indexed accesses like `Foo['bar']`). The
+        // inner content is left as-is (the parser preserves the literal
+        // content; embedded single quotes are not escaped because the
+        // source TS would have used double quotes in that case).
+        TypeExpr::Literal(LiteralValue::String(value)) => Some(format!("'{value}'")),
+        TypeExpr::Literal(LiteralValue::Number(value)) => Some(value.to_string()),
+        TypeExpr::Literal(LiteralValue::Boolean(value)) => Some(value.to_string()),
+        TypeExpr::Literal(LiteralValue::BigInt(value)) => Some(value.clone()),
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => {
+            if type_arguments.is_empty() {
+                Some(name.to_string())
+            } else {
+                let args: Option<Vec<String>> = type_arguments
+                    .iter()
+                    .map(|ty| render_type_expr_display_inner(ty, next))
+                    .collect();
+                Some(format!("{}<{}>", name, args?.join(", ")))
+            }
+        }
+        TypeExpr::Union(types) => {
+            let parts: Option<Vec<String>> = types
+                .iter()
+                .map(|ty| render_type_expr_display_inner(ty, next))
+                .collect();
+            Some(parts?.join(" | "))
+        }
+        TypeExpr::Intersection(types) => {
+            let parts: Option<Vec<String>> = types
+                .iter()
+                .map(|ty| render_type_expr_display_inner(ty, next))
+                .collect();
+            Some(parts?.join(" & "))
+        }
+        TypeExpr::Array { element, readonly } => {
+            let rendered = render_type_expr_display_inner(element, next)?;
+            Some(if *readonly {
+                format!("readonly {rendered}[]")
+            } else {
+                format!("{rendered}[]")
+            })
+        }
+        TypeExpr::Tuple { elements, readonly } => {
+            let parts: Option<Vec<String>> = elements
+                .iter()
+                .map(|element| {
+                    let mut rendered = String::new();
+                    if let Some(label) = &element.label {
+                        rendered.push_str(label);
+                        if element.optional {
+                            rendered.push('?');
+                        }
+                        rendered.push_str(": ");
+                    }
+                    if element.rest {
+                        rendered.push_str("...");
+                    }
+                    rendered.push_str(&render_type_expr_display_inner(&element.ty, next)?);
+                    Some(rendered)
+                })
+                .collect();
+            let joined = parts?.join(", ");
+            Some(if *readonly {
+                format!("readonly [{joined}]")
+            } else {
+                format!("[{joined}]")
+            })
+        }
+        TypeExpr::IndexedAccess { object, index } => {
+            let obj = render_type_expr_display_inner(object, next)?;
+            let idx = render_type_expr_display_inner(index, next)?;
+            Some(format!("{obj}[{idx}]"))
+        }
+        TypeExpr::Parenthesized(inner) => Some(format!(
+            "({})",
+            render_type_expr_display_inner(inner, next)?
+        )),
+        _ => None,
+    }
 }
 
 fn collect_native_props(elements: &ResolvedElements) -> Vec<ResolvedNativeProp> {

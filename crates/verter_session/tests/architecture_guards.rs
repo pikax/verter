@@ -1413,6 +1413,17 @@ mod resolver_core_recursion {
             "follow_routed_expr",
             "Phase 5l-supplement: bounded by TypeExpr AST depth.",
         ),
+        // -----------------------------------------------------------------
+        // surface_projector.rs — typed-IR display walker used by the slot
+        // info pipeline (W3.2 cutover). Bounded by an explicit
+        // `MAX_DISPLAY_DEPTH = 64` depth budget threaded through every
+        // recursive call site.
+        // -----------------------------------------------------------------
+        (
+            "surface_projector",
+            "render_type_expr_display_inner",
+            "Bounded by explicit `MAX_DISPLAY_DEPTH = 64` depth budget.",
+        ),
     ];
 
     /// Mark a name `host_with_ws` as a known test-helper collision —
