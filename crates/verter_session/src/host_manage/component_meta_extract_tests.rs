@@ -369,3 +369,74 @@ defineProps<Helper>()
         "the two Helper identities MUST NOT collide — naive (String, usize) keying would have collapsed them"
     );
 }
+
+/// W2.3b discriminating regression — `build_public_instance_slot_type`
+/// MUST consume `SlotAnalysis.return_expr` (typed) and ignore
+/// `SlotAnalysis.return_type` (display-only) for semantic decisions.
+///
+/// Pre-W2.3b the function called `parse_annotation_or_unknown_for_public_instance(raw)`
+/// on `slot.return_type` — a forbidden text-reparse per the Typed-IR-only
+/// resolver rule. The discriminator: construct a slot whose typed
+/// `return_expr` is `Primitive(Boolean)` while the display `return_type`
+/// string lowers to a different type (`"VNode[]"` -> `Array<Ref { name: "VNode" }>`).
+///
+/// On pre-W2.3b code, the consumer reparses `"VNode[]"` and surfaces an
+/// `Array<Ref { name: "VNode" }>` in the public-instance slot signature,
+/// so the assertion that the return type equals `Primitive(Boolean)`
+/// FAILS. On post-W2.3b code, the consumer reads `return_expr` directly
+/// and the assertion PASSES. The two trees give observably different
+/// answers — the test is discriminating.
+#[test]
+fn build_public_instance_slot_type_consumes_return_expr_not_return_type() {
+    use verter_semantic::analysis::component_meta::SlotAnalysis;
+    use verter_type_expr::{FunctionExpr, PrimitiveName, TypeExpr, TypeExprScope};
+
+    // The typed companion: an unambiguous, non-`unknown` primitive that
+    // CANNOT be derived from reparsing the display string below.
+    let typed_return = TypeExpr::Primitive(PrimitiveName::Boolean);
+
+    // The display string lowers to `Array<Ref { name: "VNode" }>` — a
+    // different shape from the typed primitive above. Pre-W2.3b the
+    // consumer reparses this and silently overrides `return_expr`.
+    let display_return_type = "VNode[]".to_string();
+
+    let slot = SlotAnalysis {
+        name: "default".to_string(),
+        is_scoped: false,
+        bindings: Vec::new(),
+        is_required: true,
+        return_type: Some(display_return_type),
+        return_expr: Some(typed_return.clone()),
+        return_expr_scope: Some(TypeExprScope::new("test:fixture")),
+        description: None,
+        tags: Vec::new(),
+    };
+
+    let built = super::build_public_instance_slot_type_for_test(&slot);
+
+    let TypeExpr::Function(func) = &built else {
+        panic!(
+            "expected a Function TypeExpr at the slot public-instance surface; got {:?}",
+            built
+        );
+    };
+
+    let FunctionExpr { return_type, .. } = func.as_ref();
+    let return_type = return_type
+        .as_deref()
+        .expect("required slot lowers to a function with a return type");
+
+    assert_eq!(
+        *return_type, typed_return,
+        "build_public_instance_slot_type MUST read `slot.return_expr`          directly. If this assertion fails on the post-W2.3b tree, the          consumer has regressed to reparsing `slot.return_type`."
+    );
+
+    // Negative: the built return type MUST NOT be the lowered form of
+    // the display string. This guards against a parse_type_annotation
+    // fallback re-entering the consumer.
+    let lowered_from_display = verter_type_expr_oxc::parse_type_annotation("VNode[]");
+    assert_ne!(
+        *return_type, lowered_from_display,
+        "build_public_instance_slot_type MUST NOT reparse `slot.return_type`          when `slot.return_expr` is present."
+    );
+}

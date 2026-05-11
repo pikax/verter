@@ -1046,17 +1046,6 @@ fn try_project_jsdoc_descriptions(
     true
 }
 
-fn parse_annotation_or_unknown_for_public_instance(raw: &str) -> verter_type_expr::TypeExpr {
-    let parsed = verter_type_expr_oxc::parse_type_annotation(raw);
-    if parsed.is_unknown() {
-        verter_type_expr::TypeExpr::Unknown {
-            raw: raw.to_string(),
-        }
-    } else {
-        parsed
-    }
-}
-
 fn build_public_instance_slot_type(
     slot: &verter_semantic::analysis::component_meta::SlotAnalysis,
 ) -> verter_type_expr::TypeExpr {
@@ -1075,10 +1064,11 @@ fn build_public_instance_slot_type(
                 })
                 .collect(),
         }));
+    // Typed-IR-only: read the analyzer-populated `return_expr` directly.
+    // `return_type` is display-only after W2.3b; we never reparse it.
     let return_type = slot
-        .return_type
-        .as_deref()
-        .map(parse_annotation_or_unknown_for_public_instance)
+        .return_expr
+        .clone()
         .unwrap_or(verter_type_expr::TypeExpr::Primitive(
             verter_type_expr::PrimitiveName::Unknown,
         ));
@@ -1486,6 +1476,19 @@ pub(in crate::host_manage) fn collect_imported_macro_participating_refs_for_test
     usize,
 )> {
     collect_imported_macro_participating_refs(host, owner_canonical, expr, participating)
+}
+
+/// Test-only entry point that exercises `build_public_instance_slot_type`
+/// for the W2.3b discriminating test that pins the contract: the
+/// `return_expr` typed companion wins over the `return_type` display
+/// string. Pre-W2.3b, the deleted `parse_annotation_or_unknown_for_public_instance`
+/// helper reparsed `return_type` and silently overrode any typed value
+/// derived from `return_expr`.
+#[cfg(test)]
+pub(in crate::host_manage) fn build_public_instance_slot_type_for_test(
+    slot: &verter_semantic::analysis::component_meta::SlotAnalysis,
+) -> verter_type_expr::TypeExpr {
+    build_public_instance_slot_type(slot)
 }
 
 #[cfg(test)]

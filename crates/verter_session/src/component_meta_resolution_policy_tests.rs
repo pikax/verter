@@ -505,6 +505,8 @@ fn w2_4_slot_binding_preserve_typed_indexed_access_via_imported_root() {
         }],
         is_required: false,
         return_type: None,
+        return_expr: None,
+        return_expr_scope: None,
         description: None,
         tags: vec![],
     });

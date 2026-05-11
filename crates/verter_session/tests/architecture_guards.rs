@@ -8348,18 +8348,11 @@ mod typed_ir_resolver_guards {
     // The W5.2 unit MUST update the pattern string here when it
     // renames the function.
     // -----------------------------------------------------------------------
-    const PARSE_TYPE_ANNOTATION_ALLOWLIST: &[(&str, u32, &str)] = &[
-        (
-            "crates/verter_session/src/host_manage/component_meta_extract.rs",
-            1050,
-            "parse_type_annotation",
-        ),
-        (
-            "crates/verter_type_expr_oxc/src/lib.rs",
-            850,
-            "parse_type_annotation",
-        ),
-    ];
+    const PARSE_TYPE_ANNOTATION_ALLOWLIST: &[(&str, u32, &str)] = &[(
+        "crates/verter_type_expr_oxc/src/lib.rs",
+        850,
+        "parse_type_annotation",
+    )];
 
     fn scan_parse_type_annotation() -> Vec<(String, u32, String)> {
         let files = collect_production_rs_files();

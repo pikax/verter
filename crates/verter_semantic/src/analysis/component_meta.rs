@@ -16,7 +16,7 @@ use crate::analysis::types::{
     AnalyzedMacroKind, AnalyzedOptionsApi, AnalyzedPropField, AnalyzedSlotField, ImportBindingKind,
     JsdocTag, StoreUsage, VueApiCallSite,
 };
-use verter_type_expr::{PrimitiveName, TypeExpr};
+use verter_type_expr::{PrimitiveName, TypeExpr, TypeExprScope};
 
 /// Convenience: build `TypeExpr::Unknown { raw }` from a string.
 fn unknown_type(raw: impl Into<String>) -> TypeExpr {
@@ -185,6 +185,15 @@ pub struct SlotAnalysis {
     pub bindings: Vec<SlotBindingAnalysis>,
     pub is_required: bool,
     pub return_type: Option<String>,
+    /// Lowered typed form of the slot return type. Propagated from
+    /// [`AnalyzedSlotField::return_expr`] (analyzer-populated). Authoritative
+    /// for resolver / projector / registry / policy / materialiser /
+    /// public-instance consumers — `return_type` is display-only.
+    pub return_expr: Option<TypeExpr>,
+    /// Scope of `return_expr`: canonical_id of the file whose OXC parse
+    /// produced the typed expression. Pairing invariant:
+    /// `return_expr.is_some() <=> return_expr_scope.is_some()`.
+    pub return_expr_scope: Option<TypeExprScope>,
     pub description: Option<String>,
     pub tags: Vec<JsdocTag>,
 }
@@ -2403,12 +2412,20 @@ fn extract_slots_from_macro(
             };
             let mut slot = remaining.remove(slot_index);
             slot.bindings = merge_slot_bindings_with_source(field, slot.bindings);
+            let return_expr = field.return_expr.clone();
+            let return_expr_scope = field.return_expr_scope.clone();
+            debug_assert!(
+                return_expr.is_some() == return_expr_scope.is_some(),
+                "SlotAnalysis pairing invariant: return_expr.is_some() == return_expr_scope.is_some()"
+            );
             out.push(SlotAnalysis {
                 name: slot.name,
                 is_scoped: !slot.bindings.is_empty(),
                 bindings: slot.bindings,
                 is_required: slot.is_required,
                 return_type: field.return_type.clone(),
+                return_expr,
+                return_expr_scope,
                 description: field.description.clone(),
                 tags: field.tags.clone(),
             });
@@ -2416,12 +2433,20 @@ fn extract_slots_from_macro(
 
         for slot in remaining {
             let source_field = slot_fields.iter().find(|field| field.name == slot.name);
+            let return_expr = source_field.and_then(|field| field.return_expr.clone());
+            let return_expr_scope = source_field.and_then(|field| field.return_expr_scope.clone());
+            debug_assert!(
+                return_expr.is_some() == return_expr_scope.is_some(),
+                "SlotAnalysis pairing invariant: return_expr.is_some() == return_expr_scope.is_some()"
+            );
             out.push(SlotAnalysis {
                 name: slot.name,
                 is_scoped: !slot.bindings.is_empty(),
                 bindings: slot.bindings,
                 is_required: slot.is_required,
                 return_type: source_field.and_then(|field| field.return_type.clone()),
+                return_expr,
+                return_expr_scope,
                 description: source_field.and_then(|field| field.description.clone()),
                 tags: source_field
                     .map(|field| field.tags.clone())
@@ -2490,12 +2515,20 @@ fn extract_slots_from_macro(
             })
             .collect();
 
+        let return_expr = field.return_expr.clone();
+        let return_expr_scope = field.return_expr_scope.clone();
+        debug_assert!(
+            return_expr.is_some() == return_expr_scope.is_some(),
+            "SlotAnalysis pairing invariant: return_expr.is_some() == return_expr_scope.is_some()"
+        );
         out.push(SlotAnalysis {
             name: field.name.clone(),
             is_scoped: !field.bindings.is_empty(),
             bindings,
             is_required: field.is_required,
             return_type: field.return_type.clone(),
+            return_expr,
+            return_expr_scope,
             description: field.description.clone(),
             tags: field.tags.clone(),
         });
@@ -2907,12 +2940,16 @@ fn merge_template_slots(
 ) {
     for tslot in template_slots {
         if !out.iter().any(|s| s.name == tslot.name) {
+            // Template-discovered slots have no AnalyzedSlotField source —
+            // pair is (None, None) per the pairing invariant.
             out.push(SlotAnalysis {
                 name: tslot.name.clone(),
                 is_scoped: tslot.has_bindings,
                 bindings: Vec::new(),
                 is_required: false,
                 return_type: None,
+                return_expr: None,
+                return_expr_scope: None,
                 description: None,
                 tags: Vec::new(),
             });
