@@ -308,7 +308,7 @@ pub fn project_macro_surfaces_with_owner(
 /// Iterative parenthesis unwrap: `((...((T) => R)))` resolves to `Some(R)`
 /// without recursion. Bounded by `MAX_PAREN_UNWRAP` to satisfy the
 /// resolver-core no-unbounded-recursion guard.
-fn slot_return_expr_from_function_type(prop_type: &TypeExpr) -> Option<TypeExpr> {
+pub(crate) fn slot_return_expr_from_function_type(prop_type: &TypeExpr) -> Option<TypeExpr> {
     const MAX_PAREN_UNWRAP: usize = 32;
     let mut current = prop_type;
     for _ in 0..MAX_PAREN_UNWRAP {

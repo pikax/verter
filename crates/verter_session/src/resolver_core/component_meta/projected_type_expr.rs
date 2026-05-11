@@ -199,7 +199,7 @@ pub(crate) fn project_macro_surfaces_from_expanded_shape(
             native_props: Vec::new(),
             props: Vec::new(),
             emits: Vec::new(),
-            slots: projected_slot_fields_from_shape(shape),
+            slots: projected_slot_fields_from_shape(shape, owner_scope.as_ref()),
             ..Default::default()
         },
         AnalyzedMacroKind::DefineExpose | AnalyzedMacroKind::DefineOptions => {
@@ -308,6 +308,7 @@ fn projected_emit_fields_from_shape(
 
 fn projected_slot_fields_from_shape(
     shape: &verter_semantic::analysis::type_expand::ExpandedObjectShape,
+    owner_scope: Option<&TypeExprScope>,
 ) -> Vec<verter_semantic::analysis::AnalyzedSlotField> {
     shape
         .properties
@@ -318,7 +319,25 @@ fn projected_slot_fields_from_shape(
             // slot's function signature.
             let (bindings, return_type) =
                 crate::resolver_core::surface_projector::slot_info_from_type_expr(&property.ty);
-            if bindings.is_empty() && return_type.is_none() {
+            // Populate `return_expr` (typed) from the function-type's typed
+            // return form. The shape's `property.ty` is the function-type
+            // produced by the upstream expander, so the return type is
+            // recoverable from it without reparsing the display string.
+            // Pairing invariant:
+            // `return_expr.is_some() <=> return_expr_scope.is_some()` —
+            // when `return_expr` populates, paint scope from the owner.
+            let return_expr =
+                crate::resolver_core::surface_projector::slot_return_expr_from_function_type(
+                    &property.ty,
+                );
+            let return_expr_scope = return_expr.as_ref().and(owner_scope.cloned());
+            debug_assert_eq!(
+                return_expr.is_some(),
+                return_expr_scope.is_some(),
+                "AnalyzedSlotField (expanded-shape) return_expr/return_expr_scope pairing violated for slot `{}`",
+                property.name,
+            );
+            if bindings.is_empty() && return_type.is_none() && return_expr.is_none() {
                 return None;
             }
             Some(verter_semantic::analysis::AnalyzedSlotField {
@@ -329,8 +348,8 @@ fn projected_slot_fields_from_shape(
                 return_type,
                 description: None,
                 tags: Vec::new(),
-                return_expr: None,
-                return_expr_scope: None,
+                return_expr,
+                return_expr_scope,
             })
         })
         .collect()
@@ -733,5 +752,105 @@ mod tests {
         );
 
         assert_eq!(result, aggregate);
+    }
+}
+
+#[cfg(test)]
+mod slot_return_expr_tests {
+    use super::*;
+    use std::sync::Arc;
+    use verter_semantic::analysis::type_expand::{ExpandedObjectShape, ExpandedProperty};
+    use verter_semantic::analysis::AnalyzedMacroKind;
+    use verter_type_expr::{FunctionExpr, PrimitiveName, TypeExpr};
+
+    /// Discriminating test for M3 — `projected_slot_fields_from_shape`
+    /// MUST populate `AnalyzedSlotField.return_expr` from the function
+    /// type's typed return form. Pre-M3 fix the field was hardcoded to
+    /// `None`, silently discarding the typed return form.
+    ///
+    /// The fixture constructs an `ExpandedObjectShape` whose slot
+    /// property has type `() => Element`. Post-M3 fix the projected
+    /// `AnalyzedSlotField.return_expr` is `Some(Ref { name: "Element", ... })`
+    /// AND `return_expr_scope` is populated with the owner canonical_id.
+    /// Pre-fix `return_expr` is `None` and the assertion FAILS.
+    #[test]
+    fn projected_slot_fields_populate_return_expr_from_typed_function() {
+        let return_ty = TypeExpr::Ref {
+            name: Arc::from("Element"),
+            type_arguments: Arc::from(Vec::new().as_slice()),
+        };
+        let func = TypeExpr::Function(Arc::new(FunctionExpr {
+            parameters: Vec::new(),
+            return_type: Some(Arc::new(return_ty.clone())),
+            type_parameters: Vec::new(),
+        }));
+
+        let shape = ExpandedObjectShape {
+            properties: vec![ExpandedProperty {
+                name: "default".to_string(),
+                ty: func,
+                optional: false,
+                readonly: false,
+            }],
+            index_signatures: Vec::new(),
+            call_signatures: Vec::new(),
+        };
+
+        let projected = project_macro_surfaces_from_expanded_shape(
+            AnalyzedMacroKind::DefineSlots,
+            &shape,
+            Some("/src/App.vue"),
+        );
+
+        assert_eq!(projected.slots.len(), 1);
+        let slot = &projected.slots[0];
+        assert_eq!(slot.name, "default");
+        assert_eq!(
+            slot.return_expr.as_ref(),
+            Some(&return_ty),
+            "return_expr must be the typed return form, NOT None — pre-M3 fix \
+             hardcoded None, silently discarding the typed return shape."
+        );
+        assert!(
+            slot.return_expr_scope.is_some(),
+            "return_expr_scope MUST be populated when return_expr is — pairing invariant"
+        );
+        assert_eq!(
+            slot.return_expr_scope.as_ref().map(|s| s.as_str()),
+            Some("/src/App.vue"),
+            "scope must reflect the owner canonical_id passed to the projector"
+        );
+    }
+
+    /// Verify that when the slot property is NOT a function type, the
+    /// projector correctly returns `return_expr: None` (the function-type
+    /// helper drops to None for non-function inputs), AND that the slot
+    /// is filtered out entirely if all three (bindings, return_type,
+    /// return_expr) are empty.
+    #[test]
+    fn projected_slot_fields_skip_non_function_properties() {
+        // A non-function property — `default: string` — has no slot
+        // signature to extract. The filter_map should drop it.
+        let shape = ExpandedObjectShape {
+            properties: vec![ExpandedProperty {
+                name: "default".to_string(),
+                ty: TypeExpr::Primitive(PrimitiveName::String),
+                optional: false,
+                readonly: false,
+            }],
+            index_signatures: Vec::new(),
+            call_signatures: Vec::new(),
+        };
+
+        let projected = project_macro_surfaces_from_expanded_shape(
+            AnalyzedMacroKind::DefineSlots,
+            &shape,
+            Some("/src/App.vue"),
+        );
+
+        assert!(
+            projected.slots.is_empty(),
+            "non-function slot property must be filtered out"
+        );
     }
 }
