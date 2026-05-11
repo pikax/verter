@@ -310,12 +310,24 @@ export function typeExprToDescriptor(
     case "array":
       return array(typeExprToDescriptor(expr.element, nativeRegistry, visiting, graphVisiting));
 
-    case "tuple":
-      return tuple(
-        expr.elements.map((e) =>
-          typeExprToDescriptor(e.ty, nativeRegistry, visiting, graphVisiting),
-        ),
+    case "tuple": {
+      const elements = expr.elements.map((e) =>
+        typeExprToDescriptor(e.ty, nativeRegistry, visiting, graphVisiting),
       );
+      // Preserve per-element labels. Producers emit `label: string | null`
+      // (Rust `TupleElement.label: Option<String>`); we mirror that across the
+      // bridge so renderers can produce `[label: type]` output instead of the
+      // pre-fix `[{ label: type }]` shape (which leaked the typed schema into
+      // user-visible display text).
+      const labels = expr.elements.map((e) => e.label ?? null);
+      const t = tuple(elements);
+      // Attach `labels` only when at least one position has a label — the
+      // schema rule is "absent labels === all anonymous".
+      if (labels.some((l) => l !== null)) {
+        return { ...t, labels };
+      }
+      return t;
+    }
 
     case "object": {
       const props = expr.properties
@@ -786,10 +798,16 @@ function substituteDescriptorTypeParameters(
       );
     case "array":
       return array(substituteDescriptorTypeParameters(descriptor.element, bindings));
-    case "tuple":
-      return tuple(
+    case "tuple": {
+      const t = tuple(
         descriptor.elements.map((element) => substituteDescriptorTypeParameters(element, bindings)),
       );
+      // Preserve labels through type-parameter substitution.
+      if (descriptor.labels) {
+        return { ...t, labels: descriptor.labels };
+      }
+      return t;
+    }
     case "object":
       return object(
         descriptor.properties.map((property) => ({
@@ -1964,17 +1982,24 @@ function graphNodeToDescriptor(
           graphVisiting,
         ),
       );
-    case NODE_TUPLE:
-      return tuple(
-        node.elements.map((element) =>
-          typeExprToDescriptor(
-            createGraphTypeExprRef(expr.graph, element.typeNodeId),
-            nativeRegistry,
-            visiting,
-            graphVisiting,
-          ),
+    case NODE_TUPLE: {
+      const els = node.elements.map((element) =>
+        typeExprToDescriptor(
+          createGraphTypeExprRef(expr.graph, element.typeNodeId),
+          nativeRegistry,
+          visiting,
+          graphVisiting,
         ),
       );
+      const labels = node.elements.map((element) =>
+        element.labelId ? expr.graph.getString(element.labelId) : null,
+      );
+      const t = tuple(els);
+      if (labels.some((l) => l !== null)) {
+        return { ...t, labels };
+      }
+      return t;
+    }
     case NODE_OBJECT: {
       const props = node.members
         .filter((member) => member.kind === MEMBER_PROPERTY || member.kind === MEMBER_METHOD)

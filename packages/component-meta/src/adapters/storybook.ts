@@ -155,8 +155,14 @@ function typeToSummary(type: TypeDescriptor): string {
       return type.types.map(typeToSummary).join(" & ");
     case "array":
       return `${typeToSummary(type.element)}[]`;
-    case "tuple":
-      return `[${type.elements.map(typeToSummary).join(", ")}]`;
+    case "tuple": {
+      const rendered = type.elements.map((entry, i) => {
+        const text = typeToSummary(entry);
+        const label = type.labels?.[i] ?? null;
+        return label ? `${label}: ${text}` : text;
+      });
+      return `[${rendered.join(", ")}]`;
+    }
     case "object":
       return "object";
     case "function":

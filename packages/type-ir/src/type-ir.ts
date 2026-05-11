@@ -56,6 +56,20 @@ export interface ArrayType {
 export interface TupleType {
   kind: "tuple";
   elements: TypeDescriptor[];
+  /**
+   * Per-element labels for labelled tuple types. Length aligns with `elements`
+   * (so `labels[i]` is the label for `elements[i]`). A `null` entry means the
+   * element at that position is anonymous in the source. When `labels` is
+   * absent, the entire tuple is anonymous (equivalent to all-`null`).
+   *
+   * Example: TS `[id: number, name?: string]` lowers to
+   * `{ kind: "tuple", elements: [number, string], labels: ["id", "name"] }`.
+   *
+   * Renderers walk `labels` to produce labelled output `[id: number, name?: string]`
+   * rather than `[{ label: "id"; }, { label?: "name"; }]` (the previous bug)
+   * or the anonymous `[number, string]` (the pre-cutover lossy form).
+   */
+  labels?: (string | null)[];
 }
 
 // ── Object ───────────────────────────────────────────────────────

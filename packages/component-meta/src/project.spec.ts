@@ -393,6 +393,7 @@ describe("ComponentMetaSession public API", () => {
                 readonly: false,
                 elements: [
                   {
+                    label: "item",
                     ty: { kind: "ref", name: "Item", typeArguments: [] },
                     optional: false,
                     rest: false,
@@ -472,7 +473,12 @@ describe("ComponentMetaSession public API", () => {
     // Emit payload tuple display is derived structurally from `event.payload`
     // (TypeDescriptor). The descriptor's tuple element is the registry-resolved
     // `Item` body. The schema (already structural) is unaffected.
-    expect(meta.events[0]?.type).toBe("[{ label: string; }]");
+    //
+    // Post-M6 fix: tuple labels are preserved through the bridge and the
+    // compat renderer prints `[label: type]` instead of the pre-fix lossy
+    // `[{ label: string; }]` shape (which leaked the resolved Item body into
+    // the display string while dropping the `item:` label).
+    expect(meta.events[0]?.type).toBe("[item: Item]");
     expect(meta.events[0]?.schema).toEqual([
       {
         kind: "object",

@@ -110,11 +110,18 @@ function convertType(
     }
 
     case "tuple": {
-      const type = `[${td.elements
-        .map((entry) =>
-          schemaDescriptorToString(entry, typeRegistry, visited, registryResolutionDepth),
-        )
-        .join(", ")}]`;
+      // Preserve labelled-tuple syntax in display text.
+      const rendered = td.elements.map((entry, i) => {
+        const text = schemaDescriptorToString(
+          entry,
+          typeRegistry,
+          visited,
+          registryResolutionDepth,
+        );
+        const label = td.labels?.[i] ?? null;
+        return label ? `${label}: ${text}` : text;
+      });
+      const type = `[${rendered.join(", ")}]`;
       if (ignore?.(type)) return type;
       return {
         kind: "array",
@@ -271,12 +278,19 @@ function schemaDescriptorToString(
         visited,
         registryResolutionDepth,
       )}[]`;
-    case "tuple":
-      return `[${td.elements
-        .map((entry) =>
-          schemaDescriptorToString(entry, typeRegistry, visited, registryResolutionDepth),
-        )
-        .join(", ")}]`;
+    case "tuple": {
+      const rendered = td.elements.map((entry, i) => {
+        const text = schemaDescriptorToString(
+          entry,
+          typeRegistry,
+          visited,
+          registryResolutionDepth,
+        );
+        const label = td.labels?.[i] ?? null;
+        return label ? `${label}: ${text}` : text;
+      });
+      return `[${rendered.join(", ")}]`;
+    }
     case "object":
       if (
         (td.indexSignatures?.length ?? 0) === 0 &&
@@ -369,8 +383,14 @@ export function typeDescriptorToString(td: TypeDescriptor): string {
       return td.types.map(typeDescriptorToString).join(" & ");
     case "array":
       return `${typeDescriptorToString(td.element)}[]`;
-    case "tuple":
-      return `[${td.elements.map(typeDescriptorToString).join(", ")}]`;
+    case "tuple": {
+      const rendered = td.elements.map((entry, i) => {
+        const text = typeDescriptorToString(entry);
+        const label = td.labels?.[i] ?? null;
+        return label ? `${label}: ${text}` : text;
+      });
+      return `[${rendered.join(", ")}]`;
+    }
     case "object":
       if (
         (td.indexSignatures?.length ?? 0) === 0 &&

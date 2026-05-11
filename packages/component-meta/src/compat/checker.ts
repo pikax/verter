@@ -1292,12 +1292,37 @@ function typeDescriptorToCompatDisplay(
         visited,
         registryResolutionDepth,
       )}[]`;
-    case "tuple":
-      return `[${descriptor.elements
-        .map((type) =>
-          typeDescriptorToCompatDisplay(type, typeRegistry, visited, registryResolutionDepth),
-        )
-        .join(", ")}]`;
+    case "tuple": {
+      // Preserve per-element labels. The Rust producer surface emits
+      // `TupleElement.label: Option<String>`; the TS bridge surfaces them
+      // as `descriptor.labels: (string | null)[]` aligned with `elements`.
+      // Renderers walk labels to produce `[label: type]` output rather
+      // than the lossy `[type]` form (drops the label entirely) or the
+      // pre-fix bug `[{ label: type }]` (leaked the typed schema into
+      // user-visible display text after registry-resolving the ref).
+      //
+      // When a label is present, render the element with the
+      // non-resolving `typeDescriptorToString` form so refs preserve
+      // their names (`[item: Item]`) instead of being expanded through
+      // the registry (`[item: { label: string; }]`). The labelled syntax
+      // already identifies the element symbolically; expanding the ref
+      // obscures the structural reading. When the element is anonymous,
+      // the existing registry-resolving display path is used (matches
+      // the pre-cutover behaviour for unlabelled tuples).
+      const rendered = descriptor.elements.map((type, i) => {
+        const label = descriptor.labels?.[i] ?? null;
+        if (label) {
+          return `${label}: ${typeDescriptorToString(type)}`;
+        }
+        return typeDescriptorToCompatDisplay(
+          type,
+          typeRegistry,
+          visited,
+          registryResolutionDepth,
+        );
+      });
+      return `[${rendered.join(", ")}]`;
+    }
     case "function":
       return compatFunctionTypeToString(descriptor, typeRegistry, visited, registryResolutionDepth);
     case "object":
