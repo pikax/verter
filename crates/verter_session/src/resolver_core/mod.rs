@@ -2,8 +2,8 @@ use dashmap::DashMap;
 use parking_lot::{Condvar, Mutex};
 use rustc_hash::FxHashMap;
 use std::hash::Hash;
-use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 
 pub(crate) mod ambient_resolve;
 pub(crate) mod bare_name_resolve;

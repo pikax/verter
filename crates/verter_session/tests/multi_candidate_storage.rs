@@ -74,7 +74,7 @@ fn r20_two_candidates_coexist_for_same_key() {
     cache.insert("k".to_string(), 200, vec![fb.clone()]);
 
     // View that validates the FIRST candidate's fact set.
-    let view_a = view_with(&[fa.clone()]);
+    let view_a = view_with(std::slice::from_ref(&fa));
     assert_eq!(
         cache.get_if_valid(&"k".to_string(), &view_a),
         Some(Arc::new(100)),
@@ -82,7 +82,7 @@ fn r20_two_candidates_coexist_for_same_key() {
     );
 
     // View that validates the SECOND candidate's fact set.
-    let view_b = view_with(&[fb.clone()]);
+    let view_b = view_with(std::slice::from_ref(&fb));
     assert_eq!(
         cache.get_if_valid(&"k".to_string(), &view_b),
         Some(Arc::new(200)),
@@ -110,7 +110,7 @@ fn r20_fifo_eviction_on_cap_overflow() {
     cache.insert("k".to_string(), 5, vec![f5.clone()]);
 
     // The first candidate must be gone.
-    let view_1 = view_with(&[f1.clone()]);
+    let view_1 = view_with(std::slice::from_ref(&f1));
     assert!(
         cache.get_if_valid(&"k".to_string(), &view_1).is_none(),
         "oldest candidate must be evicted under FIFO at cap 4"
@@ -118,7 +118,7 @@ fn r20_fifo_eviction_on_cap_overflow() {
 
     // The other four must survive.
     for (val, f) in [(2, &f2), (3, &f3), (4, &f4), (5, &f5)] {
-        let v = view_with(&[f.clone()]);
+        let v = view_with(std::slice::from_ref(f));
         assert_eq!(
             cache.get_if_valid(&"k".to_string(), &v),
             Some(Arc::new(val)),

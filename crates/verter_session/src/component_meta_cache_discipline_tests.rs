@@ -173,21 +173,24 @@ fn cache_discipline_materialize_surface_repeated_keys_warm() {
         "live entry count must NOT grow across repeated identical materialize_surface calls (baseline={baseline_live}, after_first={after_first_live}, after_n={after_n_live})"
     );
 
-    // Discrimination: an unrelated key bumps the counter by exactly 1.
-    let unrelated_key = MaterializeStructureCacheKey {
+    // Stage 5d discrimination: a different `scope_canonical_id`
+    // alone does NOT make the key distinct (cross-owner reuse —
+    // R7). Use a different `scope_axis` to force a distinct cache
+    // entry.
+    let distinct_key = MaterializeStructureCacheKey {
         scope_canonical_id: Arc::from("/other.vue"),
         base,
-        scope_axis: MaterializationScope::TopLevel,
+        scope_axis: MaterializationScope::Nested,
         mode: ProjectionMode::Expanded,
     };
-    let _ = dispatch.materialize_surface(unrelated_key);
+    let _ = dispatch.materialize_surface(distinct_key);
     let after_unrelated_live = host
         .project_type_store()
         .materialize_structure_db()
         .live_count();
     assert!(
         after_unrelated_live > after_n_live,
-        "unrelated cold key must publish a fresh live entry (after_n={after_n_live}, after_unrelated={after_unrelated_live})"
+        "distinct (scope_axis) cold key must publish a fresh live entry (after_n={after_n_live}, after_unrelated={after_unrelated_live})"
     );
 }
 

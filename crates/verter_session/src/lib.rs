@@ -81,7 +81,7 @@ pub mod component_meta_host;
 mod component_meta_indexed_access_early_out_tests;
 #[cfg(test)]
 mod component_meta_invalidation_tests;
-pub(crate) mod component_meta_materialize;
+pub mod component_meta_materialize;
 #[cfg(test)]
 mod component_meta_no_cache_promotion_tests;
 #[cfg(test)]

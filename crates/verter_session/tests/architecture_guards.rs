@@ -3686,7 +3686,9 @@ mod foundations_guards {
         "pub mod component_meta_resolution_policy",
         // ─── crate-private modules (already non-public) ─────────────
         "pub(crate) mod completion_fence",
-        "pub(crate) mod component_meta_materialize",
+        // `tests/cross_owner_materialise_reuse.rs` needs the key types
+        // (R7 cross-owner reuse).
+        "pub mod component_meta_materialize",
         // tests/cache_invariant_migration.rs — the W0.5 schema-bump
         // cohort fixture exercises `ComponentMetaResultDb::evict_if_schema_mismatch`.
         "pub mod component_meta_result_db",

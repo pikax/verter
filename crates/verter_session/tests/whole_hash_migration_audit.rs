@@ -18,8 +18,8 @@
 //! is routed through the new types and the rest are tracked here
 //! for future stages.
 
-use std::path::{Path, PathBuf};
 use std::fs;
+use std::path::{Path, PathBuf};
 
 fn workspace_root() -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
@@ -49,13 +49,11 @@ fn read_source_file(path: &Path) -> String {
 /// emits an inventory entry tracking the migration.
 #[test]
 fn whole_hash_read_site_1_prepared_decl_hash_mixing_inventoried() {
-    let path = workspace_root()
-        .join("crates/verter_session/src/resolver_core/prepared_decl.rs");
+    let path = workspace_root().join("crates/verter_session/src/resolver_core/prepared_decl.rs");
     let source = read_source_file(&path);
 
     // The legacy pattern: u64 cast from state.whole_hash[..8].
-    let legacy_pattern =
-        "u64::from_le_bytes(state.whole_hash[..8].try_into().unwrap_or_default())";
+    let legacy_pattern = "u64::from_le_bytes(state.whole_hash[..8].try_into().unwrap_or_default())";
     let occurrences = source.matches(legacy_pattern).count();
 
     // Stage-5c lands the substrate; Stage 6+ replaces these reads.
@@ -130,8 +128,7 @@ fn whole_hash_read_site_4_node_scope_id_inventoried() {
     let source = read_source_file(&path);
 
     // The legacy pattern: NodeScopeId::File { ..., whole_hash, ... }.
-    let has_field = source.contains("whole_hash: HashValue,")
-        && source.contains("NodeScopeId");
+    let has_field = source.contains("whole_hash: HashValue,") && source.contains("NodeScopeId");
 
     assert!(
         has_field,

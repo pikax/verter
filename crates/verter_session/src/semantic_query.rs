@@ -204,7 +204,9 @@ pub enum SemanticSymbolSpace {
 /// Consumers that observe a specific part's facts invalidate on
 /// that part's change; adding an overload does NOT invalidate
 /// consumers that observed only another overload's facts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
 pub struct DeclPartId(pub u32);
 
 /// Per-part fingerprint hash. Carried as payload on

@@ -177,9 +177,7 @@ fn r20_over_cap_signature_correct_value_fallback() {
         valid_facts: facts.iter().cloned().collect(),
     };
     assert!(
-        cache
-            .get_if_valid(&"fallback".to_string(), &view)
-            .is_none(),
+        cache.get_if_valid(&"fallback".to_string(), &view).is_none(),
         "over-cap admission must not have entered the cache"
     );
 }

@@ -64,8 +64,7 @@ pub const EXPECTED_MATERIALIZE_STRUCTURE_DEPTH_FUSE_TRIPPED: &str =
 pub const EXPECTED_CUSTOM: &str = "Custom(test_name, key=value)";
 pub const EXPECTED_CACHE_DRAINED_AT_UPSERT: &str =
     "CacheDrainedAtUpsert(resolved_type_cache, /probe.vue)";
-pub const EXPECTED_FACT_SIGNATURE_OVERFLOW: &str =
-    "FactSignatureOverflow(size=1100, cap=1024)";
+pub const EXPECTED_FACT_SIGNATURE_OVERFLOW: &str = "FactSignatureOverflow(size=1100, cap=1024)";
 
 // ──────────────────────────────────────────────────────────────────
 // Fixture constructors — exactly one canonical instance per variant.

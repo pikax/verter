@@ -17,8 +17,7 @@
 use std::sync::Arc;
 
 use verter_session::semantic_query::{
-    DeclIdentity, DeclPartId, ResolvedDeclSlotIdentity, SemanticSymbolSpace,
-    VersionedDeclIdentity,
+    DeclIdentity, DeclPartId, ResolvedDeclSlotIdentity, SemanticSymbolSpace, VersionedDeclIdentity,
 };
 
 const PROJECT_IDENTITY: u32 = 42;
@@ -67,10 +66,7 @@ fn r7_interface_merge_produces_one_slot_identity() {
         slot: slot_a.clone(),
         content_hash: [3; 16],
         parse_env_hash: [4; 16],
-        merged_parts: smallvec::smallvec![
-            (DeclPartId(0), [10; 16]),
-            (DeclPartId(1), [20; 16]),
-        ],
+        merged_parts: smallvec::smallvec![(DeclPartId(0), [10; 16]), (DeclPartId(1), [20; 16]),],
     };
     assert_eq!(versioned.merged_parts.len(), 2);
 }
@@ -118,7 +114,7 @@ fn r7_overload_add_changes_payload_not_validation() {
     let v2 = VersionedDeclIdentity {
         slot: slot.clone(),
         content_hash: [5; 16], // SAME content_hash — file body unchanged
-                               // for the overload we observed.
+        // for the overload we observed.
         parse_env_hash: [6; 16],
         merged_parts: smallvec::smallvec![
             (DeclPartId(0), [100; 16]), // SAME first-overload fingerprint
@@ -143,11 +139,11 @@ fn r7_overload_add_changes_payload_not_validation() {
     // overload does not change the observed fingerprints.
 }
 
-/// R7 — namespace + value merging: TS allows `class Foo` (value)
-/// + `namespace Foo` (type-space additions) to merge. The two
+/// R7: TS allows merging a `class Foo` (value-space declaration)
+/// with a `namespace Foo` (type-space additions). The two
 /// declarations live in DIFFERENT symbol spaces, so they produce
 /// DISTINCT `ResolvedDeclSlotIdentity` values even though they
-/// share `defining_canonical + merged_symbol_name`.
+/// share `defining_canonical` and `merged_symbol_name`.
 #[test]
 fn r7_namespace_value_merge_produces_distinct_slots() {
     let canonical = "/src/foo.ts";

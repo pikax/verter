@@ -127,24 +127,121 @@ impl From<MaterializationScope> for crate::component_meta_audit::Materialization
     }
 }
 
-/// Final-result cache key for the materialiser. Keyed
-/// on `(scope_canonical_id, base, scope_axis, mode)` so the same
-/// node id materialised at TopLevel vs Nested, or at Expanded vs
-/// Navigate, lands in distinct slots.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// Final-result cache key for the materialiser.
+/// `scope_canonical_id` is **NOT part of the cache key**.
+///
+/// **Cache-key semantics:** the cache key dimensions are
+/// `(base, scope_axis, mode)`. `scope_canonical_id` is retained
+/// on the struct as a fence-seed input that flows into the
+/// per-candidate `dep_signature` but is excluded from `Hash` and
+/// `PartialEq`. Cross-owner reuse: N consumer scopes that reach
+/// the same `(base, scope_axis, mode)` produce ONE cache entry.
+///
+/// **Rationale (R7 + R8):** see audit doc
+/// `docs/arch/materialize-owner-local-audit.md`. The audit confirmed
+/// the local_fence_seed is a derived function of `(defining_canonical,
+/// content_hash)`. `defining_canonical` lives inside `base`'s
+/// `NodeScopeId::File { canonical_id }` (recoverable via the
+/// semantic-graph store); `content_hash` lives in
+/// `VersionedDeclIdentity.content_hash` inside the cached value.
+/// The consumer-scope canonical id is NOT load-bearing.
+///
+/// The richer [`MaterializationCacheKey`] is the end-state form:
+/// `decl: ResolvedDeclSlotIdentity` + `projection_path` +
+/// `projection_mode` + `normalized_type_args` + `options_hash`.
+/// The cache-key behavior change is already in effect via the
+/// hand-rolled `Hash`/`PartialEq`; downstream consumers migrate
+/// to the explicit field form when adopting the richer key.
+#[derive(Debug, Clone)]
 pub struct MaterializeStructureCacheKey {
     /// Owner scope — the canonical id the materialiser was
-    /// dispatched in. Used to seed the local fence with the root
-    /// scope's `WholeHash`.
+    /// dispatched in. **NOT in the cache key** post-Stage-5d.
+    /// Retained as a fence-seed input only.
     pub scope_canonical_id: Arc<str>,
     /// Input semantic node — the lowered TypeExpr that the
-    /// materialiser is asked to materialise.
+    /// materialiser is asked to materialise. **Cache key
+    /// dimension.**
     pub base: SemanticNodeId,
-    /// Axis the input was lowered at.
+    /// Axis the input was lowered at. **Cache key dimension.**
     pub scope_axis: MaterializationScope,
     /// Caller-side projection mode the materialiser ran with.
+    /// **Cache key dimension.**
     pub mode: ProjectionMode,
 }
+
+impl PartialEq for MaterializeStructureCacheKey {
+    /// `scope_canonical_id` is intentionally excluded.
+    /// Cross-owner reuse: N consumer scopes reaching the same
+    /// `(base, scope_axis, mode)` produce ONE cache entry.
+    fn eq(&self, other: &Self) -> bool {
+        self.base == other.base && self.scope_axis == other.scope_axis && self.mode == other.mode
+    }
+}
+
+impl Eq for MaterializeStructureCacheKey {}
+
+impl std::hash::Hash for MaterializeStructureCacheKey {
+    /// `scope_canonical_id` is intentionally excluded.
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.base.hash(state);
+        self.scope_axis.hash(state);
+        self.mode.hash(state);
+    }
+}
+
+/// End-state form for the materialiser cache key:
+///
+/// ```ignore
+/// struct MaterializationCacheKey {
+///     decl: ResolvedDeclSlotIdentity,
+///     projection_path: ProjectionPathHash,
+///     projection_mode: ProjectionMode,
+///     normalized_type_args: TypeArgsHash,
+///     options_hash: Hash16,
+/// }
+/// ```
+///
+/// Introduced alongside [`MaterializeStructureCacheKey`]. The
+/// existing key's `Hash`/`PartialEq` already deliver the cross-owner
+/// reuse contract (consumer scope excluded). Downstream consumers
+/// migrate from the legacy key to this explicit form when the
+/// richer dimensions (`projection_path`, `normalized_type_args`)
+/// become load-bearing.
+///
+/// The discriminating test
+/// `tests/cross_owner_materialise_reuse.rs` verifies the cross-owner
+/// reuse invariant via the cache-entry count.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MaterializationCacheKey {
+    /// Resolved declaration slot per Stage 5c. Carries the
+    /// content-free 6-field identity (R7).
+    pub decl: crate::semantic_query::ResolvedDeclSlotIdentity,
+    /// Hash of the projection path (`['a']['b']['c']` chain) for
+    /// path-precise materialisation. Empty path = whole-surface.
+    pub projection_path: ProjectionPathHash,
+    /// Caller-side projection mode the materialiser ran with.
+    pub projection_mode: ProjectionMode,
+    /// Hash of the normalized type-argument list. Walks args in
+    /// declaration order, alpha-normalised as structural `TypeExpr`;
+    /// free type-params become `TypeParam(<binder-relative index>)`.
+    /// See `docs/arch/materialize-owner-local-audit.md` for the
+    /// normalisation rationale.
+    pub normalized_type_args: TypeArgsHash,
+    /// Caller-side options hash for fence options.
+    pub options_hash: crate::semantic_query::HashValue,
+}
+
+/// Hash of a projection path. Computed from the typed-IR
+/// `TypeExpr` chain when the path becomes load-bearing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct ProjectionPathHash(pub [u8; 16]);
+
+/// Hash of a normalized type-argument list. Computed from the
+/// alpha-normalised typed-IR argument list per the normalisation
+/// rules documented in
+/// `docs/arch/materialize-owner-local-audit.md` (b).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct TypeArgsHash(pub [u8; 16]);
 
 /// Boundary that converts a dispatch
 /// `CacheRead<QueryResult<SemanticNodeId>>` to a
