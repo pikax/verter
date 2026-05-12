@@ -366,6 +366,84 @@ impl SessionView for OverlaidView {
     }
 }
 
+// ---------------------------------------------------------------------------
+// HostViewRef — borrow-shaped HostView for short-lived call chains.
+// ---------------------------------------------------------------------------
+
+/// Borrow-shaped [`HostView`] variant — holds `&'a VerterHost`
+/// instead of `Arc<VerterHost>`.
+///
+/// `HostView` carries `Arc<VerterHost>` so it can be cloned across
+/// threads. That ownership shape is wrong for the
+/// [`ResolverContext::view`](crate::resolver_core::resolver_context::ResolverContext::view)
+/// call path, which has a `&self: &VerterHost` already in scope and
+/// would otherwise need a self-referential `Arc<VerterHost>` cycle.
+/// `HostViewRef<'a>` borrows the host instead and is the value
+/// `VerterHost`'s `view()` impl returns. The trait method exposes it
+/// as `Box<dyn SessionView + '_>` so the dyn-compatibility of
+/// `ResolverContext` is preserved.
+///
+/// Stage 6 / 4d wires real env-hash + project-identity plumbing into
+/// this shape; today the impl mirrors `HostView`.
+#[derive(Clone, Copy)]
+pub struct HostViewRef<'a> {
+    base: &'a VerterHost,
+    env_hashes: EnvHashes,
+}
+
+impl<'a> HostViewRef<'a> {
+    /// Construct a view that borrows `base` and reports the
+    /// default env hashes.
+    pub fn new(base: &'a VerterHost) -> Self {
+        Self {
+            base,
+            env_hashes: EnvHashes::default(),
+        }
+    }
+
+    /// Construct a view with explicit env hashes (reserved for
+    /// Stage 6 wiring).
+    #[allow(dead_code)]
+    pub fn with_env_hashes(base: &'a VerterHost, env_hashes: EnvHashes) -> Self {
+        Self { base, env_hashes }
+    }
+}
+
+impl SessionView for HostViewRef<'_> {
+    fn source(&self, canonical: &str) -> Option<Arc<str>> {
+        self.base.get_source(canonical)
+    }
+
+    fn content_hash_for(&self, canonical: &str) -> Option<Hash16> {
+        self.base
+            .project_type_store()
+            .indexed()
+            .content_hash_for_canonical(canonical)
+    }
+
+    fn parse_artifacts(
+        &self,
+        canonical: &str,
+    ) -> Option<Arc<crate::file_artifact_store::FileArtifacts>> {
+        self.base
+            .project_type_store()
+            .indexed()
+            .latest_artifacts_for_canonical(canonical)
+    }
+
+    fn resolved_imports(&self, _canonical: &str) -> Option<Arc<ResolvedImports>> {
+        None
+    }
+
+    fn project_identity(&self) -> ProjectIdentity {
+        ProjectIdentity([0u8; 16])
+    }
+
+    fn env_hashes(&self) -> &EnvHashes {
+        &self.env_hashes
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

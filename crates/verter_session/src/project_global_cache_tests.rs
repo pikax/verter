@@ -700,6 +700,116 @@ fn request_view_is_retired_from_crate_sources() {
     }
 }
 
+/// Stage 4b arch-guard: the `ResolverContext` trait MUST expose a
+/// `view()` method that returns a `Box<dyn SessionView + '_>`. This is
+/// the explicit-view threading entry point that replaces the retired
+/// thread-local `_in_view` / `RequestStoreView` shape (R18). The
+/// trait method is the only sanctioned way for resolver-tier code to
+/// reach a `SessionView` — without this accessor the surface would
+/// have no view at all and callers would be tempted to reintroduce
+/// the thread-local globals this stage forbids.
+///
+/// Extends `request_view_is_retired_from_crate_sources` — that test
+/// asserts the FORBIDDEN shape is absent; this test asserts the
+/// REPLACEMENT shape is present (paired positive / negative
+/// arch-guard).
+#[test]
+fn resolver_context_threads_session_view_via_view_accessor() {
+    let src = include_str!("resolver_core/resolver_context.rs");
+
+    // The trait must declare the `view()` method with the
+    // Stage 4b signature shape. Match the exact tokens so a
+    // future contributor cannot weaken this to `view(&self)
+    // -> ()` without tripping the guard.
+    assert!(
+        src.contains("fn view(&self) -> Box<dyn crate::session_view::SessionView + '_>"),
+        "ResolverContext trait must declare `view(&self) -> Box<dyn SessionView + '_>` \
+         (Stage 4b — explicit view threading; R17, R18). Missing declaration in \
+         `crates/verter_session/src/resolver_core/resolver_context.rs`."
+    );
+
+    // The impl for VerterHost must satisfy the trait by returning
+    // a `HostViewRef::new(self)` box. Match the exact construction
+    // so a future contributor cannot weaken this to a borrow-only
+    // shape that breaks dyn-compat.
+    assert!(
+        src.contains("Box::new(crate::session_view::HostViewRef::new(self))"),
+        "`impl ResolverContext for VerterHost::view` must return \
+         `Box::new(HostViewRef::new(self))` (Stage 4b)."
+    );
+
+    // The trait must NOT regress to a generic / non-dyn-compat
+    // shape. The `assert_obj_safe!(ResolverContext)` static check at
+    // the bottom of `resolver_context.rs` enforces dyn-compatibility
+    // at compile time, but we cross-check here so the guard set
+    // surfaces the failure in one place.
+    assert!(
+        src.contains("static_assertions::assert_obj_safe!(ResolverContext)"),
+        "`assert_obj_safe!(ResolverContext)` static check must remain \
+         in `resolver_context.rs` (Stage 4b — dyn-compatibility)."
+    );
+}
+
+/// Stage 4b arch-guard companion: assert that **no module-level
+/// thread-local `SessionView` storage has been reintroduced** under
+/// any name. The retired `_in_view` / `CURRENT_REQUEST_VIEW` shape
+/// is already guarded by
+/// [`request_view_is_retired_from_crate_sources`]; this test extends
+/// the watchlist to the new `SessionView` trait so a future
+/// contributor cannot ship a `thread_local! { static CURRENT_VIEW:
+/// ... = ... }` to "cache" the view across calls. The view is
+/// passed explicitly through `ResolverContext::view` (R18).
+#[test]
+fn no_thread_local_session_view_storage_in_crate_sources() {
+    let sources: &[(&str, &str)] = &[
+        (
+            "resolver_core/resolver_context.rs",
+            include_str!("resolver_core/resolver_context.rs"),
+        ),
+        ("session_view.rs", include_str!("session_view.rs")),
+        ("meta.rs", include_str!("meta.rs")),
+        ("session_runtime.rs", include_str!("session_runtime.rs")),
+        ("meta_resolve.rs", include_str!("meta_resolve.rs")),
+    ];
+
+    // The forbidden patterns: a `thread_local!` macro whose payload
+    // references `SessionView` (any variant of the type name).
+    // Use a coarse token-level scan rather than a regex to keep the
+    // guard cheap.
+    for (path, src) in sources {
+        let mut window_open = false;
+        let mut window_lines = String::new();
+        for line in src.lines() {
+            let stripped = line.trim_start();
+            if stripped.starts_with("//") {
+                // Comments don't introduce thread-local state.
+                continue;
+            }
+            if stripped.contains("thread_local!") {
+                window_open = true;
+                window_lines.clear();
+            }
+            if window_open {
+                window_lines.push_str(line);
+                window_lines.push('\n');
+                // Coarse end-of-macro detection — `thread_local!`
+                // blocks end with a `}` at column 0 or a `;` line.
+                if line == "}" || stripped == "};" {
+                    assert!(
+                        !window_lines.contains("SessionView"),
+                        "{path}: forbidden `thread_local! {{ ... SessionView ... }}` \
+                         block survives in production code. SessionView is passed \
+                         explicitly through `ResolverContext::view` (R18). \
+                         Window:\n{window_lines}"
+                    );
+                    window_open = false;
+                    window_lines.clear();
+                }
+            }
+        }
+    }
+}
+
 /// Sanity: the project-global store is reachable from the public
 /// `VerterHost` accessor so consumers can read it without reaching into
 /// private fields.
