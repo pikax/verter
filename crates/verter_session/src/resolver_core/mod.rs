@@ -157,19 +157,6 @@ pub trait StoreView {
         false
     }
 
-    /// Whether this view should check the archive for soft-invalidated
-    /// entries. Only strict (non-permissive) views return true.
-    fn checks_archive(&self) -> bool {
-        false
-    }
-    /// Validate a fact from an ARCHIVED entry. Archived entries may be stale
-    /// (they were soft-invalidated from a prior generation). The default
-    /// delegates to `validates`, but views that accept untracked files in
-    /// the primary path should be STRICT for archived entries to prevent
-    /// stale data from being returned after workspace-level content changes.
-    fn validates_archived(&self, fact: &FactVersionRef) -> bool {
-        self.validates(fact)
-    }
     /// Whether the view tracks a specific file (has its hash in the snapshot).
     ///
     /// Used by route-derived cache materialization paths to decide whether to

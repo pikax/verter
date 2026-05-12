@@ -155,7 +155,7 @@ impl From<MaterializationScope> for crate::component_meta_audit::Materialization
 #[derive(Debug, Clone)]
 pub struct MaterializeStructureCacheKey {
     /// Owner scope — the canonical id the materialiser was
-    /// dispatched in. **NOT in the cache key** post-Stage-5d.
+    /// dispatched in. **NOT in the cache key.**
     /// Retained as a fence-seed input only.
     pub scope_canonical_id: Arc<str>,
     /// Input semantic node — the lowered TypeExpr that the
@@ -213,8 +213,8 @@ impl std::hash::Hash for MaterializeStructureCacheKey {
 /// reuse invariant via the cache-entry count.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MaterializationCacheKey {
-    /// Resolved declaration slot per Stage 5c. Carries the
-    /// content-free 6-field identity (R7).
+    /// Resolved declaration slot. Carries the content-free 6-field
+    /// identity (R7).
     pub decl: crate::semantic_query::ResolvedDeclSlotIdentity,
     /// Hash of the projection path (`['a']['b']['c']` chain) for
     /// path-precise materialisation. Empty path = whole-surface.

@@ -173,10 +173,9 @@ fn cache_discipline_materialize_surface_repeated_keys_warm() {
         "live entry count must NOT grow across repeated identical materialize_surface calls (baseline={baseline_live}, after_first={after_first_live}, after_n={after_n_live})"
     );
 
-    // Stage 5d discrimination: a different `scope_canonical_id`
-    // alone does NOT make the key distinct (cross-owner reuse —
-    // R7). Use a different `scope_axis` to force a distinct cache
-    // entry.
+    // Cross-owner reuse (R7): a different `scope_canonical_id`
+    // alone does NOT make the key distinct. Use a different
+    // `scope_axis` to force a distinct cache entry.
     let distinct_key = MaterializeStructureCacheKey {
         scope_canonical_id: Arc::from("/other.vue"),
         base,

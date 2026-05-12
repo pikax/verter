@@ -181,8 +181,7 @@ impl DeclIdentity {
 /// the same `(defining_canonical, merged_symbol_name)` but living in
 /// disjoint symbol spaces (TypeScript's type-space vs value-space).
 ///
-/// Stage 5 Sub-task C introduces this enum as a key dimension on
-/// [`ResolvedDeclSlotIdentity`] per R7.
+/// Used as a key dimension on [`ResolvedDeclSlotIdentity`] per R7.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum SemanticSymbolSpace {
     /// Type-space declaration (interface, type alias, enum's type
@@ -214,8 +213,8 @@ pub struct DeclPartId(pub u32);
 /// validation oracle (slot-level facts are).
 pub type DeclPartFingerprint = HashValue;
 
-/// Stage 5 Sub-task C: cache-identity key for the resolved
-/// declaration slot. Six fields (R7):
+/// Cache-identity key for the resolved declaration slot. Six
+/// fields (R7):
 ///
 /// - `defining_canonical`: canonical id of the declaring file.
 /// - `merged_symbol_name`: stable merged-symbol identity that
@@ -228,12 +227,12 @@ pub type DeclPartFingerprint = HashValue;
 /// - `lib_env_hash`: TS lib selection + typeRoots + ambient corpus
 ///   fingerprint.
 ///
-/// **Cache invariant (R7 + Stage 5b multi-candidate substrate):**
-/// the slot identity is **content-free**. Two file versions of
-/// "same decl" produce equal slot keys; the multi-candidate
-/// `ValidatedFactCache` separates them via per-candidate
-/// `fact_dep_signature`. File-content versioning lives in
-/// [`VersionedDeclIdentity`] inside the cached payload.
+/// **Cache invariant (R7 + multi-candidate substrate):** the slot
+/// identity is **content-free**. Two file versions of "same decl"
+/// produce equal slot keys; the multi-candidate `ValidatedFactCache`
+/// separates them via per-candidate `fact_dep_signature`.
+/// File-content versioning lives in [`VersionedDeclIdentity`]
+/// inside the cached payload.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ResolvedDeclSlotIdentity {
     /// Canonical id of the declaring file. NOT the consumer scope —
@@ -293,7 +292,7 @@ impl ResolvedDeclSlotIdentity {
     }
 
     /// Compatibility constructor: derive a slot identity from a
-    /// pre-Stage-5c [`DeclIdentity`] plus the env dimensions.
+    /// legacy [`DeclIdentity`] plus the env dimensions.
     /// `whole_hash` is intentionally NOT consumed — the slot is
     /// content-free; per-file content versioning belongs on
     /// [`VersionedDeclIdentity`].
@@ -316,9 +315,8 @@ impl ResolvedDeclSlotIdentity {
     }
 }
 
-/// Stage 5 Sub-task C: per-content-version payload tag for a
-/// [`ResolvedDeclSlotIdentity`]. Three fields per R7 + per plan
-/// §"Stage 5 / Sub-task C":
+/// Per-content-version payload tag for a
+/// [`ResolvedDeclSlotIdentity`]. Three fields per R7:
 ///
 /// - `slot`: the content-free [`ResolvedDeclSlotIdentity`] this
 ///   value is associated with.

@@ -616,10 +616,9 @@ mod tests {
         );
     }
 
-    /// Stage 5b retired the `archived` map + `validates_archived`
-    /// method. Concurrent generations of the same key are now
-    /// distinguished by per-candidate fact validation against the
-    /// candidate's own `fact_dep_signature` (see
+    /// Concurrent generations of the same key are distinguished by
+    /// per-candidate fact validation against the candidate's own
+    /// `fact_dep_signature` (see
     /// `crates/verter_session/src/resolver_core/mod.rs`
     /// `ValidatedFactCache` substrate). For untracked files, the
     /// primary `validates` path accepts the cached hash because the
@@ -648,7 +647,7 @@ mod tests {
             })
         );
 
-        // Untracked file — accepted (Stage 5b multi-candidate
+        // Untracked file — accepted (multi-candidate
         // substrate relies on the candidate's own `fact_dep_signature`
         // to discriminate concurrent generations).
         assert!(
@@ -656,7 +655,7 @@ mod tests {
                 canonical_id: "/node_modules/vue/dist/vue.d.mts".to_string(),
                 hash: [42u8; 16],
             }),
-            "untracked files are accepted by primary validation in the Stage-5b substrate"
+            "untracked files are accepted by primary validation in the multi-candidate substrate"
         );
     }
 
