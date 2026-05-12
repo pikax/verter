@@ -9,6 +9,45 @@ table for the fact-based cache architecture. The full rule set
 > `fix/cutover-review-findings`). The two share the same baseline; the
 > swap is documentation-only.
 
+> AMENDMENT 2026-05-12-B — Four rows in the Legacy Deletions table
+> were verified as "never existed at the substrate baseline" and
+> should be read as **forbidden patterns to not introduce** rather
+> than retirements:
+>
+> - **Row 2:** `project_config_hash` (single bundled hash) — never
+>   existed. The 5-way env-hash split is a net-new addition.
+> - **Row 3:** ambient-lib mixing inside `resolve_env_hash` — never
+>   existed. R21 scoping rule prevents future introduction.
+> - **Row 8:** `BothTypeValue` variant of `SymbolSpace` — never
+>   existed. `SymbolSpace` was `{Type, Value}` at baseline; the
+>   3-variant `{Type, Value, Namespace}` form was added directly.
+> - **Row 21:** `decl_index_in_file` (round-1 proposal) — never
+>   introduced; `merged_symbol_name` + `merged_parts` chosen
+>   instead.
+
+> AMENDMENT 2026-05-12-C — The substrate uses
+> `fact_dep_signature: Arc<[FactVersionRef]>` (not
+> `Arc<[ObservedFact]>` as some earlier plan text spec'd). The two
+> are structurally equivalent — `FactVersionRef::Parse(ParseFactRef
+> { canonical_id, key, lane, expected_hash })` carries the same
+> fields as the older `ObservedFact { canonical, key, lane,
+> expected_hash }` shape (the only nominal difference is `String`
+> vs `Arc<str>`). `FactVersionRef` is the chosen shape because it
+> aligns with the per-domain dispatch surface (R26's
+> `validates_parse_domain` / `validates_resolve_imports_domain` /
+> `validates_route_surface_domain`).
+
+> AMENDMENT 2026-05-12-D — The whole-hash retirement audit-test at
+> `crates/verter_session/tests/whole_hash_migration_audit.rs` is a
+> **count-bounded inventory** (each enumerated read site asserted
+> to have ≤ N occurrences), not a per-site absence assertion. The
+> R20 multi-candidate substrate + `VersionedDeclIdentity` +
+> `fact_dep_signature` ship as the SUBSTRATE; consumer-path call
+> sites migrate incrementally onto their documented replacements
+> (`VersionedDeclIdentity.content_hash` for scope;
+> `fact_dep_signature` for hashing; `SessionView::content_hash_for`
+> for routed-expr tracking).
+
 ## `IdeProjectConfig` 5-way env hash audit (R21)
 
 `IdeProjectConfig` is the source of truth for the resolve-domain and
