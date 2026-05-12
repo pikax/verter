@@ -42,6 +42,14 @@ impl VerterHost {
     /// priority. The pre-invalidation invariant is now owned by
     /// `upsert_with_priority`.
     pub fn upsert(&self, req: UpsertRequest) -> Result<HostUpdateResult, HostError> {
+        // Stage 4d (R17) — counter for `tests/session_view_isolation.rs`.
+        // Increments on every `VerterHost::upsert(...)` call.
+        // Pre-Stage-4d the overlay-mutation lifecycle invoked this from
+        // session query paths; Stage 4d retired those call sites. The
+        // counter discriminates Stage-4d compliance from the pre-state.
+        self.provenance
+            .host_upsert_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.upsert_with_priority(req, Priority::Interactive)
     }
 

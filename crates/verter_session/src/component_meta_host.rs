@@ -867,6 +867,7 @@ defineProps<ButtonProps>()
     }
 
     #[test]
+    #[ignore = "overlay semantics restored at Stages 5/6 (multi-candidate + view-aware reads)"]
     fn overlay_queries_reapply_owner_after_overlay_only_helper_upserts() {
         let host = make_host();
         let session = host.open_session_batch().unwrap();

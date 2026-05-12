@@ -1636,6 +1636,10 @@ pub struct MetaProvenance {
     pub component_meta_resolved_state_recomputes: std::sync::atomic::AtomicU64,
     pub get_analysis_calls: std::sync::atomic::AtomicU64,
     pub evaluate_types_calls: std::sync::atomic::AtomicU64,
+    /// Bumped on every `VerterHost::upsert(...)` call. Used by
+    /// `tests/session_view_isolation.rs` to assert the R17
+    /// invariant that session query paths do NOT mutate the host.
+    pub host_upsert_calls: std::sync::atomic::AtomicU64,
     pub resolved_external_type_cache_hits: std::sync::atomic::AtomicU64,
     pub resolved_external_type_cache_misses: std::sync::atomic::AtomicU64,
     pub resolver_node_cache_hits: std::sync::atomic::AtomicU64,
@@ -1707,6 +1711,7 @@ impl Default for MetaProvenance {
             component_meta_resolved_state_recomputes: std::sync::atomic::AtomicU64::new(0),
             get_analysis_calls: std::sync::atomic::AtomicU64::new(0),
             evaluate_types_calls: std::sync::atomic::AtomicU64::new(0),
+            host_upsert_calls: std::sync::atomic::AtomicU64::new(0),
             resolved_external_type_cache_hits: std::sync::atomic::AtomicU64::new(0),
             resolved_external_type_cache_misses: std::sync::atomic::AtomicU64::new(0),
             resolver_node_cache_hits: std::sync::atomic::AtomicU64::new(0),

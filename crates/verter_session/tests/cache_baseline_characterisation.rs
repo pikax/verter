@@ -268,7 +268,19 @@ fn evict_canonical_cascade_contains_load_bearing_dbs_today() {
 /// sessions via CAS, with each ownership rotation forcing
 /// `host.upsert(base_or_overlay)` calls. Stage 4d deletes this. The
 /// pre-Stage-4d invariant is "the CAS path WRITES to the host."
+///
+/// **Stage 4d invariant satisfied — this characterisation test is the
+/// discriminating signal that the deletion landed.** The methods it
+/// looks for (`apply_own_overlays`, `revert_other_session_overlays`,
+/// `reapply_overlay_target`) and the `active_overlay_session`
+/// AtomicU64 + CAS were retired at Stage 4d. Ignored on the
+/// post-Stage-4d tree; Stage 7 deletes the entire characterisation
+/// file as part of the cutover (no longer characterising anything).
 #[test]
+#[ignore = "Stage 4d removed the methods this test asserts the presence of \
+           (apply_own_overlays / revert_other_session_overlays / \
+           reapply_overlay_target / active_overlay_session). The test is the \
+           discriminating signal that Stage 4d landed; Stage 7 deletes it."]
 fn overlay_path_today_calls_host_upsert_from_query_path() {
     let session_runtime_src = read_workspace_file("crates/verter_session/src/session_runtime.rs");
     let meta_src = read_workspace_file("crates/verter_session/src/meta.rs");
@@ -573,6 +585,9 @@ fn evict_canonical_body_locator_finds_the_correct_function() {
 }
 
 #[test]
+#[ignore = "Stage 4d removed `apply_own_overlays` from SessionRuntime. \
+           The locator self-test was a Stage-0 sanity check; Stage 7 \
+           deletes the entire characterisation file."]
 fn extract_method_body_locates_session_runtime_apply_own_overlays() {
     let src = read_workspace_file("crates/verter_session/src/session_runtime.rs");
     let body =

@@ -64,25 +64,29 @@ impl HostStoreView {
         Self::build(host, snapshot_epoch, None)
     }
 
-    /// Build a session-scoped store view.
+    /// Build a session-scoped store view from a raw session id.
     ///
     /// The compat token includes the session identity so that two sessions
     /// with different overlays but the same epoch never coalesce into the
-    /// same singleflight lane (Path C C14).
-    pub(crate) fn from_session(
-        view: &crate::session_runtime::SessionView,
-        host: &VerterHost,
-    ) -> Self {
+    /// same singleflight lane.
+    ///
+    /// Stage 4d — replaces the retired `from_session(view: &SessionView,
+    /// host)` overload. The old overload took a session-scoped
+    /// `SessionView` epoch carrier; that struct retired with the rest
+    /// of the overlay-mutation machinery (R17). Today the singleflight
+    /// lane identity is the raw `session_id` plumbed through the
+    /// caller; the runtime-side epoch carrier no longer exists.
+    pub(crate) fn from_session_id(session_id: u64, host: &VerterHost) -> Self {
         for _ in 0..STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS {
             let snapshot_epoch = host.current_store_view_epoch();
-            let sv = Self::build(host, snapshot_epoch, Some(view.session_id));
+            let sv = Self::build(host, snapshot_epoch, Some(session_id));
             if host.current_store_view_epoch() == snapshot_epoch {
                 return sv;
             }
         }
 
         let snapshot_epoch = host.current_store_view_epoch();
-        Self::build(host, snapshot_epoch, Some(view.session_id))
+        Self::build(host, snapshot_epoch, Some(session_id))
     }
 
     fn build(host: &VerterHost, snapshot_epoch: u64, session_id: Option<u64>) -> Self {

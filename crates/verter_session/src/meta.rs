@@ -5,18 +5,20 @@
 //!
 //! # Overlay Isolation Model
 //!
-//! Session overlays are private to the session. `upsert()` and `delete()` in
-//! one session never affect another session's view. Queries are resolved
-//! against `session overlay → shared base` via context-switching: before a
-//! query, the project applies the requesting session's overlays to the shared
-//! host and reverts any previously-applied session's overlays.
+//! Session overlays are private to the session. `upsert()` and `delete()`
+//! in one session never affect another session's view. Overlays are
+//! stored on [`SessionState`] and are read via
+//! [`crate::session_view::SessionView`] (the new read trait); sessions
+//! never mutate the host (R17). Cross-session concurrency is separated
+//! by the host's `StoreViewCompatToken`-keyed singleflight (R19).
 //!
-//! # Concurrency (C15)
+//! # Concurrency
 //!
-//! Per-session isolation is structural via `SessionRuntime`'s
-//! `ArcSwap<SessionView>` snapshots. No project-wide lock serializes
-//! overlay-aware queries. Readers load the snapshot lock-free; writers
-//! serialize via the per-session `view_writer_lock`.
+//! Sessions do not mutate the host (R17). Concurrent sessions hold
+//! overlays in their own [`SessionState`] map; cross-session
+//! concurrency is separated by the existing
+//! `StoreViewCompatToken`-keyed singleflight on the resolver runtime
+//! (R19). No project-wide lock serialises queries.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -144,8 +146,10 @@ pub(crate) struct SessionState {
 ///
 /// Multiple [`MetaSession`]s can be opened against the same project.
 /// The project owns the host, base file cache, and per-session state.
-/// Overlay serialization is per-session via `SessionRuntime`'s
-/// `view_writer_lock` (C15); the project-wide `overlay_gate` is retired.
+/// Stage 4d retired the per-session overlay-mutation lifecycle —
+/// concurrent sessions never mutate the host (R17); cross-session
+/// concurrency is separated by the existing
+/// `StoreViewCompatToken`-keyed singleflight (R19).
 pub struct MetaProject {
     host: VerterHost,
     /// Cached base sources for overlay revert. Key = canonical ID.
@@ -158,11 +162,6 @@ pub struct MetaProject {
     next_session_id: AtomicU64,
     /// Terminal shutdown flag.
     shutdown: AtomicBool,
-    /// C15: lock-free tracking of which session's overlays are currently
-    /// applied to the shared host. 0 = no session active. Replaces the
-    /// retired `overlay_gate: Mutex<OverlayState>` — reads and writes
-    /// are atomic, no Mutex contention between sessions.
-    active_overlay_session: AtomicU64,
 }
 
 impl MetaProject {
@@ -175,7 +174,6 @@ impl MetaProject {
             sessions: parking_lot::RwLock::new(HashMap::new()),
             next_session_id: AtomicU64::new(1),
             shutdown: AtomicBool::new(false),
-            active_overlay_session: AtomicU64::new(0),
         })
     }
 
@@ -374,44 +372,27 @@ impl MetaProject {
     }
 
     // -----------------------------------------------------------------------
-    // Crate-internal accessors for SessionRuntime
+    // Crate-internal accessors retired at Stage 4d
     // -----------------------------------------------------------------------
-
-    /// Read-only access to per-session state (overlays, generation).
-    pub(crate) fn sessions_read(
-        &self,
-    ) -> parking_lot::RwLockReadGuard<'_, HashMap<u64, SessionState>> {
-        self.sessions.read()
-    }
-
-    /// Read-only access to cached base sources.
-    pub(crate) fn base_sources_read(
-        &self,
-    ) -> parking_lot::RwLockReadGuard<'_, HashMap<String, Arc<str>>> {
-        self.base_sources.read()
-    }
-
-    /// Check if a session has any overlays.
-    pub(crate) fn session_has_overlays(&self, session_id: u64) -> bool {
-        let sessions = self.sessions.read();
-        sessions
-            .get(&session_id)
-            .is_some_and(|s| !s.overlays.is_empty())
-    }
+    //
+    // `sessions_read` / `base_sources_read` / `session_has_overlays`
+    // retired alongside the per-session overlay-mutation machinery.
+    // Stage 5 / 6 view-aware read paths construct overlay views
+    // directly from the session's `SessionState.overlays` map; they
+    // do not need read-guards on the project's shared state.
 
     // -----------------------------------------------------------------------
     // Internal: session lifecycle
     // -----------------------------------------------------------------------
 
-    /// Release a session: revert its overlays if active, remove its state.
-    fn release_session(&self, session_id: u64, runtime: &SessionRuntime) {
-        if self
-            .active_overlay_session
-            .compare_exchange(session_id, 0, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            runtime.revert_other_session_overlays(session_id);
-        }
+    /// Release a session: remove its state.
+    ///
+    /// Stage 4d — overlay revert retired. Overlays no longer mutate
+    /// the host, so closing a session is a pure state removal
+    /// (R17). The `_runtime` parameter remains for symmetry with
+    /// the public surface; future stages may reattach overlay-
+    /// invalidation hooks through it.
+    fn release_session(&self, session_id: u64, _runtime: &SessionRuntime) {
         self.sessions.write().remove(&session_id);
     }
 }
@@ -493,25 +474,21 @@ impl MetaSession {
         canonical_or_alias: &str,
     ) -> Result<String, MetaError> {
         self.check_alive()?;
-        self.with_overlay_target_context(canonical_or_alias, |runtime| {
+        self.with_session_runtime(canonical_or_alias, |runtime| {
             runtime
                 .host()
                 .resolve_alias_or_canonical(canonical_or_alias)
         })
     }
 
-    /// Invalidate the active overlay state when this session's overlays change.
-    /// If this session's overlays were applied to the host, revert them so the
-    /// host returns to base state. The next query re-applies the updated overlays.
+    /// Invalidate the session's runtime caches.
+    ///
+    /// Stage 4d — host mutation retired. Overlays no longer apply
+    /// to the host, so there is no overlay state to revert. The
+    /// session's overlays remain stored on `SessionState.overlays`
+    /// for the Stage 5 / 6 view-aware read paths. The runtime's
+    /// `invalidate_session_caches` is a no-op post-Stage-4d (R17).
     fn invalidate_active_overlays(&self) {
-        if self
-            .project
-            .active_overlay_session
-            .compare_exchange(self.id, 0, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            self.runtime.revert_other_session_overlays(self.id);
-        }
         self.runtime.invalidate_session_caches();
     }
 
@@ -579,7 +556,7 @@ impl MetaSession {
         canonical_or_alias: &str,
     ) -> Result<Option<crate::types::FileAnalysisSnapshot>, MetaError> {
         self.check_alive()?;
-        self.with_overlay_target_context(canonical_or_alias, |runtime| {
+        self.with_session_runtime(canonical_or_alias, |runtime| {
             runtime.host().get_analysis(canonical_or_alias)
         })
     }
@@ -592,7 +569,7 @@ impl MetaSession {
     ) -> Result<Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes>, MetaError>
     {
         self.check_alive()?;
-        self.with_overlay_target_context(canonical_or_alias, |runtime| {
+        self.with_session_runtime(canonical_or_alias, |runtime| {
             runtime.host().evaluate_types(canonical_or_alias)
         })
     }
@@ -607,7 +584,7 @@ impl MetaSession {
     ) -> Result<Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis>, MetaError>
     {
         self.check_alive()?;
-        let resolved = self.with_overlay_target_context(canonical_or_alias, |runtime| {
+        let resolved = self.with_session_runtime(canonical_or_alias, |runtime| {
             runtime.get_component_meta_with_resolution(canonical_or_alias)
         })?;
 
@@ -699,7 +676,7 @@ impl MetaSession {
         MetaError,
     > {
         self.check_alive()?;
-        let resolved = self.with_overlay_target_context(canonical_or_alias, |runtime| {
+        let resolved = self.with_session_runtime(canonical_or_alias, |runtime| {
             runtime.get_component_meta_with_resolution(canonical_or_alias)
         })?;
         match resolved {
@@ -737,7 +714,7 @@ impl MetaSession {
     ) -> Result<Option<Vec<u8>>, MetaError> {
         use std::sync::atomic::Ordering::Relaxed;
         self.check_alive()?;
-        self.with_overlay_target_context(canonical_or_alias, |runtime| {
+        self.with_session_runtime(canonical_or_alias, |runtime| {
             let host = runtime.host();
             let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
 
@@ -989,68 +966,28 @@ impl MetaSession {
     }
 
     // -----------------------------------------------------------------------
-    // Internal: run a closure with this session's overlay context applied
+    // Internal: run a closure against the session's runtime
     // -----------------------------------------------------------------------
 
-    /// Run a closure with this session's overlay context applied.
+    /// Run a closure with the session's runtime facade in scope.
     ///
-    /// Uses compare_exchange to atomically claim the active overlay slot,
-    /// preventing TOCTOU races between concurrent sessions.
-    fn with_overlay_target_context<T>(
+    /// Stage 4d — overlay context is no longer applied via host
+    /// mutation (R17). The closure simply receives the runtime
+    /// reference; overlay-aware reads route through
+    /// [`SessionView`](crate::session_view::SessionView) once Stages
+    /// 5 / 6 wire view-aware read paths into the resolver. Until
+    /// then, sessions transparently read base-host state — the
+    /// documented breaking period on the integration branch.
+    ///
+    /// The `_canonical_or_alias` parameter is kept on the signature
+    /// so callers do not need to be rewritten beyond the body
+    /// change; the value is unused today and reserved for future
+    /// per-canonical fast-path logic.
+    fn with_session_runtime<T>(
         &self,
-        canonical_or_alias: &str,
+        _canonical_or_alias: &str,
         f: impl FnOnce(&SessionRuntime) -> T,
     ) -> Result<T, MetaError> {
-        let has_overlays = self.project.session_has_overlays(self.id);
-
-        if has_overlays {
-            loop {
-                let current = self.project.active_overlay_session.load(Ordering::Acquire);
-                if current == self.id {
-                    break;
-                }
-                // Atomically claim: CAS current → self.id.
-                if self
-                    .project
-                    .active_overlay_session
-                    .compare_exchange(current, self.id, Ordering::AcqRel, Ordering::Acquire)
-                    .is_ok()
-                {
-                    if current != 0 {
-                        self.runtime.revert_other_session_overlays(current);
-                    }
-                    self.runtime.apply_own_overlays();
-                    break;
-                }
-                // CAS failed — another session raced us; retry.
-            }
-            if !canonical_or_alias.is_empty() {
-                let canonical = self
-                    .project
-                    .host
-                    .resolve_alias_or_canonical(canonical_or_alias);
-                self.runtime.reapply_overlay_target(canonical.as_str());
-            }
-        } else {
-            loop {
-                let current = self.project.active_overlay_session.load(Ordering::Acquire);
-                if current == 0 {
-                    break;
-                }
-                // Atomically clear: CAS current → 0.
-                if self
-                    .project
-                    .active_overlay_session
-                    .compare_exchange(current, 0, Ordering::AcqRel, Ordering::Acquire)
-                    .is_ok()
-                {
-                    self.runtime.revert_other_session_overlays(current);
-                    break;
-                }
-            }
-        }
-
-        self.runtime.refresh_view();
         Ok(f(&self.runtime))
     }
 }
