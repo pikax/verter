@@ -3315,6 +3315,17 @@ defineProps<Pick<HelperProps, 'size'>>()
         crate::resolver_core::FactVersionRef::DerivedFactHash { canonical_id, .. } => {
             canonical_id == "/src/Helper.ts"
         }
+        // R26 per-domain variants — not emitted on this code
+        // path yet at Stage 3. Stage 6 producers will populate
+        // them; this test continues to characterise the legacy
+        // whole-hash flow.
+        crate::resolver_core::FactVersionRef::Parse(p) => p.canonical_id == "/src/Helper.ts",
+        crate::resolver_core::FactVersionRef::ResolveImports(r) => {
+            r.canonical_id == "/src/Helper.ts"
+        }
+        crate::resolver_core::FactVersionRef::RouteSurface(r) => {
+            r.canonical_id == "/src/Helper.ts"
+        }
     });
 
     assert!(

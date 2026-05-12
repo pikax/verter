@@ -127,7 +127,34 @@ pub struct StoreViewCompatToken {
 
 pub trait StoreView {
     fn compat_token(&self) -> StoreViewCompatToken;
+
+    /// Validate a fact reference under this view. Implementers MUST
+    /// supply this method; the trait does NOT provide a default
+    /// because legacy substrate variants (`FileWholeHash`,
+    /// `DerivedFactHash`) need an implementer-specific check.
+    /// Stage 6 implementers route the per-domain variants here via
+    /// the matching `validates_*_domain` methods.
     fn validates(&self, fact: &FactVersionRef) -> bool;
+
+    /// Validate a parse-domain fact reference (R26). Default impl
+    /// returns `false` — implementers that emit parse-domain facts
+    /// override at Stage 5/6.
+    fn validates_parse_domain(&self, _fact: &ParseFactRef) -> bool {
+        false
+    }
+
+    /// Validate a resolve-imports-domain fact reference (R26).
+    /// Default impl returns `false` — Stage 6 resolver overrides.
+    fn validates_resolve_imports_domain(&self, _fact: &ResolveImportsFactRef) -> bool {
+        false
+    }
+
+    /// Validate a route-surface-domain fact reference (R26). Default
+    /// impl returns `false` — Stage 6 `RouteDb` overrides.
+    fn validates_route_surface_domain(&self, _fact: &RouteSurfaceFactRef) -> bool {
+        false
+    }
+
     /// Whether this view should check the archive for soft-invalidated
     /// entries. Only strict (non-permissive) views return true.
     fn checks_archive(&self) -> bool {
@@ -213,6 +240,58 @@ pub enum FactVersionRef {
         kind: DerivedFactKind,
         hash: ResolverHash16,
     },
+    // ── R12 per-domain variants — added at Stage 3 ──
+    //
+    // Each variant carries the fact's domain-scoped reference so
+    // [`StoreView::validates`] can route via
+    // [`crate::resolver_core::FactDomainTag::from_fact_version_ref`]
+    // to the matching per-domain validator. The dispatch table is
+    // bounded by `FactDomain` (3 variants), not by `FactKey` — adding
+    // a new `FactKey` extends a per-domain `*FactRef` enum but does
+    // NOT widen the trait (R26).
+    /// Parse-domain fact reference: per-file `FactKey` + observed
+    /// hash + lane. Validates against `FileFacts.registry`.
+    Parse(ParseFactRef),
+    /// Resolve-imports-domain fact reference: per-file
+    /// `ResolvedImportFacts` entry. Stage 6 populates the underlying
+    /// store; Stage 3 defines the dispatch surface.
+    ResolveImports(ResolveImportsFactRef),
+    /// Route-surface-domain fact reference: `RouteDb`-owned
+    /// effective-export-set / augmentation-index fingerprint. Stage 6
+    /// populates the underlying store.
+    RouteSurface(RouteSurfaceFactRef),
+}
+
+/// Parse-domain fact reference. Lane is recorded explicitly so
+/// validators know whether to check `semantic_hash` (cosmetic edits
+/// invariant) or `display_hash` (cosmetic-sensitive). See R13 lane
+/// model.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ParseFactRef {
+    pub canonical_id: String,
+    pub key: verter_semantic::facts::FactKey,
+    pub lane: verter_semantic::facts::FactLane,
+    pub expected_hash: ResolverHash16,
+}
+
+/// Resolve-imports-domain fact reference. Stage 6 producer
+/// (resolver) populates the matching store.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResolveImportsFactRef {
+    pub canonical_id: String,
+    pub key: verter_semantic::facts::FactKey,
+    pub lane: verter_semantic::facts::FactLane,
+    pub expected_hash: ResolverHash16,
+}
+
+/// Route-surface-domain fact reference. Stage 6 producer (`RouteDb`)
+/// populates the matching store.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RouteSurfaceFactRef {
+    pub canonical_id: String,
+    pub key: verter_semantic::facts::FactKey,
+    pub lane: verter_semantic::facts::FactLane,
+    pub expected_hash: ResolverHash16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

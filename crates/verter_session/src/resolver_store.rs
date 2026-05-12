@@ -282,6 +282,23 @@ impl HostStoreView {
                     )),
                 }
             }
+            // R26 per-domain variants — Stage 6 populates the
+            // matching stores and produces structured diagnostics
+            // there. `HostStoreView` does not observe them at
+            // Stage 3, so the diagnostic shape is a generic
+            // "domain fact not validated yet" string.
+            crate::resolver_core::FactVersionRef::Parse(p) => Some(format!(
+                "ParseFactRef canonical={} key={:?} lane={:?} expected={:?}",
+                p.canonical_id, p.key, p.lane, p.expected_hash
+            )),
+            crate::resolver_core::FactVersionRef::ResolveImports(r) => Some(format!(
+                "ResolveImportsFactRef canonical={} key={:?} lane={:?} expected={:?}",
+                r.canonical_id, r.key, r.lane, r.expected_hash
+            )),
+            crate::resolver_core::FactVersionRef::RouteSurface(r) => Some(format!(
+                "RouteSurfaceFactRef canonical={} key={:?} lane={:?} expected={:?}",
+                r.canonical_id, r.key, r.lane, r.expected_hash
+            )),
         }
     }
 
@@ -388,6 +405,25 @@ impl crate::resolver_core::StoreView for HostStoreView {
                     .get(&(canonical_id.clone(), *kind))
                     .is_some_and(|current| current == hash),
             },
+            // R26 per-domain variants — route to the per-domain
+            // validators. `HostStoreView` participates in the
+            // legacy whole-hash regime today; the per-domain
+            // validators are populated by Stage 6 producers.
+            // Default impls (returning `false`) are inherited from
+            // the trait until Stage 5/6 wire actual per-domain
+            // validation through this view.
+            // R26 per-domain variants — route to the per-domain
+            // validators (which return `false` by trait default at
+            // Stage 3; Stage 6 producers override).
+            crate::resolver_core::FactVersionRef::Parse(p) => {
+                crate::resolver_core::StoreView::validates_parse_domain(self, p)
+            }
+            crate::resolver_core::FactVersionRef::ResolveImports(r) => {
+                crate::resolver_core::StoreView::validates_resolve_imports_domain(self, r)
+            }
+            crate::resolver_core::FactVersionRef::RouteSurface(r) => {
+                crate::resolver_core::StoreView::validates_route_surface_domain(self, r)
+            }
         }
     }
 
@@ -416,6 +452,22 @@ impl crate::resolver_core::StoreView for HostStoreView {
                     .get(&(canonical_id.clone(), *kind))
                     .is_some_and(|current| current == hash),
             },
+            // R26 per-domain variants — archived strictness
+            // delegates to the per-domain validators (same as
+            // the live path; Stage 6 differentiates if archive
+            // semantics require it).
+            // R26 per-domain variants — route to the per-domain
+            // validators (which return `false` by trait default at
+            // Stage 3; Stage 6 producers override).
+            crate::resolver_core::FactVersionRef::Parse(p) => {
+                crate::resolver_core::StoreView::validates_parse_domain(self, p)
+            }
+            crate::resolver_core::FactVersionRef::ResolveImports(r) => {
+                crate::resolver_core::StoreView::validates_resolve_imports_domain(self, r)
+            }
+            crate::resolver_core::FactVersionRef::RouteSurface(r) => {
+                crate::resolver_core::StoreView::validates_route_surface_domain(self, r)
+            }
         }
     }
 
