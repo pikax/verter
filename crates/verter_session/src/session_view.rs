@@ -114,6 +114,23 @@ pub trait SessionView: Send + Sync {
 
     /// Five-way environment-hash bundle for this view (R21).
     fn env_hashes(&self) -> &EnvHashes;
+
+    /// Whether the view explicitly tombstones (overlay-Deletes) the
+    /// given canonical.
+    ///
+    /// Distinguishes "canonical was deleted by this session" from
+    /// "canonical is unknown / not yet loaded". Consumer paths that
+    /// short-circuit on tombstones (e.g.,
+    /// [`crate::VerterHost::get_component_meta_via_view`]) consult
+    /// this instead of inferring tombstoning from
+    /// `source().is_none()` + `content_hash_for().is_none()` (which
+    /// would also fire for "canonical not loaded yet").
+    ///
+    /// Default returns `false` — base-only views (`HostView`,
+    /// `HostViewRef`) never tombstone.
+    fn is_tombstoned(&self, _canonical: &str) -> bool {
+        false
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -387,6 +404,135 @@ impl SessionView for HostViewRef<'_> {
         &self,
         canonical: &str,
     ) -> Option<Arc<crate::file_artifact_store::FileArtifacts>> {
+        self.base
+            .project_type_store()
+            .indexed()
+            .latest_artifacts_for_canonical(canonical)
+    }
+
+    fn project_identity(&self) -> ProjectIdentity {
+        ProjectIdentity([0u8; 16])
+    }
+
+    fn env_hashes(&self) -> &EnvHashes {
+        &self.env_hashes
+    }
+}
+
+// ---------------------------------------------------------------------------
+// OverlaidViewRef — borrow-based OverlaidView
+// ---------------------------------------------------------------------------
+
+/// Borrow-shaped [`OverlaidView`] variant — holds `&'a VerterHost` plus
+/// borrowed overlay maps instead of `Arc<VerterHost>` + `Arc<FxHashMap>`.
+///
+/// Use this from `MetaSession` query paths that already hold
+/// `&self.project.host` (a `&VerterHost`) and want to thread a
+/// session-local overlay map into the consumer path without copying
+/// the host into an `Arc`. Reads check `overlays` first; absent
+/// canonicals fall through to the base host (R17).
+///
+/// **Concurrency.** Construction borrows the overlay maps; the
+/// reference is `Send + Sync` as long as the borrowed `FxHashMap`s are
+/// reachable. Sessions construct this on the stack inside a single
+/// query call and drop it before the call returns, so the borrow
+/// stays scoped to the query.
+pub struct OverlaidViewRef<'a> {
+    /// Per-canonical overlay sources (overlay → owned `Arc<str>` body).
+    overlays: &'a rustc_hash::FxHashMap<String, Arc<str>>,
+    /// Per-canonical overlay content hashes (precomputed by the
+    /// session at overlay-installation time).
+    overlay_hashes: &'a rustc_hash::FxHashMap<String, Hash16>,
+    /// Set of canonicals the session has explicitly tombstoned via
+    /// `MetaSession::delete`. Present in the set → the view reports
+    /// `source = None` and `content_hash_for = None`, irrespective of
+    /// what the base host says.
+    overlay_tombstones: &'a std::collections::HashSet<String>,
+    base: &'a VerterHost,
+    env_hashes: EnvHashes,
+}
+
+impl<'a> OverlaidViewRef<'a> {
+    /// Construct a borrow-based overlaid view.
+    ///
+    /// `overlays` and `overlay_hashes` MUST be aligned: every key in
+    /// `overlays` MUST have a precomputed entry in `overlay_hashes`.
+    /// `overlay_tombstones` holds the set of canonicals the session
+    /// has explicitly deleted (overlay-Delete entries).
+    pub fn new(
+        base: &'a VerterHost,
+        overlays: &'a rustc_hash::FxHashMap<String, Arc<str>>,
+        overlay_hashes: &'a rustc_hash::FxHashMap<String, Hash16>,
+        overlay_tombstones: &'a std::collections::HashSet<String>,
+    ) -> Self {
+        Self {
+            overlays,
+            overlay_hashes,
+            overlay_tombstones,
+            base,
+            env_hashes: EnvHashes::default(),
+        }
+    }
+
+    /// Whether the view tombstones the given canonical (overlay-Delete).
+    pub fn is_tombstoned(&self, canonical: &str) -> bool {
+        self.overlay_tombstones.contains(canonical)
+    }
+
+    /// Whether the view has an overlay-Upsert for the given canonical.
+    #[allow(dead_code)]
+    pub fn has_overlay(&self, canonical: &str) -> bool {
+        self.overlays.contains_key(canonical)
+    }
+
+    /// Borrow the base host. Reserved for internal consumer paths
+    /// that need to reach the host directly after consulting the
+    /// view.
+    pub fn host(&self) -> &VerterHost {
+        self.base
+    }
+}
+
+impl SessionView for OverlaidViewRef<'_> {
+    fn source(&self, canonical: &str) -> Option<Arc<str>> {
+        if self.overlay_tombstones.contains(canonical) {
+            return None;
+        }
+        if let Some(overlay_source) = self.overlays.get(canonical) {
+            return Some(Arc::clone(overlay_source));
+        }
+        self.base.get_source(canonical)
+    }
+
+    fn content_hash_for(&self, canonical: &str) -> Option<Hash16> {
+        if self.overlay_tombstones.contains(canonical) {
+            return None;
+        }
+        if let Some(hash) = self.overlay_hashes.get(canonical) {
+            return Some(*hash);
+        }
+        self.base
+            .project_type_store()
+            .indexed()
+            .content_hash_for_canonical(canonical)
+    }
+
+    fn is_tombstoned(&self, canonical: &str) -> bool {
+        self.overlay_tombstones.contains(canonical)
+    }
+
+    fn parse_artifacts(
+        &self,
+        canonical: &str,
+    ) -> Option<Arc<crate::file_artifact_store::FileArtifacts>> {
+        // Overlay artifacts are not yet materialised — fall through to
+        // the base host's latest artifacts so the consumer at least
+        // observes a coherent payload. R17 still holds: this read does
+        // not mutate the host. Overlay-aware artifact materialisation
+        // is reserved for the future cache-aware path.
+        if self.overlay_tombstones.contains(canonical) {
+            return None;
+        }
         self.base
             .project_type_store()
             .indexed()

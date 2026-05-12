@@ -99,6 +99,86 @@ impl VerterHost {
         Some(meta)
     }
 
+    /// View-aware variant of [`get_component_meta`].
+    ///
+    /// The supplied [`crate::session_view::SessionView`] is consulted
+    /// for cache-key derivation (R17) and dep-signature revalidation
+    /// (R19). This is the entry point sessions use to thread their
+    /// per-overlay view into the consumer path so two sessions with
+    /// conflicting overlays admit distinct multi-candidate slots in
+    /// `ComponentMetaResultDb`.
+    ///
+    /// **Tombstone semantics.** If `view.is_tombstoned(canonical)` is
+    /// `true`, the canonical is treated as deleted from the session's
+    /// perspective and the call returns `None` without consulting the
+    /// base host's cache. Base-only views (`HostView`,
+    /// `HostViewRef`) never tombstone.
+    pub fn get_component_meta_via_view(
+        &self,
+        canonical_or_alias: &str,
+        view: &dyn crate::session_view::SessionView,
+    ) -> Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis> {
+        self.provenance
+            .get_component_meta_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let started = component_meta_debug_enabled().then(Instant::now);
+        let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
+
+        // Tombstone detection (R17): a session's overlay-Delete is the
+        // explicit signal — never inferred from `source().is_none()`,
+        // which fires for unloaded canonicals too.
+        if view.is_tombstoned(canonical.as_str()) {
+            return None;
+        }
+
+        // Try the view-aware warm cache fast path.
+        if let Some(warm) =
+            self.try_component_meta_cache_hit_with_view(canonical.as_str(), view)
+        {
+            if let Some(started) = started {
+                component_meta_debug(format!(
+                    "get_component_meta_via_view owner={} warm-cache hit took {:?}",
+                    canonical,
+                    started.elapsed(),
+                ));
+            }
+            return Some(warm);
+        }
+
+        // Cold build. The resolver does not yet consume the view for
+        // analysis content, so the cold compute runs against the base
+        // host's source. The view's hash, however, IS used to publish
+        // the result so the cache slot is keyed under the overlay
+        // hash. This is the architectural contract for R20
+        // multi-candidate isolation: cold compute may share resolver
+        // work across sessions when overlay semantics are not yet
+        // overlay-aware, but the published cache slot stays per-view.
+        let resolved = self
+            .resolve_component_meta(canonical.as_str(), crate::types::ProjectionMode::Expanded)?;
+        let meta = extract_component_meta_from_resolved(
+            self,
+            canonical.as_str(),
+            &resolved,
+            true, // include_fallthrough
+        );
+
+        self.publish_component_meta_cache_entry_with_view(
+            canonical.as_str(),
+            view,
+            &resolved,
+            meta.clone(),
+        );
+
+        if let Some(started) = started {
+            component_meta_debug(format!(
+                "get_component_meta_via_view owner={} cold took {:?}",
+                canonical,
+                started.elapsed(),
+            ));
+        }
+        Some(meta)
+    }
+
     /// Look up the project-global final-result cache for the
     /// owner and return the warm payload only when its recorded
     /// dep-signature revalidates against the live host. Returns `None` on
@@ -138,6 +218,120 @@ impl VerterHost {
         // cold resolver. The plain `get_component_meta` warm path returns
         // only the analysis projection.
         Some(entry.payload.analysis.clone())
+    }
+
+    /// View-aware warm-cache fast path for component-meta queries.
+    ///
+    /// Like [`try_component_meta_cache_hit`] but derives the cache key
+    /// from `view.content_hash_for(canonical)` instead of the base
+    /// host's `shallow_file_state(canonical).whole_hash`. This is the
+    /// R17 + R18 wiring: sessions construct an
+    /// [`crate::session_view::SessionView`] over their overlay state
+    /// and the consumer path consults it for cache-key derivation, so
+    /// two sessions with conflicting overlays admit distinct cache
+    /// slots in the multi-candidate substrate.
+    ///
+    /// The `view.content_hash_for(canonical)` lookup increments
+    /// `provenance.view_aware_cache_key_lookups`. A `None` return
+    /// from the view falls through to the base host's
+    /// `shallow_file_state` — but the increment fires either way so
+    /// callers observe that the consumer path consulted the view.
+    fn try_component_meta_cache_hit_with_view(
+        &self,
+        canonical: &str,
+        view: &dyn crate::session_view::SessionView,
+    ) -> Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis> {
+        // Tombstoned canonicals (overlay-Delete) report `None` for
+        // content hash AND source. Short-circuit the warm path: a
+        // tombstoned overlay does NOT have a meaningful component-meta
+        // result and must NOT collapse onto a base cache slot.
+        self.provenance
+            .view_aware_cache_key_lookups
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let owner_whole_hash = view.content_hash_for(canonical).or_else(|| {
+            // View did not know about the canonical — fall back to
+            // the base host's shallow file state. This branch covers
+            // canonicals the session never touched.
+            self.shallow_file_state(canonical).map(|s| s.whole_hash)
+        })?;
+        let key = crate::component_meta_result_db::ComponentMetaResultKey {
+            owner_canonical: Arc::from(canonical),
+            owner_whole_hash,
+            options_fingerprint: component_meta_options_fingerprint(
+                &ComponentMetaOptions::default(),
+            ),
+        };
+        let entry = self.project_type_store.component_meta_results().get(&key)?;
+        let validator = HostFenceValidator { host: self, view };
+        use crate::completion_fence::FenceValidator;
+        let dep_sig_valid = entry
+            .dep_signature
+            .iter()
+            .all(|(canonical_id, version)| validator.validate(canonical_id, version));
+        if !dep_sig_valid {
+            return None;
+        }
+        Some(entry.payload.analysis.clone())
+    }
+
+    /// Publish the cold-build result into the project-global
+    /// final-result cache, keyed under the view's content hash for the
+    /// owner.
+    ///
+    /// Mirror of [`publish_component_meta_cache_entry`] that consults
+    /// the supplied [`crate::session_view::SessionView`] for the
+    /// owner's content hash so sessions with conflicting overlays
+    /// admit distinct multi-candidate slots. Falls through to the
+    /// base host's `shallow_file_state` if the view does not know
+    /// about the canonical.
+    fn publish_component_meta_cache_entry_with_view(
+        &self,
+        canonical: &str,
+        view: &dyn crate::session_view::SessionView,
+        resolved: &crate::meta_resolve::ResolvedComponentMetaState,
+        meta: verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    ) {
+        if resolved.synthesis_should_suppress {
+            tracing::debug!(
+                target: "verter::audit::record",
+                file = %canonical,
+                "skipping component-meta cache promotion (view-aware path): synthesis_should_suppress=true",
+            );
+            return;
+        }
+        let Some(whole_hash) = view.content_hash_for(canonical).or_else(|| {
+            self.shallow_file_state(canonical).map(|s| s.whole_hash)
+        }) else {
+            return;
+        };
+        let key = crate::component_meta_result_db::ComponentMetaResultKey {
+            owner_canonical: Arc::from(canonical),
+            owner_whole_hash: whole_hash,
+            options_fingerprint: component_meta_options_fingerprint(
+                &ComponentMetaOptions::default(),
+            ),
+        };
+        let dep_signature = Self::build_component_meta_dep_signature(
+            canonical,
+            whole_hash,
+            self.project_type_store.project_generation(),
+            &resolved.fact_versions,
+        );
+        let resolution_template =
+            crate::component_meta_result_db::ResolutionTemplate::from_resolved_state(resolved);
+        let cached = crate::component_meta_result_db::CachedComponentMetaResult {
+            analysis: meta,
+            resolution_template,
+            canonical_id: Arc::from(canonical),
+            whole_hash,
+        };
+        self.project_type_store.component_meta_results().insert(
+            key,
+            crate::component_meta_result_db::ComponentMetaResultEntry {
+                payload: Arc::new(cached),
+                dep_signature,
+            },
+        );
     }
 
     /// Publish the cold-build result into the project-global

@@ -301,11 +301,20 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     // Binds R17 (sessions are views) and R18 (no thread-local view
     // globals — the view is on the trait, passed explicitly).
     //
-    // `#[allow(dead_code)]` carves out the surface for future
-    // resolver-tier call sites that route through `ctx.view()`
-    // rather than the bare host accessors; the arch-guard
-    // `resolver_context_threads_session_view_via_view_accessor`
-    // observes the method's presence statically.
+    // Consumed by
+    // [`VerterHost::try_component_meta_cache_hit`](crate::VerterHost)
+    // for the session-less warm fast path; session-bearing calls
+    // construct an `OverlaidViewRef` directly and call
+    // `get_component_meta_via_view`.
+    //
+    // `#[allow(dead_code)]` covers Rust's dead-code detection quirk
+    // for trait methods: this method IS dispatched at runtime via the
+    // `&dyn ResolverContext` cast in `try_component_meta_cache_hit`,
+    // but the compiler's static-dispatch dead-code analyzer counts
+    // only impl-block calls, missing dyn-dispatched calls inside the
+    // crate-private surface. The arch-guard pin in
+    // `tests/architecture_guards.rs` observes the method's presence
+    // statically.
     #[allow(dead_code)]
     fn view(&self) -> Box<dyn crate::session_view::SessionView + '_>;
 }

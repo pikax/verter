@@ -549,14 +549,40 @@ impl MetaSession {
     }
 
     /// Get the analysis snapshot for a file, resolved through this session's overlay.
+    ///
+    /// **View wiring (R17).** Consults the session's overlay map for
+    /// tombstone detection: if the canonical is overlay-Deleted,
+    /// returns `Ok(None)` without reading the base host. Where the
+    /// session does not tombstone the canonical, falls through to the
+    /// base host's `get_analysis` (overlay-aware analysis content is
+    /// reserved for the future overlay-aware resolver path).
     pub fn get_analysis(
         &self,
         canonical_or_alias: &str,
     ) -> Result<Option<crate::types::FileAnalysisSnapshot>, MetaError> {
         self.check_alive()?;
+        let host = self.project.host();
+        let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
+        // Tombstone short-circuit: a session that deleted the canonical
+        // never sees the base host's analysis for it (R17).
+        if self.is_tombstoned(canonical.as_str()) {
+            return Ok(None);
+        }
         self.with_session_runtime(canonical_or_alias, |runtime| {
             runtime.host().get_analysis(canonical_or_alias)
         })
+    }
+
+    /// Whether this session has an overlay-Delete for the given canonical.
+    ///
+    /// Used by the view-aware consumer paths to short-circuit reads
+    /// against canonicals the session has explicitly tombstoned (R17).
+    pub(crate) fn is_tombstoned(&self, canonical_id: &str) -> bool {
+        let sessions = self.project.sessions.read();
+        sessions
+            .get(&self.id)
+            .map(|state| matches!(state.overlays.get(canonical_id), Some(SessionOverlay::Delete)))
+            .unwrap_or(false)
     }
 
     /// Evaluate component metadata types through this session's overlay view.
@@ -576,30 +602,24 @@ impl MetaSession {
     ///
     /// Combines enriched analysis + type evaluation in one call.
     /// Does NOT re-enter the legacy getAnalysis/evaluateTypes workflow.
+    ///
+    /// **View wiring (R17, R18).** The session constructs an
+    /// `OverlaidViewRef` over its current overlay map and threads it
+    /// explicitly through `VerterHost::get_component_meta_via_view`.
+    /// The consumer path consults the view for cache-key derivation,
+    /// so two sessions with conflicting overlays admit distinct
+    /// candidate slots in the multi-candidate substrate.
     pub fn get_component_meta(
         &self,
         canonical_or_alias: &str,
     ) -> Result<Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis>, MetaError>
     {
         self.check_alive()?;
-        let resolved = self.with_session_runtime(canonical_or_alias, |runtime| {
-            runtime.get_component_meta_with_resolution(canonical_or_alias)
-        })?;
-
-        match resolved {
-            Some((analysis, resolved)) => {
-                if let Some(err) = component_meta_resolution_budget_error(
-                    canonical_or_alias,
-                    Some(&analysis),
-                    &resolved,
-                ) {
-                    Err(err)
-                } else {
-                    Ok(Some(analysis))
-                }
-            }
-            None => Ok(None),
-        }
+        let host = self.project.host();
+        let analysis = self.with_overlay_view(|view| {
+            host.get_component_meta_via_view(canonical_or_alias, view)
+        });
+        Ok(analysis)
     }
 
     /// Path C C13 — Batch-mode fan-out for N independent component-meta
@@ -988,6 +1008,59 @@ impl MetaSession {
         f: impl FnOnce(&SessionRuntime) -> T,
     ) -> Result<T, MetaError> {
         Ok(f(&self.runtime))
+    }
+
+    /// Run a closure with a borrowed
+    /// [`crate::session_view::OverlaidViewRef`] over this session's
+    /// current overlay map.
+    ///
+    /// Materialises a snapshot of the session's `SessionState.overlays`
+    /// (with precomputed content hashes) into the two-map shape the
+    /// borrow-based view expects, then invokes `f` with the view
+    /// reference. The snapshot is dropped at the end of the call so
+    /// the next session-state mutation (`upsert`/`delete`/`reset`) is
+    /// observed by subsequent queries.
+    ///
+    /// Binds R17 (session overlays never mutate the base host) and
+    /// R18 (the view is passed by explicit `&dyn SessionView`
+    /// argument, never via a thread-local).
+    fn with_overlay_view<R>(
+        &self,
+        f: impl FnOnce(&dyn crate::session_view::SessionView) -> R,
+    ) -> R {
+        let mut overlays: rustc_hash::FxHashMap<String, Arc<str>> =
+            rustc_hash::FxHashMap::default();
+        let mut overlay_hashes: rustc_hash::FxHashMap<String, crate::types::Hash16> =
+            rustc_hash::FxHashMap::default();
+        let mut overlay_tombstones: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+
+        {
+            let sessions = self.project.sessions.read();
+            if let Some(state) = sessions.get(&self.id) {
+                for (canonical, overlay) in state.overlays.iter() {
+                    match overlay {
+                        SessionOverlay::Upsert { source } => {
+                            let body: Arc<str> = Arc::from(source.as_str());
+                            let hash = crate::hash::hash_16(body.as_bytes());
+                            overlays.insert(canonical.clone(), body);
+                            overlay_hashes.insert(canonical.clone(), hash);
+                        }
+                        SessionOverlay::Delete => {
+                            overlay_tombstones.insert(canonical.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        let view = crate::session_view::OverlaidViewRef::new(
+            self.project.host(),
+            &overlays,
+            &overlay_hashes,
+            &overlay_tombstones,
+        );
+        f(&view)
     }
 }
 

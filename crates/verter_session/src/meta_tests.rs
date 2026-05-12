@@ -987,8 +987,12 @@ fn get_analysis_without_overlay_uses_base() {
 }
 
 #[test]
-#[ignore = "consumer paths (get_analysis / get_component_meta / evaluate_types) not yet routed through ResolverContext::view(); R20 multi-candidate substrate landed but view-aware consumer wiring is pending"]
 fn get_analysis_for_deleted_file_returns_none() {
+    // R17 — overlay-Delete short-circuits the consumer path. The
+    // session's `get_analysis` consults its overlay map via the
+    // view substrate (`OverlaidViewRef` constructed at call time)
+    // and returns `None` for tombstoned canonicals without reading
+    // the base host. Wired in Stage-5-landing-gap-A.
     let project = make_project();
     let base = sfc("msg: string");
     project.upsert_base("Comp.vue", &base).unwrap();

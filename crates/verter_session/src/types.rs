@@ -1640,6 +1640,14 @@ pub struct MetaProvenance {
     /// `tests/session_view_isolation.rs` to assert the R17
     /// invariant that session query paths do NOT mutate the host.
     pub host_upsert_calls: std::sync::atomic::AtomicU64,
+    /// Bumped on every cache-key derivation that consulted a
+    /// [`crate::session_view::SessionView`] via
+    /// `view.content_hash_for(canonical)` rather than the base host's
+    /// `shallow_file_state(canonical).whole_hash`. Used by
+    /// `tests/session_view_warm_reuse.rs` to assert R17/R18 (the
+    /// consumer path is wired through `SessionView`, not through the
+    /// bare host).
+    pub view_aware_cache_key_lookups: std::sync::atomic::AtomicU64,
     pub resolved_external_type_cache_hits: std::sync::atomic::AtomicU64,
     pub resolved_external_type_cache_misses: std::sync::atomic::AtomicU64,
     pub resolver_node_cache_hits: std::sync::atomic::AtomicU64,
@@ -1712,6 +1720,7 @@ impl Default for MetaProvenance {
             get_analysis_calls: std::sync::atomic::AtomicU64::new(0),
             evaluate_types_calls: std::sync::atomic::AtomicU64::new(0),
             host_upsert_calls: std::sync::atomic::AtomicU64::new(0),
+            view_aware_cache_key_lookups: std::sync::atomic::AtomicU64::new(0),
             resolved_external_type_cache_hits: std::sync::atomic::AtomicU64::new(0),
             resolved_external_type_cache_misses: std::sync::atomic::AtomicU64::new(0),
             resolver_node_cache_hits: std::sync::atomic::AtomicU64::new(0),
