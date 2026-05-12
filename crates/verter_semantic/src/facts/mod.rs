@@ -14,12 +14,17 @@ pub mod boundary;
 pub mod component;
 pub mod corender;
 pub mod css;
+pub mod hashing;
 pub mod reactivity;
 pub mod registry;
 pub mod route;
 pub mod runtime_schema;
 pub mod symbol;
 
+pub use hashing::{
+    compute_member_presence_hash, compute_member_shape_hash, compute_semantic_hash, CrossDeclLens,
+    CrossDeclRef, HashOutcome, UnresolvedLens, MAX_HASH_DEPTH,
+};
 pub use registry::{
     AugmentationTargetKindTag, Fact, FactDomain, FactHash, FactKey, FactLane, FactRegistry,
     MacroKind as FactMacroKind, MacroTargetKey, MemberKind, ObservedFact, SymbolSpace,
