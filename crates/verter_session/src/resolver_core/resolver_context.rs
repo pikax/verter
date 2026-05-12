@@ -285,7 +285,7 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     #[allow(dead_code)]
     fn get_raw_analysis_snapshot(&self, canonical: &str) -> Option<FileAnalysisSnapshot>;
 
-    // -------- Session view (Stage 4b — explicit view threading) ----
+    // -------- Session view (explicit view threading) ----
     //
     // Returns a [`SessionView`](crate::session_view::SessionView) trait
     // object over `&self`. Resolver-tier code that needs to observe
@@ -294,18 +294,16 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     // impl (`VerterHost`) returns a `HostViewRef<'_>` boxed in a
     // `Box<dyn SessionView + '_>` so the trait stays dyn-compatible.
     //
-    // Stage 4d threads `OverlaidView`-shaped variants into the same
-    // surface for sessions that carry their own overlays. Until then,
-    // every caller reads the base host's canonical state via
-    // `ctx.view()`.
+    // Overlay-aware sessions thread `OverlaidView`-shaped variants
+    // into the same surface so callers always read the view rather
+    // than the bare host.
     //
     // Binds R17 (sessions are views) and R18 (no thread-local view
     // globals — the view is on the trait, passed explicitly).
     //
-    // dead_code allow: Stage 4b lands the method on the trait but
-    // nothing routes through it yet. Stage 4d migrates the
-    // overlay-mutation entry points to call `ctx.view()` instead of
-    // CAS-claiming the host. The arch-guard
+    // `#[allow(dead_code)]` carves out the surface for future
+    // resolver-tier call sites that route through `ctx.view()`
+    // rather than the bare host accessors; the arch-guard
     // `resolver_context_threads_session_view_via_view_accessor`
     // observes the method's presence statically.
     #[allow(dead_code)]
@@ -563,7 +561,7 @@ impl ResolverContext for crate::VerterHost {
         crate::VerterHost::get_raw_analysis_snapshot(self, canonical)
     }
 
-    // Session view (Stage 4b) -----------------------------------------
+    // Session view ----------------------------------------------------
 
     #[inline]
     fn view(&self) -> Box<dyn crate::session_view::SessionView + '_> {

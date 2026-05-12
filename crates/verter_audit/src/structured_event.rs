@@ -215,10 +215,10 @@ pub enum StructuredAuditEvent {
     /// `crates/verter_session/tests/fixtures/cache_baseline/evict_canonical_inventory.json`.
     /// The quintuple-unchanged fast path (R1) MUST NOT emit this event;
     /// the structural-change path emits one event per draining
-    /// instruction. Stage 2 cache-reuse tests use the absence of
-    /// these events to prove byte-identical re-upsert is a true no-op;
-    /// later stages use the presence/order to characterise path-
-    /// precise invalidation (Stage 6d).
+    /// instruction. Cache-reuse tests use the absence of these
+    /// events to prove byte-identical re-upsert is a true no-op;
+    /// invalidation-characterisation tests use the presence/order
+    /// to characterise path-precise invalidation.
     CacheDrainedAtUpsert {
         /// Static identifier for the cache layer being drained
         /// (e.g. `"resolved_type_cache"`, `"eval_env_cache"`,

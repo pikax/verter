@@ -194,8 +194,8 @@ pub fn compute_semantic_hash(
 }
 
 /// Compute the alpha-normalised structural fingerprint over a member
-/// header `(name, kind, exporter_salt)` per R28 / Stage 3's
-/// `MemberPresence` fact.
+/// header `(name, kind, exporter_salt)` per R28's `MemberPresence`
+/// fact.
 ///
 /// Header only — NO body fingerprint. Adding sibling `b` does not
 /// force re-walking member `a`'s body (the path-precision
@@ -459,12 +459,11 @@ impl<'a> Walker<'a> {
                 type_arguments,
                 conditional_context,
             } => {
-                // The pre-Stage-3 solver emits this on detected
-                // recursion; under R27 the worklist hasher emits
-                // `CycleRef` instead. We still hash the legacy
-                // shape alpha-stably so producers that hand us a
-                // legacy node don't change `semantic_hash` non-
-                // cosmetically.
+                // Legacy producers may still hand us this node on
+                // detected recursion; the worklist hasher emits
+                // `CycleRef` instead under R27. We hash this legacy
+                // shape alpha-stably so producers that emit it do
+                // not change `semantic_hash` non-cosmetically.
                 self.buf.push(0x38);
                 self.buf.extend_from_slice(name.as_bytes());
                 self.buf.push(0xFF);

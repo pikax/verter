@@ -1144,7 +1144,7 @@ fn postprocess_vue_declarations(
 
 /// Rewrite absolute `import("...")` paths in `.d.ts` content.
 ///
-/// During stage 1, `rewrite_relative_imports` converts relative paths to absolute.
+/// `rewrite_relative_imports` runs first and converts relative paths to absolute.
 /// tsc propagates these into `.d.ts` output. This function converts them back to
 /// relative paths from the target `.vue.d.ts` file's location.
 ///

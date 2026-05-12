@@ -15,13 +15,13 @@
 //!   mutate the base host; they coexist with the base under different
 //!   content hashes (R17).
 //!
-//! ## Plan provenance
+//! ## Architectural role
 //!
-//! Introduced by the fact-based cache refactor's **Stage 4a**. The
-//! companion stages thread `SessionView` through `ResolverContext`
-//! (Stage 4b), make [`HostFenceValidator`](crate::host_manage::HostFenceValidator)
-//! view-aware (Stage 4c), and delete the overlay-mutation machinery
-//! (Stage 4d). See `/type-cache-architecture` and `/host-session`
+//! The fact-based cache refactor consolidates session-side reads
+//! onto this trait: `ResolverContext` exposes a `view()` accessor,
+//! [`HostFenceValidator`](crate::host_manage::HostFenceValidator) is
+//! view-aware, and the host's overlay-mutation machinery is gone
+//! (R17). See `/type-cache-architecture` and `/host-session`
 //! skills for the architectural rules (R17–R20).
 //!
 //! ## What `SessionView` is NOT
@@ -51,13 +51,13 @@ use crate::VerterHost;
 ///
 /// Today only `parse_env_hash` is wired through the cache substrate;
 /// the remaining four dimensions are carried by value so that callers
-/// can pass an `EnvHashes` value without further plumbing. Stage 6
-/// migrates the cache-key composition to consume these fields.
+/// can pass an `EnvHashes` value without further plumbing. Future
+/// cache-key composition consumes these fields directly.
 ///
-/// **Stage 4a stub:** `HostView::env_hashes()` returns a static value
-/// derived from
+/// **Default-impl carrier:** `HostView::env_hashes()` returns a
+/// static value derived from
 /// [`LEGACY_PARSE_ENV_HASH`](crate::file_artifact_store::LEGACY_PARSE_ENV_HASH).
-/// The trait surface lets later stages plumb real values without
+/// The trait surface lets producers plumb real values without
 /// changing the read sites.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct EnvHashes {
@@ -137,9 +137,9 @@ pub struct HostView {
 impl HostView {
     /// Construct a `HostView` over the supplied host.
     ///
-    /// The returned view's `env_hashes()` reports the static
-    /// Stage 4a defaults; Stage 6 plumbs real env hashes through
-    /// the constructor.
+    /// The returned view's `env_hashes()` reports static defaults;
+    /// callers that have real env hashes use
+    /// [`HostView::with_env_hashes`] instead.
     pub fn new(base: Arc<VerterHost>) -> Self {
         Self {
             base,
@@ -149,7 +149,8 @@ impl HostView {
 
     /// Construct a `HostView` with explicit env hashes.
     ///
-    /// Reserved for Stage 6 wiring; today callers may pass
+    /// Used by producers that carry real env hashes from the
+    /// workspace config; callers without one pass
     /// [`EnvHashes::default()`].
     #[allow(dead_code)]
     pub fn with_env_hashes(base: Arc<VerterHost>, env_hashes: EnvHashes) -> Self {
@@ -211,11 +212,10 @@ impl SessionView for HostView {
 /// The overlay map is consulted first for `source` and
 /// `content_hash_for`. Canonicals absent from the overlay fall
 /// through to the base host. Overlay artifacts are produced on
-/// demand under the overlay's content hash (Stage 6) — Stage 4a
-/// presents the trait shape only; the artifact-side path falls
-/// through to the base host for now and is wired up in later
-/// stages when the artifact store learns to key on the overlay
-/// content hash.
+/// demand under the overlay's content hash when the artifact
+/// store learns to key on the overlay content hash; until that
+/// wiring lands the artifact-side path falls through to the
+/// base host.
 ///
 /// `OverlaidView` is `Send + Sync` because its overlay map is
 /// behind an `Arc<FxHashMap>`; mutation happens by constructing a
@@ -342,8 +342,9 @@ impl SessionView for OverlaidView {
 /// as `Box<dyn SessionView + '_>` so the dyn-compatibility of
 /// `ResolverContext` is preserved.
 ///
-/// Stage 6 / 4d wires real env-hash + project-identity plumbing into
-/// this shape; today the impl mirrors `HostView`.
+/// The impl mirrors `HostView`; once real env-hash + project-identity
+/// plumbing lands, both shapes consume the workspace config the same
+/// way.
 #[derive(Clone, Copy)]
 pub struct HostViewRef<'a> {
     base: &'a VerterHost,
@@ -360,8 +361,10 @@ impl<'a> HostViewRef<'a> {
         }
     }
 
-    /// Construct a view with explicit env hashes (reserved for
-    /// Stage 6 wiring).
+    /// Construct a view with explicit env hashes.
+    ///
+    /// Used by producers that carry real env hashes from the
+    /// workspace config.
     #[allow(dead_code)]
     pub fn with_env_hashes(base: &'a VerterHost, env_hashes: EnvHashes) -> Self {
         Self { base, env_hashes }
@@ -543,8 +546,8 @@ mod tests {
         let overlaid: Box<dyn SessionView> =
             Box::new(OverlaidView::new(Arc::clone(&host), FxHashMap::default()));
 
-        // Stage 4a env-hashes are default — the assertion exercises
-        // the dyn trait call path; the predicate is non-trivial
+        // Env-hashes default to zero — the assertion exercises the
+        // dyn trait call path; the predicate is non-trivial
         // (compares against an explicit sentinel value).
         assert!(assert_dyn(host_view.as_ref()));
         assert!(assert_dyn(overlaid.as_ref()));

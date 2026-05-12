@@ -433,7 +433,7 @@ async fn scanner_loop(
     }
 
     tracing::info!(
-        "workspace_scanner: stage 1 complete — {} .vue files processed",
+        "workspace_scanner: Vue file pass complete — {} .vue files processed",
         batch_count,
     );
 

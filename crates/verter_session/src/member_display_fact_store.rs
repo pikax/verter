@@ -48,7 +48,7 @@ pub struct MemberDisplayFactKey {
 /// Read / write contract matches
 /// [`crate::member_semantic_fact_store::MemberSemanticFactStore`]:
 /// `DashMap` shards on the key; cold miss is `None`; admission
-/// runs through producer singleflight at Stage 6d.
+/// runs through the producer singleflight.
 #[derive(Debug, Default)]
 pub struct MemberDisplayFactStore {
     entries: DashMap<MemberDisplayFactKey, Arc<Fact>>,

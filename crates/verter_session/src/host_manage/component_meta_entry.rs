@@ -116,9 +116,9 @@ impl VerterHost {
             ),
         };
         let entry = self.project_type_store.component_meta_results().get(&key)?;
-        // Stage 4c — bind a host-rooted view; the warm-cache fast
-        // path on `VerterHost` has no session context, so the
-        // overlay-free `HostViewRef` is the correct read substrate.
+        // Bind a host-rooted view; the warm-cache fast path on
+        // `VerterHost` has no session context, so the overlay-free
+        // `HostViewRef` is the correct read substrate.
         let view = crate::session_view::HostViewRef::new(self);
         let validator = HostFenceValidator {
             host: self,
@@ -429,9 +429,9 @@ impl VerterHost {
             ),
         };
         let entry = self.project_type_store.component_meta_results().get(&key)?;
-        // Stage 4c — bind a host-rooted view; the warm-cache fast
-        // path on `VerterHost` has no session context, so the
-        // overlay-free `HostViewRef` is the correct read substrate.
+        // Bind a host-rooted view; the warm-cache fast path on
+        // `VerterHost` has no session context, so the overlay-free
+        // `HostViewRef` is the correct read substrate.
         let view = crate::session_view::HostViewRef::new(self);
         let validator = HostFenceValidator {
             host: self,

@@ -146,8 +146,7 @@ pub(crate) struct SessionState {
 ///
 /// Multiple [`MetaSession`]s can be opened against the same project.
 /// The project owns the host, base file cache, and per-session state.
-/// Stage 4d retired the per-session overlay-mutation lifecycle —
-/// concurrent sessions never mutate the host (R17); cross-session
+/// Per-session overlays never mutate the host (R17); cross-session
 /// concurrency is separated by the existing
 /// `StoreViewCompatToken`-keyed singleflight (R19).
 pub struct MetaProject {
@@ -372,14 +371,13 @@ impl MetaProject {
     }
 
     // -----------------------------------------------------------------------
-    // Crate-internal accessors retired at Stage 4d
+    // Crate-internal accessors (R17 — sessions are read-only views)
     // -----------------------------------------------------------------------
     //
     // `sessions_read` / `base_sources_read` / `session_has_overlays`
-    // retired alongside the per-session overlay-mutation machinery.
-    // Stage 5 / 6 view-aware read paths construct overlay views
-    // directly from the session's `SessionState.overlays` map; they
-    // do not need read-guards on the project's shared state.
+    // do not exist on this type. View-aware read paths construct
+    // overlay views directly from the session's `SessionState.overlays`
+    // map; they do not need read-guards on the project's shared state.
 
     // -----------------------------------------------------------------------
     // Internal: session lifecycle
@@ -387,9 +385,9 @@ impl MetaProject {
 
     /// Release a session: remove its state.
     ///
-    /// Stage 4d — overlay revert retired. Overlays no longer mutate
-    /// the host, so closing a session is a pure state removal
-    /// (R17). The `_runtime` parameter remains for symmetry with
+    /// Overlays never mutate the host, so closing a session is a
+    /// pure state removal (R17). The `_runtime` parameter remains
+    /// for symmetry with
     /// the public surface; future stages may reattach overlay-
     /// invalidation hooks through it.
     fn release_session(&self, session_id: u64, _runtime: &SessionRuntime) {
@@ -483,11 +481,11 @@ impl MetaSession {
 
     /// Invalidate the session's runtime caches.
     ///
-    /// Stage 4d — host mutation retired. Overlays no longer apply
-    /// to the host, so there is no overlay state to revert. The
-    /// session's overlays remain stored on `SessionState.overlays`
-    /// for the Stage 5 / 6 view-aware read paths. The runtime's
-    /// `invalidate_session_caches` is a no-op post-Stage-4d (R17).
+    /// Overlays never apply to the host, so there is no overlay
+    /// state to revert. The session's overlays remain stored on
+    /// `SessionState.overlays` for view-aware read paths. The
+    /// runtime's `invalidate_session_caches` is a no-op under the
+    /// host-immutable contract (R17).
     fn invalidate_active_overlays(&self) {
         self.runtime.invalidate_session_caches();
     }
@@ -971,12 +969,13 @@ impl MetaSession {
 
     /// Run a closure with the session's runtime facade in scope.
     ///
-    /// Stage 4d — overlay context is no longer applied via host
-    /// mutation (R17). The closure simply receives the runtime
-    /// reference; overlay-aware reads route through
-    /// [`SessionView`](crate::session_view::SessionView) once Stages
-    /// 5 / 6 wire view-aware read paths into the resolver. Until
-    /// then, sessions transparently read base-host state — the
+    /// Overlay context is never applied via host mutation (R17).
+    /// The closure simply receives the runtime reference;
+    /// overlay-aware reads route through
+    /// [`SessionView`](crate::session_view::SessionView) when the
+    /// resolver consults view-aware read paths. Where the resolver
+    /// has not yet routed through the view substrate, sessions
+    /// transparently read base-host state — the
     /// documented breaking period on the integration branch.
     ///
     /// The `_canonical_or_alias` parameter is kept on the signature

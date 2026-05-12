@@ -134,25 +134,26 @@ pub trait StoreView {
     /// supply this method; the trait does NOT provide a default
     /// because legacy substrate variants (`FileWholeHash`,
     /// `DerivedFactHash`) need an implementer-specific check.
-    /// Stage 6 implementers route the per-domain variants here via
-    /// the matching `validates_*_domain` methods.
+    /// Per-domain implementers route the per-domain variants here
+    /// via the matching `validates_*_domain` methods.
     fn validates(&self, fact: &FactVersionRef) -> bool;
 
     /// Validate a parse-domain fact reference (R26). Default impl
-    /// returns `false` — implementers that emit parse-domain facts
-    /// override at Stage 5/6.
+    /// returns `false`; implementers that emit parse-domain facts
+    /// override.
     fn validates_parse_domain(&self, _fact: &ParseFactRef) -> bool {
         false
     }
 
     /// Validate a resolve-imports-domain fact reference (R26).
-    /// Default impl returns `false` — Stage 6 resolver overrides.
+    /// Default impl returns `false`; the resolver implementer
+    /// overrides.
     fn validates_resolve_imports_domain(&self, _fact: &ResolveImportsFactRef) -> bool {
         false
     }
 
     /// Validate a route-surface-domain fact reference (R26). Default
-    /// impl returns `false` — Stage 6 `RouteDb` overrides.
+    /// impl returns `false`; the `RouteDb` implementer overrides.
     fn validates_route_surface_domain(&self, _fact: &RouteSurfaceFactRef) -> bool {
         false
     }
@@ -229,7 +230,7 @@ pub enum FactVersionRef {
         kind: DerivedFactKind,
         hash: ResolverHash16,
     },
-    // ── R12 per-domain variants — added at Stage 3 ──
+    // ── R12 per-domain variants ──
     //
     // Each variant carries the fact's domain-scoped reference so
     // [`StoreView::validates`] can route via
@@ -242,12 +243,12 @@ pub enum FactVersionRef {
     /// hash + lane. Validates against `FileFacts.registry`.
     Parse(ParseFactRef),
     /// Resolve-imports-domain fact reference: per-file
-    /// `ResolvedImportFacts` entry. Stage 6 populates the underlying
-    /// store; Stage 3 defines the dispatch surface.
+    /// `ResolvedImportFacts` entry. The resolver populates the
+    /// underlying store; the variant defines the dispatch surface.
     ResolveImports(ResolveImportsFactRef),
     /// Route-surface-domain fact reference: `RouteDb`-owned
-    /// effective-export-set / augmentation-index fingerprint. Stage 6
-    /// populates the underlying store.
+    /// effective-export-set / augmentation-index fingerprint. The
+    /// `RouteDb` producer populates the underlying store.
     RouteSurface(RouteSurfaceFactRef),
 }
 
@@ -263,8 +264,8 @@ pub struct ParseFactRef {
     pub expected_hash: ResolverHash16,
 }
 
-/// Resolve-imports-domain fact reference. Stage 6 producer
-/// (resolver) populates the matching store.
+/// Resolve-imports-domain fact reference. The resolver producer
+/// populates the matching store.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ResolveImportsFactRef {
     pub canonical_id: String,
@@ -273,7 +274,7 @@ pub struct ResolveImportsFactRef {
     pub expected_hash: ResolverHash16,
 }
 
-/// Route-surface-domain fact reference. Stage 6 producer (`RouteDb`)
+/// Route-surface-domain fact reference. The `RouteDb` producer
 /// populates the matching store.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RouteSurfaceFactRef {
@@ -476,14 +477,14 @@ where
     K: Eq + Hash,
 {
     entries: DashMap<K, Arc<CacheEntry<V>>>,
-    /// Stage-5b instrumentation counter: increments every time a
-    /// candidate's `fact_dep_signature` is rejected for exceeding
+    /// Instrumentation counter: increments every time a candidate's
+    /// `fact_dep_signature` is rejected for exceeding
     /// [`FACT_SIGNATURE_CAP`]. Read in tests via
     /// [`ValidatedFactCache::signature_overflow_count`].
     signature_overflow: AtomicU64,
-    /// Stage-5b instrumentation counter: increments on every
-    /// `ArcSwap::store` call in the cache substrate. Hot-path
-    /// reads must never advance this counter.
+    /// Instrumentation counter: increments on every `ArcSwap::store`
+    /// call in the cache substrate. Hot-path reads must never
+    /// advance this counter.
     arcswap_stores: AtomicU64,
 }
 
@@ -523,17 +524,18 @@ impl<V> Default for CacheEntry<V> {
 /// two overlay sessions reaching the same definition with different
 /// dep signatures, etc.).
 ///
-/// Per Stage 5 Sub-task B's substrate spec:
+/// Substrate spec:
 /// - `signature_fingerprint`: short structural digest of the
 ///   `fact_dep_signature`, used for quick discriminator comparison.
 /// - `value`: the actual cached value.
 /// - `fact_dep_signature`: the ordered list of `FactVersionRef`
 ///   facts the candidate observed. Validation iterates this list
 ///   and short-circuits on the first miss.
-/// - `legacy_dep_signature`: Stage-6e shadow scaffold field. Stage-7
-///   reverts the scaffold and drops this field. Today it carries
-///   `None` for every candidate; populated by Stage 6e on the
-///   integration branch only.
+/// - `legacy_dep_signature`: optional shadow-signature scaffold
+///   reserved for a parity-comparison protocol on the integration
+///   branch. Always `None` in steady state; structurally stable so
+///   the substrate type signature does not move when a parity
+///   protocol is in flight.
 #[derive(Debug)]
 pub struct Candidate<V> {
     pub signature_fingerprint: [u8; 16],
@@ -542,18 +544,16 @@ pub struct Candidate<V> {
     pub legacy_dep_signature: Option<LegacyDepSignature>,
 }
 
-/// Stage-6e shadow scaffold marker. Populated only on the integration
-/// branch during Stage 6e to enable the dual-validation parity test.
-/// Stage 7 reverts the scaffold (`Reverts: <stage-6e-sha>`) and the
-/// field returns to `None` for every candidate. Defined here at
-/// Stage 5b so the substrate type signature is stable; the
-/// integration-branch-only Stage 6e fills in the variants.
+/// Optional shadow-signature marker reserved for a parity-comparison
+/// protocol on the integration branch. Always `None` in steady state.
+/// Defined here so the substrate type signature is stable when a
+/// parity protocol installs values on the integration branch only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LegacyDepSignature {
-    /// Opaque per-candidate identifier carried forward from the
-    /// pre-fact-validation legacy signature mechanism. Empty during
-    /// regular Stage-5b operation; Stage 6e installs the legacy
-    /// signature on the integration branch.
+    /// Opaque per-candidate identifier carried forward from a
+    /// pre-fact-validation legacy signature mechanism. Empty in
+    /// steady state; populated by the parity protocol on the
+    /// integration branch.
     pub opaque: Arc<[u8]>,
 }
 
@@ -722,16 +722,16 @@ where
         self.entries.remove(key);
     }
 
-    /// Hard-remove: same as `remove` after the `archived` retirement
-    /// of Stage 5b. Retained for source compatibility; callers may
-    /// migrate away.
+    /// Hard-remove: same as `remove` under the post-archive cache
+    /// model. Retained for source compatibility; callers may migrate
+    /// to `remove` directly.
     pub fn hard_remove(&self, key: &K) {
         self.entries.remove(key);
     }
 
-    /// Stage 5b: post-retirement of the archive map, `invalidate`
-    /// removes the entry outright. Concurrent generations of the
-    /// same key are now distinguished by per-candidate fact
+    /// With the archive map retired, `invalidate` removes the entry
+    /// outright. Concurrent generations of the same key are
+    /// distinguished by per-candidate fact
     /// validation instead of an archive sidecar; superseded
     /// candidates age out via FIFO under [`CANDIDATE_CAP`].
     pub fn invalidate(&self, key: &K) {

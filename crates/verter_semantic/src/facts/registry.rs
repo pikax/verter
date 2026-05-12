@@ -16,11 +16,12 @@
 //!   `content_hash` for display_hash). Emitted at parse time by the
 //!   shallow walk in `verter_session`.
 //! - **Resolve-imports** (`ResolveImports`): one-step import resolution
-//!   facts, resolve-env keyed. Populated by the resolver at Stage 6 —
-//!   the variants are defined here so the substrate is closed.
+//!   facts, resolve-env keyed. Populated by the resolver producer
+//!   downstream — the variants are defined here so the substrate is
+//!   closed.
 //! - **Route-surface** (`RouteSurface`): post-wildcard, post-augmentation
 //!   effective export surface facts, resolve_env + lib_env keyed.
-//!   Populated by `RouteDb` at Stage 6.
+//!   Populated by the `RouteDb` producer.
 //!
 //! Variant taxonomy: parse-time producers populate the parse-domain
 //! variants eagerly. The lazy member-body producers populate
@@ -124,10 +125,10 @@ impl AsRef<str> for InternedGlobPattern {
 /// where the declaration also introduces a name in the namespace.
 ///
 /// This is the canonical 3-variant `SymbolSpace` referenced by the
-/// final-state fact-based cache architecture. The legacy 2-variant
+/// fact-based cache architecture. The legacy 2-variant
 /// `verter_session::resolver_core::route_demand::SymbolSpace` covers
 /// resolve-only call paths that have not yet migrated; mixing the two
-/// is an error (the cutover deletes the 2-variant during Stage 6).
+/// is an error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum SymbolSpace {
     Type,
@@ -216,10 +217,10 @@ pub enum FactDomain {
     /// Producer: the parse-time shallow walk.
     ParseFile,
     /// Resolved-import facts, resolve_env_hash keyed, no lib_env.
-    /// Producer: the resolver at Stage 6.
+    /// Producer: the resolver substrate.
     ResolveImports,
     /// Route-surface facts, resolve_env_hash + lib_env_hash keyed.
-    /// Producer: `RouteDb` at Stage 6 (post-augmentation-stitched).
+    /// Producer: `RouteDb` (post-augmentation-stitched).
     RouteSurface,
 }
 
@@ -327,8 +328,8 @@ pub enum FactKey {
 
     // ────────────────────────────────────────────────────────────────
     // Resolve-imports domain (ResolvedImportFacts; resolve_env_hash
-    // keyed). Stage 6 producers populate these. Stage 3 defines them
-    // so the substrate is closed.
+    // keyed). The resolver producer populates these; the variants are
+    // defined here so the substrate is closed.
     // ────────────────────────────────────────────────────────────────
     ResolvedImportClause {
         specifier: InternedSpecifier,
@@ -348,7 +349,7 @@ pub enum FactKey {
 
     // ────────────────────────────────────────────────────────────────
     // Route-surface domain (RouteDb-owned; resolve_env_hash +
-    // lib_env_hash keyed). Stage 6 producers populate these.
+    // lib_env_hash keyed). The route-surface producer populates these.
     // ────────────────────────────────────────────────────────────────
     /// Effective post-augmentation, post-wildcard export surface
     /// fingerprint.

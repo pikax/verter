@@ -42,11 +42,11 @@ impl VerterHost {
     /// priority. The pre-invalidation invariant is now owned by
     /// `upsert_with_priority`.
     pub fn upsert(&self, req: UpsertRequest) -> Result<HostUpdateResult, HostError> {
-        // Stage 4d (R17) — counter for `tests/session_view_isolation.rs`.
-        // Increments on every `VerterHost::upsert(...)` call.
-        // Pre-Stage-4d the overlay-mutation lifecycle invoked this from
-        // session query paths; Stage 4d retired those call sites. The
-        // counter discriminates Stage-4d compliance from the pre-state.
+        // Provenance counter (R17 — host-mutation entry point).
+        // Increments on every `VerterHost::upsert(...)` call. The
+        // counter is consumed by `tests/session_view_isolation.rs`
+        // to assert that the session query paths never re-enter
+        // host-side mutation.
         self.provenance
             .host_upsert_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -299,7 +299,7 @@ impl VerterHost {
         // change because synthetic parses and remapped CSS spans become
         // stale on byte-offset shifts.
         //
-        // Audit hook (R1 / Stage 2): every observable drain emits one
+        // Audit hook (R1): every observable drain emits one
         // `CacheDrainedAtUpsert` event so tests can prove the
         // byte-identical fast path skipped this branch entirely.
         {

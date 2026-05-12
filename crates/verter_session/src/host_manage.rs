@@ -498,10 +498,10 @@ pub(crate) fn dep_signature_valid_for_host(
     host: &VerterHost,
 ) -> bool {
     use crate::completion_fence::FenceValidator;
-    // Stage 4c — the caller passes the bare host; bind a
-    // host-rooted view (`HostViewRef`) since no overlay context is
-    // supplied. Overlay-aware callers route through
-    // `dep_signature_valid_for_view` (Stage 4d entry point).
+    // The caller passes the bare host; bind a host-rooted view
+    // (`HostViewRef`) since no overlay context is supplied.
+    // Overlay-aware callers route through
+    // `dep_signature_valid_for_view`.
     let view = crate::session_view::HostViewRef::new(host);
     let validator = HostFenceValidator { host, view: &view };
     signature
@@ -523,7 +523,7 @@ pub(crate) fn dep_signature_valid_for_host(
 ///
 /// Used by cache revalidation and cold-build retry loops.
 ///
-/// Stage 4c binding (R17, R19):
+/// View-aware binding (R17, R19):
 /// - **R17** — `HostFenceValidator` consults the supplied view's
 ///   content hash before falling back to the host's
 ///   `shallow_file_state`. Two concurrent sessions with conflicting
@@ -554,9 +554,9 @@ impl crate::completion_fence::FenceValidator for HostFenceValidator<'_> {
                 if canonical_id.starts_with("ambient:/") {
                     return self.validate_ambient_whole_hash(canonical_id, *expected);
                 }
-                // Stage 4c — consult the view's content hash first.
-                // The view carries the overlay-aware content hash for
-                // overlay sessions; for overlay-free `HostView` it
+                // Consult the view's content hash first. The view
+                // carries the overlay-aware content hash for overlay
+                // sessions; for overlay-free `HostView` it
                 // matches the host's `FileArtifactStore` entry. When
                 // the view returns `None` (cache miss / not yet
                 // ingested under this view) fall through to the
@@ -587,9 +587,9 @@ impl crate::completion_fence::FenceValidator for HostFenceValidator<'_> {
 impl HostFenceValidator<'_> {
     /// View-aware single-fact validation entry point.
     ///
-    /// Exposed publicly so the Stage 4c discriminating integration
-    /// test (`tests/view_aware_validator.rs`) can drive the
-    /// validator without needing access to the
+    /// Exposed publicly so the discriminating integration test
+    /// (`tests/view_aware_validator.rs`) can drive the validator
+    /// without needing access to the
     /// `pub(crate) completion_fence::FenceValidator` trait surface.
     /// The body delegates to the trait impl, so behaviour stays
     /// identical for all internal callers.

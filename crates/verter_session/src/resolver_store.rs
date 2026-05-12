@@ -70,10 +70,10 @@ impl HostStoreView {
     /// with different overlays but the same epoch never coalesce into the
     /// same singleflight lane.
     ///
-    /// Stage 4d — replaces the retired `from_session(view: &SessionView,
+    /// This entry point replaces an earlier `from_session(view: &SessionView,
     /// host)` overload. The old overload took a session-scoped
-    /// `SessionView` epoch carrier; that struct retired with the rest
-    /// of the overlay-mutation machinery (R17). Today the singleflight
+    /// `SessionView` epoch carrier; under R17 the per-session
+    /// overlay-mutation machinery is gone, so the singleflight
     /// lane identity is the raw `session_id` plumbed through the
     /// caller; the runtime-side epoch carrier no longer exists.
     pub(crate) fn from_session_id(session_id: u64, host: &VerterHost) -> Self {
@@ -286,11 +286,11 @@ impl HostStoreView {
                     )),
                 }
             }
-            // R26 per-domain variants — Stage 6 populates the
-            // matching stores and produces structured diagnostics
-            // there. `HostStoreView` does not observe them at
-            // Stage 3, so the diagnostic shape is a generic
-            // "domain fact not validated yet" string.
+            // R26 per-domain variants — per-domain producers populate
+            // the matching stores and produce structured diagnostics
+            // there. `HostStoreView` does not observe them directly,
+            // so the diagnostic shape is a generic "domain fact not
+            // validated yet" string.
             crate::resolver_core::FactVersionRef::Parse(p) => Some(format!(
                 "ParseFactRef canonical={} key={:?} lane={:?} expected={:?}",
                 p.canonical_id, p.key, p.lane, p.expected_hash
@@ -408,13 +408,13 @@ impl crate::resolver_core::StoreView for HostStoreView {
             // R26 per-domain variants — route to the per-domain
             // validators. `HostStoreView` participates in the
             // legacy whole-hash regime today; the per-domain
-            // validators are populated by Stage 6 producers.
-            // Default impls (returning `false`) are inherited from
-            // the trait until Stage 5/6 wire actual per-domain
-            // validation through this view.
+            // validators are populated by their respective
+            // producers. Default impls (returning `false`) are
+            // inherited from the trait until per-domain producers
+            // wire actual validation through this view.
             // R26 per-domain variants — route to the per-domain
-            // validators (which return `false` by trait default at
-            // Stage 3; Stage 6 producers override).
+            // validators (which return `false` by trait default;
+            // per-domain producers override).
             crate::resolver_core::FactVersionRef::Parse(p) => {
                 crate::resolver_core::StoreView::validates_parse_domain(self, p)
             }

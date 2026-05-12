@@ -253,9 +253,9 @@ impl<'a> ComponentMetaRequestHost for SessionRequestHost<'a> {
     }
 
     fn snapshot_store_view(&self) -> Self::View {
-        // Stage 4d — `SessionRuntime::current_view()` retired alongside
-        // the session-scoped overlay-mutation machinery (R17). The
-        // singleflight lane identity reads the raw session id directly.
+        // The session-scoped overlay-mutation machinery is retired
+        // (R17); singleflight lane identity reads the raw session id
+        // directly.
         crate::resolver_store::HostStoreView::from_session_id(
             self.runtime.session_id(),
             self.runtime.host(),

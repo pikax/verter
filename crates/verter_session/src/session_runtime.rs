@@ -62,14 +62,13 @@ impl SessionRuntime {
 
     /// Try to get a cached resolved-meta from the host's shared cache.
     ///
-    /// Stage 4d — the session-scoped `resolved_meta_cache` retired
-    /// alongside the overlay-mutation machinery (R20). The host's
-    /// shared cache is fact-validated (Stage 4c view-aware
+    /// There is no session-scoped `resolved_meta_cache` (R20). The
+    /// host's shared cache is fact-validated (view-aware
     /// `HostFenceValidator`) so overlay-derived state cannot leak
-    /// across concurrent sessions once Stages 5/6 land the
-    /// multi-candidate substrate. Until then, overlay sessions
-    /// transparently read base-state results — the documented
-    /// breaking period on the integration branch.
+    /// across concurrent sessions when the multi-candidate substrate
+    /// is consulted. Where the multi-candidate substrate is not yet
+    /// in the read path, overlay sessions transparently read
+    /// base-state results.
     pub fn try_get_cached_resolved_meta(
         &self,
         canonical: &str,
@@ -80,10 +79,9 @@ impl SessionRuntime {
 
     /// Store resolved-meta in the host's shared cache.
     ///
-    /// Stage 4d — writes go directly to the host cache (which
-    /// validates via `HostFenceValidator`). Stage 5 multi-candidate
-    /// admission isolates concurrent overlay variants in the same
-    /// query-identity slot.
+    /// Writes go directly to the host cache (which validates via
+    /// `HostFenceValidator`). Multi-candidate admission isolates
+    /// concurrent overlay variants in the same query-identity slot.
     pub fn store_resolved_meta(
         &self,
         canonical: &str,
@@ -94,11 +92,11 @@ impl SessionRuntime {
             .store_cached_resolved_meta(canonical, mode, result, &result.fact_versions);
     }
 
-    /// Invalidate session-scoped caches — no-op post-Stage-4d.
+    /// Invalidate session-scoped caches — no-op.
     ///
-    /// The session-scoped cache retired with Stage 4d's overlay-
-    /// mutation deletion; all reads go through the host's shared
-    /// cache directly. Retained as a method so the public
+    /// There is no session-scoped cache (R17 — overlay mutation is
+    /// not allowed); all reads go through the host's shared cache
+    /// directly. Retained as a method so the public
     /// `MetaSession::invalidate_active_overlays` API surface stays
     /// stable for callers that may still invoke it from FFI paths.
     pub fn invalidate_session_caches(&self) {}

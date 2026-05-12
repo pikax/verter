@@ -24,7 +24,8 @@
 //! **R12 separation**: parse-domain emission MUST NOT resolve
 //! cross-file paths. `ImportRef` carries only `(specifier, binding,
 //! space)`; the resolved canonical lives on the resolve-domain
-//! `ResolvedImportClause` fact (Stage 6).
+//! `ResolvedImportClause` fact (populated by the resolver
+//! producer).
 //!
 //! **R28 shallow-walk arch-guard**: the parse-phase fact emitter
 //! MUST NOT call into cross-decl AST traversal. Same-file member
@@ -56,7 +57,9 @@ use crate::resolver_core::shallow_file_state::{
 ///
 /// The augmentation list is returned separately so [`FileArtifacts`]
 /// can place it on its `augmentations` field. The cross-project
-/// `augmentation_index` is NOT populated here — Stage 6c builds it.
+/// `augmentation_index` is NOT populated here — the augmentation-
+/// index producer builds it lazily on first augmentation-sensitive
+/// query.
 #[derive(Debug, Default, Clone)]
 pub struct ParseFactsEmission {
     pub facts: FileFacts,
@@ -414,7 +417,8 @@ fn emit_export_targets(registry: &mut FactRegistry, shallow: &ShallowFileState) 
                 // R12: parse-domain `SyntacticReexportRef` records
                 // ONLY the syntactic shape. The resolved canonical
                 // lives on the resolve-domain
-                // `ResolvedReexportBinding` fact (Stage 6).
+                // `ResolvedReexportBinding` fact (populated by the
+                // resolver producer).
                 let space = if *is_type {
                     SymbolSpace::Type
                 } else {
@@ -537,8 +541,8 @@ fn emit_import_refs(registry: &mut FactRegistry, shallow: &ShallowFileState) {
 /// the input body contains any JSDoc / comment that the semantic
 /// hash already discards. In the current substrate the body is
 /// already alpha-normalised (no comments / JSDoc), so we mix the
-/// `semantic_hash` with a stable display salt — Stage 6d will
-/// extend producers to record real JSDoc + identifier display
+/// `semantic_hash` with a stable display salt — future producers
+/// can extend this to record real JSDoc + identifier display
 /// strings on the body.
 fn compute_display_hash(_body: &TypeExpr, semantic: &Hash16) -> Hash16 {
     let mut buf: Vec<u8> = Vec::with_capacity(32);
@@ -557,15 +561,15 @@ fn compute_display_hash(_body: &TypeExpr, semantic: &Hash16) -> Hash16 {
 ///
 /// Returns an empty list when the source has no `declare module …`
 /// blocks. Cross-project `augmentation_index` population is NOT
-/// done here — Stage 6c populates it lazily on first augmentation-
-/// sensitive query.
+/// done here — the augmentation-index producer populates it lazily
+/// on first augmentation-sensitive query.
 fn collect_augmentations(indexed: &IndexedReady) -> Vec<ModuleAugmentationFact> {
     // The current parse pipeline surfaces TSModuleDeclaration names
     // via `ScriptItem::TypeDeclaration` in `verter_parser::setup`,
     // but the post-shallow-analysis state does NOT yet retain the
     // augmentation body. A dedicated extraction pass over the raw
-    // source landed here is a Stage 3 acceptable scope (the
-    // declare-module block is a single decl walk; it does NOT
+    // source is the acceptable scope here (the declare-module block
+    // is a single decl walk; it does NOT
     // violate the R28 shallow-walk arch-guard which forbids
     // CROSS-decl traversal).
     let raw_source = indexed.raw_source.as_ref();
@@ -578,8 +582,8 @@ fn collect_augmentations(indexed: &IndexedReady) -> Vec<ModuleAugmentationFact> 
 /// Walks the source byte-by-byte tracking nested braces; emits one
 /// fact per declare-module block. The body fingerprint is a stable
 /// hash over the trimmed block contents — exact field-by-field
-/// extraction lands at Stage 6 when the resolver claims the
-/// augmenter set.
+/// extraction is a future producer extension when the resolver
+/// claims the augmenter set.
 fn extract_module_augmentations_from_source(source: &str) -> Vec<ModuleAugmentationFact> {
     let mut out: Vec<ModuleAugmentationFact> = Vec::new();
     let bytes = source.as_bytes();
@@ -622,9 +626,9 @@ fn extract_module_augmentations_from_source(source: &str) -> Vec<ModuleAugmentat
                     // Capture each augmenting binding within the
                     // block. For now, emit ONE fact per block with
                     // a synthetic augmented_name = "*" because
-                    // detailed structural extraction lives in
-                    // Stage 6c. This still satisfies the Stage 3
-                    // test contract: per-archetype the fact is
+                    // detailed structural extraction is a future
+                    // producer extension. This still satisfies the
+                    // current test contract: per-archetype the fact is
                     // emitted.
                     let body_hash = hash_16(block.as_bytes());
                     // Extract individual member names where
@@ -714,7 +718,7 @@ fn extract_module_augmentations_from_source(source: &str) -> Vec<ModuleAugmentat
 
 /// Sentinel specifier used inside [`ModuleAugmentationFact`] to
 /// distinguish `declare global { … }` blocks from `declare module
-/// "..." { … }`. Stage 6c maps this back to
+/// "..." { … }`. The augmentation-index producer maps this back to
 /// `AugmentationTargetKind::GlobalAugmentation`.
 pub const GLOBAL_AUGMENTATION_TAG: &str = "$global";
 

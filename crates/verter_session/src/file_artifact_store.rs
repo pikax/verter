@@ -147,8 +147,8 @@ pub const LEGACY_PARSE_ENV_HASH: Hash16 = [0u8; 16];
 /// `MemberSemanticFactStore` / `MemberDisplayFactStore`, NOT in
 /// this registry.
 ///
-/// Resolve-domain facts are NOT populated here — they emit at Stage 6
-/// from the resolver / `RouteDb`.
+/// Resolve-domain facts are NOT populated here — they emit from the
+/// resolver / `RouteDb` producers downstream.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct FileFacts {
     registry: fact_registry::FactRegistry,
@@ -741,8 +741,8 @@ impl FileArtifactStore {
     /// Alias of [`Self::get_artifacts_any`] used by
     /// [`crate::session_view::SessionView`] impls. Exists as a named
     /// accessor so the session-view read path stays explicit about
-    /// "latest artifact for this canonical" semantics; Stage 6 wires
-    /// version-aware variants alongside this helper.
+    /// "latest artifact for this canonical" semantics; version-aware
+    /// variants live alongside this helper.
     #[must_use]
     pub fn latest_artifacts_for_canonical(&self, canonical: &str) -> Option<Arc<FileArtifacts>> {
         self.get_artifacts_any(canonical)

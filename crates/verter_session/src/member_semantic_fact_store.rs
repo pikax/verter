@@ -43,15 +43,14 @@ pub struct MemberSemanticFactKey {
 /// Lazy member-body semantic fingerprint store.
 ///
 /// **Lookup contract.** A cold miss returns `None`; the caller (the
-/// resolver / materialiser at Stage 6d) computes the fingerprint via
+/// resolver / materialiser producer) computes the fingerprint via
 /// `compute_semantic_hash` and admits the entry via
 /// [`MemberSemanticFactStore::insert`]. A warm hit returns the
 /// canonical `Member` fact without re-walking the body.
 ///
 /// **Concurrency.** `DashMap` shards on the key; concurrent readers
 /// for different keys are wait-free. Same-key admissions go through
-/// the producer's `StoreViewCompatToken`-keyed singleflight at
-/// Stage 6d.
+/// the producer's `StoreViewCompatToken`-keyed singleflight.
 #[derive(Debug, Default)]
 pub struct MemberSemanticFactStore {
     entries: DashMap<MemberSemanticFactKey, Arc<Fact>>,
@@ -113,7 +112,7 @@ pub fn member_fact_key(k: &MemberSemanticFactKey) -> FactKey {
 }
 
 /// Construct a `Member` fact from its key and a freshly-computed
-/// body fingerprint. Used by producers at Stage 6d.
+/// body fingerprint. Used by member-body producers.
 #[must_use]
 pub fn make_member_fact(key: &MemberSemanticFactKey, semantic_hash: FactHash) -> Fact {
     Fact {
@@ -196,8 +195,8 @@ mod tests {
     #[test]
     fn cosmetic_edit_keeps_same_key() {
         // R13 / R28: a cosmetic edit produces the same
-        // `parse_stable_hash` (Stage 1 invariant), so the key is
-        // unchanged and the store returns the cached fact.
+        // `parse_stable_hash` (parse-time structural invariant), so
+        // the key is unchanged and the store returns the cached fact.
         let store = MemberSemanticFactStore::new();
         let k = key("/a.ts", 5, 7, "Foo", "a");
         let cached_fact = Arc::new(make_member_fact(&k, dummy_hash(42)));
