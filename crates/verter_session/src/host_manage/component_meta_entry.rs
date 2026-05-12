@@ -194,13 +194,20 @@ impl VerterHost {
             ),
         };
         let entry = self.project_type_store.component_meta_results().get(&key)?;
-        // Bind a host-rooted view; the warm-cache fast path on
-        // `VerterHost` has no session context, so the overlay-free
-        // `HostViewRef` is the correct read substrate.
-        let view = crate::session_view::HostViewRef::new(self);
+        // Bind a host-rooted view via the `ResolverContext::view()`
+        // trait accessor. The session-less call path has no overlay,
+        // so the host's default `view()` impl returns a `HostViewRef`
+        // — the overlay-free read substrate. Routing through the trait
+        // accessor (via a `&dyn ResolverContext` cast) makes the view
+        // extension point uniformly observable: dyn-dispatched calls
+        // through `view()` exercise the trait method so static
+        // dead-code analysis sees the production caller (R18 — view is
+        // passed by explicit argument, no thread-local).
+        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = self;
+        let view = ctx.view();
         let validator = HostFenceValidator {
             host: self,
-            view: &view,
+            view: view.as_ref(),
         };
         use crate::completion_fence::FenceValidator;
         let dep_sig_valid = entry

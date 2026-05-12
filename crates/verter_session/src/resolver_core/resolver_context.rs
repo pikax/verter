@@ -307,15 +307,6 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     // construct an `OverlaidViewRef` directly and call
     // `get_component_meta_via_view`.
     //
-    // `#[allow(dead_code)]` covers Rust's dead-code detection quirk
-    // for trait methods: this method IS dispatched at runtime via the
-    // `&dyn ResolverContext` cast in `try_component_meta_cache_hit`,
-    // but the compiler's static-dispatch dead-code analyzer counts
-    // only impl-block calls, missing dyn-dispatched calls inside the
-    // crate-private surface. The arch-guard pin in
-    // `tests/architecture_guards.rs` observes the method's presence
-    // statically.
-    #[allow(dead_code)]
     fn view(&self) -> Box<dyn crate::session_view::SessionView + '_>;
 }
 
