@@ -272,27 +272,57 @@ fn r20_same_key_concurrent_admissions_preserve_cap() {
     );
 }
 
-/// `archived` retirement: after Stage 5b, `StoreView::checks_archive`
-/// is no longer a method on the trait. This test fails to compile
-/// if the method ever comes back.
+/// `archived` retirement: with `StoreView::checks_archive` gone,
+/// validation routes ONLY through the per-candidate
+/// `fact_dep_signature` walk. The test discriminates two axes:
 ///
-/// Stage 5b: this test fails because `checks_archive` was retired.
-/// Pre-Stage-5b: this test compiles because the method exists.
+/// 1. **Compile-time.** The local `TestView` only implements
+///    `compat_token` and `validates`. If `checks_archive` ever came
+///    back on `StoreView`, the trait would be incompletely
+///    implemented and this file would fail to compile.
+/// 2. **Runtime.** A validating view returns the candidate's value;
+///    a non-validating view (different fact set, same key) returns
+///    `None`. A live `checks_archive` archive-lookup path would
+///    have to be threaded through `get_if_valid` to surface or
+///    suppress the value — the observed behaviour proves it isn't.
+///
+/// The architecture guard at
+/// `tests/architecture_guards.rs::storeview_checks_archive_retired`
+/// covers the source-tree scan; this `#[test]` covers behavioural
+/// observation.
 #[test]
 fn r20_view_checks_archive_retired() {
-    // If the method comes back, the closure type below will trigger
-    // a compile error referencing a removed trait method.
-    let view = TestView {
-        token: StoreViewCompatToken {
-            epoch: 1,
-            session: None,
-        },
-        valid_facts: FxHashSet::default(),
-    };
-    // Ensure the trait is in scope — but never call `.checks_archive()`.
-    let _ = view.compat_token();
-    // The architecture guard `tests/architecture_guards.rs` enforces
-    // that `checks_archive` is not referenced anywhere in
-    // `crates/*/src/**`. This `#[test]` exists to anchor that
-    // guard's intent in the test suite.
+    let cache = ValidatedFactCache::<String, usize>::default();
+    let admitted = fact("/src/observed.ts", 7);
+    cache.insert("k".to_string(), 42, vec![admitted.clone()]);
+
+    // Hit. Validation walks the per-candidate signature and matches.
+    // No archive sidecar participates.
+    let matching_view = view_with(std::slice::from_ref(&admitted));
+    assert_eq!(
+        cache.get_if_valid(&"k".to_string(), &matching_view),
+        Some(Arc::new(42)),
+        "validation must succeed via the per-candidate \
+         fact_dep_signature walk; no `checks_archive` path exists",
+    );
+
+    // Miss. A view whose validating fact set differs by exactly one
+    // hash byte produces a miss for the same key. With
+    // `checks_archive` retired, there is no archive sidecar that
+    // could surface a stale value.
+    let unrelated_fact = fact("/src/observed.ts", 8);
+    let non_matching_view = view_with(std::slice::from_ref(&unrelated_fact));
+    assert!(
+        cache
+            .get_if_valid(&"k".to_string(), &non_matching_view)
+            .is_none(),
+        "validation MUST miss outright when no candidate's fact \
+         set matches; no archive lookup can rescue the read",
+    );
+
+    // The TestView impl above is the compile-time discriminator —
+    // it only provides `compat_token` + `validates`. This statement
+    // anchors the trait surface in runtime so the impl is not
+    // dropped as dead code.
+    let _ = matching_view.compat_token();
 }
