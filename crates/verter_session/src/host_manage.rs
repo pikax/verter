@@ -498,18 +498,47 @@ pub(crate) fn dep_signature_valid_for_host(
     host: &VerterHost,
 ) -> bool {
     use crate::completion_fence::FenceValidator;
-    let validator = HostFenceValidator { host };
+    // Stage 4c — the caller passes the bare host; bind a
+    // host-rooted view (`HostViewRef`) since no overlay context is
+    // supplied. Overlay-aware callers route through
+    // `dep_signature_valid_for_view` (Stage 4d entry point).
+    let view = crate::session_view::HostViewRef::new(host);
+    let validator = HostFenceValidator { host, view: &view };
     signature
         .iter()
         .all(|(canonical, version)| validator.validate(canonical.as_ref(), version))
 }
 
 /// [`FenceValidator`](crate::completion_fence::FenceValidator) backed by a
-/// live [`VerterHost`]. Reports whether an observed dep-fact still matches
-/// the host's current state — used by cache revalidation and
-/// cold-build retry loops.
-pub(crate) struct HostFenceValidator<'a> {
+/// live [`VerterHost`] **and a [`SessionView`]**.
+///
+/// Reports whether an observed dep-fact still matches the *view's*
+/// observable state — not just the host's. Two concurrent sessions
+/// carrying conflicting overlays validate INDEPENDENTLY: each
+/// constructs its own `HostFenceValidator` bound to its own
+/// [`SessionView`], so the `WholeHash` arm observes the view's
+/// content-hash rather than the host's shared state. The host
+/// reference is retained for `ProjectGeneration` and ambient-lib
+/// lookups which are project-wide (overlay-invariant).
+///
+/// Used by cache revalidation and cold-build retry loops.
+///
+/// Stage 4c binding (R17, R19):
+/// - **R17** — `HostFenceValidator` consults the supplied view's
+///   content hash before falling back to the host's
+///   `shallow_file_state`. Two concurrent sessions with conflicting
+///   overlays produce different validation outcomes because each
+///   carries a different view.
+/// - **R19** — fact validation is the cache-correctness oracle; the
+///   view is the concurrency-oracle's read substrate. The two
+///   remain orthogonal — `StoreViewCompatToken` continues to drive
+///   admission concurrency.
+pub struct HostFenceValidator<'a> {
     pub host: &'a VerterHost,
+    /// Read substrate the validator consults for the `WholeHash`
+    /// arm. Two concurrent sessions on different overlays bind
+    /// different views here and validate independently.
+    pub view: &'a dyn crate::session_view::SessionView,
 }
 
 impl crate::completion_fence::FenceValidator for HostFenceValidator<'_> {
@@ -519,9 +548,24 @@ impl crate::completion_fence::FenceValidator for HostFenceValidator<'_> {
                 // / A8: ambient virtual ids
                 // (`ambient:/<tag>/<canonical>`) bypass the shallow-file
                 // map (they have no `ShallowFileState`) and route to the
-                // workspace's ambient lib registry.
+                // workspace's ambient lib registry. Ambient libs are
+                // project-wide (not overlay-scoped) so they correctly
+                // consult the host's workspace view directly.
                 if canonical_id.starts_with("ambient:/") {
                     return self.validate_ambient_whole_hash(canonical_id, *expected);
+                }
+                // Stage 4c — consult the view's content hash first.
+                // The view carries the overlay-aware content hash for
+                // overlay sessions; for overlay-free `HostView` it
+                // matches the host's `FileArtifactStore` entry. When
+                // the view returns `None` (cache miss / not yet
+                // ingested under this view) fall through to the
+                // host's `shallow_file_state` path which uses the
+                // route-owned-shallow fallback — that fallback is
+                // host-wide (overlay-invariant) and is correct for
+                // canonicals not covered by an overlay.
+                if let Some(view_hash) = self.view.content_hash_for(canonical_id) {
+                    return view_hash == *expected;
                 }
                 match self.host.shallow_file_state(canonical_id) {
                     Some(state) => state.whole_hash == *expected,
@@ -541,6 +585,23 @@ impl crate::completion_fence::FenceValidator for HostFenceValidator<'_> {
 }
 
 impl HostFenceValidator<'_> {
+    /// View-aware single-fact validation entry point.
+    ///
+    /// Exposed publicly so the Stage 4c discriminating integration
+    /// test (`tests/view_aware_validator.rs`) can drive the
+    /// validator without needing access to the
+    /// `pub(crate) completion_fence::FenceValidator` trait surface.
+    /// The body delegates to the trait impl, so behaviour stays
+    /// identical for all internal callers.
+    pub fn validate_dep_fact(
+        &self,
+        canonical_id: &str,
+        version: &crate::semantic_query::DepVersion,
+    ) -> bool {
+        use crate::completion_fence::FenceValidator;
+        self.validate(canonical_id, version)
+    }
+
     /// / A8: validate an ambient virtual id against the
     /// workspace's ambient lib registry. Returns `true` iff the parsed
     /// `ProjectStableKey + canonical` pair points at an entry whose

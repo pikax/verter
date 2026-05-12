@@ -10166,7 +10166,11 @@ mod ambient_fence_validator_tests {
         .unwrap();
         let key = project_key(&ws);
         let host = host_with_ws(Arc::clone(&ws));
-        let v = HostFenceValidator { host: &host };
+        let view = crate::session_view::HostViewRef::new(&host);
+        let v = HostFenceValidator {
+            host: &host,
+            view: &view,
+        };
         let virt = ambient_virtual_canonical_id(key, "lib.es5.d.ts");
         let expected = compute_ambient_hash16(STUB_LIB.as_bytes());
         assert!(
@@ -10197,7 +10201,11 @@ mod ambient_fence_validator_tests {
         })
         .unwrap();
         let host = host_with_ws(Arc::clone(&ws));
-        let v = HostFenceValidator { host: &host };
+        let view = crate::session_view::HostViewRef::new(&host);
+        let v = HostFenceValidator {
+            host: &host,
+            view: &view,
+        };
         let virt = ambient_virtual_canonical_id(key, "lib.es5.d.ts");
         assert!(
             !v.validate(&virt, &DepVersion::WholeHash(stale)),
@@ -10221,7 +10229,11 @@ mod ambient_fence_validator_tests {
         .unwrap();
         let key = project_key(&ws);
         let host = host_with_ws(ws);
-        let v = HostFenceValidator { host: &host };
+        let view = crate::session_view::HostViewRef::new(&host);
+        let v = HostFenceValidator {
+            host: &host,
+            view: &view,
+        };
         let virt = ambient_virtual_canonical_id(key, "lib.es2015.d.ts");
         // Any hash for an unregistered canonical_id MUST be rejected.
         assert!(!v.validate(&virt, &DepVersion::WholeHash([0u8; 16])));
@@ -10231,7 +10243,11 @@ mod ambient_fence_validator_tests {
     fn validate_rejects_malformed_ambient_id() {
         let ws = ws_with_one_project();
         let host = host_with_ws(ws);
-        let v = HostFenceValidator { host: &host };
+        let view = crate::session_view::HostViewRef::new(&host);
+        let v = HostFenceValidator {
+            host: &host,
+            view: &view,
+        };
         // Missing tag/canonical separator.
         assert!(!v.validate("ambient:/", &DepVersion::WholeHash([0u8; 16])));
         // Bad tag prefix.
@@ -10249,7 +10265,11 @@ mod ambient_fence_validator_tests {
     fn validate_non_ambient_ids_route_to_shallow_file_state() {
         let ws = ws_with_one_project();
         let host = host_with_ws(ws);
-        let v = HostFenceValidator { host: &host };
+        let view = crate::session_view::HostViewRef::new(&host);
+        let v = HostFenceValidator {
+            host: &host,
+            view: &view,
+        };
         // Plain canonical id with no upserted file — shallow_file_state
         // returns None, so validator returns false. Discriminating: the
         // ambient path would have looked at workspace.ambient_libs_view()
