@@ -4026,13 +4026,19 @@ mod foundations_guards {
     //   - `pre-Phase` / `Pre-Phase` — narrative of pre-phase state.
     //   - `Phase \d+` / `phase \d+` — explicit phase reference.
     //   - `Phase-\d+` / `phase-\d+` — explicit hyphenated phase reference.
+    //   - `pre-Stage` / `Pre-Stage` / `post-Stage` / `Post-Stage` —
+    //     narrative of pre/post-stage state, mirrors the Phase family.
+    //   - `Stage \d+` / `stage \d+` / `Stage-\d+` / `stage-\d+` —
+    //     explicit stage reference (the dominant project-management
+    //     noun used by the fact-based cache refactor's stage list).
     //   - `deleted in 5[a-z]` — deletion history from the 5-series plan.
     //   - `retired in` — retirement history of any kind.
 
     /// Predicate: returns `true` when `line` contains a forbidden
     /// phase-archaeology pattern. Implemented with case-sensitive
     /// substring scanning where the plan calls for it, plus a numeric
-    /// scan for `phase \d+` / `phase-\d+`.
+    /// scan for `phase \d+` / `phase-\d+` and the equivalent
+    /// `Stage \d+` / `Stage-\d+` family.
     pub fn line_has_phase_archaeology(line: &str) -> bool {
         // Substring matches for fixed vocabulary. These are unambiguous
         // in production source and never appear as legitimate prose.
@@ -4045,6 +4051,15 @@ mod foundations_guards {
             "pre-Phase",
             "Pre-Phase",
             "retired in",
+            // Stage-family phase-archaeology mirroring the Phase
+            // family. The Stage vocabulary is the dominant
+            // project-management noun used by the fact-based cache
+            // refactor's stage list; it leaks into production
+            // source the same way Phase did.
+            "pre-Stage",
+            "Pre-Stage",
+            "post-Stage",
+            "Post-Stage",
             // Audit-infrastructure plan archaeology — these phrases
             // unambiguously reference the audit-plan document and
             // never appear in legitimate final-state prose.
@@ -4145,6 +4160,25 @@ mod foundations_guards {
                 search_from = abs + prefix.len();
             }
         }
+        // `Stage \d+` / `Stage-\d+` / `stage \d+` / `stage-\d+`
+        // (parallel shape to the Phase scan above). Stage is the
+        // project-management noun used by the fact-based cache
+        // refactor's plan; it leaks into production source the
+        // same way Phase does and must be cleaned up the same way.
+        for prefix in ["stage ", "stage-", "Stage ", "Stage-"] {
+            let mut search_from = 0usize;
+            while let Some(rel) = line[search_from..].find(prefix) {
+                let abs = search_from + rel;
+                let after = abs + prefix.len();
+                if after < line.len() {
+                    let next = line.as_bytes()[after];
+                    if next.is_ascii_digit() {
+                        return true;
+                    }
+                }
+                search_from = abs + prefix.len();
+            }
+        }
         false
     }
 
@@ -4190,11 +4224,12 @@ mod foundations_guards {
         assert!(
             violations.is_empty(),
             "Guard 7 (`no_phase_archaeology_in_production_code`) violations: production source\n\
-             files reference plan phases, cutover stages, or deletion history. Once a plan is\n\
-             over, the code should read as final-state. Durable architecture insights belong in\n\
-             `.claude/skills/*` or `docs/arch/`, not in source comments.\n\n\
-             Forbidden patterns: `d-cutover`, `post-cutover`, `pre-Phase`, `phase \\d+`,\n\
-             `phase-\\d+`, `deleted in 5[a-z]`, `retired in`.\n\n\
+             files reference plan phases, plan stages, cutover stages, or deletion history.\n\
+             Once a plan is over, the code should read as final-state. Durable architecture\n\
+             insights belong in `.claude/skills/*` or `docs/arch/`, not in source comments.\n\n\
+             Forbidden patterns: `d-cutover`, `post-cutover`, `pre-Phase`, `pre-Stage`,\n\
+             `post-Stage`, `phase \\d+`, `phase-\\d+`, `Stage \\d+`, `Stage-\\d+`,\n\
+             `deleted in 5[a-z]`, `retired in`.\n\n\
              Violations:\n  {}",
             violations
                 .iter()
@@ -4228,6 +4263,16 @@ mod foundations_guards {
             "// per plan §3.4 of the audit substrate work",
             "// Plan §3 Step 4 — joiner-accounting bumps",
             "// joiner-accounting reference §1.5 lives elsewhere",
+            // Stage-family phase-archaeology — mirrors the Phase
+            // family. These are the patterns the fact-based cache
+            // refactor's stage list leaks into production source.
+            "// Stage 4d retired the per-session overlay-mutation lifecycle.",
+            "/// Pre-Stage-4d the overlay-mutation lifecycle invoked this from query paths.",
+            "// post-Stage-4d (R17): no-op when overlays are absent.",
+            "// Stage-5b instrumentation counter — admission-cap discriminator.",
+            "/// Stage 6e installs the legacy_dep_signature shadow scaffold.",
+            "/// stage 6a wires the real ResolvedImportFacts cache.",
+            "// Stage-4d compliance from the pre-state.",
         ];
         for line in cases {
             assert!(
@@ -4246,6 +4291,12 @@ mod foundations_guards {
             "// `find_matching_angle` is no longer required because the dispatch resolver owns it.",
             "// Phase angle in radians for the easing curve.", // legitimate "phase" usage
             "// Builder Phase C owns the second pass.",        // 'Phase C' is a letter, not a digit
+            // Stage-family negative cases — Stage followed by a
+            // letter (not a digit), or "stage" used in a legitimate
+            // prose sense, must not flag.
+            "// On-stage layout pass owns the first batch.",
+            "// stages of the pipeline cooperate via the substrate.",
+            "// Build Stage C handles the second pass.", // letter-suffixed Stage is preserved
             // Final-state joiner-accounting prose — no plan citation,
             // no decimal section ref tied to audit vocabulary.
             "// Joiner-accounting contract: per-request hits/misses attribute exactly.",
@@ -4315,6 +4366,11 @@ mod foundations_guards {
             "Plan §",
             "plan §",
             "phase-archaeology",
+            // Stage-family — mirror the Phase fixed needles.
+            "pre-Stage",
+            "Pre-Stage",
+            "post-Stage",
+            "Post-Stage",
         ];
         for needle in FIXED_NEEDLES {
             if line.contains(needle) {
@@ -4342,6 +4398,32 @@ mod foundations_guards {
                     }
                     let next = bytes[after];
                     // Carve-out: colon-prefixed verb is algorithm-phase.
+                    if next != b':' {
+                        return true;
+                    }
+                }
+                search_from = abs + prefix.len();
+            }
+        }
+        // ── `Stage \d+` with the `:` carve-out. ──
+        // Mirrors the Phase scan: `Stage 1: collect ...` is
+        // algorithm-stage (preserve). Any other byte after the digit
+        // run (letter, `-`, `.`, space, EOL, `,`, `)`, `—`, etc.)
+        // is archaeology.
+        for prefix in ["Stage ", "stage ", "Stage-", "stage-"] {
+            let mut search_from = 0usize;
+            while let Some(rel) = line[search_from..].find(prefix) {
+                let abs = search_from + rel;
+                let mut after = abs + prefix.len();
+                let digit_start = after;
+                while after < bytes.len() && bytes[after].is_ascii_digit() {
+                    after += 1;
+                }
+                if after > digit_start {
+                    if after >= bytes.len() {
+                        return true;
+                    }
+                    let next = bytes[after];
                     if next != b':' {
                         return true;
                     }
@@ -4479,6 +4561,13 @@ mod foundations_guards {
             "// were deleted in Commit 3 of the cutover sub-plan).",
             "// Counterpart deleted in Plan §6.15 / N — entry stored.",
             "// Five-phase materialiser entry per plan §10.",
+            // Stage-family — mirror the Phase-family violations.
+            "// Stage 4d retired the per-session overlay lifecycle.",
+            "/// Pre-Stage-4d the overlay-mutation invoked this hook.",
+            "// post-Stage-4d the path is a no-op.",
+            "// Stage-5b instrumentation counter — admission discriminator.",
+            "/// Stage 6e installs the legacy_dep_signature shadow.",
+            "/// stage 6a wires the real cache.",
         ];
         for line in cases {
             assert!(
@@ -4494,6 +4583,10 @@ mod foundations_guards {
             "// Phase 1: collect import statements.",
             "// Phase 2: emit lowered IR.",
             "// phase 3: walk dependency graph.",
+            // Algorithm-stage carve-out — the Stage family inherits
+            // the same `:`-prefixed carve-out as Phase.
+            "// Stage 1: read parser input.",
+            "// stage 2: lower to typed IR.",
             // Final-state prose with no project-management vocabulary.
             "// Walk the prepared declaration graph for imported types.",
             "/// Returns the projected surface for a given semantic node.",
@@ -4505,6 +4598,8 @@ mod foundations_guards {
             // `Phase` followed by a letter without digits — not archaeology
             // by the broader rule (the rule specifies `Phase \d+`).
             "// Builder Phase C owns the second pass.",
+            // Stage followed by a letter — same carve-out as Phase.
+            "// Build Stage C handles the second pass.",
         ];
         for line in allowed {
             assert!(
