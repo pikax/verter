@@ -5928,10 +5928,11 @@ mod w5f_test_archaeology {
 
     use super::workspace_root;
 
-    /// W5f cutoff baseline measured at the commit that landed the W5f
-    /// architecture guards. Update only when Step 2.6 actually reduces
-    /// the count.
-    pub(super) const W5F_BASELINE: usize = 254;
+    /// W5f cutoff baseline. Update only when test-file cleanup reduces
+    /// the count, or when intentional new fixture vocabulary is added
+    /// (e.g., the Stage-family deliberate-violation fixtures added
+    /// alongside the predicate extension).
+    pub(super) const W5F_BASELINE: usize = 265;
 
     pub(super) fn is_test_file(path: &Path) -> bool {
         let name = path
