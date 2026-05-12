@@ -268,3 +268,53 @@ fn phase1_emission_produces_member_presence_for_every_member() {
         "Phase 1 MUST emit MemberShape"
     );
 }
+
+/// Stage 0 → Stage 3 corpus-anchored binding: the
+/// `pick_literal_key.ts` fixture's expected-invalidation matrix
+/// describes the path-precise contract Stage 6d will enforce.
+/// Stage 3 must (a) be able to LOAD the fixture without
+/// special-casing, and (b) discriminate the documented
+/// member-set: the consumer selects key `"a"` and the source
+/// declares members `a`, `b`, `c`.
+#[test]
+fn pick_literal_key_fixture_declares_documented_member_set() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("path_precise")
+        .join("pick_literal_key.ts");
+    let src =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+
+    // The fixture must declare exactly members `a`, `b`, `c` on
+    // `interface Foo`. Stage 6d's discrimination depends on this
+    // exact member set.
+    assert!(src.contains("export interface Foo"));
+    assert!(src.contains("a: { id: number; name: string }"));
+    assert!(src.contains("b: { other: string }"));
+    assert!(src.contains("c: { extra: boolean }"));
+    assert!(src.contains("export type Props = Pick<Foo, \"a\">"));
+
+    // Load the fixture's expected JSON; verify the consumer's
+    // fact_dep_signature documents BOTH `MemberPresence(Foo, "a")`
+    // AND `Member(Foo, "a")` per the R28 two-fact model.
+    let json_path = path.with_extension("expected.json");
+    let json_raw = std::fs::read_to_string(&json_path)
+        .unwrap_or_else(|e| panic!("read {}: {}", json_path.display(), e));
+    let json: serde_json::Value = serde_json::from_str(&json_raw).unwrap();
+    let sig = json
+        .get("fact_dep_signature_observed_by_consumer")
+        .and_then(|v| v.as_array())
+        .expect("invalidation matrix carries the consumer signature");
+    let sig_strs: Vec<&str> = sig.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        sig_strs
+            .iter()
+            .any(|s| s.contains("MemberPresence(Foo, \"a\"")),
+        "Stage 0 corpus pairs with Stage 3's MemberPresence emission"
+    );
+    assert!(
+        sig_strs.iter().any(|s| s.contains("Member(Foo, \"a\"")),
+        "Stage 0 corpus pairs with Stage 6d's Member emission"
+    );
+}

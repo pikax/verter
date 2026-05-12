@@ -446,3 +446,30 @@ fn removing_export_drops_export_fact_key() {
         "removed exports MUST validate as registry misses (R10)"
     );
 }
+
+/// Stage 0 → Stage 3 corpus-anchored binding: load the
+/// `cosmetic_edit_comment.ts` fixture and verify the documented
+/// invariant — that the file declares an `interface Foo` with
+/// members `a` and `b` plus a top-of-file standalone comment.
+/// The Stage 6d discriminator will assert that re-running the
+/// fact emitter on a comment-edited variant of this file
+/// produces the same semantic_hashes.
+#[test]
+fn cosmetic_edit_comment_fixture_declares_documented_shape() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("path_precise")
+        .join("cosmetic_edit_comment.ts");
+    let src =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+    assert!(src.contains("export interface Foo"));
+    assert!(src.contains("a: number"));
+    assert!(src.contains("b: string"));
+    // The standalone comment that gets edited in the
+    // characterisation pass.
+    assert!(
+        src.contains("This is a top-of-file standalone comment"),
+        "cosmetic_edit_comment.ts MUST contain the documented standalone comment"
+    );
+}

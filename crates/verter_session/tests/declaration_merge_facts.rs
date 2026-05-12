@@ -222,3 +222,34 @@ fn merge_with_added_part_changes_export_fact() {
         "adding an interface part MUST shift Export.semantic_hash"
     );
 }
+
+/// Stage 0 → Stage 3 corpus-anchored binding: the
+/// `declaration_merge.ts` fixture exercises the merged-symbol
+/// identity contract (R10). Stage 3 must be able to load it and
+/// verify the structural shape — two `interface MergedInterface`
+/// parts and an overloaded function — matches the documented
+/// contract.
+#[test]
+fn declaration_merge_fixture_declares_documented_merged_shape() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("path_precise")
+        .join("declaration_merge.ts");
+    let src =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+    // Two interface declarations with the same name.
+    let interface_count = src.matches("export interface MergedInterface").count();
+    assert_eq!(
+        interface_count, 2,
+        "declaration_merge.ts MUST declare two interface MergedInterface parts (got {})",
+        interface_count
+    );
+    // Function overload merge — at least two signatures.
+    let fn_overload_count = src.matches("export function mergedFn").count();
+    assert!(
+        fn_overload_count >= 2,
+        "declaration_merge.ts MUST declare at least two mergedFn overloads (got {})",
+        fn_overload_count
+    );
+}
