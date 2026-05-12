@@ -230,6 +230,22 @@ pub enum StructuredAuditEvent {
         /// Canonical id of the file whose upsert triggered the drain.
         canonical_id: Arc<str>,
     },
+    /// R20 typed event: a `ValidatedFactCache` candidate's
+    /// `fact_dep_signature` exceeded the
+    /// `FACT_SIGNATURE_CAP` size cap and was admitted as
+    /// `NonCacheable`. Producers fall back to cold recompute;
+    /// correctness is preserved but the warm-cache slot is
+    /// skipped for this candidate.
+    FactSignatureOverflow {
+        /// Number of `FactVersionRef` entries the producer
+        /// attempted to admit.
+        candidate_size: u32,
+        /// Configured cap value at admission time. Today this
+        /// equals `verter_session::resolver_core::FACT_SIGNATURE_CAP`
+        /// (1024); the field is recorded explicitly so the audit
+        /// trail survives future cap tuning.
+        cap: u32,
+    },
     /// Escape hatch for ad-hoc events. Every construction site MUST
     /// carry a `// Custom justified: <reason>` comment.
     Custom {
@@ -367,6 +383,13 @@ impl std::fmt::Display for StructuredAuditEvent {
                 layer,
                 canonical_id,
             } => write!(f, "CacheDrainedAtUpsert({layer}, {canonical_id})"),
+            Self::FactSignatureOverflow {
+                candidate_size,
+                cap,
+            } => write!(
+                f,
+                "FactSignatureOverflow(size={candidate_size}, cap={cap})"
+            ),
             Self::Custom { name, detail } => write!(f, "Custom({name}, {detail})"),
         }
     }

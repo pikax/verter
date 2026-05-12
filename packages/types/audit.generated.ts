@@ -1799,7 +1799,19 @@ layer: string,
 /**
  * Canonical id of the file whose upsert triggered the drain.
  */
-canonical_id: string, } } | { "Custom": { 
+canonical_id: string, } } | { "FactSignatureOverflow": { 
+/**
+ * Number of `FactVersionRef` entries the producer
+ * attempted to admit.
+ */
+candidate_size: number, 
+/**
+ * Configured cap value at admission time. Today this
+ * equals `verter_session::resolver_core::FACT_SIGNATURE_CAP`
+ * (1024); the field is recorded explicitly so the audit
+ * trail survives future cap tuning.
+ */
+cap: number, } } | { "Custom": { 
 /**
  * Short identifier for the event kind.
  */

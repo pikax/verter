@@ -373,10 +373,6 @@ impl crate::resolver_core::StoreView for HostStoreView {
         self.compat_token
     }
 
-    fn checks_archive(&self) -> bool {
-        true
-    }
-
     fn validates(&self, fact: &crate::resolver_core::FactVersionRef) -> bool {
         match fact {
             crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, hash } => {
@@ -416,50 +412,6 @@ impl crate::resolver_core::StoreView for HostStoreView {
             // Default impls (returning `false`) are inherited from
             // the trait until Stage 5/6 wire actual per-domain
             // validation through this view.
-            // R26 per-domain variants — route to the per-domain
-            // validators (which return `false` by trait default at
-            // Stage 3; Stage 6 producers override).
-            crate::resolver_core::FactVersionRef::Parse(p) => {
-                crate::resolver_core::StoreView::validates_parse_domain(self, p)
-            }
-            crate::resolver_core::FactVersionRef::ResolveImports(r) => {
-                crate::resolver_core::StoreView::validates_resolve_imports_domain(self, r)
-            }
-            crate::resolver_core::FactVersionRef::RouteSurface(r) => {
-                crate::resolver_core::StoreView::validates_route_surface_domain(self, r)
-            }
-        }
-    }
-
-    /// Strict validation for ARCHIVED entries. Archived entries are from a
-    /// prior generation — they were soft-invalidated and may be stale.
-    /// For untracked files (not in whole_hashes), the content may have
-    /// changed on disk since the archive was created. Reject these to
-    /// force re-materialization from current workspace content.
-    fn validates_archived(&self, fact: &crate::resolver_core::FactVersionRef) -> bool {
-        match fact {
-            crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, hash } => self
-                .whole_hashes
-                .get(canonical_id)
-                .is_some_and(|current| current == hash),
-            crate::resolver_core::FactVersionRef::DerivedFactHash {
-                canonical_id,
-                kind,
-                hash,
-            } => match kind {
-                crate::resolver_core::DerivedFactKind::DirectSource => self
-                    .whole_hashes
-                    .get(canonical_id)
-                    .is_some_and(|current| current == hash),
-                _ => self
-                    .derived_hashes
-                    .get(&(canonical_id.clone(), *kind))
-                    .is_some_and(|current| current == hash),
-            },
-            // R26 per-domain variants — archived strictness
-            // delegates to the per-domain validators (same as
-            // the live path; Stage 6 differentiates if archive
-            // semantics require it).
             // R26 per-domain variants — route to the per-domain
             // validators (which return `false` by trait default at
             // Stage 3; Stage 6 producers override).
@@ -664,50 +616,47 @@ mod tests {
         );
     }
 
-    /// validates_archived must be STRICT for untracked files: archived entries
-    /// may be from a prior generation where the workspace content was different.
-    /// Primary-entry acceptance (validates) for untracked files is safe because
-    /// those entries were just materialized from current content.
+    /// Stage 5b retired the `archived` map + `validates_archived`
+    /// method. Concurrent generations of the same key are now
+    /// distinguished by per-candidate fact validation against the
+    /// candidate's own `fact_dep_signature` (see
+    /// `crates/verter_session/src/resolver_core/mod.rs`
+    /// `ValidatedFactCache` substrate). For untracked files, the
+    /// primary `validates` path accepts the cached hash because the
+    /// candidate was admitted from current workspace content.
     #[test]
-    fn validates_archived_rejects_untracked_file_whole_hash() {
+    fn primary_validates_accepts_untracked_file_whole_hash() {
         let view = super::HostStoreView {
             mutation_epoch: 1,
             whole_hashes: FxHashMap::from_iter([("/src/tracked.ts".to_string(), [1u8; 16])]),
             ..Default::default()
         };
 
-        // Tracked file in archive — validates if hash matches.
+        // Tracked file — matches.
         assert!(
-            view.validates_archived(&crate::resolver_core::FactVersionRef::FileWholeHash {
+            view.validates(&crate::resolver_core::FactVersionRef::FileWholeHash {
                 canonical_id: "/src/tracked.ts".to_string(),
                 hash: [1u8; 16],
             })
         );
 
-        // Tracked file in archive — rejects if hash mismatches.
+        // Tracked file — mismatched hash rejected.
         assert!(
-            !view.validates_archived(&crate::resolver_core::FactVersionRef::FileWholeHash {
+            !view.validates(&crate::resolver_core::FactVersionRef::FileWholeHash {
                 canonical_id: "/src/tracked.ts".to_string(),
                 hash: [2u8; 16],
             })
         );
 
-        // Untracked file in archive — MUST reject (content may have changed).
-        assert!(
-            !view.validates_archived(&crate::resolver_core::FactVersionRef::FileWholeHash {
-                canonical_id: "/node_modules/vue/dist/vue.d.mts".to_string(),
-                hash: [42u8; 16],
-            }),
-            "validates_archived must reject untracked files to prevent stale data"
-        );
-
-        // Compare: validates() accepts the same untracked file (primary entries safe).
+        // Untracked file — accepted (Stage 5b multi-candidate
+        // substrate relies on the candidate's own `fact_dep_signature`
+        // to discriminate concurrent generations).
         assert!(
             view.validates(&crate::resolver_core::FactVersionRef::FileWholeHash {
                 canonical_id: "/node_modules/vue/dist/vue.d.mts".to_string(),
                 hash: [42u8; 16],
             }),
-            "validates() should still accept untracked files in primary cache"
+            "untracked files are accepted by primary validation in the Stage-5b substrate"
         );
     }
 

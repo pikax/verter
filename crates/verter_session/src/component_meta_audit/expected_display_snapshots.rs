@@ -64,6 +64,8 @@ pub const EXPECTED_MATERIALIZE_STRUCTURE_DEPTH_FUSE_TRIPPED: &str =
 pub const EXPECTED_CUSTOM: &str = "Custom(test_name, key=value)";
 pub const EXPECTED_CACHE_DRAINED_AT_UPSERT: &str =
     "CacheDrainedAtUpsert(resolved_type_cache, /probe.vue)";
+pub const EXPECTED_FACT_SIGNATURE_OVERFLOW: &str =
+    "FactSignatureOverflow(size=1100, cap=1024)";
 
 // ──────────────────────────────────────────────────────────────────
 // Fixture constructors — exactly one canonical instance per variant.
@@ -284,6 +286,13 @@ pub fn fixture_cache_drained_at_upsert() -> Event {
     }
 }
 
+pub fn fixture_fact_signature_overflow() -> Event {
+    Event::FactSignatureOverflow {
+        candidate_size: 1100,
+        cap: 1024,
+    }
+}
+
 /// Pair each fixture with its expected Display string. The
 /// `structured_event_display_snapshot_byte_exact_for_every_variant`
 /// test iterates this table, and the companion `all_variants_covered`
@@ -364,6 +373,10 @@ pub fn all_snapshots() -> Vec<(Event, &'static str)> {
             fixture_cache_drained_at_upsert(),
             EXPECTED_CACHE_DRAINED_AT_UPSERT,
         ),
+        (
+            fixture_fact_signature_overflow(),
+            EXPECTED_FACT_SIGNATURE_OVERFLOW,
+        ),
     ]
 }
 
@@ -414,6 +427,7 @@ mod tests {
             | Event::MaterializeStructureCycleDetected { .. }
             | Event::MaterializeStructureDepthFuseTripped { .. }
             | Event::CacheDrainedAtUpsert { .. }
+            | Event::FactSignatureOverflow { .. }
             | Event::Custom { .. } => (),
         };
 
@@ -443,6 +457,7 @@ mod tests {
             "MaterializeStructureDepthFuseTripped",
             "Custom",
             "CacheDrainedAtUpsert",
+            "FactSignatureOverflow",
         ];
         let covered: Vec<&'static str> = all_snapshots()
             .iter()
@@ -475,6 +490,7 @@ mod tests {
                 }
                 Event::Custom { .. } => "Custom",
                 Event::CacheDrainedAtUpsert { .. } => "CacheDrainedAtUpsert",
+                Event::FactSignatureOverflow { .. } => "FactSignatureOverflow",
             })
             .collect();
         for v in expected_variants.iter() {

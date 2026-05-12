@@ -1,7 +1,9 @@
+use dashmap::DashMap;
 use parking_lot::{Condvar, Mutex};
 use rustc_hash::FxHashMap;
 use std::hash::Hash;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 pub(crate) mod ambient_resolve;
 pub(crate) mod bare_name_resolve;
@@ -358,12 +360,6 @@ pub struct ResolverDiagnostic {
     pub span_start: Option<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ValidatedEntry<V> {
-    pub value: Arc<V>,
-    pub facts: Vec<FactVersionRef>,
-}
-
 #[derive(Debug, Clone)]
 pub struct StableExecutionValue<V> {
     pub value: V,
@@ -466,16 +462,42 @@ where
     })
 }
 
+/// R20 multi-candidate substrate.
+///
+/// One outer `DashMap` shard holds the cache entries, keyed by `K`.
+/// Each entry's `candidates` field is an `ArcSwap` over a `SmallVec`
+/// of `Arc<Candidate<V>>`. Concurrent generations of the "same" key
+/// (e.g., two file-content versions of the same definition) coexist
+/// as distinct candidates, validated independently against the
+/// caller's `StoreView`.
+///
+/// **Read path** (`&self`): shard-read on the `DashMap` →
+/// `ArcSwap.load()` → iterate candidates → first validating candidate
+/// is the hit. **Zero atomic writes on hit**.
+///
+/// **Write path** (`&self`): shard-write on the `DashMap` →
+/// `ArcSwap.rcu(|old| clone, FIFO-evict if cap reached, push new)`.
+///
+/// **Signature size cap**: a candidate whose `fact_dep_signature`
+/// exceeds [`FACT_SIGNATURE_CAP`] entries is admitted as
+/// `NonCacheable` — the candidate does NOT enter the cache, and
+/// the `FactSignatureOverflow` audit event fires. Callers fall back
+/// to cold recompute; correctness is preserved.
 #[derive(Debug)]
 pub struct ValidatedFactCache<K, V>
 where
     K: Eq + Hash,
 {
-    entries: Mutex<FxHashMap<K, ValidatedEntry<V>>>,
-    /// Soft-invalidated entries that are no longer reachable via `get_if_valid`
-    /// with a permissive view, but can still be found by store-view-validated
-    /// lookups via `get_if_valid_archived`.
-    archived: Mutex<FxHashMap<K, ValidatedEntry<V>>>,
+    entries: DashMap<K, Arc<CacheEntry<V>>>,
+    /// Stage-5b instrumentation counter: increments every time a
+    /// candidate's `fact_dep_signature` is rejected for exceeding
+    /// [`FACT_SIGNATURE_CAP`]. Read in tests via
+    /// [`ValidatedFactCache::signature_overflow_count`].
+    signature_overflow: AtomicU64,
+    /// Stage-5b instrumentation counter: increments on every
+    /// `ArcSwap::store` call in the cache substrate. Hot-path
+    /// reads must never advance this counter.
+    arcswap_stores: AtomicU64,
 }
 
 impl<K, V> Default for ValidatedFactCache<K, V>
@@ -484,10 +506,136 @@ where
 {
     fn default() -> Self {
         Self {
-            entries: Mutex::new(FxHashMap::default()),
-            archived: Mutex::new(FxHashMap::default()),
+            entries: DashMap::new(),
+            signature_overflow: AtomicU64::new(0),
+            arcswap_stores: AtomicU64::new(0),
         }
     }
+}
+
+/// R20 multi-candidate slot. Wraps an `ArcSwap` over a `SmallVec`
+/// of candidates so the read path can return without taking any
+/// per-slot lock; the write path is an `ArcSwap::rcu` that races
+/// against concurrent writers via copy-on-write.
+#[derive(Debug)]
+pub struct CacheEntry<V> {
+    candidates: arc_swap::ArcSwap<smallvec::SmallVec<[Arc<Candidate<V>>; CANDIDATE_CAP]>>,
+}
+
+impl<V> Default for CacheEntry<V> {
+    fn default() -> Self {
+        Self {
+            candidates: arc_swap::ArcSwap::from_pointee(smallvec::SmallVec::new()),
+        }
+    }
+}
+
+/// R20 single candidate inside a `CacheEntry`. Multiple candidates
+/// coexist when concurrent generations of the same cache key are
+/// admitted (e.g., two file-content versions of the same definition,
+/// two overlay sessions reaching the same definition with different
+/// dep signatures, etc.).
+///
+/// Per Stage 5 Sub-task B's substrate spec:
+/// - `signature_fingerprint`: short structural digest of the
+///   `fact_dep_signature`, used for quick discriminator comparison.
+/// - `value`: the actual cached value.
+/// - `fact_dep_signature`: the ordered list of `FactVersionRef`
+///   facts the candidate observed. Validation iterates this list
+///   and short-circuits on the first miss.
+/// - `legacy_dep_signature`: Stage-6e shadow scaffold field. Stage-7
+///   reverts the scaffold and drops this field. Today it carries
+///   `None` for every candidate; populated by Stage 6e on the
+///   integration branch only.
+#[derive(Debug)]
+pub struct Candidate<V> {
+    pub signature_fingerprint: [u8; 16],
+    pub value: Arc<V>,
+    pub fact_dep_signature: Arc<[FactVersionRef]>,
+    pub legacy_dep_signature: Option<LegacyDepSignature>,
+}
+
+/// Stage-6e shadow scaffold marker. Populated only on the integration
+/// branch during Stage 6e to enable the dual-validation parity test.
+/// Stage 7 reverts the scaffold (`Reverts: <stage-6e-sha>`) and the
+/// field returns to `None` for every candidate. Defined here at
+/// Stage 5b so the substrate type signature is stable; the
+/// integration-branch-only Stage 6e fills in the variants.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LegacyDepSignature {
+    /// Opaque per-candidate identifier carried forward from the
+    /// pre-fact-validation legacy signature mechanism. Empty during
+    /// regular Stage-5b operation; Stage 6e installs the legacy
+    /// signature on the integration branch.
+    pub opaque: Arc<[u8]>,
+}
+
+/// Per-slot candidate cap. The 5th admission triggers FIFO eviction
+/// of the oldest candidate.
+pub const CANDIDATE_CAP: usize = 4;
+
+/// Per-candidate `fact_dep_signature` size cap. Larger signatures
+/// are admitted as `NonCacheable` (the candidate is dropped and the
+/// `FactSignatureOverflow` audit event fires). Callers fall back to
+/// cold recompute; correctness is preserved.
+pub const FACT_SIGNATURE_CAP: usize = 1024;
+
+fn compute_signature_fingerprint(facts: &[FactVersionRef]) -> [u8; 16] {
+    use std::hash::{BuildHasher, Hasher};
+    // Two FxHasher passes seeded with distinct salts to produce 16
+    // bytes of fingerprint without pulling a heavier hash crate.
+    let salt_lo = rustc_hash::FxBuildHasher;
+    let salt_hi = rustc_hash::FxBuildHasher;
+    let mut h_lo = salt_lo.build_hasher();
+    let mut h_hi = salt_hi.build_hasher();
+    // Distinct constant seeds so the two hashers do not collapse.
+    h_lo.write_u64(0xA5A5_A5A5_5A5A_5A5A);
+    h_hi.write_u64(0x9E37_79B9_7F4A_7C15);
+    for f in facts {
+        match f {
+            FactVersionRef::FileWholeHash { canonical_id, hash } => {
+                h_lo.write(canonical_id.as_bytes());
+                h_lo.write(hash);
+                h_hi.write(canonical_id.as_bytes());
+                h_hi.write(hash);
+            }
+            FactVersionRef::DerivedFactHash {
+                canonical_id,
+                kind,
+                hash,
+            } => {
+                h_lo.write(canonical_id.as_bytes());
+                h_lo.write_u8(match kind {
+                    DerivedFactKind::Route => 1,
+                    DerivedFactKind::ImportRoute => 2,
+                    DerivedFactKind::DirectSource => 3,
+                });
+                h_lo.write(hash);
+                h_hi.write(canonical_id.as_bytes());
+                h_hi.write_u8(match kind {
+                    DerivedFactKind::Route => 1,
+                    DerivedFactKind::ImportRoute => 2,
+                    DerivedFactKind::DirectSource => 3,
+                });
+                h_hi.write(hash);
+            }
+            FactVersionRef::Parse(_)
+            | FactVersionRef::ResolveImports(_)
+            | FactVersionRef::RouteSurface(_) => {
+                // Per-domain refs serialise to their Debug form; the
+                // fingerprint is approximate but stable.
+                let s = format!("{f:?}");
+                h_lo.write(s.as_bytes());
+                h_hi.write(s.as_bytes());
+            }
+        }
+    }
+    let lo = h_lo.finish();
+    let hi = h_hi.finish();
+    let mut out = [0u8; 16];
+    out[..8].copy_from_slice(&lo.to_le_bytes());
+    out[8..].copy_from_slice(&hi.to_le_bytes());
+    out
 }
 
 impl<K, V> ValidatedFactCache<K, V>
@@ -498,24 +646,15 @@ where
     where
         TView: StoreView,
     {
-        let entries = self.entries.lock();
-        if let Some(entry) = entries.get(key) {
-            if entry.facts.iter().all(|fact| view.validates(fact)) {
-                return Some(entry.value.clone());
-            }
-        }
-        drop(entries);
-
-        // Check the archive — stale store views may still validate against
-        // prior generations of facts that were soft-invalidated.
-        // Uses validates_archived which is STRICT for untracked files to
-        // prevent stale data from surviving workspace content changes.
-        if view.checks_archive() {
-            let archived = self.archived.lock();
-            if let Some(entry) = archived.get(key) {
-                if entry.facts.iter().all(|fact| view.validates_archived(fact)) {
-                    return Some(entry.value.clone());
-                }
+        let entry = self.entries.get(key)?;
+        let candidates = entry.candidates.load();
+        for candidate in candidates.iter() {
+            if candidate
+                .fact_dep_signature
+                .iter()
+                .all(|fact| view.validates(fact))
+            {
+                return Some(candidate.value.clone());
             }
         }
         None
@@ -526,50 +665,90 @@ where
     }
 
     pub fn insert_arc(&self, key: K, value: Arc<V>, facts: Vec<FactVersionRef>) {
-        self.entries
-            .lock()
-            .insert(key, ValidatedEntry { value, facts });
+        // R20 signature-size bound. Reject candidates whose fact
+        // signature exceeds FACT_SIGNATURE_CAP.
+        if facts.len() > FACT_SIGNATURE_CAP {
+            self.signature_overflow
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // Best-effort typed-event emission. Failures (e.g., no
+            // observer / accumulator installed on the current
+            // thread) are silent — the counter is the authoritative
+            // signal.
+            crate::host_manage::push_structured_event(
+                crate::component_meta_audit::StructuredAuditEvent::FactSignatureOverflow {
+                    candidate_size: facts.len() as u32,
+                    cap: FACT_SIGNATURE_CAP as u32,
+                },
+            );
+            return;
+        }
+        let fact_arc: Arc<[FactVersionRef]> = Arc::from(facts.into_boxed_slice());
+        let fingerprint = compute_signature_fingerprint(&fact_arc);
+        let candidate = Arc::new(Candidate {
+            signature_fingerprint: fingerprint,
+            value,
+            fact_dep_signature: fact_arc,
+            legacy_dep_signature: None,
+        });
+
+        // Insert-or-update via DashMap. `entry().or_insert_with` is
+        // not used because we need to retain the existing `Arc<CacheEntry>`
+        // identity for `ArcSwap::rcu` to race-close correctly.
+        let entry = self
+            .entries
+            .entry(key)
+            .or_insert_with(|| Arc::new(CacheEntry::default()));
+        let candidates_slot = &entry.candidates;
+        candidates_slot.rcu(|old| {
+            self.arcswap_stores
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let mut new: smallvec::SmallVec<[Arc<Candidate<V>>; CANDIDATE_CAP]> =
+                smallvec::SmallVec::with_capacity(old.len() + 1);
+            new.extend(old.iter().cloned());
+            // FIFO eviction: drop the oldest entry to keep length at
+            // CANDIDATE_CAP after the push.
+            if new.len() >= CANDIDATE_CAP {
+                let drop_count = new.len() - CANDIDATE_CAP + 1;
+                new.drain(..drop_count);
+            }
+            new.push(Arc::clone(&candidate));
+            new
+        });
     }
 
     pub fn values(&self) -> Vec<Arc<V>> {
-        self.entries
-            .lock()
-            .values()
-            .map(|entry| entry.value.clone())
-            .collect()
+        let mut out = Vec::new();
+        for entry in self.entries.iter() {
+            let candidates = entry.value().candidates.load();
+            for c in candidates.iter() {
+                out.push(c.value.clone());
+            }
+        }
+        out
     }
 
     pub fn clear(&self) {
-        self.entries.lock().clear();
-        self.archived.lock().clear();
+        self.entries.clear();
     }
 
     pub fn remove(&self, key: &K) {
-        self.entries.lock().remove(key);
-        // Archive entries are NOT removed here — stale store views may
-        // still need them. The validation mechanism (whole_hash mismatch)
-        // prevents stale views from seeing facts for changed files.
+        self.entries.remove(key);
     }
 
-    /// Hard-remove: clear from both primary and archive maps.
-    /// Used when a file is deleted — archived entries must not survive
-    /// because untracked-file acceptance in `validates` would accept them.
+    /// Hard-remove: same as `remove` after the `archived` retirement
+    /// of Stage 5b. Retained for source compatibility; callers may
+    /// migrate away.
     pub fn hard_remove(&self, key: &K) {
-        self.entries.lock().remove(key);
-        self.archived.lock().remove(key);
+        self.entries.remove(key);
     }
 
-    /// Soft-invalidate: remove the entry from the primary map and move
-    /// it to the archive. Stale store views can still find the archived
-    /// entry through `get_if_valid` (which checks both maps), while
-    /// production (permissive) lookups will see no entry since the
-    /// primary map no longer holds it.
+    /// Stage 5b: post-retirement of the archive map, `invalidate`
+    /// removes the entry outright. Concurrent generations of the
+    /// same key are now distinguished by per-candidate fact
+    /// validation instead of an archive sidecar; superseded
+    /// candidates age out via FIFO under [`CANDIDATE_CAP`].
     pub fn invalidate(&self, key: &K) {
-        let mut entries = self.entries.lock();
-        if let Some(entry) = entries.remove(key) {
-            drop(entries);
-            self.archived.lock().insert(key.clone(), entry);
-        }
+        self.entries.remove(key);
     }
 
     /// Remove all entries whose key satisfies the predicate.
@@ -577,23 +756,41 @@ where
     where
         F: FnMut(&K) -> bool,
     {
-        self.entries.lock().retain(|k, _| predicate(k));
+        self.entries.retain(|k, _| predicate(k));
     }
 
     pub fn len(&self) -> usize {
-        self.entries.lock().len()
+        self.entries.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries.lock().is_empty()
+        self.entries.is_empty()
     }
 
     pub fn snapshot_all(&self) -> Vec<(K, Arc<V>)> {
-        self.entries
-            .lock()
-            .iter()
-            .map(|(k, entry)| (k.clone(), entry.value.clone()))
-            .collect()
+        let mut out = Vec::new();
+        for entry in self.entries.iter() {
+            let candidates = entry.value().candidates.load();
+            if let Some(c) = candidates.last() {
+                out.push((entry.key().clone(), c.value.clone()));
+            }
+        }
+        out
+    }
+
+    /// R20 instrumentation: number of times an over-cap
+    /// `fact_dep_signature` was rejected.
+    pub fn signature_overflow_count(&self) -> u64 {
+        self.signature_overflow
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// R20 instrumentation: number of `ArcSwap::store` (rcu)
+    /// calls observed by this substrate. Hot-path reads must
+    /// never advance this counter.
+    pub fn arcswap_store_count(&self) -> u64 {
+        self.arcswap_stores
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
