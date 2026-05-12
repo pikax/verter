@@ -261,8 +261,24 @@ sole GC mechanisms.
 paths use typed `StructuredAuditEvent` variants (`FileArtifactCache`,
 `FactRegistryWrite`, `FactValidationSummary`, `ExportRouteResolved`,
 `FactSignatureAdmissionRefused`, `FactSignatureOverflow`,
-`ModuleAugmentationStitched`, `ModuleAugmentationIndexShape`). `Custom`
-events for the new emissions on these paths are forbidden.
+`ModuleAugmentationStitched`, `ModuleAugmentationIndexShape`,
+`CacheDrainedAtUpsert`). `Custom` events for the new emissions on
+these paths are forbidden.
+
+The `CacheDrainedAtUpsert { layer, canonical_id }` variant fires at
+every cache-cascade drain site reached by the full
+`host.upsert(...)` path. The quintuple-unchanged fast path (R1)
+emits ZERO `CacheDrainedAtUpsert` events; that absence is the
+direct read-side proof that the fast path is a cache-state no-op.
+The variant is emitted via the in-tree helper
+`verter_session::host_manage::push_cache_drained_at_upsert(layer,
+canonical_id)` so all drain sites in `host_upsert.rs` flow through
+one construction point. Layer-string vocabulary
+(each is a `&'static str`): `compile_cache_overrides`,
+`compile_slots`, `derived_raw_cache`, `dependency_cache`,
+`resolver_runtime`, `project_type_store`, `resolved_type_cache`,
+`semantic_invalidate`, `workspace_parsed_edges`,
+`store_view_epoch`.
 
 **R24.** Warm cache validation is counter-only — zero allocation, zero
 structured payload emission per hit. Structured events emit only on
