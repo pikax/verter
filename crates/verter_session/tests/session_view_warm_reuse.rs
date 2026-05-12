@@ -23,8 +23,8 @@
 //! Each test is structured to FAIL pre-fix and PASS post-fix without
 //! relying on key-shape `HashSet` checks or compile-time signal alone.
 
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use verter_session::meta::MetaProject;
 use verter_session::{CompileErrorPolicy, HostConfig, VerterHost};

@@ -1753,6 +1753,26 @@ impl MaterializeStructureDb {
         self.entries.len()
     }
 
+    /// Number of distinct cache slots currently materialised in the
+    /// `MaterializeStructureDb`'s entry map.
+    ///
+    /// **R7 cross-owner reuse contract.** N consumer scopes that
+    /// reach the same `(base, scope_axis, mode)` collapse to ONE
+    /// entry because the cache key's `Hash`/`PartialEq` impls exclude
+    /// `scope_canonical_id`. Used by
+    /// `tests/cross_owner_materialise_reuse_production.rs` to verify
+    /// the production-flow contract: driving
+    /// `materialize_component_meta_structure` from N owners with a
+    /// shared inner type produces `entry_count == 1` for that slot.
+    ///
+    /// Synonym for [`live_count`](Self::live_count) kept as a stable
+    /// accessor for the landing-gap audit tests; the two will not
+    /// diverge.
+    #[must_use]
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
     /// Test-only synthetic-entry inserter used exclusively by
     /// `cache_invariant_migration` fixtures to verify the cache-cluster
     /// schema-version eviction invariant.

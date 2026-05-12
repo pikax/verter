@@ -581,7 +581,12 @@ impl MetaSession {
         let sessions = self.project.sessions.read();
         sessions
             .get(&self.id)
-            .map(|state| matches!(state.overlays.get(canonical_id), Some(SessionOverlay::Delete)))
+            .map(|state| {
+                matches!(
+                    state.overlays.get(canonical_id),
+                    Some(SessionOverlay::Delete)
+                )
+            })
             .unwrap_or(false)
     }
 
@@ -616,9 +621,8 @@ impl MetaSession {
     {
         self.check_alive()?;
         let host = self.project.host();
-        let analysis = self.with_overlay_view(|view| {
-            host.get_component_meta_via_view(canonical_or_alias, view)
-        });
+        let analysis = self
+            .with_overlay_view(|view| host.get_component_meta_via_view(canonical_or_alias, view));
         Ok(analysis)
     }
 

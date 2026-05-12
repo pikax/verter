@@ -283,14 +283,24 @@ impl VerterHost {
         )
     }
 
-    /// Test-only [`ProjectSemanticDispatch`] accessor for dispatch tests.
+    /// Test / arch-guard [`ProjectSemanticDispatch`] accessor for
+    /// dispatch tests.
     ///
     /// Production callers route dispatch through the component-meta
     /// resolver and engine; tests construct a hermetic host and
     /// dispatch directly via this accessor to exercise the
     /// cache-discipline / read-once / terminal-mode-only-expansion
     /// invariants without going through the surface materialiser.
-    #[cfg(test)]
+    ///
+    /// Visible to integration tests (no `#[cfg(test)]` gate) so
+    /// `tests/cross_owner_materialise_reuse_production.rs` can drive
+    /// `materialize_surface` from N owner scopes and observe the
+    /// cross-owner reuse contract on the live
+    /// `MaterializeStructureDb`. The accessor's contract is
+    /// arch-guard / test-fixture; production resolver code MUST NOT
+    /// construct this dispatcher directly — it goes through the
+    /// component-meta resolver / engine. The accessor's existence is
+    /// a documented test-bridge, not a public-API stability promise.
     #[must_use]
     pub fn semantic_dispatch(
         &self,

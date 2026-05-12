@@ -992,7 +992,7 @@ fn get_analysis_for_deleted_file_returns_none() {
     // session's `get_analysis` consults its overlay map via the
     // view substrate (`OverlaidViewRef` constructed at call time)
     // and returns `None` for tombstoned canonicals without reading
-    // the base host. Wired in Stage-5-landing-gap-A.
+    // the base host.
     let project = make_project();
     let base = sfc("msg: string");
     project.upsert_base("Comp.vue", &base).unwrap();

@@ -132,9 +132,7 @@ impl VerterHost {
         }
 
         // Try the view-aware warm cache fast path.
-        if let Some(warm) =
-            self.try_component_meta_cache_hit_with_view(canonical.as_str(), view)
-        {
+        if let Some(warm) = self.try_component_meta_cache_hit_with_view(canonical.as_str(), view) {
             if let Some(started) = started {
                 component_meta_debug(format!(
                     "get_component_meta_via_view owner={} warm-cache hit took {:?}",
@@ -299,9 +297,10 @@ impl VerterHost {
             );
             return;
         }
-        let Some(whole_hash) = view.content_hash_for(canonical).or_else(|| {
-            self.shallow_file_state(canonical).map(|s| s.whole_hash)
-        }) else {
+        let Some(whole_hash) = view
+            .content_hash_for(canonical)
+            .or_else(|| self.shallow_file_state(canonical).map(|s| s.whole_hash))
+        else {
             return;
         };
         let key = crate::component_meta_result_db::ComponentMetaResultKey {
