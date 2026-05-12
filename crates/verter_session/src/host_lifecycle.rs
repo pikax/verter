@@ -96,6 +96,16 @@ impl VerterHost {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Public accessor for the coarse semantic-mutation epoch counter.
+    ///
+    /// Exposed for cache-reuse invariant tests that assert
+    /// byte-identical `upsert` calls do not bump the epoch (R1 —
+    /// quintuple-unchanged upsert is a true cache-state no-op).
+    #[must_use]
+    pub fn store_view_epoch(&self) -> u64 {
+        self.current_store_view_epoch()
+    }
+
     pub(crate) fn bump_store_view_epoch(&self) -> u64 {
         self.clear_thread_local_parsed_eval_program_cache();
         self.store_view_epoch

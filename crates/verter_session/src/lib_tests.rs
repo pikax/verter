@@ -3997,7 +3997,17 @@ mod phase2a_upsert_tests {
     }
 
     #[test]
-    fn test_upsert_fast_path_materializes_compile_cache_after_scheduler_only_load() {
+    fn test_upsert_fast_path_is_a_true_no_op_after_scheduler_only_load() {
+        // R1 / R2 — byte-identical re-upsert after a scheduler-only cold
+        // load is a true cache-state no-op. The pre-Stage-2 fast path
+        // materialised `DependencyState` (writing `generation = snap.generation`)
+        // and other per-canonical state; that behaviour is deleted.
+        //
+        // The new contract: scheduler-only loads do not create
+        // `DependencyState`; byte-identical re-upserts do not create it
+        // either. Callers that need `DependencyState` must use the full
+        // upsert flow (a structural change) or call `ensure_loaded`,
+        // which goes through `integrate_scheduler_snapshot`.
         use verter_scheduler::job::CompletionState;
 
         let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
@@ -4024,9 +4034,14 @@ mod phase2a_upsert_tests {
         );
         assert!(
             host.compile_cache().get("/src/App.vue").is_none(),
-            "scheduler-only load should not implicitly create compile_cache state"
+            "scheduler-only load does not create compile_cache state"
+        );
+        assert!(
+            host.dependency_cache().get("/src/App.vue").is_none(),
+            "scheduler-only load does not create dependency_cache state"
         );
 
+        let epoch_before = host.store_view_epoch();
         let result = host
             .upsert(UpsertRequest {
                 canonical_id: Some("/src/App.vue".to_string()),
@@ -4038,20 +4053,22 @@ mod phase2a_upsert_tests {
             .expect("byte-identical upsert should succeed");
         assert!(
             !result.changed,
-            "byte-identical upsert after scheduler-only load should remain a no-op"
+            "byte-identical upsert after scheduler-only load remains a no-op"
         );
 
-        let snap = host
-            .scheduler_source("/src/App.vue")
-            .expect("scheduler source should still exist");
-        // generation lives on DependencyState (D48 split).
-        let dep = host
-            .dependency_cache()
-            .get("/src/App.vue")
-            .expect("byte-identical upsert should still materialize DependencyState");
+        // R1: byte-identical re-upsert MUST NOT bump store_view_epoch.
         assert_eq!(
-            dep.generation, snap.generation,
-            "fast-path upsert should align DependencyState generation with the scheduler"
+            host.store_view_epoch(),
+            epoch_before,
+            "R1: byte-identical re-upsert must not bump store_view_epoch"
+        );
+        // R1: byte-identical re-upsert MUST NOT materialise DependencyState
+        // when none existed pre-call. The pre-Stage-2 fast path created
+        // the entry with `dep.generation = snap.generation`; the new
+        // contract leaves it absent.
+        assert!(
+            host.dependency_cache().get("/src/App.vue").is_none(),
+            "R1: byte-identical re-upsert MUST NOT materialise DependencyState"
         );
     }
 
@@ -4306,17 +4323,26 @@ mod phase2a_upsert_tests {
         );
     }
 
-    /// §4.3 #4 (F7): Discriminating per Codex 1 P1b / Claude N5.
-    /// Upsert Comp.vue with `./types`. Then `set_workspace(fresh)`. Then
-    /// byte-identical re-upsert. Assert workspace reverse-deps reports
-    /// Comp.vue for the new workspace.
-    /// **Pre-§2.13 fails** — the byte-identical fast path skipped edge
-    /// writes; a fresh workspace had no edges to merge.
+    /// R1 / R2 — byte-identical re-upsert is a true no-op. It does NOT
+    /// re-write workspace edges. A workspace swap that drops edges is
+    /// recovered via a STRUCTURAL re-upsert (`source` differs from
+    /// cached), not via a byte-identical one.
+    ///
+    /// Pre-Stage-2 contract (deleted): the fast path called
+    /// `record_parsed_edges` so a fresh workspace was re-populated by
+    /// a byte-identical re-upsert. That contract violated R1 (cache
+    /// mutation as a side effect of "source unchanged") and R2
+    /// ("`upsert` means the source changed").
+    ///
+    /// Post-Stage-2 contract (this test): a structural re-upsert
+    /// repopulates the fresh workspace; a byte-identical re-upsert
+    /// does NOT. The fresh workspace stays empty until the source
+    /// actually changes.
     #[test]
-    fn host_byte_identical_reupload_via_fresh_workspace_repopulates_edges() {
+    fn structural_re_upsert_repopulates_fresh_workspace_edges() {
         let host = VerterHost::new_standalone(HostConfig::default());
-        let src = "<script setup lang=\"ts\">import { Foo } from './types'</script>\n<template /></template>";
-        let _ = upsert_vue(&host, "/src/Comp.vue", src);
+        let src_a = "<script setup lang=\"ts\">import { Foo } from './types'</script>\n<template /></template>";
+        let _ = upsert_vue(&host, "/src/Comp.vue", src_a);
         // Confirm initial workspace has the edge.
         assert!(host
             .workspace()
@@ -4324,9 +4350,7 @@ mod phase2a_upsert_tests {
             .contains(&"/src/Comp.vue".to_string()));
 
         // Swap to a FRESH workspace (clears workspace edges; compile cache
-        // and scheduler state preserved). The fresh workspace has no record
-        // of any edges — so a byte-identical re-upsert must re-fire the
-        // workspace edge write to re-populate.
+        // and scheduler state preserved).
         let fresh = Arc::new(verter_workspace::MemoryWorkspace::new(
             verter_workspace::MemoryOptions::default(),
         ));
@@ -4335,24 +4359,41 @@ mod phase2a_upsert_tests {
             fresh.reverse_deps_for("/src/types.ts").is_empty(),
             "fresh workspace must start with no edges"
         );
-        // Byte-identical re-upsert.
-        let _ = upsert_vue(&host, "/src/Comp.vue", src);
+        // R1 discrimination: byte-identical re-upsert is a no-op. The
+        // fresh workspace must STAY empty.
+        let _ = upsert_vue(&host, "/src/Comp.vue", src_a);
+        assert!(
+            fresh.reverse_deps_for("/src/types.ts").is_empty(),
+            "R1: byte-identical re-upsert MUST NOT re-write workspace edges. \
+             The pre-Stage-2 fast path called record_parsed_edges — that \
+             behaviour is deleted."
+        );
+
+        // A STRUCTURAL re-upsert (different source) flows through the
+        // full upsert path, which re-applies workspace edges.
+        let src_b = "<script setup lang=\"ts\">import { Foo, Bar } from './types'</script>\n<template /></template>";
+        let _ = upsert_vue(&host, "/src/Comp.vue", src_b);
         assert!(
             fresh
                 .reverse_deps_for("/src/types.ts")
                 .contains(&"/src/Comp.vue".to_string()),
-            "fast-path edge-write must fire on byte-identical re-upsert (F7 fix)"
+            "Structural re-upsert MUST re-write workspace edges via the \
+             full upsert path (R2 — the source actually changed)."
         );
     }
 
-    /// §4.3 #13 (F13): Use a truly-unknown extension `.custom` that is
-    /// NOT in `probe_extensions()`. Construct host with `.custom` in
-    /// `resolve_extensions`. Upsert; swap workspace; re-upsert. Assert
-    /// `.custom` is stripped to `/src/x` and finds Comp.vue.
+    /// `set_workspace` re-applies `HostConfig::resolve_extensions` to
+    /// the new workspace so a truly-unknown extension `.custom` (not in
+    /// `probe_extensions()`) still strips to its stem for edge-resolution.
+    ///
     /// **Discriminating contract**: if `set_workspace` doesn't re-apply
-    /// HostConfig::resolve_extensions, ws_b uses default probe_extensions
-    /// only; `.custom` is not stripped; `reverse_deps_for("/src/x.custom")`
-    /// returns empty.
+    /// `HostConfig::resolve_extensions`, the fresh workspace uses default
+    /// probe extensions only; `.custom` is not stripped;
+    /// `reverse_deps_for("/src/x.custom")` returns empty.
+    ///
+    /// Post-Stage-2 the trigger is a STRUCTURAL re-upsert (different
+    /// source), because R1 makes byte-identical re-upsert a no-op that
+    /// no longer flows edges into the new workspace.
     #[test]
     fn host_set_workspace_swap_preserves_configured_extensions() {
         let mut config = HostConfig::default();
@@ -4364,25 +4405,27 @@ mod phase2a_upsert_tests {
         ));
         let host = VerterHost::new(config, ws_a);
 
-        let src =
+        let src_a =
             "<script setup lang=\"ts\">import { Foo } from './x'</script>\n<template /></template>";
-        let _ = upsert_vue(&host, "/src/Comp.vue", src);
+        let _ = upsert_vue(&host, "/src/Comp.vue", src_a);
 
-        // Swap to a fresh workspace (no host config applied yet at swap).
+        // Swap to a fresh workspace.
         let ws_b = Arc::new(verter_workspace::MemoryWorkspace::new(
             verter_workspace::MemoryOptions::default(),
         ));
         host.set_workspace(ws_b.clone());
 
-        // Re-upsert — forces edges to flow into ws_b.
-        let _ = upsert_vue(&host, "/src/Comp.vue", src);
+        // Structural re-upsert (different source) — runs the full
+        // upsert path which re-writes edges into ws_b.
+        let src_b = "<script setup lang=\"ts\">import { Foo, Bar } from './x'</script>\n<template /></template>";
+        let _ = upsert_vue(&host, "/src/Comp.vue", src_b);
 
         // `.custom` extension stripping requires set_workspace to re-apply
         // HostConfig::resolve_extensions to ws_b.
         let owners = ws_b.reverse_deps_for("/src/x.custom");
         assert!(
             owners.contains(&"/src/Comp.vue".to_string()),
-            "set_workspace must re-apply HostConfig::resolve_extensions so .custom strips to stem (F13 fix); got {owners:?}",
+            "set_workspace must re-apply HostConfig::resolve_extensions so .custom strips to stem; got {owners:?}",
         );
     }
 

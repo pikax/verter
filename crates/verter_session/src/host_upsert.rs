@@ -201,77 +201,53 @@ impl VerterHost {
             )
             .collect();
 
-        // ── Fast path: byte-identical source ──
-        // Per D48: byte-identical source change is still a "source-content"
-        // event for the purposes of deriving downstream artifacts (the
-        // re-upsert can come from a fresh workspace where overlay state was
-        // dropped). DerivedRawState's caches (cached_resolved_meta,
-        // cached_meta_payload, cached_fallthrough, import_routes) are dropped;
-        // ProfileState's per-profile compile_slots are cleared so the next
-        // compile rebuilds with the new generation; DependencyState is
-        // overwritten with the new deps set.
+        // ── Fast path: quintuple-unchanged source ──
+        //
+        // Per R1: `host.upsert(canonical, source)` is a cache-state no-op
+        // iff the quintuple `(canonical, content_hash, parse_env_hash,
+        // resolve_env_hash, lib_env_hash)` is unchanged. Env-hash
+        // dimensions are construction-time on the host; the only paths
+        // that mutate them (`configure_projects`, `set_workspace`) reset
+        // the entire host before any subsequent `upsert` can hit this
+        // gate. The whole-hash equality below is therefore sufficient to
+        // prove quintuple-unchanged in the live `upsert` call.
+        //
+        // Per R2: cache eviction is an explicit method with a stated
+        // scope — it is NEVER a side effect of `upsert`. This path
+        // performs zero cache mutations, zero semantic invalidations,
+        // zero store-view epoch bumps, and zero workspace-edge writes.
+        //
+        // The single exception is alias-map sync, which fires only when
+        // `req.aliases` introduces a new alias that did not previously
+        // point to this canonical. Alias identity is a caller-supplied
+        // dimension distinct from the quintuple; it must update on
+        // disagreement to honour the contract that aliases caller
+        // supplied are reachable from the canonical.
         let old_whole_hash = old_host_data.map(|h| h.parse.whole_hash);
         if !changes.changed && old_whole_hash == Some(parse.whole_hash) {
-            // ProfileState fast-path mutation.
-            {
-                let mut profile_ref = self
-                    .compile_cache()
-                    .entry(canonical_id.clone())
-                    .or_default();
-                let profile = profile_ref.value_mut();
-                profile.compile_slots.clear();
+            // Alias-map sync runs only when `req.aliases` differs from
+            // the previously recorded set for this canonical. This is
+            // the only mutation permitted on the quintuple-unchanged
+            // fast path; everything else is a no-op per R1.
+            //
+            // The compare uses the EXISTING DependencyState entry as the
+            // sole source of truth. When no entry exists (e.g. a
+            // scheduler-only cold load preceded the upsert) we MUST NOT
+            // materialise one as a side effect of the fast path — that
+            // would violate R1. Callers that need DependencyState created
+            // run the full upsert path (a structural change) or
+            // `ensure_loaded`.
+            if let Some(existing_dep) = self.dependency_cache().get(&canonical_id) {
+                if existing_dep.aliases != alias_set {
+                    let old_aliases = existing_dep.aliases.clone();
+                    // Drop the read-guard before taking the entry write.
+                    drop(existing_dep);
+                    if let Some(mut dep_ref) = self.dependency_cache().get_mut(&canonical_id) {
+                        dep_ref.value_mut().aliases = alias_set.clone();
+                    }
+                    self.update_alias_map(&canonical_id, &old_aliases, &alias_set);
+                }
             }
-            // DerivedRawState fast-path mutation.
-            {
-                let mut derived_ref = self
-                    .derived_raw_cache()
-                    .entry(canonical_id.clone())
-                    .or_default();
-                let derived = derived_ref.value_mut();
-                derived.evicted = false;
-                derived.cached_resolved_meta.clear();
-                derived.cached_meta_payload = None;
-                derived.cached_fallthrough = None;
-                derived.import_routes.clear();
-            }
-            // DependencyState fast-path mutation; capture old aliases for
-            // alias-map diff before overwriting.
-            let old_aliases = {
-                let mut dep_ref = self
-                    .dependency_cache()
-                    .entry(canonical_id.clone())
-                    .or_default();
-                let dep = dep_ref.value_mut();
-                let old_aliases = dep.aliases.clone();
-                dep.aliases = alias_set.clone();
-                dep.dependencies = new_deps.clone();
-                dep.generation = new_source_snap.generation;
-                old_aliases
-            };
-            self.update_alias_map(&canonical_id, &old_aliases, &alias_set);
-
-            // Sub-: byte-identical fast-path workspace-edge write
-            // (closes F7 — fast path used to be a separate writer that
-            // skipped record_parsed_edges, leaving the workspace stale on
-            // re-upsert with a fresh workspace). Per R4 lifecycle this
-            // CLEARS workspace exact_resolved/exact_resolutions/lazy_resolved/
-            // semantic_transitive — matching cc.import_routes.clear() at line
-            // 170. ambient_resolved survives.
-            let parsed_edges = Self::build_parsed_edges_from_analysis(
-                &canonical_id,
-                &parse.external_requests,
-                &parse.script_analysis.imports,
-                &parse.script_analysis.module_references,
-            );
-            self.ws().record_parsed_edges(&canonical_id, &parsed_edges);
-
-            self.resolver.runtime.evict_canonical(&canonical_id);
-            self.project_type_store.evict_canonical(&canonical_id);
-            self.resolved_type_cache().clear();
-            self.eval_env_cache().clear();
-            self.semantic_invalidate(&canonical_id);
-            self.ws().notify_upsert(&canonical_id, req.source.clone());
-            self.bump_store_view_epoch();
             return Ok(HostUpdateResult {
                 canonical_id,
                 changed: false,
@@ -291,7 +267,6 @@ impl VerterHost {
                 parse_duration_ms,
             });
         }
-
         // ── Per-domain invalidation per D48 invalidation matrix ──
         // A source-content-change (whole_hash_changed or semantic_changed)
         // is the per-canonical "Source content change for owner" trigger:
@@ -315,6 +290,10 @@ impl VerterHost {
         // when semantic_changed). Override maps are cleared on whole_hash
         // change because synthetic parses and remapped CSS spans become
         // stale on byte-offset shifts.
+        //
+        // Audit hook (R1 / Stage 2): every observable drain emits one
+        // `CacheDrainedAtUpsert` event so tests can prove the
+        // byte-identical fast path skipped this branch entirely.
         {
             let mut profile_ref = self
                 .compile_cache()
@@ -324,11 +303,16 @@ impl VerterHost {
             if whole_hash_changed {
                 profile.content_overrides.clear();
                 profile.style_overrides.clear();
+                crate::host_manage::push_cache_drained_at_upsert(
+                    "compile_cache_overrides",
+                    &canonical_id,
+                );
             }
             if changes.changed && changes.semantic_changed {
                 profile.compile_slots.clear();
                 profile.latest_diagnostics.clear();
                 profile.diagnostics_generation += 1;
+                crate::host_manage::push_cache_drained_at_upsert("compile_slots", &canonical_id);
             }
         }
 
@@ -343,21 +327,25 @@ impl VerterHost {
                 .entry(canonical_id.clone())
                 .or_default();
             let derived = derived_ref.value_mut();
+            let mut drained_derived = false;
             if whole_hash_changed {
                 derived.cached_tsc_extract = None;
                 derived.cached_resolved_meta.clear();
                 derived.cached_meta_payload = None;
                 derived.cached_fallthrough = None;
+                drained_derived = true;
             }
             if changes.changed {
                 derived.cached_resolved_meta.clear();
                 derived.cached_meta_payload = None;
                 derived.cached_fallthrough = None;
+                drained_derived = true;
             }
             if changes.changed && changes.semantic_changed {
                 derived.cached_resolved_meta.clear();
                 derived.cached_meta_payload = None;
                 derived.cached_fallthrough = None;
+                drained_derived = true;
             }
             if changes.changed
                 && (changes.slice_changes.script_changed
@@ -369,9 +357,11 @@ impl VerterHost {
                 derived.cached_resolved_meta.clear();
                 derived.cached_meta_payload = None;
                 derived.cached_fallthrough = None;
+                drained_derived = true;
             }
             if whole_hash_changed || changes.semantic_changed {
                 derived.raw_template_analysis = None;
+                drained_derived = true;
             }
             // import_routes is the sub-mirror of IndexedReady.import_routes.
             // It is recomputed by downstream resolver passes after this
@@ -379,6 +369,12 @@ impl VerterHost {
             // resolver run.
             derived.import_routes.clear();
             derived.evicted = false;
+            if drained_derived {
+                crate::host_manage::push_cache_drained_at_upsert(
+                    "derived_raw_cache",
+                    &canonical_id,
+                );
+            }
         }
 
         // ── DependencyState (dependency_cache_db) — dep-closure metadata ──
@@ -396,6 +392,7 @@ impl VerterHost {
             dep.aliases = alias_set.clone();
             dep.generation = dep.generation.saturating_add(1);
         }
+        crate::host_manage::push_cache_drained_at_upsert("dependency_cache", &canonical_id);
 
         // ── Build result data from parse ──
         let result_data = UpsertResultData {
@@ -413,9 +410,13 @@ impl VerterHost {
         // Hard-evict module facts so stale store views can't see the
         // prior generation after a content change.
         self.resolver.runtime.evict_canonical(&canonical_id);
+        crate::host_manage::push_cache_drained_at_upsert("resolver_runtime", &canonical_id);
         self.project_type_store.evict_canonical(&canonical_id);
+        crate::host_manage::push_cache_drained_at_upsert("project_type_store", &canonical_id);
         self.resolved_type_cache().clear();
+        crate::host_manage::push_cache_drained_at_upsert("resolved_type_cache", &canonical_id);
         self.semantic_invalidate(&canonical_id);
+        crate::host_manage::push_cache_drained_at_upsert("semantic_invalidate", &canonical_id);
 
         self.update_alias_map(&canonical_id, &old_aliases, &alias_set);
 
@@ -424,6 +425,7 @@ impl VerterHost {
         // dependents are queried. The workspace is sole authority for
         // reverse-dep tracking.
         self.record_parsed_edges_to_vfs(&canonical_id, &result_data);
+        crate::host_manage::push_cache_drained_at_upsert("workspace_parsed_edges", &canonical_id);
 
         self.smart_invalidate_dependents(
             &canonical_id,
@@ -433,7 +435,7 @@ impl VerterHost {
         self.ws().notify_upsert(&canonical_id, req.source.clone());
 
         let result = build_upsert_result(
-            canonical_id,
+            canonical_id.clone(),
             result_data,
             &changes,
             &prev_nodes,
@@ -443,6 +445,7 @@ impl VerterHost {
             parse_duration_ms,
         );
         self.bump_store_view_epoch();
+        crate::host_manage::push_cache_drained_at_upsert("store_view_epoch", &canonical_id);
         result
     }
 
