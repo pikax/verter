@@ -172,8 +172,22 @@ mod tests {
         let store = MemberDisplayFactStore::new();
         let k_v1 = key("/a.ts", 1, 1, "Foo", "a");
         let k_v2 = key("/a.ts", 2, 1, "Foo", "a");
-        store.insert(k_v1.clone(), Arc::new(make_member_display_fact(&k_v1, dummy_hash(1), dummy_hash(10))));
-        store.insert(k_v2.clone(), Arc::new(make_member_display_fact(&k_v2, dummy_hash(1), dummy_hash(11))));
+        store.insert(
+            k_v1.clone(),
+            Arc::new(make_member_display_fact(
+                &k_v1,
+                dummy_hash(1),
+                dummy_hash(10),
+            )),
+        );
+        store.insert(
+            k_v2.clone(),
+            Arc::new(make_member_display_fact(
+                &k_v2,
+                dummy_hash(1),
+                dummy_hash(11),
+            )),
+        );
         // Two distinct entries.
         assert_eq!(store.len(), 2);
         // Old entry is preserved at the v1 content hash; new at v2.
@@ -188,11 +202,19 @@ mod tests {
         let k_env_b = key("/a.ts", 5, 2, "Foo", "a");
         store.insert(
             k_env_a.clone(),
-            Arc::new(make_member_display_fact(&k_env_a, dummy_hash(0), dummy_hash(0xA))),
+            Arc::new(make_member_display_fact(
+                &k_env_a,
+                dummy_hash(0),
+                dummy_hash(0xA),
+            )),
         );
         store.insert(
             k_env_b.clone(),
-            Arc::new(make_member_display_fact(&k_env_b, dummy_hash(0), dummy_hash(0xB))),
+            Arc::new(make_member_display_fact(
+                &k_env_b,
+                dummy_hash(0),
+                dummy_hash(0xB),
+            )),
         );
         assert_eq!(store.len(), 2);
         assert_eq!(store.get(&k_env_a).unwrap().display_hash[0], 0xA);

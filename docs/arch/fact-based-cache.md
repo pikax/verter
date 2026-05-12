@@ -56,7 +56,7 @@ The `FileArtifactStore` key does **NOT** carry `lib_env_hash`
 `lib_env_hash` because module augmentations are looked up against
 the lib + ambient corpus.
 
-## Cache layer key composition (post-cutover end-state)
+## Cache layer key composition (final-state)
 
 | Layer | Family | Key | Validation |
 |---|---|---|---|
@@ -79,14 +79,139 @@ comments, JSDoc, generic param rename). Computed once per
 `(canonical, content_hash, parse_env_hash)` and lives alongside
 `IndexedReady` in `FileArtifactStore.FileArtifacts`.
 
+## Fact registry shape
+
+The per-file fact registry lives on
+`verter_session::file_artifact_store::FileFacts.registry` and uses
+the schema defined in `verter_semantic::facts::registry` (R10–R13,
+R28, R29):
+
+```rust
+struct FactRegistry {
+    facts: FxHashMap<FactKey, Fact>,
+    syntactic_export_set: Option<Fact>,
+}
+
+struct Fact {
+    key: FactKey,
+    semantic_hash: FactHash,  // alpha-normalised, cosmetic-invariant
+    display_hash: FactHash,   // cosmetic-sensitive
+}
+
+enum FactKey {
+    // Parse-domain (R12; populated at parse time)
+    Export { name, space },
+    ExportAlias { exported_as, space },
+    SyntacticExportSet,
+    LocalDecl { name, space },
+    Member { exporter, name, space },         // body — lazy
+    MemberPresence { exporter, name, space }, // header — eager
+    MemberShape { exporter, space },          // whole-surface — eager
+    MacroSurface { kind, target },
+    TemplateRoot,
+    ImportRef { specifier, binding, space },
+    SyntacticReexportRef { specifier, source_name, target_name, space },
+    ModuleAugmentation { specifier, augmented_name, space },
+
+    // Resolve-imports domain (R12; populated downstream by the resolver)
+    ResolvedImportClause { specifier, binding, space, resolved_canonical, resolved_source_name },
+    ResolvedReexportBinding { specifier, source_name, target_name, space, resolved_canonical, resolved_source_name },
+
+    // Route-surface domain (R12; populated downstream by RouteDb)
+    EffectiveExportSet,
+    ModuleAugmentationIndexShape { target_kind_tag, external_specifier, resolved_relative_canonical, wildcard_pattern },
+}
+
+enum FactDomain { ParseFile, ResolveImports, RouteSurface }
+
+impl FactKey {
+    fn domain(&self) -> FactDomain;  // routes per-domain validator dispatch
+}
+```
+
+`FactKey::domain()` routes validator lookups through the `StoreView`
+trait surface:
+
+```rust
+trait StoreView {
+    fn compat_token(&self) -> StoreViewCompatToken;
+    fn validates(&self, fact: &FactVersionRef) -> bool;
+    // R26 per-domain validators — default impls return `false`;
+    // Stage 6 producers override.
+    fn validates_parse_domain(&self, _fact: &ParseFactRef) -> bool { false }
+    fn validates_resolve_imports_domain(&self, _fact: &ResolveImportsFactRef) -> bool { false }
+    fn validates_route_surface_domain(&self, _fact: &RouteSurfaceFactRef) -> bool { false }
+}
+```
+
+The dispatch table is bounded by `FactDomain` (3 variants), not by
+`FactKey`. Adding a new `FactKey` extends a per-domain `*FactRef`
+enum but does NOT widen the trait.
+
+## Two-phase emission (R28)
+
+Parse-time emission (eager, shallow, O(file_size)) populates the
+parse-domain `FactRegistry` on the per-file `FileFacts`. The producer
+is `verter_session::fact_emission::emit_parse_facts(&IndexedReady) ->
+ParseFactsEmission { facts: FileFacts, augmentations: Vec<…> }`.
+
+The lazy member-body emission is split into TWO host-owned stores
+keyed differently so cosmetic edits hit only the display store:
+
+| Store | Key | Lifecycle |
+|---|---|---|
+| `MemberSemanticFactStore` | `(canonical, parse_stable_hash, parse_env_hash, exporter, member_name, symbol_space)` | A cosmetic edit keeps the same key → the cached fact survives |
+| `MemberDisplayFactStore` | `(canonical, content_hash, parse_env_hash, exporter, member_name, symbol_space)` | A cosmetic edit re-keys → the producer recomputes (may equal original under whitespace-only edit, may differ under JSDoc) |
+
+Both stores admit through `entry().or_insert(...)`: insert-only-if-
+absent, so producer races for the same key collapse to a single
+canonical fact. Downstream consumers always observe pointer-equal
+`Arc<Fact>` for the same key.
+
+## Cycle-safe worklist hashing (R27)
+
+`verter_semantic::facts::hashing::compute_semantic_hash` walks a
+`TypeExpr` body and emits an alpha-normalised `Hash16`. Stack-safe
+(explicit `depth` counter, `MAX_HASH_DEPTH = 64`), cycle-safe
+(`VisitedSet` emits `CycleRef(visit_index)` on re-entry), path-
+precise (cross-decl refs resolve through a `CrossDeclLens` and emit
+reference-shape edges WITHOUT inlining the referent's body).
+
+Over-budget walks set `HashOutcome.budget_exceeded = true`; producers
+MUST admit the cache entry as `NonCacheable` (the admission guard
+lives downstream).
+
+Visit order is canonical: lexicographic by `(name, symbol_space)`
+at each unresolved-neighbor expansion; tie-break by `(canonical,
+name, symbol_space)`. The `CycleRef` placeholder is therefore
+invariant under source-text reordering — the same cycle produces
+byte-identical fingerprints regardless of declaration order.
+
 ## See also
 
 - `.claude/skills/type-cache-architecture/SKILL.md` — full R1–R29
   rule set with semantic content.
 - `crates/verter_workspace/src/env_hash.rs` — env-hash function
   implementations.
+- `crates/verter_semantic/src/facts/registry.rs` — `FactKey` /
+  `Fact` / `FactRegistry` / `SymbolSpace` definitions; the
+  `Interned*` newtype set lives here.
+- `crates/verter_semantic/src/facts/hashing.rs` —
+  `compute_semantic_hash`, `compute_member_presence_hash`,
+  `compute_member_shape_hash`, `CrossDeclLens`,
+  `MAX_HASH_DEPTH`.
 - `crates/verter_session/src/file_artifact_store.rs` —
   `FileArtifactStore`, `FileArtifactKey`, `FileArtifacts`,
-  `AugmentationTargetKey`, supporting types.
+  `FileFacts`, `AugmentationTargetKey`, supporting types.
+- `crates/verter_session/src/fact_emission.rs` —
+  `emit_parse_facts` parse-time producer + module-augmentation
+  extraction.
+- `crates/verter_session/src/member_semantic_fact_store.rs` —
+  `MemberSemanticFactStore` (lazy, `parse_stable_hash`-keyed).
+- `crates/verter_session/src/member_display_fact_store.rs` —
+  `MemberDisplayFactStore` (lazy, `content_hash`-keyed).
+- `crates/verter_session/src/resolver_core/mod.rs` —
+  `FactVersionRef` per-domain variants + `StoreView` per-domain
+  validator dispatch.
 - `crates/verter_session/src/parse_stable_hash.rs` —
   `compute_parse_stable_hash` implementation.

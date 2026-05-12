@@ -422,37 +422,189 @@ key composition table. Summary:
 | `RefCycleResultDb`, `SemanticGraphStore` query nodes | Query-identity (multi-candidate) | `ResolvedDeclSlotIdentity` (slot) + `VersionedDeclIdentity` inside value |
 | `ComponentMetaResultDb` | Query-identity (multi-candidate) | Owner identity (per R8) |
 
+## Two-phase emission map (R28)
+
+Parse-time emission (eager, shallow, O(file_size)) populates the
+parse-domain `FactRegistry` on `FileArtifacts.facts`. The producer
+is `verter_session::fact_emission::emit_parse_facts(&IndexedReady)`,
+which emits:
+
+- `Export(name, space)` — per locally-declared exported binding.
+- `LocalDecl(name, space)` — per NOT-exported local.
+- `MemberShape(exporter, space)` — whole-surface fingerprint.
+- `MemberPresence(exporter, name, space)` — header-only
+  `(name, kind, exporter_salt)`; NO body fingerprint.
+- `SyntacticExportSet` — whole-file surface fingerprint.
+- `ImportRef(specifier, binding, space)` — syntactic import shape;
+  NO resolved canonical (R12).
+- `SyntacticReexportRef(specifier, source_name, target_name, space)`
+- `ExportAlias(exported_as, space)` — per `export {X as Y}`.
+- `ModuleAugmentation(specifier, augmented_name, space)` — per
+  augmented binding inside each `declare module "X" {…}` /
+  `declare global {…}` block.
+
+Lazy emission (member body, on first member-access query) lives in
+TWO separate stores keyed differently to physically separate
+semantic vs display:
+
+| Store | Key | Keys-on |
+|---|---|---|
+| `MemberSemanticFactStore` | `(canonical, parse_stable_hash, parse_env_hash, exporter, member_name, symbol_space)` | `parse_stable_hash` — cosmetic edits do NOT re-key |
+| `MemberDisplayFactStore` | `(canonical, content_hash, parse_env_hash, exporter, member_name, symbol_space)` | `content_hash` — cosmetic edits DO re-key |
+
+Both stores admit through `entry().or_insert(...)`:
+insert-only-if-absent. Producer races for the same key collapse to
+one canonical fact; downstream consumers observe pointer-equal
+`Arc<Fact>` for the same key.
+
+## R27 worklist algorithm
+
+`verter_semantic::facts::hashing::compute_semantic_hash(body, space,
+lens) -> HashOutcome` is the stack-safe + cycle-safe + path-precise
+fingerprinter. Contract:
+
+- **Stack-safe**: explicit `depth` counter, hard cap
+  `MAX_HASH_DEPTH = 64`. Over-budget walks set
+  `HashOutcome.budget_exceeded = true` and emit `BUDGET_EXCEEDED`
+  placeholder bytes. Producers MUST admit the cache entry as
+  `NonCacheable` (the admission guard lives downstream).
+- **Cycle-safe**: per-node identity-key `VisitedSet` (`BTreeMap`).
+  Re-entry through a node emits `CycleRef(visit_index)` placeholder
+  rather than recursing. Identity key folds in `Arc` pointer
+  addresses of owned sub-nodes — two physically identical `Arc`s
+  ARE the same node and re-enter as `CycleRef`. Different `Arc`s
+  carrying structurally identical content are distinct nodes.
+- **Canonical visit order**: lexicographic by `(name, symbol_space)`
+  at each unresolved-neighbor expansion; tie-break by
+  `(canonical, name, symbol_space)`. `CycleRef` placeholder identity
+  is therefore invariant under source-text reordering.
+- **Path-precise**: cross-decl references resolve through
+  `CrossDeclLens` and emit reference-shape edges
+  (`LocalDecl(name, space)`, `ImportRef(spec, binding, space)`,
+  `TypeOfRef(name)`, `Unresolved(name, space)`) WITHOUT inlining
+  the referent's body (R14). Free type parameters
+  alpha-normalise to binder-relative indices.
+
+## MemberPresence vs Member detailed table (R28)
+
+| Consumer touch | Observes |
+|---|---|
+| `Pick<Foo, "a">` | `MemberPresence(Foo, "a")` + `Member(Foo, "a")` |
+| `Omit<Foo, "a">` | `MemberShape(Foo)` (whole surface) |
+| `keyof Foo` | `MemberShape(Foo)` |
+| `Foo["a"]` | `MemberPresence(Foo, "a")` + `Member(Foo, "a")` |
+| `Foo["a"]["b"]` | both `Member` chains observed |
+| `{ [K in keyof Foo]: T }` | `MemberShape(Foo)` |
+
+The discrimination matrix:
+
+- Adding `Foo.b` → new `MemberPresence(Foo, "b")` emitted; existing
+  `MemberPresence(Foo, "a")` unchanged; `Member(Foo, "a")` unchanged.
+  `MemberShape` changes but `Pick<Foo, "a">` consumer does NOT
+  observe `MemberShape` → NOT invalidated.
+- Editing `Foo.a` body → `MemberPresence(Foo, "a")` unchanged
+  (header invariant); `Member(Foo, "a")` changes → consumer IS
+  invalidated.
+- Removing `Foo.a` → `MemberPresence(Foo, "a")` becomes a registry
+  miss → consumer IS invalidated.
+
 ## Key concrete files
 
 - `crates/verter_workspace/src/env_hash.rs` — five env-hash functions on
   `IdeProjectConfig` + `EnvHashInputs<'_>`.
-- `crates/verter_session/src/file_artifact_store.rs` — `FileArtifactStore`,
-  `FileArtifactKey`, `FileArtifacts`, `AugmentationTargetKey`,
-  `AugmentationTargetKind`, `AugmenterSet`, `FileFacts`, `ParsedEdges`,
-  `ModuleAugmentationFact`, `ProjectIdentity`, `InternedSpecifier`,
-  `InternedName`, `InternedGlobPattern`, `SymbolSpace`.
+- `crates/verter_semantic/src/facts/registry.rs` — `FactKey`,
+  `Fact`, `FactDomain`, `FactRegistry`, `SymbolSpace`,
+  `MemberKind`, `FactLane`, `ObservedFact`, `MacroKind`,
+  `MacroTargetKey`, `InternedSpecifier`, `InternedName`,
+  `InternedGlobPattern`, `AugmentationTargetKindTag`.
+- `crates/verter_semantic/src/facts/hashing.rs` —
+  `compute_semantic_hash`, `compute_member_presence_hash`,
+  `compute_member_shape_hash`, `CrossDeclLens`, `CrossDeclRef`,
+  `HashOutcome`, `MAX_HASH_DEPTH = 64`.
+- `crates/verter_session/src/file_artifact_store.rs` —
+  `FileArtifactStore`, `FileArtifactKey`, `FileArtifacts`,
+  `FileFacts` (registry-backed); re-exports
+  `Interned{Specifier,Name,GlobPattern}` + `SymbolSpace` from
+  `verter_semantic::facts::registry`;
+  `AugmentationTargetKey`, `AugmentationTargetKind`,
+  `AugmenterSet`, `ParsedEdges`, `ModuleAugmentationFact`,
+  `ProjectIdentity`.
+- `crates/verter_session/src/fact_emission.rs` —
+  `emit_parse_facts(&IndexedReady) -> ParseFactsEmission`,
+  `GLOBAL_AUGMENTATION_TAG`, single-pass
+  `extract_module_augmentations_from_source` byte scanner.
+- `crates/verter_session/src/member_semantic_fact_store.rs` —
+  `MemberSemanticFactStore`, `MemberSemanticFactKey`,
+  `make_member_fact`, `member_fact_key`.
+- `crates/verter_session/src/member_display_fact_store.rs` —
+  `MemberDisplayFactStore`, `MemberDisplayFactKey`,
+  `make_member_display_fact`, `member_display_fact_key`.
 - `crates/verter_session/src/parse_stable_hash.rs` —
   `compute_parse_stable_hash(&IndexedReady) -> Hash16`.
 - `crates/verter_session/src/resolver_core/mod.rs` —
-  `ValidatedFactCache`, `FactVersionRef`, `StoreView`,
+  `ValidatedFactCache`, `FactVersionRef` (legacy +
+  `Parse`/`ResolveImports`/`RouteSurface` per-domain variants),
+  `ParseFactRef`, `ResolveImportsFactRef`, `RouteSurfaceFactRef`,
+  `StoreView` (per-domain validator methods),
   `StoreViewCompatToken`.
 - `crates/verter_session/src/semantic_query.rs` — `DeclIdentity`
   (migrating to `ResolvedDeclSlotIdentity`).
 
 ## Discriminating tests
 
-- `crates/verter_workspace/src/env_hash_tests.rs` — 15 unit tests on
-  the env-hash split (R21).
-- `crates/verter_session/src/file_artifact_store_tests.rs` — 13 unit
-  tests on the store (R5, R6, R28, R29).
-- `crates/verter_session/tests/env_hash_isolation.rs` — 4 R21
+- `crates/verter_workspace/src/env_hash_tests.rs` — env-hash split
+  unit tests (R21).
+- `crates/verter_session/src/file_artifact_store_tests.rs` — store
+  unit tests (R5, R6, R28, R29).
+- `crates/verter_session/tests/env_hash_isolation.rs` — R21
   scoping rule tests.
-- `crates/verter_session/tests/cache_key_invariants.rs` — 6 R5 / R6
+- `crates/verter_session/tests/cache_key_invariants.rs` — R5 / R6
   key-shape tests.
-- `crates/verter_session/tests/parse_stable_hash_invariance.rs` — 9
+- `crates/verter_session/tests/parse_stable_hash_invariance.rs` —
   cosmetic-invariant + decl-shape-discriminating tests.
-- `crates/verter_session/tests/file_artifact_store_smoke.rs` — 4
+- `crates/verter_session/tests/file_artifact_store_smoke.rs` —
   consumer-side smoke tests.
+- `crates/verter_semantic/src/facts/registry.rs` (`registry_tests`
+  inline module) — `FactKey::domain()` routing per R12 / R26,
+  `SymbolSpace` tag stability per R11.
+- `crates/verter_semantic/src/facts/hashing.rs` (inline `tests`
+  module) — alpha-normalisation under object member reorder
+  (R16), stack-safety on 200-deep nesting (R27),
+  `MemberPresence`/`MemberShape` discrimination (R28).
+- `crates/verter_session/src/fact_emission.rs` (inline `tests`
+  module) — `declare module …` source-byte scanner per R29
+  archetype.
+- `crates/verter_session/src/member_semantic_fact_store.rs` /
+  `member_display_fact_store.rs` (inline `tests` modules) —
+  store admission, parse_stable_hash vs content_hash keying
+  contract (R13).
+- `crates/verter_session/tests/fact_fingerprint_stability.rs` —
+  R10/R11/R13/R16 binding (cosmetic-invariance, namespace
+  coexistence, decl-reorder stability, syntactic export set).
+- `crates/verter_session/tests/fact_semantic_display_split.rs` —
+  R13 binding (semantic store survives cosmetic edit; display
+  store re-keys).
+- `crates/verter_session/tests/parse_resolve_domain_separation.rs`
+  — R12 binding (`ImportRef` invariant under resolution change).
+- `crates/verter_session/tests/member_presence_vs_member.rs` —
+  R28 two-fact model (`pick_literal_key.ts` invariant).
+- `crates/verter_session/tests/cycle_safety.rs` — R27 binding
+  (stack-safe + cycle-safe + canonical visit order).
+- `crates/verter_session/tests/shallow_walk_invariant.rs` — R28
+  arch-guard (parse-time emitter does not call cross-decl AST
+  traversal).
+- `crates/verter_session/tests/module_augmentation.rs` — R29
+  binding (per-archetype fact emission; `augmentation_index`
+  stays empty at parse time).
+- `crates/verter_session/tests/declaration_merge_facts.rs` — R10
+  binding (merged `interface Foo` parts emit one `Export`).
+- `crates/verter_session/tests/fact_lane_correctness.rs` — R13
+  lane binding (generic param rename invariant).
+- `crates/verter_session/tests/fact_emission_parse_time_budget.rs`
+  — emitter scales linearly on 10k-decl input.
+- `crates/verter_session/tests/storeview_per_domain_dispatch.rs` —
+  R26 binding (dispatch table bounded by `FactDomain`, not
+  `FactKey`).
 
 ## Related skills
 

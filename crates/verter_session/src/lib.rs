@@ -105,10 +105,10 @@ pub mod cross_file;
 mod deps;
 pub mod fact_emission;
 pub mod file_artifact_store;
-pub mod member_display_fact_store;
-pub mod member_semantic_fact_store;
 mod hash;
 pub(crate) mod instant;
+pub mod member_display_fact_store;
+pub mod member_semantic_fact_store;
 pub mod parse_stable_hash;
 #[cfg(test)]
 mod project_semantic_dispatch_invariants_tests;

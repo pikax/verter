@@ -65,10 +65,7 @@ pub const MAX_HASH_DEPTH: usize = 64;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum CrossDeclRef {
     /// `Ref("Local", space)` — same-file declaration.
-    LocalDecl {
-        name: Arc<str>,
-        space: SymbolSpace,
-    },
+    LocalDecl { name: Arc<str>, space: SymbolSpace },
     /// `ImportRefRef("./spec", "binding", space)` — imported binding.
     /// No `resolved_canonical` (R12).
     ImportRef {
@@ -319,7 +316,8 @@ impl<'a> Walker<'a> {
         let identity_key = self.node_identity_key(node);
         if let Some(&first_index) = self.visited.get(&identity_key) {
             self.buf.push(0xCC); // CycleRef tag
-            self.buf.extend_from_slice(&(first_index as u32).to_le_bytes());
+            self.buf
+                .extend_from_slice(&(first_index as u32).to_le_bytes());
             self.buf.push(0xFF);
             self.depth -= 1;
             return;
@@ -333,7 +331,8 @@ impl<'a> Walker<'a> {
             TypeExpr::Literal(lit) => self.write_literal(lit),
             TypeExpr::Union(arms) => {
                 self.buf.push(0x20);
-                self.buf.extend_from_slice(&(arms.len() as u32).to_le_bytes());
+                self.buf
+                    .extend_from_slice(&(arms.len() as u32).to_le_bytes());
                 for arm in arms.iter() {
                     self.walk_node(arm);
                     self.buf.push(0xFE);
@@ -341,7 +340,8 @@ impl<'a> Walker<'a> {
             }
             TypeExpr::Intersection(arms) => {
                 self.buf.push(0x21);
-                self.buf.extend_from_slice(&(arms.len() as u32).to_le_bytes());
+                self.buf
+                    .extend_from_slice(&(arms.len() as u32).to_le_bytes());
                 for arm in arms.iter() {
                     self.walk_node(arm);
                     self.buf.push(0xFE);
@@ -355,7 +355,8 @@ impl<'a> Walker<'a> {
             TypeExpr::Tuple { elements, readonly } => {
                 self.buf.push(0x23);
                 self.buf.push(u8::from(*readonly));
-                self.buf.extend_from_slice(&(elements.len() as u32).to_le_bytes());
+                self.buf
+                    .extend_from_slice(&(elements.len() as u32).to_le_bytes());
                 for tuple_elem in elements.iter() {
                     self.write_tuple_element(tuple_elem);
                 }
@@ -405,7 +406,8 @@ impl<'a> Walker<'a> {
                 // Mapped type's `[K in Source]: Value` declares a
                 // single type parameter `K`. Alpha-normalise by
                 // pushing a one-name frame.
-                self.type_param_frame.push(vec![Arc::from(parameter.as_str())]);
+                self.type_param_frame
+                    .push(vec![Arc::from(parameter.as_str())]);
                 self.buf.extend_from_slice(b"alpha:K");
                 self.walk_node(source);
                 self.buf.push(0xFD);
@@ -425,12 +427,14 @@ impl<'a> Walker<'a> {
                 expressions,
             } => {
                 self.buf.push(0x35);
-                self.buf.extend_from_slice(&(quasis.len() as u32).to_le_bytes());
+                self.buf
+                    .extend_from_slice(&(quasis.len() as u32).to_le_bytes());
                 for q in quasis {
                     self.buf.extend_from_slice(q.as_bytes());
                     self.buf.push(0xFF);
                 }
-                self.buf.extend_from_slice(&(expressions.len() as u32).to_le_bytes());
+                self.buf
+                    .extend_from_slice(&(expressions.len() as u32).to_le_bytes());
                 for e in expressions.iter() {
                     self.walk_node(e);
                     self.buf.push(0xFE);
@@ -464,7 +468,8 @@ impl<'a> Walker<'a> {
                 self.buf.push(0x38);
                 self.buf.extend_from_slice(name.as_bytes());
                 self.buf.push(0xFF);
-                self.buf.extend_from_slice(&(type_arguments.len() as u32).to_le_bytes());
+                self.buf
+                    .extend_from_slice(&(type_arguments.len() as u32).to_le_bytes());
                 for ta in type_arguments.iter() {
                     self.walk_node(ta);
                     self.buf.push(0xFE);
@@ -890,9 +895,7 @@ impl<'a> Walker<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use verter_type_expr::{
-        ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr,
-    };
+    use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr};
 
     fn prim(p: PrimitiveName) -> TypeExpr {
         TypeExpr::Primitive(p)
@@ -1047,8 +1050,7 @@ mod tests {
         // Different cross-decl shapes produce different hashes.
         assert_ne!(h_foo.hash, h_bar.hash);
         // Unresolved lens produces a third distinct hash for `Foo`.
-        let h_foo_unresolved =
-            compute_semantic_hash(&ref_foo, SymbolSpace::Type, &UnresolvedLens);
+        let h_foo_unresolved = compute_semantic_hash(&ref_foo, SymbolSpace::Type, &UnresolvedLens);
         assert_ne!(
             h_foo.hash, h_foo_unresolved.hash,
             "LocalDecl(Foo) and Unresolved(Foo) MUST differ"

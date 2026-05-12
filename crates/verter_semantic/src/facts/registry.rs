@@ -185,12 +185,9 @@ impl MemberKind {
     #[must_use]
     pub fn tag(self) -> [u8; 4] {
         match self {
-            Self::Property { readonly, optional } => [
-                0x10,
-                u8::from(readonly),
-                u8::from(optional),
-                0x00,
-            ],
+            Self::Property { readonly, optional } => {
+                [0x10, u8::from(readonly), u8::from(optional), 0x00]
+            }
             Self::Method => [0x11, 0, 0, 0],
             Self::Accessor => [0x12, 0, 0, 0],
             Self::Index => [0x13, 0, 0, 0],

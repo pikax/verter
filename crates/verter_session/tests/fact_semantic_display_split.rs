@@ -191,7 +191,11 @@ fn jsdoc_edit_keeps_semantic_rekeys_display_to_new_value() {
     let old_disp_hash = dummy_disp(0xA0);
     display_store.insert(
         disp_key_v1.clone(),
-        Arc::new(make_member_display_fact(&disp_key_v1, sem_hash, old_disp_hash)),
+        Arc::new(make_member_display_fact(
+            &disp_key_v1,
+            sem_hash,
+            old_disp_hash,
+        )),
     );
 
     // JSDoc edit — different content_hash, new display value.
@@ -206,7 +210,11 @@ fn jsdoc_edit_keeps_semantic_rekeys_display_to_new_value() {
     let new_disp_hash = dummy_disp(0xB0);
     display_store.insert(
         disp_key_v2.clone(),
-        Arc::new(make_member_display_fact(&disp_key_v2, sem_hash, new_disp_hash)),
+        Arc::new(make_member_display_fact(
+            &disp_key_v2,
+            sem_hash,
+            new_disp_hash,
+        )),
     );
 
     // Semantic store: unchanged.

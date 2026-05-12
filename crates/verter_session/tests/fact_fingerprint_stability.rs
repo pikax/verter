@@ -39,8 +39,8 @@ use verter_session::resolver_core::shallow_file_state::{
 };
 use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr};
 
-fn empty_external() -> Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>
-{
+fn empty_external(
+) -> Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource> {
     Arc::new(verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default())
 }
 
@@ -303,10 +303,7 @@ fn adding_export_bumps_syntactic_export_set_and_adds_export_fact() {
         reg_one.get(&bar_key).is_none(),
         "Bar must NOT exist before adding the export"
     );
-    assert!(
-        reg_two.get(&bar_key).is_some(),
-        "Bar MUST exist post-add"
-    );
+    assert!(reg_two.get(&bar_key).is_some(), "Bar MUST exist post-add");
 
     let set_one = reg_one
         .get(&FactKey::SyntacticExportSet)
@@ -396,9 +393,9 @@ fn decl_reorder_does_not_change_emitted_fact_set() {
     // Every fact key in `reg_a` MUST exist in `reg_b` with the
     // same semantic_hash.
     for (key, fact_a) in reg_a.iter() {
-        let fact_b = reg_b.get(key).unwrap_or_else(|| {
-            panic!("declaration reorder dropped key: {key:?}")
-        });
+        let fact_b = reg_b
+            .get(key)
+            .unwrap_or_else(|| panic!("declaration reorder dropped key: {key:?}"));
         assert_eq!(
             fact_a.semantic_hash, fact_b.semantic_hash,
             "decl reorder MUST be byte-identical: {key:?}"

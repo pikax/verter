@@ -18,9 +18,7 @@ use std::sync::Arc;
 use verter_semantic::facts::{
     compute_semantic_hash, CrossDeclLens, CrossDeclRef, SymbolSpace, UnresolvedLens, MAX_HASH_DEPTH,
 };
-use verter_type_expr::{
-    ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr,
-};
+use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr};
 
 #[test]
 fn mutually_recursive_types_terminate_without_stack_overflow() {

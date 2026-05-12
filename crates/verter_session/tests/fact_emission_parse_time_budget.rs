@@ -36,8 +36,8 @@ use verter_session::resolver_core::shallow_file_state::{
 };
 use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr};
 
-fn empty_external() -> Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>
-{
+fn empty_external(
+) -> Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource> {
     Arc::new(verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default())
 }
 
@@ -71,12 +71,7 @@ fn build_large_indexed(decl_count: usize) -> Arc<IndexedReady> {
                 member_deps,
             },
         );
-        exports.insert(
-            name.clone(),
-            ExportTarget::Local {
-                symbol_name: name,
-            },
-        );
+        exports.insert(name.clone(), ExportTarget::Local { symbol_name: name });
     }
     let shallow = ShallowFileState {
         whole_hash: [0u8; 16],

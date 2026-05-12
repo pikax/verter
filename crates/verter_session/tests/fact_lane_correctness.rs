@@ -21,8 +21,8 @@ use verter_semantic::facts::{
 use verter_semantic::facts::{Fact, FactKey};
 use verter_session::file_artifact_store::InternedName;
 use verter_type_expr::{
-    FunctionExpr, FunctionParam, ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName,
-    TypeExpr, TypeParam,
+    FunctionExpr, FunctionParam, ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr,
+    TypeParam,
 };
 
 #[test]
@@ -109,7 +109,10 @@ fn property_value_change_shifts_semantic_hash() {
     }));
     let h_a = compute_semantic_hash(&body_a, SymbolSpace::Type, &UnresolvedLens);
     let h_b = compute_semantic_hash(&body_b, SymbolSpace::Type, &UnresolvedLens);
-    assert_ne!(h_a.hash, h_b.hash, "type-shape edit MUST shift semantic_hash");
+    assert_ne!(
+        h_a.hash, h_b.hash,
+        "type-shape edit MUST shift semantic_hash"
+    );
 }
 
 #[test]

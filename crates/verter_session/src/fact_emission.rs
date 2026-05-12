@@ -35,12 +35,12 @@
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
+use verter_semantic::analysis::types::hash_16;
+use verter_semantic::analysis::Hash16;
 use verter_semantic::facts::{
     compute_member_presence_hash, compute_member_shape_hash, compute_semantic_hash, CrossDeclLens,
     CrossDeclRef, Fact, FactKey, FactRegistry, MemberKind, SymbolSpace,
 };
-use verter_semantic::analysis::types::hash_16;
-use verter_semantic::analysis::Hash16;
 use verter_type_expr::{ObjectExpr, ObjectMember, TypeExpr};
 
 use crate::file_artifact_store::{
@@ -134,7 +134,10 @@ impl ShallowLens {
                 .import_targets
                 .iter()
                 .map(|(local, target)| {
-                    (local.clone(), Arc::<str>::from(target.source_specifier.as_str()))
+                    (
+                        local.clone(),
+                        Arc::<str>::from(target.source_specifier.as_str()),
+                    )
                 })
                 .collect(),
         }
@@ -169,11 +172,7 @@ impl CrossDeclLens for ShallowLens {
 // Emission helpers
 // ──────────────────────────────────────────────────────────────────
 
-fn emit_type_symbols(
-    registry: &mut FactRegistry,
-    shallow: &ShallowFileState,
-    lens: &ShallowLens,
-) {
+fn emit_type_symbols(registry: &mut FactRegistry, shallow: &ShallowFileState, lens: &ShallowLens) {
     let mut sorted: Vec<(&String, &ShallowTypeSymbol)> = shallow.symbols.iter().collect();
     sorted.sort_by(|a, b| a.0.cmp(b.0));
     for (name, symbol) in sorted {
@@ -225,12 +224,8 @@ fn emit_type_symbols(
                     readonly: false,
                     optional: false,
                 };
-                let presence_hash = compute_member_presence_hash(
-                    name,
-                    member_name.as_ref(),
-                    member_kind,
-                    space,
-                );
+                let presence_hash =
+                    compute_member_presence_hash(name, member_name.as_ref(), member_kind, space);
                 registry.insert(Fact {
                     key: FactKey::MemberPresence {
                         exporter: exporter.clone(),
@@ -264,13 +259,8 @@ fn members_for_shape(
     members
 }
 
-fn emit_value_symbols(
-    registry: &mut FactRegistry,
-    shallow: &ShallowFileState,
-    lens: &ShallowLens,
-) {
-    let mut sorted: Vec<(&String, &ShallowValueSymbol)> =
-        shallow.value_symbols.iter().collect();
+fn emit_value_symbols(registry: &mut FactRegistry, shallow: &ShallowFileState, lens: &ShallowLens) {
+    let mut sorted: Vec<(&String, &ShallowValueSymbol)> = shallow.value_symbols.iter().collect();
     sorted.sort_by(|a, b| a.0.cmp(b.0));
     for (name, symbol) in sorted {
         let exporter = InternedName::from(name.as_str());
@@ -365,12 +355,8 @@ fn emit_value_symbols(
                     display_hash: shape_hash,
                 });
                 for (member_name, kind) in &members_for_shape {
-                    let presence_hash = compute_member_presence_hash(
-                        name,
-                        member_name.as_ref(),
-                        *kind,
-                        space,
-                    );
+                    let presence_hash =
+                        compute_member_presence_hash(name, member_name.as_ref(), *kind, space);
                     registry.insert(Fact {
                         key: FactKey::MemberPresence {
                             exporter: exporter.clone(),
@@ -518,8 +504,10 @@ fn emit_syntactic_export_set(registry: &mut FactRegistry, shallow: &ShallowFileS
 }
 
 fn emit_import_refs(registry: &mut FactRegistry, shallow: &ShallowFileState) {
-    let mut sorted: Vec<(&String, &crate::resolver_core::shallow_file_state::ImportTarget)> =
-        shallow.import_targets.iter().collect();
+    let mut sorted: Vec<(
+        &String,
+        &crate::resolver_core::shallow_file_state::ImportTarget,
+    )> = shallow.import_targets.iter().collect();
     sorted.sort_by(|a, b| a.0.cmp(b.0));
     for (local, target) in sorted {
         let space = SymbolSpace::Type;
@@ -622,7 +610,7 @@ fn extract_module_augmentations_from_source(source: &str) -> Vec<ModuleAugmentat
             }
             let specifier = &source[spec_start..j];
             j += 1; // past closing quote
-            // Skip whitespace + look for `{`.
+                    // Skip whitespace + look for `{`.
             while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
                 j += 1;
             }

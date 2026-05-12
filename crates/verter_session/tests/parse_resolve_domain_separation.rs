@@ -17,12 +17,10 @@ use verter_semantic::facts::{FactKey, SymbolSpace};
 use verter_session::fact_emission::emit_parse_facts;
 use verter_session::file_artifact_store::{InternedName, InternedSpecifier};
 use verter_session::project_type_store::IndexedReady;
-use verter_session::resolver_core::shallow_file_state::{
-    ExportTarget, ImportTarget, ShallowFileState,
-};
+use verter_session::resolver_core::shallow_file_state::{ImportTarget, ShallowFileState};
 
-fn empty_external() -> Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>
-{
+fn empty_external(
+) -> Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource> {
     Arc::new(verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default())
 }
 
@@ -88,7 +86,10 @@ fn import_ref_invariant_under_resolution_change() {
         binding: InternedName::from("Theme"),
         space: SymbolSpace::Type,
     };
-    let pre_fact = emission_pre.facts.lookup(&key).expect("ImportRef emitted pre");
+    let pre_fact = emission_pre
+        .facts
+        .lookup(&key)
+        .expect("ImportRef emitted pre");
     let post_fact = emission_post
         .facts
         .lookup(&key)

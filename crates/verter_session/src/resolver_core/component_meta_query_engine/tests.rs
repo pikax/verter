@@ -3323,9 +3323,7 @@ defineProps<Pick<HelperProps, 'size'>>()
         crate::resolver_core::FactVersionRef::ResolveImports(r) => {
             r.canonical_id == "/src/Helper.ts"
         }
-        crate::resolver_core::FactVersionRef::RouteSurface(r) => {
-            r.canonical_id == "/src/Helper.ts"
-        }
+        crate::resolver_core::FactVersionRef::RouteSurface(r) => r.canonical_id == "/src/Helper.ts",
     });
 
     assert!(

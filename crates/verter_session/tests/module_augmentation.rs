@@ -28,8 +28,8 @@ use verter_session::file_artifact_store::InternedSpecifier;
 use verter_session::project_type_store::IndexedReady;
 use verter_session::resolver_core::shallow_file_state::ShallowFileState;
 
-fn empty_external() -> Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>
-{
+fn empty_external(
+) -> Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource> {
     Arc::new(verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default())
 }
 
