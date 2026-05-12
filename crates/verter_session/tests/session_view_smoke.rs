@@ -63,18 +63,6 @@ fn host_view_returns_source_for_ingested_canonical() {
 }
 
 #[test]
-fn host_view_returns_none_for_resolved_imports_pre_stage_6a() {
-    // Stage 4a placeholder contract: `resolved_imports` is a `None`
-    // sentinel until Stage 6a wires the real `ResolvedImportFacts`
-    // cache. The shape is here so Stage 6a is purely additive.
-    let host = host();
-    upsert(&host, "/m.ts", "export const x = 1;");
-
-    let view = HostView::new(host);
-    assert!(view.resolved_imports("/m.ts").is_none());
-}
-
-#[test]
 fn overlaid_view_overlay_wins_then_falls_through_to_base() {
     let host = host();
     upsert(&host, "/base-only.ts", "export const a = 1;");

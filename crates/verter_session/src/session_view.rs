@@ -67,25 +67,6 @@ pub struct EnvHashes {
     pub lib_env_hash: Hash16,
 }
 
-/// Per-import resolution facts under a resolve-env.
-///
-/// **Stage 4a stub** — Stage 6a (`resolved_import_facts.rs`) replaces
-/// this with the real type carrying `ResolvedImportClause` +
-/// `ResolvedReexportBinding` facts and per-specifier resolutions
-/// (plan Architectural Target → Cache layers).
-///
-/// The trait method [`SessionView::resolved_imports`] returns an
-/// `Option<Arc<ResolvedImports>>`; until Stage 6a, every implementation
-/// returns `None`. The signature stays stable so the Stage 6a cutover
-/// is purely additive — callers that pattern-match on `None` continue
-/// to compile.
-#[derive(Debug, Default)]
-pub struct ResolvedImports {
-    // Stage 6a fields land here. Kept as a unit-shaped placeholder
-    // for Stage 4a; never constructed pre-Stage-6a.
-    _placeholder: (),
-}
-
 /// Read-only view over the base host's source / artifact state.
 ///
 /// All resolver-tier queries route their host reads through this
@@ -126,15 +107,6 @@ pub trait SessionView: Send + Sync {
         &self,
         canonical: &str,
     ) -> Option<Arc<crate::file_artifact_store::FileArtifacts>>;
-
-    /// Return per-import resolution facts under this view's
-    /// resolve-env, if computed.
-    ///
-    /// **Stage 4a placeholder.** Returns `None` until Stage 6a
-    /// (`resolved_import_facts.rs`) wires the real
-    /// `ResolvedImportFacts` cache. The method shape is published
-    /// here so Stage 6a is purely additive.
-    fn resolved_imports(&self, canonical: &str) -> Option<Arc<ResolvedImports>>;
 
     /// Project identity (16-byte stable key) for this view's
     /// project.
@@ -218,18 +190,9 @@ impl SessionView for HostView {
             .latest_artifacts_for_canonical(canonical)
     }
 
-    fn resolved_imports(&self, _canonical: &str) -> Option<Arc<ResolvedImports>> {
-        // Stage 6a wires the real `ResolvedImportFacts` cache.
-        // Until then, every view returns `None`; callers fall
-        // back to the legacy import-resolution path.
-        None
-    }
-
     fn project_identity(&self) -> ProjectIdentity {
-        // The base host's project identity comes from its
-        // workspace config. Stage 6 plumbs this through a host
-        // accessor; the static-zero ProjectIdentity here is the
-        // single-project default that today's tests rely on.
+        // Single-project default; multi-project plumbing reads
+        // the host's workspace config when wired.
         ProjectIdentity([0u8; 16])
     }
 
@@ -342,19 +305,15 @@ impl SessionView for OverlaidView {
         &self,
         canonical: &str,
     ) -> Option<Arc<crate::file_artifact_store::FileArtifacts>> {
-        // Stage 4a: even when an overlay is present, the artifact
-        // store does not yet key on the overlay content hash, so
-        // we fall through to the base host's latest artifacts.
-        // Stage 6 wires this to the overlay-aware artifact path.
+        // The artifact store does not yet key on the overlay
+        // content hash, so an overlaid canonical falls through to
+        // the base host's latest artifacts. Wiring the
+        // overlay-aware artifact path is reserved for the future
+        // overlay-aware caches.
         self.base
             .project_type_store()
             .indexed()
             .latest_artifacts_for_canonical(canonical)
-    }
-
-    fn resolved_imports(&self, _canonical: &str) -> Option<Arc<ResolvedImports>> {
-        // Stage 6a wires the real `ResolvedImportFacts` cache.
-        None
     }
 
     fn project_identity(&self) -> ProjectIdentity {
@@ -431,10 +390,6 @@ impl SessionView for HostViewRef<'_> {
             .latest_artifacts_for_canonical(canonical)
     }
 
-    fn resolved_imports(&self, _canonical: &str) -> Option<Arc<ResolvedImports>> {
-        None
-    }
-
     fn project_identity(&self) -> ProjectIdentity {
         ProjectIdentity([0u8; 16])
     }
@@ -497,13 +452,6 @@ mod tests {
             hash.is_some(),
             "HostView.content_hash_for must report a hash for an ingested canonical"
         );
-    }
-
-    #[test]
-    fn host_view_resolved_imports_returns_none_pre_stage_6a() {
-        let host = fresh_host();
-        let view = HostView::new(Arc::clone(&host));
-        assert!(view.resolved_imports("/x.ts").is_none());
     }
 
     #[test]
