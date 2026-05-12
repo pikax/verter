@@ -62,6 +62,8 @@ pub const EXPECTED_MATERIALIZE_STRUCTURE_CYCLE_DETECTED: &str =
 pub const EXPECTED_MATERIALIZE_STRUCTURE_DEPTH_FUSE_TRIPPED: &str =
     "MaterializeStructureDepthFuseTripped(Object#7, Nested, Expanded, depth=4096)";
 pub const EXPECTED_CUSTOM: &str = "Custom(test_name, key=value)";
+pub const EXPECTED_CACHE_DRAINED_AT_UPSERT: &str =
+    "CacheDrainedAtUpsert(resolved_type_cache, /probe.vue)";
 
 // ──────────────────────────────────────────────────────────────────
 // Fixture constructors — exactly one canonical instance per variant.
@@ -275,6 +277,13 @@ pub fn fixture_custom() -> Event {
     }
 }
 
+pub fn fixture_cache_drained_at_upsert() -> Event {
+    Event::CacheDrainedAtUpsert {
+        layer: Arc::from("resolved_type_cache"),
+        canonical_id: Arc::from("/probe.vue"),
+    }
+}
+
 /// Pair each fixture with its expected Display string. The
 /// `structured_event_display_snapshot_byte_exact_for_every_variant`
 /// test iterates this table, and the companion `all_variants_covered`
@@ -351,6 +360,10 @@ pub fn all_snapshots() -> Vec<(Event, &'static str)> {
             EXPECTED_MATERIALIZE_STRUCTURE_DEPTH_FUSE_TRIPPED,
         ),
         (fixture_custom(), EXPECTED_CUSTOM),
+        (
+            fixture_cache_drained_at_upsert(),
+            EXPECTED_CACHE_DRAINED_AT_UPSERT,
+        ),
     ]
 }
 
@@ -400,6 +413,7 @@ mod tests {
             | Event::MaterializeStructurePolicySkip { .. }
             | Event::MaterializeStructureCycleDetected { .. }
             | Event::MaterializeStructureDepthFuseTripped { .. }
+            | Event::CacheDrainedAtUpsert { .. }
             | Event::Custom { .. } => (),
         };
 
@@ -428,6 +442,7 @@ mod tests {
             "MaterializeStructureCycleDetected",
             "MaterializeStructureDepthFuseTripped",
             "Custom",
+            "CacheDrainedAtUpsert",
         ];
         let covered: Vec<&'static str> = all_snapshots()
             .iter()
@@ -459,6 +474,7 @@ mod tests {
                     "MaterializeStructureDepthFuseTripped"
                 }
                 Event::Custom { .. } => "Custom",
+                Event::CacheDrainedAtUpsert { .. } => "CacheDrainedAtUpsert",
             })
             .collect();
         for v in expected_variants.iter() {

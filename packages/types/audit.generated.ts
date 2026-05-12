@@ -1786,7 +1786,20 @@ mode: ProjectionModeAudit,
 /**
  * Materialiser stack depth at trip.
  */
-depth: number, } } | { "Custom": { 
+depth: number, } } | { "CacheDrainedAtUpsert": { 
+/**
+ * Static identifier for the cache layer being drained
+ * (e.g. `"resolved_type_cache"`, `"eval_env_cache"`,
+ * `"compile_slots"`, `"derived_raw_cache"`,
+ * `"semantic_invalidate"`, `"workspace_parsed_edges"`,
+ * `"resolver_runtime"`, `"store_view_epoch"`,
+ * `"project_type_store"`, `"dependency_cache"`).
+ */
+layer: string, 
+/**
+ * Canonical id of the file whose upsert triggered the drain.
+ */
+canonical_id: string, } } | { "Custom": { 
 /**
  * Short identifier for the event kind.
  */

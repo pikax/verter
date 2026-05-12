@@ -579,6 +579,26 @@ pub fn push_structured_event(event: crate::component_meta_audit::StructuredAudit
     }
 }
 
+/// Push a typed `StructuredAuditEvent::CacheDrainedAtUpsert` into
+/// the active request's accumulator. Emitted at every cache-cascade
+/// drain site reached by the full `host.upsert(...)` path; the
+/// quintuple-unchanged fast path does NOT emit this event (R1).
+/// Tests observing the absence of these events prove the fast path
+/// is a true cache-state no-op.
+///
+/// The `layer` argument is a static string identifying the cache
+/// layer (e.g. `"resolved_type_cache"`, `"compile_slots"`); the
+/// runtime value is stored as an `Arc<str>` so the event remains
+/// serialisable.
+pub fn push_cache_drained_at_upsert(layer: &'static str, canonical_id: &str) {
+    push_structured_event(
+        crate::component_meta_audit::StructuredAuditEvent::CacheDrainedAtUpsert {
+            layer: std::sync::Arc::<str>::from(layer),
+            canonical_id: std::sync::Arc::<str>::from(canonical_id),
+        },
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Per-request counter helpers
 // ---------------------------------------------------------------------------

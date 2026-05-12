@@ -208,6 +208,28 @@ pub enum StructuredAuditEvent {
         /// Materialiser stack depth at trip.
         depth: u16,
     },
+    /// One cache cascade drain at the per-canonical upsert layer.
+    ///
+    /// Emitted by the full `host.upsert(...)` path at every cache
+    /// drain site enumerated in
+    /// `crates/verter_session/tests/fixtures/cache_baseline/evict_canonical_inventory.json`.
+    /// The quintuple-unchanged fast path (R1) MUST NOT emit this event;
+    /// the structural-change path emits one event per draining
+    /// instruction. Stage 2 cache-reuse tests use the absence of
+    /// these events to prove byte-identical re-upsert is a true no-op;
+    /// later stages use the presence/order to characterise path-
+    /// precise invalidation (Stage 6d).
+    CacheDrainedAtUpsert {
+        /// Static identifier for the cache layer being drained
+        /// (e.g. `"resolved_type_cache"`, `"eval_env_cache"`,
+        /// `"compile_slots"`, `"derived_raw_cache"`,
+        /// `"semantic_invalidate"`, `"workspace_parsed_edges"`,
+        /// `"resolver_runtime"`, `"store_view_epoch"`,
+        /// `"project_type_store"`, `"dependency_cache"`).
+        layer: Arc<str>,
+        /// Canonical id of the file whose upsert triggered the drain.
+        canonical_id: Arc<str>,
+    },
     /// Escape hatch for ad-hoc events. Every construction site MUST
     /// carry a `// Custom justified: <reason>` comment.
     Custom {
@@ -341,6 +363,10 @@ impl std::fmt::Display for StructuredAuditEvent {
                 f,
                 "MaterializeStructureDepthFuseTripped({base}, {scope_axis:?}, {mode:?}, depth={depth})"
             ),
+            Self::CacheDrainedAtUpsert {
+                layer,
+                canonical_id,
+            } => write!(f, "CacheDrainedAtUpsert({layer}, {canonical_id})"),
             Self::Custom { name, detail } => write!(f, "Custom({name}, {detail})"),
         }
     }
