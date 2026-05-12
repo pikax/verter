@@ -867,7 +867,7 @@ defineProps<ButtonProps>()
     }
 
     #[test]
-    #[ignore = "overlay semantics restored at Stages 5/6 (multi-candidate + view-aware reads)"]
+    #[ignore = "consumer paths (get_analysis / get_component_meta / evaluate_types) not yet routed through ResolverContext::view(); R20 multi-candidate substrate landed but view-aware consumer wiring is pending"]
     fn overlay_queries_reapply_owner_after_overlay_only_helper_upserts() {
         let host = make_host();
         let session = host.open_session_batch().unwrap();

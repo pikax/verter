@@ -929,15 +929,14 @@ fn delete_in_session_a_does_not_hide_from_session_b() {
 // Analysis through overlay
 // ---------------------------------------------------------------------------
 
-// Stage 4d retired the per-session overlay-mutation lifecycle that
-// applied session overlays to the shared host. Stages 5 (multi-
-// candidate cache) and 6 (view-aware read paths) reinstate
-// overlay-aware reads through `SessionView`. Until then,
-// overlay-aware queries transparently observe base-host state, so
-// the tests that assert overlay-visible semantics are ignored on
-// the integration branch.
+// Overlay-visible semantics depend on the consumer paths
+// (`get_analysis`, `get_component_meta`, `evaluate_types`) routing
+// host reads through `ResolverContext::view()`. The R20 multi-candidate
+// cache substrate is landed but the consumer wiring is pending; until
+// it lands the tests below observe base-host state for overlayed
+// canonicals and stay ignored.
 #[test]
-#[ignore = "overlay semantics restored at Stages 5/6 (multi-candidate + view-aware reads)"]
+#[ignore = "consumer paths (get_analysis / get_component_meta / evaluate_types) not yet routed through ResolverContext::view(); R20 multi-candidate substrate landed but view-aware consumer wiring is pending"]
 fn get_analysis_sees_overlay_content() {
     let project = make_project();
     let base = sfc("msg: string");
@@ -988,7 +987,7 @@ fn get_analysis_without_overlay_uses_base() {
 }
 
 #[test]
-#[ignore = "overlay semantics restored at Stages 5/6 (multi-candidate + view-aware reads)"]
+#[ignore = "consumer paths (get_analysis / get_component_meta / evaluate_types) not yet routed through ResolverContext::view(); R20 multi-candidate substrate landed but view-aware consumer wiring is pending"]
 fn get_analysis_for_deleted_file_returns_none() {
     let project = make_project();
     let base = sfc("msg: string");
@@ -1009,7 +1008,7 @@ fn get_analysis_for_deleted_file_returns_none() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "overlay semantics restored at Stages 5/6 (multi-candidate + view-aware reads)"]
+#[ignore = "consumer paths (get_analysis / get_component_meta / evaluate_types) not yet routed through ResolverContext::view(); R20 multi-candidate substrate landed but view-aware consumer wiring is pending"]
 fn analysis_isolation_between_sessions() {
     let project = make_project();
     let base = sfc("msg: string");
@@ -1123,7 +1122,7 @@ fn reset_restores_base_state_and_drops_overlay_only_files() {
 }
 
 #[test]
-#[ignore = "overlay semantics restored at Stages 5/6 (multi-candidate + view-aware reads)"]
+#[ignore = "consumer paths (get_analysis / get_component_meta / evaluate_types) not yet routed through ResolverContext::view(); R20 multi-candidate substrate landed but view-aware consumer wiring is pending"]
 fn reset_reverts_an_active_overlay_from_the_shared_host() {
     let project = make_project();
     let base = sfc("label: string");
@@ -1246,7 +1245,7 @@ defineProps<ButtonProps>()
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "overlay semantics restored at Stages 5/6 (multi-candidate + view-aware reads)"]
+#[ignore = "consumer paths (get_analysis / get_component_meta / evaluate_types) not yet routed through ResolverContext::view(); R20 multi-candidate substrate landed but view-aware consumer wiring is pending"]
 fn concurrent_sessions_on_different_files() {
     let project = make_project();
     project.upsert_base("A.vue", &sfc("a: string")).unwrap();
@@ -1429,7 +1428,7 @@ defineProps<Props>()
 }
 
 #[test]
-#[ignore = "overlay semantics restored at Stages 5/6 (multi-candidate + view-aware reads)"]
+#[ignore = "consumer paths (get_analysis / get_component_meta / evaluate_types) not yet routed through ResolverContext::view(); R20 multi-candidate substrate landed but view-aware consumer wiring is pending"]
 fn evaluate_types_reuses_cached_results_until_the_file_changes() {
     let project = make_project();
     project
@@ -5221,7 +5220,7 @@ defineSlots<Slots>()
 }
 
 #[test]
-#[ignore = "overlay semantics restored at Stages 5/6 (multi-candidate + view-aware reads)"]
+#[ignore = "consumer paths (get_analysis / get_component_meta / evaluate_types) not yet routed through ResolverContext::view(); R20 multi-candidate substrate landed but view-aware consumer wiring is pending"]
 fn evaluate_types_invalidates_cached_results_when_dependency_changes() {
     let project = make_project();
     project
@@ -17310,7 +17309,7 @@ fn cached_eval_inputs_track_macro_and_runtime_dependencies() {
 }
 
 #[test]
-#[ignore = "overlay semantics restored at Stages 5/6 (multi-candidate + view-aware reads)"]
+#[ignore = "consumer paths (get_analysis / get_component_meta / evaluate_types) not yet routed through ResolverContext::view(); R20 multi-candidate substrate landed but view-aware consumer wiring is pending"]
 fn type_reachable_count_zero_falls_back_to_all_sources() {
     // Component with inline defineProps (no macro_type_deps) should still
     // resolve locally without any cross-file imported-eval work.
@@ -18619,7 +18618,7 @@ const emit = defineEmits<{
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "overlay semantics restored at Stages 5/6 (multi-candidate + view-aware reads)"]
+#[ignore = "consumer paths (get_analysis / get_component_meta / evaluate_types) not yet routed through ResolverContext::view(); R20 multi-candidate substrate landed but view-aware consumer wiring is pending"]
 fn singleflight_lanes_are_session_scoped() {
     let project = make_project();
     project
