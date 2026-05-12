@@ -1,0 +1,244 @@
+//! R29 binding: per-file module-augmentation fact emission for all
+//! four archetypes (external specifier, resolved relative
+//! canonical, wildcard ambient, global augmentation).
+//!
+//! Verify-bullet 12: each R29 archetype emits the correct
+//! parse-domain `ModuleAugmentation` fact into
+//! `FileArtifacts.augmentations`. The cross-project
+//! `augmentation_index` remains empty at Stage 3 (populated lazily
+//! by Stage 6c when resolve-domain dimensions become available).
+//!
+//! Tests load the Stage 0 path-precise fixtures under
+//! `tests/fixtures/path_precise/module_augmentation_*.ts` and
+//! invoke the Phase 1 emitter over a synthetic `IndexedReady`
+//! that carries the fixture's raw_source. The discrimination
+//! contract: every archetype must produce at least one
+//! `ModuleAugmentationFact` with the right `specifier` slot.
+//!
+//! Architectural rules bound: R29.
+
+use std::fs;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use rustc_hash::{FxHashMap, FxHashSet};
+use verter_semantic::facts::{FactKey, SymbolSpace};
+use verter_session::fact_emission::emit_parse_facts;
+use verter_session::file_artifact_store::InternedSpecifier;
+use verter_session::project_type_store::IndexedReady;
+use verter_session::resolver_core::shallow_file_state::ShallowFileState;
+
+fn empty_external() -> Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>
+{
+    Arc::new(verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default())
+}
+
+fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates/")
+        .parent()
+        .expect("repo root")
+        .to_path_buf()
+}
+
+fn fixture(name: &str) -> String {
+    let path = workspace_root()
+        .join("crates")
+        .join("verter_session")
+        .join("tests")
+        .join("fixtures")
+        .join("path_precise")
+        .join(name);
+    fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e))
+}
+
+fn build_indexed_with_source(raw: &str) -> Arc<IndexedReady> {
+    let shallow = ShallowFileState {
+        whole_hash: [0u8; 16],
+        exports: FxHashMap::default(),
+        wildcard_reexports: Vec::new(),
+        symbols: FxHashMap::default(),
+        value_symbols: FxHashMap::default(),
+        import_locals: FxHashSet::default(),
+        import_targets: FxHashMap::default(),
+        analysis: empty_external(),
+    };
+    Arc::new(IndexedReady {
+        whole_hash: [0u8; 16],
+        shallow_state: Arc::new(shallow),
+        import_routes: Arc::new(FxHashMap::default()),
+        import_route_hash: None,
+        route_hash: None,
+        raw_source: Arc::from(raw),
+        eval_source: Arc::from(""),
+        cached_parse: None,
+        script_analysis: None,
+        export_signatures: None,
+        snapshot: Arc::new(verter_session::FileAnalysisSnapshot::default()),
+        external_type_analysis: empty_external(),
+    })
+}
+
+#[test]
+fn external_specifier_archetype_emits_module_augmentation_fact() {
+    // R29: `declare module "vue" { interface ComponentOptions ... }`
+    // emits one parse-domain `ModuleAugmentation` fact with
+    // specifier = "vue".
+    let raw = fixture("module_augmentation_external.ts");
+    let indexed = build_indexed_with_source(&raw);
+    let emission = emit_parse_facts(&indexed);
+    assert!(
+        !emission.augmentations.is_empty(),
+        "external specifier archetype MUST emit at least one ModuleAugmentationFact"
+    );
+    let has_vue = emission
+        .augmentations
+        .iter()
+        .any(|f| f.specifier.as_ref() == "vue");
+    assert!(has_vue, "expected specifier 'vue' in augmentations");
+}
+
+#[test]
+fn resolved_relative_canonical_archetype_emits_module_augmentation_fact() {
+    let raw = fixture("module_augmentation_relative.ts");
+    let indexed = build_indexed_with_source(&raw);
+    let emission = emit_parse_facts(&indexed);
+    assert!(
+        !emission.augmentations.is_empty(),
+        "relative-specifier archetype MUST emit at least one ModuleAugmentationFact"
+    );
+    let has_relative = emission
+        .augmentations
+        .iter()
+        .any(|f| f.specifier.as_ref().starts_with("./") || f.specifier.as_ref().starts_with("../"));
+    assert!(
+        has_relative,
+        "expected relative specifier (./… or ../…) in augmentations"
+    );
+}
+
+#[test]
+fn wildcard_ambient_archetype_emits_module_augmentation_fact() {
+    let raw = fixture("module_augmentation_wildcard.ts");
+    let indexed = build_indexed_with_source(&raw);
+    let emission = emit_parse_facts(&indexed);
+    assert!(
+        !emission.augmentations.is_empty(),
+        "wildcard ambient archetype MUST emit at least one ModuleAugmentationFact"
+    );
+    let has_wildcard = emission
+        .augmentations
+        .iter()
+        .any(|f| f.specifier.as_ref().contains('*'));
+    assert!(
+        has_wildcard,
+        "expected wildcard specifier (containing `*`) in augmentations"
+    );
+}
+
+#[test]
+fn global_archetype_emits_module_augmentation_fact_via_global_tag() {
+    use verter_session::fact_emission::GLOBAL_AUGMENTATION_TAG;
+    let raw = fixture("module_augmentation_global.ts");
+    let indexed = build_indexed_with_source(&raw);
+    let emission = emit_parse_facts(&indexed);
+    assert!(
+        !emission.augmentations.is_empty(),
+        "global archetype MUST emit at least one ModuleAugmentationFact"
+    );
+    let has_global = emission
+        .augmentations
+        .iter()
+        .any(|f| f.specifier.as_ref() == GLOBAL_AUGMENTATION_TAG);
+    assert!(
+        has_global,
+        "expected $global sentinel specifier in augmentations \
+         (Stage 6c maps this to AugmentationTargetKind::GlobalAugmentation)"
+    );
+}
+
+#[test]
+fn augmentation_facts_land_in_fact_registry() {
+    // R29: the per-augmentation fact ALSO lands in the parse-domain
+    // `FileFacts.registry` under
+    // `FactKey::ModuleAugmentation { specifier, augmented_name, space }`.
+    let raw = fixture("module_augmentation_external.ts");
+    let indexed = build_indexed_with_source(&raw);
+    let emission = emit_parse_facts(&indexed);
+    let mut found_in_registry = 0;
+    for aug in emission.augmentations.iter() {
+        let key = FactKey::ModuleAugmentation {
+            specifier: InternedSpecifier::from(aug.specifier.as_ref()),
+            augmented_name: aug.augmented_name.clone(),
+            space: aug.space,
+        };
+        if emission.facts.lookup(&key).is_some() {
+            found_in_registry += 1;
+        }
+    }
+    assert!(
+        found_in_registry > 0,
+        "Phase 1 emitter MUST land ModuleAugmentation facts in the registry"
+    );
+}
+
+#[test]
+fn augmentation_index_on_file_artifact_store_remains_empty_at_stage_3() {
+    // R29 / Stage 3: the per-file `FileArtifacts.augmentations` list
+    // is populated by Phase 1, but the cross-project
+    // `FileArtifactStore.augmentation_index` (keyed on
+    // `AugmentationTargetKey`) is NOT — Stage 6c populates it
+    // lazily on first augmentation-sensitive query.
+    use verter_session::file_artifact_store::FileArtifactStore;
+    let store = FileArtifactStore::new();
+    // No production code path populates the index at Stage 3.
+    assert_eq!(
+        store.augmentation_index_len(),
+        0,
+        "augmentation_index MUST stay empty at Stage 3 (populated at Stage 6c)"
+    );
+}
+
+#[test]
+fn no_augmentation_archetype_emits_empty_augmentation_list() {
+    // Discrimination: an ordinary file with no `declare module …`
+    // blocks MUST produce an empty augmentation list.
+    let raw = "export const x = 1;";
+    let indexed = build_indexed_with_source(raw);
+    let emission = emit_parse_facts(&indexed);
+    assert!(
+        emission.augmentations.is_empty(),
+        "files without `declare module …` MUST produce empty augmentations"
+    );
+}
+
+#[test]
+fn nested_braces_in_augmentation_do_not_truncate_block() {
+    // R29 brace matcher correctness: nested `{ ... }` inside the
+    // augmentation body MUST NOT terminate the declare-module
+    // block early. We construct a synthetic source with an inline
+    // nested object literal.
+    let raw = r#"
+declare module "x" {
+  interface A {
+    nested: { a: 1 }
+  }
+}
+const sentinel = 7;
+"#;
+    let indexed = build_indexed_with_source(raw);
+    let emission = emit_parse_facts(&indexed);
+    assert!(
+        emission
+            .augmentations
+            .iter()
+            .any(|f| f.specifier.as_ref() == "x" && f.augmented_name.as_ref() == "A"),
+        "expected interface A under specifier 'x'"
+    );
+}
+
+// Silence unused-import warning when SymbolSpace isn't needed at
+// the moment.
+#[allow(dead_code)]
+fn _suppress_unused_symbol_space_import(_s: SymbolSpace) {}

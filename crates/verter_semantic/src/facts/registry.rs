@@ -22,11 +22,11 @@
 //!   effective export surface facts, resolve_env + lib_env keyed.
 //!   Populated by `RouteDb` at Stage 6.
 //!
-//! Stage 3 introduces all variant identities. Phase 1 producers (parse
-//! time) populate the parse-domain variants eagerly. Phase 2 producers
-//! (lazy member-body) populate `Member` semantic / display facts on
-//! first member-access query. Resolve-domain variants stay
-//! `UNPOPULATED` until Stage 6 wires the resolver into the fact graph.
+//! Variant taxonomy: parse-time producers populate the parse-domain
+//! variants eagerly. The lazy member-body producers populate
+//! `Member` semantic / display facts on first member-access query.
+//! Resolve-domain variants stay UNPOPULATED until the resolver wires
+//! into the fact graph downstream.
 
 use std::sync::Arc;
 
@@ -124,7 +124,7 @@ impl AsRef<str> for InternedGlobPattern {
 /// where the declaration also introduces a name in the namespace.
 ///
 /// This is the canonical 3-variant `SymbolSpace` referenced by the
-/// post-cutover fact-based cache architecture. The legacy 2-variant
+/// final-state fact-based cache architecture. The legacy 2-variant
 /// `verter_session::resolver_core::route_demand::SymbolSpace` covers
 /// resolve-only call paths that have not yet migrated; mixing the two
 /// is an error (the cutover deletes the 2-variant during Stage 6).
@@ -273,14 +273,14 @@ pub enum FactKey {
         name: InternedName,
         space: SymbolSpace,
     },
-    /// Member body fingerprint — Phase 2 lazy, computed once per
+    /// Member body fingerprint — lazy, computed once per
     /// `(canonical, parse_stable_hash, exporter, name, space)`.
     Member {
         exporter: InternedName,
         name: InternedName,
         space: SymbolSpace,
     },
-    /// Member header (name + kind + exporter salt). Phase 1 eager.
+    /// Member header (name + kind + exporter salt). Eager parse-time.
     /// Body fingerprint is NOT included (R28); adding sibling
     /// `b` does not force re-walking `a`'s body.
     MemberPresence {
@@ -454,8 +454,8 @@ impl FactKey {
 /// cosmetic edits do NOT churn it; `MemberDisplayFactStore` is keyed
 /// on `content_hash` so cosmetic edits recompute display facts only.
 /// At the per-file `FileFacts` level (parse-domain), both fields are
-/// stored together because Phase-1 producers compute both in one
-/// pass.
+/// stored together because parse-time producers compute both in
+/// one pass.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Fact {
     pub key: FactKey,
@@ -495,10 +495,11 @@ pub struct ObservedFact {
 
 /// Per-file fact registry — the parse-domain authoritative store.
 ///
-/// Populated by Phase 1 of the shallow walk (parse-time, O(file_size)).
-/// Phase 2 facts (`Member.semantic_hash`, `Member.display_hash`)
-/// live in two SEPARATE host-owned stores keyed differently so a
-/// cosmetic edit hits only the display store.
+/// Populated by the parse-time shallow walk (O(file_size)).
+/// Lazy member-body facts (`Member.semantic_hash`,
+/// `Member.display_hash`) live in two SEPARATE host-owned stores
+/// keyed differently so a cosmetic edit hits only the display
+/// store.
 ///
 /// **Lookup cost contract.** All `FactKey::domain() == ParseFile`
 /// lookups MUST be O(1). The registry is backed by an `FxHashMap`.
@@ -515,7 +516,7 @@ pub struct FactRegistry {
 
 impl FactRegistry {
     /// Empty registry — used for placeholder construction and
-    /// pre-Phase-1 inputs.
+    /// inputs that bypass the parse-time emitter.
     #[must_use]
     pub fn empty() -> Self {
         Self::default()

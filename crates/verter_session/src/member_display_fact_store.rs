@@ -1,8 +1,9 @@
-//! `MemberDisplayFactStore` — Phase 2 lazy member-body DISPLAY
+//! `MemberDisplayFactStore` — lazy member-body DISPLAY
 //! fingerprints, keyed on `content_hash`.
 //!
-//! The parallel of [`crate::member_semantic_fact_store`]. Phase 2
-//! emission produces TWO fingerprints per `Member` fact:
+//! The parallel of [`crate::member_semantic_fact_store`]. The
+//! lazy-member-body producer emits TWO fingerprints per `Member`
+//! fact:
 //!
 //! - The SEMANTIC fingerprint (R16) lives in
 //!   `MemberSemanticFactStore`, keyed on `parse_stable_hash`. A
@@ -42,7 +43,7 @@ pub struct MemberDisplayFactKey {
     pub symbol_space: SymbolSpace,
 }
 
-/// Lazy Phase 2 member-body DISPLAY fingerprint store.
+/// Lazy member-body DISPLAY fingerprint store.
 ///
 /// Read / write contract matches
 /// [`crate::member_semantic_fact_store::MemberSemanticFactStore`]:

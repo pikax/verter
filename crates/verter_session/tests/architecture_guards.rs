@@ -3580,6 +3580,20 @@ mod foundations_guards {
         // hash, both consumed by tests and by future-stage host paths.
         "pub mod file_artifact_store",
         "pub mod parse_stable_hash",
+        // Parse-time fact-emission producer (R10–R16, R28, R29) —
+        // walks `IndexedReady.shallow_state` and populates the
+        // per-file `FactRegistry` + module-augmentation facts.
+        // Consumed by tests/fact_*.rs + tests/module_augmentation.rs +
+        // tests/shallow_walk_invariant.rs + future host paths.
+        "pub mod fact_emission",
+        // Lazy member-body fact stores (R13, R28) — semantic and
+        // display fingerprint stores keyed differently so cosmetic
+        // edits invalidate display-bearing materialisations only.
+        // Consumed by tests/fact_semantic_display_split.rs +
+        // tests/member_presence_vs_member.rs + future resolver
+        // / materialiser admission paths.
+        "pub mod member_display_fact_store",
+        "pub mod member_semantic_fact_store",
         // tests/semantic_analysis_audit_e2e.rs +
         // tests/semantic_analysis_audit_tls_propagation.rs — public
         // audited entry-point that wires

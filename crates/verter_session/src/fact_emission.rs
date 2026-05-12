@@ -1,4 +1,4 @@
-//! Phase 1 fact emission — parse-time, shallow, O(file_size).
+//! Parse-time fact emission — parse-time, shallow, O(file_size).
 //!
 //! Walks the post-shallow-analysis [`IndexedReady`] (via its
 //! [`ShallowFileState`]) and produces the parse-domain
@@ -30,7 +30,7 @@
 //! MUST NOT call into cross-decl AST traversal. Same-file member
 //! body fingerprints (`Member` facts) are NOT emitted here — they
 //! emit lazily into `MemberSemanticFactStore` /
-//! `MemberDisplayFactStore` on first member-access query (Phase 2).
+//! `MemberDisplayFactStore` on first member-access query (the lazy member-body store).
 
 use std::sync::Arc;
 
@@ -51,25 +51,25 @@ use crate::resolver_core::shallow_file_state::{
     ExportTarget, ShallowFileState, ShallowTypeSymbol, ShallowValueSymbol,
 };
 
-/// Phase 1 emission result: a populated [`FileFacts`] plus the
+/// parse-time emission result: a populated [`FileFacts`] plus the
 /// per-file augmentation list.
 ///
 /// The augmentation list is returned separately so [`FileArtifacts`]
 /// can place it on its `augmentations` field. The cross-project
 /// `augmentation_index` is NOT populated here — Stage 6c builds it.
 #[derive(Debug, Default, Clone)]
-pub struct Phase1Emission {
+pub struct ParseFactsEmission {
     pub facts: FileFacts,
     pub augmentations: Vec<ModuleAugmentationFact>,
 }
 
-/// Emit Phase 1 parse-domain facts from an [`IndexedReady`].
+/// Emit parse-domain facts from an [`IndexedReady`].
 ///
 /// Side-effect free; deterministic over the same [`IndexedReady`]
 /// input. Producers feed the result into
 /// `FileArtifacts::{facts, augmentations}`.
 #[must_use]
-pub fn emit_phase1(indexed: &IndexedReady) -> Phase1Emission {
+pub fn emit_parse_facts(indexed: &IndexedReady) -> ParseFactsEmission {
     let shallow = &*indexed.shallow_state;
     let lens = ShallowLens::from_shallow(shallow);
 
@@ -104,7 +104,7 @@ pub fn emit_phase1(indexed: &IndexedReady) -> Phase1Emission {
         });
     }
 
-    Phase1Emission {
+    ParseFactsEmission {
         facts: FileFacts::from_registry(registry),
         augmentations,
     }

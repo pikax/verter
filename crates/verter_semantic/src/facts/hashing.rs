@@ -172,9 +172,9 @@ pub struct HashOutcome {
     /// MUST admit the cache entry as `NonCacheable` when this is
     /// `true` (R27).
     pub budget_exceeded: bool,
-    /// Stable count of visited unique nodes — used by Phase 1
-    /// producers + cycle tests to verify visit-order stability under
-    /// reordering.
+    /// Stable count of visited unique nodes — used by parse-time
+    /// producers + cycle tests to verify visit-order stability
+    /// under reordering.
     pub visited_nodes: usize,
 }
 
@@ -224,7 +224,7 @@ pub fn compute_member_presence_hash(
 /// member name + kind list (R28 `MemberShape`).
 ///
 /// Sorted by name, order-insensitive at top level. Member-body
-/// fingerprints live in separate `Member` facts (Phase 2 lazy).
+/// fingerprints live in separate `Member` facts (lazy).
 #[must_use]
 pub fn compute_member_shape_hash(
     exporter: &str,

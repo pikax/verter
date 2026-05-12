@@ -1,7 +1,7 @@
-//! `MemberSemanticFactStore` — Phase 2 lazy member-body semantic
+//! `MemberSemanticFactStore` — lazy member-body semantic
 //! fingerprints, keyed on `parse_stable_hash`.
 //!
-//! Phase 2 is the lazy half of the fact-emission contract (R28):
+//! The lazy-member-body half of the fact-emission contract (R28):
 //! `Member(exporter, name, space).semantic_hash` is computed on the
 //! FIRST member-access query that needs it, then interned here so
 //! every subsequent consumer reuses the same canonical body
@@ -40,7 +40,7 @@ pub struct MemberSemanticFactKey {
     pub symbol_space: SymbolSpace,
 }
 
-/// Lazy Phase 2 member-body semantic fingerprint store.
+/// Lazy member-body semantic fingerprint store.
 ///
 /// **Lookup contract.** A cold miss returns `None`; the caller (the
 /// resolver / materialiser at Stage 6d) computes the fingerprint via
@@ -119,7 +119,7 @@ pub fn make_member_fact(key: &MemberSemanticFactKey, semantic_hash: FactHash) ->
     Fact {
         key: member_fact_key(key),
         semantic_hash,
-        // Phase 2 semantic-only — display fact lives in the parallel
+        // Semantic-only — display fact lives in the parallel
         // store keyed on content_hash. The producer fills the
         // display fact separately.
         display_hash: semantic_hash,

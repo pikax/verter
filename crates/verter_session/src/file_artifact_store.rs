@@ -139,12 +139,13 @@ pub const LEGACY_PARSE_ENV_HASH: Hash16 = [0u8; 16];
 /// during file-artifact construction (R10–R16, R28, R29). Consumers
 /// read parse-domain facts via [`FileFacts::registry`] / `lookup`.
 ///
-/// Phase 1 emission populates: `Export`, `ExportAlias`,
+/// Parse-time emission populates: `Export`, `ExportAlias`,
 /// `SyntacticExportSet`, `LocalDecl`, `MemberShape`, `MemberPresence`,
 /// `MacroSurface`, `TemplateRoot`, `ImportRef`, `SyntacticReexportRef`,
-/// `ModuleAugmentation`. The `Member` body fingerprint is Phase 2
-/// lazy and lives in `MemberSemanticFactStore` /
-/// `MemberDisplayFactStore`, NOT in this registry.
+/// `ModuleAugmentation`. The `Member` body fingerprint is computed
+/// lazily on first member-access query and lives in
+/// `MemberSemanticFactStore` / `MemberDisplayFactStore`, NOT in
+/// this registry.
 ///
 /// Resolve-domain facts are NOT populated here — they emit at Stage 6
 /// from the resolver / `RouteDb`.
@@ -155,7 +156,7 @@ pub struct FileFacts {
 
 impl FileFacts {
     /// Construct an empty fact registry. Used by tests + legacy
-    /// constructors that bypass Phase 1 emission.
+    /// constructors that bypass parse-time emission.
     #[must_use]
     pub fn empty() -> Self {
         Self::default()
@@ -174,8 +175,8 @@ impl FileFacts {
         &self.registry
     }
 
-    /// Borrow the registry mutably — used by Phase 1 producers
-    /// during construction.
+    /// Borrow the registry mutably — used by the parse-time
+    /// producer during construction.
     pub fn registry_mut(&mut self) -> &mut fact_registry::FactRegistry {
         &mut self.registry
     }
@@ -199,7 +200,8 @@ impl FileFacts {
         self.registry.is_empty()
     }
 
-    /// The cached `SyntacticExportSet` fact (if Phase 1 emitted one).
+    /// The cached `SyntacticExportSet` fact (if parse-time
+    /// emission produced one).
     #[must_use]
     pub fn syntactic_export_set(&self) -> Option<&fact_registry::Fact> {
         self.registry.syntactic_export_set.as_ref()
@@ -324,20 +326,20 @@ pub struct FileArtifacts {
 impl FileArtifacts {
     /// Construct a `FileArtifacts` carrying only an `IndexedReady`.
     ///
-    /// **Phase 1 fact emission runs here** — the constructed
+    /// **Parse-time fact emission runs here** — the constructed
     /// `FileFacts` is populated with the parse-domain
     /// `FactRegistry` (`Export`, `LocalDecl`, `MemberShape`,
     /// `MemberPresence`, `SyntacticExportSet`, `ImportRef`,
     /// `SyntacticReexportRef`, `ExportAlias`, `ModuleAugmentation`)
-    /// by [`crate::fact_emission::emit_phase1`]. The per-file
+    /// by [`crate::fact_emission::emit_parse_facts`]. The per-file
     /// augmentation list is populated alongside the facts. The
     /// cross-project `augmentation_index` on
-    /// [`FileArtifactStore`] is NOT touched here — Stage 6c
-    /// populates it lazily.
+    /// [`FileArtifactStore`] is NOT touched here — it is
+    /// populated lazily on first augmentation-sensitive query.
     #[must_use]
     pub fn with_indexed(indexed: Arc<IndexedReady>) -> Self {
         let parse_stable_hash = crate::parse_stable_hash::compute_parse_stable_hash(&indexed);
-        let emission = crate::fact_emission::emit_phase1(&indexed);
+        let emission = crate::fact_emission::emit_parse_facts(&indexed);
         Self {
             indexed,
             facts: Arc::new(emission.facts),
