@@ -173,6 +173,7 @@ mod resolver_store;
 pub mod semantic_query;
 pub(crate) mod semantic_query_memo;
 pub(crate) mod session_runtime;
+pub mod session_view;
 mod shared;
 pub(crate) mod source_map_remap;
 #[cfg(test)]

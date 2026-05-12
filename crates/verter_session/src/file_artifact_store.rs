@@ -716,6 +716,38 @@ impl FileArtifactStore {
         None
     }
 
+    /// Return the content hash of the latest cached artifacts entry
+    /// for `canonical`, or `None` if no artifact has been ingested yet.
+    ///
+    /// Used by [`crate::session_view::SessionView`] impls to surface
+    /// the content hash that backs the cached parse artifacts. The
+    /// returned hash is the `content_hash` dimension of whichever
+    /// `FileArtifactKey` matches `canonical` — concurrent entries
+    /// under different `parse_env_hash` collapse to the same
+    /// content hash here.
+    #[must_use]
+    pub fn content_hash_for_canonical(&self, canonical: &str) -> Option<Hash16> {
+        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+            return None;
+        }
+        for entry in self.artifacts.iter() {
+            if entry.key().canonical.as_ref() == canonical {
+                return Some(entry.key().content_hash);
+            }
+        }
+        None
+    }
+
+    /// Alias of [`Self::get_artifacts_any`] used by
+    /// [`crate::session_view::SessionView`] impls. Exists as a named
+    /// accessor so the session-view read path stays explicit about
+    /// "latest artifact for this canonical" semantics; Stage 6 wires
+    /// version-aware variants alongside this helper.
+    #[must_use]
+    pub fn latest_artifacts_for_canonical(&self, canonical: &str) -> Option<Arc<FileArtifacts>> {
+        self.get_artifacts_any(canonical)
+    }
+
     /// Insert (or replace) the payload for `key`.
     pub fn insert_artifacts(
         &self,

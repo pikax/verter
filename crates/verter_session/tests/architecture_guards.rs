@@ -3701,6 +3701,14 @@ mod foundations_guards {
         "pub(crate) mod project_semantic_dispatch",
         "pub(crate) mod semantic_query_memo",
         "pub(crate) mod session_runtime",
+        // Stage 4a SessionView trait surface — `HostView` and
+        // `OverlaidView` impls. `pub` because the integration smoke
+        // test `tests/session_view_smoke.rs` consumes the trait
+        // directly via `verter_session::session_view::SessionView`.
+        // Stages 4b/4c thread the trait through `ResolverContext`
+        // and `HostFenceValidator`; Stage 4d retires the
+        // overlay-mutation machinery the trait replaces.
+        "pub mod session_view",
         "pub(crate) mod source_map_remap",
         "pub(crate) mod spike_instrumentation",
         "pub(crate) mod template_convert",
