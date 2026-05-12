@@ -177,6 +177,191 @@ impl DeclIdentity {
     }
 }
 
+/// Per-domain symbol space tag. Distinguishes declarations sharing
+/// the same `(defining_canonical, merged_symbol_name)` but living in
+/// disjoint symbol spaces (TypeScript's type-space vs value-space).
+///
+/// Stage 5 Sub-task C introduces this enum as a key dimension on
+/// [`ResolvedDeclSlotIdentity`] per R7.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum SemanticSymbolSpace {
+    /// Type-space declaration (interface, type alias, enum's type
+    /// half, class's type half).
+    Type,
+    /// Value-space declaration (function, const, let, var, enum's
+    /// value half, class's value half).
+    Value,
+}
+
+/// Per-declaration-part identifier. Inside a merged declaration
+/// group (e.g. multiple `interface Foo` declarations sharing the
+/// same `merged_symbol_name`), each contributing part is tagged
+/// with a stable `DeclPartId` so the per-part fingerprint can be
+/// stored on [`VersionedDeclIdentity::merged_parts`].
+///
+/// **Validation contract (R7):** `merged_parts` is **payload, not
+/// validation**. Slot-level fact validation is the oracle.
+/// Consumers that observe a specific part's facts invalidate on
+/// that part's change; adding an overload does NOT invalidate
+/// consumers that observed only another overload's facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, serde::Serialize, serde::Deserialize)]
+pub struct DeclPartId(pub u32);
+
+/// Per-part fingerprint hash. Carried as payload on
+/// [`VersionedDeclIdentity::merged_parts`]; not used as a
+/// validation oracle (slot-level facts are).
+pub type DeclPartFingerprint = HashValue;
+
+/// Stage 5 Sub-task C: cache-identity key for the resolved
+/// declaration slot. Six fields (R7):
+///
+/// - `defining_canonical`: canonical id of the declaring file.
+/// - `merged_symbol_name`: stable merged-symbol identity that
+///   survives declaration reordering and TS declaration merging.
+/// - `symbol_space`: type vs value disambiguator
+///   ([`SemanticSymbolSpace`]).
+/// - `project_identity`: workspace + tsconfig + provider-root
+///   discriminator.
+/// - `type_env_hash`: TS compiler-options dimension.
+/// - `lib_env_hash`: TS lib selection + typeRoots + ambient corpus
+///   fingerprint.
+///
+/// **Cache invariant (R7 + Stage 5b multi-candidate substrate):**
+/// the slot identity is **content-free**. Two file versions of
+/// "same decl" produce equal slot keys; the multi-candidate
+/// `ValidatedFactCache` separates them via per-candidate
+/// `fact_dep_signature`. File-content versioning lives in
+/// [`VersionedDeclIdentity`] inside the cached payload.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResolvedDeclSlotIdentity {
+    /// Canonical id of the declaring file. NOT the consumer scope —
+    /// see audit doc `docs/arch/materialize-owner-local-audit.md`
+    /// (a) for the `local_fence_seed` derivation rationale.
+    pub defining_canonical: Arc<str>,
+    /// Stable merged-symbol name. Invariant under declaration
+    /// reordering AND under TS declaration merging.
+    pub merged_symbol_name: Arc<str>,
+    /// Type-space vs value-space discriminator.
+    pub symbol_space: SemanticSymbolSpace,
+    /// Project identity dimension (workspace + tsconfig + provider).
+    pub project_identity: u32,
+    /// Type-env dimension (strict, noImplicitAny, target, …).
+    pub type_env_hash: HashValue,
+    /// Lib-env dimension (lib selection + typeRoots + ambient corpus).
+    pub lib_env_hash: HashValue,
+}
+
+impl ResolvedDeclSlotIdentity {
+    /// Build a slot identity for a type-space declaration.
+    #[must_use]
+    pub fn type_slot(
+        defining_canonical: Arc<str>,
+        merged_symbol_name: Arc<str>,
+        project_identity: u32,
+        type_env_hash: HashValue,
+        lib_env_hash: HashValue,
+    ) -> Self {
+        Self {
+            defining_canonical,
+            merged_symbol_name,
+            symbol_space: SemanticSymbolSpace::Type,
+            project_identity,
+            type_env_hash,
+            lib_env_hash,
+        }
+    }
+
+    /// Build a slot identity for a value-space declaration.
+    #[must_use]
+    pub fn value_slot(
+        defining_canonical: Arc<str>,
+        merged_symbol_name: Arc<str>,
+        project_identity: u32,
+        type_env_hash: HashValue,
+        lib_env_hash: HashValue,
+    ) -> Self {
+        Self {
+            defining_canonical,
+            merged_symbol_name,
+            symbol_space: SemanticSymbolSpace::Value,
+            project_identity,
+            type_env_hash,
+            lib_env_hash,
+        }
+    }
+
+    /// Compatibility constructor: derive a slot identity from a
+    /// pre-Stage-5c [`DeclIdentity`] plus the env dimensions.
+    /// `whole_hash` is intentionally NOT consumed — the slot is
+    /// content-free; per-file content versioning belongs on
+    /// [`VersionedDeclIdentity`].
+    #[must_use]
+    pub fn from_decl_identity(
+        identity: &DeclIdentity,
+        symbol_space: SemanticSymbolSpace,
+        project_identity: u32,
+        type_env_hash: HashValue,
+        lib_env_hash: HashValue,
+    ) -> Self {
+        Self {
+            defining_canonical: Arc::clone(&identity.canonical_id),
+            merged_symbol_name: Arc::clone(&identity.decl_name),
+            symbol_space,
+            project_identity,
+            type_env_hash,
+            lib_env_hash,
+        }
+    }
+}
+
+/// Stage 5 Sub-task C: per-content-version payload tag for a
+/// [`ResolvedDeclSlotIdentity`]. Three fields per R7 + per plan
+/// §"Stage 5 / Sub-task C":
+///
+/// - `slot`: the content-free [`ResolvedDeclSlotIdentity`] this
+///   value is associated with.
+/// - `content_hash`: per-file content version (sourced from
+///   `IndexedReady.whole_hash` at admission time). Two file versions
+///   of "same decl" produce equal slot keys + distinct `content_hash`
+///   payloads — the multi-candidate `ValidatedFactCache` separates
+///   them via per-candidate fact validation.
+/// - `parse_env_hash`: parser flags + SFC compiler flags
+///   dimension. Cosmetic edits within the same parser flags
+///   produce the same `parse_env_hash`; flag changes invalidate
+///   the cached entry.
+/// - `merged_parts`: per-part fingerprints inside a merged
+///   declaration group. **Payload, NOT a validation oracle (R7).**
+///   Consumers observe specific parts via their `fact_dep_signature`;
+///   adding an overload does NOT, by itself, invalidate consumers
+///   that observed only one overload's facts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionedDeclIdentity {
+    pub slot: ResolvedDeclSlotIdentity,
+    pub content_hash: HashValue,
+    pub parse_env_hash: HashValue,
+    pub merged_parts: smallvec::SmallVec<[(DeclPartId, DeclPartFingerprint); 2]>,
+}
+
+impl VersionedDeclIdentity {
+    /// Build a versioned identity with a single declaration part.
+    #[must_use]
+    pub fn single_part(
+        slot: ResolvedDeclSlotIdentity,
+        content_hash: HashValue,
+        parse_env_hash: HashValue,
+        part: (DeclPartId, DeclPartFingerprint),
+    ) -> Self {
+        let mut merged_parts = smallvec::SmallVec::new();
+        merged_parts.push(part);
+        Self {
+            slot,
+            content_hash,
+            parse_env_hash,
+            merged_parts,
+        }
+    }
+}
+
 /// A reference that is either a declaration identity (not interned in the
 /// arena) or a concrete semantic node. Path C C16: declaration identity
 /// is carried as `DeclIdentity` data, not as an interned node variant.
