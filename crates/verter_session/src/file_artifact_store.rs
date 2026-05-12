@@ -323,15 +323,27 @@ pub struct FileArtifacts {
 
 impl FileArtifacts {
     /// Construct a `FileArtifacts` carrying only an `IndexedReady`.
+    ///
+    /// **Phase 1 fact emission runs here** — the constructed
+    /// `FileFacts` is populated with the parse-domain
+    /// `FactRegistry` (`Export`, `LocalDecl`, `MemberShape`,
+    /// `MemberPresence`, `SyntacticExportSet`, `ImportRef`,
+    /// `SyntacticReexportRef`, `ExportAlias`, `ModuleAugmentation`)
+    /// by [`crate::fact_emission::emit_phase1`]. The per-file
+    /// augmentation list is populated alongside the facts. The
+    /// cross-project `augmentation_index` on
+    /// [`FileArtifactStore`] is NOT touched here — Stage 6c
+    /// populates it lazily.
     #[must_use]
     pub fn with_indexed(indexed: Arc<IndexedReady>) -> Self {
         let parse_stable_hash = crate::parse_stable_hash::compute_parse_stable_hash(&indexed);
+        let emission = crate::fact_emission::emit_phase1(&indexed);
         Self {
             indexed,
-            facts: Arc::new(FileFacts::empty()),
+            facts: Arc::new(emission.facts),
             parsed_edges: Arc::new(ParsedEdges::empty()),
             parse_stable_hash,
-            augmentations: Arc::new(Vec::new()),
+            augmentations: Arc::new(emission.augmentations),
         }
     }
 }
