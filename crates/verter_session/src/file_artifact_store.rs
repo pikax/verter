@@ -65,8 +65,18 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use smallvec::SmallVec;
 use verter_semantic::analysis::Hash16;
+use verter_semantic::facts::registry as fact_registry;
 
 use crate::project_type_store::IndexedReady;
+
+// The fact-registry types live in `verter_semantic` so the registry can
+// reference them without a back-edge on `verter_session`. We re-import
+// them here so existing callers continue to see them under the
+// `verter_session::file_artifact_store::*` paths they already use
+// (no `pub use as` shimming — the types are identical, not renamed).
+pub use verter_semantic::facts::registry::{
+    InternedGlobPattern, InternedName, InternedSpecifier, SymbolSpace,
+};
 
 // ── Project identity wrapper ──
 
@@ -78,53 +88,6 @@ use crate::project_type_store::IndexedReady;
 /// project under the same syntactic specifier (Codex P0.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ProjectIdentity(pub Hash16);
-
-// ── Interned strings ──
-
-/// An interned module-specifier string (e.g. `"vue"`, `"./local"`,
-/// `"*.css"`). Wraps an `Arc<str>` so the type is movable into
-/// data structures without back-references; later stages can swap in a
-/// crate-wide interner if profiling shows hot-path duplication.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct InternedSpecifier(pub Arc<str>);
-
-impl From<&str> for InternedSpecifier {
-    fn from(s: &str) -> Self {
-        Self(Arc::from(s))
-    }
-}
-
-/// An interned symbol name (export name, member name, etc.).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct InternedName(pub Arc<str>);
-
-impl From<&str> for InternedName {
-    fn from(s: &str) -> Self {
-        Self(Arc::from(s))
-    }
-}
-
-/// An interned wildcard pattern (e.g. `"*.css"`).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct InternedGlobPattern(pub Arc<str>);
-
-impl From<&str> for InternedGlobPattern {
-    fn from(s: &str) -> Self {
-        Self(Arc::from(s))
-    }
-}
-
-// ── Symbol space ──
-
-/// The TypeScript / Verter symbol space a binding occupies. A `class Foo`
-/// declaration occupies BOTH `Type` and `Value` and emits two distinct
-/// facts (R11) — `BothTypeValue` is forbidden.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SymbolSpace {
-    Type,
-    Value,
-    Namespace,
-}
 
 // ── FileArtifactKey ──
 
@@ -168,25 +131,78 @@ pub const LEGACY_PARSER_VERSION: u32 = 1;
 /// before later stages plumb the real env hash through every call site.
 pub const LEGACY_PARSE_ENV_HASH: Hash16 = [0u8; 16];
 
-// ── FileFacts placeholder ──
+// ── FileFacts ──
 
 /// Per-file fact registry payload.
 ///
-/// Empty registry placeholder. The fact-emission walk will populate this
-/// with the parse-domain facts (`Export`, `LocalDecl`, `MemberShape`,
-/// `MemberPresence`, `SyntacticExportSet`, `MacroSurface`, `TemplateRoot`,
-/// `ImportRef`, `SyntacticReexportRef`, `ModuleAugmentation`) emitted
-/// during shallow analysis (R10–R16, R28, R29).
-#[derive(Debug, Default, Clone)]
+/// Owns the parse-domain `FactRegistry` populated by the shallow walk
+/// during file-artifact construction (R10–R16, R28, R29). Consumers
+/// read parse-domain facts via [`FileFacts::registry`] / `lookup`.
+///
+/// Phase 1 emission populates: `Export`, `ExportAlias`,
+/// `SyntacticExportSet`, `LocalDecl`, `MemberShape`, `MemberPresence`,
+/// `MacroSurface`, `TemplateRoot`, `ImportRef`, `SyntacticReexportRef`,
+/// `ModuleAugmentation`. The `Member` body fingerprint is Phase 2
+/// lazy and lives in `MemberSemanticFactStore` /
+/// `MemberDisplayFactStore`, NOT in this registry.
+///
+/// Resolve-domain facts are NOT populated here — they emit at Stage 6
+/// from the resolver / `RouteDb`.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct FileFacts {
-    // A FactKey-indexed registry is populated here once fact-emission lands.
-    _stage1_placeholder: (),
+    registry: fact_registry::FactRegistry,
 }
 
 impl FileFacts {
+    /// Construct an empty fact registry. Used by tests + legacy
+    /// constructors that bypass Phase 1 emission.
     #[must_use]
     pub fn empty() -> Self {
         Self::default()
+    }
+
+    /// Construct a populated `FileFacts` from a fact registry.
+    #[must_use]
+    pub fn from_registry(registry: fact_registry::FactRegistry) -> Self {
+        Self { registry }
+    }
+
+    /// Borrow the underlying registry. O(1) per-key lookup via
+    /// `registry().get(&key)`.
+    #[must_use]
+    pub fn registry(&self) -> &fact_registry::FactRegistry {
+        &self.registry
+    }
+
+    /// Borrow the registry mutably — used by Phase 1 producers
+    /// during construction.
+    pub fn registry_mut(&mut self) -> &mut fact_registry::FactRegistry {
+        &mut self.registry
+    }
+
+    /// O(1) per-key lookup. `None` is an invalidation observation —
+    /// the binding was removed or never existed.
+    #[must_use]
+    pub fn lookup(&self, key: &fact_registry::FactKey) -> Option<&fact_registry::Fact> {
+        self.registry.get(key)
+    }
+
+    /// Number of parse-domain facts.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.registry.len()
+    }
+
+    /// `true` if no facts have been emitted.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.registry.is_empty()
+    }
+
+    /// The cached `SyntacticExportSet` fact (if Phase 1 emitted one).
+    #[must_use]
+    pub fn syntactic_export_set(&self) -> Option<&fact_registry::Fact> {
+        self.registry.syntactic_export_set.as_ref()
     }
 }
 
