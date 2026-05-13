@@ -36,12 +36,14 @@ pub mod vue_default_synth;
 
 pub mod checker_text_adapter;
 
+pub mod fact_read_set;
 pub mod fuses;
 pub mod imported_root_db;
 pub(crate) mod resolver_context;
 pub mod route_db;
 pub(crate) mod scope_shadowing;
 
+pub use fact_read_set::{FactReadSet, FactReadSetCell, FactReadSetFinalise};
 pub(crate) use resolver_context::ResolverContext;
 
 pub use fuses::{FuseBudgets, FuseState, FuseTrip};
