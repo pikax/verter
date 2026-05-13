@@ -286,6 +286,19 @@ inflight_aborted_retries: number,
 cold_aborts_swept: number, };
 
 /**
+ * Why the walker stopped.
+ */
+export type ChainTermination = "Complete" | { "DepthExceeded": { 
+/**
+ * Depth cap that was exceeded.
+ */
+cap: number, } } | { "Cycle": { 
+/**
+ * EdgeId where the walker detected the cycle.
+ */
+at_edge: EdgeId, } } | "NotFound";
+
+/**
  * Compile request payload.
  */
 export type CompilePayload = { 
@@ -1012,6 +1025,60 @@ base: NodeId,
  * Path segments applied from base → result, in order.
  */
 path: Array<ProjectPathSegment>, };
+
+/**
+ * Provenance chain returned by [`RequestAuditRecord::why_loaded`] /
+ * [`RequestAuditRecord::why_instantiated`]. Always carries a
+ * [`ChainTermination`] so renderers can distinguish a complete walk
+ * from a depth-capped, cycle-terminated, or shared-load-redirected
+ * one.
+ */
+export type ProvenanceChain = { 
+/**
+ * In-audit `NodeId` the walk started from. `None` when the walker
+ * could not locate any matching root in the audit record.
+ */
+root: NodeId | null, 
+/**
+ * Steps in BFS order. Each step is one derivation edge whose
+ * `result` is the current frontier node; `depth` records the hop
+ * count from the root.
+ */
+steps: Array<ProvenanceStep>, 
+/**
+ * Why the walk stopped. `Complete` means the frontier exhausted
+ * without hitting any structural termination.
+ */
+terminated: ChainTermination, 
+/**
+ * Shared-load reuses observed for the queried canonical (only
+ * populated by `why_loaded`). Renderers display these as terminal
+ * branches per
+ */
+shared_load_terminals: Array<SharedLoadReuseRecord>, };
+
+/**
+ * One step on a [`ProvenanceChain`].
+ */
+export type ProvenanceStep = { 
+/**
+ * EdgeId of the derivation edge visited at this step.
+ */
+edge_id: EdgeId, 
+/**
+ * Distance from the walker's root node (BFS depth).
+ */
+depth: number, 
+/**
+ * `display_label` of the edge's result node.
+ */
+node_label: string, 
+/**
+ * The full derivation edge (result / sources / meta) captured
+ * verbatim so the TS-side renderer doesn't need to re-resolve
+ * edges against the source audit.
+ */
+edge: DerivationEdgeRecord, };
 
 /**
  * Top-level audit record for one logical request — the envelope every
