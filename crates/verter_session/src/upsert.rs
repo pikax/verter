@@ -4,8 +4,6 @@
 //! computing granular slice-level diffs, and assembling the final
 //! [`HostUpdateResult`](crate::HostUpdateResult).
 
-use std::collections::BTreeSet;
-
 use crate::cache::{compute_changed_removed_nodes, sorted_nodes};
 use crate::hash::diff_indices;
 use crate::id::render_ids;
@@ -200,59 +198,8 @@ pub(crate) fn build_upsert_result(
     })
 }
 
-/// Compute which export names changed between old and new export signatures.
-/// Returns the set of export names whose declaration hashes differ.
-///
-/// Per R3 this helper is no longer consumed by the upsert hot path
-/// (read-side fact validation is the correctness oracle). Preserved
-/// as a building block for LSP affected-files reporting through the
-/// R22 reverse-dep graph as an observability surface.
-#[allow(dead_code)]
-pub(crate) fn compute_changed_exports(
-    old: &[verter_semantic::analysis::ExportSignature],
-    new: &[verter_semantic::analysis::ExportSignature],
-) -> BTreeSet<String> {
-    if old.is_empty() && new.is_empty() {
-        return BTreeSet::new();
-    }
-    if old.is_empty() {
-        return new.iter().map(|s| s.name.clone()).collect();
-    }
-    if new.is_empty() {
-        return old.iter().map(|s| s.name.clone()).collect();
-    }
-
-    use rustc_hash::FxHashMap;
-    let old_map: FxHashMap<&str, &[u8; 16]> = old
-        .iter()
-        .map(|s| (s.name.as_str(), &s.declaration_hash))
-        .collect();
-    let new_map: FxHashMap<&str, &[u8; 16]> = new
-        .iter()
-        .map(|s| (s.name.as_str(), &s.declaration_hash))
-        .collect();
-
-    let mut changed = BTreeSet::new();
-
-    // Check for changed or removed exports
-    for (name, old_hash) in &old_map {
-        match new_map.get(name) {
-            Some(new_hash) if new_hash != old_hash => {
-                changed.insert(name.to_string());
-            }
-            None => {
-                changed.insert(name.to_string());
-            }
-            _ => {}
-        }
-    }
-
-    // Check for added exports
-    for name in new_map.keys() {
-        if !old_map.contains_key(name) {
-            changed.insert(name.to_string());
-        }
-    }
-
-    changed
-}
+// `compute_changed_exports` retired with the R3 cross-file
+// invalidation cutover — downstream caches revalidate lazily via
+// `fact_dep_signature` checks, so a producer-side export-diff helper
+// is no longer needed by the upsert path. LSP affected-files
+// reporting consumes the reverse-dep graph directly (R22).

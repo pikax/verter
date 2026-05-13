@@ -1,17 +1,15 @@
 //! Dependency tracking helpers.
 //!
 //! Contains the logic for determining whether an import resolves to a given
-//! dependency, stripping configured extensions for extensionless matching,
-//! and the change-detection helpers consumed by LSP affected-files reporting
-//! (`should_invalidate_dependent`, `compute_changed_exports`). Per R3 these
-//! helpers no longer drive eager cache invalidation; the read-side fact
-//! oracle handles staleness, and the reverse-dep graph stays content-addressed
-//! for memory-bound GC and affected-files surfacing only (R22).
+//! dependency and stripping configured extensions for extensionless
+//! matching. Per R3, downstream caches revalidate lazily through their
+//! own `fact_dep_signature` checks; this module no longer carries
+//! change-detection helpers for eager invalidation. The reverse-dep
+//! graph is content-addressed for memory-bound GC and affected-files
+//! surfacing only (R22).
 #![allow(dead_code)]
 
 use std::collections::BTreeSet;
-
-use verter_semantic::analysis::project_resolver::{ResolvePhase, ResolveRequestKind};
 
 use crate::id;
 use crate::types::*;
@@ -99,56 +97,6 @@ fn import_resolves_to_dep_view(
     }
 }
 
-fn import_resolves_to_dep_with_resolver_data(
-    canonical_id: &str,
-    import_routes: &mut rustc_hash::FxHashMap<String, DependencyResolution>,
-    dependencies: &mut BTreeSet<String>,
-    script_lang: Option<&str>,
-    import_source: &str,
-    dependency_id: &str,
-    resolve_extensions: &[String],
-    workspace: Option<&dyn verter_workspace::WorkspaceAccess>,
-) -> bool {
-    let cached_view = DependentView {
-        canonical_id: canonical_id.to_string(),
-        import_routes: import_routes.clone(),
-        dependencies: dependencies.clone(),
-        script_lang: script_lang.map(str::to_string),
-        macro_type_deps: Vec::new(),
-        imports: Vec::new(),
-        resolved_type_hashes: rustc_hash::FxHashMap::default(),
-    };
-    if import_resolves_to_dep_view(
-        &cached_view,
-        import_source,
-        dependency_id,
-        resolve_extensions,
-    ) {
-        return true;
-    }
-
-    if let Some(ws) = workspace {
-        let ctx = verter_workspace::ResolutionContext {
-            phase: ResolvePhase::CodegenBlocker,
-            kind: ResolveRequestKind::EsmImport,
-        };
-        if let Some(result) = ws.resolve_import(canonical_id, import_source, ctx) {
-            dependencies.insert(result.source_id.clone());
-            import_routes.insert(
-                import_source.to_string(),
-                DependencyResolution {
-                    specifier: import_source.to_string(),
-                    resolved_canonical_id: Some(result.source_id.clone()),
-                    possible_canonical_ids: vec![result.source_id.clone()],
-                },
-            );
-            return result.source_id == dependency_id;
-        }
-    }
-
-    false
-}
-
 /// Check if an import source from `view` resolves to `dependency_id`.
 /// Test-only wrapper that exposes the private `import_resolves_to_dep_view`.
 #[cfg(test)]
@@ -161,156 +109,10 @@ pub(crate) fn import_resolves_to_dep(
     import_resolves_to_dep_view(view, import_source, dependency_id, resolve_extensions)
 }
 
-fn import_resolves_to_dep_with_resolver_view(
-    view: &mut DependentView,
-    import_source: &str,
-    dependency_id: &str,
-    resolve_extensions: &[String],
-    workspace: Option<&dyn verter_workspace::WorkspaceAccess>,
-) -> bool {
-    import_resolves_to_dep_with_resolver_data(
-        &view.canonical_id,
-        &mut view.import_routes,
-        &mut view.dependencies,
-        view.script_lang.as_deref(),
-        import_source,
-        dependency_id,
-        resolve_extensions,
-        workspace,
-    )
-}
-
-/// Determine whether a dependent SFC should be invalidated given
-/// which exports changed in a dependency.
-///
-/// When `dep_source` is available, Tier 3 resolution is attempted: the type
-/// is resolved from the dep file and hashed. If the resolved shape is unchanged,
-/// invalidation is skipped even though the export text changed.
-///
-/// Returns `(should_invalidate, updated_resolved_type_hashes)`. The caller must
-/// write back the updated hashes to `CompileCacheEntry`.
-pub(crate) fn should_invalidate_dependent_view(
-    view: &mut DependentView,
-    dependency_id: &str,
-    changed_exports: &BTreeSet<String>,
-    no_signatures: bool,
-    dep_source: Option<&str>,
-    resolve_extensions: &[String],
-    workspace: Option<&dyn verter_workspace::WorkspaceAccess>,
-) -> bool {
-    if no_signatures {
-        return true;
-    }
-
-    if changed_exports.is_empty() {
-        return false;
-    }
-
-    let mut macro_type_deps = Vec::new();
-    let macro_import_sources: Vec<_> = view
-        .macro_type_deps
-        .iter()
-        .map(|dep| dep.import_source.clone())
-        .collect();
-    for (index, import_source) in macro_import_sources.iter().enumerate() {
-        if import_resolves_to_dep_with_resolver_view(
-            view,
-            import_source,
-            dependency_id,
-            resolve_extensions,
-            workspace,
-        ) {
-            macro_type_deps.push(view.macro_type_deps[index].clone());
-        }
-    }
-
-    if !macro_type_deps.is_empty() {
-        let tier2_changed: Vec<&str> = macro_type_deps
-            .iter()
-            .filter(|dep| changed_exports.contains(&dep.type_name))
-            .map(|dep| dep.type_name.as_str())
-            .collect();
-
-        if tier2_changed.is_empty() {
-            return false;
-        }
-
-        if let Some(dep_src) = dep_source {
-            let alloc = oxc_allocator::Allocator::new();
-            let mut any_shape_changed = false;
-
-            for type_name in &tier2_changed {
-                let key = (dependency_id.to_string(), type_name.to_string());
-
-                if let Some(resolved) =
-                    verter_compiler::utils::oxc::vue::resolve_type::resolve_external_type_with_canonical(
-                        type_name, dep_src, &alloc, dependency_id,
-                    )
-                {
-                    let new_hash =
-                        verter_compiler::utils::oxc::vue::resolve_type::hash_resolved_type(
-                            &resolved,
-                            dep_src.as_bytes(),
-                        );
-
-                    if let Some(old_hash) = view.resolved_type_hashes.get(&key) {
-                        if *old_hash == new_hash {
-                            view.resolved_type_hashes.insert(key, new_hash);
-                            continue;
-                        }
-                    }
-
-                    view.resolved_type_hashes.insert(key, new_hash);
-                    any_shape_changed = true;
-                } else {
-                    any_shape_changed = true;
-                }
-            }
-
-            return any_shape_changed;
-        }
-
-        return true;
-    }
-
-    let import_checks: Vec<_> = view
-        .imports
-        .iter()
-        .map(|imp| (imp.source.clone(), imp.is_type_only))
-        .collect();
-    let mut has_runtime_import = false;
-    for (import_source, is_type_only) in &import_checks {
-        if !*is_type_only
-            && import_resolves_to_dep_with_resolver_view(
-                view,
-                import_source,
-                dependency_id,
-                resolve_extensions,
-                workspace,
-            )
-        {
-            has_runtime_import = true;
-            break;
-        }
-    }
-
-    if has_runtime_import {
-        return true;
-    }
-
-    if view.dependencies.contains(dependency_id)
-        && import_checks.iter().all(|(import_source, _)| {
-            !import_resolves_to_dep_with_resolver_view(
-                view,
-                import_source,
-                dependency_id,
-                resolve_extensions,
-                workspace,
-            )
-        })
-    {
-        return true;
-    }
-
-    false
-}
+// `should_invalidate_dependent_view` retired with the R3 cross-file
+// invalidation cutover. Downstream caches revalidate lazily through
+// their own `fact_dep_signature` checks on read; the dependent-SFC
+// invalidation predicate is no longer needed. The path-resolution
+// helpers above (`import_resolves_to_dep`) survive as they remain
+// useful for LSP affected-files surfacing via the R22 reverse-dep
+// graph.

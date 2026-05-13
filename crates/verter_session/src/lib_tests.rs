@@ -4,16 +4,12 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 
 use super::cache;
-use super::deps::{
-    import_resolves_to_dep, should_invalidate_dependent_view, strip_configured_extension,
-    DependentView,
-};
+use super::deps::{import_resolves_to_dep, strip_configured_extension, DependentView};
 use super::id::canonicalize_id;
 use super::parse::parse_vue_snapshot;
 use super::shared::{read_lock, write_lock};
 use super::upsert::{
-    build_upsert_result, compute_changed_exports, compute_upsert_changes_from_parse,
-    UpsertChangeResult, UpsertResultData,
+    build_upsert_result, compute_upsert_changes_from_parse, UpsertChangeResult, UpsertResultData,
 };
 use super::*;
 use verter_semantic::analysis::AnalysisScope;
@@ -363,165 +359,11 @@ fn canonicalize_id_handles_edge_cases() {
     assert_eq!(canonicalize_id("   "), "");
 }
 
-/// @ai-generated - compute_changed_exports: added export detected
-#[test]
-fn compute_changed_exports_added() {
-    let old = vec![];
-    let new = vec![verter_semantic::analysis::ExportSignature {
-        name: "MyType".to_string(),
-        declaration_hash: [1; 16],
-        is_type: true,
-        span: Default::default(),
-        reexport_source: None,
-        reexport_local: None,
-        local_span: None,
-    }];
-    let changed = compute_changed_exports(&old, &new);
-    assert!(changed.contains("MyType"));
-}
-
-/// @ai-generated - compute_changed_exports: both empty → empty set
-#[test]
-fn compute_changed_exports_both_empty() {
-    let changed = compute_changed_exports(&[], &[]);
-    assert!(changed.is_empty());
-}
-
-/// @ai-generated - compute_changed_exports: hash changed detected
-#[test]
-fn compute_changed_exports_hash_changed() {
-    let old = vec![verter_semantic::analysis::ExportSignature {
-        name: "MyType".to_string(),
-        declaration_hash: [1; 16],
-        is_type: true,
-        span: Default::default(),
-        reexport_source: None,
-        reexport_local: None,
-        local_span: None,
-    }];
-    let new = vec![verter_semantic::analysis::ExportSignature {
-        name: "MyType".to_string(),
-        declaration_hash: [2; 16],
-        is_type: true,
-        span: Default::default(),
-        reexport_source: None,
-        reexport_local: None,
-        local_span: None,
-    }];
-    let changed = compute_changed_exports(&old, &new);
-    assert!(changed.contains("MyType"));
-}
-
-/// @ai-generated - compute_changed_exports: mixed add + remove + change + unchanged
-#[test]
-fn compute_changed_exports_mixed() {
-    let old = vec![
-        verter_semantic::analysis::ExportSignature {
-            name: "Kept".to_string(),
-            declaration_hash: [1; 16],
-            is_type: true,
-            span: Default::default(),
-            reexport_source: None,
-            reexport_local: None,
-            local_span: None,
-        },
-        verter_semantic::analysis::ExportSignature {
-            name: "Changed".to_string(),
-            declaration_hash: [2; 16],
-            is_type: true,
-            span: Default::default(),
-            reexport_source: None,
-            reexport_local: None,
-            local_span: None,
-        },
-        verter_semantic::analysis::ExportSignature {
-            name: "Removed".to_string(),
-            declaration_hash: [3; 16],
-            is_type: true,
-            span: Default::default(),
-            reexport_source: None,
-            reexport_local: None,
-            local_span: None,
-        },
-    ];
-    let new = vec![
-        verter_semantic::analysis::ExportSignature {
-            name: "Kept".to_string(),
-            declaration_hash: [1; 16],
-            is_type: true,
-            span: Default::default(),
-            reexport_source: None,
-            reexport_local: None,
-            local_span: None,
-        },
-        verter_semantic::analysis::ExportSignature {
-            name: "Changed".to_string(),
-            declaration_hash: [9; 16],
-            is_type: true,
-            span: Default::default(),
-            reexport_source: None,
-            reexport_local: None,
-            local_span: None,
-        },
-        verter_semantic::analysis::ExportSignature {
-            name: "Added".to_string(),
-            declaration_hash: [4; 16],
-            is_type: true,
-            span: Default::default(),
-            reexport_source: None,
-            reexport_local: None,
-            local_span: None,
-        },
-    ];
-    let changed = compute_changed_exports(&old, &new);
-    assert!(!changed.contains("Kept"), "unchanged should not appear");
-    assert!(changed.contains("Changed"), "hash-changed should appear");
-    assert!(changed.contains("Removed"), "removed should appear");
-    assert!(changed.contains("Added"), "added should appear");
-    assert_eq!(changed.len(), 3);
-}
-
-/// @ai-generated - compute_changed_exports: removed export detected
-#[test]
-fn compute_changed_exports_removed() {
-    let old = vec![verter_semantic::analysis::ExportSignature {
-        name: "MyType".to_string(),
-        declaration_hash: [1; 16],
-        is_type: true,
-        span: Default::default(),
-        reexport_source: None,
-        reexport_local: None,
-        local_span: None,
-    }];
-    let new = vec![];
-    let changed = compute_changed_exports(&old, &new);
-    assert!(changed.contains("MyType"));
-}
-
-/// @ai-generated - compute_changed_exports: unchanged export not in set
-#[test]
-fn compute_changed_exports_unchanged() {
-    let old = vec![verter_semantic::analysis::ExportSignature {
-        name: "MyType".to_string(),
-        declaration_hash: [1; 16],
-        is_type: true,
-        span: Default::default(),
-        reexport_source: None,
-        reexport_local: None,
-        local_span: None,
-    }];
-    let new = vec![verter_semantic::analysis::ExportSignature {
-        name: "MyType".to_string(),
-        declaration_hash: [1; 16],
-        is_type: true,
-        span: Default::default(),
-        reexport_source: None,
-        reexport_local: None,
-        local_span: None,
-    }];
-    let changed = compute_changed_exports(&old, &new);
-    assert!(changed.is_empty());
-}
+// Retired: `compute_changed_exports_*` characterised the legacy
+// eager-invalidation cross-file change-detection helper. Under R3
+// downstream caches revalidate lazily through their own
+// `fact_dep_signature` checks; the `compute_changed_exports` helper
+// was retired with this rewrite.
 
 /// @ai-generated - compute_upsert_changes: first insert (no old entry) → changed=true
 #[test]
@@ -835,75 +677,12 @@ fn import_resolves_to_dep_relative_extension_strip() {
     ));
 }
 
-#[test]
-fn should_invalidate_dependent_promotes_workspace_resolution_into_cache() {
-    let ws = verter_workspace::MemoryWorkspace::new(verter_workspace::MemoryOptions::default());
-    ws.set_exact_resolutions(
-        "/src/App.vue",
-        vec![verter_workspace::ExactResolution {
-            specifier: "@/dep".to_string(),
-            phase: verter_workspace::ResolvePhase::CodegenBlocker,
-            kind: verter_workspace::ResolveRequestKind::EsmImport,
-            resolved_canonical_id: Some("/src/dep.ts".to_string()),
-            possible_canonical_ids: vec!["/src/dep.ts".to_string()],
-        }],
-    );
-
-    let mut view = DependentView {
-        canonical_id: "/src/App.vue".to_string(),
-        import_routes: FxHashMap::default(),
-        dependencies: BTreeSet::default(),
-        script_lang: Some("ts".to_string()),
-        macro_type_deps: Vec::new(),
-        imports: vec![verter_semantic::analysis::AnalyzedImport {
-            source: "@/dep".to_string(),
-            is_type_only: false,
-            bindings: Vec::new(),
-            span: verter_span::Span::new(0, 0),
-            resolved_canonical_id: None,
-        }],
-        resolved_type_hashes: FxHashMap::default(),
-    };
-    let changed_exports = BTreeSet::from(["value".to_string()]);
-    let resolve_extensions = vec![".ts".to_string()];
-
-    let first = should_invalidate_dependent_view(
-        &mut view,
-        "/src/dep.ts",
-        &changed_exports,
-        false,
-        None,
-        &resolve_extensions,
-        Some(&ws),
-    );
-
-    assert!(
-        first,
-        "runtime invalidation should resolve aliased imports through the workspace when the cache is cold"
-    );
-    assert_eq!(
-        view.import_routes
-            .get("@/dep")
-            .and_then(|resolution| resolution.resolved_canonical_id.as_deref()),
-        Some("/src/dep.ts"),
-        "workspace-resolved alias routes should be promoted into import_routes for future checks"
-    );
-
-    let second = should_invalidate_dependent_view(
-        &mut view,
-        "/src/dep.ts",
-        &changed_exports,
-        false,
-        None,
-        &resolve_extensions,
-        None,
-    );
-
-    assert!(
-        second,
-        "once promoted into import_routes, the same invalidation check should succeed without a live workspace resolver"
-    );
-}
+// Retired: `should_invalidate_dependent_promotes_workspace_resolution_into_cache`
+// characterised the legacy eager-invalidation cross-file path. Under
+// R3, downstream caches revalidate lazily through `fact_dep_signature`
+// checks on read; the `should_invalidate_dependent_view` helper was
+// retired with this rewrite. Affected-file surfacing for LSP still
+// reads the reverse-dep graph (R22) but no longer drives invalidation.
 
 /// @ai-generated - invalidate_nodes removes last_good_outputs for targeted nodes
 #[test]
@@ -1408,6 +1187,12 @@ fn tier3_comment_added_no_invalidation() {
 /// @ai-generated - Tier 3: property added to dep type → invalidation
 #[test]
 fn tier3_property_added_invalidates() {
+    // R3 fact-validation oracle: editing imported `types.ts` to add
+    // a member must cause Comp.vue's compile slot to fail the
+    // `fact_dep_signature` validation on its next warm-hit read.
+    // The slot itself stays in the cache (no eager evict), but
+    // `compile_slot_is_warm` returns `false` so the next compile
+    // recomputes.
     let host = VerterHost::new_standalone(HostConfig::default());
 
     let _ = upsert_vue(
@@ -1435,7 +1220,19 @@ fn tier3_property_added_invalidates() {
         })
         .unwrap();
 
-    // Add a property to MyType
+    // Pre-edit: the slot is warm (just compiled).
+    #[cfg(not(target_arch = "wasm32"))]
+    assert!(
+        host.compile_slot_is_warm("/src/Comp.vue", &profile_dev()),
+        "compile slot should be warm immediately after compile"
+    );
+
+    // Add a property to MyType — adds a new MemberPresence/Member
+    // fact pair on `types.ts`. The `fact_dep_signature` recorded
+    // by the cold compile traced MemberPresence(MyType) /
+    // Member(MyType) at the prior content; the new content's facts
+    // differ, so validation must mismatch on the next warm-hit
+    // read.
     let _ = host
         .upsert(UpsertRequest {
             canonical_id: None,
@@ -1446,30 +1243,18 @@ fn tier3_property_added_invalidates() {
         })
         .unwrap();
 
-    // Tier 3: resolved type shape changed → invalidation
+    // R3 oracle: the slot's `fact_dep_signature` no longer validates
+    // against the active `HostStoreView`, so `compile_slot_is_warm`
+    // reports `false` and the next compile recomputes.
     #[cfg(not(target_arch = "wasm32"))]
-    {
-        let cc = host
-            .compile_cache()
-            .get("/src/Comp.vue")
-            .expect("compile_cache entry exists");
-        assert!(
-            cc.compile_slots.is_empty(),
-            "compile slots should be cleared when resolved type shape changed (prop added)"
-        );
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        let files = read_lock(&host.files);
-        let comp = files.get("/src/Comp.vue").unwrap();
-        assert!(
-            comp.compile_slots.is_empty(),
-            "compile slots should be cleared when resolved type shape changed (prop added)"
-        );
-    }
+    assert!(
+        !host.compile_slot_is_warm("/src/Comp.vue", &profile_dev()),
+        "compile slot MUST report not-warm after dep `types.ts` changed (R3 fact-validation)"
+    );
 }
 
-/// @ai-generated - Tier 3: property type changed → invalidation
+/// R3 fact-validation oracle: editing the type of a consumed member
+/// must invalidate the consumer on read.
 #[test]
 fn tier3_property_type_changed_invalidates() {
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -1499,7 +1284,16 @@ fn tier3_property_type_changed_invalidates() {
         })
         .unwrap();
 
-    // Change foo's type from string to number
+    #[cfg(not(target_arch = "wasm32"))]
+    assert!(
+        host.compile_slot_is_warm("/src/Comp.vue", &profile_dev()),
+        "compile slot should be warm immediately after compile"
+    );
+
+    // Change foo's type from string to number — same MemberPresence
+    // but different Member body fingerprint. Compile slot's
+    // `fact_dep_signature` records the prior Member hash; the next
+    // warm-hit read must mismatch and report not-warm.
     let _ = host
         .upsert(UpsertRequest {
             canonical_id: None,
@@ -1511,25 +1305,70 @@ fn tier3_property_type_changed_invalidates() {
         .unwrap();
 
     #[cfg(not(target_arch = "wasm32"))]
-    {
-        let cc = host
-            .compile_cache()
-            .get("/src/Comp.vue")
-            .expect("compile_cache entry exists");
-        assert!(
-            cc.compile_slots.is_empty(),
-            "compile slots should be cleared when prop type changed"
-        );
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        let files = read_lock(&host.files);
-        let comp = files.get("/src/Comp.vue").unwrap();
-        assert!(
-            comp.compile_slots.is_empty(),
-            "compile slots should be cleared when prop type changed"
-        );
-    }
+    assert!(
+        !host.compile_slot_is_warm("/src/Comp.vue", &profile_dev()),
+        "compile slot MUST report not-warm after consumed member's type changed (R3 fact-validation)"
+    );
+}
+
+/// R3 fact-validation control oracle (A1-8): an upsert to an
+/// UNRELATED canonical does NOT invalidate the consumer's compile
+/// slot. Path-precise dep observation guarantees only the actual
+/// consumed members participate in the signature.
+#[test]
+fn tier3_unrelated_file_upsert_keeps_compile_slot_warm() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+
+    let _ = upsert_vue(
+        &host,
+        "/src/Comp.vue",
+        "<script setup lang=\"ts\">\nimport type { MyType } from './types'\nconst props = defineProps<MyType>()\n</script>\n<template><div/></template>",
+    );
+
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/src/types.ts".to_string(),
+            source: Arc::from("export interface MyType { foo: string }"),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        })
+        .unwrap();
+
+    let _ = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: Some("/src/Comp.vue".to_string()),
+            canonical_id: None,
+            node_kind: None,
+            compile_profile: profile_dev(),
+        })
+        .unwrap();
+
+    #[cfg(not(target_arch = "wasm32"))]
+    assert!(
+        host.compile_slot_is_warm("/src/Comp.vue", &profile_dev()),
+        "compile slot should be warm immediately after compile"
+    );
+
+    // Unrelated file upsert — Comp.vue doesn't import this file.
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/src/unrelated.ts".to_string(),
+            source: Arc::from("export const x = 1;"),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        })
+        .unwrap();
+
+    // R3 oracle: unrelated upsert must not affect Comp.vue's slot.
+    // The slot's `fact_dep_signature` does not reference
+    // `/src/unrelated.ts`, so validation still passes.
+    #[cfg(not(target_arch = "wasm32"))]
+    assert!(
+        host.compile_slot_is_warm("/src/Comp.vue", &profile_dev()),
+        "compile slot MUST stay warm after upsert to a file the consumer doesn't import (path-precision)"
+    );
 }
 
 /// @ai-generated - Tier 3: resolved_type_hashes are stored for future comparisons
