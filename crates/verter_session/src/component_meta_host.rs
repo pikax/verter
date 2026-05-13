@@ -334,6 +334,41 @@ impl ComponentMetaSession {
             .map_err(ComponentMetaHostError::from)
     }
 
+    /// Batch surface for [`Self::get_component_meta`]: compute metadata
+    /// for `canonical_or_aliases` under one shared overlay view and a
+    /// single scheduler dispatch.
+    ///
+    /// Delegates to [`crate::meta::MetaSession::get_component_meta_batch`]
+    /// so all N queries share the host-owned admission caches
+    /// (`MaterializeStructureDb`, `ComponentMetaResultDb`,
+    /// `SemanticGraphStore`). Per-id failures surface in each result
+    /// slot; the batch does not abort.
+    pub fn get_component_meta_batch(
+        &self,
+        canonical_or_aliases: &[String],
+    ) -> Result<
+        Vec<
+            Result<
+                Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis>,
+                ComponentMetaHostError,
+            >,
+        >,
+        ComponentMetaHostError,
+    > {
+        component_meta_trace_custom!(
+            "component_meta_session_batch",
+            format!("batch_size={}", canonical_or_aliases.len()),
+        );
+        let raw = self
+            .inner
+            .get_component_meta_batch(canonical_or_aliases)
+            .map_err(ComponentMetaHostError::from)?;
+        Ok(raw
+            .into_iter()
+            .map(|slot| slot.map_err(ComponentMetaHostError::from))
+            .collect())
+    }
+
     /// Get component metadata plus the resolved-state sidecar AND the
     /// per-request audit record produced by the same resolution.
     /// Synchronous — the audit record is retrievable immediately
@@ -411,6 +446,28 @@ impl ComponentMetaSession {
     ) -> Result<Option<Vec<u8>>, ComponentMetaHostError> {
         self.inner
             .get_component_meta_payload(canonical_or_alias, encode_fn)
+            .map_err(ComponentMetaHostError::from)
+    }
+
+    /// Batch surface for [`Self::get_component_meta_payload`]: compute
+    /// encoded payloads for `canonicals_or_aliases` under one shared
+    /// overlay view and a single scheduler dispatch. Per-id misses /
+    /// failures surface as `None` in their slot.
+    pub fn get_component_meta_batch_payloads<F>(
+        &self,
+        canonical_or_aliases: &[String],
+        encode_fn: F,
+    ) -> Result<Vec<Option<Vec<u8>>>, ComponentMetaHostError>
+    where
+        F: Fn(
+                verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+                &crate::meta_resolve::ResolvedComponentMetaState,
+            ) -> Vec<u8>
+            + Sync
+            + Send,
+    {
+        self.inner
+            .get_component_meta_batch_payloads(canonical_or_aliases, encode_fn)
             .map_err(ComponentMetaHostError::from)
     }
 

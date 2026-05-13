@@ -228,8 +228,7 @@ fn batch_scheduler_submit_count_is_o1() {
     let after = scheduler.counters().submit_count.load(Ordering::Relaxed);
     let delta = after - baseline;
     assert_eq!(
-        delta,
-        1,
+        delta, 1,
         "batch dispatch is O(1) per batch — `scheduler.counters.submit_count` \
          MUST bump by exactly 1 regardless of N={n} jobs. delta={delta} \
          (baseline={baseline}, after={after}). A delta of N would indicate \

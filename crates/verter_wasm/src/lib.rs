@@ -1492,6 +1492,56 @@ impl WasmMetaSession {
         }))?
     }
 
+    /// Component metadata as a JS object (FFI projection), or `null`
+    /// when the canonical does not resolve.
+    #[wasm_bindgen(js_name = "getComponentMeta")]
+    pub fn get_component_meta(&self, canonical_or_alias: &str) -> Result<JsValue, JsValue> {
+        let session = self.session()?;
+        catch_panic(AssertUnwindSafe(|| {
+            let Some(analysis) = session
+                .get_component_meta(canonical_or_alias)
+                .map_err(ffi_err)?
+            else {
+                return Ok(JsValue::NULL);
+            };
+            let ffi =
+                verter_ffi::convert::component_meta_analysis_to_ffi_with_resolution(analysis, None);
+            to_wasm_value(&ffi)
+        }))?
+    }
+
+    /// Batch surface for `getComponentMeta`: compute metadata for
+    /// `canonicalsOrAliases` under one shared overlay view and a
+    /// single scheduler dispatch. Returns one slot per input in input
+    /// order as a JS array; each slot is the FFI projection of the
+    /// analysis, or `null` for a missing canonical / per-id failure.
+    ///
+    /// Throws only on project-level shutdown.
+    #[wasm_bindgen(js_name = "getComponentMetaBatch")]
+    pub fn get_component_meta_batch(
+        &self,
+        canonicals_or_aliases: Vec<String>,
+    ) -> Result<JsValue, JsValue> {
+        let session = self.session()?;
+        catch_panic(AssertUnwindSafe(|| {
+            let results = session
+                .get_component_meta_batch(&canonicals_or_aliases)
+                .map_err(ffi_err)?;
+            let ffi_results: Vec<Option<FfiComponentMeta>> = results
+                .into_iter()
+                .map(|slot| match slot {
+                    Ok(Some(analysis)) => Some(
+                        verter_ffi::convert::component_meta_analysis_to_ffi_with_resolution(
+                            analysis, None,
+                        ),
+                    ),
+                    Ok(None) | Err(_) => None,
+                })
+                .collect();
+            to_wasm_value(&ffi_results)
+        }))?
+    }
+
     /// Run the Rust walker against a committed audit record (JSON
     /// string from a prior `getComponentMetaWithAudit` round-trip
     /// through `JSON.stringify`) rooted at `canonical_id`. Returns

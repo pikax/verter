@@ -292,6 +292,36 @@ impl NapiMetaSession {
         }))?
     }
 
+    /// Batch surface for `getComponentMeta`: compute metadata for
+    /// `canonicalsOrAliases` under one shared overlay view and a single
+    /// scheduler dispatch. Returns one slot per input in input order;
+    /// a missing slot is encoded as a sentinel zero-length `Buffer`
+    /// (a real payload always contains the FFI envelope, so JS readers
+    /// can use `buf.length === 0` as the canonical "no result"
+    /// sentinel). Per-id failures (budget overruns, alias errors)
+    /// surface as the sentinel as well.
+    ///
+    /// Throws only on project-level shutdown.
+    #[napi(js_name = "getComponentMetaBatch")]
+    pub fn get_component_meta_batch(
+        &self,
+        canonicals_or_aliases: Vec<String>,
+    ) -> Result<Vec<Buffer>> {
+        let session = self.session()?;
+        catch_panic(std::panic::AssertUnwindSafe(|| {
+            let payloads = session
+                .get_component_meta_batch_payloads(&canonicals_or_aliases, encode_meta_payload)
+                .map_err(meta_err)?;
+            Ok(payloads
+                .into_iter()
+                .map(|slot| match slot {
+                    Some(bytes) => Buffer::from(bytes),
+                    None => Buffer::from(Vec::<u8>::new()),
+                })
+                .collect())
+        }))?
+    }
+
     /// Synchronous audit bundle — returns JSON bytes of
     /// `{ analysis: FfiComponentMeta, resolution: FfiComponentMetaResolution,
     ///   record: RequestAuditRecord }`. Requires the host to have

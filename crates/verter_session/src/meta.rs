@@ -685,6 +685,91 @@ impl MetaSession {
         Ok(results)
     }
 
+    /// Batch surface returning **encoded payload bytes** per input, for
+    /// NAPI / WASM consumers that need the wire-format buffer rather
+    /// than the in-process `ComponentMetaAnalysis` struct.
+    ///
+    /// Shares the same single-scheduler-dispatch contract as
+    /// [`Self::get_component_meta_batch`]: one overlay view, one
+    /// scheduler context, shared host-owned admission caches. The
+    /// supplied `encode_fn` is invoked once per non-cached id on the
+    /// scheduler's CPU pool.
+    ///
+    /// Returns one slot per input in input order: `Some(bytes)` for a
+    /// successful payload, `None` for a missing canonical or per-id
+    /// failure. `Err(MetaError::Shutdown)` only when the project has
+    /// been shut down before dispatch.
+    pub fn get_component_meta_batch_payloads<F>(
+        &self,
+        canonical_or_aliases: &[String],
+        encode_fn: F,
+    ) -> Result<Vec<Option<Vec<u8>>>, MetaError>
+    where
+        F: Fn(
+                verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+                &crate::meta_resolve::ResolvedComponentMetaState,
+            ) -> Vec<u8>
+            + Sync
+            + Send,
+    {
+        use std::sync::atomic::Ordering::Relaxed;
+        use std::sync::Arc;
+        self.check_alive()?;
+        let scheduler = self.project.host().scheduler();
+        let host = self.project.host();
+        let jobs: Vec<verter_scheduler::stage::SchedulerJobKind> = canonical_or_aliases
+            .iter()
+            .map(
+                |canonical| verter_scheduler::stage::SchedulerJobKind::ComponentMeta {
+                    canonical_id: Arc::from(canonical.as_str()),
+                },
+            )
+            .collect();
+        // Wire the per-id payload path through one shared
+        // `SessionView` (R17, R18) and one scheduler dispatch (R7 / R8).
+        // The closure mirrors `get_component_meta_payload`'s body —
+        // payload-cache fast path → cold resolve → encode → publish.
+        let encode_fn_ref = &encode_fn;
+        let results = self.with_overlay_view(|_view| {
+            scheduler.dispatch_meta_jobs(jobs, move |job| {
+                let verter_scheduler::stage::SchedulerJobKind::ComponentMeta { canonical_id } = job;
+                let canonical_or_alias = canonical_id.as_ref();
+                let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
+                if let Some(cached) = host.try_get_cached_meta_payload(canonical.as_str()) {
+                    host.provenance().payload_cache_hits.fetch_add(1, Relaxed);
+                    return Some(cached);
+                }
+                host.provenance().payload_cache_misses.fetch_add(1, Relaxed);
+                let resolved = host.resolve_component_meta(
+                    canonical.as_str(),
+                    crate::types::ProjectionMode::Expanded,
+                )?;
+                let (analysis, fallthrough_fact_versions) =
+                    crate::host_manage::extract_component_meta_from_resolved_with_facts(
+                        host,
+                        canonical.as_str(),
+                        &resolved,
+                    );
+                if component_meta_resolution_budget_error(
+                    canonical.as_str(),
+                    Some(&analysis),
+                    &resolved,
+                )
+                .is_some()
+                {
+                    return None;
+                }
+                let payload = encode_fn_ref(analysis, &resolved);
+                host.provenance().payload_encodes.fetch_add(1, Relaxed);
+                let facts =
+                    fallthrough_fact_versions.unwrap_or_else(|| resolved.fact_versions.clone());
+                host.store_meta_payload(canonical.as_str(), &facts, payload.clone());
+                Some(payload)
+            })
+        });
+        Ok(results)
+    }
+
     /// Combined component-meta query: returns BOTH the analysis projection AND
     /// the resolved-meta sidecar in a single call, avoiding a duplicate
     /// resolved-state query when callers need both views.
