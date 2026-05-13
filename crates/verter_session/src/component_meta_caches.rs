@@ -2121,7 +2121,15 @@ impl RefCycleResultDb {
                     cache_suppress: false,
                 });
             }
-            if !ctx.validate_dep_signature(&entry_arc.dep_signature) {
+            // R3 AND-gate: BOTH the legacy whole-hash dep_signature
+            // AND the R28 path-precise fact_dep_signature must
+            // validate before a slow-path peek is admitted.
+            if !ctx.validate_dep_signature(&entry_arc.dep_signature)
+                || !crate::fact_signature_helpers::validate_fact_signature(
+                    ctx,
+                    &entry_arc.fact_dep_signature,
+                )
+            {
                 // R8-5 — decrement live_counter on stale removal so
                 // the shared counter tracks live entries, not stale ones.
                 let removed = self
@@ -2132,6 +2140,10 @@ impl RefCycleResultDb {
                 }
                 return None;
             }
+            crate::fact_signature_helpers::bubble_fact_signature(
+                ctx,
+                &entry_arc.fact_dep_signature,
+            );
             entry_arc
                 .validated_at_generation
                 .store(current_gen, Ordering::Relaxed);
@@ -2507,9 +2519,19 @@ where
         db.entries(),
         db.inflight(),
         id.clone(),
-        // Validate(&Entry) -> Option<V>
+        // Validate(&Entry) -> Option<V> — R3 AND-gate of legacy
+        // dep_signature and R28 path-precise fact_dep_signature.
         |entry: &RefCycleEntry| {
-            if ctx.validate_dep_signature(&entry.dep_signature) {
+            if ctx.validate_dep_signature(&entry.dep_signature)
+                && crate::fact_signature_helpers::validate_fact_signature(
+                    ctx,
+                    &entry.fact_dep_signature,
+                )
+            {
+                crate::fact_signature_helpers::bubble_fact_signature(
+                    ctx,
+                    &entry.fact_dep_signature,
+                );
                 Some(crate::semantic_query::CacheRead {
                     value: entry.result,
                     dep_signature: Arc::clone(&entry.dep_signature),
@@ -2533,15 +2555,25 @@ where
                 validated_at_generation: AtomicU64::new(current_gen),
             })
         },
-        // Project(&Entry) -> V
-        |entry: &RefCycleEntry| crate::semantic_query::CacheRead {
-            value: entry.result,
-            dep_signature: Arc::clone(&entry.dep_signature),
-            walker_diagnostics: Arc::from([]),
-            cache_suppress: false,
+        // Project(&Entry) -> V — bubble path-precise observation set
+        // so outer cold-computes see the BFS's transitive facts.
+        |entry: &RefCycleEntry| {
+            crate::fact_signature_helpers::bubble_fact_signature(ctx, &entry.fact_dep_signature);
+            crate::semantic_query::CacheRead {
+                value: entry.result,
+                dep_signature: Arc::clone(&entry.dep_signature),
+                walker_diagnostics: Arc::from([]),
+                cache_suppress: false,
+            }
         },
-        // revalidate_after_compute(&Entry) -> bool
-        |entry: &RefCycleEntry| ctx.validate_dep_signature(&entry.dep_signature),
+        // revalidate_after_compute(&Entry) -> bool — AND-gate.
+        |entry: &RefCycleEntry| {
+            ctx.validate_dep_signature(&entry.dep_signature)
+                && crate::fact_signature_helpers::validate_fact_signature(
+                    ctx,
+                    &entry.fact_dep_signature,
+                )
+        },
         // post_publish(&Arc<Entry>, &K)
         move |entry_arc: &Arc<RefCycleEntry>, _k: &DeclIdentity| {
             db.bump_live_counter();

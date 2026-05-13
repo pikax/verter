@@ -648,6 +648,20 @@ impl ResolverContext for crate::VerterHost {
     }
 }
 
+/// Module-internal accessor mirroring
+/// [`ResolverContext::current_fact_tracer`] for non-`ctx` callers
+/// (e.g. `SemanticGraphStore::get` warm-hit). The TLS slot itself
+/// is private to the `fact_tracer_tls` sub-module — this is the
+/// documented seam for callers that do not hold a
+/// `ResolverContext`. Returns `None` when no `with_fact_tracer`
+/// installer is on the stack.
+#[inline]
+#[must_use]
+pub(crate) fn current_fact_tracer_via_tls<'a>() -> Option<&'a crate::resolver_core::FactReadSetCell>
+{
+    fact_tracer_tls::current_tracer()
+}
+
 // ── `with_fact_tracer` installer ──────────────────────────────────────
 //
 // One cold compute on one thread holds a `FactReadSetCell` for its

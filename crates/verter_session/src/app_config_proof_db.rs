@@ -104,20 +104,32 @@ impl AppConfigNoOverrideProofDb {
     /// Look up a proof entry. Returns `None` on miss; the fast-path
     /// caller declines and the slow path runs.
     ///
-    /// The `validate` closure consults
-    /// [`crate::host_manage::HostFenceValidator`] to revalidate the
-    /// entry's `dep_signature` against current host state. A stale
-    /// entry is treated as a miss.
-    pub fn peek<F>(
+    /// R3 AND-gate: BOTH the caller-supplied `validate` closure
+    /// (legacy whole-hash `dep_signature` consulting
+    /// [`crate::host_manage::HostFenceValidator`]) AND the R28
+    /// path-precise `fact_dep_signature` (validated against the
+    /// current store view through `ctx`) must validate. A stale
+    /// entry on either rail is treated as a miss. On a successful
+    /// warm hit, the path-precise observation set bubbles into any
+    /// active outer fact tracer.
+    #[allow(dead_code)] // wired R3/R26/R28 validator; awaiting production callers
+    pub(crate) fn peek<F>(
         &self,
         key: &AppConfigNoOverrideProofKey,
+        ctx: &dyn crate::resolver_core::ResolverContext,
         validate: F,
     ) -> Option<Arc<AppConfigNoOverrideProofEntry>>
     where
         F: FnOnce(&DepSignature) -> bool,
     {
         let entry = self.entries.get(key)?;
-        if validate(&entry.dep_signature) {
+        if validate(&entry.dep_signature)
+            && crate::fact_signature_helpers::validate_fact_signature(
+                ctx,
+                &entry.fact_dep_signature,
+            )
+        {
+            crate::fact_signature_helpers::bubble_fact_signature(ctx, &entry.fact_dep_signature);
             Some(Arc::clone(entry.value()))
         } else {
             // Stale; drop reference to allow eviction by other paths.

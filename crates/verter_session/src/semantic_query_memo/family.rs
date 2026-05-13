@@ -19,16 +19,12 @@ pub(super) struct MemoEntry {
     pub(super) dep_signature: DepSignature,
     /// R3/R26/R28 path-precise dep signature sibling to
     /// `dep_signature`. Bubbles into outer fact tracers via
-    /// [`crate::fact_signature_helpers::bubble_fact_signature`] so an
-    /// active outer cold-compute sees this memo's observation set on
-    /// transitive hits. The AND-gate alongside the legacy
-    /// `dep_signature`.
-    ///
-    /// Allowed unread for now: warm-hit consumers continue to validate
-    /// via the legacy `dep_signature` AND-gate; subsequent follow-up
-    /// work wires the validators and bubble-up paths to read this
-    /// substrate.
-    #[allow(dead_code)]
+    /// [`crate::fact_signature_helpers::bubble_fact_signature_via_tls`]
+    /// from `SemanticGraphStore::get` and
+    /// `try_warm_hit_fast_path` so an active outer cold-compute sees
+    /// this memo's observation set on transitive hits. The AND-gate
+    /// against the current view validates at the outer fence
+    /// revalidation point.
     pub(super) fact_dep_signature: Arc<[crate::resolver_core::FactVersionRef]>,
     /// Walker diagnostics observed during the cold build that produced
     /// this entry. Replayed on warm hits via `CacheRead.walker_diagnostics`.

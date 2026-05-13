@@ -1145,11 +1145,21 @@ impl SemanticGraphStore {
         let (family, slot) = family_and_slot(key);
         let entries = self.entries_lock_diagnosed();
         let result = entries.get(&family).and_then(|slots| {
-            slots.slot(slot).cloned().map(|entry| CacheRead {
-                value: entry.result,
-                dep_signature: entry.dep_signature,
-                walker_diagnostics: entry.walker_diagnostics,
-                cache_suppress: false,
+            slots.slot(slot).cloned().map(|entry| {
+                // R3/R26/R28 - bubble the entry path-precise fact
+                // observation set into any outer cold-compute scope
+                // so transitive memo hits do not lose contributing
+                // fact identities. AND-gate validation happens at
+                // the outer fence revalidation point.
+                crate::fact_signature_helpers::bubble_fact_signature_via_tls(
+                    &entry.fact_dep_signature,
+                );
+                CacheRead {
+                    value: entry.result,
+                    dep_signature: entry.dep_signature,
+                    walker_diagnostics: entry.walker_diagnostics,
+                    cache_suppress: false,
+                }
             })
         });
         if let Some(rctx) = crate::request_context::current_request_context() {
@@ -1332,11 +1342,22 @@ impl SemanticGraphStore {
             // wall-clock.
             let entries = self.entries.lock();
             entries.get(&family).and_then(|slots| {
-                slots.slot(slot).cloned().map(|entry| CacheRead {
-                    value: entry.result,
-                    dep_signature: entry.dep_signature,
-                    walker_diagnostics: entry.walker_diagnostics,
-                    cache_suppress: false,
+                slots.slot(slot).cloned().map(|entry| {
+                    // R3/R26/R28 - bubble the entry path-precise
+                    // fact observation set into any outer
+                    // cold-compute scope so transitive memo hits do
+                    // not lose the contributing fact identities. The
+                    // AND-gate validation against the current view
+                    // happens at the outer fence revalidation point.
+                    crate::fact_signature_helpers::bubble_fact_signature_via_tls(
+                        &entry.fact_dep_signature,
+                    );
+                    CacheRead {
+                        value: entry.result,
+                        dep_signature: entry.dep_signature,
+                        walker_diagnostics: entry.walker_diagnostics,
+                        cache_suppress: false,
+                    }
                 })
             })
         };

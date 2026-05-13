@@ -950,7 +950,20 @@ pub(crate) fn materialize_component_meta_structure(
         db.inflight(),
         key.clone(),
         |entry: &MaterializeStructureEntry| {
-            if ctx.validate_dep_signature(&entry.dep_signature) {
+            // R3 AND-gate: BOTH the legacy whole-hash dep_signature
+            // AND the R28 path-precise fact_dep_signature must
+            // validate. Either rail mismatching fails the warm hit
+            // and forces cold recompute.
+            if ctx.validate_dep_signature(&entry.dep_signature)
+                && crate::fact_signature_helpers::validate_fact_signature(
+                    ctx,
+                    &entry.fact_dep_signature,
+                )
+            {
+                crate::fact_signature_helpers::bubble_fact_signature(
+                    ctx,
+                    &entry.fact_dep_signature,
+                );
                 Some(crate::semantic_query::CacheRead {
                     value: entry.outcome.clone(),
                     dep_signature: entry.dep_signature.clone(),
@@ -962,14 +975,24 @@ pub(crate) fn materialize_component_meta_structure(
             }
         },
         compute,
-        |entry: &MaterializeStructureEntry| crate::semantic_query::CacheRead {
-            value: entry.outcome.clone(),
-            dep_signature: entry.dep_signature.clone(),
-            walker_diagnostics: Arc::from([]),
-            cache_suppress: false,
+        |entry: &MaterializeStructureEntry| {
+            crate::fact_signature_helpers::bubble_fact_signature(ctx, &entry.fact_dep_signature);
+            crate::semantic_query::CacheRead {
+                value: entry.outcome.clone(),
+                dep_signature: entry.dep_signature.clone(),
+                walker_diagnostics: Arc::from([]),
+                cache_suppress: false,
+            }
         },
-        // Race-closer — post-compute revalidation.
-        |entry: &MaterializeStructureEntry| ctx.validate_dep_signature(&entry.dep_signature),
+        // Race-closer — post-compute revalidation. AND-gate both
+        // rails.
+        |entry: &MaterializeStructureEntry| {
+            ctx.validate_dep_signature(&entry.dep_signature)
+                && crate::fact_signature_helpers::validate_fact_signature(
+                    ctx,
+                    &entry.fact_dep_signature,
+                )
+        },
         // post_publish — register reverse-index AFTER
         // entries.insert AND AFTER successful revalidation.
         move |entry_arc: &Arc<MaterializeStructureEntry>, k: &MaterializeStructureCacheKey| {

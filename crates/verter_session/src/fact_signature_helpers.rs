@@ -85,6 +85,23 @@ pub(crate) fn bubble_fact_signature(ctx: &dyn ResolverContext, signature: &[Fact
     }
 }
 
+/// Variant of [`bubble_fact_signature`] for warm-hit paths that
+/// don't carry a `ResolverContext` reference (e.g. the semantic
+/// graph store's `SemanticGraphStore::get` / fast-path warm hit).
+/// Bubbles into the active TLS tracer when one is installed; no-op
+/// otherwise. Required so transitive fact observations from the
+/// semantic memo bubble into any outer cold-compute scope on warm
+/// hits.
+#[inline]
+pub(crate) fn bubble_fact_signature_via_tls(signature: &[FactVersionRef]) {
+    if signature.is_empty() {
+        return;
+    }
+    if let Some(cell) = crate::resolver_core::current_fact_tracer_via_tls() {
+        cell.observe_borrowed_signature(signature);
+    }
+}
+
 /// Sentinel hash returned when the producer requests a fact that the
 /// FileFacts registry hasn't materialised yet (e.g. cold-compute
 /// races a parse that hasn't published yet). Validator reads against
