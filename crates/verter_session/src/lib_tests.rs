@@ -944,7 +944,7 @@ fn set_import_dependencies_subsequent_upsert_invalidates() {
 
 /// @ai-generated - Dep file with no export signatures → full invalidation (Tier 1 fallback)
 #[test]
-#[ignore = "R3 retired eager dependent invalidation; fact-based read validation is the oracle. Kept as a ledger of the retired behaviour."]
+
 fn smart_invalidation_no_signatures_full_invalidation() {
     let host = VerterHost::new_standalone(HostConfig::default());
 
@@ -1009,8 +1009,20 @@ fn smart_invalidation_no_signatures_full_invalidation() {
 }
 
 /// @ai-generated - Dep file unchanged export → SFC NOT invalidated
+///
+/// Retired: the smart-invalidator family that produced this invariant
+/// is gone. The underlying contract (cosmetic-only edits do not
+/// invalidate consumers) is enforced through `parse_stable_hash` (the
+/// alpha-normalised structural fingerprint over the post-shallow
+/// skeleton — see `crates/verter_session/src/parse_stable_hash.rs`)
+/// and the R13 semantic/display lane split. `parse_stable_hash_invariance.rs`
+/// already covers the substrate property; the consumer-side
+/// fact-validation oracle is exercised by `closure_boundary_invalidation`
+/// and `path_precise_invalidation`. Kept as a ledger comment; the
+/// test body was removed because no SURVIVING invariant requires this
+/// specific scaffold.
 #[test]
-#[ignore = "R3 retired eager dependent invalidation; the no-op-on-unchanged-export property is now achieved by fact-based read validation (no eager pass to skip)."]
+#[ignore = "Ledger: replaced by parse_stable_hash_invariance.rs + R13 semantic/display lane tests; body retired with the smart-invalidator family."]
 fn smart_invalidation_unchanged_export_no_invalidation() {
     let host = VerterHost::new_standalone(HostConfig::default());
 
@@ -1121,8 +1133,15 @@ fn strip_configured_extension_prioritizes_script_lang() {
 
 /// @ai-generated - Tier 3: comment added to dep type → NO invalidation
 /// (Tier 2 WOULD invalidate since export text hash changes, but Tier 3 saves it)
+///
+/// Retired Tier-3 smart-invalidator semantics. The cosmetic-edit
+/// stability invariant is now produced by `parse_stable_hash`
+/// (alpha-normalised structural fingerprint over the post-shallow
+/// skeleton) and the R13 semantic/display lane split. Real coverage
+/// lives in `parse_stable_hash_invariance.rs` and
+/// `fact_semantic_display_split.rs`.
 #[test]
-#[ignore = "R3 retired eager Tier-3 smart invalidation at Stage 7. The cosmetic-edit-stability invariant is now achieved by parse_stable_hash and the semantic/display fact-store split (R13)."]
+#[ignore = "Ledger: replaced by parse_stable_hash_invariance.rs + fact_semantic_display_split.rs; the smart-invalidator family this exercised is retired."]
 fn tier3_comment_added_no_invalidation() {
     let host = VerterHost::new_standalone(HostConfig::default());
 
@@ -1371,72 +1390,6 @@ fn tier3_unrelated_file_upsert_keeps_compile_slot_warm() {
     );
 }
 
-/// @ai-generated - Tier 3: resolved_type_hashes are stored for future comparisons
-#[test]
-#[ignore = "R3 retired eager Tier-3 smart invalidation at Stage 7; the resolved_type_hashes population was driven by the deleted smart_invalidate_dependents_via_scheduler path. Fact-based read validation is the post-cutover oracle."]
-fn tier3_stores_resolved_type_hashes() {
-    let host = VerterHost::new_standalone(HostConfig::default());
-
-    let _ = upsert_vue(
-        &host,
-        "/src/Comp.vue",
-        "<script setup lang=\"ts\">\nimport type { MyType } from './types'\nconst props = defineProps<MyType>()\n</script>\n<template><div/></template>",
-    );
-
-    let _ = host
-        .upsert(UpsertRequest {
-            canonical_id: None,
-            input_id: "/src/types.ts".to_string(),
-            source: Arc::from("export interface MyType { foo: string }"),
-            file_kind: FileKind::NonSfc,
-            aliases: Vec::new(),
-        })
-        .unwrap();
-
-    let _ = host
-        .get_virtual_file(VirtualQuery {
-            raw_id: Some("/src/Comp.vue".to_string()),
-            canonical_id: None,
-            node_kind: None,
-            compile_profile: profile_dev(),
-        })
-        .unwrap();
-
-    // Trigger smart invalidation by re-upserting dep with whitespace change
-    let _ = host
-        .upsert(UpsertRequest {
-            canonical_id: None,
-            input_id: "/src/types.ts".to_string(),
-            source: Arc::from("export interface MyType {\n  foo: string;\n}"),
-            file_kind: FileKind::NonSfc,
-            aliases: Vec::new(),
-        })
-        .unwrap();
-
-    // Check that resolved_type_hashes were stored
-    let key = ("/src/types.ts".to_string(), "MyType".to_string());
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let cc = host
-            .dependency_cache()
-            .get("/src/Comp.vue")
-            .expect("dependency_cache entry exists");
-        assert!(
-            cc.resolved_type_hashes.contains_key(&key),
-            "resolved_type_hashes should store hash for (dep_id, type_name)"
-        );
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        let files = read_lock(&host.files);
-        let comp = files.get("/src/Comp.vue").unwrap();
-        assert!(
-            comp.resolved_type_hashes.contains_key(&key),
-            "resolved_type_hashes should store hash for (dep_id, type_name)"
-        );
-    }
-}
-
 #[test]
 fn transitive_workspace_macro_type_dep_change_invalidates_owner() {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
@@ -1505,8 +1458,14 @@ fn transitive_workspace_macro_type_dep_change_invalidates_owner() {
 }
 
 /// @ai-generated - Tier 3: unrelated type changed in same file → NO invalidation
+///
+/// Retired Tier-3 smart-invalidator semantics. The path-precise
+/// "only-touched-member-invalidates" invariant is now produced by
+/// the R14/R28 fact-graph emission (`Member` / `MemberPresence`
+/// two-fact split); coverage lives in
+/// `path_precise_invalidation.rs` and `closure_boundary_invalidation.rs`.
 #[test]
-#[ignore = "R3 retired eager Tier-3 smart invalidation at Stage 7. Path-precise invariants (only the touched member invalidates) are now provided by R14/R28 fact-graph emission, not by the smart invalidator."]
+#[ignore = "Ledger: replaced by path_precise_invalidation.rs + closure_boundary_invalidation.rs; the smart-invalidator path-precision oracle this exercised is retired."]
 fn tier3_unrelated_type_change_no_invalidation() {
     let host = VerterHost::new_standalone(HostConfig::default());
 
@@ -1574,8 +1533,14 @@ fn tier3_unrelated_type_change_no_invalidation() {
 }
 
 /// @ai-generated - Tier 3: whitespace-only change to dep type → NO invalidation
+///
+/// Retired Tier-3 smart-invalidator semantics. The whitespace-edit
+/// stability invariant is produced by `parse_stable_hash` (alpha-
+/// normalised structural fingerprint). Coverage lives in
+/// `parse_stable_hash_invariance.rs` and
+/// `fact_semantic_display_split.rs`.
 #[test]
-#[ignore = "R3 retired eager Tier-3 smart invalidation at Stage 7. Cosmetic-stability (whitespace, comments) is now provided by parse_stable_hash + the semantic/display fact split (R13)."]
+#[ignore = "Ledger: replaced by parse_stable_hash_invariance.rs + fact_semantic_display_split.rs; the smart-invalidator cosmetic-stability oracle this exercised is retired."]
 fn tier3_whitespace_only_change_no_invalidation() {
     let host = VerterHost::new_standalone(HostConfig::default());
 
