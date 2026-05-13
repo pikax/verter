@@ -308,6 +308,78 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     // `get_component_meta_via_view`.
     //
     fn view(&self) -> Box<dyn crate::session_view::SessionView + '_>;
+
+    // -------- Push-style fact-read tracer (cold-path only) ---------
+    //
+    // Cold-compute callers record each fact they read from a
+    // content-addressed source through [`observe`] /
+    // [`observe_borrowed_signature`]. On warm-hit paths no tracer is
+    // installed; both convenience methods become observable no-ops.
+    //
+    // The tracer is owned by an installer that brackets one cold
+    // compute on one thread; see
+    // [`crate::VerterHost::with_fact_tracer`] for the RAII entry
+    // point. The trait method [`current_fact_tracer`] returns the
+    // active tracer (if any) without exposing the installer
+    // mechanism — implementers may install through TLS, a per-host
+    // map, or any other substrate.
+    //
+    // R24 zero-allocation guarantee: when no tracer is installed,
+    // `current_fact_tracer()` returns `None` and the default-impl
+    // [`observe`] / [`observe_borrowed_signature`] methods short-
+    // circuit without entering any allocator path.
+    //
+    // R25 cold-path-only contract: the tracer is active on cold
+    // compute and write-admission paths only. Warm hits validate
+    // their stored `fact_dep_signature` directly without
+    // instantiating a tracer.
+
+    /// Return the active fact-read tracer if one is installed.
+    ///
+    /// Returns `None` on warm-hit paths and on any non-cold-compute
+    /// caller. Implementations install a tracer for the duration of
+    /// one cold compute via a documented installer (the default
+    /// implementer wires this through
+    /// [`crate::VerterHost::with_fact_tracer`]).
+    ///
+    /// Resolver-tier consumers (route-db lookups, materialiser
+    /// cache hits, audit-event emitters) call this method to
+    /// route their observations onto the active tracer. The
+    /// integration-test surface (`tests/`) and public-API mirror
+    /// [`crate::VerterHost::current_fact_tracer`] exercise this
+    /// method through the same TLS slot the resolver tier uses.
+    #[allow(dead_code)]
+    fn current_fact_tracer(&self) -> Option<&crate::resolver_core::FactReadSetCell>;
+
+    /// Record one observed fact onto the active tracer, or no-op if
+    /// none is active.
+    ///
+    /// Cold-compute callers MUST call this for each fact they read
+    /// from a content-addressed source. Warm-hit fast-path callers
+    /// SHOULD NOT call it — the call is cheap, but the design
+    /// intent is that warm validation reads the existing
+    /// `fact_dep_signature` directly.
+    #[inline]
+    #[allow(dead_code)]
+    fn observe(&self, fact: crate::resolver_core::FactVersionRef) {
+        if let Some(cell) = self.current_fact_tracer() {
+            cell.observe(fact);
+        }
+    }
+
+    /// Bulk-record a routed-hit's existing dep-signature onto the
+    /// active tracer.
+    ///
+    /// Used when a higher-tier cold compute consumes a lower-tier
+    /// cached result; the caller inherits the callee's observations
+    /// without re-walking them.
+    #[inline]
+    #[allow(dead_code)]
+    fn observe_borrowed_signature(&self, sig: &[crate::resolver_core::FactVersionRef]) {
+        if let Some(cell) = self.current_fact_tracer() {
+            cell.observe_borrowed_signature(sig);
+        }
+    }
 }
 
 // Sealed marker — only `VerterHost` may implement `ResolverContext`.
@@ -566,5 +638,172 @@ impl ResolverContext for crate::VerterHost {
     #[inline]
     fn view(&self) -> Box<dyn crate::session_view::SessionView + '_> {
         Box::new(crate::session_view::HostViewRef::new(self))
+    }
+
+    // Fact tracer ----------------------------------------------------
+
+    #[inline]
+    fn current_fact_tracer(&self) -> Option<&crate::resolver_core::FactReadSetCell> {
+        fact_tracer_tls::current_tracer()
+    }
+}
+
+// ── `with_fact_tracer` installer ──────────────────────────────────────
+//
+// One cold compute on one thread holds a `FactReadSetCell` for its
+// lifetime. The installer plants the cell into a TLS slot and the
+// trait method [`ResolverContext::current_fact_tracer`] reads it.
+//
+// **Why this is NOT an R18 violation.** R18 forbids hidden global
+// view state — views must be passed explicitly so concurrent
+// sessions don't see each other's overlays. The fact tracer is a
+// different substrate: it is per-compute, per-thread instrumentation
+// that NEVER stores host state and NEVER influences resolver
+// semantics. The TLS slot is a back-end for the
+// [`crate::VerterHost::with_fact_tracer`] RAII scope and is reachable
+// only through the documented trait method. The contract is:
+//   1. The installer brackets exactly one cold compute on one thread.
+//   2. Nested installers panic — observations must never silently
+//      route to a sibling tracer.
+//   3. Readers must go through `ResolverContext::current_fact_tracer`,
+//      never through the TLS slot directly. The slot is private to
+//      this module.
+//
+// The trait-method discipline is the architectural contract. The TLS
+// implementation is hidden inside this module and is not part of any
+// public surface.
+
+mod fact_tracer_tls {
+    use std::cell::Cell;
+    use std::ptr;
+
+    use crate::resolver_core::FactReadSetCell;
+
+    thread_local! {
+        /// Active per-compute tracer for this thread, or null when no
+        /// installer is on the stack. Stored as a raw pointer so the
+        /// trait method can hand out a `&FactReadSetCell` borrow whose
+        /// lifetime is tied to the borrow of `&self` on the host.
+        /// The installer guards this pointer's validity for the
+        /// scope's duration.
+        static ACTIVE_TRACER: Cell<*const FactReadSetCell> = const { Cell::new(ptr::null()) };
+    }
+
+    /// Plant `cell` into the TLS slot and return the previous value
+    /// for the [`RestoreGuard`] to restore on drop. Panics if a
+    /// tracer is already installed — observations must never
+    /// silently route to a sibling tracer.
+    pub(super) fn install(cell: &FactReadSetCell) {
+        ACTIVE_TRACER.with(|slot| {
+            let prev = slot.get();
+            assert!(
+                prev.is_null(),
+                "FactReadSet tracers must not nest — installer was \
+                 called inside an active `with_fact_tracer` scope. \
+                 Observations from the inner scope would silently \
+                 route to the outer scope and never surface."
+            );
+            slot.set(cell as *const FactReadSetCell);
+        });
+    }
+
+    /// Clear the TLS slot. Called on the installer's `Drop`.
+    pub(super) fn clear() {
+        ACTIVE_TRACER.with(|slot| {
+            slot.set(ptr::null());
+        });
+    }
+
+    /// Return the currently-installed tracer, or `None` when no
+    /// installer is on the stack.
+    ///
+    /// The returned borrow lives for the lifetime of the trait-method
+    /// call. The installer's RAII guard guarantees the pointer is
+    /// valid for the entire duration of the cold compute that
+    /// installed it.
+    #[inline]
+    pub(super) fn current_tracer<'a>() -> Option<&'a FactReadSetCell> {
+        ACTIVE_TRACER.with(|slot| {
+            let ptr = slot.get();
+            if ptr.is_null() {
+                None
+            } else {
+                // SAFETY: the installer (`with_fact_tracer`) keeps
+                // the `FactReadSetCell` alive for the entire scope
+                // and clears the slot on drop. No code outside this
+                // module reads the slot. Therefore, while
+                // `ptr.is_null()` is false, the pointee is valid.
+                Some(unsafe { &*ptr })
+            }
+        })
+    }
+}
+
+/// RAII guard that clears the TLS tracer slot on drop.
+///
+/// Internal to the `with_fact_tracer` machinery. Returned by
+/// [`install_tracer`] so the caller's `with_fact_tracer` closure
+/// can hold the guard for the closure's duration.
+struct TracerScope;
+
+impl Drop for TracerScope {
+    fn drop(&mut self) {
+        fact_tracer_tls::clear();
+    }
+}
+
+impl crate::VerterHost {
+    /// Run `f` with a fact tracer installed; return
+    /// `(R, FactReadSet)`.
+    ///
+    /// The tracer accumulates every `observe` /
+    /// `observe_borrowed_signature` call made through any
+    /// [`ResolverContext`] reference derived from this host
+    /// inside the closure.
+    ///
+    /// Nested scopes panic — a cold compute cannot install a second
+    /// tracer over an active one because observations would route to
+    /// the inner scope and never bubble up to the outer one.
+    ///
+    /// The tracer is `!Send + !Sync` and is installed on the caller's
+    /// thread only. Worker threads spawned from inside `f` do NOT
+    /// inherit the tracer; consumers that fan out work across threads
+    /// must collect signatures explicitly and call
+    /// [`ResolverContext::observe_borrowed_signature`] on the parent
+    /// thread to merge the worker's facts.
+    #[must_use]
+    pub fn with_fact_tracer<F, R>(&self, f: F) -> (R, crate::resolver_core::FactReadSet)
+    where
+        F: FnOnce() -> R,
+    {
+        let cell = crate::resolver_core::FactReadSetCell::new();
+        // Install + immediately bind the scope guard so the TLS slot
+        // is cleared on any subsequent panic. `install` itself panics
+        // if a tracer is already on the stack — that panic propagates
+        // BEFORE the guard binds, leaving the outer scope's TLS slot
+        // untouched.
+        fact_tracer_tls::install(&cell);
+        let scope = TracerScope;
+        let result = f();
+        // Explicit drop so the slot is cleared before we consume
+        // `cell.into_inner()`. After this point no `&FactReadSetCell`
+        // can leak out of TLS.
+        drop(scope);
+        (result, cell.into_inner())
+    }
+
+    /// Public accessor for the active fact tracer.
+    ///
+    /// Returns the currently-installed [`FactReadSetCell`] handle, or
+    /// `None` when no [`Self::with_fact_tracer`] scope is on the
+    /// stack. This is the public-API mirror of the resolver-tier
+    /// trait method `ResolverContext::current_fact_tracer` and exists
+    /// so consumers outside the resolver-tier seal (notably integration
+    /// tests + benches) can verify warm-hit vs cold-compute behaviour
+    /// without depending on the sealed trait.
+    #[inline]
+    #[must_use]
+    pub fn current_fact_tracer(&self) -> Option<&crate::resolver_core::FactReadSetCell> {
+        fact_tracer_tls::current_tracer()
     }
 }
