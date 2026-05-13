@@ -1742,6 +1742,14 @@ pub struct ProjectTypeStore {
     /// TS lib data). See
     /// [`crate::resolved_import_facts::ResolvedImportFactsDb`].
     resolved_import_facts: crate::resolved_import_facts::ResolvedImportFactsDb,
+    /// R28 — lazy `Member.semantic_hash` store.
+    /// Keyed on `parse_stable_hash` so cosmetic edits preserve the entry.
+    /// See [`crate::member_semantic_fact_store::MemberSemanticFactStore`].
+    member_semantic_facts: crate::member_semantic_fact_store::MemberSemanticFactStore,
+    /// R28 — lazy `Member.display_hash` store.
+    /// Keyed on `content_hash` so cosmetic edits recompute display facts only.
+    /// See [`crate::member_display_fact_store::MemberDisplayFactStore`].
+    member_display_facts: crate::member_display_fact_store::MemberDisplayFactStore,
     /// Debug / diagnostic counters.
     pub counters: ProjectTypeStoreCounters,
 }
@@ -1866,6 +1874,9 @@ impl ProjectTypeStore {
             resolved_type_cache_db: ResolvedTypeCacheDb::new(),
             semantic_db: parking_lot::Mutex::new(verter_semantic::db::SemanticDb::new()),
             resolved_import_facts: crate::resolved_import_facts::ResolvedImportFactsDb::new(),
+            member_semantic_facts:
+                crate::member_semantic_fact_store::MemberSemanticFactStore::new(),
+            member_display_facts: crate::member_display_fact_store::MemberDisplayFactStore::new(),
             counters,
         }
     }
@@ -2098,6 +2109,26 @@ impl ProjectTypeStore {
         &self.resolved_import_facts
     }
 
+    /// R28 — lazy `Member.semantic_hash` store keyed on
+    /// `parse_stable_hash` so cosmetic edits preserve the entry. See
+    /// [`crate::member_semantic_fact_store::MemberSemanticFactStore`]
+    /// for the producer contract.
+    pub fn member_semantic_fact_store(
+        &self,
+    ) -> &crate::member_semantic_fact_store::MemberSemanticFactStore {
+        &self.member_semantic_facts
+    }
+
+    /// R28 — lazy `Member.display_hash` store keyed on `content_hash`
+    /// so cosmetic edits recompute display facts only. See
+    /// [`crate::member_display_fact_store::MemberDisplayFactStore`]
+    /// for the producer contract.
+    pub fn member_display_fact_store(
+        &self,
+    ) -> &crate::member_display_fact_store::MemberDisplayFactStore {
+        &self.member_display_facts
+    }
+
     /// Issue #6 / accessor for the `AppConfigNoOverrideProof`
     /// cache consulted by the ComponentConfig theme variant fast path.
     /// On miss, the fast path declines and the slow path runs.
@@ -2187,6 +2218,13 @@ impl ProjectTypeStore {
         // so subsequent semantic queries observe an unavailable cache
         // and recompute against fresh facts.
         self.semantic_db.lock().invalidate(canonical_id);
+        // R28 — the two-fact `MemberPresence`/`Member` model splits
+        // body fingerprints across semantic vs display lanes. A
+        // per-canonical content edit drops both lanes' entries for
+        // the canonical so subsequent member-body fingerprints emit
+        // from fresh source.
+        self.member_semantic_facts.invalidate_canonical(canonical_id);
+        self.member_display_facts.invalidate_canonical(canonical_id);
         // D48 split: the per-domain compile-cache entries
         // (CompileCacheDb / DerivedRawCacheDb / DependencyCacheDb) are
         // NOT dropped here. The matrix routes the "source content

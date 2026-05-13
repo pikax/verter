@@ -19,6 +19,8 @@
     {"field": "indexed", "method": "remove"},
     {"field": "materialize_memo_db", "method": "invalidate_canonical"},
     {"field": "materialize_structure_db", "method": "invalidate_for_canonical"},
+    {"field": "member_display_facts", "method": "invalidate_canonical"},
+    {"field": "member_semantic_facts", "method": "invalidate_canonical"},
     {"field": "owner_collection_db", "method": "invalidate_canonical"},
     {"field": "owner_import_surfaces", "method": "remove"},
     {"field": "prepared_member_db", "method": "invalidate_canonical"},

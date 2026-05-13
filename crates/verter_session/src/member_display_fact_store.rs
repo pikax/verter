@@ -87,6 +87,15 @@ impl MemberDisplayFactStore {
     pub fn clear(&self) {
         self.entries.clear();
     }
+
+    /// Drop every cached entry whose `canonical` matches the supplied
+    /// canonical id. Used by the project-global eviction cascade when
+    /// a canonical file's content changes (per the
+    /// `evict_canonical_inventory.json` contract).
+    pub fn invalidate_canonical(&self, canonical: &str) {
+        self.entries
+            .retain(|key, _| key.canonical.as_ref() != canonical);
+    }
 }
 
 /// Build a `FactKey::Member` discriminator from a
