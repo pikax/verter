@@ -422,11 +422,16 @@ impl VerterHost {
         //
         // R3 target end-state: fact-based read validation is the
         // sole correctness oracle, with eager invalidation removed.
-        // The cross-file fact-graph wiring (producer admission with
-        // dep-precise signatures) is a prerequisite. Until producers
-        // carry complete cross-file signatures, the per-canonical
-        // eviction below remains as a backstop for cross-file edits
-        // so the consumer warm path observes a fresh recompute.
+        // Substrate landed under Stage 7C: producer-side
+        // barrel-chain fact observation in
+        // `OwnerImportSurface.fact_dep_signature` (Gap 1) +
+        // workspace-content-generation gating of known-miss import
+        // route resolutions (Gap 2). Further substrate (route
+        // surface cache fact-validation, multi-candidate
+        // route_owned_shallow, cross-file fact-aware imported
+        // roots) is still in flight; the per-canonical eviction
+        // below remains as a backstop for cross-file edits so
+        // consumer warm paths observe a fresh recompute.
         self.resolver.runtime.evict_canonical(&canonical_id);
         crate::host_manage::push_cache_drained_at_upsert("resolver_runtime", &canonical_id);
         self.project_type_store.evict_canonical(&canonical_id);

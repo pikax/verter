@@ -115,7 +115,10 @@ impl OwnerImportSurfaceDb {
 
     /// Look up the owner surface for `owner_canonical` if the cached entry
     /// matches `expected_owner_whole_hash`. Stale entries are rejected at
-    /// the key level so no callers observe a mixed-version surface.
+    /// the key level so no callers observe a mixed-version surface. This
+    /// permissive variant does NOT validate `fact_dep_signature` against
+    /// any view; production callers prefer [`Self::get_with_view`] which
+    /// gates the entry on its observed chain facts (R3/R26/R28).
     ///
     /// Lookups against a Db whose `schema_version` does not match the current
     /// [`crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION`] return `None`
@@ -151,6 +154,34 @@ impl OwnerImportSurfaceDb {
             }
         }
         result
+    }
+
+    /// Look up the owner surface for `owner_canonical` and validate
+    /// every fact recorded in its `fact_dep_signature` against the
+    /// caller's `StoreView`. R3/R26/R28: the producer threads
+    /// every barrel/reexport chain participant's fact into the
+    /// signature so a chain-internal change (barrel retarget, route
+    /// surface edit) invalidates the cached surface on read — no
+    /// eager `evict_canonical` required.
+    #[must_use]
+    pub fn get_with_view<V>(
+        &self,
+        owner_canonical: &str,
+        expected_owner_whole_hash: Hash16,
+        view: &V,
+    ) -> Option<Arc<OwnerImportSurface>>
+    where
+        V: crate::resolver_core::StoreView,
+    {
+        let candidate = self.get(owner_canonical, expected_owner_whole_hash)?;
+        if candidate
+            .fact_dep_signature
+            .iter()
+            .all(|fact| view.validates(fact))
+        {
+            return Some(candidate);
+        }
+        None
     }
 
     /// Insert or replace the surface for `owner_canonical`. A replacement

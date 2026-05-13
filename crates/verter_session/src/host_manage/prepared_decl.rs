@@ -646,12 +646,34 @@ impl VerterHost {
         let canonical_id = normalized_canonical_id.as_ref();
 
         // Fast path: check FileArtifactStore through the project-global cache.
-        let cached = self.project_type_store.indexed().get_any(canonical_id);
-        if let Some(indexed) = cached {
-            // Staleness gate: the ambient-or-explicit store view governs hash
-            // identity. Inside a request, an outdated entry is rejected and
-            // we fall through to re-materialize. Outside a request this gate
-            // is permissive.
+        // R3 cutover: query the scheduler's current `whole_hash` for the
+        // canonical and pin the lookup to it. With eager
+        // `evict_canonical` removed at upsert, the `get_any`
+        // permissive lookup could return a stale candidate alongside
+        // the fresh content's entry; gating on the scheduler's
+        // current hash forces the cache to serve the authoritative
+        // version per R1 (content-addressed identity).
+        let current_whole_hash = self
+            .effective_file_state(canonical_id, None)
+            .map(|state| state.whole_hash);
+        if let Some(current_hash) = current_whole_hash {
+            if let Some(indexed) = self
+                .project_type_store
+                .indexed()
+                .get(canonical_id, current_hash)
+            {
+                component_meta_trace_custom!(
+                    "ensure_indexed_ready_fast_hit",
+                    format!("owner={} whole_hash={:?}", canonical_id, indexed.whole_hash),
+                );
+                return Some(indexed);
+            }
+        } else if let Some(indexed) = self.project_type_store.indexed().get_any(canonical_id) {
+            // Scheduler doesn't have a current snapshot (e.g. the
+            // canonical was loaded from a foreign source path or test
+            // seed) — fall back to the permissive lookup that gives
+            // the first matching candidate. Staleness in that path is
+            // not driven by content upserts.
             if self.store_view_allows_current_whole_hash(canonical_id, indexed.whole_hash) {
                 component_meta_trace_custom!(
                     "ensure_indexed_ready_fast_hit",
@@ -966,8 +988,24 @@ impl VerterHost {
         };
         match singleflight.run(canonical_id.to_owned(), token, || {
             // Re-check cache inside the flight — another thread may have
-            // populated it after we dropped the first probe.
-            if let Some(indexed) = self.project_type_store.indexed().get_any(canonical_id) {
+            // populated it after we dropped the first probe. Gate the
+            // re-check on the scheduler's current `whole_hash` for the
+            // same reason as the outer fast-path: with eager
+            // `evict_canonical` retired, a stale candidate could
+            // coexist with the fresh entry and `get_any` is not
+            // content-discriminating.
+            let current_whole_hash = self
+                .effective_file_state(canonical_id, None)
+                .map(|state| state.whole_hash);
+            if let Some(current_hash) = current_whole_hash {
+                if let Some(indexed) = self
+                    .project_type_store
+                    .indexed()
+                    .get(canonical_id, current_hash)
+                {
+                    return Ok(indexed);
+                }
+            } else if let Some(indexed) = self.project_type_store.indexed().get_any(canonical_id) {
                 return Ok(indexed);
             }
             materialize().ok_or(())
@@ -1463,8 +1501,20 @@ impl VerterHost {
         let shallow = self.shallow_file_state(owner_canonical)?;
         let whole_hash = shallow.whole_hash;
         let surfaces = self.project_type_store.owner_import_surfaces();
-        if let Some(cached) = surfaces.get(owner_canonical, whole_hash) {
+        // R3/R26/R28: fact-validate the cached surface against the
+        // live store view. A barrel retarget / chain-internal edit
+        // invalidates the entry on read via its recorded
+        // `fact_dep_signature`. Stale-key cleanup keeps the cache
+        // bounded — when the chain facts no longer validate, we
+        // drop the entry outright so the next build replaces it.
+        let live_view = self.resolver_store_view();
+        if let Some(cached) =
+            surfaces.get_with_view(owner_canonical, whole_hash, &live_view)
+        {
             return Some(cached);
+        }
+        if surfaces.get(owner_canonical, whole_hash).is_some() {
+            surfaces.remove(owner_canonical);
         }
 
         component_meta_trace_custom!(

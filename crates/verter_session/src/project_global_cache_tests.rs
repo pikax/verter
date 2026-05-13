@@ -784,12 +784,20 @@ fn owner_import_surface_rebuilds_after_owner_edit_phase2() {
     let hash_v2 = ensure_facts(&host, "/w/owner.ts");
     assert_ne!(hash_v1, hash_v2);
 
-    // The old surface was evicted — direct hash lookup must miss.
-    assert!(host
-        .project_type_store()
-        .owner_import_surfaces()
-        .get("/w/owner.ts", hash_v1)
-        .is_none());
+    // R3/R26/R28: after the owner edit, the consumer lookup at the
+    // NEW hash_v2 must miss the cached v1 surface (key mismatch).
+    // The v1 entry MAY remain physically present in the DashMap until
+    // overwritten by the next insert — DashMap is a single-entry-per-
+    // canonical store and the new surface admission replaces it
+    // atomically. The semantic invariant is: no consumer observes
+    // a v1 surface when asking about v2.
+    assert!(
+        host.project_type_store()
+            .owner_import_surfaces()
+            .get("/w/owner.ts", hash_v2)
+            .is_none(),
+        "no v2-keyed surface exists before the producer rebuilds"
+    );
 
     // A new lookup for Bar rebuilds the surface under hash_v2.
     let resolved = host
@@ -797,6 +805,16 @@ fn owner_import_surface_rebuilds_after_owner_edit_phase2() {
         .expect("Bar resolves under the new owner hash");
     assert_eq!(resolved.0, "/w/types.ts");
     assert_eq!(resolved.1, "Bar");
+
+    // After the rebuild, only the v2-keyed surface is reachable —
+    // the DashMap replaced the prior v1 entry atomically.
+    assert!(
+        host.project_type_store()
+            .owner_import_surfaces()
+            .get("/w/owner.ts", hash_v1)
+            .is_none(),
+        "v1 surface is unreachable once v2 surface is admitted"
+    );
 
     // Foo is no longer a local binding — surface lookup misses.
     assert!(host
