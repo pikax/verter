@@ -137,6 +137,43 @@ impl VerterHost {
         crate::parse::imported_eval_source_type(canonical_id, raw_source, cached_parse)
     }
 
+    /// Stage 10 — view-aware variant of [`Self::read_analysis_source`].
+    ///
+    /// Consults `view.source(canonical)` FIRST so overlay-only
+    /// sources are visible to the resolver tier; falls back to the
+    /// base host's read path on miss.
+    ///
+    /// Per R17: the view does NOT mutate the host. Per R18: the view
+    /// is threaded explicitly (no TLS view globals). Per the Stage
+    /// 10 contract: only call sites with a view in scope (those
+    /// rooted at `get_component_meta_via_view` / `evaluate_types`
+    /// session entry-points) use this variant.
+    ///
+    /// Substrate-only API. Resolver-tier migration of deep callers
+    /// (e.g., `extract_component_meta_from_inputs`,
+    /// `compute_template_analysis_if_missing`) is staged separately
+    /// because each consumer signature change is a non-trivial
+    /// architectural surface change; the substrate is in place so
+    /// future plans can migrate consumers incrementally.
+    #[allow(dead_code)]
+    pub(crate) fn read_analysis_source_via_view(
+        &self,
+        canonical_id: &str,
+        view: &dyn crate::session_view::SessionView,
+    ) -> Option<Arc<str>> {
+        if canonical_id.is_empty() {
+            return None;
+        }
+        if let Some(source) = view.source(canonical_id) {
+            component_meta_trace_custom!(
+                "read_analysis_source_result",
+                read_analysis_source_result_detail(canonical_id, "session-view", source.len(), false),
+            );
+            return Some(source);
+        }
+        self.read_analysis_source(canonical_id)
+    }
+
     pub(crate) fn read_analysis_source(&self, canonical_id: &str) -> Option<Arc<str>> {
         component_meta_trace_custom!("read_analysis_source", format!("owner={canonical_id}"));
         if canonical_id.is_empty() {
