@@ -83,8 +83,17 @@ fn family_a_entries_carry_fact_dep_signature() {
 }
 
 /// The legacy `engine_dep_signature_for_canonical` helper is no
-/// longer called by Family A producers. The new
-/// `engine_fact_signature_*` helpers cover all 9 call sites.
+/// longer called by Family A producers. Per the R28 path-precise
+/// contract, callers select one of:
+/// - `engine_fact_signature_for_canonical_member` — for caches
+///   keyed on a single member of an exporter type
+///   (`MemberPresence + Member`).
+/// - `engine_fact_signature_for_exported_type` — for caches keyed
+///   on a top-level type identity
+///   (`Export + LocalDecl + MemberShape`).
+/// - `engine_fact_signature_for_canonical_surface` — for caches
+///   whose validity depends on the file's surface fingerprint
+///   (`SyntacticExportSet`).
 #[test]
 fn family_a_producers_call_new_fact_helpers() {
     let registry =
@@ -92,13 +101,13 @@ fn family_a_producers_call_new_fact_helpers() {
     assert!(
         !registry.contains("engine_dep_signature_for_canonical("),
         "registry_decl.rs must NOT call engine_dep_signature_for_canonical after the R28 \
-         migration — use engine_fact_signature_for_canonical_member instead."
+         migration — use engine_fact_signature_for_exported_type instead."
     );
     assert!(
-        registry.contains("engine_fact_signature_for_canonical_member("),
-        "registry_decl.rs must call engine_fact_signature_for_canonical_member for its 4 \
+        registry.contains("engine_fact_signature_for_exported_type("),
+        "registry_decl.rs must call engine_fact_signature_for_exported_type for its 4 \
          (canonical, name)-keyed cache producers (imported_registry_db, declaration_lookup_db, \
-         resolvability_db, owner_collection_db)."
+         resolvability_db, owner_collection_db) — these track top-level type identity."
     );
 
     let prepared_surface =
@@ -106,12 +115,19 @@ fn family_a_producers_call_new_fact_helpers() {
     assert!(
         !prepared_surface.contains("engine_dep_signature_for_canonical("),
         "prepared_surface.rs must NOT call engine_dep_signature_for_canonical after the R28 \
-         migration — use engine_fact_signature_for_canonical_member instead."
+         migration — use the engine_fact_signature_* helpers instead."
+    );
+    // PreparedSurface and PreparedTarget observe top-level identity;
+    // PreparedMember observes per-member facts.
+    assert!(
+        prepared_surface.contains("engine_fact_signature_for_exported_type("),
+        "prepared_surface.rs must call engine_fact_signature_for_exported_type for the \
+         prepared_surface_db and prepared_target_db cache producers (top-level identity)."
     );
     assert!(
         prepared_surface.contains("engine_fact_signature_for_canonical_member("),
-        "prepared_surface.rs must call engine_fact_signature_for_canonical_member for its \
-         3 cache producers (prepared_surface_db, prepared_member_db, prepared_target_db)."
+        "prepared_surface.rs must call engine_fact_signature_for_canonical_member for the \
+         prepared_member_db cache producer (path-precise member observation per R28)."
     );
 
     let routed_expr =
@@ -119,12 +135,12 @@ fn family_a_producers_call_new_fact_helpers() {
     assert!(
         !routed_expr.contains("engine_dep_signature_for_canonical("),
         "routed_expr.rs must NOT call engine_dep_signature_for_canonical after the R28 \
-         migration — use engine_fact_signature_for_canonical_member instead."
+         migration — use engine_fact_signature_for_exported_type instead."
     );
     assert!(
-        routed_expr.contains("engine_fact_signature_for_canonical_member("),
-        "routed_expr.rs must call engine_fact_signature_for_canonical_member for the \
-         routed_expr_surface_db cache producer."
+        routed_expr.contains("engine_fact_signature_for_exported_type("),
+        "routed_expr.rs must call engine_fact_signature_for_exported_type for the \
+         routed_expr_surface_db cache producer (top-level identity)."
     );
 
     let materialize = read_session_source("meta_resolve/materialize/field_types.rs");
