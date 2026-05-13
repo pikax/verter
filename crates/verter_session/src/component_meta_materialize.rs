@@ -405,10 +405,19 @@ fn finish_cacheable(
             .indexed()
             .get_any(key.scope_canonical_id.as_ref())
         {
+            let whole_hash = indexed.whole_hash;
             local_fence.push((
                 Arc::clone(&key.scope_canonical_id),
-                DepVersion::WholeHash(indexed.whole_hash),
+                DepVersion::WholeHash(whole_hash),
             ));
+            // Sub-task E: mirror the scope-canonical fence push onto
+            // the active fact-read tracer. R24 — silent when no
+            // tracer is installed.
+            crate::component_meta_audit::observe_fence_entry(
+                ctx,
+                &key.scope_canonical_id,
+                &DepVersion::WholeHash(whole_hash),
+            );
         }
     }
     if !outcome.is_cacheable() {
@@ -633,6 +642,13 @@ pub(crate) fn materialize_component_meta_structure(
                         &mut local_fence,
                         &body_read.dep_signature,
                     );
+                    // Sub-task E: observe the sub-query's signature
+                    // onto the active tracer alongside the legacy
+                    // fence merge.
+                    crate::component_meta_audit::observe_dep_signature(
+                        ctx,
+                        &body_read.dep_signature,
+                    );
                     let body_id = match body_read.value {
                         QueryResult::Value(id) => id,
                         _ => {
@@ -670,6 +686,12 @@ pub(crate) fn materialize_component_meta_structure(
                     });
                     crate::component_meta_audit::merge_dep_signature_into_local_fence(
                         &mut local_fence,
+                        &projected.dep_signature,
+                    );
+                    // Sub-task E: observe the projected sub-query
+                    // onto the active fact-read tracer.
+                    crate::component_meta_audit::observe_dep_signature(
+                        ctx,
                         &projected.dep_signature,
                     );
                     let projected_id = match projected.value {
@@ -777,6 +799,12 @@ pub(crate) fn materialize_component_meta_structure(
                     &mut local_fence,
                     &read.dep_signature,
                 );
+                // Sub-task E: observe the Instantiate sub-query onto
+                // the active tracer alongside the legacy fence merge.
+                crate::component_meta_audit::observe_dep_signature(
+                    ctx,
+                    &read.dep_signature,
+                );
                 match read.value {
                     QueryResult::Value(body_id) => {
                         // Recursively materialise the resolved body
@@ -793,6 +821,12 @@ pub(crate) fn materialize_component_meta_structure(
                         let body_read = materialize_component_meta_structure(ctx, body_key);
                         crate::component_meta_audit::merge_dep_signature_into_local_fence(
                             &mut local_fence,
+                            &body_read.dep_signature,
+                        );
+                        // Sub-task E: observe the recursive materialise
+                        // call's signature onto the active tracer.
+                        crate::component_meta_audit::observe_dep_signature(
+                            ctx,
                             &body_read.dep_signature,
                         );
                         match body_read.value {
@@ -862,6 +896,12 @@ pub(crate) fn materialize_component_meta_structure(
                     &mut local_fence,
                     &read.dep_signature,
                 );
+                // Sub-task E: observe the ProjectPath sub-query's
+                // signature onto the active fact-read tracer.
+                crate::component_meta_audit::observe_dep_signature(
+                    ctx,
+                    &read.dep_signature,
+                );
                 match read.value {
                     QueryResult::Value(id) => MaterializeOutcome::Value(id),
                     QueryResult::Recursive(_) => MaterializeOutcome::Tainted(key_for_compute.base),
@@ -878,10 +918,19 @@ pub(crate) fn materialize_component_meta_structure(
                 .indexed()
                 .get_any(key_for_compute.scope_canonical_id.as_ref())
             {
+                let whole_hash = indexed.whole_hash;
                 local_fence.push((
                     Arc::clone(&key_for_compute.scope_canonical_id),
-                    DepVersion::WholeHash(indexed.whole_hash),
+                    DepVersion::WholeHash(whole_hash),
                 ));
+                // Sub-task E: mirror the scope-canonical seed push
+                // onto the active fact-read tracer. R24 — silent when
+                // no tracer is installed.
+                crate::component_meta_audit::observe_fence_entry(
+                    ctx,
+                    &key_for_compute.scope_canonical_id,
+                    &DepVersion::WholeHash(whole_hash),
+                );
             }
         }
         if !outcome.is_cacheable() {
@@ -1101,6 +1150,11 @@ fn materialize_child_at_nested(
         local_fence,
         &sub_read.dep_signature,
     );
+    // Sub-task E: mirror the sub-query's legacy dep_signature onto the
+    // active fact-read tracer so the parent cold compute accumulates
+    // the same fact observations the child saw. R24 — silent on the
+    // no-tracer fast path.
+    crate::component_meta_audit::observe_dep_signature(ctx, &sub_read.dep_signature);
     let new_value = match sub_read.value {
         MaterializeOutcome::Value(id) | MaterializeOutcome::Miss(id) => id,
         // Non-cacheable outcomes — keep the input child id symbolic.

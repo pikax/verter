@@ -140,3 +140,59 @@ fn route_db_writes_record_fact_dep_signatures() {
          facts cannot revalidate."
     );
 }
+
+/// Sub-task E: every dispatch / sub-query in the materialiser cold-
+/// compute path MUST observe its consumed signature onto the active
+/// fact-read tracer via `observe_dep_signature` / `observe_fence_entry`.
+///
+/// The arch-guard counts observe call sites in the materialiser and
+/// requires they cover every dispatch-family + every fence-push site.
+/// A regression below the threshold means a dispatch family or a
+/// scope-canonical seed push is missing its observe pairing — the
+/// fact-based tracer would record an incomplete signature and the
+/// strict admission guard would either refuse the resulting cache
+/// candidate (`admission_refused_count` increments) or admit a
+/// candidate that misses some of its real dependencies (silent
+/// staleness on later edits).
+#[test]
+fn materialiser_pipeline_observes_dep_signatures_on_every_dispatch_family() {
+    let path = crates_dir()
+        .join("verter_session")
+        .join("src")
+        .join("component_meta_materialize.rs");
+    let src = read(&path);
+
+    // Discrimination 1: at least one `observe_dep_signature` per
+    // dispatch family (Pick/Omit body, Pick/Omit projected,
+    // recursive Instantiate body, ProjectPath fallback, sub-query
+    // via `materialize_child_at_nested`). Counting the call sites
+    // pins each family.
+    let observe_dep_count = src.matches("observe_dep_signature(").count();
+    assert!(
+        observe_dep_count >= 6,
+        "materialiser must observe sub-query dep signatures via \
+         `observe_dep_signature(ctx, ...)` at every dispatch family \
+         (Pick/Omit body, Pick/Omit projected, Instantiate body, \
+         recursive body materialise, ProjectPath fallback, \
+         materialize_child_at_nested). Got {} call sites — a value \
+         below 6 means a dispatch family is missing its observe \
+         pairing; the resulting cold compute would record an \
+         incomplete fact-dep signature.",
+        observe_dep_count
+    );
+
+    // Discrimination 2: at least one `observe_fence_entry` per
+    // scope-canonical seed push (`finish_cacheable` + the in-place
+    // closure seed at the end of `materialize_component_meta_structure`).
+    let observe_fence_count = src.matches("observe_fence_entry(").count();
+    assert!(
+        observe_fence_count >= 2,
+        "materialiser must observe scope-canonical seed pushes via \
+         `observe_fence_entry(...)` in both `finish_cacheable` AND \
+         the cold-compute closure tail. Got {} call sites — a value \
+         below 2 means the scope-canonical whole_hash dependency is \
+         not recorded on the active fact-read tracer; downstream \
+         staleness signals would miss owner-file edits.",
+        observe_fence_count
+    );
+}

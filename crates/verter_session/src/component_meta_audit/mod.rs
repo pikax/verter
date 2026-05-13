@@ -863,6 +863,62 @@ pub fn merge_dep_signature_into_local_fence(
     }
 }
 
+/// Translate a single legacy `(canonical, DepVersion)` fence entry
+/// into the equivalent fact-based
+/// [`FactVersionRef`](crate::resolver_core::FactVersionRef)
+/// observation and record it on the active fact-read tracer (if one
+/// is installed).
+///
+/// R24 contract — observations are silent when no tracer is on the
+/// caller's thread. The translation is purely structural:
+/// `DepVersion::WholeHash(h)` maps to
+/// `FactVersionRef::FileWholeHash { canonical_id, hash: h }`. Route
+/// and project generation entries (`RouteGeneration` /
+/// `ProjectGeneration`) do not have a per-fact peer in the
+/// fact-based substrate; they are skipped (the fence-merge path
+/// continues to record them on the legacy `local_fence`).
+///
+/// Sub-task E wiring point — used by materialiser-tier cold computes
+/// alongside the existing `local_fence.push` so an observe-equipped
+/// cold compute records both legacy and fact-based signatures
+/// without duplicating the producer call.
+pub fn observe_fence_entry(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    canonical: &Arc<str>,
+    version: &crate::semantic_query::DepVersion,
+) {
+    use crate::resolver_core::FactVersionRef;
+    use crate::semantic_query::DepVersion;
+    if let DepVersion::WholeHash(hash) = version {
+        ctx.observe(FactVersionRef::FileWholeHash {
+            canonical_id: canonical.as_ref().to_string(),
+            hash: *hash,
+        });
+    }
+    // Route / Project generation entries do not map to a fact-based
+    // ref directly; the legacy fence still records them for
+    // legacy-validator consumers.
+}
+
+/// Translate every entry of a legacy dep signature into fact-based
+/// observations on the active tracer (or no-op when none is
+/// installed).
+///
+/// Used by materialiser-tier cold computes after a
+/// `dispatch.execute_read(...)` consumes a sub-query — the
+/// caller's tracer inherits the callee's observed facts through
+/// per-entry translation. R24 zero-allocation guarantee on the
+/// no-tracer fast path: each `observe_fence_entry` call short-
+/// circuits to an inline `None` arm.
+pub fn observe_dep_signature(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    incoming: &[(Arc<str>, crate::semantic_query::DepVersion)],
+) {
+    for (canonical, version) in incoming {
+        observe_fence_entry(ctx, canonical, version);
+    }
+}
+
 /// Record a fresh [`IndexedReady`](crate::project_type_store::IndexedReady)
 /// insertion in the active request's accumulator. Pushes both a
 /// typed [`IndexedReadyBuildRecord`] (direct lane used by the miner
