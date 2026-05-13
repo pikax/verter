@@ -335,8 +335,8 @@ impl Scheduler {
             .collect()
     }
 
-    /// Path C C13 — dispatch a batch of non-staged scheduler jobs
-    /// (per-job-kind work that does not flow through the
+    /// Dispatch a batch of non-staged scheduler jobs (per-job-kind
+    /// work that does not flow through the
     /// Source → Analysis → Artifact lifecycle). Each job runs as a
     /// closure on the scheduler's CPU pool and the function returns
     /// per-job results in submission order.
@@ -348,9 +348,12 @@ impl Scheduler {
     /// single-request synchronous path through
     /// `MetaSession::get_component_meta`.
     ///
-    /// Counter side effect: each dispatched job increments
-    /// `counters.submit_count` so contention instrumentation can
-    /// observe Batch-mode parallelism.
+    /// Counter side effect: increments `counters.submit_count` by
+    /// **exactly one per batch dispatch**, regardless of `jobs.len()`.
+    /// One batch dispatch is one scheduler submission; the N individual
+    /// jobs share that submission's context. Callers can rely on
+    /// `submit_count` being O(1) per `dispatch_meta_jobs` call (zero
+    /// when `jobs` is empty).
     ///
     /// On WASM (single-threaded), runs sequentially on the calling
     /// thread — same observable behaviour, no Rayon fan-out.
@@ -363,11 +366,15 @@ impl Scheduler {
         F: Fn(&crate::stage::SchedulerJobKind) -> R + Sync + Send,
         R: Send,
     {
-        for _ in &jobs {
-            self.counters
-                .submit_count
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if jobs.is_empty() {
+            return Vec::new();
         }
+        // One scheduler submission per batch dispatch, independent of
+        // `jobs.len()` — see the batch-API verify-bullet:
+        // `submit_count` increases by exactly 1 per batch.
+        self.counters
+            .submit_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         #[cfg(not(target_arch = "wasm32"))]
         {
             use rayon::prelude::*;

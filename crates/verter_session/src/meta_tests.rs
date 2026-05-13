@@ -96,13 +96,13 @@ fn open_session_defaults_to_interactive_mode() {
     );
 }
 
-/// Path C C13 — Batch-mode `get_component_meta_batch` dispatches N
-/// independent component-meta queries through the scheduler's CPU
-/// pool and bumps `scheduler.counters().submit_count` by N. Every
-/// per-id result resolves to the same shape the synchronous
-/// `get_component_meta` path returns, so callers can rely on
-/// observable equivalence between the two execution modes while only
-/// the fan-out characteristic differs.
+/// `get_component_meta_batch` performs a **single** scheduler
+/// submission per batch dispatch. `submit_count` increases by exactly
+/// one, independent of `jobs.len()` (R7 / R8 — one view, one
+/// scheduler context, shared admissions). Every per-id result resolves
+/// to the same shape the synchronous `get_component_meta` path returns,
+/// so callers can rely on observable equivalence between the two
+/// execution modes while only the fan-out characteristic differs.
 #[test]
 fn get_component_meta_batch_dispatches_through_scheduler() {
     use std::sync::atomic::Ordering;
@@ -150,9 +150,12 @@ fn get_component_meta_batch_dispatches_through_scheduler() {
         );
     }
     let after_submit = scheduler.counters().submit_count.load(Ordering::Relaxed);
-    assert!(
-        after_submit >= baseline_submit + 3,
-        "batch dispatch should bump scheduler.counters.submit_count by at least N=3 (baseline={baseline_submit} after={after_submit})",
+    assert_eq!(
+        after_submit - baseline_submit,
+        1,
+        "batch dispatch is O(1) per batch: \
+         scheduler.counters.submit_count MUST bump by exactly 1 \
+         regardless of N=3 jobs (baseline={baseline_submit} after={after_submit})",
     );
 }
 

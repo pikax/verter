@@ -616,27 +616,35 @@ impl MetaSession {
         Ok(analysis)
     }
 
-    /// Path C C13 — Batch-mode fan-out for N independent component-meta
-    /// queries through the scheduler's CPU pool.
+    /// Batch surface for [`Self::get_component_meta`]: compute metadata
+    /// for `canonical_or_aliases` in a single scheduler dispatch under
+    /// **one shared overlay view**.
     ///
-    /// Constructs one [`SchedulerJobKind::ComponentMeta`] per requested
-    /// canonical id and submits the batch to
-    /// [`Scheduler::dispatch_meta_jobs`], which runs each query in
-    /// parallel on the scheduler's Rayon pool. Returns per-id results
-    /// in submission order. Use this from test harnesses, the MCP
-    /// server, and any other Batch-mode caller that has more than one
-    /// independent component-meta query in flight at a time.
+    /// Construction contract:
+    ///
+    /// - the session's overlay map is snapshotted **once** into a
+    ///   borrow-based [`crate::session_view::OverlaidViewRef`] that
+    ///   lives for the duration of the batch (no per-id view rebuild);
+    /// - the scheduler dispatches the N jobs in a single batched
+    ///   submission, so `scheduler.counters().submit_count` increases
+    ///   by exactly one (independent of N);
+    /// - all N jobs route through
+    ///   [`VerterHost::get_component_meta_via_view`] against the same
+    ///   `&dyn SessionView`, so they share the host-owned admission
+    ///   caches (`MaterializeStructureDb`, `ComponentMetaResultDb`,
+    ///   `SemanticGraphStore`) — two files importing the same inner
+    ///   type collapse to a single materialiser admission, not N.
+    ///
+    /// Per-id failures (budget overruns, alias errors) surface in the
+    /// per-result `Result` slot; the batch does not abort on per-id
+    /// failure. Returns one result slot per input file in input order;
+    /// `Err(MetaError::Shutdown)` only when the project itself has
+    /// been shut down before dispatch.
     ///
     /// Interactive callers (LSP, single-request SFC fetches) should
-    /// continue using [`Self::get_component_meta`] — the single-request
-    /// synchronous path is the lowest-latency option for one query and
-    /// avoids the Rayon scheduling overhead Batch mode introduces.
-    ///
-    /// Returns `Err(MetaError::Shutdown)` when the project has been
-    /// shut down. Per-query budget errors surface in the per-result
-    /// `Result` slot, so the caller can inspect each query
-    /// independently.
-    #[allow(dead_code)]
+    /// continue using [`Self::get_component_meta`] — for one query, the
+    /// single-request synchronous path avoids the Rayon dispatch cost
+    /// Batch mode pays.
     pub fn get_component_meta_batch(
         &self,
         canonical_or_aliases: &[String],
@@ -652,6 +660,7 @@ impl MetaSession {
         use std::sync::Arc;
         self.check_alive()?;
         let scheduler = self.project.host().scheduler();
+        let host = self.project.host();
         let jobs: Vec<verter_scheduler::stage::SchedulerJobKind> = canonical_or_aliases
             .iter()
             .map(
@@ -660,16 +669,18 @@ impl MetaSession {
                 },
             )
             .collect();
-        // Self-borrow for the closure — scheduler.dispatch_meta_jobs
-        // requires `Sync + Send` on the executor. `&MetaSession` is
-        // `Sync` because all interior shared state goes through
-        // `Arc`/atomics. The closure body re-enters the synchronous
-        // `get_component_meta` path so overlay-aware resolution stays
-        // identical to the Interactive path.
-        let session_ref = self;
-        let results = scheduler.dispatch_meta_jobs(jobs, |job| {
-            let verter_scheduler::stage::SchedulerJobKind::ComponentMeta { canonical_id } = job;
-            session_ref.get_component_meta(canonical_id.as_ref())
+        // Snapshot the session overlay map ONCE for the entire batch so
+        // every dispatched job sees identical view semantics (R17 — base
+        // host is never mutated; R18 — the view is passed explicitly).
+        // `with_overlay_view` borrows the snapshot for the duration of
+        // the closure; the scheduler runs the N jobs synchronously
+        // before the closure returns, so the snapshot stays alive
+        // across the whole batch.
+        let results = self.with_overlay_view(|view| {
+            scheduler.dispatch_meta_jobs(jobs, |job| {
+                let verter_scheduler::stage::SchedulerJobKind::ComponentMeta { canonical_id } = job;
+                Ok(host.get_component_meta_via_view(canonical_id.as_ref(), view))
+            })
         });
         Ok(results)
     }
