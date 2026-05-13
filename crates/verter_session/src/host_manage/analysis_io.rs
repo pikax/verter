@@ -1293,7 +1293,9 @@ impl VerterHost {
         self.resolver.runtime.invalidate_canonical(&canonical);
         self.project_type_store.evict_canonical(&canonical);
         self.resolved_type_cache().clear();
-        self.semantic_invalidate(&canonical);
+        // R4 producer: rebuild parse-domain facts for the externally
+        // changed canonical.
+        self.register_facts_for_new_content(&canonical);
         self.bump_store_view_epoch();
     }
 

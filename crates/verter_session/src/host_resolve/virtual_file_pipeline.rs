@@ -246,20 +246,21 @@ impl VerterHost {
     /// `(canonical_id, profile)` hit the compile cache without doing any
     /// work?
     ///
-    /// Body mirrors the freshness predicate the writer uses inside
-    /// `get_virtual_file` (see this file at the start of the
-    /// `cache_miss` block — `slot.semantic_hash == parse.semantic_hash
+    /// Mirrors the freshness predicate the writer uses inside
+    /// `get_virtual_file` (`slot.semantic_hash == parse.semantic_hash
     /// && slot.style_override_hash == soh && slot.content_override_hash
-    /// == coh`). binds this predicate to remain
-    /// in lockstep with the writer; if the writer's predicate ever
+    /// == coh && fact-signature validates`). The predicate stays in
+    /// lockstep with the writer; if the writer's predicate ever
     /// changes, this accessor changes with it.
     ///
-    /// Eviction in the host fast path (`host_upsert.rs` byte-identical
-    /// branch) calls `cc.compile_slots.clear()`; a missing slot makes
-    /// this accessor return `false`, which matches the writer's
-    /// observable behavior on an evicted entry. The predicate
-    /// therefore intentionally does NOT carry an `if cc.evicted`
-    /// early-return — the writer doesn't either.
+    /// R3 fact-validation gates the warm hit: the `slot.semantic_hash`
+    /// check covers the owning canonical's own content identity, but
+    /// cross-file dependency edits (e.g. `/src/types.ts` mutates while
+    /// `/src/Comp.vue` is unchanged) only surface through
+    /// `compile_slot_fact_signature_validates`. A consumer with a
+    /// stale fact_dep_signature lookup mismatches the active view
+    /// here and the predicate returns `false`, which routes the
+    /// caller through cold recompute.
     pub fn compile_slot_is_warm(&self, canonical_id: &str, profile: &CompileProfile) -> bool {
         use crate::host_executor::HostSourceData;
         let canonical = self.resolve_alias_or_canonical(canonical_id);
@@ -296,6 +297,7 @@ impl VerterHost {
         slot.semantic_hash == parse.semantic_hash
             && slot.style_override_hash == soh
             && slot.content_override_hash == coh
+            && self.compile_slot_fact_signature_validates(slot)
     }
 
     /// Retrieve a compiled virtual file (script, template, style, or main bundle).

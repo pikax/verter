@@ -155,9 +155,23 @@ pub(crate) fn observe_compile_tier_dependencies(
 /// Emit a `ParseFactRef` observation against the producer's current
 /// fact registry. The `expected_hash` is recovered from
 /// `FileArtifactStore::get_artifacts_any(canonical_id).facts.lookup(&key)`
-/// at the moment of cold-compute. If the fact is absent, observe
-/// the sentinel `[0u8; 16]` so a later population (or its absence)
-/// is still discriminating — the validator detects mismatch.
+/// at the moment of cold-compute.
+///
+/// Two outcomes:
+///
+/// - Hash present → observe `FactVersionRef::Parse` with the real
+///   hash. A later mismatch invalidates the consumer.
+/// - Hash absent (file not in artifact store yet, fact not yet
+///   emitted) → DO NOT OBSERVE. Observing a `ZERO_HASH` sentinel
+///   would mean the consumer becomes invalid the moment the
+///   producer finally populates the fact, which is semantically
+///   wrong: the consumer did not depend on the absence. The
+///   conservative behaviour is to skip the observation, accepting
+///   that this specific dependency will not invalidate the consumer
+///   on a subsequent edit. Producers may revisit this when a fully
+///   populated artifact-store invariant is in place; until then,
+///   skipping prevents false-positive invalidations on the very
+///   first compile of a freshly-upserted file.
 fn observe_parse_fact_present(
     host: &VerterHost,
     canonical_id: &str,
@@ -165,8 +179,9 @@ fn observe_parse_fact_present(
     key: FactKey,
     lane: FactLane,
 ) {
-    let expected_hash =
-        lookup_parse_fact_hash(host, canonical_id, &key, lane).unwrap_or_else(zero_hash);
+    let Some(expected_hash) = lookup_parse_fact_hash(host, canonical_id, &key, lane) else {
+        return;
+    };
     cell.observe(FactVersionRef::Parse(ParseFactRef {
         canonical_id: canonical_id.to_string(),
         key,
@@ -190,10 +205,6 @@ fn lookup_parse_fact_hash(
         FactLane::Semantic => fact.semantic_hash,
         FactLane::Display => fact.display_hash,
     })
-}
-
-fn zero_hash() -> Hash16 {
-    [0u8; 16]
 }
 
 fn symbol_space_for_import(import: &AnalyzedImport) -> SymbolSpace {

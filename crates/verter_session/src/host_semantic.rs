@@ -263,11 +263,24 @@ impl VerterHost {
         QueryResult::complete(schema, revision)
     }
 
-    /// Invalidate cached semantic facts for a file.
+    /// R4 producer: register parse-domain facts for new content.
     ///
-    /// Called when the VFS reports a file change, a provider restarts,
-    /// or project config changes.
-    pub fn semantic_invalidate(&self, canonical_id: &str) {
+    /// On a content_hash transition for a canonical file, drop the
+    /// previously-cached `FileSemantic` from `SemanticDb` so the next
+    /// resolver pass rebuilds the parse-domain fact registry for the
+    /// new bytes. This is the parse-domain *producer* contract — NOT
+    /// downstream cache invalidation. Downstream caches revalidate
+    /// lazily through their own `fact_dep_signature` checks (R3).
+    ///
+    /// Called from:
+    /// - `upsert_with_priority` (pre-parse step for the upserted
+    ///   canonical)
+    /// - `host_manage::analysis_io::on_workspace_external_change`
+    ///   (rebuild facts after a workspace-driven content change)
+    /// - `host_lifecycle::reload_canonical` (deletion / unload
+    ///   propagation; the new content for a reloaded canonical
+    ///   produces fresh facts).
+    pub fn register_facts_for_new_content(&self, canonical_id: &str) {
         self.semantic_db().invalidate(canonical_id);
     }
 

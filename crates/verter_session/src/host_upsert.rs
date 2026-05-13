@@ -68,12 +68,15 @@ impl VerterHost {
         req: UpsertRequest,
         priority: Priority,
     ) -> Result<HostUpdateResult, HostError> {
-        // Invalidate semantic cache for this file before re-parsing.
-        // Mandatory invariant per row "Pre-invalidation
-        // invariant" — batch upserts route through here, NOT through
-        // `upsert_via_scheduler_with_priority` directly.
+        // R4 producer: drop the prior parse-domain `FileSemantic`
+        // for this canonical so the next resolver pass rebuilds the
+        // fact registry from the new content. This is the producer
+        // contract — NOT downstream cache invalidation. Downstream
+        // caches revalidate lazily through their own
+        // `fact_dep_signature` checks (R3); the upsert itself does
+        // not eagerly drain them.
         if let Some(ref id) = req.canonical_id {
-            self.semantic_db().invalidate(id);
+            self.register_facts_for_new_content(id);
         }
 
         // Test-only observable: lets `compile_many_propagates_*_priority`
@@ -425,7 +428,7 @@ impl VerterHost {
         crate::host_manage::push_cache_drained_at_upsert("project_type_store", &canonical_id);
         self.resolved_type_cache().clear();
         crate::host_manage::push_cache_drained_at_upsert("resolved_type_cache", &canonical_id);
-        self.semantic_invalidate(&canonical_id);
+        self.register_facts_for_new_content(&canonical_id);
         crate::host_manage::push_cache_drained_at_upsert("semantic_invalidate", &canonical_id);
 
         self.update_alias_map(&canonical_id, &old_aliases, &alias_set);
