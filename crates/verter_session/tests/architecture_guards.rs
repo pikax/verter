@@ -3703,6 +3703,13 @@ mod foundations_guards {
         // tests/cache_invariant_migration.rs — the W0.5 schema-bump
         // cohort fixture exercises `ComponentMetaResultDb::evict_if_schema_mismatch`.
         "pub mod component_meta_result_db",
+        // R3/R26/R28 compile-tier fact-observation helper module.
+        // Wraps the compile cold-compute pass in
+        // `with_fact_tracer` and emits per-`Member`/`MemberPresence`,
+        // `ImportRef`, and `ModuleAugmentationIndexShape` observations
+        // so cross-file edits invalidate the consumer's CompileSlot
+        // via warm-hit fact-validation without eager invalidation.
+        "pub(crate) mod compile_fact_emission",
         "pub(crate) mod cooperative_admission",
         "pub(crate) mod host_executor",
         "pub(crate) mod host_test_audit",

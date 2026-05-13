@@ -273,6 +273,7 @@ mod tests {
                 last_access_tick: 1,
                 tsx: None,
                 template_analysis: None,
+                fact_dep_signature: std::sync::Arc::from(Vec::new()),
             },
         );
 

@@ -212,6 +212,36 @@ impl VerterHost {
         Ok(())
     }
 
+    /// R3/R26/R28 warm-hit fact-signature oracle.
+    ///
+    /// Validates every fact recorded on `slot.fact_dep_signature`
+    /// against the host's current `HostStoreView`. A single mismatch
+    /// returns `false` and the warm hit misses; the caller falls
+    /// through to cold recompute. Empty signature (cold-compute
+    /// paths not yet wired to the tracer) trivially validates so
+    /// the existing pre-fact semantic_hash / override-hash fast path
+    /// remains the gating predicate until every compile-tier cold
+    /// path wires the tracer.
+    ///
+    /// `O(signature.len())` per call, zero allocation on the empty
+    /// path. Validation reads through the `HostStoreView` snapshot
+    /// captured at the start of the request; concurrent edits do
+    /// NOT race against this read.
+    #[inline]
+    pub(crate) fn compile_slot_fact_signature_validates(
+        &self,
+        slot: &crate::types::CompileSlot,
+    ) -> bool {
+        if slot.fact_dep_signature.is_empty() {
+            return true;
+        }
+        let view = self.resolver_store_view();
+        use crate::resolver_core::StoreView;
+        slot.fact_dep_signature
+            .iter()
+            .all(|fact| view.validates(fact))
+    }
+
     /// Read-only predicate: would `get_virtual_file(query)` for this
     /// `(canonical_id, profile)` hit the compile cache without doing any
     /// work?
@@ -230,11 +260,7 @@ impl VerterHost {
     /// observable behavior on an evicted entry. The predicate
     /// therefore intentionally does NOT carry an `if cc.evicted`
     /// early-return — the writer doesn't either.
-    pub(crate) fn compile_slot_is_warm(
-        &self,
-        canonical_id: &str,
-        profile: &CompileProfile,
-    ) -> bool {
+    pub fn compile_slot_is_warm(&self, canonical_id: &str, profile: &CompileProfile) -> bool {
         use crate::host_executor::HostSourceData;
         let canonical = self.resolve_alias_or_canonical(canonical_id);
         let profile_hash = compile_profile_hash(profile);
@@ -358,6 +384,7 @@ impl VerterHost {
                         if slot.semantic_hash == parse.semantic_hash
                             && slot.style_override_hash == soh
                             && slot.content_override_hash == coh
+                            && self.compile_slot_fact_signature_validates(slot)
                         {
                             #[cfg(feature = "session_metrics")]
                             self.metrics
@@ -494,8 +521,26 @@ impl VerterHost {
             .map(|o| o.hash)
             .unwrap_or(0);
 
+        // R3/R26/R28 cold-compute fact-observation scope. The tracer
+        // accumulates every cross-file fact (per-`Member` /
+        // `MemberPresence` for macro type deps, `ImportRef` per script
+        // import, `ModuleAugmentationIndexShape` per augmented
+        // specifier) that the compile pass reads. The finalised
+        // signature lands on the new `CompileSlot.fact_dep_signature`
+        // and validates the slot on every warm-hit read.
+        let (compile_result, fact_read_set) = self.with_fact_tracer(|| {
+            crate::compile_fact_emission::observe_compile_tier_dependencies(
+                self,
+                &canonical_id,
+                &compile_input.script_imports,
+                &compile_input.macro_type_deps,
+            );
+            self.compile_entry(&compile_input, &query.compile_profile)
+        });
+        let compile_fact_dep_signature =
+            crate::compile_fact_emission::finalise_signature_or_empty(fact_read_set);
         let (compiled_outputs, diagnostics, stale, compiled_tsx, compiled_template_analysis) =
-            match self.compile_entry(&compile_input, &query.compile_profile) {
+            match compile_result {
                 Ok((outputs, diagnostics, tsx, tpl)) => (outputs, diagnostics, false, tsx, tpl),
                 Err(diagnostics) => {
                     self.store_latest_diagnostics(&canonical_id, profile_hash, diagnostics.clone());
@@ -550,6 +595,7 @@ impl VerterHost {
                         last_access_tick: last_tick,
                         tsx: compiled_tsx.clone(),
                         template_analysis: compiled_template_analysis.clone(),
+                        fact_dep_signature: Arc::clone(&compile_fact_dep_signature),
                     },
                 );
                 cc.latest_diagnostics

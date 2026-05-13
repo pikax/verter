@@ -943,6 +943,7 @@ fn invalidate_nodes_removes_last_good() {
             last_access_tick: 1,
             tsx: None,
             template_analysis: None,
+            fact_dep_signature: std::sync::Arc::from(Vec::new()),
         },
     );
 
@@ -3784,6 +3785,7 @@ mod phase2a_upsert_tests {
                     last_access_tick: 0,
                     tsx: None,
                     template_analysis: None,
+                    fact_dep_signature: std::sync::Arc::from(Vec::new()),
                 },
             );
         }

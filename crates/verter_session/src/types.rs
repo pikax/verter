@@ -1333,6 +1333,23 @@ pub(crate) struct CompileSlot {
     #[allow(dead_code)]
     pub(crate) template_analysis:
         Option<verter_semantic::analysis::template::TemplateAnalysisSnapshot>,
+    /// R3/R26/R28 cold-compute fact signature. Accumulated by the
+    /// `with_fact_tracer` scope wrapping the compile cold-compute
+    /// pass; every per-`Member`, per-`MemberPresence`,
+    /// `ImportRef`, and `RouteSurface`
+    /// (incl. `ModuleAugmentationIndexShape`) observation made
+    /// during compile is recorded here. Validated on every warm-hit
+    /// read against the producer's current fact registry — a
+    /// cross-file edit invalidates the affected per-Member fact and
+    /// the consumer's warm hit misses without any eager invalidation.
+    ///
+    /// Empty signature (default) is a valid state for cold-compute
+    /// paths that have not yet been wired to the tracer; the warm-hit
+    /// path treats an empty signature as "no facts observed" and
+    /// falls back to the existing `semantic_hash`/override-hash
+    /// pre-filter. The arch-guard test asserts non-empty signature
+    /// production for the compile cold path on macro-dep files.
+    pub(crate) fact_dep_signature: Arc<[crate::resolver_core::FactVersionRef]>,
 }
 
 /// Lightweight extract of FileEntry fields needed for compilation,
