@@ -190,9 +190,7 @@ impl VerterHost {
             });
         }
 
-        // Strict admission. Bundles always carry `FileWholeHash`
-        // (constructed above) — empty-signature is a programmer
-        // error and is correctly refused by the strict guard.
+        // Strict admission. Bundles always carry `FileWholeHash`.
         self.resolver
             .runtime
             .prepared_decl_bundles
@@ -276,10 +274,7 @@ impl VerterHost {
             });
         }
 
-        // 7. Insert into the stable cache.
-        // Strict admission. Bundles always carry `FileWholeHash`
-        // (constructed above) — empty-signature is a programmer
-        // error and is correctly refused by the strict guard.
+        // 7. Insert into the stable cache. Strict admission — bundles always carry `FileWholeHash`.
         self.resolver
             .runtime
             .prepared_decl_bundles
@@ -1481,9 +1476,8 @@ impl VerterHost {
     /// Resolve a direct owner import binding to its final root identity via
     /// the owner import surface. Returns `(final_canonical,
     /// final_exported_name)` matching the legacy
-    /// [`Self::resolve_imported_type_root`] contract for direct
-    /// owner imports, but sourced from one cached surface per owner version.
-    ///
+    /// [`Self::resolve_imported_type_root`] contract for direct owner
+    /// imports, but sourced from one cached surface per owner version.
     /// Callers that already have the owner canonical plus a local binding
     /// name must prefer this method over `resolve_imported_type_root`
     /// so direct owner imports resolve exactly once per owner version. The
