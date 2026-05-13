@@ -83,7 +83,9 @@ pub use origin_graph::{
     OriginEdgeMetaDto, ProjectPathSegment, ProjectionModeAudit, SemanticNodeKind, VfsLayer,
 };
 pub use payloads::cache_outcomes::CacheOutcomeKind;
-pub use payloads::tags::{BundlerKindTag, CompileTargetTag, LspMethodTag, ProjectionModeTag};
+pub use payloads::tags::{
+    AugmentationTargetKindTag, BundlerKindTag, CompileTargetTag, LspMethodTag, ProjectionModeTag,
+};
 pub use payloads::{
     AuditDiagnosticEntry, AuditDiagnosticKind, BundlerBatchPayload, CompilePayload,
     ComponentMetaPayload, LspRequestPayload, McpToolPayload, SemanticAnalysisPayload,

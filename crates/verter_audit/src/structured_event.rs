@@ -19,6 +19,7 @@ use crate::origin_graph::{
     ProjectionModeAudit, VfsLayer,
 };
 use crate::payloads::cache_outcomes::CacheOutcomeKind;
+use crate::payloads::tags::AugmentationTargetKindTag;
 use crate::record::{u64_as_decimal_string, Hash16};
 
 /// Typed structured event emitted by an audited request path.
@@ -246,6 +247,67 @@ pub enum StructuredAuditEvent {
         /// trail survives future cap tuning.
         cap: u32,
     },
+    /// Module-augmentation stitching produced an effective export
+    /// set for an augmentation target (R29 + G1).
+    ///
+    /// Cold-path only — emitted once per `EffectiveExportSet`
+    /// cold/stale compute, after the augmenter set has been folded
+    /// into the consumer's effective surface. The `target_kind_tag`
+    /// + the parallel optional fields below identify the target.
+    /// `augmenter_count` and `fingerprint` describe the
+    /// `AugmenterSet` that contributed.
+    ModuleAugmentationStitched {
+        /// Discriminator for the augmentation target kind.
+        target_kind_tag: AugmentationTargetKindTag,
+        /// External-specifier text when
+        /// `target_kind_tag == ExternalSpecifier`.
+        external_specifier: Option<Arc<str>>,
+        /// Resolved canonical path when
+        /// `target_kind_tag == ResolvedRelativeCanonical`.
+        resolved_relative_canonical: Option<Arc<str>>,
+        /// Wildcard glob pattern when
+        /// `target_kind_tag == WildcardAmbient`.
+        wildcard_pattern: Option<Arc<str>>,
+        /// Number of augmenters that contributed to the surface.
+        augmenter_count: u32,
+        /// `AugmenterSet.fingerprint` at stitch time. The
+        /// `ModuleAugmentationIndexShape` fact recorded on the
+        /// consumer's `fact_dep_signature` carries this same value
+        /// as its `expected_hash`, so a future augmenter-set change
+        /// invalidates the consumer.
+        fingerprint: Hash16,
+    },
+    /// `FileArtifactStore.augmentation_index` entry was installed
+    /// or refreshed (R29 + G1).
+    ///
+    /// Cold-path only — emitted by the index-population path when
+    /// a new `AugmentationTargetKey` is inserted (`prev_fingerprint
+    /// == None`) or an existing entry's `AugmenterSet.fingerprint`
+    /// transitions because a new augmenter has entered or left
+    /// `FileArtifactStore` (`prev_fingerprint == Some(...)`).
+    /// Downstream consumers that observed the prior fingerprint
+    /// fail their `fact_dep_signature` validation on the next read
+    /// and recompute.
+    ModuleAugmentationIndexShape {
+        /// Discriminator for the augmentation target kind.
+        target_kind_tag: AugmentationTargetKindTag,
+        /// External-specifier text when
+        /// `target_kind_tag == ExternalSpecifier`.
+        external_specifier: Option<Arc<str>>,
+        /// Resolved canonical path when
+        /// `target_kind_tag == ResolvedRelativeCanonical`.
+        resolved_relative_canonical: Option<Arc<str>>,
+        /// Wildcard glob pattern when
+        /// `target_kind_tag == WildcardAmbient`.
+        wildcard_pattern: Option<Arc<str>>,
+        /// Previous fingerprint when this is a refresh; `None` on
+        /// first install.
+        prev_fingerprint: Option<Hash16>,
+        /// New fingerprint after install/refresh.
+        new_fingerprint: Hash16,
+        /// Number of augmenters in the post-install set.
+        augmenter_count: u32,
+    },
     /// Escape hatch for ad-hoc events. Every construction site MUST
     /// carry a `// Custom justified: <reason>` comment.
     Custom {
@@ -390,6 +452,55 @@ impl std::fmt::Display for StructuredAuditEvent {
                 f,
                 "FactSignatureOverflow(size={candidate_size}, cap={cap})"
             ),
+            Self::ModuleAugmentationStitched {
+                target_kind_tag,
+                external_specifier,
+                resolved_relative_canonical,
+                wildcard_pattern,
+                augmenter_count,
+                fingerprint,
+            } => {
+                let target = format_augmentation_target(
+                    *target_kind_tag,
+                    external_specifier.as_deref(),
+                    resolved_relative_canonical.as_deref(),
+                    wildcard_pattern.as_deref(),
+                );
+                write!(
+                    f,
+                    "ModuleAugmentationStitched({target}, n={augmenter_count}, fp={})",
+                    short_hash(fingerprint)
+                )
+            }
+            Self::ModuleAugmentationIndexShape {
+                target_kind_tag,
+                external_specifier,
+                resolved_relative_canonical,
+                wildcard_pattern,
+                prev_fingerprint,
+                new_fingerprint,
+                augmenter_count,
+            } => {
+                let target = format_augmentation_target(
+                    *target_kind_tag,
+                    external_specifier.as_deref(),
+                    resolved_relative_canonical.as_deref(),
+                    wildcard_pattern.as_deref(),
+                );
+                match prev_fingerprint {
+                    Some(prev) => write!(
+                        f,
+                        "ModuleAugmentationIndexShape({target}, prev={}, new={}, n={augmenter_count})",
+                        short_hash(prev),
+                        short_hash(new_fingerprint),
+                    ),
+                    None => write!(
+                        f,
+                        "ModuleAugmentationIndexShape({target}, install={}, n={augmenter_count})",
+                        short_hash(new_fingerprint),
+                    ),
+                }
+            }
             Self::Custom { name, detail } => write!(f, "Custom({name}, {detail})"),
         }
     }
@@ -401,4 +512,30 @@ fn short_hash(hash: &Hash16) -> String {
         s.push_str(&format!("{byte:02x}"));
     }
     s
+}
+
+/// Format an augmentation target for `Display`. Picks the parallel
+/// optional field that matches `target_kind_tag` and renders it
+/// concisely.
+fn format_augmentation_target(
+    target_kind_tag: AugmentationTargetKindTag,
+    external_specifier: Option<&str>,
+    resolved_relative_canonical: Option<&str>,
+    wildcard_pattern: Option<&str>,
+) -> String {
+    match target_kind_tag {
+        AugmentationTargetKindTag::ExternalSpecifier => match external_specifier {
+            Some(spec) => format!("ext={spec}"),
+            None => "ext=?".to_owned(),
+        },
+        AugmentationTargetKindTag::ResolvedRelativeCanonical => match resolved_relative_canonical {
+            Some(canon) => format!("rel={canon}"),
+            None => "rel=?".to_owned(),
+        },
+        AugmentationTargetKindTag::WildcardAmbient => match wildcard_pattern {
+            Some(pat) => format!("wild={pat}"),
+            None => "wild=?".to_owned(),
+        },
+        AugmentationTargetKindTag::GlobalAugmentation => "global".to_owned(),
+    }
 }

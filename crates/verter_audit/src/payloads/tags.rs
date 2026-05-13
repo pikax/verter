@@ -38,6 +38,35 @@ pub enum ProjectionModeTag {
     Skeleton,
 }
 
+/// Augmentation target kind — mirror of
+/// `verter_session::file_artifact_store::AugmentationTargetKind`.
+///
+/// Discriminates the four shapes a `declare module "X" { ... }`
+/// augmentation can target: an external specifier, a relative path
+/// resolved against the augmenter, a wildcard ambient pattern, or
+/// the global block. The concrete target value (specifier text,
+/// resolved canonical, wildcard pattern) lives in the parallel
+/// optional fields of the audit-event variants that carry this tag,
+/// keeping the tag itself `Copy + Hash + Eq`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "audit.generated.ts")]
+pub enum AugmentationTargetKindTag {
+    /// `declare module "vue" {}` — bare specifier resolved through
+    /// the project's module resolver under the resolve env. Default
+    /// because it is the most common archetype on real Vue / React
+    /// codebases.
+    #[default]
+    ExternalSpecifier,
+    /// `declare module "./local" {}` — relative path resolved
+    /// against the augmenter's own canonical.
+    ResolvedRelativeCanonical,
+    /// `declare module "*.css" {}` — wildcard ambient module
+    /// pattern.
+    WildcardAmbient,
+    /// `declare global { ... }` — augments the global scope.
+    GlobalAugmentation,
+}
+
 /// Bundler kind — mirror of the unplugin's bundler discriminator.
 /// Not `Copy` because the `Other` variant carries an owned name.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]

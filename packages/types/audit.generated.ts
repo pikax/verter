@@ -52,6 +52,20 @@ macro_index: number | null, };
 export type AuditDiagnosticKind = "CyclicReference" | "BudgetExceeded" | "OpenConditional" | "ResolverError" | "IdempotentArm" | "EmptyUnionArm" | "Other";
 
 /**
+ * Augmentation target kind — mirror of
+ * `verter_session::file_artifact_store::AugmentationTargetKind`.
+ *
+ * Discriminates the four shapes a `declare module "X" { ... }`
+ * augmentation can target: an external specifier, a relative path
+ * resolved against the augmenter, a wildcard ambient pattern, or
+ * the global block. The concrete target value (specifier text,
+ * resolved canonical, wildcard pattern) lives in the parallel
+ * optional fields of the audit-event variants that carry this tag,
+ * keeping the tag itself `Copy + Hash + Eq`.
+ */
+export type AugmentationTargetKindTag = "ExternalSpecifier" | "ResolvedRelativeCanonical" | "WildcardAmbient" | "GlobalAugmentation";
+
+/**
  * Aggregate summary produced by the bundler's batch run.
  *
  * One payload covers all records the [`crate::batch::BatchAuditAggregator`]
@@ -270,19 +284,6 @@ inflight_aborted_retries: number,
  * Cold entries reaped during generation reconciliation.
  */
 cold_aborts_swept: number, };
-
-/**
- * Why the walker stopped.
- */
-export type ChainTermination = "Complete" | { "DepthExceeded": { 
-/**
- * Depth cap that was exceeded.
- */
-cap: number, } } | { "Cycle": { 
-/**
- * EdgeId where the walker detected the cycle.
- */
-at_edge: EdgeId, } } | "NotFound";
 
 /**
  * Compile request payload.
@@ -1011,60 +1012,6 @@ base: NodeId,
  * Path segments applied from base → result, in order.
  */
 path: Array<ProjectPathSegment>, };
-
-/**
- * Provenance chain returned by [`RequestAuditRecord::why_loaded`] /
- * [`RequestAuditRecord::why_instantiated`]. Always carries a
- * [`ChainTermination`] so renderers can distinguish a complete walk
- * from a depth-capped, cycle-terminated, or shared-load-redirected
- * one.
- */
-export type ProvenanceChain = { 
-/**
- * In-audit `NodeId` the walk started from. `None` when the walker
- * could not locate any matching root in the audit record.
- */
-root: NodeId | null, 
-/**
- * Steps in BFS order. Each step is one derivation edge whose
- * `result` is the current frontier node; `depth` records the hop
- * count from the root.
- */
-steps: Array<ProvenanceStep>, 
-/**
- * Why the walk stopped. `Complete` means the frontier exhausted
- * without hitting any structural termination.
- */
-terminated: ChainTermination, 
-/**
- * Shared-load reuses observed for the queried canonical (only
- * populated by `why_loaded`). Renderers display these as terminal
- * branches per
- */
-shared_load_terminals: Array<SharedLoadReuseRecord>, };
-
-/**
- * One step on a [`ProvenanceChain`].
- */
-export type ProvenanceStep = { 
-/**
- * EdgeId of the derivation edge visited at this step.
- */
-edge_id: EdgeId, 
-/**
- * Distance from the walker's root node (BFS depth).
- */
-depth: number, 
-/**
- * `display_label` of the edge's result node.
- */
-node_label: string, 
-/**
- * The full derivation edge (result / sources / meta) captured
- * verbatim so the TS-side renderer doesn't need to re-resolve
- * edges against the source audit.
- */
-edge: DerivationEdgeRecord, };
 
 /**
  * Top-level audit record for one logical request — the envelope every
@@ -1811,7 +1758,70 @@ candidate_size: number,
  * (1024); the field is recorded explicitly so the audit
  * trail survives future cap tuning.
  */
-cap: number, } } | { "Custom": { 
+cap: number, } } | { "ModuleAugmentationStitched": { 
+/**
+ * Discriminator for the augmentation target kind.
+ */
+target_kind_tag: AugmentationTargetKindTag, 
+/**
+ * External-specifier text when
+ * `target_kind_tag == ExternalSpecifier`.
+ */
+external_specifier: string | null, 
+/**
+ * Resolved canonical path when
+ * `target_kind_tag == ResolvedRelativeCanonical`.
+ */
+resolved_relative_canonical: string | null, 
+/**
+ * Wildcard glob pattern when
+ * `target_kind_tag == WildcardAmbient`.
+ */
+wildcard_pattern: string | null, 
+/**
+ * Number of augmenters that contributed to the surface.
+ */
+augmenter_count: number, 
+/**
+ * `AugmenterSet.fingerprint` at stitch time. The
+ * `ModuleAugmentationIndexShape` fact recorded on the
+ * consumer's `fact_dep_signature` carries this same value
+ * as its `expected_hash`, so a future augmenter-set change
+ * invalidates the consumer.
+ */
+fingerprint: [number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number], } } | { "ModuleAugmentationIndexShape": { 
+/**
+ * Discriminator for the augmentation target kind.
+ */
+target_kind_tag: AugmentationTargetKindTag, 
+/**
+ * External-specifier text when
+ * `target_kind_tag == ExternalSpecifier`.
+ */
+external_specifier: string | null, 
+/**
+ * Resolved canonical path when
+ * `target_kind_tag == ResolvedRelativeCanonical`.
+ */
+resolved_relative_canonical: string | null, 
+/**
+ * Wildcard glob pattern when
+ * `target_kind_tag == WildcardAmbient`.
+ */
+wildcard_pattern: string | null, 
+/**
+ * Previous fingerprint when this is a refresh; `None` on
+ * first install.
+ */
+prev_fingerprint: [number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number] | null, 
+/**
+ * New fingerprint after install/refresh.
+ */
+new_fingerprint: [number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number], 
+/**
+ * Number of augmenters in the post-install set.
+ */
+augmenter_count: number, } } | { "Custom": { 
 /**
  * Short identifier for the event kind.
  */
