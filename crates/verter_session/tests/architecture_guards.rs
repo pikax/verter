@@ -8072,6 +8072,181 @@ fn getcomponentmeta_uses_per_macro_projectors() {
 // `tests/no_legacy_walker.rs` `RETIRED_SYMBOLS` gate which scans
 // the entire workspace, not just `crates/verter_session/src/host_manage/`.
 
+/// R22 + reachability-GC rename guard.
+///
+/// Production source must reference the unified
+/// `evict_unreachable_artifacts` reachability sweep, NOT the
+/// historical `evict_unreachable_indexed_ready` name. The store the
+/// sweep operates on holds `IndexedReady`, `FileFacts`, `ParsedEdges`,
+/// and augmentations under one key, so the broader name is the
+/// correct one. Doc-comment back-references in non-production paths
+/// (e.g. `.phase-markers/`, `tools/orchestrator/reports/`, plan docs)
+/// are out of scope.
+#[test]
+fn reachability_gc_uses_unified_artifact_name() {
+    use std::fs;
+    let scan_dirs = ["crates/verter_session/src", "crates/verter_workspace/src"];
+    let mut violations: Vec<String> = Vec::new();
+    for dir in &scan_dirs {
+        let root = workspace_root().join(dir);
+        let mut stack = vec![root.clone()];
+        while let Some(p) = stack.pop() {
+            let read = match fs::read_dir(&p) {
+                Ok(rd) => rd,
+                Err(_) => continue,
+            };
+            for entry in read.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                let src = match fs::read_to_string(&path) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                for (idx, line) in src.lines().enumerate() {
+                    if line.contains("evict_unreachable_indexed_ready") {
+                        violations.push(format!("{}:{}: {}", path.display(), idx + 1, line.trim()));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "reachability_gc_uses_unified_artifact_name: production source \
+         still references the legacy `evict_unreachable_indexed_ready` \
+         name. The unified sweep is `evict_unreachable_artifacts`. \
+         Violations:\n{}",
+        violations.join("\n")
+    );
+}
+
+/// R22 — reverse graph is never wired to cache invalidation.
+///
+/// Production source must not adjacently combine a reverse-graph
+/// read (`reverse_deps_for`, `affected_canonicals`) with a cache
+/// invalidation / eviction call. The reverse import graph is
+/// content-addressed and serves reachability GC + LSP affected-files
+/// reporting + diagnostics only — wiring it to a cache flush would
+/// resurrect the eager-invalidation model R22 retired.
+///
+/// "Adjacent" is defined as: a reverse-graph read and a forbidden
+/// call appearing within a 5-line sliding window in the same source
+/// file. This is a heuristic gate; it errs on the side of
+/// false-positives so the reviewer can audit any genuinely close
+/// pair. The architecture-guards self-test pair below proves the
+/// heuristic discriminates.
+#[test]
+fn reverse_graph_not_wired_to_invalidation() {
+    use std::fs;
+
+    const REVERSE_READS: &[&str] = &["reverse_deps_for", "affected_canonicals"];
+    const FORBIDDEN_INVALIDATIONS: &[&str] = &[
+        "invalidate_canonical",
+        ".clear()",
+        "evict_canonical",
+        "semantic_invalidate",
+        "smart_invalidate_dependents",
+    ];
+    // host_upsert.rs has a backstop dependent-eviction block that
+    // still reads `reverse_deps_for` to find owners for the byte-
+    // identical-input-failure branch. R3 target removes this once
+    // producer admission carries dep-precise signatures across the
+    // cross-file boundary; until then the block is explicitly
+    // documented and outside the guard's scope.
+    const ALLOW_LIST: &[&str] = &["crates/verter_session/src/host_upsert.rs"];
+
+    let scan_dirs = ["crates/verter_session/src", "crates/verter_workspace/src"];
+    let mut violations: Vec<String> = Vec::new();
+    for dir in &scan_dirs {
+        let root = workspace_root().join(dir);
+        let mut stack = vec![root];
+        while let Some(p) = stack.pop() {
+            let read = match fs::read_dir(&p) {
+                Ok(rd) => rd,
+                Err(_) => continue,
+            };
+            for entry in read.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                // Skip test files — the guard targets production paths
+                // only. Tests legitimately read the reverse graph next
+                // to invalidation calls when characterising older
+                // behaviour.
+                let path_str = path.display().to_string().replace('\\', "/");
+                if path_str.ends_with("_tests.rs") || path_str.contains("/tests/") {
+                    continue;
+                }
+                // Allow-list residual back-stops that R3 will remove.
+                let rel_str = path
+                    .strip_prefix(workspace_root())
+                    .map(|p| p.display().to_string().replace('\\', "/"))
+                    .unwrap_or_else(|_| path_str.clone());
+                if ALLOW_LIST.iter().any(|p| rel_str == *p) {
+                    continue;
+                }
+                let src = match fs::read_to_string(&path) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                let lines: Vec<&str> = src.lines().collect();
+                for (idx, line) in lines.iter().enumerate() {
+                    if !REVERSE_READS.iter().any(|n| line.contains(n)) {
+                        continue;
+                    }
+                    let start = idx.saturating_sub(2);
+                    let end = (idx + 3).min(lines.len());
+                    for (j, neighbour) in lines.iter().enumerate().take(end).skip(start) {
+                        if j == idx {
+                            continue;
+                        }
+                        if FORBIDDEN_INVALIDATIONS
+                            .iter()
+                            .any(|n| neighbour.contains(n))
+                        {
+                            violations.push(format!(
+                                "{}:{}: reverse-graph read adjacent to invalidation `{}` at line {}",
+                                path.display(),
+                                idx + 1,
+                                FORBIDDEN_INVALIDATIONS
+                                    .iter()
+                                    .find(|n| neighbour.contains(*n))
+                                    .copied()
+                                    .unwrap_or("?"),
+                                j + 1,
+                            ));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "reverse_graph_not_wired_to_invalidation: production source \
+         has a reverse-graph read adjacent (within 5 lines) to a cache \
+         invalidation call. R22 forbids wiring the reverse graph to \
+         cache flushes — the reverse axis is content-addressed and \
+         serves reachability GC + LSP affected-files reporting only. \
+         If the adjacency is legitimate (e.g. a documented backstop) \
+         add the file to the guard's allow-list with a one-line \
+         rationale. Violations:\n{}",
+        violations.join("\n")
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Typed-IR-Only Resolver Rule guards (CLAUDE.md "Typed-IR-Only Resolver Rule")
 // ---------------------------------------------------------------------------
