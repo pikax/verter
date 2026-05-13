@@ -46,6 +46,7 @@ pub(crate) mod component_meta_request_impl;
 pub(crate) mod eval_env;
 pub(crate) mod eval_program;
 pub(crate) mod fallthrough;
+pub(crate) mod imported_type_root;
 pub(crate) mod intrinsic_projection;
 pub(crate) mod jsdoc_resolve;
 pub(crate) mod prepared_decl;
