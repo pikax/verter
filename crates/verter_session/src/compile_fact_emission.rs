@@ -70,9 +70,9 @@ pub(crate) fn observe_compile_tier_dependencies(
     };
 
     // 1. Per-import `ImportRef` observation (R12 — parse-domain
-    //    fact carrying the unresolved binding shape). Adding /
-    //    removing an import binding invalidates the compile output
-    //    that references the binding.
+    //    fact carrying the unresolved binding shape on the OWNER's
+    //    file). Adding / removing the binding on the owner side
+    //    invalidates the compile output that references it.
     let mut seen_imports = FxHashSet::default();
     for import in script_imports {
         let space = symbol_space_for_import(import);
@@ -88,6 +88,31 @@ pub(crate) fn observe_compile_tier_dependencies(
                 space,
             };
             observe_parse_fact_present(host, canonical_id, cell, key, FactLane::Semantic);
+
+            // R28 path-precise cross-file: also observe the
+            // `Export(binding, space)` fact on the resolved dep so
+            // that an edit to the imported declaration's body
+            // invalidates the consumer's compile slot. The owner's
+            // `ImportRef` only fingerprints the import shape on the
+            // owner — the dep-side `Export` fact carries the
+            // declaration's body fingerprint. Path-precise: editing
+            // a sibling export in the dep does not invalidate this
+            // consumer.
+            if let Some(resolved_dep) =
+                resolve_import_source_to_canonical(host, canonical_id, import.source.as_str())
+            {
+                let dep_export_key = FactKey::Export {
+                    name: InternedName::from(local.as_str()),
+                    space,
+                };
+                observe_parse_fact_present(
+                    host,
+                    &resolved_dep,
+                    cell,
+                    dep_export_key,
+                    FactLane::Semantic,
+                );
+            }
         }
     }
 
