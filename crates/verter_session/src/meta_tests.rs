@@ -1432,10 +1432,9 @@ defineProps<Props>()
 // is not visible until the resolver consults the active SessionView for
 // source. `get_analysis_via_view` lands the overlay-aware analysis path in
 // stage 6d-followup; threading view-aware source into the resolver pipeline
-// is the remaining work for Stage 7+ (resolver-tier `view.source()`
-// consultation).
+// is future work (resolver-tier `view.source()` consultation).
 #[test]
-#[ignore = "stage-6d-followup: evaluate_types resolver path reads source from base host; overlay-aware source plumbing through the resolver is Stage 7+ work"]
+#[ignore = "consumer paths: evaluate_types resolver reads source from base host; overlay-aware source plumbing through the resolver is future work"]
 fn evaluate_types_reuses_cached_results_until_the_file_changes() {
     let project = make_project();
     project
@@ -5227,7 +5226,7 @@ defineSlots<Slots>()
 }
 
 #[test]
-#[ignore = "stage-6d-followup: evaluate_types resolver path reads dep source from base host; overlay-aware source plumbing through the resolver is Stage 7+ work"]
+#[ignore = "consumer paths: evaluate_types resolver reads dep source from base host; overlay-aware source plumbing through the resolver is future work"]
 fn evaluate_types_invalidates_cached_results_when_dependency_changes() {
     let project = make_project();
     project
@@ -17316,7 +17315,7 @@ fn cached_eval_inputs_track_macro_and_runtime_dependencies() {
 }
 
 #[test]
-#[ignore = "stage-6d-followup: get_component_meta resolver path reads source from base host; overlay-only canonicals not visible until resolver consults view.source() (Stage 7+ work)"]
+#[ignore = "consumer paths: get_component_meta resolver reads source from base host; overlay-only canonicals not visible until resolver consults view.source() (future work)"]
 fn type_reachable_count_zero_falls_back_to_all_sources() {
     // Component with inline defineProps (no macro_type_deps) should still
     // resolve locally without any cross-file imported-eval work.
@@ -18625,7 +18624,7 @@ const emit = defineEmits<{
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "stage-6d-followup: get_component_meta resolver path reads owner source from base host; per-session overlay singleflight isolation requires resolver-tier view.source() consultation (Stage 7+ work)"]
+#[ignore = "consumer paths: get_component_meta resolver reads owner source from base host; per-session overlay singleflight isolation requires resolver-tier view.source() consultation (future work)"]
 fn singleflight_lanes_are_session_scoped() {
     let project = make_project();
     project

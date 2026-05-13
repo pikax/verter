@@ -882,7 +882,7 @@ pub fn merge_dep_signature_into_local_fence(
 /// alongside the existing `local_fence.push` so an observe-equipped
 /// cold compute records both legacy and fact-based signatures
 /// without duplicating the producer call.
-pub fn observe_fence_entry(
+pub(crate) fn observe_fence_entry(
     ctx: &dyn crate::resolver_core::ResolverContext,
     canonical: &Arc<str>,
     version: &crate::semantic_query::DepVersion,
@@ -910,7 +910,7 @@ pub fn observe_fence_entry(
 /// per-entry translation. R24 zero-allocation guarantee on the
 /// no-tracer fast path: each `observe_fence_entry` call short-
 /// circuits to an inline `None` arm.
-pub fn observe_dep_signature(
+pub(crate) fn observe_dep_signature(
     ctx: &dyn crate::resolver_core::ResolverContext,
     incoming: &[(Arc<str>, crate::semantic_query::DepVersion)],
 ) {

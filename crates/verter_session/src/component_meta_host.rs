@@ -867,7 +867,7 @@ defineProps<ButtonProps>()
     }
 
     #[test]
-    #[ignore = "stage-6d-followup: get_component_meta resolver path reads helper deps from base host; overlay-only dependency graphs require resolver-tier view.source() consultation (Stage 7+ work)"]
+    #[ignore = "consumer paths: get_component_meta resolver reads helper deps from base host; overlay-only dependency graphs require future resolver-tier view.source() consultation"]
     fn overlay_queries_reapply_owner_after_overlay_only_helper_upserts() {
         let host = make_host();
         let session = host.open_session_batch().unwrap();

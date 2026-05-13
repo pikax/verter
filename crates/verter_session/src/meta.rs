@@ -161,20 +161,6 @@ pub struct MetaProject {
     next_session_id: AtomicU64,
     /// Terminal shutdown flag.
     shutdown: AtomicBool,
-    /// Project-wide serialisation for overlay-aware consumer queries
-    /// (R17 transient-overlay protocol).
-    ///
-    /// Sessions that thread an overlay-covering view through
-    /// [`VerterHost::evaluate_types_via_view`] or
-    /// [`VerterHost::get_component_meta_via_view`] briefly push their
-    /// overlay source onto the host scheduler, run the cold compute,
-    /// then revert the scheduler view. Holding this mutex around
-    /// that bracket serialises overlay-aware queries across sessions
-    /// so two concurrent sessions never observe each other's
-    /// transient overlay state. The base host invariant (R17) is
-    /// preserved at the end of every query — readers outside the
-    /// session see the base content.
-    overlay_query_lock: parking_lot::Mutex<()>,
 }
 
 impl MetaProject {
@@ -187,7 +173,6 @@ impl MetaProject {
             sessions: parking_lot::RwLock::new(HashMap::new()),
             next_session_id: AtomicU64::new(1),
             shutdown: AtomicBool::new(false),
-            overlay_query_lock: parking_lot::Mutex::new(()),
         })
     }
 
@@ -574,7 +559,6 @@ impl MetaSession {
     /// builds the snapshot directly from the overlay content. This
     /// is the consumer side of the R17 contract (the base host's
     /// caches are not mutated).
-
     pub fn get_analysis(
         &self,
         canonical_or_alias: &str,

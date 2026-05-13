@@ -801,10 +801,7 @@ pub(crate) fn materialize_component_meta_structure(
                 );
                 // Sub-task E: observe the Instantiate sub-query onto
                 // the active tracer alongside the legacy fence merge.
-                crate::component_meta_audit::observe_dep_signature(
-                    ctx,
-                    &read.dep_signature,
-                );
+                crate::component_meta_audit::observe_dep_signature(ctx, &read.dep_signature);
                 match read.value {
                     QueryResult::Value(body_id) => {
                         // Recursively materialise the resolved body
@@ -898,10 +895,7 @@ pub(crate) fn materialize_component_meta_structure(
                 );
                 // Sub-task E: observe the ProjectPath sub-query's
                 // signature onto the active fact-read tracer.
-                crate::component_meta_audit::observe_dep_signature(
-                    ctx,
-                    &read.dep_signature,
-                );
+                crate::component_meta_audit::observe_dep_signature(ctx, &read.dep_signature);
                 match read.value {
                     QueryResult::Value(id) => MaterializeOutcome::Value(id),
                     QueryResult::Recursive(_) => MaterializeOutcome::Tainted(key_for_compute.base),

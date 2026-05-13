@@ -479,7 +479,6 @@ impl VerterHost {
         }
     }
 
-
     /// View-aware variant of [`Self::get_analysis`].
     ///
     /// R17 / R18 — Consults the supplied [`SessionView`] for overlay

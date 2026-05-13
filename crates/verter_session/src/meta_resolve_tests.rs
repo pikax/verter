@@ -4135,7 +4135,7 @@ defineProps<Props>()
 // ===========================================================================
 
 #[test]
-#[ignore = "stage-6d-followup: get_component_meta_with_resolution resolver path reads dep source from base host; overlay-aware source plumbing through the resolver is Stage 7+ work"]
+#[ignore = "consumer paths: get_component_meta_with_resolution resolver reads dep source from base host; overlay-aware source plumbing through the resolver is future work"]
 fn overlay_queries_do_not_reuse_unsound_base_resolved_meta_cache() {
     let project = make_project();
     project
