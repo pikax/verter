@@ -9,6 +9,36 @@
 //! (the
 //! `every_custom_variant_construction_site_has_justification_comment`
 //! architecture guard enforces this).
+//!
+//! # R23 scope-fence (cache-subsystem emissions)
+//!
+//! New emissions on the cache subsystem call paths
+//! (`FileArtifactStore` admit/evict, `FactRegistry` writes,
+//! `RouteDb` per-name resolution, `ValidatedFactCache` validation
+//! summaries, augmentation stitching, augmentation-index updates,
+//! and admission-guard refusals) MUST use the typed
+//! [`StructuredAuditEvent`] variants enumerated below. The
+//! [`StructuredAuditEvent::Custom`] escape hatch is forbidden on
+//! these surfaces — the
+//! `audit_event_shape::stage_6c_augmentation_paths_do_not_emit_custom`
+//! and `audit_event_shape::cache_subsystem_paths_do_not_emit_custom`
+//! arch guards enforce this scope fence in the
+//! `verter_session::resolver_core::route_db`,
+//! `verter_session::file_artifact_store`,
+//! `verter_session::resolver_core::mod`, and
+//! `verter_semantic::facts::registry` source surfaces.
+//!
+//! The typed cache-subsystem variants are:
+//!
+//! - [`StructuredAuditEvent::CacheDrainedAtUpsert`]
+//! - [`StructuredAuditEvent::FactSignatureOverflow`]
+//! - [`StructuredAuditEvent::FactSignatureAdmissionRefused`]
+//! - [`StructuredAuditEvent::ModuleAugmentationStitched`]
+//! - [`StructuredAuditEvent::ModuleAugmentationIndexShape`]
+//! - [`StructuredAuditEvent::FileArtifactCache`]
+//! - [`StructuredAuditEvent::FactRegistryWrite`]
+//! - [`StructuredAuditEvent::FactValidationSummary`]
+//! - [`StructuredAuditEvent::ExportRouteResolved`]
 
 use std::sync::Arc;
 
@@ -19,7 +49,10 @@ use crate::origin_graph::{
     ProjectionModeAudit, VfsLayer,
 };
 use crate::payloads::cache_outcomes::CacheOutcomeKind;
-use crate::payloads::tags::{AdmissionRefusalReason, AugmentationTargetKindTag};
+use crate::payloads::tags::{
+    AdmissionRefusalReason, AugmentationTargetKindTag, FactKeyKindTag, FactLaneTag,
+    FileArtifactCacheAction,
+};
 use crate::record::{u64_as_decimal_string, Hash16};
 
 /// Typed structured event emitted by an audited request path.
@@ -325,6 +358,100 @@ pub enum StructuredAuditEvent {
         /// Number of augmenters in the post-install set.
         augmenter_count: u32,
     },
+    /// `FileArtifactStore` admitted or evicted an artifact entry
+    /// (R5). Cold-path / mutation-path only — warm reads (`get`,
+    /// `get_any`) never emit this event.
+    ///
+    /// The discriminator carries the canonical id, the action
+    /// (`Admit` / `Evict`), the content-hash + parse-env-hash
+    /// dimensions of the affected `FileArtifactKey`, and the
+    /// post-action `entries.len()` so downstream telemetry can
+    /// observe the store's footprint trajectory without an
+    /// out-of-band counter.
+    FileArtifactCache {
+        /// Canonical id whose entry was admitted or evicted.
+        canonical_id: Arc<str>,
+        /// Discriminator for the action.
+        action: FileArtifactCacheAction,
+        /// Content hash dimension of the `FileArtifactKey`.
+        content_hash: Hash16,
+        /// Parse-env hash dimension of the `FileArtifactKey`.
+        parse_env_hash: Hash16,
+        /// Total entries in the store after this action — for
+        /// non-mutating Admit/Evict no-ops the count is the
+        /// post-action store size, which equals the pre-action
+        /// size.
+        entry_count_after: u32,
+    },
+    /// A parse-domain `Fact` was admitted to the `FactRegistry`
+    /// (R10, R11). Parse-time emission — cold path only; fires
+    /// once per fact insertion at shallow-process time. The
+    /// `semantic_hash` / `display_hash` discriminator pair lets
+    /// downstream telemetry observe semantic-vs-display lane
+    /// churn without re-reading the registry.
+    FactRegistryWrite {
+        /// Canonical id whose registry the fact was admitted to.
+        canonical_id: Arc<str>,
+        /// Discriminator for the structural shape of the fact's
+        /// `FactKey`.
+        fact_key_kind: FactKeyKindTag,
+        /// Discriminator for the lane the fact was observed under.
+        lane: FactLaneTag,
+        /// `Fact::semantic_hash` recorded at admission time.
+        semantic_hash: Hash16,
+        /// `Fact::display_hash` recorded at admission time.
+        display_hash: Hash16,
+    },
+    /// Aggregate counters for one `ValidatedFactCache` validation
+    /// pass (R24). Warm-hit aggregation only — counters bump
+    /// once per fact-validation pass close-out, never per-hit on
+    /// the hot path. Per-request consumers fold these counters
+    /// into footprint summaries without paying per-validation
+    /// emission cost.
+    FactValidationSummary {
+        /// Stamped request id this summary attributes to.
+        #[serde(with = "u64_as_decimal_string")]
+        #[ts(type = "string")]
+        request_id: u64,
+        /// Static identifier for the cache layer this summary
+        /// closes (mirrors the discriminator on
+        /// `CacheDrainedAtUpsert.layer`).
+        cache_kind: Arc<str>,
+        /// Number of `fact_dep_signature` validation attempts
+        /// performed during the pass.
+        validations_attempted: u32,
+        /// Number of warm hits — validating candidate found on
+        /// first match.
+        warm_hits: u32,
+        /// Number of stale misses — entry exists but no candidate
+        /// validated under the active view.
+        stale_misses: u32,
+        /// Number of archive-style fallback checks consulted
+        /// during the pass (zero in steady state; non-zero on
+        /// substrate paths that retain a sidecar archive layer).
+        archive_checks: u32,
+    },
+    /// `RouteDb` resolved a per-name route to a canonical+source
+    /// target (R15). Cold-path only — fires when a consumer
+    /// actually walks the `EffectiveExportSet` and the resolver
+    /// admits a fresh route candidate. The `augmented` field
+    /// records whether the resolution went through module
+    /// augmentation stitching, so consumers can correlate
+    /// `ExportRouteResolved` with `ModuleAugmentationStitched`
+    /// without joining on fingerprints.
+    ExportRouteResolved {
+        /// Canonical id of the provider whose surface was queried.
+        provider_canonical: Arc<str>,
+        /// Name the consumer asked for (`exported_name`).
+        exported_name: Arc<str>,
+        /// Canonical id where the route resolved.
+        resolved_canonical: Arc<str>,
+        /// Defining symbol name in the resolved canonical.
+        resolved_source_name: Arc<str>,
+        /// `true` when the resolution traversed an augmenter
+        /// surface; `false` for a bare native route.
+        augmented: bool,
+    },
     /// Escape hatch for ad-hoc events. Every construction site MUST
     /// carry a `// Custom justified: <reason>` comment.
     Custom {
@@ -522,6 +649,51 @@ impl std::fmt::Display for StructuredAuditEvent {
                     ),
                 }
             }
+            Self::FileArtifactCache {
+                canonical_id,
+                action,
+                content_hash,
+                parse_env_hash,
+                entry_count_after,
+            } => write!(
+                f,
+                "FileArtifactCache({canonical_id}, {action:?}, ch={}, pe={}, n={entry_count_after})",
+                short_hash(content_hash),
+                short_hash(parse_env_hash),
+            ),
+            Self::FactRegistryWrite {
+                canonical_id,
+                fact_key_kind,
+                lane,
+                semantic_hash,
+                display_hash,
+            } => write!(
+                f,
+                "FactRegistryWrite({canonical_id}, {fact_key_kind:?}, {lane:?}, sem={}, disp={})",
+                short_hash(semantic_hash),
+                short_hash(display_hash),
+            ),
+            Self::FactValidationSummary {
+                request_id,
+                cache_kind,
+                validations_attempted,
+                warm_hits,
+                stale_misses,
+                archive_checks,
+            } => write!(
+                f,
+                "FactValidationSummary(#{request_id}, {cache_kind}, n={validations_attempted}, warm={warm_hits}, stale={stale_misses}, archive={archive_checks})"
+            ),
+            Self::ExportRouteResolved {
+                provider_canonical,
+                exported_name,
+                resolved_canonical,
+                resolved_source_name,
+                augmented,
+            } => write!(
+                f,
+                "ExportRouteResolved({provider_canonical}::{exported_name} -> {resolved_canonical}::{resolved_source_name}, augmented={augmented})"
+            ),
             Self::Custom { name, detail } => write!(f, "Custom({name}, {detail})"),
         }
     }

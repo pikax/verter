@@ -589,6 +589,43 @@ export type DispatchKeyKind = "ResolveDecl" | "Instantiate" | "ProjectMember" | 
 export type EdgeId = number;
 
 /**
+ * Discriminator naming the shape of a parse-domain
+ * [`FactKey`] published into the registry. Carried by
+ * [`super::super::structured_event::StructuredAuditEvent::FactRegistryWrite`].
+ *
+ * `Copy` + `Hash` + `Eq` so consumers may bucket emission counts
+ * per fact-key kind without owning string data.
+ *
+ * Mirror of the structural-kind enumeration in
+ * `verter_semantic::facts::registry::FactKey`. Only the parse-domain
+ * kinds are mirrored — resolve-imports and route-surface domain
+ * facts use the parallel `ResolvedImportFacts` / `RouteDb`
+ * admission paths and emit their own typed events.
+ */
+export type FactKeyKindTag = "Export" | "ExportAlias" | "SyntacticExportSet" | "LocalDecl" | "Member" | "MemberPresence" | "MemberShape" | "MacroSurface" | "TemplateRoot" | "ImportRef" | "SyntacticReexportRef" | "ModuleAugmentation";
+
+/**
+ * Which lane (`Semantic` or `Display`) a fact carries. Audit-side
+ * mirror of `verter_semantic::facts::registry::FactLane`.
+ *
+ * `Copy` + `Hash` + `Eq` for emission aggregation. Producers
+ * translate the session-side enum to this tag at emission time so
+ * the substrate stays leaf.
+ */
+export type FactLaneTag = "Semantic" | "Display";
+
+/**
+ * Discriminator naming the action a [`FileArtifactStore`] entry
+ * transitions through. Carried by
+ * [`super::super::structured_event::StructuredAuditEvent::FileArtifactCache`].
+ *
+ * `Copy` + `Hash` + `Eq` so consumers may bucket events by action.
+ *
+ * [`FileArtifactStore`]: ../../../../verter_session/src/file_artifact_store.rs.html
+ */
+export type FileArtifactCacheAction = "Admit" | "Evict";
+
+/**
  * Per-file attribution attached to a
  * [`crate::record::RequestAuditRecord::files`] entry.
  */
@@ -1910,7 +1947,103 @@ new_fingerprint: [number, number, number, number, number, number, number, number
 /**
  * Number of augmenters in the post-install set.
  */
-augmenter_count: number, } } | { "Custom": { 
+augmenter_count: number, } } | { "FileArtifactCache": { 
+/**
+ * Canonical id whose entry was admitted or evicted.
+ */
+canonical_id: string, 
+/**
+ * Discriminator for the action.
+ */
+action: FileArtifactCacheAction, 
+/**
+ * Content hash dimension of the `FileArtifactKey`.
+ */
+content_hash: [number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number], 
+/**
+ * Parse-env hash dimension of the `FileArtifactKey`.
+ */
+parse_env_hash: [number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number], 
+/**
+ * Total entries in the store after this action — for
+ * non-mutating Admit/Evict no-ops the count is the
+ * post-action store size, which equals the pre-action
+ * size.
+ */
+entry_count_after: number, } } | { "FactRegistryWrite": { 
+/**
+ * Canonical id whose registry the fact was admitted to.
+ */
+canonical_id: string, 
+/**
+ * Discriminator for the structural shape of the fact's
+ * `FactKey`.
+ */
+fact_key_kind: FactKeyKindTag, 
+/**
+ * Discriminator for the lane the fact was observed under.
+ */
+lane: FactLaneTag, 
+/**
+ * `Fact::semantic_hash` recorded at admission time.
+ */
+semantic_hash: [number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number], 
+/**
+ * `Fact::display_hash` recorded at admission time.
+ */
+display_hash: [number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number], } } | { "FactValidationSummary": { 
+/**
+ * Stamped request id this summary attributes to.
+ */
+request_id: string, 
+/**
+ * Static identifier for the cache layer this summary
+ * closes (mirrors the discriminator on
+ * `CacheDrainedAtUpsert.layer`).
+ */
+cache_kind: string, 
+/**
+ * Number of `fact_dep_signature` validation attempts
+ * performed during the pass.
+ */
+validations_attempted: number, 
+/**
+ * Number of warm hits — validating candidate found on
+ * first match.
+ */
+warm_hits: number, 
+/**
+ * Number of stale misses — entry exists but no candidate
+ * validated under the active view.
+ */
+stale_misses: number, 
+/**
+ * Number of archive-style fallback checks consulted
+ * during the pass (zero in steady state; non-zero on
+ * substrate paths that retain a sidecar archive layer).
+ */
+archive_checks: number, } } | { "ExportRouteResolved": { 
+/**
+ * Canonical id of the provider whose surface was queried.
+ */
+provider_canonical: string, 
+/**
+ * Name the consumer asked for (`exported_name`).
+ */
+exported_name: string, 
+/**
+ * Canonical id where the route resolved.
+ */
+resolved_canonical: string, 
+/**
+ * Defining symbol name in the resolved canonical.
+ */
+resolved_source_name: string, 
+/**
+ * `true` when the resolution traversed an augmenter
+ * surface; `false` for a bare native route.
+ */
+augmented: boolean, } } | { "Custom": { 
 /**
  * Short identifier for the event kind.
  */

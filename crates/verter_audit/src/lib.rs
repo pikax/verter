@@ -85,7 +85,7 @@ pub use origin_graph::{
 pub use payloads::cache_outcomes::CacheOutcomeKind;
 pub use payloads::tags::{
     AdmissionRefusalReason, AugmentationTargetKindTag, BundlerKindTag, CompileTargetTag,
-    LspMethodTag, ProjectionModeTag,
+    FactKeyKindTag, FactLaneTag, FileArtifactCacheAction, LspMethodTag, ProjectionModeTag,
 };
 pub use payloads::{
     AuditDiagnosticEntry, AuditDiagnosticKind, BundlerBatchPayload, CompilePayload,

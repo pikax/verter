@@ -141,3 +141,88 @@ pub enum LspMethodTag {
     /// Open-ended escape hatch for methods not enumerated above.
     Other(String),
 }
+
+/// Discriminator naming the action a [`FileArtifactStore`] entry
+/// transitions through. Carried by
+/// [`super::super::structured_event::StructuredAuditEvent::FileArtifactCache`].
+///
+/// `Copy` + `Hash` + `Eq` so consumers may bucket events by action.
+///
+/// [`FileArtifactStore`]: ../../../../verter_session/src/file_artifact_store.rs.html
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "audit.generated.ts")]
+pub enum FileArtifactCacheAction {
+    /// A fresh `FileArtifacts` payload was admitted to the store —
+    /// either a brand-new canonical or a new content-hash variant
+    /// of an existing canonical. Default because admit dominates
+    /// over evict on the steady-state baseline.
+    #[default]
+    Admit,
+    /// An existing payload was evicted (LRU sweep, project
+    /// generation bump, or explicit `remove_canonical`).
+    Evict,
+}
+
+/// Discriminator naming the shape of a parse-domain
+/// [`FactKey`] published into the registry. Carried by
+/// [`super::super::structured_event::StructuredAuditEvent::FactRegistryWrite`].
+///
+/// `Copy` + `Hash` + `Eq` so consumers may bucket emission counts
+/// per fact-key kind without owning string data.
+///
+/// Mirror of the structural-kind enumeration in
+/// `verter_semantic::facts::registry::FactKey`. Only the parse-domain
+/// kinds are mirrored — resolve-imports and route-surface domain
+/// facts use the parallel `ResolvedImportFacts` / `RouteDb`
+/// admission paths and emit their own typed events.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "audit.generated.ts")]
+pub enum FactKeyKindTag {
+    /// `FactKey::Export` — exported binding. Default because exports
+    /// dominate the registry on the steady-state baseline.
+    #[default]
+    Export,
+    /// `FactKey::ExportAlias` — `export { Foo as Bar }`.
+    ExportAlias,
+    /// `FactKey::SyntacticExportSet` — whole-file export set
+    /// fingerprint.
+    SyntacticExportSet,
+    /// `FactKey::LocalDecl` — locally declared, non-exported
+    /// binding.
+    LocalDecl,
+    /// `FactKey::Member` — lazy member body fingerprint.
+    Member,
+    /// `FactKey::MemberPresence` — eager member header
+    /// fingerprint.
+    MemberPresence,
+    /// `FactKey::MemberShape` — ordered member shape.
+    MemberShape,
+    /// `FactKey::MacroSurface` — Vue macro invocation surface.
+    MacroSurface,
+    /// `FactKey::TemplateRoot` — Vue template root list shape.
+    TemplateRoot,
+    /// `FactKey::ImportRef` — one syntactic import.
+    ImportRef,
+    /// `FactKey::SyntacticReexportRef` — one syntactic re-export
+    /// specifier.
+    SyntacticReexportRef,
+    /// `FactKey::ModuleAugmentation` — one `declare module "X" {}`
+    /// augmenting declaration.
+    ModuleAugmentation,
+}
+
+/// Which lane (`Semantic` or `Display`) a fact carries. Audit-side
+/// mirror of `verter_semantic::facts::registry::FactLane`.
+///
+/// `Copy` + `Hash` + `Eq` for emission aggregation. Producers
+/// translate the session-side enum to this tag at emission time so
+/// the substrate stays leaf.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "audit.generated.ts")]
+pub enum FactLaneTag {
+    /// Semantic lane — type-checker-relevant content. Default.
+    #[default]
+    Semantic,
+    /// Display lane — cosmetic / human-readable rendering only.
+    Display,
+}
