@@ -59,6 +59,12 @@ pub struct OwnerImportSurface {
     /// owner's own whole-hash is always included; transitive target hashes
     /// are appended as they are observed.
     pub dep_signature: DepSignature,
+    /// R3/R26/R28 path-precise dep signature sibling. Bubbles into
+    /// outer fact tracers via
+    /// [`crate::fact_signature_helpers::bubble_fact_signature`].
+    /// AND-gate with the legacy `dep_signature` per codex's Stage
+    /// 7C.A1b guidance.
+    pub fact_dep_signature: Arc<[crate::resolver_core::FactVersionRef]>,
 }
 
 /// Host-owned cache of owner import surfaces. Keyed by owner canonical;
@@ -195,6 +201,7 @@ impl OwnerImportSurfaceDb {
             owner_whole_hash: [0u8; 16],
             bindings: Arc::new(FxHashMap::default()),
             dep_signature: Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
+            fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
         });
         self.insert(canonical, surface);
     }
@@ -283,11 +290,15 @@ where
     sig_entries.sort_by(|a, b| a.0.cmp(&b.0));
     sig_entries.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
 
+    let dep_signature: DepSignature = Arc::from(sig_entries.into_boxed_slice());
+    let fact_dep_signature =
+        crate::component_meta_materialize::fact_signature_from_fence(dep_signature.as_ref());
     Arc::new(OwnerImportSurface {
         owner_canonical,
         owner_whole_hash,
         bindings: Arc::new(bindings),
-        dep_signature: Arc::from(sig_entries.into_boxed_slice()),
+        dep_signature,
+        fact_dep_signature,
     })
 }
 

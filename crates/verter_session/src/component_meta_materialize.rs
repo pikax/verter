@@ -424,9 +424,11 @@ fn finish_cacheable(
         *non_cacheable_slot.borrow_mut() = Some((outcome, local_fence));
         return None;
     }
+    let fact_dep_signature = fact_signature_from_fence(&local_fence);
     Some(MaterializeStructureEntry {
         outcome,
         dep_signature: dep_signature_from_fence(local_fence),
+        fact_dep_signature,
     })
 }
 
@@ -934,9 +936,11 @@ pub(crate) fn materialize_component_meta_structure(
             *non_cacheable_for_compute.borrow_mut() = Some((outcome, local_fence));
             return None;
         }
+        let fact_dep_signature = fact_signature_from_fence(&local_fence);
         Some(MaterializeStructureEntry {
             outcome,
             dep_signature: dep_signature_from_fence(local_fence),
+            fact_dep_signature,
         })
     };
 
@@ -1165,6 +1169,33 @@ fn materialize_child_at_nested(
 #[must_use]
 pub fn dep_signature_from_fence(fence: Vec<(Arc<str>, DepVersion)>) -> DepSignature {
     Arc::from(fence.into_boxed_slice())
+}
+
+/// R3/R26/R28 path-precise sibling of [`dep_signature_from_fence`].
+/// Maps the materialiser's `local_fence` accumulator into the
+/// `Arc<[FactVersionRef]>` form that the new
+/// `fact_dep_signature` field on [`crate::component_meta_caches::MaterializeStructureEntry`]
+/// carries. `WholeHash` entries map to `FileWholeHash`;
+/// `RouteGeneration` / `ProjectGeneration` entries are dropped
+/// (coarse-grained generation counters do not map to a content
+/// hash and would force the warm-cache validator to invalidate on
+/// unrelated activity). Mirrors the conversion used by
+/// `crate::meta_resolve::dep_signature::accumulate_dispatch_dep_signature`.
+#[must_use]
+pub fn fact_signature_from_fence(
+    fence: &[(Arc<str>, DepVersion)],
+) -> Arc<[crate::resolver_core::FactVersionRef]> {
+    use crate::resolver_core::FactVersionRef;
+    let mut out: Vec<FactVersionRef> = Vec::with_capacity(fence.len());
+    for (canonical, version) in fence.iter() {
+        if let DepVersion::WholeHash(hash) = version {
+            out.push(FactVersionRef::FileWholeHash {
+                canonical_id: canonical.as_ref().to_string(),
+                hash: *hash,
+            });
+        }
+    }
+    Arc::from(out)
 }
 
 #[cfg(test)]
@@ -2157,6 +2188,7 @@ export type C<T> = A<T>
         let stale_entry = StdArc::new(MaterializeStructureEntry {
             outcome: MaterializeOutcome::Value(decl_ref_node),
             dep_signature: stale_signature,
+            fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
         });
         let db = host.project_type_store().materialize_structure_db();
         db.entries().insert(key.clone(), stale_entry);
@@ -2494,6 +2526,7 @@ export type C<T> = A<T>
         let stale_entry = std::sync::Arc::new(crate::component_meta_caches::RefCycleEntry {
             result: false,
             dep_signature: stale_signature,
+            fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
             validated_at_generation: std::sync::atomic::AtomicU64::new(u64::MAX),
         });
         let db = host.project_type_store().ref_cycle_db();

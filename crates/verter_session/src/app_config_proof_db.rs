@@ -74,6 +74,12 @@ pub struct AppConfigNoOverrideProofEntry {
     /// file's content_hash plus the workspace-level
     /// `interface_merging_of_app_config_generation` counter.
     pub dep_signature: DepSignature,
+    /// R3/R26/R28 path-precise dep signature sibling. Bubbles into
+    /// outer fact tracers via
+    /// [`crate::fact_signature_helpers::bubble_fact_signature`].
+    /// AND-gate with the legacy `dep_signature` per codex's Stage
+    /// 7C.A1b guidance.
+    pub fact_dep_signature: Arc<[crate::resolver_core::FactVersionRef]>,
 }
 
 /// Host-owned cache. Sole authority for the proof state on
@@ -128,7 +134,12 @@ impl AppConfigNoOverrideProofDb {
     /// contributed to the determination plus the workspace-level
     /// `interface_merging_of_app_config_generation` counter.
     pub fn publish(&self, key: AppConfigNoOverrideProofKey, dep_signature: DepSignature) {
-        let entry = Arc::new(AppConfigNoOverrideProofEntry { dep_signature });
+        let fact_dep_signature =
+            crate::component_meta_materialize::fact_signature_from_fence(dep_signature.as_ref());
+        let entry = Arc::new(AppConfigNoOverrideProofEntry {
+            dep_signature,
+            fact_dep_signature,
+        });
         if self.entries.insert(key, entry).is_none() {
             self.live_counter.fetch_add(1, Ordering::Relaxed);
         }

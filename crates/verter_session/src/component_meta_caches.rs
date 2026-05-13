@@ -1629,7 +1629,17 @@ use crate::component_meta_materialize::{MaterializeOutcome, MaterializeStructure
 /// Entry stored in `MaterializeStructureDb`. Carries the
 /// cacheable `MaterializeOutcome` (`Value` or `Miss` only — `Recursive`
 /// and `Tainted` are non-cacheable per-call sentinels) plus the
-/// `dep_signature` that produced it.
+/// legacy whole-hash `dep_signature` and the R3/R26/R28 path-precise
+/// `fact_dep_signature` observed during the cold build.
+///
+/// The dual signature reflects the AND-gate transitional model:
+/// the legacy DepSignature stays in place for its existing consumer
+/// ecosystem (`accumulate_dispatch_dep_signature` bubble-up,
+/// `dep_signature_valid_for_host` warm-hit validation, audit-event
+/// emission). The fact_dep_signature is the R3/R26/R28 substrate
+/// that bubbles through [`crate::fact_signature_helpers::bubble_fact_signature`]
+/// so an active outer fact tracer accumulates this inner cache's
+/// observation set on every transitive hit.
 #[derive(Clone)]
 pub struct MaterializeStructureEntry {
     /// The cached outcome. ONLY `Value` or `Miss` may be stored here.
@@ -1640,6 +1650,10 @@ pub struct MaterializeStructureEntry {
     /// `peek` and the cooperative-admission post-publish revalidation
     /// to detect stale entries after canonical invalidation.
     pub dep_signature: DepSignature,
+    /// R3/R26/R28 path-precise dep signature. Bubbles into outer
+    /// fact tracers via [`crate::fact_signature_helpers::bubble_fact_signature`]
+    /// for transitive observation coverage.
+    pub fact_dep_signature: Arc<[FactVersionRef]>,
 }
 
 /// Final-result cache for the structural
@@ -1858,6 +1872,7 @@ impl MaterializeStructureDb {
         let entry = Arc::new(MaterializeStructureEntry {
             outcome: MaterializeOutcome::Miss(SemanticNodeId(0)),
             dep_signature: Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
+            fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
         });
         self.entries.insert(key, entry);
         self.live_counter.fetch_add(1, Ordering::Relaxed);
@@ -1960,6 +1975,13 @@ pub struct RefCycleEntry {
     /// `peek`'s slow path to revalidate against `HostFenceValidator`
     /// when `validated_at_generation` is stale.
     pub dep_signature: DepSignature,
+    /// R3/R26/R28 path-precise dep signature sibling to
+    /// `dep_signature`. Bubbles into outer fact tracers via
+    /// [`crate::fact_signature_helpers::bubble_fact_signature`] so an
+    /// active outer cold-compute sees the inner BFS's observation set
+    /// on transitive hits. The AND-gate alongside the legacy
+    /// `dep_signature`.
+    pub fact_dep_signature: Arc<[FactVersionRef]>,
     /// Generation-local validity field. Updated to the
     /// current `workspace().content_generation()` on:
     ///   - cold publish (initial value = current generation);
@@ -2502,9 +2524,12 @@ where
         || -> Option<RefCycleEntry> {
             let mut compute_fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
             let result = compute_bfs(&mut compute_fence);
+            let fact_dep_signature =
+                crate::component_meta_materialize::fact_signature_from_fence(&compute_fence);
             Some(RefCycleEntry {
                 result,
                 dep_signature: Arc::from(compute_fence.into_boxed_slice()),
+                fact_dep_signature,
                 validated_at_generation: AtomicU64::new(current_gen),
             })
         },

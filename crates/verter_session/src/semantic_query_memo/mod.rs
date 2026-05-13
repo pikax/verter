@@ -1750,9 +1750,12 @@ impl SemanticGraphStore {
         if matches!(family, FamilyKey::ResolvedNamedType { .. }) {
             return;
         }
+        let fact_dep_signature =
+            crate::component_meta_materialize::fact_signature_from_fence(dep_signature.as_ref());
         let entry = MemoEntry {
             result: result.clone(),
             dep_signature: dep_signature.clone(),
+            fact_dep_signature,
             walker_diagnostics: Arc::clone(walker_diagnostics),
         };
         let mut entries = self.entries_lock_diagnosed();
@@ -1851,9 +1854,12 @@ impl SemanticGraphStore {
         if self.inflight.lock().contains_key(&key) {
             return;
         }
+        let fact_dep_signature =
+            crate::component_meta_materialize::fact_signature_from_fence(dep_signature.as_ref());
         let entry = MemoEntry {
             result,
             dep_signature: dep_signature.clone(),
+            fact_dep_signature,
             walker_diagnostics: Arc::from([]),
         };
         let mut entries = self.entries_lock_diagnosed();

@@ -26,25 +26,27 @@
 use verter_session::{CompileProfile, FileKind, HostConfig, UpsertRequest, VerterHost};
 
 fn upsert_ts(host: &VerterHost, canonical: &str, source: &str) {
-    host.upsert(UpsertRequest {
-        canonical_id: Some(canonical.to_string()),
-        input_id: canonical.to_string(),
-        source: source.into(),
-        file_kind: FileKind::NonSfc,
-        aliases: Vec::new(),
-    })
-    .expect("upsert ts");
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some(canonical.to_string()),
+            input_id: canonical.to_string(),
+            source: source.into(),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        })
+        .expect("upsert ts");
 }
 
 fn upsert_vue(host: &VerterHost, canonical: &str, source: &str) {
-    host.upsert(UpsertRequest {
-        canonical_id: Some(canonical.to_string()),
-        input_id: canonical.to_string(),
-        source: source.into(),
-        file_kind: FileKind::VueSfc,
-        aliases: Vec::new(),
-    })
-    .expect("upsert vue");
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some(canonical.to_string()),
+            input_id: canonical.to_string(),
+            source: source.into(),
+            file_kind: FileKind::VueSfc,
+            aliases: Vec::new(),
+        })
+        .expect("upsert vue");
 }
 
 fn prime_compile(host: &VerterHost, canonical: &str) {

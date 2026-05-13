@@ -151,19 +151,10 @@ pub(crate) fn fact_signature_for_canonical_member(
         space,
     };
     let local_decl_key = FactKey::LocalDecl { name, space };
-    let mut entries: Vec<FactVersionRef> = Vec::with_capacity(2);
-    entries.push(parse_fact_ref(
-        ctx,
-        canonical_id,
-        export_key,
-        FactLane::Semantic,
-    ));
-    entries.push(parse_fact_ref(
-        ctx,
-        canonical_id,
-        local_decl_key,
-        FactLane::Semantic,
-    ));
+    let entries: Vec<FactVersionRef> = vec![
+        parse_fact_ref(ctx, canonical_id, export_key, FactLane::Semantic),
+        parse_fact_ref(ctx, canonical_id, local_decl_key, FactLane::Semantic),
+    ];
     Arc::from(entries)
 }
 

@@ -141,26 +141,6 @@ pub(crate) const SEMANTIC_MISS: &str = "semanticMiss";
 pub(crate) const SEMANTIC_OBJECT_SURFACE: &str = "semanticObjectSurface";
 pub(crate) const SEMANTIC_SURFACE_MEMBER: &str = "semanticSurfaceMember";
 
-/// Build a single-fact `DepSignature` for a canonical's current
-/// `whole_hash`. Used by Step 3 closure's ctx-DB read-through call
-/// sites — each cache entry's dep_signature mirrors the canonical(s)
-/// the entry depends on so [`HostFenceValidator`](crate::host_manage::HostFenceValidator)
-/// can revalidate it on warm hit and post-compute.
-pub(crate) fn engine_dep_signature_for_canonical(
-    ctx: &dyn ResolverContext,
-    canonical_id: &str,
-) -> crate::semantic_query::DepSignature {
-    let whole_hash = ctx
-        .shallow_file_state(canonical_id)
-        .map(|state| state.whole_hash)
-        .unwrap_or_default();
-    let entries = vec![(
-        std::sync::Arc::<str>::from(canonical_id),
-        crate::semantic_query::DepVersion::WholeHash(whole_hash),
-    )];
-    std::sync::Arc::from(entries.into_boxed_slice())
-}
-
 /// Build an R28 path-precise `Arc<[FactVersionRef]>` for a cache
 /// keyed on `(canonical, member_name)` in the `Type` symbol space.
 /// Observes both `MemberPresence` and `Member` facts so the consumer

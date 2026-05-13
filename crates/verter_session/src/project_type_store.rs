@@ -2868,6 +2868,7 @@ mod tests {
                 owner_whole_hash: hash,
                 bindings: Arc::new(FxHashMap::default()),
                 dep_signature: Arc::from(Vec::new().into_boxed_slice()),
+                fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
             }),
         );
         store.component_meta_results().insert(
