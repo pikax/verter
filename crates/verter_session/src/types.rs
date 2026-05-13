@@ -208,7 +208,7 @@ pub struct HostConfig {
     /// The default policy is **D33 live-content reachability only** —
     /// `memory_pressure_threshold == usize::MAX`, so no caller ever
     /// passes `memory_pressure: true` to
-    /// [`crate::project_type_store::ProjectTypeStore::evict_unreachable_indexed_ready`]
+    /// [`crate::project_type_store::ProjectTypeStore::evict_unreachable_artifacts`]
     /// in default builds. The LRU floor path is preserved as an unused
     /// capability for production callers that want to opt in
     /// (out-of-plan-scope per D119).
@@ -285,7 +285,7 @@ pub struct RecursionBudgetOverrides {
 pub struct EvictionPolicyConfig {
     /// Memory-pressure threshold above which a caller may pass
     /// `memory_pressure: true` to
-    /// [`crate::project_type_store::ProjectTypeStore::evict_unreachable_indexed_ready`].
+    /// [`crate::project_type_store::ProjectTypeStore::evict_unreachable_artifacts`].
     /// Default `usize::MAX` — no caller ever enters the LRU floor
     /// path. The host does not auto-detect memory pressure; callers
     /// are responsible for citing the trigger.
@@ -297,7 +297,7 @@ pub struct EvictionPolicyConfig {
     pub memory_pressure_threshold: usize,
     /// Minimum number of cached entries the LRU floor preserves when
     /// it runs. Only consulted on the `memory_pressure: true` branch
-    /// of [`crate::project_type_store::ProjectTypeStore::evict_unreachable_indexed_ready`].
+    /// of [`crate::project_type_store::ProjectTypeStore::evict_unreachable_artifacts`].
     /// Default `1024`.
     pub min_floor: usize,
 }

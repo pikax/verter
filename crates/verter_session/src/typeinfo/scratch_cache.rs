@@ -107,7 +107,7 @@ impl ScratchCache {
     }
 
     /// Drop the cached entry for `uri`. No-op if absent. Used by
-    /// integration tests + the `evict_unreachable_indexed_ready` hook.
+    /// integration tests + the `evict_unreachable_artifacts` hook.
     #[allow(dead_code)]
     pub fn remove(&mut self, uri: &str) -> Option<SemanticNodeId> {
         self.entries.remove(uri).map(|e| e.node_id)

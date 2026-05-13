@@ -558,7 +558,7 @@ fn bump_project_generation_evicts_all_three_sub_shapes() {
 // 5 from rewritten rehoming-doc §3.3 = 11 total).
 //
 // FAIL pre-1C-γ:
-//   - `evict_unreachable_indexed_ready` does not exist on
+//   - `evict_unreachable_artifacts` does not exist on
 //     `ProjectTypeStore` (D33 reachability sweep absent).
 //   - `EvictionPolicyConfig` does not exist on `HostConfig`
 //     (D119 tunable absent).
@@ -601,7 +601,7 @@ fn seed_indexed_ready(
 /// reachability sweeps, the cached `IndexedReady` `Arc` survives
 /// pointer-equality, proving no re-lowering was triggered.
 /// Pre-1C-γ this could not hold because
-/// `evict_unreachable_indexed_ready` did not exist; the only
+/// `evict_unreachable_artifacts` did not exist; the only
 /// cache-eviction primitives were `evict_canonical` (drops the
 /// entry unconditionally) and `bump_project_generation_and_evict`
 /// (clears `FileArtifactStore` indirectly via `evict_canonical_for`).
@@ -627,7 +627,7 @@ fn unchanged_live_file_never_re_lowered_across_publish_cycles() {
     // entry MUST survive.
     let mut live: rustc_hash::FxHashSet<(Arc<str>, [u8; 16])> = rustc_hash::FxHashSet::default();
     live.insert((Arc::clone(&canonical), whole_hash));
-    store.evict_unreachable_indexed_ready(&live, false, 1024);
+    store.evict_unreachable_artifacts(&live, false, 1024);
     let mid_arc = store
         .indexed()
         .get_any(canonical.as_ref())
@@ -640,7 +640,7 @@ fn unchanged_live_file_never_re_lowered_across_publish_cycles() {
 
     // Cycle 2 — same set, same content hash. The pointer survives a
     // second sweep.
-    store.evict_unreachable_indexed_ready(&live, false, 1024);
+    store.evict_unreachable_artifacts(&live, false, 1024);
     let post_arc = store
         .indexed()
         .get_any(canonical.as_ref())
@@ -902,7 +902,7 @@ fn lru_floor_only_triggers_under_memory_pressure_threshold() {
     // preserves every entry because the live set covers the cache
     // exactly.
     let min_floor = 10;
-    store.evict_unreachable_indexed_ready(&live, false, min_floor);
+    store.evict_unreachable_artifacts(&live, false, min_floor);
     assert_eq!(
         store.indexed().len(),
         n,
@@ -911,7 +911,7 @@ fn lru_floor_only_triggers_under_memory_pressure_threshold() {
     );
 
     // memory_pressure: true → LRU shrinks to exactly min_floor.
-    store.evict_unreachable_indexed_ready(&live, true, min_floor);
+    store.evict_unreachable_artifacts(&live, true, min_floor);
     assert_eq!(
         store.indexed().len(),
         min_floor,

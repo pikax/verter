@@ -2240,8 +2240,10 @@ impl ProjectTypeStore {
 
     /// Live-content reachability sweep on [`FileArtifactStore`].
     ///
-    /// Per D33: any cached `IndexedReady` entry whose
-    /// `(canonical_id, content_hash)` pair is not present in
+    /// R22 contract: the reverse import graph drives reachability GC +
+    /// LSP affected-files reporting + diagnostics, but is **never**
+    /// wired to cache invalidation. Any cached `FileArtifacts` entry
+    /// whose `(canonical_id, content_hash)` pair is not present in
     /// `live_publish_set` is dropped. The publish set is the union of
     /// every `(canonical_id, content_hash)` reachable from any open
     /// editor / live VFS state — callers compute it from their VFS
@@ -2254,16 +2256,28 @@ impl ProjectTypeStore {
     /// has `memory_pressure_threshold == usize::MAX`, so callers
     /// derived from `HostConfig::eviction_policy` never enter this
     /// branch in default builds.
-    pub fn evict_unreachable_indexed_ready(
+    ///
+    /// The sweep operates on the unified [`FileArtifactStore`], which
+    /// holds `IndexedReady`, `FileFacts`, `ParsedEdges`, and
+    /// augmentations under one key — hence the broader name reflects
+    /// what reachability GC actually drops.
+    pub fn evict_unreachable_artifacts(
         &self,
         live_publish_set: &rustc_hash::FxHashSet<(Arc<str>, Hash16)>,
         memory_pressure: bool,
         min_floor: usize,
     ) {
-        // D33: live-content reachability first.
-        for (canonical, content_hash) in self.indexed.keys() {
-            if !live_publish_set.contains(&(Arc::clone(&canonical), content_hash)) {
-                self.indexed.remove(canonical.as_ref());
+        // D33: live-content reachability first. Each full
+        // [`FileArtifactKey`] is checked against the live set by its
+        // `(canonical, content_hash)` projection; only the unreachable
+        // version is dropped (other versions of the same canonical
+        // survive — the broader `remove(canonical)` API would drop
+        // every version of a canonical even when only one version was
+        // unreachable, which the version-specific evict avoids).
+        for key in self.indexed.artifact_keys() {
+            let projection = (Arc::clone(&key.canonical), key.content_hash);
+            if !live_publish_set.contains(&projection) {
+                let _ = self.indexed.remove_artifacts(&key);
             }
         }
         // D40 + D119: LRU floor only under explicit memory pressure.
