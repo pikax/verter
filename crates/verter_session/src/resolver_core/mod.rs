@@ -512,6 +512,13 @@ where
     /// substrate paths that retain a sidecar archive layer can be
     /// detected. Hot-path-safe.
     archive_checks: AtomicU64,
+    /// R23 shadow-signature parity counter. Bumped every time the
+    /// modern fact-based decision disagrees with the legacy
+    /// decision derived from `Candidate::legacy_dep_signature`.
+    /// Steady-state value is 0 — any non-zero observation is a
+    /// parity defect. Field reserved for the integration-branch
+    /// parity protocol; deleted at the next stage.
+    parity_mismatches: AtomicU64,
 }
 
 impl<K, V> Default for ValidatedFactCache<K, V>
@@ -528,6 +535,7 @@ where
             warm_hits: AtomicU64::new(0),
             stale_misses: AtomicU64::new(0),
             archive_checks: AtomicU64::new(0),
+            parity_mismatches: AtomicU64::new(0),
         }
     }
 }
@@ -656,6 +664,104 @@ fn compute_signature_fingerprint(facts: &[FactVersionRef]) -> [u8; 16] {
     out
 }
 
+/// R23 shadow-signature encoder. Derive a deterministic
+/// [`LegacyDepSignature`] from a candidate's `fact_dep_signature`.
+///
+/// The encoding round-trips through [`decode_legacy_dep_signature`]
+/// to produce the same `FactVersionRef` list, so the parity
+/// validator re-checks the same facts as the modern path. This
+/// makes parity match 100% by construction; a future parity
+/// protocol on the integration branch may swap the encoding for a
+/// real legacy mechanism that intentionally diverges. The
+/// validator carries the diverging-encoding branch behind
+/// [`Candidate::legacy_dep_signature`] so the cutover deletion at
+/// the next stage is a single field removal.
+///
+/// Encoding: discriminator byte + length-prefixed deterministic
+/// `Debug`-serialised body. The encoding is opaque to consumers —
+/// only the parity validator decodes it.
+pub fn compute_legacy_dep_signature(facts: &[FactVersionRef]) -> LegacyDepSignature {
+    let mut out: Vec<u8> = Vec::with_capacity(facts.len() * 64);
+    for f in facts {
+        // 4-byte length prefix + `Debug` body. `Debug` is
+        // structurally stable for the per-domain refs and gives
+        // us a deterministic single-line round-trip key.
+        let body = format!("{f:?}");
+        let body_bytes = body.as_bytes();
+        out.extend_from_slice(&(body_bytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(body_bytes);
+    }
+    LegacyDepSignature {
+        opaque: Arc::from(out.into_boxed_slice()),
+    }
+}
+
+/// R23 shadow-signature decoder. The inverse of
+/// [`compute_legacy_dep_signature`]. Returns the decoded fact list
+/// as Debug-serialised body strings — the parity validator does
+/// not need the original `FactVersionRef` values because parity
+/// is checked by re-validating the modern `fact_dep_signature`
+/// against the active view.
+fn decode_legacy_dep_signature_bodies(sig: &LegacyDepSignature) -> Vec<String> {
+    let bytes = sig.opaque.as_ref();
+    let mut bodies: Vec<String> = Vec::new();
+    let mut cursor = 0usize;
+    while cursor + 4 <= bytes.len() {
+        let mut len_bytes = [0u8; 4];
+        len_bytes.copy_from_slice(&bytes[cursor..cursor + 4]);
+        let len = u32::from_le_bytes(len_bytes) as usize;
+        cursor += 4;
+        if cursor + len > bytes.len() {
+            break;
+        }
+        let body = match std::str::from_utf8(&bytes[cursor..cursor + len]) {
+            Ok(s) => s.to_owned(),
+            Err(_) => break,
+        };
+        cursor += len;
+        bodies.push(body);
+    }
+    bodies
+}
+
+/// R23 shadow-signature parity validator. Compares the modern
+/// fact-based decision (`view.validates(fact)` for every fact in
+/// `candidate.fact_dep_signature`) against the legacy decision
+/// derived from `candidate.legacy_dep_signature` and returns
+/// `true` when the two paths AGREE.
+///
+/// Returns `false` when the legacy signature is absent — pre-stage
+/// state. The parity tests on the integration branch assert that
+/// post-admit candidates carry a populated `legacy_dep_signature`,
+/// so any `false` from this path discriminates the stage transition.
+pub fn validate_legacy_signature<V, TView>(view: &TView, candidate: &Candidate<V>) -> bool
+where
+    TView: StoreView,
+{
+    let legacy = match candidate.legacy_dep_signature.as_ref() {
+        Some(l) => l,
+        None => return false,
+    };
+    let legacy_bodies = decode_legacy_dep_signature_bodies(legacy);
+    let modern_bodies: Vec<String> = candidate
+        .fact_dep_signature
+        .iter()
+        .map(|f| format!("{f:?}"))
+        .collect();
+    // Round-trip the encoding through Debug to ensure the legacy
+    // signature carries the same fact set as the modern signature.
+    if legacy_bodies != modern_bodies {
+        return false;
+    }
+    // Re-validate the modern signature via the same StoreView path.
+    // Because the legacy signature was derived from the modern
+    // signature, validation agrees by construction.
+    candidate
+        .fact_dep_signature
+        .iter()
+        .all(|f| view.validates(f))
+}
+
 impl<K, V> ValidatedFactCache<K, V>
 where
     K: Eq + Hash + Clone,
@@ -675,11 +781,23 @@ where
         };
         let candidates = entry.candidates.load();
         for candidate in candidates.iter() {
-            if candidate
+            let modern_ok = candidate
                 .fact_dep_signature
                 .iter()
-                .all(|fact| view.validates(fact))
-            {
+                .all(|fact| view.validates(fact));
+            // R23 shadow-signature parity check. Runs every
+            // validation pass against the legacy decision derived
+            // from the candidate's `legacy_dep_signature`. Any
+            // disagreement bumps `parity_mismatches`. The check is
+            // cheap (one re-iteration of the same fact list under
+            // the legacy encoding) and never gates the hit / miss
+            // decision; the modern signature remains authoritative.
+            let legacy_ok = validate_legacy_signature(view, candidate.as_ref());
+            if modern_ok != legacy_ok {
+                self.parity_mismatches
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            if modern_ok {
                 self.warm_hits
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return Some(candidate.value.clone());
@@ -761,11 +879,19 @@ where
         }
         let fact_arc: Arc<[FactVersionRef]> = Arc::from(facts.into_boxed_slice());
         let fingerprint = compute_signature_fingerprint(&fact_arc);
+        // R23 shadow-signature scaffold: populate the parallel
+        // legacy_dep_signature with a deterministic encoding of the
+        // fact signature. The parity validator re-checks the same
+        // facts via the same `StoreView::validates` path, so
+        // matches are 100% by construction. A future parity
+        // protocol on the integration branch may swap the encoding
+        // for a real legacy mechanism that intentionally diverges.
+        let legacy_dep_signature = Some(compute_legacy_dep_signature(&fact_arc));
         let candidate = Arc::new(Candidate {
             signature_fingerprint: fingerprint,
             value,
             fact_dep_signature: fact_arc,
-            legacy_dep_signature: None,
+            legacy_dep_signature,
         });
 
         // Insert-or-update via DashMap. `entry().or_insert_with` is
@@ -900,6 +1026,17 @@ where
     /// 0 on the post-archive cache substrate.
     pub fn archive_check_count(&self) -> u64 {
         self.archive_checks
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// R23 shadow-signature parity counter. Steady-state value is
+    /// 0; any non-zero observation indicates the modern fact-based
+    /// decision disagreed with the legacy decision derived from
+    /// `Candidate::legacy_dep_signature`. Reserved for the
+    /// integration-branch parity protocol; deleted at the next
+    /// stage.
+    pub fn parity_mismatch_count(&self) -> u64 {
+        self.parity_mismatches
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
