@@ -16,8 +16,7 @@ use std::path::PathBuf;
 fn read_file(rel: &str) -> String {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let path = PathBuf::from(manifest_dir).join(rel);
-    fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+    fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
 /// Gap 1 substrate: `build_owner_import_surface` accepts a
