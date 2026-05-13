@@ -4,7 +4,7 @@
 //! Stage 7's canary asserts the same invariant under the full
 //! `repo_first_pass` / `repo_warm_second_pass` loop; this Stage 6d
 //! pre-canary runs at unit-test speed against the hermetic baseline
-//! + path-precise archetypes so a producer that flatten transitive
+//! and path-precise archetypes so a producer that flatten transitive
 //! facts into an over-1024 signature surfaces here, not at Stage 7.
 //!
 //! **Discrimination.** A non-zero `signature_overflow_count` means

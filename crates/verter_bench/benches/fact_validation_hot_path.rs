@@ -30,7 +30,7 @@ use verter_session::resolver_core::{FactVersionRef, ParseFactRef, ValidatedFactC
 use verter_session::semantic_query::HashValue;
 
 fn make_view() -> impl verter_session::resolver_core::StoreView {
-    verter_session::resolver_core::PermissiveStoreView::default()
+    verter_session::resolver_core::PermissiveStoreView
 }
 
 fn dummy_fact(canonical: &str, name: &str, expected_hash: HashValue) -> FactVersionRef {
