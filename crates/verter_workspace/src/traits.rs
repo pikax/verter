@@ -209,6 +209,35 @@ pub trait WorkspaceRead: Send + Sync {
     /// semantic_transitive). Stems are NOT included.
     fn forward_deps_for(&self, canonical_id: &str) -> Vec<String>;
 
+    /// R22 contract: transitive importers of `edited`. The reverse
+    /// import graph serves reachability GC + LSP affected-files
+    /// reporting + diagnostics; it is **never** wired to cache
+    /// invalidation. This BFS walks the canonical reverse axis and
+    /// returns the transitive closure of files that (directly or
+    /// indirectly) import `edited`, sorted for stable order.
+    ///
+    /// Default implementation walks via [`Self::reverse_deps_for`]. The
+    /// `edited` file itself is NOT included in the result; cycles
+    /// terminate via the visited set.
+    fn affected_canonicals(&self, edited: &str) -> Vec<String> {
+        let mut out: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut frontier: Vec<String> = self.reverse_deps_for(edited);
+        while let Some(next) = frontier.pop() {
+            if next == edited {
+                continue;
+            }
+            if !out.insert(next.clone()) {
+                continue;
+            }
+            for parent in self.reverse_deps_for(&next) {
+                if parent != edited && !out.contains(&parent) {
+                    frontier.push(parent);
+                }
+            }
+        }
+        out.into_iter().collect()
+    }
+
     /// Inspection: snapshot of an owner's dependency state.
     fn dependency_snapshot(&self, canonical_id: &str) -> Option<DependencySnapshotView>;
 
