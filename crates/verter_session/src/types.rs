@@ -1472,6 +1472,11 @@ pub struct DerivedRawState {
 #[derive(Debug, Default)]
 pub struct DependencyState {
     pub(crate) dependencies: std::collections::BTreeSet<String>,
+    /// Retired observability surface: per-dep type hashes formerly
+    /// populated by the deleted smart-invalidation cascade. Field
+    /// preserved for future affected-files reporting; no current
+    /// reader.
+    #[allow(dead_code)]
     pub(crate) resolved_type_hashes: FxHashMap<(String, String), Hash16>,
     pub(crate) aliases: std::collections::BTreeSet<String>,
     pub(crate) generation: u64,

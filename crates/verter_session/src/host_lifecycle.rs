@@ -1,5 +1,4 @@
-//! `impl VerterHost` — lifecycle, workspace-bridge, and dependency
-//! invalidation methods.
+//! `impl VerterHost` — lifecycle and workspace-bridge methods.
 //!
 //! Owns:
 //! - workspace-bridge accessors (`set_workspace`, `provenance`,
@@ -14,7 +13,7 @@
 //!   `ensure_loaded`)
 //! - alias-map maintenance (`resolve_alias_or_canonical`,
 //!   `update_alias_map`)
-//! - dependency invalidation (`smart_invalidate_dependents`)
+//! - workspace edge tracking (reverse-dep graph for memory-bound GC)
 //! - feature-gated metrics snapshot (`metrics_snapshot`)
 //!
 //! These methods all share the host-cache cascade discipline: when a
@@ -25,7 +24,6 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use crate::deps;
 use crate::id::canonicalize_id;
 use crate::instant::Instant;
 use crate::shared::{read_lock, write_lock};
@@ -706,55 +704,6 @@ impl VerterHost {
         }
         for alias in new_aliases {
             alias_map.insert(alias.clone(), canonical_id.to_string());
-        }
-    }
-
-    /// Smart invalidation: when a dependency changes, only invalidate
-    /// dependent SFCs whose macro-consumed types were actually affected.
-    ///
-    /// Workspace `reverse_deps_for` is the sole authority. The
-    /// workspace internally handles longest-suffix-first stem stripping
-    /// against the configured `default_resolve_extensions`, so a single
-    /// call covers both canonical and stem-axis hits.
-    pub(crate) fn smart_invalidate_dependents(
-        &self,
-        dependency_id: &str,
-        old_export_signatures: &[verter_semantic::analysis::ExportSignature],
-        new_export_signatures: &[verter_semantic::analysis::ExportSignature],
-    ) {
-        let ws = self.ws();
-        let owners: BTreeSet<String> = ws.reverse_deps_for(dependency_id).into_iter().collect();
-
-        // When a genuinely new dependency arrives (old signatures
-        // empty, new non-empty), dependents may have cached "miss"
-        // import routes for this dep. Evict their project-store entries
-        // unconditionally so fresh accesses re-resolve import routes.
-        // For existing deps where only the export surface changed,
-        // scope eviction to the owners that were actually invalidated.
-        let dep_is_newly_added =
-            old_export_signatures.is_empty() && !new_export_signatures.is_empty();
-
-        let ws_ref = self.workspace.read();
-        let cleared = deps::smart_invalidate_dependents_via_scheduler(
-            self,
-            owners.clone(),
-            Some(ws_ref.as_ref()),
-            &self.config,
-            dependency_id,
-            old_export_signatures,
-            new_export_signatures,
-        );
-        let evict_targets = if dep_is_newly_added || cleared.is_empty() {
-            &owners
-        } else {
-            &cleared
-        };
-        if !evict_targets.is_empty() {
-            self.eval_env_cache().clear();
-        }
-        for owner in evict_targets {
-            self.resolver.runtime.invalidate_canonical(owner);
-            self.project_type_store.evict_canonical(owner);
         }
     }
 }

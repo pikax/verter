@@ -1162,60 +1162,9 @@ fn set_import_dependencies_subsequent_upsert_invalidates() {
     }
 }
 
-#[test]
-fn invalidate_dependents_of_works_when_dependency_was_never_loaded() {
-    let host = VerterHost::new_standalone(HostConfig::default());
-
-    let _ = upsert_vue(
-        &host,
-        "/src/Comp.vue",
-        "<script setup lang=\"ts\">\nimport { helper } from './tempUtil'\n</script>\n<template><div>{{ helper }}</div></template>",
-    );
-
-    host.set_import_dependencies(
-        "/src/Comp.vue",
-        vec![DependencyResolution {
-            specifier: "./tempUtil".to_string(),
-            resolved_canonical_id: Some("/src/tempUtil.ts".to_string()),
-            possible_canonical_ids: Vec::new(),
-        }],
-    );
-
-    let _ = host
-        .get_virtual_file(VirtualQuery {
-            raw_id: Some("/src/Comp.vue".to_string()),
-            canonical_id: None,
-            node_kind: None,
-            compile_profile: profile_dev(),
-        })
-        .unwrap();
-
-    host.invalidate_dependents_of("/src/tempUtil.ts");
-
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let cc = host
-            .compile_cache()
-            .get("/src/Comp.vue")
-            .expect("compile_cache entry exists");
-        assert!(
-            cc.compile_slots.is_empty(),
-            "compile slots should be cleared even when the deleted dependency was never loaded"
-        );
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        let files = read_lock(&host.files);
-        let comp = files.get("/src/Comp.vue").unwrap();
-        assert!(
-            comp.compile_slots.is_empty(),
-            "compile slots should be cleared even when the deleted dependency was never loaded"
-        );
-    }
-}
-
 /// @ai-generated - Dep file with no export signatures → full invalidation (Tier 1 fallback)
 #[test]
+#[ignore = "R3 retired eager dependent invalidation; fact-based read validation is the oracle. Kept as a ledger of the retired behaviour."]
 fn smart_invalidation_no_signatures_full_invalidation() {
     let host = VerterHost::new_standalone(HostConfig::default());
 
@@ -1281,6 +1230,7 @@ fn smart_invalidation_no_signatures_full_invalidation() {
 
 /// @ai-generated - Dep file unchanged export → SFC NOT invalidated
 #[test]
+#[ignore = "R3 retired eager dependent invalidation; the no-op-on-unchanged-export property is now achieved by fact-based read validation (no eager pass to skip)."]
 fn smart_invalidation_unchanged_export_no_invalidation() {
     let host = VerterHost::new_standalone(HostConfig::default());
 
@@ -1392,6 +1342,7 @@ fn strip_configured_extension_prioritizes_script_lang() {
 /// @ai-generated - Tier 3: comment added to dep type → NO invalidation
 /// (Tier 2 WOULD invalidate since export text hash changes, but Tier 3 saves it)
 #[test]
+#[ignore = "R3 retired eager Tier-3 smart invalidation at Stage 7. The cosmetic-edit-stability invariant is now achieved by parse_stable_hash and the semantic/display fact-store split (R13)."]
 fn tier3_comment_added_no_invalidation() {
     let host = VerterHost::new_standalone(HostConfig::default());
 
@@ -1582,6 +1533,7 @@ fn tier3_property_type_changed_invalidates() {
 
 /// @ai-generated - Tier 3: resolved_type_hashes are stored for future comparisons
 #[test]
+#[ignore = "R3 retired eager Tier-3 smart invalidation at Stage 7; the resolved_type_hashes population was driven by the deleted smart_invalidate_dependents_via_scheduler path. Fact-based read validation is the post-cutover oracle."]
 fn tier3_stores_resolved_type_hashes() {
     let host = VerterHost::new_standalone(HostConfig::default());
 
@@ -1714,6 +1666,7 @@ fn transitive_workspace_macro_type_dep_change_invalidates_owner() {
 
 /// @ai-generated - Tier 3: unrelated type changed in same file → NO invalidation
 #[test]
+#[ignore = "R3 retired eager Tier-3 smart invalidation at Stage 7. Path-precise invariants (only the touched member invalidates) are now provided by R14/R28 fact-graph emission, not by the smart invalidator."]
 fn tier3_unrelated_type_change_no_invalidation() {
     let host = VerterHost::new_standalone(HostConfig::default());
 
@@ -1782,6 +1735,7 @@ fn tier3_unrelated_type_change_no_invalidation() {
 
 /// @ai-generated - Tier 3: whitespace-only change to dep type → NO invalidation
 #[test]
+#[ignore = "R3 retired eager Tier-3 smart invalidation at Stage 7. Cosmetic-stability (whitespace, comments) is now provided by parse_stable_hash + the semantic/display fact split (R13)."]
 fn tier3_whitespace_only_change_no_invalidation() {
     let host = VerterHost::new_standalone(HostConfig::default());
 

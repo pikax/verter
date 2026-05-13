@@ -202,6 +202,12 @@ pub(crate) fn build_upsert_result(
 
 /// Compute which export names changed between old and new export signatures.
 /// Returns the set of export names whose declaration hashes differ.
+///
+/// Per R3 this helper is no longer consumed by the upsert hot path
+/// (read-side fact validation is the correctness oracle). Preserved
+/// as a building block for LSP affected-files reporting through the
+/// R22 reverse-dep graph as an observability surface.
+#[allow(dead_code)]
 pub(crate) fn compute_changed_exports(
     old: &[verter_semantic::analysis::ExportSignature],
     new: &[verter_semantic::analysis::ExportSignature],

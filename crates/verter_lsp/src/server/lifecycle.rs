@@ -818,11 +818,13 @@ pub(super) async fn handle_did_change_watched_files(
     }
 
     // ── Vue file deletions ─────────────────────────────────────
+    //
+    // R3: eager dependent invalidation is forbidden. Cache entries
+    // are validated on read against the exact facts they recorded;
+    // staleness is detected lazily. Workspace edge updates fire via
+    // `host().remove(...)` below so the reverse-dep graph stays
+    // current for memory-bound GC and affected-files reporting.
     for (canonical_id, uri_str) in &vue_delete_ids {
-        server
-            .documents
-            .host()
-            .invalidate_dependents_of(canonical_id);
         if let Some(state) = server.remove_provider_sync_state(canonical_id).or_else(|| {
             let profile = server.documents.tsx_profile.read().clone();
             server
@@ -844,20 +846,12 @@ pub(super) async fn handle_did_change_watched_files(
 
     // ── Vue file creates/changes ───────────────────────────────
     for canonical_id in &vue_resync_ids {
-        server
-            .documents
-            .host()
-            .invalidate_dependents_of(canonical_id);
         server.resync_background_vue_file(canonical_id).await;
         tracing::debug!("did_change_watched_files: resynced vue {canonical_id}");
     }
 
     // ── TS/JS file deletions ───────────────────────────────────
     for canonical_id in &ts_js_delete_ids {
-        server
-            .documents
-            .host()
-            .invalidate_dependents_of(canonical_id);
         if let Some(state) = server.remove_provider_sync_state(canonical_id) {
             server.close_provider_state(&state).await;
         }
@@ -867,12 +861,6 @@ pub(super) async fn handle_did_change_watched_files(
 
     // ── TS/JS file creates/changes ─────────────────────────────
     if !ts_js_resync_ids.is_empty() {
-        for canonical_id in &ts_js_resync_ids {
-            server
-                .documents
-                .host()
-                .invalidate_dependents_of(canonical_id);
-        }
         if let Some(sync) = &server.project_sync {
             let host = server.documents.host_arc();
             let sync = sync.clone();

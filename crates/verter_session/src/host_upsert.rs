@@ -283,9 +283,6 @@ impl VerterHost {
         // outputs that depended on the changed slices are evicted from the
         // ProfileState entry below.
         let whole_hash_changed = old_whole_hash != Some(parse.whole_hash);
-        let old_export_signatures = old_host_data
-            .map(|h| h.parse.export_signatures.clone())
-            .unwrap_or_default();
         let prev_nodes = old_host_data
             .map(|h| h.parse.meta.virtual_nodes())
             .unwrap_or_default();
@@ -412,11 +409,16 @@ impl VerterHost {
             preprocessor_requests: parse.preprocessor_requests.clone(),
             export_signatures: parse.export_signatures.clone(),
         };
-        let new_export_signatures = parse.export_signatures.clone();
 
         // ── Post-commit housekeeping ──
-        // Hard-evict module facts so stale store views can't see the
-        // prior generation after a content change.
+        //
+        // R3 target end-state: fact-based read validation is the
+        // sole correctness oracle, with eager invalidation removed.
+        // The cross-file fact-graph wiring (producer admission with
+        // dep-precise signatures) is a prerequisite. Until producers
+        // carry complete cross-file signatures, the per-canonical
+        // eviction below remains as a backstop for cross-file edits
+        // so the consumer warm path observes a fresh recompute.
         self.resolver.runtime.evict_canonical(&canonical_id);
         crate::host_manage::push_cache_drained_at_upsert("resolver_runtime", &canonical_id);
         self.project_type_store.evict_canonical(&canonical_id);
@@ -428,18 +430,35 @@ impl VerterHost {
 
         self.update_alias_map(&canonical_id, &old_aliases, &alias_set);
 
-        // Sync parsed edges to VFS BEFORE smart_invalidate_dependents so the
-        // workspace's reverse-dep graph reflects the new edges before
-        // dependents are queried. The workspace is sole authority for
-        // reverse-dep tracking.
+        // Sync parsed edges to VFS before any dependent revalidation
+        // so the workspace's reverse-dep graph reflects the new edges
+        // (R22 memory-bound GC + LSP affected-files reporting).
         self.record_parsed_edges_to_vfs(&canonical_id, &result_data);
         crate::host_manage::push_cache_drained_at_upsert("workspace_parsed_edges", &canonical_id);
 
-        self.smart_invalidate_dependents(
-            &canonical_id,
-            &old_export_signatures,
-            &new_export_signatures,
-        );
+        // Dependent compile-output drain via per-domain D48 caches.
+        // R3 target removes this once producer admission carries
+        // dep-precise signatures across the cross-file boundary.
+        let owners: std::collections::BTreeSet<String> = self
+            .ws()
+            .reverse_deps_for(&canonical_id)
+            .into_iter()
+            .collect();
+        for owner in &owners {
+            if let Some(mut cc) = self.compile_cache().get_mut(owner) {
+                cc.compile_slots.clear();
+            }
+            if let Some(mut derived) = self.derived_raw_cache().get_mut(owner) {
+                derived.cached_resolved_meta.clear();
+                derived.cached_meta_payload = None;
+                derived.cached_fallthrough = None;
+            }
+            self.resolver.runtime.invalidate_canonical(owner);
+            self.project_type_store.evict_canonical(owner);
+        }
+        if !owners.is_empty() {
+            self.eval_env_cache().clear();
+        }
         self.ws().notify_upsert(&canonical_id, req.source.clone());
 
         let result = build_upsert_result(

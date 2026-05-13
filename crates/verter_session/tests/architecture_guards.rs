@@ -5950,7 +5950,7 @@ mod w5f_test_archaeology {
     /// the count, or when intentional new fixture vocabulary is added
     /// (e.g., the Stage-family deliberate-violation fixtures added
     /// alongside the predicate extension).
-    pub(super) const W5F_BASELINE: usize = 265;
+    pub(super) const W5F_BASELINE: usize = 269;
 
     pub(super) fn is_test_file(path: &Path) -> bool {
         let name = path

@@ -435,37 +435,6 @@ fn cache_subsystem_paths_do_not_emit_custom() {
     }
 }
 
-/// Shadow-scaffold sanity check: `Candidate.legacy_dep_signature`
-/// field is present on the public type signature. Stage 7's
-/// revert deletes this field; the test compiles only on the
-/// integration branch tree.
-#[test]
-fn shadow_scaffold_candidate_carries_legacy_dep_signature_field() {
-    use std::sync::Arc;
-    use verter_session::resolver_core::{Candidate, FactVersionRef, LegacyDepSignature};
-    // Construct a Candidate directly to force the field to be
-    // referenceable. If the field is renamed or removed, this
-    // test fails to compile.
-    let _c: Candidate<u32> = Candidate {
-        signature_fingerprint: [0u8; 16],
-        value: Arc::new(0u32),
-        fact_dep_signature: Arc::<[FactVersionRef]>::from(Vec::<FactVersionRef>::new()),
-        legacy_dep_signature: Some(LegacyDepSignature {
-            opaque: Arc::<[u8]>::from(Vec::<u8>::new()),
-        }),
-    };
-}
-
-/// Shadow-scaffold sanity check: the parity-counter accessor exists
-/// on `ValidatedFactCache`. Stage 7's revert deletes the accessor.
-#[test]
-fn shadow_scaffold_parity_mismatch_count_accessor_exists() {
-    use verter_session::resolver_core::ValidatedFactCache;
-    let cache: ValidatedFactCache<&'static str, u32> = ValidatedFactCache::default();
-    let n = cache.parity_mismatch_count();
-    assert_eq!(n, 0, "empty cache has zero parity mismatches");
-}
-
 #[allow(dead_code)]
 fn _suppress_unused_walk() {
     let _ = walk_rs_files;

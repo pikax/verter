@@ -1037,15 +1037,6 @@ impl VerterHost {
         }
     }
 
-    /// Invalidate compile outputs of files that depend on the given path.
-    ///
-    /// Unlike `remove()`, this works even when the dependency file was never
-    /// loaded into the host but reverse-dependency edges were registered.
-    pub fn invalidate_dependents_of(&self, canonical_or_alias: &str) {
-        let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
-        self.smart_invalidate_dependents(&canonical, &[], &[]);
-    }
-
     /// Remove a file from the host, cleaning up aliases, dependencies,
     /// and invalidating compile slots of any dependents.
     ///
@@ -1291,7 +1282,13 @@ impl VerterHost {
         // Sync exact resolutions to workspace.
         self.ws().set_exact_resolutions(&canonical, vfs_resolutions);
         // Soft-invalidate: file content didn't change, only import routes.
-        // Module facts are archived for stale store views.
+        //
+        // R3 target end-state: eager dependent invalidation goes
+        // away once producer admission carries the dep-precise
+        // signatures the fact-validation oracle needs. The local
+        // drain below is the backstop for the route-only
+        // observation surface; the read-side fact oracle remains
+        // the correctness oracle for cached values.
         self.invalidate_route_owned_shallow_cache(&canonical);
         self.resolver.runtime.invalidate_canonical(&canonical);
         self.project_type_store.evict_canonical(&canonical);

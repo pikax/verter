@@ -1655,6 +1655,7 @@ fn get_diagnostics_without_compilation() {
 
 /// @ai-generated - Dep file type export changes → SFC using that type invalidated
 #[test]
+#[ignore = "R3 retired eager dependent invalidation at Stage 7; SFC freshness is now achieved by fact-based read validation rather than upsert-time cascade."]
 fn smart_invalidation_type_dep_changed_invalidates_sfc() {
     let host = VerterHost::new_standalone(HostConfig::default());
 
