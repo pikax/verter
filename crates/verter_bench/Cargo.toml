@@ -103,6 +103,10 @@ harness = false
 name = "fact_tracer_warm_hit_zero_alloc"
 harness = false
 
+[[bench]]
+name = "fact_validation_hot_path"
+harness = false
+
 
 [[example]]
 name = "expression_validator"
