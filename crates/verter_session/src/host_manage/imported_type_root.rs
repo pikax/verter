@@ -85,11 +85,10 @@ impl VerterHost {
                     // resolved by a prior query. Then collect full route
                     // participant facts via build_named_type_export_route_entry
                     // for proper cache invalidation on intermediate barrel changes.
-                    let (route_result, facts) = self
-                        .build_named_type_export_route_entry(
-                            normalized_canonical.as_str(),
-                            imported_name,
-                        )?;
+                    let (route_result, facts) = self.build_named_type_export_route_entry(
+                        normalized_canonical.as_str(),
+                        imported_name,
+                    )?;
                     let root_result = match route_result {
                         crate::resolver_core::RouteResult::Resolved {
                             defining_canonical,

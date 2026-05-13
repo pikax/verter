@@ -721,11 +721,7 @@ fn import_route_negative_cache_invalidates_on_workspace_content_generation_bump(
     let pre = host.cached_import_route_resolution("/w/owner.ts", "./theme");
     assert!(
         pre.is_some()
-            && pre
-                .as_ref()
-                .unwrap()
-                .resolved_canonical_id
-                .is_none()
+            && pre.as_ref().unwrap().resolved_canonical_id.is_none()
             && pre.as_ref().unwrap().possible_canonical_ids.is_empty(),
         "bundler-provided known-miss is cached in derived.import_routes"
     );

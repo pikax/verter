@@ -1378,9 +1378,7 @@ impl VerterHost {
         // bounded — when the chain facts no longer validate, we
         // drop the entry outright so the next build replaces it.
         let live_view = self.resolver_store_view();
-        if let Some(cached) =
-            surfaces.get_with_view(owner_canonical, whole_hash, &live_view)
-        {
+        if let Some(cached) = surfaces.get_with_view(owner_canonical, whole_hash, &live_view) {
             return Some(cached);
         }
         if surfaces.get(owner_canonical, whole_hash).is_some() {

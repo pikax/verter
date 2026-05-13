@@ -1544,8 +1544,7 @@ pub struct DerivedRawState {
     /// entry outright via the resolver's parse-domain invalidation
     /// path). Missing entries are treated as "never recorded" → the
     /// reader forces a fresh resolution.
-    pub(crate) import_routes_known_miss_recorded_at_generation:
-        FxHashMap<String, u64>,
+    pub(crate) import_routes_known_miss_recorded_at_generation: FxHashMap<String, u64>,
 }
 
 /// Dependency-closure-domain state for the scheduler-backed compile cache (D48).
