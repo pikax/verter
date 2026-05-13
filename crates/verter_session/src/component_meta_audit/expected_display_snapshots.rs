@@ -306,9 +306,7 @@ pub fn fixture_module_augmentation_stitched_external() -> Event {
         resolved_relative_canonical: None,
         wildcard_pattern: None,
         augmenter_count: 2,
-        fingerprint: [
-            1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        ],
+        fingerprint: [1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
     }
 }
 
@@ -319,9 +317,7 @@ pub fn fixture_module_augmentation_index_shape_install() -> Event {
         resolved_relative_canonical: None,
         wildcard_pattern: None,
         prev_fingerprint: None,
-        new_fingerprint: [
-            5, 6, 7, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        ],
+        new_fingerprint: [5, 6, 7, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         augmenter_count: 1,
     }
 }
@@ -332,12 +328,8 @@ pub fn fixture_module_augmentation_index_shape_refresh() -> Event {
         external_specifier: Some(Arc::from("vue")),
         resolved_relative_canonical: None,
         wildcard_pattern: None,
-        prev_fingerprint: Some([
-            5, 6, 7, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        ]),
-        new_fingerprint: [
-            9, 10, 11, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        ],
+        prev_fingerprint: Some([5, 6, 7, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        new_fingerprint: [9, 10, 11, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         augmenter_count: 2,
     }
 }

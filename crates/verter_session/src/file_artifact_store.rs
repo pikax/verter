@@ -878,8 +878,7 @@ impl FileArtifactStore {
         // Dedup by canonical so a file with multiple matching facts
         // contributes only once.
         let mut matched: Vec<(Arc<str>, Hash16)> = Vec::new();
-        let mut seen_canonicals: rustc_hash::FxHashSet<Arc<str>> =
-            rustc_hash::FxHashSet::default();
+        let mut seen_canonicals: rustc_hash::FxHashSet<Arc<str>> = rustc_hash::FxHashSet::default();
         for artifact_entry in self.artifacts.iter() {
             let augmenter_canonical = Arc::clone(&artifact_entry.key().canonical);
             let artifacts: &FileArtifacts = artifact_entry.value();
@@ -899,11 +898,7 @@ impl FileArtifactStore {
         }
 
         // Sort by (canonical, parse_stable_hash) for determinism.
-        matched.sort_by(|a, b| {
-            a.0.as_ref()
-                .cmp(b.0.as_ref())
-                .then_with(|| a.1.cmp(&b.1))
-        });
+        matched.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()).then_with(|| a.1.cmp(&b.1)));
 
         let augmenter_count = matched.len() as u32;
         let fingerprint = compute_augmenter_set_fingerprint(&matched);
@@ -914,7 +909,9 @@ impl FileArtifactStore {
         });
 
         // Insert. Capture prev fingerprint for audit event.
-        let prev = self.augmentation_index.insert(key.clone(), Arc::clone(&set));
+        let prev = self
+            .augmentation_index
+            .insert(key.clone(), Arc::clone(&set));
         let prev_fingerprint = prev.as_ref().map(|p| p.fingerprint);
 
         // Emit `ModuleAugmentationIndexShape` typed audit event.
@@ -996,11 +993,7 @@ impl FileArtifactStore {
                     }
                 }
             }
-            matched.sort_by(|a, b| {
-                a.0.as_ref()
-                    .cmp(b.0.as_ref())
-                    .then_with(|| a.1.cmp(&b.1))
-            });
+            matched.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()).then_with(|| a.1.cmp(&b.1)));
             let augmenter_count = matched.len() as u32;
             let new_fingerprint = compute_augmenter_set_fingerprint(&matched);
 
@@ -1018,12 +1011,7 @@ impl FileArtifactStore {
             });
             self.augmentation_index.insert(key.clone(), new_set);
 
-            emit_module_augmentation_index_shape_event(
-                &key,
-                old,
-                new_fingerprint,
-                augmenter_count,
-            );
+            emit_module_augmentation_index_shape_event(&key, old, new_fingerprint, augmenter_count);
         }
     }
 
@@ -1043,9 +1031,7 @@ impl FileArtifactStore {
     /// the route-surface-domain fingerprints into the view for
     /// per-candidate validation (R29 + G1 + R26).
     #[must_use]
-    pub fn snapshot_augmentation_index_fingerprints(
-        &self,
-    ) -> Vec<(AugmentationTargetKey, Hash16)> {
+    pub fn snapshot_augmentation_index_fingerprints(&self) -> Vec<(AugmentationTargetKey, Hash16)> {
         self.augmentation_index
             .iter()
             .map(|entry| (entry.key().clone(), entry.value().fingerprint))
@@ -1103,7 +1089,7 @@ const GLOBAL_AUGMENTATION_TAG: &str = "$global";
 /// Does `fact` (emitted by `augmenter_canonical`) contribute to the
 /// queried `target_key`?
 ///
-/// Stage 6c classification semantics:
+/// Classification semantics by target-kind archetype:
 ///
 /// - `ExternalSpecifier(s)` → match `fact.specifier == s` AND the
 ///   specifier is NOT relative, NOT a wildcard, NOT the global tag.
@@ -1129,10 +1115,7 @@ where
             let is_relative = specifier.starts_with("./") || specifier.starts_with("../");
             let is_wildcard = specifier.contains('*');
             let is_global = specifier == GLOBAL_AUGMENTATION_TAG;
-            !is_relative
-                && !is_wildcard
-                && !is_global
-                && specifier == target_spec.as_ref()
+            !is_relative && !is_wildcard && !is_global && specifier == target_spec.as_ref()
         }
         AugmentationTargetKind::ResolvedRelativeCanonical(target_canon) => {
             if !(specifier.starts_with("./") || specifier.starts_with("../")) {
@@ -1188,33 +1171,33 @@ pub(crate) fn emit_module_augmentation_index_shape_event(
     augmenter_count: u32,
 ) {
     use verter_audit::AugmentationTargetKindTag;
-    let (tag, external_specifier, resolved_relative_canonical, wildcard_pattern) =
-        match &key.target {
-            AugmentationTargetKind::ExternalSpecifier(spec) => (
-                AugmentationTargetKindTag::ExternalSpecifier,
-                Some(Arc::<str>::from(spec.as_ref())),
-                None,
-                None,
-            ),
-            AugmentationTargetKind::ResolvedRelativeCanonical(canon) => (
-                AugmentationTargetKindTag::ResolvedRelativeCanonical,
-                None,
-                Some(Arc::clone(canon)),
-                None,
-            ),
-            AugmentationTargetKind::WildcardAmbient(pat) => (
-                AugmentationTargetKindTag::WildcardAmbient,
-                None,
-                None,
-                Some(Arc::<str>::from(pat.as_ref())),
-            ),
-            AugmentationTargetKind::GlobalAugmentation => (
-                AugmentationTargetKindTag::GlobalAugmentation,
-                None,
-                None,
-                None,
-            ),
-        };
+    let (tag, external_specifier, resolved_relative_canonical, wildcard_pattern) = match &key.target
+    {
+        AugmentationTargetKind::ExternalSpecifier(spec) => (
+            AugmentationTargetKindTag::ExternalSpecifier,
+            Some(Arc::<str>::from(spec.as_ref())),
+            None,
+            None,
+        ),
+        AugmentationTargetKind::ResolvedRelativeCanonical(canon) => (
+            AugmentationTargetKindTag::ResolvedRelativeCanonical,
+            None,
+            Some(Arc::clone(canon)),
+            None,
+        ),
+        AugmentationTargetKind::WildcardAmbient(pat) => (
+            AugmentationTargetKindTag::WildcardAmbient,
+            None,
+            None,
+            Some(Arc::<str>::from(pat.as_ref())),
+        ),
+        AugmentationTargetKind::GlobalAugmentation => (
+            AugmentationTargetKindTag::GlobalAugmentation,
+            None,
+            None,
+            None,
+        ),
+    };
     crate::host_manage::push_structured_event(
         crate::component_meta_audit::StructuredAuditEvent::ModuleAugmentationIndexShape {
             target_kind_tag: tag,

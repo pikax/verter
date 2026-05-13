@@ -79,21 +79,20 @@ impl StoreView for RejectRouteSurfaceFingerprintView {
         self.token
     }
     fn validates(&self, fact: &FactVersionRef) -> bool {
-        match fact {
-            FactVersionRef::RouteSurface(r) => match &r.key {
-                FactKey::ModuleAugmentationIndexShape {
-                    target_kind_tag: AugmentationTargetKindTag::ExternalSpecifier,
-                    external_specifier: Some(spec),
-                    ..
-                } if spec.as_ref() == self.rejected_external_specifier
-                    && r.expected_hash == self.rejected_fingerprint =>
-                {
-                    false
-                }
-                _ => true,
-            },
-            _ => true,
-        }
+        let FactVersionRef::RouteSurface(r) = fact else {
+            return true;
+        };
+        let FactKey::ModuleAugmentationIndexShape {
+            target_kind_tag: AugmentationTargetKindTag::ExternalSpecifier,
+            external_specifier: Some(spec),
+            ..
+        } = &r.key
+        else {
+            return true;
+        };
+        // Reject exactly the recorded (spec, fingerprint) pair.
+        !(spec.as_ref() == self.rejected_external_specifier
+            && r.expected_hash == self.rejected_fingerprint)
     }
 }
 
@@ -196,8 +195,7 @@ fn syntactic_export_set_differs_from_effective_export_set() {
     let parse_export_set = FactKey::SyntacticExportSet;
     let route_effective_set = FactKey::EffectiveExportSet;
     assert!(
-        std::mem::discriminant(&parse_export_set)
-            != std::mem::discriminant(&route_effective_set),
+        std::mem::discriminant(&parse_export_set) != std::mem::discriminant(&route_effective_set),
         "SyntacticExportSet (parse-domain) and EffectiveExportSet \
          (resolve-domain) MUST be distinct FactKey variants (R15)"
     );

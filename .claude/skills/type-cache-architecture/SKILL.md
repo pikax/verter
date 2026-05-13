@@ -403,6 +403,34 @@ augmenter_parse_stable_hash)]))`. Adding / removing an augmenter
 changes the fingerprint → existing `EffectiveExportSet` candidates
 invalidate.
 
+**Stitching pipeline.** `RouteDb::get_or_compute_effective_export_set`
+is the cold path. It calls
+`FileArtifactStore::ensure_augmentation_index_populated(target_key)`
+on first miss — the scan walks every loaded `FileArtifacts.augmentations`,
+sorts matched augmenters by `(canonical, parse_stable_hash)`, computes
+the fingerprint, inserts into `augmentation_index`, and emits a typed
+`ModuleAugmentationIndexShape` audit event recording the install (or
+refresh on re-population). The stitcher then folds each augmenter's
+`(augmented_name, space)` contributions into an
+`EffectiveExportSetEntry { entries, augmenter_count,
+augmenter_set_fingerprint, fact_dep_signature }`. The
+`fact_dep_signature` records the
+`RouteSurface(ModuleAugmentationIndexShape)` fact plus per-contributor
+`FileWholeHash` anchors so:
+
+- adding / removing an augmenter changes the augmenter-set
+  fingerprint → consumer invalidates (G1);
+- editing one augmenter's body changes that file's whole hash →
+  consumer invalidates;
+- editing an unrelated file (not in the augmenter set) leaves the
+  signature valid → consumer warm-hits (R14 / R28 narrow scope).
+
+A typed `ModuleAugmentationStitched` audit event records each
+cold-path compute. Both audit-event variants live on
+`verter_audit::StructuredAuditEvent`; the `Custom` escape hatch is
+forbidden on the augmentation stitching surface (R23 scope-fence
+guarded by `tests/audit_event_shape.rs`).
+
 ## Cache layer key composition
 
 See `docs/arch/fact-based-cache.md` for the canonical per-cache-layer

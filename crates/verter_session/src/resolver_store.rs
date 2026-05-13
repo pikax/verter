@@ -265,19 +265,6 @@ impl HostStoreView {
         }
     }
 
-    /// Test-only convenience: insert an augmentation-index fingerprint
-    /// snapshot for `(target_kind_tag + parallel optionals)` directly.
-    /// Production paths drive this via `snapshot_augmentation_index`.
-    #[cfg(test)]
-    pub(crate) fn install_route_surface_index_fingerprint_for_test(
-        &mut self,
-        key: RouteSurfaceIndexShapeKey,
-        fingerprint: Hash16,
-    ) {
-        self.route_surface_index_fingerprints
-            .insert(key, fingerprint);
-    }
-
     pub(crate) fn mutation_epoch(&self) -> u64 {
         self.mutation_epoch
     }
@@ -439,7 +426,9 @@ pub(crate) fn augmentation_target_kind_tag_for(
     use crate::file_artifact_store::AugmentationTargetKind;
     use verter_semantic::facts::registry::AugmentationTargetKindTag;
     match target {
-        AugmentationTargetKind::ExternalSpecifier(_) => AugmentationTargetKindTag::ExternalSpecifier,
+        AugmentationTargetKind::ExternalSpecifier(_) => {
+            AugmentationTargetKindTag::ExternalSpecifier
+        }
         AugmentationTargetKind::ResolvedRelativeCanonical(_) => {
             AugmentationTargetKindTag::ResolvedRelativeCanonical
         }
@@ -463,9 +452,7 @@ pub(crate) fn augmentation_target_resolved_relative_canonical(
 ) -> Option<String> {
     use crate::file_artifact_store::AugmentationTargetKind;
     match target {
-        AugmentationTargetKind::ResolvedRelativeCanonical(canon) => {
-            Some(canon.as_ref().to_owned())
-        }
+        AugmentationTargetKind::ResolvedRelativeCanonical(canon) => Some(canon.as_ref().to_owned()),
         _ => None,
     }
 }
@@ -545,7 +532,7 @@ impl crate::resolver_core::StoreView for HostStoreView {
 
     /// Route-surface-domain validator (R26 + R29 + G1).
     ///
-    /// Stage 6c wires the `ModuleAugmentationIndexShape` variant
+    /// Routes the `ModuleAugmentationIndexShape` variant
     /// against the snapshot of augmentation-index fingerprints
     /// captured at view-build time. Other `FactKey` variants in the
     /// route-surface domain (`EffectiveExportSet`) are not yet
@@ -565,9 +552,7 @@ impl crate::resolver_core::StoreView for HostStoreView {
             } => {
                 let key = RouteSurfaceIndexShapeKey {
                     target_kind_tag: *target_kind_tag,
-                    external_specifier: external_specifier
-                        .as_ref()
-                        .map(|s| s.as_ref().to_owned()),
+                    external_specifier: external_specifier.as_ref().map(|s| s.as_ref().to_owned()),
                     resolved_relative_canonical: resolved_relative_canonical
                         .as_ref()
                         .map(|s| s.as_ref().to_owned()),

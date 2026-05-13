@@ -189,23 +189,18 @@ impl StoreView for RejectStaleAugmenterFingerprint {
         self.token
     }
     fn validates(&self, fact: &FactVersionRef) -> bool {
-        match fact {
-            FactVersionRef::RouteSurface(r) => {
-                use verter_semantic::facts::FactKey;
-                match &r.key {
-                    FactKey::ModuleAugmentationIndexShape {
-                        external_specifier: Some(s),
-                        ..
-                    } if s.as_ref() == self.target_spec
-                        && r.expected_hash == self.stale_fingerprint =>
-                    {
-                        false
-                    }
-                    _ => true,
-                }
-            }
-            _ => true,
-        }
+        use verter_semantic::facts::FactKey;
+        let FactVersionRef::RouteSurface(r) = fact else {
+            return true;
+        };
+        let FactKey::ModuleAugmentationIndexShape {
+            external_specifier: Some(s),
+            ..
+        } = &r.key
+        else {
+            return true;
+        };
+        !(s.as_ref() == self.target_spec && r.expected_hash == self.stale_fingerprint)
     }
 }
 
@@ -475,7 +470,13 @@ fn augmenter_set_refresh_invalidates_downstream() {
         target.clone(),
         &AcceptAllView::new(1),
         &store,
-        |c| if c == "/primary-aug.ts" { Some([31u8; 16]) } else { None },
+        |c| {
+            if c == "/primary-aug.ts" {
+                Some([31u8; 16])
+            } else {
+                None
+            }
+        },
         |_, _| None,
     );
     let initial_fingerprint = effective_initial.augmenter_set_fingerprint;
@@ -494,11 +495,9 @@ fn augmenter_set_refresh_invalidates_downstream() {
     let secondary_artifacts = store
         .get_artifacts(&secondary_key)
         .expect("just-inserted artifact MUST be reachable");
-    store.refresh_augmentation_index_for_canonical(
-        &secondary_key,
-        &secondary_artifacts,
-        |_, _| None,
-    );
+    store.refresh_augmentation_index_for_canonical(&secondary_key, &secondary_artifacts, |_, _| {
+        None
+    });
 
     // The previously-recorded fingerprint is now stale: a view that
     // refuses it should fail to validate the cached entry.
@@ -551,18 +550,20 @@ fn augmenter_set_refresh_invalidates_downstream() {
         }
         fn validates(&self, fact: &FactVersionRef) -> bool {
             use verter_semantic::facts::FactKey;
-            match fact {
-                FactVersionRef::RouteSurface(r) => match &r.key {
-                    FactKey::ModuleAugmentationIndexShape {
-                        external_specifier: Some(s),
-                        ..
-                    } if s.as_ref() == self.target_spec => {
-                        r.expected_hash == self.new_fingerprint
-                    }
-                    _ => true,
-                },
-                _ => true,
+            let FactVersionRef::RouteSurface(r) = fact else {
+                return true;
+            };
+            let FactKey::ModuleAugmentationIndexShape {
+                external_specifier: Some(s),
+                ..
+            } = &r.key
+            else {
+                return true;
+            };
+            if s.as_ref() != self.target_spec {
+                return true;
             }
+            r.expected_hash == self.new_fingerprint
         }
     }
 
@@ -629,7 +630,13 @@ fn edit_augmenting_file_invalidates_consumer() {
         target.clone(),
         &AcceptAllView::new(1),
         &store,
-        |c| if c == "/aug.ts" { Some(original_hash) } else { None },
+        |c| {
+            if c == "/aug.ts" {
+                Some(original_hash)
+            } else {
+                None
+            }
+        },
         |_, _| None,
     );
 

@@ -486,9 +486,7 @@ impl RouteDb {
                     // Stitch each augmenter's contributions for the
                     // queried target.
                     let mut stitched: Vec<EffectiveExportEntry> = Vec::new();
-                    for (augmenter_canonical, _parse_stable_hash) in
-                        augmenter_set.entries.iter()
-                    {
+                    for (augmenter_canonical, _parse_stable_hash) in augmenter_set.entries.iter() {
                         let Some(art) = artifact_store
                             .latest_artifacts_for_canonical(augmenter_canonical.as_ref())
                         else {
@@ -532,9 +530,7 @@ impl RouteDb {
                         lane: verter_semantic::facts::FactLane::Semantic,
                         expected_hash: augmenter_set.fingerprint,
                     }));
-                    for (augmenter_canonical, _parse_stable_hash) in
-                        augmenter_set.entries.iter()
-                    {
+                    for (augmenter_canonical, _parse_stable_hash) in augmenter_set.entries.iter() {
                         if let Some(hash) = contributor_whole_hash(augmenter_canonical.as_ref()) {
                             facts.push(FactVersionRef::FileWholeHash {
                                 canonical_id: augmenter_canonical.as_ref().to_owned(),
@@ -624,7 +620,7 @@ impl RouteDb {
     /// a fresh `Vec<FactVersionRef>` suitable for re-admission into a
     /// downstream `ValidatedFactCache`.
     ///
-    /// The post-Stage-6c contract: the signature is already the
+    /// Contract: the signature is already the
     /// validation oracle for the surface — it was finalised at
     /// admission time. This helper exists for callers that need to
     /// thread the existing signature into a higher-tier

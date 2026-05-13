@@ -253,8 +253,8 @@ pub enum StructuredAuditEvent {
     /// Cold-path only — emitted once per `EffectiveExportSet`
     /// cold/stale compute, after the augmenter set has been folded
     /// into the consumer's effective surface. The `target_kind_tag`
-    /// + the parallel optional fields below identify the target.
-    /// `augmenter_count` and `fingerprint` describe the
+    /// together with the parallel optional fields below identify the
+    /// target. `augmenter_count` and `fingerprint` describe the
     /// `AugmenterSet` that contributed.
     ModuleAugmentationStitched {
         /// Discriminator for the augmentation target kind.
