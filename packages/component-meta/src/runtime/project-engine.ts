@@ -44,6 +44,13 @@ export interface NativeMetaSession {
   readonly overlayGeneration: number;
   /** Single native component-meta query. Returns a protobuf payload. */
   getComponentMeta(canonicalOrAlias: string): Buffer | null;
+  /**
+   * Batch component-meta query. Returns one buffer slot per input in
+   * input order — non-empty for a successful payload, empty for a
+   * missing canonical or per-id failure. One scheduler dispatch, one
+   * overlay view, host-owned admission caches shared across the batch.
+   */
+  getComponentMetaBatch(canonicalsOrAliases: string[]): Buffer[];
   /** Full resolved native query with resolution sidecars. Returns a protobuf payload. */
   getResolvedComponentMeta(canonicalOrAlias: string): Buffer | null;
   /** Provenance counters for observability. Returns JSON. */

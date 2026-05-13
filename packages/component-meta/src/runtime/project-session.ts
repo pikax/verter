@@ -178,6 +178,34 @@ export class ProjectSession {
   }
 
   /**
+   * Batch native component-meta query. All `canonicalIds` resolve under
+   * a single shared overlay view and a single scheduler dispatch on
+   * the native side; host-owned admission caches
+   * (`MaterializeStructureDb`, `ComponentMetaResultDb`,
+   * `SemanticGraphStore`) are shared across the batch.
+   *
+   * Returns one slot per input in input order — decoded metadata for
+   * successful slots, `null` for missing canonicals or per-id failures.
+   *
+   * Per-id decode results are NOT memoized through `_memoizedDecode`
+   * because the batch is the canonical entry point for callers that
+   * want one scheduler context; subsequent per-id `getComponentMeta`
+   * calls will hit the per-id memo on warm state.
+   */
+  getComponentMetaBatch(canonicalIds: string[]): Array<unknown | null> {
+    this.ensureOpen();
+    const payloads = this._nativeSession.getComponentMetaBatch(canonicalIds);
+    return payloads.map((payload) => {
+      // Sentinel: empty buffer means "no result" (missing canonical or
+      // per-id failure).
+      if (payload === null || payload === undefined || payload.length === 0) {
+        return null;
+      }
+      return decodeComponentMetaPayload(payload);
+    });
+  }
+
+  /**
    * Full native component-meta query with resolution sidecars.
    */
   getResolvedComponentMeta(canonicalId: string): unknown | null {

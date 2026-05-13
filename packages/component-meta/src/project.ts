@@ -209,6 +209,61 @@ export class ComponentMetaSession {
   }
 
   /**
+   * Batch surface for {@link getComponentMeta}. All `filePaths` resolve
+   * under one shared overlay view and a single scheduler dispatch on
+   * the native side; host-owned admission caches
+   * (`MaterializeStructureDb`, `ComponentMetaResultDb`,
+   * `SemanticGraphStore`) are shared across the batch.
+   *
+   * Returns one slot per input in input order — a fully-projected
+   * `VolarComponentMeta` for successful slots, the empty-meta default
+   * for missing canonicals / per-id failures.
+   */
+  async getComponentMetaBatch(filePaths: string[]): Promise<VolarComponentMeta[]> {
+    this.ensureOpen();
+    // Resolve each input to its canonical absolute path; preserve
+    // input order positionally.
+    const canonicalIds: string[] = filePaths.map((p) => {
+      const abs = this.ensureNativeMetaFile(p);
+      // ensureNativeMetaFile returns undefined when the file cannot
+      // be located. Pass the input through verbatim — the native
+      // batch will surface a missing-canonical slot.
+      return abs ?? p;
+    });
+    const sessionWithBatch = this._session as {
+      getComponentMetaBatch?: (canonicalIds: string[]) => Array<unknown | null>;
+    };
+    const getComponentMetaBatch = sessionWithBatch.getComponentMetaBatch;
+    if (typeof getComponentMetaBatch !== "function") {
+      // Fallback: per-id loop. Stays positional in input order and
+      // matches the batch semantics observable from JS, at the cost
+      // of N scheduler dispatches. Preserves backward compatibility
+      // for native bindings that have not yet exposed the batch
+      // surface.
+      const results: VolarComponentMeta[] = [];
+      for (const p of filePaths) {
+        results.push(await this.getComponentMeta(p));
+      }
+      return results;
+    }
+    const raw = getComponentMetaBatch.call(this._session, canonicalIds);
+    return raw.map((nativeMeta) => {
+      if (!nativeMeta) {
+        return { type: 0, props: [], events: [], slots: [], exposed: [] };
+      }
+      const declaredOnly = projectDeclaredOnlyNativeResult(nativeMeta as NativeComponentMetaResult);
+      if (!declaredOnly) {
+        return { type: 0, props: [], events: [], slots: [], exposed: [] };
+      }
+      return mapComponentMeta(
+        nativeComponentMetaToComponentMeta(declaredOnly),
+        this._options,
+        nativeTypeRegistryToMap(declaredOnly),
+      );
+    });
+  }
+
+  /**
    * Tier 1B selective surface (D32 + D101). Returns the
    * `verter.v1.ComponentMetaSurface` proto bytes — eager scalars
    * combined with `NamedTypeHandle` for every type-bearing field.
