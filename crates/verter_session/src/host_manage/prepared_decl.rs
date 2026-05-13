@@ -190,11 +190,20 @@ impl VerterHost {
             });
         }
 
-        self.resolver.runtime.prepared_decl_bundles.insert_arc(
-            canonical_id.to_string(),
-            std::sync::Arc::clone(&bundle),
-            facts,
-        );
+        // Stage 10 strict admission migration. Prepared-decl bundles
+        // always carry at least the owner's `FileWholeHash` fact
+        // (constructed above), so strict admission is unconditionally
+        // safe. An empty-signature admission here would indicate a
+        // programmer error and is correctly refused.
+        self.resolver
+            .runtime
+            .prepared_decl_bundles
+            .insert_arc_with_kind(
+                canonical_id.to_string(),
+                std::sync::Arc::clone(&bundle),
+                facts,
+                "prepared_decl_bundles",
+            );
 
         self.provenance
             .bundle_materializations
@@ -270,11 +279,20 @@ impl VerterHost {
         }
 
         // 7. Insert into the stable cache.
-        self.resolver.runtime.prepared_decl_bundles.insert_arc(
-            canonical_id.to_string(),
-            std::sync::Arc::clone(&bundle),
-            facts,
-        );
+        // Stage 10 strict admission migration. Prepared-decl bundles
+        // always carry at least the owner's `FileWholeHash` fact
+        // (constructed above), so strict admission is unconditionally
+        // safe. An empty-signature admission here would indicate a
+        // programmer error and is correctly refused.
+        self.resolver
+            .runtime
+            .prepared_decl_bundles
+            .insert_arc_with_kind(
+                canonical_id.to_string(),
+                std::sync::Arc::clone(&bundle),
+                facts,
+                "prepared_decl_bundles",
+            );
 
         self.provenance
             .bundle_materializations

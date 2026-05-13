@@ -270,7 +270,22 @@ impl RouteDb {
                 match resolve() {
                     Some((result, facts)) => {
                         let arc = Arc::new(result);
-                        self.routes.insert_arc(key.clone(), arc.clone(), facts);
+                        // Stage 10 strict admission migration. Routes
+                        // resolved with non-empty fact signatures admit
+                        // through the strict entry-point; empty-signature
+                        // resolves are the legacy negative-cache pattern
+                        // (`get_or_resolve_route` passes `Vec::new()`)
+                        // and are NOT admitted — the route surface is
+                        // still returned to the caller, but the entry is
+                        // not persisted as a fact-validated cache hit.
+                        if !facts.is_empty() {
+                            self.routes.insert_arc_with_kind(
+                                key.clone(),
+                                arc.clone(),
+                                facts,
+                                "route_db.routes",
+                            );
+                        }
                         // R23 typed event: cold-path route admission.
                         // Fires once per `(provider, exported_name)`
                         // resolution. The `augmented` field is `false`
@@ -393,8 +408,20 @@ impl RouteDb {
                     Some(surface) => {
                         let arc = Arc::new(surface);
                         let facts = self.barrel_validation_facts(&arc);
-                        self.barrel_surfaces
-                            .insert_arc(key.clone(), arc.clone(), facts);
+                        // Stage 10 strict admission migration. Barrel
+                        // surfaces with a non-empty fact-dep signature
+                        // admit through the strict entry-point; an
+                        // empty signature (no dependency facts to
+                        // validate against) skips admission rather
+                        // than caching a phantom-fact entry.
+                        if !facts.is_empty() {
+                            self.barrel_surfaces.insert_arc_with_kind(
+                                key.clone(),
+                                arc.clone(),
+                                facts,
+                                "route_db.barrel_surfaces",
+                            );
+                        }
                         Ok(arc)
                     }
                     None => Err(()),
@@ -562,8 +589,18 @@ impl RouteDb {
                         augmenter_set_fingerprint: augmenter_set.fingerprint,
                         fact_dep_signature: signature,
                     });
-                    self.effective_export_sets
-                        .insert_arc(key.clone(), Arc::clone(&entry), facts);
+                    // Stage 10 strict admission migration. The
+                    // `EffectiveExportSet` cold-build always pushes
+                    // at least the `ModuleAugmentationIndexShape`
+                    // fact above, so `facts` is non-empty by
+                    // construction here — strict admission is
+                    // unconditionally safe.
+                    self.effective_export_sets.insert_arc_with_kind(
+                        key.clone(),
+                        Arc::clone(&entry),
+                        facts,
+                        "route_db.effective_export_sets",
+                    );
 
                     // Emit the cold-path audit event.
                     emit_module_augmentation_stitched_event(

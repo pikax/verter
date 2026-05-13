@@ -129,7 +129,19 @@ impl ImportedRootDb {
             match resolve() {
                 Some((result, facts)) => {
                     let arc = Arc::new(result);
-                    self.roots.insert_arc(key.clone(), arc.clone(), facts);
+                    // Stage 10 strict admission migration. Imported
+                    // root entries with non-empty fact signatures admit
+                    // through the strict entry-point; empty-signature
+                    // resolves stay unpersisted (the result is still
+                    // returned to the caller).
+                    if !facts.is_empty() {
+                        self.roots.insert_arc_with_kind(
+                            key.clone(),
+                            arc.clone(),
+                            facts,
+                            "imported_root_db.roots",
+                        );
+                    }
                     Ok(arc)
                 }
                 None => Err(()),

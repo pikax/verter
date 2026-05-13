@@ -52,6 +52,22 @@ where
         self.cache.insert_arc(key, value, facts);
     }
 
+    /// Strict-admission wrapper: forwards through to
+    /// [`ValidatedFactCache::insert_arc_with_kind`] so producers that
+    /// migrated under Stage 10 admit through the fact-completeness
+    /// guard. Empty signatures refuse + emit
+    /// `FactSignatureAdmissionRefused`; over-cap signatures refuse +
+    /// emit `FactSignatureOverflow`.
+    pub fn insert_arc_with_kind(
+        &self,
+        key: K,
+        value: Arc<V>,
+        facts: Vec<FactVersionRef>,
+        cache_kind: &'static str,
+    ) {
+        self.cache.insert_arc_with_kind(key, value, facts, cache_kind);
+    }
+
     pub fn cached_values(&self) -> Vec<Arc<V>> {
         self.cache.values()
     }

@@ -2628,11 +2628,21 @@ impl VerterHost {
             );
             return None;
         }
-        self.resolver_runtime().component_meta.insert_arc(
-            cache_key,
-            cached.state.clone(),
-            cached.fact_versions.clone(),
-        );
+        // Stage 10 strict admission migration. The cached state's
+        // fact_versions are populated at cold-compute publish time;
+        // re-hydration here passes them through unchanged. Empty
+        // signatures skip admission rather than caching a phantom-
+        // fact entry — the cached state is still returned.
+        if !cached.fact_versions.is_empty() {
+            self.resolver_runtime()
+                .component_meta
+                .insert_arc_with_kind(
+                    cache_key,
+                    cached.state.clone(),
+                    cached.fact_versions.clone(),
+                    "component_meta.results",
+                );
+        }
         Some(cached.state.as_ref().clone())
     }
 
@@ -2655,11 +2665,22 @@ impl VerterHost {
             ),
         );
         let state = Arc::new(state.clone());
-        self.resolver_runtime().component_meta.insert_arc(
-            resolved_meta_cache_key(canonical, mode),
-            state.clone(),
-            fact_versions.to_vec(),
-        );
+        // Stage 10 strict admission migration. Cold-publish path:
+        // empty signatures are skipped (the publish caller passes
+        // an empty slice when the cold compute didn't observe any
+        // facts — strict admission would refuse and emit
+        // `FactSignatureAdmissionRefused`, which would inflate the
+        // refused counter on the steady-state baseline).
+        if !fact_versions.is_empty() {
+            self.resolver_runtime()
+                .component_meta
+                .insert_arc_with_kind(
+                    resolved_meta_cache_key(canonical, mode),
+                    state.clone(),
+                    fact_versions.to_vec(),
+                    "component_meta.results",
+                );
+        }
         self.mirror_cached_resolved_meta_arc(canonical, mode, state);
     }
 
