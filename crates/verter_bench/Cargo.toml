@@ -99,6 +99,10 @@ harness = false
 name = "cache_baseline"
 harness = false
 
+[[bench]]
+name = "fact_tracer_warm_hit_zero_alloc"
+harness = false
+
 
 [[example]]
 name = "expression_validator"
