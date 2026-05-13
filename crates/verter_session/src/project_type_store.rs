@@ -1874,8 +1874,8 @@ impl ProjectTypeStore {
             resolved_type_cache_db: ResolvedTypeCacheDb::new(),
             semantic_db: parking_lot::Mutex::new(verter_semantic::db::SemanticDb::new()),
             resolved_import_facts: crate::resolved_import_facts::ResolvedImportFactsDb::new(),
-            member_semantic_facts:
-                crate::member_semantic_fact_store::MemberSemanticFactStore::new(),
+            member_semantic_facts: crate::member_semantic_fact_store::MemberSemanticFactStore::new(
+            ),
             member_display_facts: crate::member_display_fact_store::MemberDisplayFactStore::new(),
             counters,
         }
@@ -2223,7 +2223,8 @@ impl ProjectTypeStore {
         // per-canonical content edit drops both lanes' entries for
         // the canonical so subsequent member-body fingerprints emit
         // from fresh source.
-        self.member_semantic_facts.invalidate_canonical(canonical_id);
+        self.member_semantic_facts
+            .invalidate_canonical(canonical_id);
         self.member_display_facts.invalidate_canonical(canonical_id);
         // D48 split: the per-domain compile-cache entries
         // (CompileCacheDb / DerivedRawCacheDb / DependencyCacheDb) are

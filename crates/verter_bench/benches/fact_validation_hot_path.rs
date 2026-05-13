@@ -25,11 +25,9 @@ use std::hint::black_box;
 
 use criterion::{criterion_group, criterion_main, Criterion};
 
-use verter_session::resolver_core::{
-    FactVersionRef, ParseFactRef, ValidatedFactCache,
-};
-use verter_session::semantic_query::HashValue;
 use verter_semantic::facts::{FactKey, FactLane, SymbolSpace};
+use verter_session::resolver_core::{FactVersionRef, ParseFactRef, ValidatedFactCache};
+use verter_session::semantic_query::HashValue;
 
 fn make_view() -> impl verter_session::resolver_core::StoreView {
     verter_session::resolver_core::PermissiveStoreView::default()

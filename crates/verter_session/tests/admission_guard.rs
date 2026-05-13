@@ -25,11 +25,11 @@
 //!   directly by running the cold compute path twice and observing
 //!   that both runs return the same value.
 
+use verter_semantic::analysis::Hash16;
+use verter_semantic::facts::{FactKey, FactLane, SymbolSpace};
 use verter_session::resolver_core::{
     FactVersionRef, ParseFactRef, ValidatedFactCache, FACT_SIGNATURE_CAP,
 };
-use verter_semantic::analysis::Hash16;
-use verter_semantic::facts::{FactKey, FactLane, SymbolSpace};
 
 fn fake_fact(name: &str) -> FactVersionRef {
     FactVersionRef::Parse(ParseFactRef {
@@ -120,7 +120,12 @@ fn oversized_signature_refuses_admission() {
         over_cap.push(fake_fact(&format!("G{i}")));
     }
     assert_eq!(over_cap.len(), FACT_SIGNATURE_CAP + 1);
-    cache.insert_arc_with_kind("over_cap", std::sync::Arc::new(2u32), over_cap, "test_cache");
+    cache.insert_arc_with_kind(
+        "over_cap",
+        std::sync::Arc::new(2u32),
+        over_cap,
+        "test_cache",
+    );
 
     assert_eq!(
         cache.len(),

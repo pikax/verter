@@ -33,10 +33,10 @@ use std::path::PathBuf;
 
 use rustc_hash::FxHashSet;
 
+use verter_semantic::facts::{FactKey, FactLane, SymbolSpace};
 use verter_session::resolver_core::{
     FactVersionRef, ParseFactRef, StoreView, StoreViewCompatToken, ValidatedFactCache,
 };
-use verter_semantic::facts::{FactKey, FactLane, SymbolSpace};
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -55,10 +55,8 @@ fn read_expected_json(name: &str) -> serde_json::Value {
         .join("fixtures")
         .join("path_precise")
         .join(name);
-    let raw = fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read fixture {path:?}: {e}"));
-    serde_json::from_str(&raw)
-        .unwrap_or_else(|e| panic!("parse JSON {path:?}: {e}"))
+    let raw = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read fixture {path:?}: {e}"));
+    serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse JSON {path:?}: {e}"))
 }
 
 #[derive(Debug)]
@@ -218,9 +216,7 @@ fn member_add_preserves_existing_member_consumers() {
     // validates them.
     let post_view = TestView {
         token: make_token(),
-        valid_facts: [member_a.clone(), presence_a.clone()]
-            .into_iter()
-            .collect(),
+        valid_facts: [member_a.clone(), presence_a.clone()].into_iter().collect(),
     };
 
     assert!(

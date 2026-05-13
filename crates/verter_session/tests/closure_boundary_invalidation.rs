@@ -15,11 +15,11 @@
 
 use rustc_hash::FxHashSet;
 
+use verter_semantic::facts::{FactKey, FactLane, SymbolSpace};
 use verter_session::resolver_core::{
     FactVersionRef, ParseFactRef, StoreView, StoreViewCompatToken, ValidatedFactCache,
 };
 use verter_session::semantic_query::HashValue;
-use verter_semantic::facts::{FactKey, FactLane, SymbolSpace};
 
 /// Synthetic store view: a fact `validates` iff its
 /// `FactVersionRef` is in `valid_facts`. The `compat_token` is a
@@ -105,13 +105,9 @@ fn editing_imported_member_a_invalidates_only_consumers_of_member_a() {
     // expected hashes.
     let pre_view = TestView {
         token: make_token(),
-        valid_facts: [
-            member_a_pre.clone(),
-            member_b_pre.clone(),
-            import_x.clone(),
-        ]
-        .into_iter()
-        .collect(),
+        valid_facts: [member_a_pre.clone(), member_b_pre.clone(), import_x.clone()]
+            .into_iter()
+            .collect(),
     };
     assert!(cache.get_if_valid(&"consumer_a", &pre_view).is_some());
     assert!(cache.get_if_valid(&"consumer_b", &pre_view).is_some());
@@ -196,11 +192,15 @@ fn editing_import_ref_does_not_invalidate_unrelated_consumers() {
 
     // Discrimination: owner1 invalidated, owner2 preserved.
     assert!(
-        cache.get_if_valid(&"consumer_owner_1", &post_view).is_none(),
+        cache
+            .get_if_valid(&"consumer_owner_1", &post_view)
+            .is_none(),
         "consumer_owner_1 MUST be invalidated when its OWN ImportRef changes"
     );
     assert!(
-        cache.get_if_valid(&"consumer_owner_2", &post_view).is_some(),
+        cache
+            .get_if_valid(&"consumer_owner_2", &post_view)
+            .is_some(),
         "consumer_owner_2 MUST be preserved when owner1's ImportRef (not its own) \
          changes — closure-boundary observations are per-importer"
     );
