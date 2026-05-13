@@ -2628,11 +2628,11 @@ impl VerterHost {
             );
             return None;
         }
-        // Stage 10 strict admission migration. The cached state's
-        // fact_versions are populated at cold-compute publish time;
-        // re-hydration here passes them through unchanged. Empty
-        // signatures skip admission rather than caching a phantom-
-        // fact entry — the cached state is still returned.
+        // Strict admission. The cached state's fact_versions are
+        // populated at cold-compute publish time; re-hydration here
+        // passes them through unchanged. Empty signatures skip
+        // admission rather than caching a phantom-fact entry — the
+        // cached state is still returned.
         if !cached.fact_versions.is_empty() {
             self.resolver_runtime()
                 .component_meta
@@ -2665,10 +2665,10 @@ impl VerterHost {
             ),
         );
         let state = Arc::new(state.clone());
-        // Stage 10 strict admission migration. Cold-publish path:
-        // empty signatures are skipped (the publish caller passes
-        // an empty slice when the cold compute didn't observe any
-        // facts — strict admission would refuse and emit
+        // Strict admission. Cold-publish path: empty signatures
+        // are skipped (the publish caller passes an empty slice
+        // when the cold compute didn't observe any facts — strict
+        // admission would refuse and emit
         // `FactSignatureAdmissionRefused`, which would inflate the
         // refused counter on the steady-state baseline).
         if !fact_versions.is_empty() {

@@ -121,7 +121,7 @@ impl FileArtifactKey {
         }
     }
 
-    /// Stage 10 — test-only public shim over [`Self::legacy`].
+    /// Test-only public shim over [`Self::legacy`].
     ///
     /// Used by `tests/eviction_policy.rs` and similar integration
     /// tests that need to construct multiple distinct
@@ -386,7 +386,7 @@ pub struct FileArtifactStore {
     access_tick: AtomicU64,
     /// Per-key hit counter — bumped on every warm `get` /
     /// `get_artifacts` hit. Consumed by the LRU floor's promotion
-    /// predicate (Stage 10): entries whose counter is below
+    /// predicate: entries whose counter is below
     /// `promote_threshold` are evicted first regardless of
     /// `last_access` recency.
     hit_counters: DashMap<FileArtifactKey, u32>,
@@ -592,8 +592,8 @@ impl FileArtifactStore {
     /// order.
     ///
     /// Delegates to [`Self::evict_lru_promoted`] with `promote_threshold
-    /// = 0` (no promotion — pure recency LRU). Stage 10 callers thread
-    /// the configured `promote_threshold` directly through
+    /// = 0` (no promotion — pure recency LRU). Promotion-aware callers
+    /// thread the configured `promote_threshold` directly through
     /// `evict_lru_promoted` to preserve hot entries.
     pub fn evict_lru(&self, min_floor: usize) {
         self.evict_lru_promoted(min_floor, 0);
@@ -607,7 +607,7 @@ impl FileArtifactStore {
     /// `promote_threshold`) survive unless every entry is hot, in
     /// which case the floor falls back to pure recency.
     ///
-    /// Stage 10 / R22 — memory-bound eviction. The hot/cold split
+    /// R22 — memory-bound eviction. The hot/cold split
     /// is the only behavioural difference from the pure-recency
     /// [`Self::evict_lru`]; correctness still flows from
     /// fact-validation (R19).

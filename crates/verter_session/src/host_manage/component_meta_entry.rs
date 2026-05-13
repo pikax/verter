@@ -74,7 +74,7 @@ impl VerterHost {
         }
 
         // Cold build — install a `with_fact_tracer` outer scope so
-        // the Stage-6d materialiser `observe` wiring accumulates a
+        // the materialiser `observe` wiring accumulates a
         // real `FactReadSet`. The tracer's accumulator becomes the
         // candidate's `fact_dep_signature` at publish time.
         //

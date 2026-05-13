@@ -129,11 +129,11 @@ impl ImportedRootDb {
             match resolve() {
                 Some((result, facts)) => {
                     let arc = Arc::new(result);
-                    // Stage 10 strict admission migration. Imported
-                    // root entries with non-empty fact signatures admit
-                    // through the strict entry-point; empty-signature
-                    // resolves stay unpersisted (the result is still
-                    // returned to the caller).
+                    // Strict admission. Imported root entries with
+                    // non-empty fact signatures admit through the
+                    // strict entry-point; empty-signature resolves stay
+                    // unpersisted (the result is still returned to the
+                    // caller).
                     if !facts.is_empty() {
                         self.roots.insert_arc_with_kind(
                             key.clone(),
@@ -333,7 +333,7 @@ mod tests {
 
     #[test]
     fn get_or_resolve_caches() {
-        // Stage 10 strict admission migration: the zero-facts
+        // Strict-admission contract: the zero-facts
         // `get_or_resolve` helper does NOT admit a fact-validated
         // entry. To exercise the caching path, callers thread a
         // non-empty fact signature through `get_or_resolve_with_facts`.
@@ -367,7 +367,7 @@ mod tests {
 
     #[test]
     fn get_or_resolve_with_empty_facts_does_not_cache() {
-        // Stage 10 discrimination: zero-fact root resolves are NOT
+        // Strict-admission discrimination: zero-fact root resolves are NOT
         // admitted. The second call re-invokes the resolver
         // because the first skipped admission.
         let db = ImportedRootDb::new();
@@ -391,9 +391,9 @@ mod tests {
         assert_eq!(
             call_count.load(std::sync::atomic::Ordering::Relaxed),
             2,
-            "Zero-fact root resolves are not cached under Stage 10 \
-             strict admission; migrate to \
-             `get_or_resolve_with_facts` to opt back into caching."
+            "Zero-fact root resolves are not cached under strict \
+             admission; migrate to `get_or_resolve_with_facts` to \
+             opt back into caching."
         );
     }
 

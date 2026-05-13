@@ -2267,9 +2267,9 @@ impl ProjectTypeStore {
         memory_pressure: bool,
         min_floor: usize,
     ) {
-        // Stage 10: the legacy 3-arg API delegates to the policy-aware
-        // variant with policy defaults so existing callers retain
-        // their behaviour unchanged. New callers thread an explicit
+        // The legacy 3-arg API delegates to the policy-aware variant
+        // with policy defaults so existing callers retain their
+        // behaviour unchanged. Policy-aware callers thread an explicit
         // `EvictionPolicyConfig` through `evict_unreachable_artifacts_with_policy`.
         let policy = crate::types::EvictionPolicyConfig {
             memory_pressure_threshold: usize::MAX,
@@ -2280,7 +2280,7 @@ impl ProjectTypeStore {
     }
 
     /// Policy-aware reachability + LRU floor + per-canonical
-    /// retention sweep. Stage 10 — consumes the full
+    /// retention sweep. Consumes the full
     /// [`crate::types::EvictionPolicyConfig`] so callers can opt in
     /// to per-canonical retention + promotion-aware LRU eviction.
     ///
@@ -2306,7 +2306,7 @@ impl ProjectTypeStore {
                 let _ = self.indexed.remove_artifacts(&key);
             }
         }
-        // Stage 10: per-canonical retention runs on every sweep so
+        // Per-canonical retention runs on every sweep so
         // long-lived sessions don't accumulate unbounded variants.
         // The default retention (3) covers the {current, previous,
         // baseline} window; `usize::MAX` disables the cap.

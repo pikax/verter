@@ -53,11 +53,10 @@ where
     }
 
     /// Strict-admission wrapper: forwards through to
-    /// [`ValidatedFactCache::insert_arc_with_kind`] so producers that
-    /// migrated under Stage 10 admit through the fact-completeness
-    /// guard. Empty signatures refuse + emit
-    /// `FactSignatureAdmissionRefused`; over-cap signatures refuse +
-    /// emit `FactSignatureOverflow`.
+    /// [`ValidatedFactCache::insert_arc_with_kind`] so producers
+    /// admit through the fact-completeness guard. Empty signatures
+    /// refuse + emit `FactSignatureAdmissionRefused`; over-cap
+    /// signatures refuse + emit `FactSignatureOverflow`.
     pub fn insert_arc_with_kind(
         &self,
         key: K,

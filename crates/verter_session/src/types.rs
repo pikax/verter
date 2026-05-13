@@ -282,16 +282,16 @@ pub struct RecursionBudgetOverrides {
 /// builds. The threshold exists so production deployments can opt in
 /// without a code change.
 ///
-/// `per_canonical_content_hash_retention` (R20-adjacent, Stage 10)
-/// bounds the number of distinct `content_hash` variants the host
-/// keeps for a single canonical id. Older variants beyond this
-/// count are dropped on the next reachability sweep regardless of
-/// whether they are still in the live publish set — this is the
-/// concrete memory-bound (R22) for "what happens after a long-lived
-/// session edits the same file 100 times".
+/// `per_canonical_content_hash_retention` (R20-adjacent) bounds
+/// the number of distinct `content_hash` variants the host keeps
+/// for a single canonical id. Older variants beyond this count are
+/// dropped on the next reachability sweep regardless of whether
+/// they are still in the live publish set — this is the concrete
+/// memory-bound (R22) for "what happens after a long-lived session
+/// edits the same file 100 times".
 ///
-/// `promote_threshold` (Stage 10) is the per-canonical hit count
-/// required before an entry is "hot" for LRU-floor purposes.
+/// `promote_threshold` is the per-canonical hit count required
+/// before an entry is "hot" for LRU-floor purposes.
 /// Entries below the threshold age out first under memory pressure
 /// even when their `last_access` tick is newer than a hot entry's;
 /// hot entries survive the floor unless every entry has been
@@ -420,14 +420,13 @@ impl Default for EvictionPolicyConfig {
             // for typical project sizes in the corpus baseline; the
             // actual production tuning lives outside the plan scope.
             min_floor: 1024,
-            // R22 / Stage 10 — keep the most recent 3
-            // `content_hash` variants per canonical. Tracks the
-            // {current, previous, baseline} window typical of an
-            // interactive editor.
+            // R22 — keep the most recent 3 `content_hash` variants
+            // per canonical. Tracks the {current, previous,
+            // baseline} window typical of an interactive editor.
             per_canonical_content_hash_retention: 3,
-            // Stage 10 — promote an entry to "hot" after 2 warm
-            // hits; cold entries age out first under memory
-            // pressure regardless of `last_access` recency.
+            // Promote an entry to "hot" after 2 warm hits; cold
+            // entries age out first under memory pressure
+            // regardless of `last_access` recency.
             promote_threshold: 2,
         }
     }

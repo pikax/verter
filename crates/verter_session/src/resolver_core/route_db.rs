@@ -270,10 +270,10 @@ impl RouteDb {
                 match resolve() {
                     Some((result, facts)) => {
                         let arc = Arc::new(result);
-                        // Stage 10 strict admission migration. Routes
-                        // resolved with non-empty fact signatures admit
-                        // through the strict entry-point; empty-signature
-                        // resolves are the legacy negative-cache pattern
+                        // Strict admission. Routes resolved with
+                        // non-empty fact signatures admit through the
+                        // strict entry-point; empty-signature resolves
+                        // are the legacy negative-cache pattern
                         // (`get_or_resolve_route` passes `Vec::new()`)
                         // and are NOT admitted — the route surface is
                         // still returned to the caller, but the entry is
@@ -408,12 +408,12 @@ impl RouteDb {
                     Some(surface) => {
                         let arc = Arc::new(surface);
                         let facts = self.barrel_validation_facts(&arc);
-                        // Stage 10 strict admission migration. Barrel
-                        // surfaces with a non-empty fact-dep signature
-                        // admit through the strict entry-point; an
-                        // empty signature (no dependency facts to
-                        // validate against) skips admission rather
-                        // than caching a phantom-fact entry.
+                        // Strict admission. Barrel surfaces with a
+                        // non-empty fact-dep signature admit through
+                        // the strict entry-point; an empty signature
+                        // (no dependency facts to validate against)
+                        // skips admission rather than caching a
+                        // phantom-fact entry.
                         if !facts.is_empty() {
                             self.barrel_surfaces.insert_arc_with_kind(
                                 key.clone(),
@@ -589,12 +589,11 @@ impl RouteDb {
                         augmenter_set_fingerprint: augmenter_set.fingerprint,
                         fact_dep_signature: signature,
                     });
-                    // Stage 10 strict admission migration. The
-                    // `EffectiveExportSet` cold-build always pushes
-                    // at least the `ModuleAugmentationIndexShape`
-                    // fact above, so `facts` is non-empty by
-                    // construction here — strict admission is
-                    // unconditionally safe.
+                    // Strict admission. The `EffectiveExportSet`
+                    // cold-build always pushes at least the
+                    // `ModuleAugmentationIndexShape` fact above, so
+                    // `facts` is non-empty by construction here —
+                    // strict admission is unconditionally safe.
                     self.effective_export_sets.insert_arc_with_kind(
                         key.clone(),
                         Arc::clone(&entry),
@@ -948,7 +947,7 @@ mod tests {
         let view = TestView::accepting_all(1);
         let call_count = std::sync::atomic::AtomicU32::new(0);
 
-        // Stage 10 strict admission migration: the zero-facts
+        // Strict admission contract: the zero-facts
         // `get_or_resolve_route` helper does NOT cache its result
         // because the empty signature would refuse strict admission.
         // Callers that want a cached entry must thread a non-empty
@@ -984,9 +983,9 @@ mod tests {
 
     #[test]
     fn get_or_resolve_route_with_empty_facts_does_not_cache() {
-        // Stage 10 discrimination: the zero-facts variant must NOT
-        // admit a cache entry. The second call re-invokes the
-        // resolver because the first call skipped admission.
+        // Strict-admission discrimination: the zero-facts variant
+        // must NOT admit a cache entry. The second call re-invokes
+        // the resolver because the first call skipped admission.
         let db = RouteDb::new();
         let view = TestView::accepting_all(1);
         let call_count = std::sync::atomic::AtomicU32::new(0);
@@ -1008,10 +1007,10 @@ mod tests {
         assert_eq!(
             call_count.load(std::sync::atomic::Ordering::Relaxed),
             2,
-            "Zero-fact route resolves are not cached under Stage 10 \
-             strict admission; the second call MUST re-invoke the \
-             resolver. Migrate to `get_or_resolve_route_with_facts` \
-             with a non-empty fact signature to opt back into caching."
+            "Zero-fact route resolves are not cached under strict \
+             admission; the second call MUST re-invoke the resolver. \
+             Migrate to `get_or_resolve_route_with_facts` with a \
+             non-empty fact signature to opt back into caching."
         );
     }
 
