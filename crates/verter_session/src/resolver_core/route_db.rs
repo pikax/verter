@@ -597,12 +597,12 @@ impl RouteDb {
         self.effective_export_sets.len()
     }
 
-    /// Stage 6d instrumentation: total `signature_overflow_count`
-    /// across every backing `ValidatedFactCache` on this `RouteDb`.
-    /// Read by the Stage 6d pre-canary + Stage 7 final canary; a
-    /// non-zero value means a producer flattened transitive facts
-    /// where it should have folded a downstream materialiser's
-    /// `semantic_hash`.
+    /// R20 instrumentation: total `signature_overflow_count` across
+    /// every backing `ValidatedFactCache` on this `RouteDb`. A non-
+    /// zero value means a producer flattened transitive facts where
+    /// it should have folded a downstream materialiser's
+    /// `semantic_hash`. The pre-canary + final canary both assert
+    /// this stays at 0 over the steady-state loop.
     #[must_use]
     pub fn signature_overflow_count(&self) -> u64 {
         self.routes.signature_overflow_count()
@@ -610,12 +610,11 @@ impl RouteDb {
             + self.effective_export_sets.signature_overflow_count()
     }
 
-    /// Stage 6d instrumentation: total `admission_refused_count`
-    /// across every backing `ValidatedFactCache` on this `RouteDb`.
-    /// Today the route producers run in loose mode; this aggregator
-    /// stays at 0 until the producers migrate to
-    /// `insert_arc_with_kind`. Read by the Stage 6d pre-canary +
-    /// Stage 7 final canary.
+    /// R20 instrumentation: total `admission_refused_count` across
+    /// every backing `ValidatedFactCache` on this `RouteDb`.
+    /// Producers that admit via the loose `insert_arc` path keep
+    /// this counter at 0; only strict-mode admissions via
+    /// `insert_arc_with_kind` advance it.
     #[must_use]
     pub fn admission_refused_count(&self) -> u64 {
         self.routes.admission_refused_count()

@@ -487,10 +487,8 @@ where
     /// [`FACT_SIGNATURE_CAP`]. Read in tests via
     /// [`ValidatedFactCache::signature_overflow_count`].
     signature_overflow: AtomicU64,
-    /// Stage 6d instrumentation counter: increments every time a
-    /// candidate's admission is refused by the fact-completeness
-    /// guard (today: empty `fact_dep_signature` on a source-
-    /// dependent cache). Read in tests via
+    /// R20 instrumentation counter: increments on each admission
+    /// refused by the fact-completeness guard. Read via
     /// [`ValidatedFactCache::admission_refused_count`].
     admission_refused: AtomicU64,
     /// Instrumentation counter: increments on every `ArcSwap::store`
@@ -664,32 +662,17 @@ where
     }
 
     pub fn insert_arc(&self, key: K, value: Arc<V>, facts: Vec<FactVersionRef>) {
-        // R20 signature-size bound runs for every admission. The
-        // empty-signature fact-completeness guard is opt-in via
-        // `insert_arc_with_kind` so existing producers that record
-        // stable "miss" candidates with an empty signature
-        // continue to admit (`route_db` / `imported_root_db` etc.).
+        // Loose admission. The fact-completeness empty-signature
+        // guard is opt-in via `insert_arc_with_kind`; stable-miss
+        // producers (e.g. `route_db`, `imported_root_db`) admit
+        // through this path.
         self.insert_arc_inner(key, value, facts, None);
     }
 
-    /// Admit a candidate with the Stage 6d fact-completeness
-    /// admission guard ENABLED. Producers that opt in pass a
-    /// `'static str` `cache_kind` discriminator carried in the
-    /// `FactSignatureAdmissionRefused` audit event.
-    ///
-    /// **Strict admission contract (R20 + Stage 6d):**
-    /// - Over-cap `fact_dep_signature` → refuse admission, emit
-    ///   `FactSignatureOverflow`, bump `signature_overflow`.
-    /// - Empty `fact_dep_signature` → refuse admission, emit
-    ///   `FactSignatureAdmissionRefused`, bump `admission_refused`.
-    ///   Correctness preserved by cold recompute every time.
-    /// - Otherwise admit via the multi-candidate RCU path.
-    ///
-    /// Loose-mode callers (`insert_arc`) skip the empty-signature
-    /// arm so stable-miss candidates continue to admit. Stage 7's
-    /// canary asserts `admission_refused_count == 0` over the
-    /// steady-state loop — strict callers are expected to observe
-    /// at least one fact.
+    /// Admit with the fact-completeness guard ENABLED. R20 strict
+    /// contract: empty signature → refuse + `FactSignatureAdmissionRefused`;
+    /// over-cap → refuse + `FactSignatureOverflow`. `cache_kind`
+    /// is the `'static str` discriminator on the refusal event.
     pub fn insert_arc_with_kind(
         &self,
         key: K,
@@ -724,11 +707,9 @@ where
             );
             return;
         }
-        // R20 Stage 6d fact-completeness admission guard. Only
-        // strict callers (`insert_arc_with_kind`) enforce the
-        // empty-signature refusal — they have opted into the
-        // contract that producers must observe at least one fact
-        // before admitting.
+        // R20 fact-completeness guard. Strict callers
+        // (`insert_arc_with_kind`) refuse empty signatures so
+        // producers must observe at least one fact before admit.
         if let Some(cache_kind) = strict_cache_kind {
             if facts.is_empty() {
                 self.admission_refused
@@ -845,13 +826,9 @@ where
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Stage 6d instrumentation: number of times a candidate
-    /// admission was refused by the fact-completeness guard
-    /// (today: empty `fact_dep_signature` on a source-dependent
-    /// cache). The synthetic admission-guard test asserts this
-    /// counter advances when a producer fails to observe; the
-    /// pre-canary test asserts it stays at 0 over the steady-state
-    /// loop.
+    /// R20 instrumentation: number of admissions refused by the
+    /// fact-completeness guard. Pre-canary asserts this stays 0
+    /// over steady-state load.
     pub fn admission_refused_count(&self) -> u64 {
         self.admission_refused
             .load(std::sync::atomic::Ordering::Relaxed)

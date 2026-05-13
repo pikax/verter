@@ -68,7 +68,7 @@ pub enum AugmentationTargetKindTag {
 }
 
 /// Reason a `ValidatedFactCache` candidate admission was refused
-/// by the Stage 6d fact-completeness guard.
+/// by the fact-completeness guard.
 ///
 /// Carried by
 /// [`super::super::structured_event::StructuredAuditEvent::FactSignatureAdmissionRefused`].
@@ -79,14 +79,14 @@ pub enum AugmentationTargetKindTag {
 pub enum AdmissionRefusalReason {
     /// The producer observed zero facts during cold compute, but the
     /// cache requires at least one observed fact to admit. Default
-    /// because it is the canonical Stage 6d failure mode: an empty
+    /// because it is the canonical failure mode: an empty
     /// signature on a source-dependent cache indicates a missing
     /// `observe(...)` call upstream of the publish site.
     #[default]
     EmptySignature,
     /// The cache is not on the documented allowlist of source-
     /// independent kinds. Reserved for future use when the allowlist
-    /// becomes a runtime gate; not emitted in the Stage 6d landing.
+    /// becomes a runtime gate.
     NonCacheableKind,
 }
 

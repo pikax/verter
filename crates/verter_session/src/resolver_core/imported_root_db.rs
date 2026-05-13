@@ -208,8 +208,8 @@ impl ImportedRootDb {
         self.singleflight.clear();
     }
 
-    /// Stage 6d instrumentation: `signature_overflow_count` on
-    /// the backing `ValidatedFactCache`. A non-zero value means a
+    /// R20 instrumentation: `signature_overflow_count` on the
+    /// backing `ValidatedFactCache`. A non-zero value means a
     /// producer flattened transitive facts where it should have
     /// folded a downstream materialiser's `semantic_hash`.
     #[must_use]
@@ -217,10 +217,10 @@ impl ImportedRootDb {
         self.roots.signature_overflow_count()
     }
 
-    /// Stage 6d instrumentation: `admission_refused_count` on the
-    /// backing `ValidatedFactCache`. Today producers run in loose
-    /// mode; this aggregator stays at 0 until the producers
-    /// migrate to `insert_arc_with_kind`.
+    /// R20 instrumentation: `admission_refused_count` on the
+    /// backing `ValidatedFactCache`. Producers that admit via the
+    /// loose `insert_arc` path keep this counter at 0; only strict-
+    /// mode admissions via `insert_arc_with_kind` advance it.
     #[must_use]
     pub fn admission_refused_count(&self) -> u64 {
         self.roots.admission_refused_count()

@@ -3890,6 +3890,13 @@ mod foundations_guards {
             "crates/verter_session/src/host_manage/component_meta_extract.rs",
             "crates/verter_session/src/host_manage/component_meta_methods.rs",
             "crates/verter_session/src/host_resolve.rs",
+            // `ValidatedFactCache<K, V>` substrate + multi-candidate
+            // RCU storage + admission guards + per-counter
+            // instrumentation. The cache is the load-bearing
+            // primitive every consumer routes through; splitting it
+            // would either duplicate the substrate or push the API
+            // through a re-export shim with no behavioural gain.
+            "crates/verter_session/src/resolver_core/mod.rs",
             "crates/verter_session/src/meta_resolve/materialize/field_types.rs",
             "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
             "crates/verter_session/src/parse.rs",

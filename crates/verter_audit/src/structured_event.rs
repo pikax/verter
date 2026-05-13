@@ -251,10 +251,10 @@ pub enum StructuredAuditEvent {
     /// admission guard because its `fact_dep_signature` was empty and
     /// the cache is NOT a documented source-independent kind. The
     /// candidate was admitted as `NonCacheable`; correctness is
-    /// preserved by falling back to cold recompute every time. Stage
-    /// 6d / Stage 7 canary asserts this event fires for the
-    /// synthetic empty-signature test only — production producers
-    /// must observe at least one fact.
+    /// preserved by falling back to cold recompute every time. The
+    /// final-state canary asserts this event fires for the synthetic
+    /// empty-signature test only — production producers must observe
+    /// at least one fact.
     FactSignatureAdmissionRefused {
         /// Static identifier for the cache layer that refused the
         /// admission (mirrors the `layer` discriminator on
