@@ -3594,6 +3594,17 @@ mod foundations_guards {
         // / materialiser admission paths.
         "pub mod member_display_fact_store",
         "pub mod member_semantic_fact_store",
+        // Resolve-domain authoritative cache for resolved import /
+        // re-export bindings + per-specifier resolutions (R5, R12,
+        // R21, R28). Public because
+        // tests/resolved_import_facts_invariants.rs and
+        // tests/resolved_import_facts_key_shape.rs consume
+        // `ResolvedImportFactsDb`, `ResolvedImportFactsKey`, and
+        // `RESOLVED_IMPORT_FACTS_RESOLVER_VERSION` through the
+        // canonical module path; future resolver consumers (RouteDb
+        // fact-validation, materialiser observations) reach the
+        // same module.
+        "pub mod resolved_import_facts",
         // tests/semantic_analysis_audit_e2e.rs +
         // tests/semantic_analysis_audit_tls_propagation.rs — public
         // audited entry-point that wires

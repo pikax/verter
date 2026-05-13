@@ -1734,6 +1734,14 @@ pub struct ProjectTypeStore {
     /// `ProjectTypeStore` so the unified `bump_project_generation_and_evict`
     /// cascade can reset it alongside the typed DBs.
     semantic_db: parking_lot::Mutex<verter_semantic::db::SemanticDb>,
+    /// Resolve-domain authoritative cache for resolved import / re-export
+    /// bindings + per-specifier resolutions. Keyed
+    /// `(canonical, content_hash, parse_env_hash, resolve_env_hash,
+    /// resolver_version)`; intentionally excludes `lib_env_hash` (R21
+    /// scoping rule — base import-target resolution does not depend on
+    /// TS lib data). See
+    /// [`crate::resolved_import_facts::ResolvedImportFactsDb`].
+    resolved_import_facts: crate::resolved_import_facts::ResolvedImportFactsDb,
     /// Debug / diagnostic counters.
     pub counters: ProjectTypeStoreCounters,
 }
@@ -1857,6 +1865,7 @@ impl ProjectTypeStore {
             dependency_cache_db: DependencyCacheDb::new(),
             resolved_type_cache_db: ResolvedTypeCacheDb::new(),
             semantic_db: parking_lot::Mutex::new(verter_semantic::db::SemanticDb::new()),
+            resolved_import_facts: crate::resolved_import_facts::ResolvedImportFactsDb::new(),
             counters,
         }
     }
@@ -2077,6 +2086,16 @@ impl ProjectTypeStore {
 
     pub fn routed_expr_surface_db(&self) -> &RoutedExprSurfaceDb {
         &self.routed_expr_surface_db
+    }
+
+    /// Resolve-domain authoritative store for resolved import /
+    /// re-export bindings + per-specifier resolutions. Keyed by
+    /// `(canonical, content_hash, parse_env_hash, resolve_env_hash,
+    /// resolver_version)` — see
+    /// [`crate::resolved_import_facts::ResolvedImportFactsKey`].
+    /// `lib_env_hash` is intentionally absent (R21 scoping rule).
+    pub fn resolved_import_facts(&self) -> &crate::resolved_import_facts::ResolvedImportFactsDb {
+        &self.resolved_import_facts
     }
 
     /// Issue #6 / accessor for the `AppConfigNoOverrideProof`

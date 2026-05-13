@@ -131,6 +131,59 @@ pub trait SessionView: Send + Sync {
     fn is_tombstoned(&self, _canonical: &str) -> bool {
         false
     }
+
+    /// Cached resolved-import facts for a canonical id under this
+    /// view, if present.
+    ///
+    /// Looks up the
+    /// [`crate::resolved_import_facts::ResolvedImportFactsDb`]
+    /// slot keyed by
+    /// `(canonical, content_hash_for(canonical),
+    /// env_hashes().parse_env_hash,
+    /// env_hashes().resolve_env_hash,
+    /// RESOLVED_IMPORT_FACTS_RESOLVER_VERSION)`. Returns `None`
+    /// when the cache has not been populated for that quintuple —
+    /// the resolver populates entries on first demand and
+    /// downstream consumers re-read from here instead of
+    /// re-walking the AST.
+    ///
+    /// `lib_env_hash` is intentionally absent from the cache key
+    /// (R21 scoping rule — base import-target resolution does not
+    /// depend on TS lib data).
+    fn resolved_import_facts(
+        &self,
+        canonical: &str,
+    ) -> Option<Arc<crate::resolved_import_facts::ResolvedImportFacts>>;
+}
+
+/// Shared lookup helper used by the base-only views
+/// ([`HostView`], [`HostViewRef`]).
+///
+/// Resolves the `(canonical, content_hash, parse_env_hash,
+/// resolve_env_hash, resolver_version)` quintuple from the host's
+/// file-artifact store + the supplied env hashes, then reads from
+/// [`crate::resolved_import_facts::ResolvedImportFactsDb`].
+///
+/// Returns `None` when the canonical has not been parsed yet
+/// (`content_hash_for_canonical` reports `None`) or when the cache
+/// has not been populated for the resolved quintuple.
+fn resolved_import_facts_via_host(
+    base: &VerterHost,
+    canonical: &str,
+    env_hashes: &EnvHashes,
+) -> Option<Arc<crate::resolved_import_facts::ResolvedImportFacts>> {
+    let content_hash = base
+        .project_type_store()
+        .indexed()
+        .content_hash_for_canonical(canonical)?;
+    let key = crate::resolved_import_facts::ResolvedImportFactsKey {
+        canonical: Arc::from(canonical),
+        content_hash,
+        parse_env_hash: env_hashes.parse_env_hash,
+        resolve_env_hash: env_hashes.resolve_env_hash,
+        resolver_version: crate::resolved_import_facts::RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
+    };
+    base.project_type_store().resolved_import_facts().get(&key)
 }
 
 // ---------------------------------------------------------------------------
@@ -216,6 +269,13 @@ impl SessionView for HostView {
 
     fn env_hashes(&self) -> &EnvHashes {
         &self.env_hashes
+    }
+
+    fn resolved_import_facts(
+        &self,
+        canonical: &str,
+    ) -> Option<Arc<crate::resolved_import_facts::ResolvedImportFacts>> {
+        resolved_import_facts_via_host(self.base.as_ref(), canonical, &self.env_hashes)
     }
 }
 
@@ -340,6 +400,30 @@ impl SessionView for OverlaidView {
     fn env_hashes(&self) -> &EnvHashes {
         &self.env_hashes
     }
+
+    fn resolved_import_facts(
+        &self,
+        canonical: &str,
+    ) -> Option<Arc<crate::resolved_import_facts::ResolvedImportFacts>> {
+        // The resolved-import facts cache keys on `content_hash`,
+        // which is overlay-aware: an overlay that differs from the
+        // base source yields a distinct cache slot. The lookup
+        // therefore reads the overlay's content hash when an
+        // overlay covers the canonical and the base host's
+        // otherwise.
+        let content_hash = self.content_hash_for(canonical)?;
+        let key = crate::resolved_import_facts::ResolvedImportFactsKey {
+            canonical: Arc::from(canonical),
+            content_hash,
+            parse_env_hash: self.env_hashes.parse_env_hash,
+            resolve_env_hash: self.env_hashes.resolve_env_hash,
+            resolver_version: crate::resolved_import_facts::RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
+        };
+        self.base
+            .project_type_store()
+            .resolved_import_facts()
+            .get(&key)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -416,6 +500,13 @@ impl SessionView for HostViewRef<'_> {
 
     fn env_hashes(&self) -> &EnvHashes {
         &self.env_hashes
+    }
+
+    fn resolved_import_facts(
+        &self,
+        canonical: &str,
+    ) -> Option<Arc<crate::resolved_import_facts::ResolvedImportFacts>> {
+        resolved_import_facts_via_host(self.base, canonical, &self.env_hashes)
     }
 }
 
@@ -545,6 +636,29 @@ impl SessionView for OverlaidViewRef<'_> {
 
     fn env_hashes(&self) -> &EnvHashes {
         &self.env_hashes
+    }
+
+    fn resolved_import_facts(
+        &self,
+        canonical: &str,
+    ) -> Option<Arc<crate::resolved_import_facts::ResolvedImportFacts>> {
+        // Tombstoned canonicals report no resolved-import facts so
+        // consumers cannot read a stale resolution past a delete.
+        if self.overlay_tombstones.contains(canonical) {
+            return None;
+        }
+        let content_hash = self.content_hash_for(canonical)?;
+        let key = crate::resolved_import_facts::ResolvedImportFactsKey {
+            canonical: Arc::from(canonical),
+            content_hash,
+            parse_env_hash: self.env_hashes.parse_env_hash,
+            resolve_env_hash: self.env_hashes.resolve_env_hash,
+            resolver_version: crate::resolved_import_facts::RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
+        };
+        self.base
+            .project_type_store()
+            .resolved_import_facts()
+            .get(&key)
     }
 }
 
