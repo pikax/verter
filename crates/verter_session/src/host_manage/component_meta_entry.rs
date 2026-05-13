@@ -73,19 +73,33 @@ impl VerterHost {
             return Some(warm);
         }
 
-        // Cold build — install a request view for the duration of the
-        // existing resolver path. replaces the view with fence
-        // observation only.
-        let resolved = self
-            .resolve_component_meta(canonical.as_str(), crate::types::ProjectionMode::Expanded)?;
-        // Always include fallthrough — the solver path does not use walker
-        // overflow as a gating signal.
-        let meta = extract_component_meta_from_resolved(
-            self,
-            canonical.as_str(),
-            &resolved,
-            true, // include_fallthrough
-        );
+        // Cold build — install a `with_fact_tracer` outer scope so
+        // the Stage-6d materialiser `observe` wiring accumulates a
+        // real `FactReadSet`. The tracer's accumulator becomes the
+        // candidate's `fact_dep_signature` at publish time.
+        //
+        // R24 contract: the tracer is installed on COLD paths only.
+        // The warm-hit fast path above returned before reaching
+        // here, so no tracer is installed for hot reads (zero
+        // allocation per hit).
+        let ((resolved_opt, meta_opt), _read_set) = self.with_fact_tracer(|| {
+            let resolved = match self.resolve_component_meta(
+                canonical.as_str(),
+                crate::types::ProjectionMode::Expanded,
+            ) {
+                Some(r) => r,
+                None => return (None, None),
+            };
+            let meta = extract_component_meta_from_resolved(
+                self,
+                canonical.as_str(),
+                &resolved,
+                true, // include_fallthrough
+            );
+            (Some(resolved), Some(meta))
+        });
+        let resolved = resolved_opt?;
+        let meta = meta_opt?;
 
         self.publish_component_meta_cache_entry(canonical.as_str(), &resolved, meta.clone());
 
@@ -151,14 +165,29 @@ impl VerterHost {
         // multi-candidate isolation: cold compute may share resolver
         // work across sessions when overlay semantics are not yet
         // overlay-aware, but the published cache slot stays per-view.
-        let resolved = self
-            .resolve_component_meta(canonical.as_str(), crate::types::ProjectionMode::Expanded)?;
-        let meta = extract_component_meta_from_resolved(
-            self,
-            canonical.as_str(),
-            &resolved,
-            true, // include_fallthrough
-        );
+        //
+        // Install `with_fact_tracer` outer scope so the materialiser
+        // `observe` wiring accumulates a real `FactReadSet` that
+        // becomes the candidate's `fact_dep_signature`. R24: tracer
+        // installs on cold-path only; warm-hits returned above.
+        let ((resolved_opt, meta_opt), _read_set) = self.with_fact_tracer(|| {
+            let resolved = match self.resolve_component_meta(
+                canonical.as_str(),
+                crate::types::ProjectionMode::Expanded,
+            ) {
+                Some(r) => r,
+                None => return (None, None),
+            };
+            let meta = extract_component_meta_from_resolved(
+                self,
+                canonical.as_str(),
+                &resolved,
+                true, // include_fallthrough
+            );
+            (Some(resolved), Some(meta))
+        });
+        let resolved = resolved_opt?;
+        let meta = meta_opt?;
 
         self.publish_component_meta_cache_entry_with_view(
             canonical.as_str(),
