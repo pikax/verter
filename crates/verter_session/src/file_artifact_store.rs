@@ -120,6 +120,21 @@ impl FileArtifactKey {
             parser_version: LEGACY_PARSER_VERSION,
         }
     }
+
+    /// Stage 10 — test-only public shim over [`Self::legacy`].
+    ///
+    /// Used by `tests/eviction_policy.rs` and similar integration
+    /// tests that need to construct multiple distinct
+    /// `FileArtifactKey` variants for the same canonical to
+    /// exercise the per-canonical retention sweep + the
+    /// promotion-aware LRU floor. The production `pub(crate)`
+    /// surface is unchanged; this `pub fn` exists only inside
+    /// `#[cfg(any(test, debug_assertions))]` so production
+    /// builds carry no public exposure of the legacy constructor.
+    #[cfg(any(test, debug_assertions))]
+    pub fn legacy_for_test(canonical: Arc<str>, content_hash: Hash16) -> Self {
+        Self::legacy(canonical, content_hash)
+    }
 }
 
 /// Parser version for legacy-shape inserts. Bumps invalidate every
