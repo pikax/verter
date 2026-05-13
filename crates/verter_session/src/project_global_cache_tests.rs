@@ -687,6 +687,72 @@ fn owner_import_surface_fact_signature_changes_on_barrel_retarget() {
     );
 }
 
+/// R3/R26/R28 Gap 2: negative resolutions in
+/// `cached_import_route_resolution` must invalidate when the
+/// workspace's `content_generation` advances. Setup: the bundler
+/// (via `set_import_dependencies`) records a known-miss for a
+/// specifier whose target does not yet exist. When the target
+/// canonical is upserted (bumping `content_generation`), the next
+/// resolution must re-resolve rather than serve the stale
+/// known-miss from the cache.
+#[test]
+fn import_route_negative_cache_invalidates_on_workspace_content_generation_bump() {
+    use crate::types::DependencyResolution;
+    let host = host();
+
+    // /w/owner.ts imports from './theme' — but no /w/theme.ts exists yet.
+    upsert_ts(
+        &host,
+        "/w/owner.ts",
+        "import type theme from './theme'\nexport type Owner = typeof theme",
+    );
+    // Bundler cold-resolves and records a known-miss (no resolved canonical,
+    // no candidates) — the bundler "looked, found nothing".
+    host.set_import_dependencies(
+        "/w/owner.ts",
+        vec![DependencyResolution {
+            specifier: "./theme".to_string(),
+            resolved_canonical_id: None,
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    // Pre-condition: the cached negative is observable.
+    let pre = host.cached_import_route_resolution("/w/owner.ts", "./theme");
+    assert!(
+        pre.is_some()
+            && pre
+                .as_ref()
+                .unwrap()
+                .resolved_canonical_id
+                .is_none()
+            && pre.as_ref().unwrap().possible_canonical_ids.is_empty(),
+        "bundler-provided known-miss is cached in derived.import_routes"
+    );
+
+    // Upsert the new canonical — workspace content_generation bumps.
+    upsert_ts(&host, "/w/theme.ts", "export default { item: 'item' }");
+
+    // Post-condition: the cached negative MUST NOT be served any
+    // more. The fact-validation oracle uses the recorded
+    // `import_routes_recorded_at_generation` to detect the
+    // generation advance and force a cold re-resolution. We assert
+    // either (a) the negative was invalidated outright (cache miss
+    // returns None), or (b) the re-read returns a fresh positive
+    // resolution for the now-discoverable target.
+    let post = host.cached_import_route_resolution("/w/owner.ts", "./theme");
+    let is_negative_still_served = post
+        .as_ref()
+        .map(|res| res.resolved_canonical_id.is_none() && res.possible_canonical_ids.is_empty())
+        .unwrap_or(false);
+    assert!(
+        !is_negative_still_served,
+        "Gap 2: known-miss must invalidate once workspace content_generation \
+         advances. Observed {:?}",
+        post
+    );
+}
+
 /// Phase 2: editing an owner bumps the owner's whole_hash and rebuilds the
 /// surface under the new key. The old surface becomes unreachable at the
 /// key level; the new surface reflects the current import set.

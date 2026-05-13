@@ -374,8 +374,13 @@ impl VerterHost {
             // import_routes is the sub-mirror of IndexedReady.import_routes.
             // It is recomputed by downstream resolver passes after this
             // upsert; clear here so stale entries do not leak into the next
-            // resolver run.
+            // resolver run. R3/R26/R28 Gap 2: drop the parallel
+            // per-specifier known-miss generation table so subsequent
+            // bundler resolutions admit fresh tags.
             derived.import_routes.clear();
+            derived
+                .import_routes_known_miss_recorded_at_generation
+                .clear();
             derived.evicted = false;
             if drained_derived {
                 crate::host_manage::push_cache_drained_at_upsert(

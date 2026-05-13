@@ -1127,7 +1127,26 @@ impl VerterHost {
             return None;
         }
         let derived = self.derived_raw_cache().get(canonical_id)?;
-        derived.import_routes.get(import_source).cloned()
+        let resolution = derived.import_routes.get(import_source).cloned()?;
+        // R3/R26/R28 Gap 2: known-miss resolutions must invalidate
+        // once the workspace's `content_generation` advances past
+        // the value recorded at admission — a NEW canonical may now
+        // satisfy a previously-unresolvable specifier. Positive
+        // resolutions stay valid until the owner's source content
+        // changes (evicts the DerivedRawState entry outright via
+        // R4 parse-domain invalidation).
+        if Self::import_route_is_known_miss(&resolution) {
+            let recorded_at = derived
+                .import_routes_known_miss_recorded_at_generation
+                .get(import_source)
+                .copied()
+                .unwrap_or(0);
+            let current = self.ws().content_generation();
+            if recorded_at == 0 || current > recorded_at {
+                return None;
+            }
+        }
+        Some(resolution)
     }
 
     fn append_file_whole_and_route_fact_versions(

@@ -1265,12 +1265,30 @@ impl VerterHost {
             deps
         };
         // Replace import_routes on DerivedRawState.
+        // R3/R26/R28 Gap 2: for each known-miss in the new map,
+        // record the workspace `content_generation` at admission so
+        // the reader can detect when a new canonical (which advances
+        // content_generation) may now satisfy the previously
+        // unresolvable specifier. Positive resolutions do not need a
+        // generation tag — they stay valid until the owner's source
+        // content changes.
+        let current_generation = self.ws().content_generation();
+        let mut known_miss_generations: rustc_hash::FxHashMap<String, u64> =
+            rustc_hash::FxHashMap::default();
+        for (specifier, res) in import_routes.iter() {
+            if res.resolved_canonical_id.is_none() && res.possible_canonical_ids.is_empty() {
+                known_miss_generations.insert(specifier.clone(), current_generation);
+            }
+        }
         {
             let mut derived_ref = self
                 .derived_raw_cache()
                 .entry(canonical.clone())
                 .or_default();
             derived_ref.value_mut().import_routes = import_routes.clone();
+            derived_ref
+                .value_mut()
+                .import_routes_known_miss_recorded_at_generation = known_miss_generations;
         }
         let old_transitive_deps = old_deps
             .difference(&old_direct_deps)

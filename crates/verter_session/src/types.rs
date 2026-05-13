@@ -1532,6 +1532,20 @@ pub struct DerivedRawState {
     /// cache across no-op reloads. `None` triggers the conservative bump that
     /// matches pre-fix behavior.
     pub(crate) evicted_whole_hash: Option<Hash16>,
+
+    /// Per-specifier workspace `content_generation` recorded when a
+    /// known-miss `DependencyResolution` (no resolved canonical and
+    /// no candidates) was admitted to `import_routes`. R3/R26/R28
+    /// Gap 2: the reader must re-resolve once the workspace's
+    /// `content_generation` advances past the recorded value — a new
+    /// canonical may now satisfy the specifier. Positive resolutions
+    /// do not need entries here; they stay valid until the owner's
+    /// source content changes (which evicts this `DerivedRawState`
+    /// entry outright via the resolver's parse-domain invalidation
+    /// path). Missing entries are treated as "never recorded" → the
+    /// reader forces a fresh resolution.
+    pub(crate) import_routes_known_miss_recorded_at_generation:
+        FxHashMap<String, u64>,
 }
 
 /// Dependency-closure-domain state for the scheduler-backed compile cache (D48).
