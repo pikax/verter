@@ -835,6 +835,198 @@ impl FileArtifactStore {
         self.augmentation_index.insert(key, set)
     }
 
+    /// Lazily populate the augmentation-index entry for `key`, then
+    /// return the `AugmenterSet`.
+    ///
+    /// On a warm hit, returns the cached `Arc<AugmenterSet>` directly
+    /// without re-scanning. On a cold miss, scans `self.artifacts` for
+    /// files whose `FileArtifacts.augmentations` match the queried
+    /// target under the current `(project_identity, resolve_env_hash,
+    /// lib_env_hash)`, sorts the matched augmenters by
+    /// `(augmenter_canonical, parse_stable_hash)`, computes a stable
+    /// fingerprint, inserts, and emits a `ModuleAugmentationIndexShape`
+    /// audit event recording the install (or refresh on
+    /// re-population). Subsequent reads under the same key are
+    /// warm-hit fast paths.
+    ///
+    /// Index population is incremental per R29 — only files that have
+    /// entered `FileArtifactStore` contribute. There is no
+    /// workspace-wide eager scan; out-of-program files contribute
+    /// nothing (matches TypeScript's own augmentation-visibility
+    /// rule).
+    ///
+    /// `resolve_relative_canonical` is a caller-supplied hook that
+    /// resolves a `(augmenter_canonical, relative_specifier)` pair to
+    /// a canonical when the queried target is `ResolvedRelativeCanonical`.
+    /// `None` means the augmenter's specifier did not resolve to the
+    /// queried canonical and the augmenter is skipped.
+    pub fn ensure_augmentation_index_populated<R>(
+        &self,
+        key: &AugmentationTargetKey,
+        resolve_relative_canonical: R,
+    ) -> Arc<AugmenterSet>
+    where
+        R: Fn(&str, &str) -> Option<Arc<str>>,
+    {
+        if let Some(existing) = self.augmentation_index.get(key) {
+            return existing.clone();
+        }
+
+        // Cold scan — collect (canonical, parse_stable_hash) for
+        // every artifact whose augmentations include at least one
+        // matching `ModuleAugmentationFact` for the queried target.
+        // Dedup by canonical so a file with multiple matching facts
+        // contributes only once.
+        let mut matched: Vec<(Arc<str>, Hash16)> = Vec::new();
+        let mut seen_canonicals: rustc_hash::FxHashSet<Arc<str>> =
+            rustc_hash::FxHashSet::default();
+        for artifact_entry in self.artifacts.iter() {
+            let augmenter_canonical = Arc::clone(&artifact_entry.key().canonical);
+            let artifacts: &FileArtifacts = artifact_entry.value();
+            for fact in artifacts.augmentations.iter() {
+                if augmenter_matches_target(
+                    fact,
+                    key,
+                    augmenter_canonical.as_ref(),
+                    &resolve_relative_canonical,
+                ) {
+                    if seen_canonicals.insert(Arc::clone(&augmenter_canonical)) {
+                        matched.push((augmenter_canonical.clone(), artifacts.parse_stable_hash));
+                    }
+                    break;
+                }
+            }
+        }
+
+        // Sort by (canonical, parse_stable_hash) for determinism.
+        matched.sort_by(|a, b| {
+            a.0.as_ref()
+                .cmp(b.0.as_ref())
+                .then_with(|| a.1.cmp(&b.1))
+        });
+
+        let augmenter_count = matched.len() as u32;
+        let fingerprint = compute_augmenter_set_fingerprint(&matched);
+        let entries: SmallVec<[(Arc<str>, Hash16); 2]> = matched.into_iter().collect();
+        let set = Arc::new(AugmenterSet {
+            entries,
+            fingerprint,
+        });
+
+        // Insert. Capture prev fingerprint for audit event.
+        let prev = self.augmentation_index.insert(key.clone(), Arc::clone(&set));
+        let prev_fingerprint = prev.as_ref().map(|p| p.fingerprint);
+
+        // Emit `ModuleAugmentationIndexShape` typed audit event.
+        emit_module_augmentation_index_shape_event(
+            key,
+            prev_fingerprint,
+            fingerprint,
+            augmenter_count,
+        );
+
+        set
+    }
+
+    /// Refresh existing augmentation-index entries that a newly-
+    /// inserted file's augmentations may contribute to.
+    ///
+    /// Walks every existing `AugmentationTargetKey`, checks whether
+    /// the new artifact's augmentations match the target under the
+    /// caller's resolver hook, recomputes the augmenter set when it
+    /// does, and emits a refresh audit event when the fingerprint
+    /// changes. Existing entries that the new file does NOT contribute
+    /// to are left untouched — out-of-program files contribute
+    /// nothing.
+    pub fn refresh_augmentation_index_for_canonical<R>(
+        &self,
+        new_artifact_key: &FileArtifactKey,
+        new_artifacts: &FileArtifacts,
+        resolve_relative_canonical: R,
+    ) where
+        R: Fn(&str, &str) -> Option<Arc<str>>,
+    {
+        if new_artifacts.augmentations.is_empty() {
+            return;
+        }
+
+        // Snapshot existing keys so we don't hold a shard read-lock
+        // while we recompute + insert (DashMap re-entrance hazard).
+        let existing_keys: Vec<AugmentationTargetKey> = self
+            .augmentation_index
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        for key in existing_keys {
+            // Does the new artifact contribute to this key? If not,
+            // skip — the cached entry is still valid (no augmenter
+            // set change for this target).
+            let augmenter_canonical = new_artifact_key.canonical.as_ref();
+            let contributes = new_artifacts.augmentations.iter().any(|fact| {
+                augmenter_matches_target(
+                    fact,
+                    &key,
+                    augmenter_canonical,
+                    &resolve_relative_canonical,
+                )
+            });
+            if !contributes {
+                continue;
+            }
+
+            // Rebuild the set with the new artifact folded in.
+            let mut matched: Vec<(Arc<str>, Hash16)> = Vec::new();
+            let mut seen_canonicals: rustc_hash::FxHashSet<Arc<str>> =
+                rustc_hash::FxHashSet::default();
+            for artifact_entry in self.artifacts.iter() {
+                let augmenter_canon = Arc::clone(&artifact_entry.key().canonical);
+                let artifacts: &FileArtifacts = artifact_entry.value();
+                for fact in artifacts.augmentations.iter() {
+                    if augmenter_matches_target(
+                        fact,
+                        &key,
+                        augmenter_canon.as_ref(),
+                        &resolve_relative_canonical,
+                    ) {
+                        if seen_canonicals.insert(Arc::clone(&augmenter_canon)) {
+                            matched.push((augmenter_canon.clone(), artifacts.parse_stable_hash));
+                        }
+                        break;
+                    }
+                }
+            }
+            matched.sort_by(|a, b| {
+                a.0.as_ref()
+                    .cmp(b.0.as_ref())
+                    .then_with(|| a.1.cmp(&b.1))
+            });
+            let augmenter_count = matched.len() as u32;
+            let new_fingerprint = compute_augmenter_set_fingerprint(&matched);
+
+            // Compare with old fingerprint. If unchanged, skip the
+            // insert + event emission.
+            let old = self.augmentation_index.get(&key).map(|e| e.fingerprint);
+            if old == Some(new_fingerprint) {
+                continue;
+            }
+
+            let entries: SmallVec<[(Arc<str>, Hash16); 2]> = matched.into_iter().collect();
+            let new_set = Arc::new(AugmenterSet {
+                entries,
+                fingerprint: new_fingerprint,
+            });
+            self.augmentation_index.insert(key.clone(), new_set);
+
+            emit_module_augmentation_index_shape_event(
+                &key,
+                old,
+                new_fingerprint,
+                augmenter_count,
+            );
+        }
+    }
+
     /// Drop every entry from the augmentation index.
     pub fn clear_augmentation_index(&self) {
         self.augmentation_index.clear();
@@ -844,6 +1036,20 @@ impl FileArtifactStore {
     #[must_use]
     pub fn augmentation_index_len(&self) -> usize {
         self.augmentation_index.len()
+    }
+
+    /// Snapshot every `(AugmentationTargetKey, fingerprint)` pair in
+    /// the augmentation index. Used by `HostStoreView::build` to copy
+    /// the route-surface-domain fingerprints into the view for
+    /// per-candidate validation (R29 + G1 + R26).
+    #[must_use]
+    pub fn snapshot_augmentation_index_fingerprints(
+        &self,
+    ) -> Vec<(AugmentationTargetKey, Hash16)> {
+        self.augmentation_index
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().fingerprint))
+            .collect()
     }
 }
 
@@ -887,6 +1093,139 @@ impl crate::invalidation_domain::InvalidationByCanonical for FileArtifactStore {
         let after = self.len();
         before.saturating_sub(after)
     }
+}
+
+/// Special marker the parse-domain emission uses for `declare global
+/// { ... }` blocks (see `fact_emission::GLOBAL_AUGMENTATION_TAG`).
+/// Duplicated here to keep the matcher free-standing of fact_emission.
+const GLOBAL_AUGMENTATION_TAG: &str = "$global";
+
+/// Does `fact` (emitted by `augmenter_canonical`) contribute to the
+/// queried `target_key`?
+///
+/// Stage 6c classification semantics:
+///
+/// - `ExternalSpecifier(s)` → match `fact.specifier == s` AND the
+///   specifier is NOT relative, NOT a wildcard, NOT the global tag.
+/// - `ResolvedRelativeCanonical(canon)` → match relative specifiers
+///   (start with `./` or `../`) whose `resolve_relative_canonical`
+///   resolves equal to `canon`.
+/// - `WildcardAmbient(pattern)` → match `fact.specifier == pattern`
+///   AND the specifier contains a wildcard `*`.
+/// - `GlobalAugmentation` → match `fact.specifier == "$global"`.
+pub(crate) fn augmenter_matches_target<R>(
+    fact: &ModuleAugmentationFact,
+    target_key: &AugmentationTargetKey,
+    augmenter_canonical: &str,
+    resolve_relative_canonical: R,
+) -> bool
+where
+    R: Fn(&str, &str) -> Option<Arc<str>>,
+{
+    let specifier: &str = fact.specifier.as_ref();
+    match &target_key.target {
+        AugmentationTargetKind::ExternalSpecifier(target_spec) => {
+            // Bare external: not relative, not wildcard, not global.
+            let is_relative = specifier.starts_with("./") || specifier.starts_with("../");
+            let is_wildcard = specifier.contains('*');
+            let is_global = specifier == GLOBAL_AUGMENTATION_TAG;
+            !is_relative
+                && !is_wildcard
+                && !is_global
+                && specifier == target_spec.as_ref()
+        }
+        AugmentationTargetKind::ResolvedRelativeCanonical(target_canon) => {
+            if !(specifier.starts_with("./") || specifier.starts_with("../")) {
+                return false;
+            }
+            match resolve_relative_canonical(augmenter_canonical, specifier) {
+                Some(resolved) => resolved.as_ref() == target_canon.as_ref(),
+                None => false,
+            }
+        }
+        AugmentationTargetKind::WildcardAmbient(target_pattern) => {
+            specifier.contains('*') && specifier == target_pattern.as_ref()
+        }
+        AugmentationTargetKind::GlobalAugmentation => specifier == GLOBAL_AUGMENTATION_TAG,
+    }
+}
+
+/// Compute the stable `AugmenterSet.fingerprint` over the sorted
+/// `[(augmenter_canonical, parse_stable_hash)]` list.
+///
+/// Two FxHasher passes seeded with distinct salts produce a 16-byte
+/// hash with low collision risk. Matches the cheap-hash pattern used
+/// by `resolver_core::compute_signature_fingerprint`.
+pub(crate) fn compute_augmenter_set_fingerprint(entries: &[(Arc<str>, Hash16)]) -> Hash16 {
+    use std::hash::{BuildHasher, Hasher};
+    let salt_lo = rustc_hash::FxBuildHasher;
+    let salt_hi = rustc_hash::FxBuildHasher;
+    let mut h_lo = salt_lo.build_hasher();
+    let mut h_hi = salt_hi.build_hasher();
+    h_lo.write_u64(0xC4A1_C4A1_4A1C_4A1C);
+    h_hi.write_u64(0x9E37_79B9_7F4A_7C15);
+    for (canon, hash) in entries {
+        h_lo.write(canon.as_bytes());
+        h_lo.write(hash);
+        h_hi.write(canon.as_bytes());
+        h_hi.write(hash);
+    }
+    let lo = h_lo.finish();
+    let hi = h_hi.finish();
+    let mut out = [0u8; 16];
+    out[..8].copy_from_slice(&lo.to_le_bytes());
+    out[8..].copy_from_slice(&hi.to_le_bytes());
+    out
+}
+
+/// Emit a typed `StructuredAuditEvent::ModuleAugmentationIndexShape`
+/// event recording an install / refresh of the augmentation-index
+/// entry. Silent no-op when no audit accumulator is installed.
+pub(crate) fn emit_module_augmentation_index_shape_event(
+    key: &AugmentationTargetKey,
+    prev_fingerprint: Option<Hash16>,
+    new_fingerprint: Hash16,
+    augmenter_count: u32,
+) {
+    use verter_audit::AugmentationTargetKindTag;
+    let (tag, external_specifier, resolved_relative_canonical, wildcard_pattern) =
+        match &key.target {
+            AugmentationTargetKind::ExternalSpecifier(spec) => (
+                AugmentationTargetKindTag::ExternalSpecifier,
+                Some(Arc::<str>::from(spec.as_ref())),
+                None,
+                None,
+            ),
+            AugmentationTargetKind::ResolvedRelativeCanonical(canon) => (
+                AugmentationTargetKindTag::ResolvedRelativeCanonical,
+                None,
+                Some(Arc::clone(canon)),
+                None,
+            ),
+            AugmentationTargetKind::WildcardAmbient(pat) => (
+                AugmentationTargetKindTag::WildcardAmbient,
+                None,
+                None,
+                Some(Arc::<str>::from(pat.as_ref())),
+            ),
+            AugmentationTargetKind::GlobalAugmentation => (
+                AugmentationTargetKindTag::GlobalAugmentation,
+                None,
+                None,
+                None,
+            ),
+        };
+    crate::host_manage::push_structured_event(
+        crate::component_meta_audit::StructuredAuditEvent::ModuleAugmentationIndexShape {
+            target_kind_tag: tag,
+            external_specifier,
+            resolved_relative_canonical,
+            wildcard_pattern,
+            prev_fingerprint,
+            new_fingerprint,
+            augmenter_count,
+        },
+    );
 }
 
 #[cfg(test)]

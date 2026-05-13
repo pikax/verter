@@ -7,16 +7,29 @@
 //! wildcard specifiers are resolved once. Individual `(barrel, name)` lookups
 //! then read the surface in O(1). Route misses are cached as `RouteResult::Miss`.
 //!
+//! `EffectiveExportSet` cold-path computation stitches module augmentations
+//! into the resolved export surface for a provider canonical. The
+//! `effective_export_sets` sister table caches the post-augmentation
+//! result keyed by `(provider, project_identity, resolve_env_hash,
+//! lib_env_hash)` (R21 — route surface depends on libs because module
+//! augmentations live in libs).
+//!
 //! Concurrent cold requests for the same barrel surface or route key coalesce
 //! via singleflight.
 
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
+use verter_semantic::facts::registry::{InternedName, SymbolSpace};
 
-use crate::resolver_core::{
-    FactVersionRef, PermissiveStoreView, SingleflightGroup, StoreView, ValidatedFactCache,
+use crate::file_artifact_store::{
+    AugmentationTargetKey, AugmentationTargetKind, FileArtifactStore, ProjectIdentity,
 };
+use crate::resolver_core::{
+    FactVersionRef, PermissiveStoreView, RouteSurfaceFactRef, SingleflightGroup, StoreView,
+    ValidatedFactCache,
+};
+use crate::types::Hash16;
 
 /// Result of resolving a named export route.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +84,67 @@ pub struct BarrelRouteSurface {
     pub fact_dep_signature: Arc<[FactVersionRef]>,
 }
 
+/// Key for the per-provider effective export surface (R29 + R21).
+///
+/// Identifies one effective surface scoped to a `(provider, project,
+/// resolve env, lib env)` quadruple. `lib_env_hash` enters this key
+/// because module augmentations live in libs / ambient corpora and
+/// can change which augmenters are visible — see R21 scoping rule.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EffectiveExportSetKey {
+    /// Canonical id of the provider whose surface this is.
+    pub provider_canonical: String,
+    /// Project identity dimension (R21).
+    pub project_identity: ProjectIdentity,
+    /// Resolve-env hash dimension (R21).
+    pub resolve_env_hash: Hash16,
+    /// Lib-env hash dimension (R21).
+    pub lib_env_hash: Hash16,
+}
+
+/// One contribution from an augmenter into a provider's effective
+/// export surface.
+///
+/// Equality + hash are by `(augmented_name, space, contributor_canonical)`
+/// so a downstream cache that hashes the entry can detect order-stable
+/// changes.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EffectiveExportEntry {
+    /// Augmented name added by the contributor.
+    pub augmented_name: InternedName,
+    /// Symbol space of the contribution.
+    pub space: SymbolSpace,
+    /// Canonical id of the file that emitted this augmentation.
+    pub contributor_canonical: Arc<str>,
+}
+
+/// Cached effective export set after augmentation stitching (R29 +
+/// G1).
+///
+/// `entries` is sorted by `(augmented_name, space, contributor_canonical)`
+/// so the post-stitch surface is determinate under augmenter set
+/// reordering. `fact_dep_signature` records the
+/// `ModuleAugmentationIndexShape` fact for the queried target plus
+/// per-augmenter file-version anchors — invalidating the consumer when
+/// the augmenter set changes (G1) OR when one augmenter's content
+/// changes.
+#[derive(Debug, Clone)]
+pub struct EffectiveExportSetEntry {
+    /// Stitched effective contributions sorted by
+    /// `(augmented_name, space, contributor_canonical)`.
+    pub entries: Arc<[EffectiveExportEntry]>,
+    /// Number of augmenters that contributed to this surface.
+    pub augmenter_count: u32,
+    /// Fingerprint of the augmenter set at stitch time. The
+    /// downstream consumer's `fact_dep_signature` records a
+    /// `RouteSurfaceFactRef::ModuleAugmentationIndexShape` carrying
+    /// this hash as `expected_hash`.
+    pub augmenter_set_fingerprint: Hash16,
+    /// Fact-dep signature for this candidate. Multi-candidate cache
+    /// slots store one signature per candidate.
+    pub fact_dep_signature: Arc<[FactVersionRef]>,
+}
+
 /// Shared DB for canonical export routing facts.
 pub struct RouteDb {
     /// `(provider_canonical, exported_name)` → route result.
@@ -79,6 +153,12 @@ pub struct RouteDb {
     /// `barrel_canonical` → full wildcard route surface (lazy, built once).
     barrel_surfaces: ValidatedFactCache<String, BarrelRouteSurface>,
     barrel_singleflight: SingleflightGroup<String, Arc<BarrelRouteSurface>, ()>,
+    /// Per-provider effective export surface (post-augmentation
+    /// stitching) keyed by `(provider, project_identity,
+    /// resolve_env_hash, lib_env_hash)` (R15 + R21 + R29).
+    effective_export_sets: ValidatedFactCache<EffectiveExportSetKey, EffectiveExportSetEntry>,
+    effective_export_singleflight:
+        SingleflightGroup<EffectiveExportSetKey, Arc<EffectiveExportSetEntry>, ()>,
 }
 
 impl RouteDb {
@@ -88,6 +168,8 @@ impl RouteDb {
             route_singleflight: SingleflightGroup::default(),
             barrel_surfaces: ValidatedFactCache::default(),
             barrel_singleflight: SingleflightGroup::default(),
+            effective_export_sets: ValidatedFactCache::default(),
+            effective_export_singleflight: SingleflightGroup::default(),
         }
     }
 
@@ -241,6 +323,19 @@ impl RouteDb {
         }
 
         self.barrel_surfaces.remove(&provider_canonical.to_owned());
+
+        // Evict every effective-export-set candidate for this
+        // provider across all `(project, resolve_env, lib_env)` keys.
+        let effective_keys: Vec<_> = self
+            .effective_export_sets
+            .snapshot_all()
+            .into_iter()
+            .map(|(key, _)| key)
+            .filter(|key| key.provider_canonical == provider_canonical)
+            .collect();
+        for key in effective_keys {
+            self.effective_export_sets.remove(&key);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -305,16 +400,220 @@ impl RouteDb {
         self.barrel_surfaces.insert(key, surface, facts);
     }
 
+    // ────────────────────────────────────────────────────────────
+    // Effective export set (post-augmentation stitching) — R29 + G1
+    // ────────────────────────────────────────────────────────────
+
+    /// Warm-hit lookup for an effective export surface, validated
+    /// against the current view. Returns the cached entry if the
+    /// recorded `fact_dep_signature` still holds; otherwise `None`
+    /// (caller routes through [`Self::get_or_compute_effective_export_set`]
+    /// for the cold path).
+    pub fn get_effective_export_set<V: StoreView>(
+        &self,
+        key: &EffectiveExportSetKey,
+        view: &V,
+    ) -> Option<Arc<EffectiveExportSetEntry>> {
+        self.effective_export_sets.get_if_valid(key, view)
+    }
+
+    /// Look up or compute the effective export surface for a provider
+    /// under the given env, stitching module augmentations from the
+    /// host's augmentation index.
+    ///
+    /// `target` classifies the queried specifier into one of the four
+    /// `AugmentationTargetKind` archetypes (R29). The cold path:
+    ///
+    /// 1. Builds `AugmentationTargetKey` from `key` + `target`.
+    /// 2. Calls
+    ///    [`FileArtifactStore::ensure_augmentation_index_populated`]
+    ///    to materialise the augmenter set (and emit a
+    ///    `ModuleAugmentationIndexShape` event on first install).
+    /// 3. Iterates each augmenter's parse-domain
+    ///    [`ModuleAugmentationFact`] entries that match the target,
+    ///    stitches `(augmented_name, space)` contributions into the
+    ///    effective set sorted by
+    ///    `(augmented_name, space, contributor_canonical)`.
+    /// 4. Records a
+    ///    [`FactVersionRef::RouteSurface`] entry for
+    ///    [`FactKey::ModuleAugmentationIndexShape`] (with
+    ///    `expected_hash = AugmenterSet.fingerprint`) so a future
+    ///    augmenter-set change invalidates the consumer (per G1),
+    ///    plus a per-contributor `FileWholeHash` so an edit to an
+    ///    augmenting file's content also invalidates the consumer.
+    /// 5. Emits a typed
+    ///    [`StructuredAuditEvent::ModuleAugmentationStitched`] audit
+    ///    event for the cold compute.
+    ///
+    /// `resolve_relative_canonical` is the caller-supplied resolver
+    /// hook used for the `ResolvedRelativeCanonical` target archetype.
+    pub fn get_or_compute_effective_export_set<V, FH, RR>(
+        &self,
+        key: EffectiveExportSetKey,
+        target: AugmentationTargetKind,
+        view: &V,
+        artifact_store: &FileArtifactStore,
+        contributor_whole_hash: FH,
+        resolve_relative_canonical: RR,
+    ) -> Arc<EffectiveExportSetEntry>
+    where
+        V: StoreView,
+        FH: Fn(&str) -> Option<Hash16>,
+        RR: Fn(&str, &str) -> Option<Arc<str>>,
+    {
+        if let Some(existing) = self.effective_export_sets.get_if_valid(&key, view) {
+            return existing;
+        }
+
+        let flight =
+            self.effective_export_singleflight
+                .run(key.clone(), view.compat_token(), || {
+                    if let Some(existing) = self.effective_export_sets.get_if_valid(&key, view) {
+                        return Ok(existing);
+                    }
+
+                    let augmentation_target_key = AugmentationTargetKey {
+                        project_identity: key.project_identity,
+                        resolve_env_hash: key.resolve_env_hash,
+                        lib_env_hash: key.lib_env_hash,
+                        target: target.clone(),
+                    };
+                    let augmenter_set = artifact_store.ensure_augmentation_index_populated(
+                        &augmentation_target_key,
+                        &resolve_relative_canonical,
+                    );
+
+                    // Stitch each augmenter's contributions for the
+                    // queried target.
+                    let mut stitched: Vec<EffectiveExportEntry> = Vec::new();
+                    for (augmenter_canonical, _parse_stable_hash) in
+                        augmenter_set.entries.iter()
+                    {
+                        let Some(art) = artifact_store
+                            .latest_artifacts_for_canonical(augmenter_canonical.as_ref())
+                        else {
+                            continue;
+                        };
+                        for fact in art.augmentations.iter() {
+                            if !crate::file_artifact_store::augmenter_matches_target(
+                                fact,
+                                &augmentation_target_key,
+                                augmenter_canonical.as_ref(),
+                                &resolve_relative_canonical,
+                            ) {
+                                continue;
+                            }
+                            stitched.push(EffectiveExportEntry {
+                                augmented_name: fact.augmented_name.clone(),
+                                space: fact.space,
+                                contributor_canonical: Arc::clone(augmenter_canonical),
+                            });
+                        }
+                    }
+                    stitched.sort_by(|a, b| {
+                        a.augmented_name
+                            .as_ref()
+                            .cmp(b.augmented_name.as_ref())
+                            .then_with(|| compare_symbol_space(a.space, b.space))
+                            .then_with(|| {
+                                a.contributor_canonical
+                                    .as_ref()
+                                    .cmp(b.contributor_canonical.as_ref())
+                            })
+                    });
+
+                    // Build the validation signature: the
+                    // augmentation-index-shape fact + per-contributor
+                    // file-whole-hash anchors.
+                    let mut facts: Vec<FactVersionRef> = Vec::new();
+                    facts.push(FactVersionRef::RouteSurface(RouteSurfaceFactRef {
+                        canonical_id: key.provider_canonical.clone(),
+                        key: build_module_augmentation_index_shape_fact_key(&target),
+                        lane: verter_semantic::facts::FactLane::Semantic,
+                        expected_hash: augmenter_set.fingerprint,
+                    }));
+                    for (augmenter_canonical, _parse_stable_hash) in
+                        augmenter_set.entries.iter()
+                    {
+                        if let Some(hash) = contributor_whole_hash(augmenter_canonical.as_ref()) {
+                            facts.push(FactVersionRef::FileWholeHash {
+                                canonical_id: augmenter_canonical.as_ref().to_owned(),
+                                hash,
+                            });
+                        }
+                    }
+                    let signature: Arc<[FactVersionRef]> =
+                        Arc::from(facts.clone().into_boxed_slice());
+
+                    let augmenter_count = augmenter_set.entries.len() as u32;
+                    let entry = Arc::new(EffectiveExportSetEntry {
+                        entries: Arc::from(stitched.into_boxed_slice()),
+                        augmenter_count,
+                        augmenter_set_fingerprint: augmenter_set.fingerprint,
+                        fact_dep_signature: signature,
+                    });
+                    self.effective_export_sets
+                        .insert_arc(key.clone(), Arc::clone(&entry), facts);
+
+                    // Emit the cold-path audit event.
+                    emit_module_augmentation_stitched_event(
+                        &target,
+                        augmenter_count,
+                        augmenter_set.fingerprint,
+                    );
+
+                    Ok(entry)
+                });
+
+        match flight {
+            Ok(run_result) => (*run_result.value).clone(),
+            Err(()) => {
+                // Singleflight returned Err only when the inner
+                // closure does — our closure always Ok's. This arm
+                // remains as a defensive fall-through so the type
+                // signature stays infallible to callers.
+                Arc::new(EffectiveExportSetEntry {
+                    entries: Arc::from(Vec::<EffectiveExportEntry>::new().into_boxed_slice()),
+                    augmenter_count: 0,
+                    augmenter_set_fingerprint: [0u8; 16],
+                    fact_dep_signature: Arc::from(Vec::<FactVersionRef>::new().into_boxed_slice()),
+                })
+            }
+        }
+    }
+
+    /// Insert a pre-built `EffectiveExportSetEntry` directly. Test-only
+    /// helper for asserting cache-state assumptions without driving a
+    /// full cold compute.
+    #[cfg(test)]
+    pub fn insert_effective_export_set(
+        &self,
+        key: EffectiveExportSetKey,
+        entry: EffectiveExportSetEntry,
+        facts: Vec<FactVersionRef>,
+    ) {
+        self.effective_export_sets.insert(key, entry, facts);
+    }
+
+    /// Number of slots in the effective-export-set table.
+    #[must_use]
+    pub fn effective_export_set_len(&self) -> usize {
+        self.effective_export_sets.len()
+    }
+
     // -----------------------------------------------------------------------
     // Clearing
     // -----------------------------------------------------------------------
 
-    /// Clear all cached routes and barrel surfaces.
+    /// Clear all cached routes, barrel surfaces, and effective export
+    /// sets.
     pub fn clear(&self) {
         self.routes.clear();
         self.route_singleflight.clear();
         self.barrel_surfaces.clear();
         self.barrel_singleflight.clear();
+        self.effective_export_sets.clear();
+        self.effective_export_singleflight.clear();
     }
 
     // -----------------------------------------------------------------------
@@ -342,6 +641,111 @@ impl Default for RouteDb {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Build the parse-domain `FactKey::ModuleAugmentationIndexShape`
+/// payload that an `EffectiveExportSet` consumer observes for the
+/// queried target. The parallel optional fields hold the concrete
+/// target value; the `target_kind_tag` discriminates.
+fn build_module_augmentation_index_shape_fact_key(
+    target: &AugmentationTargetKind,
+) -> verter_semantic::facts::FactKey {
+    use verter_semantic::facts::registry::AugmentationTargetKindTag;
+    match target {
+        AugmentationTargetKind::ExternalSpecifier(spec) => {
+            verter_semantic::facts::FactKey::ModuleAugmentationIndexShape {
+                target_kind_tag: AugmentationTargetKindTag::ExternalSpecifier,
+                external_specifier: Some(spec.clone()),
+                resolved_relative_canonical: None,
+                wildcard_pattern: None,
+            }
+        }
+        AugmentationTargetKind::ResolvedRelativeCanonical(canon) => {
+            verter_semantic::facts::FactKey::ModuleAugmentationIndexShape {
+                target_kind_tag: AugmentationTargetKindTag::ResolvedRelativeCanonical,
+                external_specifier: None,
+                resolved_relative_canonical: Some(Arc::clone(canon)),
+                wildcard_pattern: None,
+            }
+        }
+        AugmentationTargetKind::WildcardAmbient(pat) => {
+            verter_semantic::facts::FactKey::ModuleAugmentationIndexShape {
+                target_kind_tag: AugmentationTargetKindTag::WildcardAmbient,
+                external_specifier: None,
+                resolved_relative_canonical: None,
+                wildcard_pattern: Some(pat.clone()),
+            }
+        }
+        AugmentationTargetKind::GlobalAugmentation => {
+            verter_semantic::facts::FactKey::ModuleAugmentationIndexShape {
+                target_kind_tag: AugmentationTargetKindTag::GlobalAugmentation,
+                external_specifier: None,
+                resolved_relative_canonical: None,
+                wildcard_pattern: None,
+            }
+        }
+    }
+}
+
+/// Emit a typed
+/// [`StructuredAuditEvent::ModuleAugmentationStitched`] for the
+/// cold-path compute. Silent no-op when no audit accumulator is
+/// installed on the active thread.
+fn emit_module_augmentation_stitched_event(
+    target: &AugmentationTargetKind,
+    augmenter_count: u32,
+    fingerprint: Hash16,
+) {
+    use verter_audit::AugmentationTargetKindTag;
+    let (tag, external_specifier, resolved_relative_canonical, wildcard_pattern) = match target {
+        AugmentationTargetKind::ExternalSpecifier(spec) => (
+            AugmentationTargetKindTag::ExternalSpecifier,
+            Some(Arc::<str>::from(spec.as_ref())),
+            None,
+            None,
+        ),
+        AugmentationTargetKind::ResolvedRelativeCanonical(canon) => (
+            AugmentationTargetKindTag::ResolvedRelativeCanonical,
+            None,
+            Some(Arc::clone(canon)),
+            None,
+        ),
+        AugmentationTargetKind::WildcardAmbient(pat) => (
+            AugmentationTargetKindTag::WildcardAmbient,
+            None,
+            None,
+            Some(Arc::<str>::from(pat.as_ref())),
+        ),
+        AugmentationTargetKind::GlobalAugmentation => (
+            AugmentationTargetKindTag::GlobalAugmentation,
+            None,
+            None,
+            None,
+        ),
+    };
+    crate::host_manage::push_structured_event(
+        crate::component_meta_audit::StructuredAuditEvent::ModuleAugmentationStitched {
+            target_kind_tag: tag,
+            external_specifier,
+            resolved_relative_canonical,
+            wildcard_pattern,
+            augmenter_count,
+            fingerprint,
+        },
+    );
+}
+
+/// Total ordering over `SymbolSpace` variants for deterministic
+/// stitching order. Type < Value < Namespace.
+fn compare_symbol_space(a: SymbolSpace, b: SymbolSpace) -> std::cmp::Ordering {
+    fn rank(s: SymbolSpace) -> u8 {
+        match s {
+            SymbolSpace::Type => 0,
+            SymbolSpace::Value => 1,
+            SymbolSpace::Namespace => 2,
+        }
+    }
+    rank(a).cmp(&rank(b))
 }
 
 impl crate::invalidation_domain::ParticipatesInInvalidation for RouteDb {

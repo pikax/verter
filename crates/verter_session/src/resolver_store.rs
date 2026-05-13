@@ -32,6 +32,30 @@ pub struct HostStoreView {
     whole_hashes: FxHashMap<String, Hash16>,
     derived_hashes: FxHashMap<(String, crate::resolver_core::DerivedFactKind), Hash16>,
     import_routes: FxHashMap<(String, String), crate::types::DependencyResolution>,
+    /// Route-surface-domain snapshot — augmentation-index fingerprints
+    /// keyed by a structural representation of the
+    /// `(target_kind_tag, target_payload)` shape. Validation against
+    /// `RouteSurfaceFactRef::ModuleAugmentationIndexShape` consults
+    /// this map (R29 + G1 + R26).
+    ///
+    /// The key shape mirrors the one the
+    /// `FactKey::ModuleAugmentationIndexShape` variant carries; see
+    /// [`route_surface_index_key`] for the canonical mapping. An
+    /// absent key means the augmentation-index entry has not yet
+    /// been populated — the validator returns `false` so the
+    /// downstream cache misses.
+    route_surface_index_fingerprints: FxHashMap<RouteSurfaceIndexShapeKey, Hash16>,
+}
+
+/// Structural key for snapshotting `ModuleAugmentationIndexShape`
+/// fingerprints into [`HostStoreView`]. Mirrors the parallel
+/// optional fields of `FactKey::ModuleAugmentationIndexShape`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct RouteSurfaceIndexShapeKey {
+    pub target_kind_tag: verter_semantic::facts::registry::AugmentationTargetKindTag,
+    pub external_specifier: Option<String>,
+    pub resolved_relative_canonical: Option<String>,
+    pub wildcard_pattern: Option<String>,
 }
 
 impl Default for HostStoreView {
@@ -46,6 +70,7 @@ impl Default for HostStoreView {
             whole_hashes: FxHashMap::default(),
             derived_hashes: FxHashMap::default(),
             import_routes: FxHashMap::default(),
+            route_surface_index_fingerprints: FxHashMap::default(),
         }
     }
 }
@@ -175,6 +200,7 @@ impl HostStoreView {
         }
 
         view.snapshot_tracked_import_route_hashes(host);
+        view.snapshot_augmentation_index(host.project_type_store.indexed());
         view.compat_token = view.compute_compat_token();
         view
     }
@@ -214,6 +240,42 @@ impl HostStoreView {
                 import_route_hash.unwrap_or(empty_import_route_hash),
             );
         }
+    }
+
+    /// Snapshot the augmentation-index fingerprints from a
+    /// [`FileArtifactStore`] into this view (R29 + G1). Called by
+    /// `build` when the host's project-type-store is reachable, and
+    /// directly from tests that construct a view over a standalone
+    /// `FileArtifactStore`.
+    pub(crate) fn snapshot_augmentation_index(
+        &mut self,
+        artifact_store: &crate::file_artifact_store::FileArtifactStore,
+    ) {
+        for (key, fingerprint) in artifact_store.snapshot_augmentation_index_fingerprints() {
+            let snap_key = RouteSurfaceIndexShapeKey {
+                target_kind_tag: augmentation_target_kind_tag_for(&key.target),
+                external_specifier: augmentation_target_external_specifier(&key.target),
+                resolved_relative_canonical: augmentation_target_resolved_relative_canonical(
+                    &key.target,
+                ),
+                wildcard_pattern: augmentation_target_wildcard_pattern(&key.target),
+            };
+            self.route_surface_index_fingerprints
+                .insert(snap_key, fingerprint);
+        }
+    }
+
+    /// Test-only convenience: insert an augmentation-index fingerprint
+    /// snapshot for `(target_kind_tag + parallel optionals)` directly.
+    /// Production paths drive this via `snapshot_augmentation_index`.
+    #[cfg(test)]
+    pub(crate) fn install_route_surface_index_fingerprint_for_test(
+        &mut self,
+        key: RouteSurfaceIndexShapeKey,
+        fingerprint: Hash16,
+    ) {
+        self.route_surface_index_fingerprints
+            .insert(key, fingerprint);
     }
 
     pub(crate) fn mutation_epoch(&self) -> u64 {
@@ -368,6 +430,56 @@ fn hash16_from_sorted(f: impl Fn(&mut rustc_hash::FxHasher)) -> Hash16 {
     out
 }
 
+/// Map an [`AugmentationTargetKind`] into the parallel-fields shape
+/// the parse-domain [`FactKey::ModuleAugmentationIndexShape`] +
+/// audit-event variants use.
+pub(crate) fn augmentation_target_kind_tag_for(
+    target: &crate::file_artifact_store::AugmentationTargetKind,
+) -> verter_semantic::facts::registry::AugmentationTargetKindTag {
+    use crate::file_artifact_store::AugmentationTargetKind;
+    use verter_semantic::facts::registry::AugmentationTargetKindTag;
+    match target {
+        AugmentationTargetKind::ExternalSpecifier(_) => AugmentationTargetKindTag::ExternalSpecifier,
+        AugmentationTargetKind::ResolvedRelativeCanonical(_) => {
+            AugmentationTargetKindTag::ResolvedRelativeCanonical
+        }
+        AugmentationTargetKind::WildcardAmbient(_) => AugmentationTargetKindTag::WildcardAmbient,
+        AugmentationTargetKind::GlobalAugmentation => AugmentationTargetKindTag::GlobalAugmentation,
+    }
+}
+
+pub(crate) fn augmentation_target_external_specifier(
+    target: &crate::file_artifact_store::AugmentationTargetKind,
+) -> Option<String> {
+    use crate::file_artifact_store::AugmentationTargetKind;
+    match target {
+        AugmentationTargetKind::ExternalSpecifier(spec) => Some(spec.as_ref().to_owned()),
+        _ => None,
+    }
+}
+
+pub(crate) fn augmentation_target_resolved_relative_canonical(
+    target: &crate::file_artifact_store::AugmentationTargetKind,
+) -> Option<String> {
+    use crate::file_artifact_store::AugmentationTargetKind;
+    match target {
+        AugmentationTargetKind::ResolvedRelativeCanonical(canon) => {
+            Some(canon.as_ref().to_owned())
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn augmentation_target_wildcard_pattern(
+    target: &crate::file_artifact_store::AugmentationTargetKind,
+) -> Option<String> {
+    use crate::file_artifact_store::AugmentationTargetKind;
+    match target {
+        AugmentationTargetKind::WildcardAmbient(pat) => Some(pat.as_ref().to_owned()),
+        _ => None,
+    }
+}
+
 impl crate::resolver_core::StoreView for HostStoreView {
     fn compat_token(&self) -> crate::resolver_core::StoreViewCompatToken {
         self.compat_token
@@ -429,6 +541,57 @@ impl crate::resolver_core::StoreView for HostStoreView {
 
     fn tracks_file(&self, canonical_id: &str) -> bool {
         self.whole_hashes.contains_key(canonical_id)
+    }
+
+    /// Route-surface-domain validator (R26 + R29 + G1).
+    ///
+    /// Stage 6c wires the `ModuleAugmentationIndexShape` variant
+    /// against the snapshot of augmentation-index fingerprints
+    /// captured at view-build time. Other `FactKey` variants in the
+    /// route-surface domain (`EffectiveExportSet`) are not yet
+    /// validated here — they are admitted via the
+    /// `fact_dep_signature` route-of-record on each candidate.
+    fn validates_route_surface_domain(
+        &self,
+        fact: &crate::resolver_core::RouteSurfaceFactRef,
+    ) -> bool {
+        use verter_semantic::facts::FactKey;
+        match &fact.key {
+            FactKey::ModuleAugmentationIndexShape {
+                target_kind_tag,
+                external_specifier,
+                resolved_relative_canonical,
+                wildcard_pattern,
+            } => {
+                let key = RouteSurfaceIndexShapeKey {
+                    target_kind_tag: *target_kind_tag,
+                    external_specifier: external_specifier
+                        .as_ref()
+                        .map(|s| s.as_ref().to_owned()),
+                    resolved_relative_canonical: resolved_relative_canonical
+                        .as_ref()
+                        .map(|s| s.as_ref().to_owned()),
+                    wildcard_pattern: wildcard_pattern.as_ref().map(|s| s.as_ref().to_owned()),
+                };
+                match self.route_surface_index_fingerprints.get(&key) {
+                    Some(current) => current == &fact.expected_hash,
+                    // Absent from the snapshot — the augmentation
+                    // index has not been populated under this view.
+                    // Refuse the candidate so the consumer recomputes
+                    // through the cold path (which will populate the
+                    // index).
+                    None => false,
+                }
+            }
+            // EffectiveExportSet and other route-surface facts are
+            // not snapshotted into the view yet; admit them via the
+            // per-candidate signature alone.
+            FactKey::EffectiveExportSet => true,
+            // Other parse-domain / resolve-domain keys do not belong
+            // to the route-surface domain; the dispatch layer guards
+            // against this so the match is exhaustive defensively.
+            _ => false,
+        }
     }
 }
 
