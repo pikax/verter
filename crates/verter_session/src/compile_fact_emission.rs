@@ -14,12 +14,14 @@
 //! dependency the script analysis recorded — `defineProps<T>()` /
 //! `defineEmits<U>()` / `defineSlots<S>()` references. Observing
 //! `FileWholeHash` for those deps would over-invalidate on cosmetic
-//! edits and silent re-roll on adding unrelated sibling members.
-//! Path-precise observation emits one `ParseFactRef::Member` (full
-//! body fingerprint) plus one `ParseFactRef::MemberPresence`
-//! (header) per `(dep_canonical, type_name)` tuple. A cross-file
-//! edit that adds or removes the consumed `type_name` invalidates
-//! the consumer; an edit to a sibling member does not.
+//! edits and silently re-roll on adding unrelated sibling members.
+//! Path-precise observation emits one `Export(type_name)` (the
+//! declaration body fingerprint) plus one
+//! `MemberShape(exporter=type_name)` (member surface fingerprint)
+//! plus one `MemberPresence(exporter=type_name, name=m)` per
+//! enumerated member `m` of the referenced type. A cross-file edit
+//! that adds, removes, or changes the consumed members invalidates
+//! the consumer; an edit to an unrelated sibling type does not.
 //!
 //! ## Augmentation observation (R29)
 //!
@@ -89,14 +91,25 @@ pub(crate) fn observe_compile_tier_dependencies(
         }
     }
 
-    // 2. Per-`macro_type_deps` `Member` + `MemberPresence`
-    //    observation (R28 path-precise; the producer reads the body
-    //    of the referenced type to generate the prop / emit / slot
-    //    validation, so it consumes both the existence and the
-    //    body fingerprint). Editing a sibling member does NOT
-    //    invalidate the consumer because the consumer only
-    //    observes `Member(target_name)`.
-    let mut seen_members = FxHashSet::default();
+    // 2. Per-`macro_type_deps` cross-file observation. The macro
+    //    consumer reads the referenced type's body to derive the
+    //    prop / emit / slot validation surface. The producer
+    //    therefore observes:
+    //
+    //    - `Export(type_name, Type)` — the body fingerprint of the
+    //      referenced type's declaration. Changes when the type
+    //      body changes.
+    //    - `MemberShape(exporter=type_name, Type)` — the member
+    //      surface of the referenced type. Changes when a sibling
+    //      member is added or removed.
+    //    - One `MemberPresence(exporter=type_name, name=m, Type)`
+    //      per existing member `m`, enumerated from the
+    //      dependency's `FactRegistry`. R28 path-precision:
+    //      editing one member's header (kind / readonly /
+    //      optional) invalidates exactly the consumer of that
+    //      member; the `MemberShape` observation pins
+    //      add / remove churn.
+    let mut seen_deps = FxHashSet::default();
     for dep in macro_type_deps {
         // Resolve `dep.import_source` to a canonical via the
         // owner's import_routes (DerivedRawState sub-mirror).
@@ -106,43 +119,42 @@ pub(crate) fn observe_compile_tier_dependencies(
             continue;
         };
         let space = SymbolSpace::Type;
-        let name = InternedName::from(dep.type_name.as_str());
-        let exporter = name.clone();
-        if !seen_members.insert((
-            resolved_canonical.clone(),
-            exporter.clone(),
-            name.clone(),
-            space,
-        )) {
+        let type_name = InternedName::from(dep.type_name.as_str());
+        if !seen_deps.insert((resolved_canonical.clone(), type_name.clone(), space)) {
             continue;
         }
-        // MemberPresence: header existence fact (R10 — adding `b`
-        // does not change `MemberPresence(a)`).
-        let presence_key = FactKey::MemberPresence {
-            exporter: exporter.clone(),
-            name: name.clone(),
+
+        // Export(type_name) — declaration body fingerprint.
+        let export_key = FactKey::Export {
+            name: type_name.clone(),
             space,
         };
         observe_parse_fact_present(
             host,
             &resolved_canonical,
             cell,
-            presence_key,
+            export_key,
             FactLane::Semantic,
         );
-        // Member: body fingerprint (full structural shape).
-        let body_key = FactKey::Member {
-            exporter,
-            name,
+
+        // MemberShape(exporter=type_name) — member surface
+        // fingerprint. Changes on sibling add / remove.
+        let shape_key = FactKey::MemberShape {
+            exporter: type_name.clone(),
             space,
         };
         observe_parse_fact_present(
             host,
             &resolved_canonical,
             cell,
-            body_key,
+            shape_key,
             FactLane::Semantic,
         );
+
+        // Enumerate the type's existing members from the
+        // dependency's FactRegistry and emit one
+        // `MemberPresence(exporter=type_name, name=m)` per member.
+        observe_member_presences_for_export(host, &resolved_canonical, cell, &type_name, space);
     }
 
     // 3. ModuleAugmentationIndexShape per consumed specifier (R29).
@@ -161,17 +173,15 @@ pub(crate) fn observe_compile_tier_dependencies(
 ///
 /// - Hash present → observe `FactVersionRef::Parse` with the real
 ///   hash. A later mismatch invalidates the consumer.
-/// - Hash absent (file not in artifact store yet, fact not yet
-///   emitted) → DO NOT OBSERVE. Observing a `ZERO_HASH` sentinel
-///   would mean the consumer becomes invalid the moment the
-///   producer finally populates the fact, which is semantically
-///   wrong: the consumer did not depend on the absence. The
-///   conservative behaviour is to skip the observation, accepting
-///   that this specific dependency will not invalidate the consumer
-///   on a subsequent edit. Producers may revisit this when a fully
-///   populated artifact-store invariant is in place; until then,
-///   skipping prevents false-positive invalidations on the very
-///   first compile of a freshly-upserted file.
+/// - Hash absent (file not in artifact store, fact not emitted) →
+///   DO NOT OBSERVE. The cold-compute pre-tracer prefetch in
+///   `VerterHost::prefetch_compile_tier_observation_targets` is
+///   the producer-timing contract that drives dependency
+///   artifacts to indexed-ready before this point. When the
+///   prefetch could not resolve / load the dep (external
+///   specifier without workspace fallback, deleted file, etc.)
+///   the observation is conservatively skipped so a consumer
+///   never depends on a fact that the producer cannot publish.
 fn observe_parse_fact_present(
     host: &VerterHost,
     canonical_id: &str,
@@ -188,6 +198,54 @@ fn observe_parse_fact_present(
         lane,
         expected_hash,
     }));
+}
+
+/// Enumerate every `MemberPresence(exporter, *, space)` fact in the
+/// dep's `FileFacts` and observe each one through the tracer. Used
+/// by the compile-tier producer to record path-precise member
+/// presence observations for each cross-file macro type dep.
+///
+/// If the dep's `FileArtifacts` is not yet in the project store the
+/// enumeration is a no-op (the pre-tracer prefetch should have
+/// driven it to indexed-ready, but a stale-load fallback still
+/// holds for unresolvable specifiers).
+fn observe_member_presences_for_export(
+    host: &VerterHost,
+    canonical_id: &str,
+    cell: &FactReadSetCell,
+    exporter: &InternedName,
+    space: SymbolSpace,
+) {
+    let Some(artifacts) = host
+        .project_type_store()
+        .indexed()
+        .get_artifacts_any(canonical_id)
+    else {
+        return;
+    };
+    for (key, _) in artifacts.facts.registry().iter() {
+        if let FactKey::MemberPresence {
+            exporter: ex,
+            name,
+            space: sp,
+        } = key
+        {
+            if ex == exporter && *sp == space {
+                let presence_key = FactKey::MemberPresence {
+                    exporter: ex.clone(),
+                    name: name.clone(),
+                    space: *sp,
+                };
+                observe_parse_fact_present(
+                    host,
+                    canonical_id,
+                    cell,
+                    presence_key,
+                    FactLane::Semantic,
+                );
+            }
+        }
+    }
 }
 
 fn lookup_parse_fact_hash(

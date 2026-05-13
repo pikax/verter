@@ -155,6 +155,132 @@ impl VerterHost {
         }
     }
 
+    /// R3/R26/R28 cold-compute prefetch: resolve and load the cross-file
+    /// dependency surface the compile-tier fact tracer will observe
+    /// before the tracer is installed.
+    ///
+    /// The compile-tier tracer in `observe_compile_tier_dependencies`
+    /// reads two pieces of state per macro-type-dep:
+    ///
+    /// 1. `derived_raw_cache().get(owner).import_routes` — the
+    ///    owner's per-import resolution table; needed to translate
+    ///    `dep.import_source` to a canonical id.
+    /// 2. `project_type_store.indexed().get_artifacts_any(dep)` —
+    ///    the dependency's `FileArtifactStore` entry; needed to look
+    ///    up the `Member` / `MemberPresence` fact hashes.
+    ///
+    /// On a cold compute of the owner SFC neither of those is
+    /// pre-populated, so without this prefetch the tracer silently
+    /// records an empty signature and the consumer would never
+    /// invalidate on a cross-file edit.
+    ///
+    /// Strategy: prefetch the dependency surface OUTSIDE the tracer
+    /// scope (so the load itself is not part of the observed read
+    /// set). For each macro-type-dep:
+    ///
+    /// - Resolve `dep.import_source` via `workspace.resolve_import`
+    ///   (Type-import first, ESM-import fallback) and cache the route
+    ///   in `derived_raw_cache().import_routes`.
+    /// - Call `ensure_indexed_ready(dep_canonical)` to publish the
+    ///   dependency's `IndexedReady` into `FileArtifactStore`. Just
+    ///   `ensure_loaded` is insufficient — fact lookup reads the
+    ///   indexed-artifact's `facts` registry, which is only populated
+    ///   by the indexed-ready materialiser.
+    ///
+    /// Script imports (used by the augmentation observation) reach
+    /// `FileArtifactStore` via `ensure_indexed_ready` on each
+    /// resolvable specifier. Unresolved specifiers (external packages
+    /// without a workspace fallback) are skipped: the augmentation
+    /// observation uses the index-level fingerprint snapshot rather
+    /// than per-canonical artifacts and tolerates a missing canonical.
+    fn prefetch_compile_tier_observation_targets(
+        &self,
+        owner_canonical: &str,
+        script_imports: &[verter_semantic::analysis::AnalyzedImport],
+        macro_type_deps: &[verter_semantic::analysis::MacroTypeDep],
+    ) {
+        // Owner's indexed-ready must be present so the tracer can
+        // resolve owner-relative import surfaces; the owner's own
+        // FileArtifactStore entry is also a producer-side dependency
+        // of route observation (R26).
+        let _ = self.ensure_indexed_ready(owner_canonical);
+
+        let workspace = self.workspace();
+        let mut resolved_deps = std::collections::BTreeSet::<String>::new();
+
+        // Macro-type deps: TypeImport first, ESM fallback. Cache the
+        // import-route so `resolve_import_source_to_canonical` in
+        // `compile_fact_emission` finds it.
+        for dep in macro_type_deps {
+            let resolved = workspace
+                .resolve_import(
+                    owner_canonical,
+                    &dep.import_source,
+                    verter_workspace::ResolutionContext {
+                        phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                        kind: verter_workspace::ResolveRequestKind::TypeImport,
+                    },
+                )
+                .or_else(|| {
+                    workspace.resolve_import(
+                        owner_canonical,
+                        &dep.import_source,
+                        verter_workspace::ResolutionContext {
+                            phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                            kind: verter_workspace::ResolveRequestKind::EsmImport,
+                        },
+                    )
+                });
+            if let Some(resolution) = resolved {
+                self.cache_import_route_result(
+                    owner_canonical,
+                    &dep.import_source,
+                    &resolution.source_id,
+                );
+                if resolution.source_id != owner_canonical {
+                    resolved_deps.insert(resolution.source_id);
+                }
+            }
+        }
+
+        // Script imports: cache the import route + indexed-ready so
+        // the tracer's ImportRef + augmentation observations have
+        // populated state. Type-only imports use the TypeImport
+        // phase; value imports use EsmImport.
+        for import in script_imports {
+            let kind = if import.is_type_only {
+                verter_workspace::ResolveRequestKind::TypeImport
+            } else {
+                verter_workspace::ResolveRequestKind::EsmImport
+            };
+            if let Some(resolution) = workspace.resolve_import(
+                owner_canonical,
+                import.source.as_str(),
+                verter_workspace::ResolutionContext {
+                    phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                    kind,
+                },
+            ) {
+                self.cache_import_route_result(
+                    owner_canonical,
+                    import.source.as_str(),
+                    &resolution.source_id,
+                );
+                if resolution.source_id != owner_canonical {
+                    resolved_deps.insert(resolution.source_id);
+                }
+            }
+        }
+
+        // Drive each resolved dep to IndexedReady so its
+        // `FileArtifactStore` entry (including the `facts` registry)
+        // is published before the tracer queries fact hashes. Calls
+        // are idempotent / cache-hit on warm reads.
+        for dep_canonical in resolved_deps {
+            let _ = self.ensure_indexed_ready(&dep_canonical);
+        }
+    }
+
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn ensure_compiled(
         &self,
@@ -298,6 +424,27 @@ impl VerterHost {
             && slot.style_override_hash == soh
             && slot.content_override_hash == coh
             && self.compile_slot_fact_signature_validates(slot)
+    }
+
+    /// Public R3/R26/R28 inspector: returns a clone of the compile
+    /// slot's `fact_dep_signature` for the given `(canonical, profile)`
+    /// pair, or `None` if no slot has been admitted.
+    ///
+    /// Used by integration tests + downstream observability to verify
+    /// the producer actually recorded the cross-file fact set the
+    /// consumer's read-side fact-validation oracle depends on.
+    pub fn compile_slot_fact_dep_signature(
+        &self,
+        canonical_id: &str,
+        profile: &CompileProfile,
+    ) -> Option<Arc<[crate::resolver_core::FactVersionRef]>> {
+        let canonical = self.resolve_alias_or_canonical(canonical_id);
+        let profile_hash = compile_profile_hash(profile);
+        self.compile_cache().get(&canonical).and_then(|cc| {
+            cc.compile_slots
+                .get(&profile_hash)
+                .map(|s| Arc::clone(&s.fact_dep_signature))
+        })
     }
 
     /// Retrieve a compiled virtual file (script, template, style, or main bundle).
@@ -522,6 +669,19 @@ impl VerterHost {
             .as_ref()
             .map(|o| o.hash)
             .unwrap_or(0);
+
+        // R3/R26/R28 cold-compute prefetch (pre-tracer): make sure
+        // the cross-file dependency surface the tracer will observe is
+        // resolved + indexed-ready before the tracer is installed.
+        // Performed outside `with_fact_tracer` so that load / index
+        // mutations are not folded into the consumer's observed read
+        // set. See `prefetch_compile_tier_observation_targets` for
+        // the contract.
+        self.prefetch_compile_tier_observation_targets(
+            &canonical_id,
+            &compile_input.script_imports,
+            &compile_input.macro_type_deps,
+        );
 
         // R3/R26/R28 cold-compute fact-observation scope. The tracer
         // accumulates every cross-file fact (per-`Member` /
