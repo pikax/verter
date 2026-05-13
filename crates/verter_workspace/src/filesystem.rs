@@ -545,12 +545,21 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
     }
 
     fn notify_upsert(&self, canonical_id: &str, source: Arc<str>) {
-        self.engine.invalidate_package_manifest(canonical_id);
-        self.engine
+        // R22 contract: byte-identical re-upsert is a TRUE no-op. The
+        // overlay `set` returns whether content actually changed; only
+        // when it did do we invalidate the package manifest and bump
+        // the content generation. Bumping when nothing changed would
+        // needlessly clear the lazy-resolution cache and force
+        // downstream observers to re-validate.
+        let changed = self
+            .engine
             .overlay
             .write()
             .set(canonical_id.to_string(), source);
-        self.engine.bump_content_generation();
+        if changed {
+            self.engine.invalidate_package_manifest(canonical_id);
+            self.engine.bump_content_generation();
+        }
     }
 
     fn notify_close(&self, canonical_id: &str) {

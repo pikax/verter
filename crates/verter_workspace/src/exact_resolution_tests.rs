@@ -113,9 +113,11 @@ fn replace_parsed_edges_keys_unresolved_by_specifier_and_kind() {
 
 // ── Test #4 ──
 #[test]
-fn replace_parsed_edges_clears_lazy_resolved() {
-    // Trivially failing-first since the API name `replace_parsed_edges`
-    // doesn't exist pre-impl.
+fn byte_identical_replace_parsed_edges_preserves_lazy_resolved() {
+    // R22 contract: on byte-identical re-record, secondary classes
+    // (here `lazy_resolved`) SURVIVE. The reverse graph is
+    // content-addressed; an identical re-record carries no new
+    // information and must not poke sibling caches.
     let mut store = EdgeStore::new();
     store.replace_parsed_edges("/src/Comp.vue", BTreeSet::new(), vec![], vec![]);
     store.add_lazy_resolved_dep("/src/Comp.vue", "/node_modules/vue/index.ts");
@@ -123,21 +125,51 @@ fn replace_parsed_edges_clears_lazy_resolved() {
         store.reverse_deps_for_target("/node_modules/vue/index.ts", None),
         vec!["/src/Comp.vue"],
     );
-    // Re-record clears lazy_resolved.
+    // Byte-identical re-record is a TRUE no-op — lazy_resolved is NOT
+    // cleared.
     store.replace_parsed_edges("/src/Comp.vue", BTreeSet::new(), vec![], vec![]);
+    assert_eq!(
+        store.reverse_deps_for_target("/node_modules/vue/index.ts", None),
+        vec!["/src/Comp.vue"],
+        "R22 contract: byte-identical re-record must NOT clear \
+         lazy_resolved (idempotency on the quintuple)"
+    );
+}
+
+// ── Test #4-bis ──
+#[test]
+fn structurally_changed_replace_parsed_edges_clears_lazy_resolved() {
+    // F11 lifecycle survives the idempotency gate for the structural-change branch:
+    // when the parsed-edge inputs ACTUALLY differ, secondary classes
+    // are still cleared (parsed re-record is a structural event when
+    // the inputs change). This pairs with the byte-identical idempotency
+    // test above as the discriminating negation.
+    let mut store = EdgeStore::new();
+    store.replace_parsed_edges("/src/Comp.vue", BTreeSet::new(), vec![], vec![]);
+    store.add_lazy_resolved_dep("/src/Comp.vue", "/node_modules/vue/index.ts");
+    assert_eq!(
+        store.reverse_deps_for_target("/node_modules/vue/index.ts", None),
+        vec!["/src/Comp.vue"],
+    );
+    // Structural re-record with a DIFFERENT parsed_resolved set →
+    // lazy_resolved cleared per F11 lifecycle.
+    store.replace_parsed_edges("/src/Comp.vue", btree(&["/lib/types.ts"]), vec![], vec![]);
     assert!(
         store
             .reverse_deps_for_target("/node_modules/vue/index.ts", None)
             .is_empty(),
-        "lazy_resolved must be cleared on parse re-record"
+        "F11 lifecycle: a structurally-changed re-record clears \
+         lazy_resolved (parsed_resolved set differs)"
     );
 }
 
 // ── Test #5 ──
 #[test]
-fn replace_parsed_edges_clears_exact_resolved() {
-    // F11: matches host_upsert.rs:170 — every upsert clears bundler state.
+fn byte_identical_replace_parsed_edges_preserves_exact_resolved() {
+    // R22 contract: on byte-identical re-record, secondary classes
+    // (here `exact_resolved` + `exact_resolutions`) SURVIVE.
     let mut store = EdgeStore::new();
+    store.replace_parsed_edges("/src/Comp.vue", BTreeSet::new(), vec![], vec![]);
     store.replace_exact_resolutions(
         "/src/Comp.vue",
         vec![exact("./bar", Some("/src/bar.ts"), vec![])],
@@ -146,17 +178,50 @@ fn replace_parsed_edges_clears_exact_resolved() {
         store.reverse_deps_for_target("/src/bar.ts", None),
         vec!["/src/Comp.vue"],
     );
-    // Re-record clears exact_resolved + exact_resolutions.
+    // Byte-identical re-record is a TRUE no-op — exact_resolved &
+    // exact_resolutions are NOT cleared.
     store.replace_parsed_edges("/src/Comp.vue", BTreeSet::new(), vec![], vec![]);
+    assert_eq!(
+        store.reverse_deps_for_target("/src/bar.ts", None),
+        vec!["/src/Comp.vue"],
+        "R22 contract: byte-identical re-record must NOT clear \
+         exact_resolved"
+    );
+    assert!(
+        store.has_exact_resolutions("/src/Comp.vue"),
+        "R22 contract: byte-identical re-record must NOT clear \
+         exact_resolutions"
+    );
+}
+
+// ── Test #5-bis ──
+#[test]
+fn structurally_changed_replace_parsed_edges_clears_exact_resolved() {
+    // F11 lifecycle survives the idempotency gate for the structural-change branch.
+    let mut store = EdgeStore::new();
+    store.replace_parsed_edges("/src/Comp.vue", BTreeSet::new(), vec![], vec![]);
+    store.replace_exact_resolutions(
+        "/src/Comp.vue",
+        vec![exact("./bar", Some("/src/bar.ts"), vec![])],
+    );
+    assert_eq!(
+        store.reverse_deps_for_target("/src/bar.ts", None),
+        vec!["/src/Comp.vue"],
+    );
+    // Structural re-record clears exact_resolved + exact_resolutions
+    // per F11 lifecycle.
+    store.replace_parsed_edges("/src/Comp.vue", btree(&["/lib/types.ts"]), vec![], vec![]);
     assert!(
         store
             .reverse_deps_for_target("/src/bar.ts", None)
             .is_empty(),
-        "exact_resolved must be cleared on parse re-record"
+        "F11 lifecycle: structurally-changed re-record clears \
+         exact_resolved"
     );
     assert!(
         !store.has_exact_resolutions("/src/Comp.vue"),
-        "exact_resolutions map must be cleared on parse re-record"
+        "F11 lifecycle: structurally-changed re-record clears \
+         exact_resolutions"
     );
 }
 
@@ -176,21 +241,46 @@ fn replace_parsed_edges_does_not_clear_ambient_resolved() {
 
 // ── Test #7 ──
 #[test]
-fn replace_parsed_edges_clears_semantic_transitive() {
-    // F11: semantic_transitive cleared on parse re-record (matches
-    // cc.dependencies reset; the macro resolver re-fires post-upsert).
+fn byte_identical_replace_parsed_edges_preserves_semantic_transitive() {
+    // R22 contract: on byte-identical re-record, `semantic_transitive`
+    // SURVIVES. The macro resolver's dep closure is keyed by
+    // canonical id; an identical re-record does not change which
+    // canonicals are reachable, so the cached transitive edges remain
+    // valid.
     let mut store = EdgeStore::new();
+    store.replace_parsed_edges("/src/Comp.vue", BTreeSet::new(), vec![], vec![]);
     store.replace_semantic_transitive("/src/Comp.vue", btree(&["/src/shared.ts"]));
     assert_eq!(
         store.reverse_deps_for_target("/src/shared.ts", None),
         vec!["/src/Comp.vue"],
     );
     store.replace_parsed_edges("/src/Comp.vue", BTreeSet::new(), vec![], vec![]);
+    assert_eq!(
+        store.reverse_deps_for_target("/src/shared.ts", None),
+        vec!["/src/Comp.vue"],
+        "R22 contract: byte-identical re-record must NOT clear \
+         semantic_transitive"
+    );
+}
+
+// ── Test #7-bis ──
+#[test]
+fn structurally_changed_replace_parsed_edges_clears_semantic_transitive() {
+    // F11 lifecycle survives the idempotency gate for the structural-change branch.
+    let mut store = EdgeStore::new();
+    store.replace_parsed_edges("/src/Comp.vue", BTreeSet::new(), vec![], vec![]);
+    store.replace_semantic_transitive("/src/Comp.vue", btree(&["/src/shared.ts"]));
+    assert_eq!(
+        store.reverse_deps_for_target("/src/shared.ts", None),
+        vec!["/src/Comp.vue"],
+    );
+    store.replace_parsed_edges("/src/Comp.vue", btree(&["/lib/types.ts"]), vec![], vec![]);
     assert!(
         store
             .reverse_deps_for_target("/src/shared.ts", None)
             .is_empty(),
-        "semantic_transitive must be cleared on parse re-record"
+        "F11 lifecycle: structurally-changed re-record clears \
+         semantic_transitive"
     );
 }
 
@@ -771,9 +861,17 @@ fn replace_exact_resolutions_changed_to_none_restores_stem() {
 #[test]
 fn record_parsed_edges_followed_by_set_exact_round_trip() {
     // Sequence: parse `./types` (stem present) → bundler resolves
-    // (stem dampened, canonical present) → parse re-record (per F11
-    // lifecycle: clears exact_resolutions, so stem becomes active again,
-    // canonical empty).
+    // (stem dampened, canonical present) → STRUCTURALLY DIFFERENT parse
+    // re-record (per F11 lifecycle: clears exact_resolutions, so stem
+    // becomes active again, canonical empty).
+    //
+    // R22 contract: the F11 lifecycle survives only on the
+    // structural-change branch — a byte-identical re-record is a TRUE
+    // no-op and would NOT clear `exact_resolutions`. This test
+    // discriminates by introducing a SECOND unresolved relative on the
+    // re-record (`./types-v2`), so `parsed_unresolved_relatives`
+    // genuinely differs from the snapshot and the clear lifecycle
+    // fires.
     let mut store = EdgeStore::new();
     store.replace_parsed_edges(
         "/src/Comp.vue",
@@ -797,26 +895,35 @@ fn record_parsed_edges_followed_by_set_exact_round_trip() {
         store.reverse_deps_for_target("/lib/types.ts", None),
         vec!["/src/Comp.vue"],
     );
-    // Re-record: clears exact_resolutions; stem becomes active again.
+    // Structurally-different re-record (a second unresolved relative
+    // makes the input set diverge from the snapshot): clears
+    // exact_resolutions; stem becomes active again.
     store.replace_parsed_edges(
         "/src/Comp.vue",
         BTreeSet::new(),
-        vec![(
-            ("./types".to_string(), ResolveRequestKind::EsmImport),
-            "/src/types".to_string(),
-        )],
+        vec![
+            (
+                ("./types".to_string(), ResolveRequestKind::EsmImport),
+                "/src/types".to_string(),
+            ),
+            (
+                ("./types-v2".to_string(), ResolveRequestKind::EsmImport),
+                "/src/types-v2".to_string(),
+            ),
+        ],
         vec![],
     );
     assert!(
         store
             .reverse_deps_for_target("/lib/types.ts", None)
             .is_empty(),
-        "F11: exact_resolved cleared on re-record"
+        "F11: exact_resolved cleared on structurally-changed re-record"
     );
     assert_eq!(
         store.reverse_deps_for_target("/src/types", None),
         vec!["/src/Comp.vue"],
-        "stem reactivated after re-record (exact_resolutions cleared)"
+        "stem reactivated after structurally-changed re-record \
+         (exact_resolutions cleared)"
     );
 }
 

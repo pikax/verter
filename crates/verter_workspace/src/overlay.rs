@@ -24,10 +24,20 @@ impl OverlayStore {
         self.entries.get(&key).cloned()
     }
 
-    /// Set overlay content for a file.
-    pub fn set(&mut self, canonical_id: String, source: Arc<str>) {
+    /// Set overlay content for a file. Returns `true` iff the stored
+    /// content actually changed. R22 idempotency contract: callers
+    /// gate on this return so byte-identical re-upserts do not bump
+    /// downstream generation counters or fire reverse-graph
+    /// invalidation.
+    pub fn set(&mut self, canonical_id: String, source: Arc<str>) -> bool {
         let key = canonicalize_path(&canonical_id);
-        self.entries.insert(key, source);
+        match self.entries.get(&key) {
+            Some(existing) if Arc::ptr_eq(existing, &source) || **existing == *source => false,
+            _ => {
+                self.entries.insert(key, source);
+                true
+            }
+        }
     }
 
     /// Clear overlay for a file. Returns `true` if an overlay was removed.

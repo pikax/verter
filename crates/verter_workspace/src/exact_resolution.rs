@@ -158,6 +158,26 @@ impl DependencySnapshotView {
     }
 }
 
+/// Compare a stored `parsed_unresolved_relatives` map against an
+/// incoming `unresolved_pairs` vector for byte-identical equality.
+/// Used by [`EdgeStore::replace_parsed_edges`] to gate the no-op fast
+/// path (R22 idempotency on the quintuple).
+fn parsed_unresolved_matches(
+    stored: &FxHashMap<(String, ResolveRequestKind), String>,
+    incoming: &[((String, ResolveRequestKind), String)],
+) -> bool {
+    if stored.len() != incoming.len() {
+        return false;
+    }
+    for (key, stem) in incoming {
+        match stored.get(key) {
+            Some(existing) if existing == stem => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
 /// Storage for per-file edge state and the reverse dependency graph.
 ///
 /// The edge store tracks:
@@ -252,8 +272,18 @@ impl EdgeStore {
     }
 
     /// Replace `parsed_resolved` + `parsed_unresolved_relatives` +
-    /// `bare_specifiers` + clear `lazy_resolved` + clear `exact_resolved` +
-    /// clear `exact_resolutions` + clear `semantic_transitive`.
+    /// `bare_specifiers`. R22 contract: on byte-identical inputs the
+    /// call is a TRUE no-op — secondary classes (`lazy_resolved`,
+    /// `exact_resolved`, `exact_resolutions`, `semantic_transitive`)
+    /// are NOT cleared, because they hang off canonical-id keys that
+    /// remain valid when the parsed edge set is unchanged. The reverse
+    /// graph is content-addressed and must not invalidate sibling
+    /// caches on identical re-record.
+    ///
+    /// On input-differing re-record, secondary classes are cleared per
+    /// the F11 lifecycle (parsed re-record is a structural event when
+    /// the inputs actually changed).
+    ///
     /// **NOT clear `ambient_resolved` (F1.5).**
     pub fn replace_parsed_edges(
         &mut self,
@@ -262,6 +292,23 @@ impl EdgeStore {
         unresolved_pairs: Vec<((String, ResolveRequestKind), String)>,
         bare_specifiers: Vec<(String, ResolveRequestKind)>,
     ) {
+        // R22 idempotency gate: if every parsed-edge input is
+        // byte-identical to the snapshot's existing state, perform no
+        // write at all. The reverse graph is content-addressed; an
+        // identical re-record adds no information and must not poke
+        // any sibling cache.
+        if let Some(state) = self.files.get(canonical_id) {
+            if state.deps.parsed_resolved == parsed_resolved
+                && state.deps.bare_specifiers == bare_specifiers
+                && parsed_unresolved_matches(
+                    &state.deps.parsed_unresolved_relatives,
+                    &unresolved_pairs,
+                )
+            {
+                return;
+            }
+        }
+
         self.write_pattern(canonical_id, |snap| {
             // Per F11 lifecycle: clear classes that are bundler/parser-driven.
             snap.parsed_resolved = parsed_resolved;
