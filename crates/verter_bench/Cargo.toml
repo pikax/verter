@@ -107,6 +107,14 @@ harness = false
 name = "fact_validation_hot_path"
 harness = false
 
+[[bench]]
+name = "repo_warm_second_pass"
+harness = false
+
+[[bench]]
+name = "repo_first_pass_loop"
+harness = false
+
 
 [[example]]
 name = "expression_validator"
