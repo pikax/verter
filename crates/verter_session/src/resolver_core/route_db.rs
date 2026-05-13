@@ -17,7 +17,6 @@ use rustc_hash::FxHashMap;
 use crate::resolver_core::{
     FactVersionRef, PermissiveStoreView, SingleflightGroup, StoreView, ValidatedFactCache,
 };
-use crate::types::Hash16;
 
 /// Result of resolving a named export route.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,15 +50,25 @@ impl RouteResult {
 ///
 /// Maps each wildcard `source_specifier` to its resolved `canonical_id`.
 /// Built lazily on first barrel query, then reused for all subsequent queries.
+///
+/// Version rooting lives in `fact_dep_signature` (a sorted, deduplicated
+/// list of `FactVersionRef` entries the producer observed while
+/// computing the surface). Concurrent file versions of the same
+/// `barrel_canonical` coexist as distinct candidates inside the
+/// multi-candidate `ValidatedFactCache` slot — each candidate's
+/// signature validates against the current `StoreView`.
 #[derive(Debug, Clone)]
 pub struct BarrelRouteSurface {
+    /// The barrel canonical this surface was built for.
     pub barrel_canonical: String,
     /// specifier → canonical_id
     pub wildcard_edges: FxHashMap<String, String>,
-    /// Hash of the barrel file that produced this surface.
-    pub whole_hash: Hash16,
-    /// Hashes of the wildcard source files at build time.
-    pub source_hashes: Vec<(String, Hash16)>,
+    /// Fact dependencies recorded while the surface was built — the
+    /// validation signature for this candidate. Multi-candidate cache
+    /// slots store one signature per candidate so concurrent file
+    /// versions or overlay variants coexist without overwriting each
+    /// other.
+    pub fact_dep_signature: Arc<[FactVersionRef]>,
 }
 
 /// Shared DB for canonical export routing facts.
@@ -312,18 +321,20 @@ impl RouteDb {
     // Fact construction
     // -----------------------------------------------------------------------
 
+    /// Return the cached `fact_dep_signature` for a barrel surface as
+    /// a fresh `Vec<FactVersionRef>` suitable for re-admission into a
+    /// downstream `ValidatedFactCache`.
+    ///
+    /// The post-Stage-6c contract: the signature is already the
+    /// validation oracle for the surface — it was finalised at
+    /// admission time. This helper exists for callers that need to
+    /// thread the existing signature into a higher-tier
+    /// `insert_arc(..., facts)` call (the `ValidatedFactCache` API
+    /// takes `Vec<FactVersionRef>`, not the immutable `Arc<[...]>`
+    /// the candidate stores). For warm-hit observation onto the
+    /// active tracer use `observe_borrowed_signature(...)` instead.
     fn barrel_validation_facts(&self, surface: &BarrelRouteSurface) -> Vec<FactVersionRef> {
-        let mut facts = vec![FactVersionRef::FileWholeHash {
-            canonical_id: surface.barrel_canonical.clone(),
-            hash: surface.whole_hash,
-        }];
-        for (source_canonical, source_hash) in &surface.source_hashes {
-            facts.push(FactVersionRef::FileWholeHash {
-                canonical_id: source_canonical.clone(),
-                hash: *source_hash,
-            });
-        }
-        facts
+        surface.fact_dep_signature.as_ref().to_vec()
     }
 }
 
@@ -464,11 +475,23 @@ mod tests {
                 m.insert("./bar".to_owned(), "bar.ts".to_owned());
                 m
             },
-            whole_hash: [1; 16],
-            source_hashes: vec![
-                ("foo.ts".to_owned(), [2; 16]),
-                ("bar.ts".to_owned(), [3; 16]),
-            ],
+            fact_dep_signature: Arc::from(
+                vec![
+                    FactVersionRef::FileWholeHash {
+                        canonical_id: "barrel.ts".to_owned(),
+                        hash: [1; 16],
+                    },
+                    FactVersionRef::FileWholeHash {
+                        canonical_id: "foo.ts".to_owned(),
+                        hash: [2; 16],
+                    },
+                    FactVersionRef::FileWholeHash {
+                        canonical_id: "bar.ts".to_owned(),
+                        hash: [3; 16],
+                    },
+                ]
+                .into_boxed_slice(),
+            ),
         };
 
         db.insert_barrel_surface(surface);
@@ -491,8 +514,13 @@ mod tests {
             Some(BarrelRouteSurface {
                 barrel_canonical: "barrel.ts".to_owned(),
                 wildcard_edges: FxHashMap::default(),
-                whole_hash: [1; 16],
-                source_hashes: vec![],
+                fact_dep_signature: Arc::from(
+                    vec![FactVersionRef::FileWholeHash {
+                        canonical_id: "barrel.ts".to_owned(),
+                        hash: [1; 16],
+                    }]
+                    .into_boxed_slice(),
+                ),
             })
         });
         assert!(result.is_some());
@@ -521,8 +549,13 @@ mod tests {
         db.insert_barrel_surface(BarrelRouteSurface {
             barrel_canonical: "b.ts".to_owned(),
             wildcard_edges: FxHashMap::default(),
-            whole_hash: [1; 16],
-            source_hashes: vec![],
+            fact_dep_signature: Arc::from(
+                vec![FactVersionRef::FileWholeHash {
+                    canonical_id: "b.ts".to_owned(),
+                    hash: [1; 16],
+                }]
+                .into_boxed_slice(),
+            ),
         });
 
         db.clear();

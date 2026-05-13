@@ -66,25 +66,43 @@ fn whole_hash_read_site_1_prepared_decl_hash_mixing_inventoried() {
     );
 }
 
-/// Read site #2 — `route_db.rs:318`. `BarrelRouteSurface` carries
-/// `whole_hash: Hash16`, and the route-result hash entries propagate
-/// it as the file-version anchor.
+/// Read site #2 — `route_db.rs:318` (Stage-5 inventory). The Stage-5
+/// inventory captured `BarrelRouteSurface.whole_hash: Hash16` +
+/// per-source-file hashes (`source_hashes: Vec<(String, Hash16)>`) as
+/// the file-version anchor for barrel-surface validation.
 ///
-/// **Documented Stage-5c+ replacement**: "Replaced by
-/// `fact_dep_signature` on the `RouteResult` value."
+/// **Stage 6c retirement**: replaced by
+/// `BarrelRouteSurface.fact_dep_signature: Arc<[FactVersionRef]>`.
+/// The barrel surface now carries its own validation signature
+/// directly, validated against the active `StoreView` like every
+/// other `ValidatedFactCache` candidate. This test inverts the
+/// Stage-5 invariant — it asserts the legacy whole_hash + source_hashes
+/// fields are GONE and the replacement signature field is present.
 #[test]
 fn whole_hash_read_site_2_route_db_surface_hash_inventoried() {
     let path = workspace_root().join("crates/verter_session/src/resolver_core/route_db.rs");
     let source = read_source_file(&path);
 
-    // The legacy pattern: BarrelRouteSurface.whole_hash field +
-    // route surface hash propagation.
+    // Legacy patterns that MUST be absent post-Stage-6c.
     let has_surface_hash_field =
         source.contains("pub whole_hash: Hash16,") || source.contains("pub whole_hash: HashValue,");
+    let has_source_hashes_field = source.contains("pub source_hashes: Vec<");
 
     assert!(
-        has_surface_hash_field,
-        "BarrelRouteSurface.whole_hash field must be present (inventory site #2)"
+        !has_surface_hash_field,
+        "BarrelRouteSurface.whole_hash field MUST be retired post-Stage-6c \
+         (replaced by fact_dep_signature: Arc<[FactVersionRef]>)"
+    );
+    assert!(
+        !has_source_hashes_field,
+        "BarrelRouteSurface.source_hashes field MUST be retired post-Stage-6c \
+         (replaced by fact_dep_signature: Arc<[FactVersionRef]>)"
+    );
+
+    // Positive assertion: the replacement field is present.
+    assert!(
+        source.contains("pub fact_dep_signature: Arc<[FactVersionRef]>"),
+        "BarrelRouteSurface.fact_dep_signature MUST be present (Stage-6c replacement for whole_hash)"
     );
 }
 

@@ -19,6 +19,7 @@ use super::{
     MaterializeSkipReason, ProjectionModeAudit, StructuredAuditEvent as Event, VfsLayer,
 };
 use crate::types::Hash16;
+use verter_audit::AugmentationTargetKindTag;
 
 // ──────────────────────────────────────────────────────────────────
 // Expected Display strings, authored to match the hand-written
@@ -65,6 +66,12 @@ pub const EXPECTED_CUSTOM: &str = "Custom(test_name, key=value)";
 pub const EXPECTED_CACHE_DRAINED_AT_UPSERT: &str =
     "CacheDrainedAtUpsert(resolved_type_cache, /probe.vue)";
 pub const EXPECTED_FACT_SIGNATURE_OVERFLOW: &str = "FactSignatureOverflow(size=1100, cap=1024)";
+pub const EXPECTED_MODULE_AUGMENTATION_STITCHED_EXTERNAL: &str =
+    "ModuleAugmentationStitched(ext=vue, n=2, fp=01020304)";
+pub const EXPECTED_MODULE_AUGMENTATION_INDEX_SHAPE_INSTALL: &str =
+    "ModuleAugmentationIndexShape(ext=vue, install=05060708, n=1)";
+pub const EXPECTED_MODULE_AUGMENTATION_INDEX_SHAPE_REFRESH: &str =
+    "ModuleAugmentationIndexShape(ext=vue, prev=05060708, new=090a0b0c, n=2)";
 
 // ──────────────────────────────────────────────────────────────────
 // Fixture constructors — exactly one canonical instance per variant.
@@ -292,6 +299,49 @@ pub fn fixture_fact_signature_overflow() -> Event {
     }
 }
 
+pub fn fixture_module_augmentation_stitched_external() -> Event {
+    Event::ModuleAugmentationStitched {
+        target_kind_tag: AugmentationTargetKindTag::ExternalSpecifier,
+        external_specifier: Some(Arc::from("vue")),
+        resolved_relative_canonical: None,
+        wildcard_pattern: None,
+        augmenter_count: 2,
+        fingerprint: [
+            1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ],
+    }
+}
+
+pub fn fixture_module_augmentation_index_shape_install() -> Event {
+    Event::ModuleAugmentationIndexShape {
+        target_kind_tag: AugmentationTargetKindTag::ExternalSpecifier,
+        external_specifier: Some(Arc::from("vue")),
+        resolved_relative_canonical: None,
+        wildcard_pattern: None,
+        prev_fingerprint: None,
+        new_fingerprint: [
+            5, 6, 7, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ],
+        augmenter_count: 1,
+    }
+}
+
+pub fn fixture_module_augmentation_index_shape_refresh() -> Event {
+    Event::ModuleAugmentationIndexShape {
+        target_kind_tag: AugmentationTargetKindTag::ExternalSpecifier,
+        external_specifier: Some(Arc::from("vue")),
+        resolved_relative_canonical: None,
+        wildcard_pattern: None,
+        prev_fingerprint: Some([
+            5, 6, 7, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ]),
+        new_fingerprint: [
+            9, 10, 11, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ],
+        augmenter_count: 2,
+    }
+}
+
 /// Pair each fixture with its expected Display string. The
 /// `structured_event_display_snapshot_byte_exact_for_every_variant`
 /// test iterates this table, and the companion `all_variants_covered`
@@ -376,6 +426,18 @@ pub fn all_snapshots() -> Vec<(Event, &'static str)> {
             fixture_fact_signature_overflow(),
             EXPECTED_FACT_SIGNATURE_OVERFLOW,
         ),
+        (
+            fixture_module_augmentation_stitched_external(),
+            EXPECTED_MODULE_AUGMENTATION_STITCHED_EXTERNAL,
+        ),
+        (
+            fixture_module_augmentation_index_shape_install(),
+            EXPECTED_MODULE_AUGMENTATION_INDEX_SHAPE_INSTALL,
+        ),
+        (
+            fixture_module_augmentation_index_shape_refresh(),
+            EXPECTED_MODULE_AUGMENTATION_INDEX_SHAPE_REFRESH,
+        ),
     ]
 }
 
@@ -427,6 +489,8 @@ mod tests {
             | Event::MaterializeStructureDepthFuseTripped { .. }
             | Event::CacheDrainedAtUpsert { .. }
             | Event::FactSignatureOverflow { .. }
+            | Event::ModuleAugmentationStitched { .. }
+            | Event::ModuleAugmentationIndexShape { .. }
             | Event::Custom { .. } => (),
         };
 
@@ -457,6 +521,8 @@ mod tests {
             "Custom",
             "CacheDrainedAtUpsert",
             "FactSignatureOverflow",
+            "ModuleAugmentationStitched",
+            "ModuleAugmentationIndexShape",
         ];
         let covered: Vec<&'static str> = all_snapshots()
             .iter()
@@ -490,6 +556,8 @@ mod tests {
                 Event::Custom { .. } => "Custom",
                 Event::CacheDrainedAtUpsert { .. } => "CacheDrainedAtUpsert",
                 Event::FactSignatureOverflow { .. } => "FactSignatureOverflow",
+                Event::ModuleAugmentationStitched { .. } => "ModuleAugmentationStitched",
+                Event::ModuleAugmentationIndexShape { .. } => "ModuleAugmentationIndexShape",
             })
             .collect();
         for v in expected_variants.iter() {
