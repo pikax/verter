@@ -48,7 +48,10 @@ pub(crate) use resolver_context::ResolverContext;
 
 pub use fuses::{FuseBudgets, FuseState, FuseTrip};
 pub use imported_root_db::{ImportedRootDb, ImportedRootResult};
-pub use route_db::{BarrelRouteSurface, RouteDb, RouteResult};
+pub use route_db::{
+    BarrelRouteSurface, EffectiveExportEntry, EffectiveExportSetEntry, EffectiveExportSetKey,
+    RouteDb, RouteResult,
+};
 
 pub type ResolverHash16 = verter_semantic::analysis::Hash16;
 pub use component_meta::{
