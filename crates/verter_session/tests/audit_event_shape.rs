@@ -79,6 +79,60 @@ fn stage_6c_audit_event_variants_exist() {
     let _ = format!("{}", index_refresh);
 }
 
+/// Stage 6d — `FactSignatureAdmissionRefused` and
+/// `FactSignatureOverflow` are both reachable as construction sites.
+/// Compile-time check via type construction. R23 scope-fence: the
+/// Stage 6d emissions on the admission-guard call paths use typed
+/// variants, not `Custom`.
+#[test]
+fn stage_6d_admission_guard_audit_event_variants_exist() {
+    use std::sync::Arc;
+    use verter_audit::{AdmissionRefusalReason, StructuredAuditEvent};
+
+    let refused = StructuredAuditEvent::FactSignatureAdmissionRefused {
+        cache_kind: Arc::from("validated_fact_cache_generic"),
+        reason: AdmissionRefusalReason::EmptySignature,
+    };
+    let s = format!("{}", refused);
+    assert!(
+        s.contains("FactSignatureAdmissionRefused"),
+        "Display arm must render the variant name, got {s}"
+    );
+    assert!(
+        s.contains("EmptySignature"),
+        "Display arm must render the refusal reason, got {s}"
+    );
+
+    let overflow = StructuredAuditEvent::FactSignatureOverflow {
+        candidate_size: 2048,
+        cap: 1024,
+    };
+    let s = format!("{}", overflow);
+    assert!(
+        s.contains("FactSignatureOverflow"),
+        "Display arm must render the variant name, got {s}"
+    );
+}
+
+/// `AdmissionRefusalReason` enumerates both refusal reasons documented
+/// by the Stage 6d admission-guard contract. Compile-time enumeration
+/// check via exhaustive match.
+#[test]
+fn admission_refusal_reason_covers_documented_reasons() {
+    use verter_audit::AdmissionRefusalReason;
+    fn classify(r: AdmissionRefusalReason) -> &'static str {
+        match r {
+            AdmissionRefusalReason::EmptySignature => "empty",
+            AdmissionRefusalReason::NonCacheableKind => "non-cacheable",
+        }
+    }
+    assert_eq!(classify(AdmissionRefusalReason::EmptySignature), "empty");
+    assert_eq!(
+        classify(AdmissionRefusalReason::NonCacheableKind),
+        "non-cacheable"
+    );
+}
+
 /// `AugmentationTargetKindTag` enumerates exactly the four archetypes
 /// required by R29. Compile-time enumeration check via exhaustive
 /// match.

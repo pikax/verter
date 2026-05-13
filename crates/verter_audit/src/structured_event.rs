@@ -19,7 +19,7 @@ use crate::origin_graph::{
     ProjectionModeAudit, VfsLayer,
 };
 use crate::payloads::cache_outcomes::CacheOutcomeKind;
-use crate::payloads::tags::AugmentationTargetKindTag;
+use crate::payloads::tags::{AdmissionRefusalReason, AugmentationTargetKindTag};
 use crate::record::{u64_as_decimal_string, Hash16};
 
 /// Typed structured event emitted by an audited request path.
@@ -247,6 +247,23 @@ pub enum StructuredAuditEvent {
         /// trail survives future cap tuning.
         cap: u32,
     },
+    /// R20 typed event: a `ValidatedFactCache` candidate failed the
+    /// admission guard because its `fact_dep_signature` was empty and
+    /// the cache is NOT a documented source-independent kind. The
+    /// candidate was admitted as `NonCacheable`; correctness is
+    /// preserved by falling back to cold recompute every time. Stage
+    /// 6d / Stage 7 canary asserts this event fires for the
+    /// synthetic empty-signature test only — production producers
+    /// must observe at least one fact.
+    FactSignatureAdmissionRefused {
+        /// Static identifier for the cache layer that refused the
+        /// admission (mirrors the `layer` discriminator on
+        /// `CacheDrainedAtUpsert`). Values like `"materialize_structure"`,
+        /// `"route_db_routes"`, `"validated_fact_cache_generic"`.
+        cache_kind: Arc<str>,
+        /// Reason for the refusal.
+        reason: AdmissionRefusalReason,
+    },
     /// Module-augmentation stitching produced an effective export
     /// set for an augmentation target (R29 + G1).
     ///
@@ -451,6 +468,10 @@ impl std::fmt::Display for StructuredAuditEvent {
             } => write!(
                 f,
                 "FactSignatureOverflow(size={candidate_size}, cap={cap})"
+            ),
+            Self::FactSignatureAdmissionRefused { cache_kind, reason } => write!(
+                f,
+                "FactSignatureAdmissionRefused({cache_kind}, {reason:?})"
             ),
             Self::ModuleAugmentationStitched {
                 target_kind_tag,

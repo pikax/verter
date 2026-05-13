@@ -67,6 +67,29 @@ pub enum AugmentationTargetKindTag {
     GlobalAugmentation,
 }
 
+/// Reason a `ValidatedFactCache` candidate admission was refused
+/// by the Stage 6d fact-completeness guard.
+///
+/// Carried by
+/// [`super::super::structured_event::StructuredAuditEvent::FactSignatureAdmissionRefused`].
+/// `Copy` + `Hash` + `Eq` because audit consumers may aggregate
+/// refusal counts per reason.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "audit.generated.ts")]
+pub enum AdmissionRefusalReason {
+    /// The producer observed zero facts during cold compute, but the
+    /// cache requires at least one observed fact to admit. Default
+    /// because it is the canonical Stage 6d failure mode: an empty
+    /// signature on a source-dependent cache indicates a missing
+    /// `observe(...)` call upstream of the publish site.
+    #[default]
+    EmptySignature,
+    /// The cache is not on the documented allowlist of source-
+    /// independent kinds. Reserved for future use when the allowlist
+    /// becomes a runtime gate; not emitted in the Stage 6d landing.
+    NonCacheableKind,
+}
+
 /// Bundler kind — mirror of the unplugin's bundler discriminator.
 /// Not `Copy` because the `Other` variant carries an owned name.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
