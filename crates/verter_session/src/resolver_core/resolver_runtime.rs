@@ -64,7 +64,8 @@ where
         facts: Vec<FactVersionRef>,
         cache_kind: &'static str,
     ) {
-        self.cache.insert_arc_with_kind(key, value, facts, cache_kind);
+        self.cache
+            .insert_arc_with_kind(key, value, facts, cache_kind);
     }
 
     pub fn cached_values(&self) -> Vec<Arc<V>> {

@@ -2320,7 +2320,8 @@ impl ProjectTypeStore {
             self.indexed
                 .evict_lru_promoted(policy.min_floor, policy.promote_threshold);
         }
-    }/// D48 matrix row 1 — Source content change for owner.
+    }
+    /// D48 matrix row 1 — Source content change for owner.
     ///
     /// Drops the source-content-domain (`DerivedRawCacheDb`) and
     /// dep-closure-domain (`DependencyCacheDb`) entries for `canonical_id`

@@ -83,10 +83,9 @@ impl VerterHost {
         // here, so no tracer is installed for hot reads (zero
         // allocation per hit).
         let ((resolved_opt, meta_opt), _read_set) = self.with_fact_tracer(|| {
-            let resolved = match self.resolve_component_meta(
-                canonical.as_str(),
-                crate::types::ProjectionMode::Expanded,
-            ) {
+            let resolved = match self
+                .resolve_component_meta(canonical.as_str(), crate::types::ProjectionMode::Expanded)
+            {
                 Some(r) => r,
                 None => return (None, None),
             };
@@ -171,10 +170,9 @@ impl VerterHost {
         // becomes the candidate's `fact_dep_signature`. R24: tracer
         // installs on cold-path only; warm-hits returned above.
         let ((resolved_opt, meta_opt), _read_set) = self.with_fact_tracer(|| {
-            let resolved = match self.resolve_component_meta(
-                canonical.as_str(),
-                crate::types::ProjectionMode::Expanded,
-            ) {
+            let resolved = match self
+                .resolve_component_meta(canonical.as_str(), crate::types::ProjectionMode::Expanded)
+            {
                 Some(r) => r,
                 None => return (None, None),
             };

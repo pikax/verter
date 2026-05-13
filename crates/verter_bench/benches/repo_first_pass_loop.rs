@@ -201,7 +201,10 @@ fn bench_repo_first_pass_80_components(c: &mut Criterion) {
                          ({:.3}ms). The 80-component loop must show monotonically \
                          decreasing per-batch p50 (with 10% tolerance) — a regression \
                          here indicates the warm-cache is not absorbing the trend.",
-                        i, cur, i - 1, prev
+                        i,
+                        cur,
+                        i - 1,
+                        prev
                     );
                 }
                 // Warm hit rate: re-query the same 80 components.
@@ -231,7 +234,8 @@ fn bench_repo_first_pass_80_components(c: &mut Criterion) {
                      ({:.3}ms) > last-batch cold p50 ({:.3}ms). Warm-hit \
                      rate target (≥ 98 %) implies warm p99 should sit at \
                      or below the steady-state cold p50.",
-                    warm_p99, last_batch_p50
+                    warm_p99,
+                    last_batch_p50
                 );
             }
             total

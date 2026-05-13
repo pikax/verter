@@ -2634,14 +2634,12 @@ impl VerterHost {
         // admission rather than caching a phantom-fact entry — the
         // cached state is still returned.
         if !cached.fact_versions.is_empty() {
-            self.resolver_runtime()
-                .component_meta
-                .insert_arc_with_kind(
-                    cache_key,
-                    cached.state.clone(),
-                    cached.fact_versions.clone(),
-                    "component_meta.results",
-                );
+            self.resolver_runtime().component_meta.insert_arc_with_kind(
+                cache_key,
+                cached.state.clone(),
+                cached.fact_versions.clone(),
+                "component_meta.results",
+            );
         }
         Some(cached.state.as_ref().clone())
     }
@@ -2672,14 +2670,12 @@ impl VerterHost {
         // `FactSignatureAdmissionRefused`, which would inflate the
         // refused counter on the steady-state baseline).
         if !fact_versions.is_empty() {
-            self.resolver_runtime()
-                .component_meta
-                .insert_arc_with_kind(
-                    resolved_meta_cache_key(canonical, mode),
-                    state.clone(),
-                    fact_versions.to_vec(),
-                    "component_meta.results",
-                );
+            self.resolver_runtime().component_meta.insert_arc_with_kind(
+                resolved_meta_cache_key(canonical, mode),
+                state.clone(),
+                fact_versions.to_vec(),
+                "component_meta.results",
+            );
         }
         self.mirror_cached_resolved_meta_arc(canonical, mode, state);
     }

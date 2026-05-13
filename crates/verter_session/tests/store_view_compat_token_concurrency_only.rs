@@ -164,9 +164,7 @@ fn store_view_compat_token_is_concurrency_oracle_only() {
             // pure docstring) the mention is intrinsically about
             // the concurrency oracle and is allowed regardless of
             // any nearby forbidden vocabulary.
-            let same_line_redeemed = SAME_LINE_REDEMPTION_TERMS
-                .iter()
-                .any(|t| line.contains(t));
+            let same_line_redeemed = SAME_LINE_REDEMPTION_TERMS.iter().any(|t| line.contains(t));
             if same_line_redeemed {
                 continue;
             }

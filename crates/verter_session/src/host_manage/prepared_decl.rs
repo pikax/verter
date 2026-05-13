@@ -193,12 +193,15 @@ impl VerterHost {
         // Strict admission. Bundles always carry `FileWholeHash`
         // (constructed above) — empty-signature is a programmer
         // error and is correctly refused by the strict guard.
-        self.resolver.runtime.prepared_decl_bundles.insert_arc_with_kind(
-            canonical_id.to_string(),
-            std::sync::Arc::clone(&bundle),
-            facts,
-            "prepared_decl_bundles",
-        );
+        self.resolver
+            .runtime
+            .prepared_decl_bundles
+            .insert_arc_with_kind(
+                canonical_id.to_string(),
+                std::sync::Arc::clone(&bundle),
+                facts,
+                "prepared_decl_bundles",
+            );
 
         self.provenance
             .bundle_materializations
@@ -277,12 +280,15 @@ impl VerterHost {
         // Strict admission. Bundles always carry `FileWholeHash`
         // (constructed above) — empty-signature is a programmer
         // error and is correctly refused by the strict guard.
-        self.resolver.runtime.prepared_decl_bundles.insert_arc_with_kind(
-            canonical_id.to_string(),
-            std::sync::Arc::clone(&bundle),
-            facts,
-            "prepared_decl_bundles",
-        );
+        self.resolver
+            .runtime
+            .prepared_decl_bundles
+            .insert_arc_with_kind(
+                canonical_id.to_string(),
+                std::sync::Arc::clone(&bundle),
+                facts,
+                "prepared_decl_bundles",
+            );
 
         self.provenance
             .bundle_materializations

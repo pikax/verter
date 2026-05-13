@@ -623,11 +623,7 @@ impl FileArtifactStore {
             .iter()
             .map(|entry| {
                 let key = entry.key().clone();
-                let hits = self
-                    .hit_counters
-                    .get(&key)
-                    .map(|c| *c.value())
-                    .unwrap_or(0);
+                let hits = self.hit_counters.get(&key).map(|c| *c.value()).unwrap_or(0);
                 let tick = self
                     .last_access
                     .get(&key.canonical)

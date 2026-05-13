@@ -165,7 +165,12 @@ impl VerterHost {
         if let Some(source) = view.source(canonical_id) {
             component_meta_trace_custom!(
                 "read_analysis_source_result",
-                read_analysis_source_result_detail(canonical_id, "session-view", source.len(), false),
+                read_analysis_source_result_detail(
+                    canonical_id,
+                    "session-view",
+                    source.len(),
+                    false
+                ),
             );
             return Some(source);
         }

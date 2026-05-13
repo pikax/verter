@@ -957,26 +957,24 @@ mod tests {
             canonical_id: "bar.ts".to_owned(),
             hash: [0u8; 16],
         };
-        let result =
-            db.get_or_resolve_route_with_facts("index.ts", "Bar", &view, || {
-                call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                Some((
-                    RouteResult::Resolved {
-                        defining_canonical: "bar.ts".to_owned(),
-                        defining_symbol: "Bar".to_owned(),
-                    },
-                    vec![dummy_fact.clone()],
-                ))
-            });
+        let result = db.get_or_resolve_route_with_facts("index.ts", "Bar", &view, || {
+            call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Some((
+                RouteResult::Resolved {
+                    defining_canonical: "bar.ts".to_owned(),
+                    defining_symbol: "Bar".to_owned(),
+                },
+                vec![dummy_fact.clone()],
+            ))
+        });
         assert!(result.is_some());
 
         // Second call should hit cache because we admitted with a
         // non-empty fact signature on the first pass.
-        let result2 =
-            db.get_or_resolve_route_with_facts("index.ts", "Bar", &view, || {
-                call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                Some((RouteResult::Miss, vec![dummy_fact.clone()]))
-            });
+        let result2 = db.get_or_resolve_route_with_facts("index.ts", "Bar", &view, || {
+            call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Some((RouteResult::Miss, vec![dummy_fact.clone()]))
+        });
         assert!(result2.is_some());
         assert_eq!(call_count.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
