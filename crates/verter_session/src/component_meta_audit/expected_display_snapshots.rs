@@ -75,6 +75,24 @@ pub const EXPECTED_MODULE_AUGMENTATION_INDEX_SHAPE_INSTALL: &str =
 pub const EXPECTED_MODULE_AUGMENTATION_INDEX_SHAPE_REFRESH: &str =
     "ModuleAugmentationIndexShape(ext=vue, prev=05060708, new=090a0b0c, n=2)";
 
+pub const EXPECTED_FILE_ARTIFACT_CACHE_ADMIT: &str =
+    "FileArtifactCache(/w/a.ts, Admit, ch=01020304, pe=05060708, n=1)";
+
+pub const EXPECTED_FILE_ARTIFACT_CACHE_EVICT: &str =
+    "FileArtifactCache(/w/a.ts, Evict, ch=01020304, pe=05060708, n=0)";
+
+pub const EXPECTED_FACT_REGISTRY_WRITE: &str =
+    "FactRegistryWrite(/w/a.ts, Export, Semantic, sem=01020304, disp=05060708)";
+
+pub const EXPECTED_FACT_VALIDATION_SUMMARY: &str =
+    "FactValidationSummary(#7, materialize_structure, n=100, warm=80, stale=15, archive=5)";
+
+pub const EXPECTED_EXPORT_ROUTE_RESOLVED_AUGMENTED: &str =
+    "ExportRouteResolved(/w/providers/index.ts::Foo -> /w/lib.ts::Foo, augmented=true)";
+
+pub const EXPECTED_EXPORT_ROUTE_RESOLVED_PLAIN: &str =
+    "ExportRouteResolved(/w/providers/index.ts::Foo -> /w/lib.ts::Foo, augmented=false)";
+
 // ──────────────────────────────────────────────────────────────────
 // Fixture constructors — exactly one canonical instance per variant.
 // The DISPLAY_SNAPSHOTS table pairs each fixture with its expected
@@ -343,6 +361,67 @@ pub fn fixture_module_augmentation_index_shape_refresh() -> Event {
     }
 }
 
+pub fn fixture_file_artifact_cache_admit() -> Event {
+    Event::FileArtifactCache {
+        canonical_id: Arc::from("/w/a.ts"),
+        action: verter_audit::FileArtifactCacheAction::Admit,
+        content_hash: [1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        parse_env_hash: [5, 6, 7, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        entry_count_after: 1,
+    }
+}
+
+pub fn fixture_file_artifact_cache_evict() -> Event {
+    Event::FileArtifactCache {
+        canonical_id: Arc::from("/w/a.ts"),
+        action: verter_audit::FileArtifactCacheAction::Evict,
+        content_hash: [1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        parse_env_hash: [5, 6, 7, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        entry_count_after: 0,
+    }
+}
+
+pub fn fixture_fact_registry_write() -> Event {
+    Event::FactRegistryWrite {
+        canonical_id: Arc::from("/w/a.ts"),
+        fact_key_kind: verter_audit::FactKeyKindTag::Export,
+        lane: verter_audit::FactLaneTag::Semantic,
+        semantic_hash: [1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        display_hash: [5, 6, 7, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    }
+}
+
+pub fn fixture_fact_validation_summary() -> Event {
+    Event::FactValidationSummary {
+        request_id: 7,
+        cache_kind: Arc::from("materialize_structure"),
+        validations_attempted: 100,
+        warm_hits: 80,
+        stale_misses: 15,
+        archive_checks: 5,
+    }
+}
+
+pub fn fixture_export_route_resolved_augmented() -> Event {
+    Event::ExportRouteResolved {
+        provider_canonical: Arc::from("/w/providers/index.ts"),
+        exported_name: Arc::from("Foo"),
+        resolved_canonical: Arc::from("/w/lib.ts"),
+        resolved_source_name: Arc::from("Foo"),
+        augmented: true,
+    }
+}
+
+pub fn fixture_export_route_resolved_plain() -> Event {
+    Event::ExportRouteResolved {
+        provider_canonical: Arc::from("/w/providers/index.ts"),
+        exported_name: Arc::from("Foo"),
+        resolved_canonical: Arc::from("/w/lib.ts"),
+        resolved_source_name: Arc::from("Foo"),
+        augmented: false,
+    }
+}
+
 /// Pair each fixture with its expected Display string. The
 /// `structured_event_display_snapshot_byte_exact_for_every_variant`
 /// test iterates this table, and the companion `all_variants_covered`
@@ -443,6 +522,27 @@ pub fn all_snapshots() -> Vec<(Event, &'static str)> {
             fixture_module_augmentation_index_shape_refresh(),
             EXPECTED_MODULE_AUGMENTATION_INDEX_SHAPE_REFRESH,
         ),
+        (
+            fixture_file_artifact_cache_admit(),
+            EXPECTED_FILE_ARTIFACT_CACHE_ADMIT,
+        ),
+        (
+            fixture_file_artifact_cache_evict(),
+            EXPECTED_FILE_ARTIFACT_CACHE_EVICT,
+        ),
+        (fixture_fact_registry_write(), EXPECTED_FACT_REGISTRY_WRITE),
+        (
+            fixture_fact_validation_summary(),
+            EXPECTED_FACT_VALIDATION_SUMMARY,
+        ),
+        (
+            fixture_export_route_resolved_augmented(),
+            EXPECTED_EXPORT_ROUTE_RESOLVED_AUGMENTED,
+        ),
+        (
+            fixture_export_route_resolved_plain(),
+            EXPECTED_EXPORT_ROUTE_RESOLVED_PLAIN,
+        ),
     ]
 }
 
@@ -497,6 +597,10 @@ mod tests {
             | Event::FactSignatureAdmissionRefused { .. }
             | Event::ModuleAugmentationStitched { .. }
             | Event::ModuleAugmentationIndexShape { .. }
+            | Event::FileArtifactCache { .. }
+            | Event::FactRegistryWrite { .. }
+            | Event::FactValidationSummary { .. }
+            | Event::ExportRouteResolved { .. }
             | Event::Custom { .. } => (),
         };
 
@@ -530,6 +634,10 @@ mod tests {
             "FactSignatureAdmissionRefused",
             "ModuleAugmentationStitched",
             "ModuleAugmentationIndexShape",
+            "FileArtifactCache",
+            "FactRegistryWrite",
+            "FactValidationSummary",
+            "ExportRouteResolved",
         ];
         let covered: Vec<&'static str> = all_snapshots()
             .iter()
@@ -566,6 +674,10 @@ mod tests {
                 Event::FactSignatureAdmissionRefused { .. } => "FactSignatureAdmissionRefused",
                 Event::ModuleAugmentationStitched { .. } => "ModuleAugmentationStitched",
                 Event::ModuleAugmentationIndexShape { .. } => "ModuleAugmentationIndexShape",
+                Event::FileArtifactCache { .. } => "FileArtifactCache",
+                Event::FactRegistryWrite { .. } => "FactRegistryWrite",
+                Event::FactValidationSummary { .. } => "FactValidationSummary",
+                Event::ExportRouteResolved { .. } => "ExportRouteResolved",
             })
             .collect();
         for v in expected_variants.iter() {

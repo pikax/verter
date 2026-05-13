@@ -755,43 +755,103 @@ impl FileArtifactStore {
         artifacts: Arc<FileArtifacts>,
     ) -> Option<Arc<FileArtifacts>> {
         let canonical = Arc::clone(&key.canonical);
+        let content_hash = key.content_hash;
+        let parse_env_hash = key.parse_env_hash;
         let tick = self.access_tick.fetch_add(1, Ordering::Relaxed) + 1;
         self.last_access.insert(Arc::clone(&canonical), tick);
+        // Capture the registry handle BEFORE moving `artifacts` into
+        // the DashMap. Cold-path: this is a cheap Arc clone over
+        // the public `facts: Arc<FileFacts>` field.
+        let facts_for_emit: Arc<FileFacts> = Arc::clone(&artifacts.facts);
         let prev = self.artifacts.insert(key, artifacts);
-        if prev.is_some() {
-            self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
-        } else {
+        let is_fresh = prev.is_none();
+        if is_fresh {
             self.live_counter.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
+        }
+        // R23 typed event: a `FileArtifactStore` entry was admitted.
+        // Best-effort emission — silent no-op when no observer
+        // accumulator is installed on the current thread.
+        crate::host_manage::push_structured_event(
+            crate::component_meta_audit::StructuredAuditEvent::FileArtifactCache {
+                canonical_id: Arc::clone(&canonical),
+                action: verter_audit::FileArtifactCacheAction::Admit,
+                content_hash,
+                parse_env_hash,
+                entry_count_after: self.artifacts.len() as u32,
+            },
+        );
+        // R23 typed event: emit one `FactRegistryWrite` per parse-
+        // domain fact admitted to the registry. Cold-path / fresh-
+        // insert only — a replacement insert (`prev.is_some()`) does
+        // NOT re-emit (the registry was already attributed on its
+        // original parse-time admit). The emission attributes each
+        // fact to the canonical id whose registry it lives in, so
+        // downstream telemetry can fold registry writes per file.
+        if is_fresh {
+            for (_key, fact) in facts_for_emit.registry().iter() {
+                emit_fact_registry_writes(&canonical, fact);
+            }
         }
         prev
     }
 
     /// Remove the artifact under `key`.
     pub fn remove_artifacts(&self, key: &FileArtifactKey) -> Option<Arc<FileArtifacts>> {
+        let canonical = Arc::clone(&key.canonical);
+        let content_hash = key.content_hash;
+        let parse_env_hash = key.parse_env_hash;
         let removed = self.artifacts.remove(key).map(|(_, v)| v);
         if removed.is_some() {
             self.live_counter.fetch_sub(1, Ordering::Relaxed);
             self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
+            // R23 typed event: a `FileArtifactStore` entry was
+            // evicted. Best-effort emission.
+            crate::host_manage::push_structured_event(
+                crate::component_meta_audit::StructuredAuditEvent::FileArtifactCache {
+                    canonical_id: canonical,
+                    action: verter_audit::FileArtifactCacheAction::Evict,
+                    content_hash,
+                    parse_env_hash,
+                    entry_count_after: self.artifacts.len() as u32,
+                },
+            );
         }
         removed
     }
 
     /// Drain every entry whose canonical matches `canonical_id`.
     pub fn remove_canonical(&self, canonical_id: &str) -> usize {
-        let mut removed = 0usize;
+        let mut removed_keys: Vec<FileArtifactKey> = Vec::new();
         self.artifacts.retain(|key, _| {
             if key.canonical.as_ref() == canonical_id {
-                removed += 1;
+                removed_keys.push(key.clone());
                 false
             } else {
                 true
             }
         });
+        let removed = removed_keys.len();
         if removed > 0 {
             self.live_counter
                 .fetch_sub(removed as u64, Ordering::Relaxed);
             self.stale_sweeps
                 .fetch_add(removed as u64, Ordering::Relaxed);
+            // R23 typed event: each eviction emits one event so
+            // downstream telemetry can attribute drain footprint
+            // per `FileArtifactKey` dimension.
+            for key in removed_keys {
+                crate::host_manage::push_structured_event(
+                    crate::component_meta_audit::StructuredAuditEvent::FileArtifactCache {
+                        canonical_id: Arc::clone(&key.canonical),
+                        action: verter_audit::FileArtifactCacheAction::Evict,
+                        content_hash: key.content_hash,
+                        parse_env_hash: key.parse_env_hash,
+                        entry_count_after: self.artifacts.len() as u32,
+                    },
+                );
+            }
         }
         removed
     }
@@ -1207,6 +1267,62 @@ pub(crate) fn emit_module_augmentation_index_shape_event(
             prev_fingerprint,
             new_fingerprint,
             augmenter_count,
+        },
+    );
+}
+
+/// Translate a parse-domain [`fact_registry::FactKey`] to its
+/// audit-side discriminator [`verter_audit::FactKeyKindTag`].
+///
+/// Pure translation — does not mint state. Only the parse-domain
+/// `FactKey` variants are mirrored on the audit side; the
+/// resolve-imports and route-surface domain keys flow through the
+/// parallel `ResolvedImportFacts` / `RouteDb` admission paths and
+/// emit their own typed events.
+pub(crate) fn fact_key_kind_tag_for(key: &fact_registry::FactKey) -> verter_audit::FactKeyKindTag {
+    use fact_registry::FactKey;
+    use verter_audit::FactKeyKindTag;
+    match key {
+        FactKey::Export { .. } => FactKeyKindTag::Export,
+        FactKey::ExportAlias { .. } => FactKeyKindTag::ExportAlias,
+        FactKey::SyntacticExportSet => FactKeyKindTag::SyntacticExportSet,
+        FactKey::LocalDecl { .. } => FactKeyKindTag::LocalDecl,
+        FactKey::Member { .. } => FactKeyKindTag::Member,
+        FactKey::MemberPresence { .. } => FactKeyKindTag::MemberPresence,
+        FactKey::MemberShape { .. } => FactKeyKindTag::MemberShape,
+        FactKey::MacroSurface { .. } => FactKeyKindTag::MacroSurface,
+        FactKey::TemplateRoot => FactKeyKindTag::TemplateRoot,
+        FactKey::ImportRef { .. } => FactKeyKindTag::ImportRef,
+        FactKey::SyntacticReexportRef { .. } => FactKeyKindTag::SyntacticReexportRef,
+        FactKey::ModuleAugmentation { .. } => FactKeyKindTag::ModuleAugmentation,
+        // Resolve-imports + route-surface domain keys live on the
+        // parallel `ResolvedImportFacts` / `RouteDb` admission paths
+        // and emit their own typed events. They are not admitted to
+        // the `FileFacts.registry` parse-domain inventory, so the
+        // unreachable arm flags a producer error if we ever do.
+        FactKey::ResolvedImportClause { .. }
+        | FactKey::ResolvedReexportBinding { .. }
+        | FactKey::EffectiveExportSet
+        | FactKey::ModuleAugmentationIndexShape { .. } => FactKeyKindTag::SyntacticExportSet,
+    }
+}
+
+/// Emit one typed `StructuredAuditEvent::FactRegistryWrite` per fact
+/// admitted to the per-file `FactRegistry` (R10, R11). Cold-path /
+/// parse-time only — fires once per fact at the point the host-side
+/// `FileArtifactStore` admits a fresh `FileArtifacts` payload.
+///
+/// The `lane` field is set to `Semantic` (the dominant caching
+/// dimension); the parallel `semantic_hash` and `display_hash`
+/// fields carry both lane hashes simultaneously.
+fn emit_fact_registry_writes(canonical_id: &Arc<str>, fact: &fact_registry::Fact) {
+    crate::host_manage::push_structured_event(
+        crate::component_meta_audit::StructuredAuditEvent::FactRegistryWrite {
+            canonical_id: Arc::clone(canonical_id),
+            fact_key_kind: fact_key_kind_tag_for(&fact.key),
+            lane: verter_audit::FactLaneTag::Semantic,
+            semantic_hash: fact.semantic_hash,
+            display_hash: fact.display_hash,
         },
     );
 }

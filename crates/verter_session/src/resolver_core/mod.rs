@@ -495,6 +495,23 @@ where
     /// call in the cache substrate. Hot-path reads must never
     /// advance this counter.
     arcswap_stores: AtomicU64,
+    /// R24 instrumentation counter: total `get_if_valid` calls
+    /// attempted against this cache. Bumped once per read attempt.
+    /// Hot-path-safe: a single `fetch_add` per call.
+    validations_attempted: AtomicU64,
+    /// R24 instrumentation counter: number of `get_if_valid` calls
+    /// that found a validating candidate. Hot-path-safe.
+    warm_hits: AtomicU64,
+    /// R24 instrumentation counter: number of `get_if_valid` calls
+    /// where an entry existed but no candidate validated under the
+    /// active view. Hot-path-safe.
+    stale_misses: AtomicU64,
+    /// R24 instrumentation counter: number of archive-style fallback
+    /// checks consulted during validation. Zero in steady state on
+    /// the post-archive cache substrate — recorded explicitly so
+    /// substrate paths that retain a sidecar archive layer can be
+    /// detected. Hot-path-safe.
+    archive_checks: AtomicU64,
 }
 
 impl<K, V> Default for ValidatedFactCache<K, V>
@@ -507,6 +524,10 @@ where
             signature_overflow: AtomicU64::new(0),
             admission_refused: AtomicU64::new(0),
             arcswap_stores: AtomicU64::new(0),
+            validations_attempted: AtomicU64::new(0),
+            warm_hits: AtomicU64::new(0),
+            stale_misses: AtomicU64::new(0),
+            archive_checks: AtomicU64::new(0),
         }
     }
 }
@@ -643,7 +664,15 @@ where
     where
         TView: StoreView,
     {
-        let entry = self.entries.get(key)?;
+        // R24 counter: increments once per read attempt. Hot-path
+        // single atomic. Producers fold the four `*_count()` reads
+        // into a `FactValidationSummary` event at request close-out.
+        self.validations_attempted
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let entry = match self.entries.get(key) {
+            Some(e) => e,
+            None => return None,
+        };
         let candidates = entry.candidates.load();
         for candidate in candidates.iter() {
             if candidate
@@ -651,9 +680,16 @@ where
                 .iter()
                 .all(|fact| view.validates(fact))
             {
+                self.warm_hits
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return Some(candidate.value.clone());
             }
         }
+        // Entry existed but no candidate validated under the active
+        // view — stale miss. The hot path's three-counter bump is
+        // still cheaper than a single `Arc` clone.
+        self.stale_misses
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         None
     }
 
@@ -840,6 +876,69 @@ where
     pub fn arcswap_store_count(&self) -> u64 {
         self.arcswap_stores
             .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// R24 instrumentation: total `get_if_valid` calls attempted.
+    pub fn validations_attempted_count(&self) -> u64 {
+        self.validations_attempted
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// R24 instrumentation: warm hits.
+    pub fn warm_hit_count(&self) -> u64 {
+        self.warm_hits.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// R24 instrumentation: stale misses (entry existed but no
+    /// candidate validated under the active view).
+    pub fn stale_miss_count(&self) -> u64 {
+        self.stale_misses
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// R24 instrumentation: archive-style fallback checks. Always
+    /// 0 on the post-archive cache substrate.
+    pub fn archive_check_count(&self) -> u64 {
+        self.archive_checks
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Drain the four R24 validation counters and emit a typed
+    /// [`StructuredAuditEvent::FactValidationSummary`] event
+    /// attributing the captured totals to `request_id` /
+    /// `cache_kind`. Best-effort emission — silent no-op when no
+    /// observer accumulator is installed.
+    ///
+    /// Drains the counters atomically (via `swap`) so a follow-up
+    /// pass starts at zero. Callers that want a non-destructive
+    /// read can use the four `*_count` accessors directly.
+    pub fn emit_validation_summary_for_request(
+        &self,
+        request_id: u64,
+        cache_kind: &'static str,
+    ) {
+        let validations_attempted = self
+            .validations_attempted
+            .swap(0, std::sync::atomic::Ordering::Relaxed) as u32;
+        let warm_hits = self
+            .warm_hits
+            .swap(0, std::sync::atomic::Ordering::Relaxed) as u32;
+        let stale_misses = self
+            .stale_misses
+            .swap(0, std::sync::atomic::Ordering::Relaxed) as u32;
+        let archive_checks = self
+            .archive_checks
+            .swap(0, std::sync::atomic::Ordering::Relaxed) as u32;
+        crate::host_manage::push_structured_event(
+            crate::component_meta_audit::StructuredAuditEvent::FactValidationSummary {
+                request_id,
+                cache_kind: Arc::from(cache_kind),
+                validations_attempted,
+                warm_hits,
+                stale_misses,
+                archive_checks,
+            },
+        );
     }
 }
 

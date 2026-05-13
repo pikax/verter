@@ -271,6 +271,20 @@ impl RouteDb {
                     Some((result, facts)) => {
                         let arc = Arc::new(result);
                         self.routes.insert_arc(key.clone(), arc.clone(), facts);
+                        // R23 typed event: cold-path route admission.
+                        // Fires once per `(provider, exported_name)`
+                        // resolution. The `augmented` field is `false`
+                        // for the bare-route resolution path; the
+                        // post-augmentation-stitched
+                        // `EffectiveExportSet` path emits its own
+                        // `ExportRouteResolved` with `augmented: true`
+                        // when consumers walk its entries.
+                        emit_export_route_resolved_event(
+                            &key.0,
+                            &key.1,
+                            arc.as_ref(),
+                            /* augmented = */ false,
+                        );
                         Ok(arc)
                     }
                     None => Err(()),
@@ -754,6 +768,34 @@ fn emit_module_augmentation_stitched_event(
             fingerprint,
         },
     );
+}
+
+/// Emit a typed
+/// [`StructuredAuditEvent::ExportRouteResolved`] for the cold-path
+/// route admission. Silent no-op when no audit accumulator is
+/// installed on the active thread. `Miss` results never emit —
+/// only resolved routes carry an attribution.
+fn emit_export_route_resolved_event(
+    provider_canonical: &str,
+    exported_name: &str,
+    result: &RouteResult,
+    augmented: bool,
+) {
+    if let RouteResult::Resolved {
+        defining_canonical,
+        defining_symbol,
+    } = result
+    {
+        crate::host_manage::push_structured_event(
+            crate::component_meta_audit::StructuredAuditEvent::ExportRouteResolved {
+                provider_canonical: Arc::<str>::from(provider_canonical),
+                exported_name: Arc::<str>::from(exported_name),
+                resolved_canonical: Arc::<str>::from(defining_canonical.as_str()),
+                resolved_source_name: Arc::<str>::from(defining_symbol.as_str()),
+                augmented,
+            },
+        );
+    }
 }
 
 /// Total ordering over `SymbolSpace` variants for deterministic
