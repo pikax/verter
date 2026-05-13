@@ -1741,7 +1741,7 @@ pub struct ProjectTypeStore {
     /// scoping rule — base import-target resolution does not depend on
     /// TS lib data). See
     /// [`crate::resolved_import_facts::ResolvedImportFactsDb`].
-    resolved_import_facts: crate::resolved_import_facts::ResolvedImportFactsDb,
+    resolved_import_facts: Arc<crate::resolved_import_facts::ResolvedImportFactsDb>,
     /// R28 — lazy `Member.semantic_hash` store.
     /// Keyed on `parse_stable_hash` so cosmetic edits preserve the entry.
     /// See [`crate::member_semantic_fact_store::MemberSemanticFactStore`].
@@ -1873,7 +1873,9 @@ impl ProjectTypeStore {
             dependency_cache_db: DependencyCacheDb::new(),
             resolved_type_cache_db: ResolvedTypeCacheDb::new(),
             semantic_db: parking_lot::Mutex::new(verter_semantic::db::SemanticDb::new()),
-            resolved_import_facts: crate::resolved_import_facts::ResolvedImportFactsDb::new(),
+            resolved_import_facts: Arc::new(
+                crate::resolved_import_facts::ResolvedImportFactsDb::new(),
+            ),
             member_semantic_facts: crate::member_semantic_fact_store::MemberSemanticFactStore::new(
             ),
             member_display_facts: crate::member_display_fact_store::MemberDisplayFactStore::new(),
@@ -2106,6 +2108,19 @@ impl ProjectTypeStore {
     /// [`crate::resolved_import_facts::ResolvedImportFactsKey`].
     /// `lib_env_hash` is intentionally absent (R21 scoping rule).
     pub fn resolved_import_facts(&self) -> &crate::resolved_import_facts::ResolvedImportFactsDb {
+        &self.resolved_import_facts
+    }
+
+    /// Cloned `Arc` handle for the resolved-import facts cache.
+    /// Mirrors [`Self::routes_handle`] — returns a clonable shared
+    /// reference so call sites that capture a long-lived snapshot
+    /// (e.g. `HostStoreView::build`) can hold an owned handle pinned
+    /// to the same store-owned instance. Successive calls return
+    /// `Arc`s that [`Arc::ptr_eq`] the inner instance.
+    #[must_use]
+    pub fn resolved_import_facts_handle(
+        &self,
+    ) -> &Arc<crate::resolved_import_facts::ResolvedImportFactsDb> {
         &self.resolved_import_facts
     }
 

@@ -317,6 +317,26 @@ impl VerterHost {
         &self.project_type_store
     }
 
+    /// Env-hash bundle (R21) attached to a [`HostStoreView`] at
+    /// view-build time. Returns the default `EnvHashes` value today —
+    /// the five-way `(parse_env_hash, resolve_env_hash, type_env_hash,
+    /// lib_env_hash)` carrier is presently default-valued at the host
+    /// boundary; producers that have real env hashes (e.g. owner
+    /// imports, route surface compute) plumb them through their own
+    /// computation paths. Promoting the host-side bundle to a real
+    /// value is tracked under the workspace-config plumbing follow-up.
+    pub(crate) fn host_view_env_hashes(&self) -> crate::session_view::EnvHashes {
+        crate::session_view::EnvHashes::default()
+    }
+
+    /// Project identity (R21) attached to a [`HostStoreView`] at
+    /// view-build time. Returns the single-project default identity
+    /// today — multi-project plumbing reads from the host's workspace
+    /// config when the surface ships.
+    pub(crate) fn host_view_project_identity(&self) -> crate::file_artifact_store::ProjectIdentity {
+        crate::file_artifact_store::ProjectIdentity([0u8; 16])
+    }
+
     /// Host-owned scratch cache for the typeinfo
     /// `evaluate_type_expression` entry-point. Used internally by
     /// [`Self::evaluate_type_expression_with_audit`] to memoise the

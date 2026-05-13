@@ -832,6 +832,20 @@ where
         out
     }
 
+    /// View-free permissive read: returns the last-admitted
+    /// candidate's value for `key`, ignoring `fact_dep_signature`
+    /// validation. Used by per-domain `StoreView` validators that
+    /// need to consult the substrate without re-entering the view's
+    /// `validates` dispatch (which would recurse).
+    ///
+    /// Returns `None` when the slot has no entries.
+    #[must_use]
+    pub fn lookup_any_candidate(&self, key: &K) -> Option<Arc<V>> {
+        let entry = self.entries.get(key)?;
+        let candidates = entry.candidates.load();
+        candidates.last().map(|c| c.value.clone())
+    }
+
     /// R20 instrumentation: number of times an over-cap
     /// `fact_dep_signature` was rejected.
     pub fn signature_overflow_count(&self) -> u64 {

@@ -146,6 +146,7 @@ pub struct EffectiveExportSetEntry {
 }
 
 /// Shared DB for canonical export routing facts.
+#[derive(Debug)]
 pub struct RouteDb {
     /// `(provider_canonical, exported_name)` → route result.
     routes: ValidatedFactCache<(String, String), RouteResult>,
@@ -645,6 +646,32 @@ impl RouteDb {
     #[must_use]
     pub fn effective_export_set_len(&self) -> usize {
         self.effective_export_sets.len()
+    }
+
+    /// View-free permissive lookup of the cached
+    /// [`EffectiveExportSetEntry::augmenter_set_fingerprint`] for
+    /// the supplied key. Used by the route-surface-domain validator
+    /// (R26) so a consumer that recorded
+    /// `RouteSurfaceFactRef::EffectiveExportSet` with
+    /// `expected_hash = augmenter_set_fingerprint` can revalidate on
+    /// read without re-entering the view's `validates` dispatch
+    /// (the validator itself runs inside the view, so calling the
+    /// view-aware `get_effective_export_set` would recurse).
+    ///
+    /// Returns `Some(fingerprint)` when an entry exists for the
+    /// composed `(provider, project, resolve_env, lib_env)` slot,
+    /// `None` otherwise. Multi-candidate slots return the
+    /// last-admitted candidate's fingerprint (consistent with
+    /// `ValidatedFactCache::snapshot_all` last-writer-wins
+    /// semantics for permissive reads).
+    #[must_use]
+    pub fn lookup_effective_export_set_fingerprint(
+        &self,
+        key: &EffectiveExportSetKey,
+    ) -> Option<Hash16> {
+        self.effective_export_sets
+            .lookup_any_candidate(key)
+            .map(|entry| entry.augmenter_set_fingerprint)
     }
 
     /// R20 instrumentation: total `signature_overflow_count` across

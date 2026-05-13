@@ -53,6 +53,46 @@ pub struct HostStoreView {
     /// untracked (validator returns `false` — a path-precise
     /// consumer expected its fact to be in the registry).
     file_facts: FxHashMap<String, std::sync::Arc<crate::file_artifact_store::FileFacts>>,
+    /// Resolve-imports-domain handle (R26): `Arc` clone of the
+    /// project store's `ResolvedImportFactsDb`. The validator for
+    /// `ResolveImportsFactRef` composes
+    /// `ResolvedImportFactsKey { canonical, content_hash,
+    /// parse_env_hash, resolve_env_hash, resolver_version }` from
+    /// the fact's `canonical_id`, this view's tracked
+    /// `whole_hashes[canonical]`, and `env_hashes`, then looks up the
+    /// matching `Arc<ResolvedImportFacts>` and compares the per-fact
+    /// `semantic_hash` / `display_hash` of the stored
+    /// `ResolvedImportClauseEntry.fact` /
+    /// `ResolvedReexportBindingEntry.fact` (per `fact.lane`) against
+    /// `expected_hash`.
+    ///
+    /// One `Arc` clone at view-build time; reads thereafter are
+    /// wait-free against concurrent writers because `DashMap` shards
+    /// per key.
+    resolved_import_facts:
+        Option<std::sync::Arc<crate::resolved_import_facts::ResolvedImportFactsDb>>,
+    /// Route-surface-domain handle (R26): `Arc` clone of the
+    /// project store's `RouteDb`. The validator for
+    /// `RouteSurfaceFactRef` with `FactKey::EffectiveExportSet`
+    /// composes
+    /// `EffectiveExportSetKey { provider_canonical, project_identity,
+    /// resolve_env_hash, lib_env_hash }` from the fact's
+    /// `canonical_id` plus the view's `project_identity` and
+    /// `env_hashes`, then compares the cached entry's
+    /// `augmenter_set_fingerprint` to `expected_hash`.
+    ///
+    /// One `Arc` clone at view-build time; reads thereafter are
+    /// wait-free against concurrent writers.
+    route_db: Option<std::sync::Arc<crate::resolver_core::route_db::RouteDb>>,
+    /// Env-hash bundle (R21) captured at view-build time.
+    /// `env_hashes.parse_env_hash` + `env_hashes.resolve_env_hash`
+    /// participate in `ResolvedImportFactsKey` composition;
+    /// `env_hashes.resolve_env_hash` + `env_hashes.lib_env_hash`
+    /// participate in `EffectiveExportSetKey` composition.
+    env_hashes: crate::session_view::EnvHashes,
+    /// Project identity captured at view-build time. Participates in
+    /// `EffectiveExportSetKey` composition (R21).
+    project_identity: crate::file_artifact_store::ProjectIdentity,
 }
 
 /// Structural key for snapshotting `ModuleAugmentationIndexShape`
@@ -80,6 +120,10 @@ impl Default for HostStoreView {
             import_routes: FxHashMap::default(),
             route_surface_index_fingerprints: FxHashMap::default(),
             file_facts: FxHashMap::default(),
+            resolved_import_facts: None,
+            route_db: None,
+            env_hashes: crate::session_view::EnvHashes::default(),
+            project_identity: crate::file_artifact_store::ProjectIdentity([0u8; 16]),
         }
     }
 }
@@ -211,6 +255,20 @@ impl HostStoreView {
         view.snapshot_tracked_import_route_hashes(host);
         view.snapshot_augmentation_index(host.project_type_store.indexed());
         view.snapshot_file_facts(host.project_type_store.indexed());
+        // R26 per-domain producer handles captured at view-build
+        // time. Cheap `Arc::clone` per snapshot; reads through the
+        // handles are wait-free against concurrent writers because
+        // both `ResolvedImportFactsDb` and `RouteDb` shard by key
+        // (DashMap-backed).
+        view.resolved_import_facts = Some(std::sync::Arc::clone(
+            host.project_type_store.resolved_import_facts_handle(),
+        ));
+        view.route_db = Some(host.project_type_store.routes_handle());
+        // R21 env-hash + project-identity capture. Required for
+        // `ResolvedImportFactsKey` + `EffectiveExportSetKey`
+        // composition inside the per-domain validators.
+        view.env_hashes = host.host_view_env_hashes();
+        view.project_identity = host.host_view_project_identity();
         view.compat_token = view.compute_compat_token();
         view
     }
@@ -604,14 +662,136 @@ impl crate::resolver_core::StoreView for HostStoreView {
         }
     }
 
+    /// Resolve-imports-domain validator (R26).
+    ///
+    /// Compose `ResolvedImportFactsKey { canonical, content_hash,
+    /// parse_env_hash, resolve_env_hash, resolver_version }` from the
+    /// fact's `canonical_id`, the view's tracked
+    /// `whole_hashes[canonical]`, and the view's `env_hashes`. Look
+    /// up the matching `Arc<ResolvedImportFacts>` from the captured
+    /// `ResolvedImportFactsDb` handle and compare the per-binding
+    /// `semantic_hash` / `display_hash` (per `fact.lane`) of the
+    /// matching `ResolvedImportClauseEntry` or
+    /// `ResolvedReexportBindingEntry` against `expected_hash`.
+    ///
+    /// Outcomes:
+    /// - Handle missing (view built without a resolved-import-facts
+    ///   snapshot) → reject. A consumer that observed a real fact
+    ///   under no producer is a bug; the caller falls back to cold
+    ///   compute, which will re-emit through the producer.
+    /// - File untracked under the view (no `whole_hashes[canonical]`
+    ///   entry) → accept the optimistic content-hash sentinel
+    ///   (`expected_hash == ZERO_HASH`); reject any real fact hash
+    ///   for an untracked file (same shape as
+    ///   `validates_parse_domain`).
+    /// - Cache slot absent for the composed key → reject. The cache
+    ///   was the recording site; absence means the consumer
+    ///   observed a stale slice.
+    /// - Binding present and hash matches → accept; hash differs →
+    ///   reject (cosmetic-only edit invalidates display-lane
+    ///   consumers but not semantic-lane consumers, per the lane
+    ///   discriminator).
+    fn validates_resolve_imports_domain(
+        &self,
+        fact: &crate::resolver_core::ResolveImportsFactRef,
+    ) -> bool {
+        use verter_semantic::facts::registry::FactLane;
+        use verter_semantic::facts::FactKey;
+        const ZERO_HASH: Hash16 = [0u8; 16];
+
+        let facts_db = match self.resolved_import_facts.as_ref() {
+            Some(db) => db,
+            None => return false,
+        };
+
+        // R26 producer: untracked-file optimistic-accept window. A
+        // path-precise resolve-imports consumer that observed against
+        // a sentinel hash (`ZERO_HASH`) means "this file produced no
+        // value at observation time"; accept that observation against
+        // an untracked file (still produces no value).
+        let content_hash = match self.whole_hashes.get(fact.canonical_id.as_str()) {
+            Some(h) => *h,
+            None => return fact.expected_hash == ZERO_HASH,
+        };
+
+        let key = crate::resolved_import_facts::ResolvedImportFactsKey {
+            canonical: std::sync::Arc::from(fact.canonical_id.as_str()),
+            content_hash,
+            parse_env_hash: self.env_hashes.parse_env_hash,
+            resolve_env_hash: self.env_hashes.resolve_env_hash,
+            resolver_version: crate::resolved_import_facts::RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
+        };
+
+        let facts = match facts_db.get(&key) {
+            Some(f) => f,
+            // Cache slot absent — the consumer observed a real fact
+            // hash but the resolve-imports producer has not yet
+            // populated the entry under this view. Reject so the
+            // caller recomputes through the producer (which will
+            // populate the cache + re-emit).
+            None => return fact.expected_hash == ZERO_HASH,
+        };
+
+        // Pick the lane that the consumer observed under.
+        let pick_lane = |f: &std::sync::Arc<verter_semantic::facts::registry::Fact>| match fact.lane
+        {
+            FactLane::Semantic => f.semantic_hash,
+            FactLane::Display => f.display_hash,
+        };
+
+        match &fact.key {
+            FactKey::ResolvedImportClause {
+                specifier,
+                binding,
+                space,
+                resolved_canonical,
+                resolved_source_name,
+            } => facts.import_clauses.iter().any(|entry| {
+                entry.specifier == *specifier
+                    && entry.binding == *binding
+                    && entry.space == *space
+                    && entry.resolved_canonical.as_ref().map(|c| c.as_ref())
+                        == Some(resolved_canonical.as_ref())
+                    && entry.resolved_source_name == *resolved_source_name
+                    && pick_lane(&entry.fact) == fact.expected_hash
+            }),
+            FactKey::ResolvedReexportBinding {
+                specifier,
+                source_name,
+                target_name,
+                space,
+                resolved_canonical,
+                resolved_source_name,
+            } => facts.reexport_bindings.iter().any(|entry| {
+                entry.specifier == *specifier
+                    && entry.source_name == *source_name
+                    && entry.target_name == *target_name
+                    && entry.space == *space
+                    && entry.resolved_canonical.as_ref().map(|c| c.as_ref())
+                        == Some(resolved_canonical.as_ref())
+                    && entry.resolved_source_name == *resolved_source_name
+                    && pick_lane(&entry.fact) == fact.expected_hash
+            }),
+            // Non-resolve-imports FactKey shapes do not belong to
+            // the resolve-imports domain. The dispatch layer routes
+            // by `FactDomain` so this arm is defensive.
+            _ => false,
+        }
+    }
+
     /// Route-surface-domain validator (R26 + R29 + G1).
     ///
-    /// Routes the `ModuleAugmentationIndexShape` variant
-    /// against the snapshot of augmentation-index fingerprints
-    /// captured at view-build time. Other `FactKey` variants in the
-    /// route-surface domain (`EffectiveExportSet`) are not yet
-    /// validated here — they are admitted via the
-    /// `fact_dep_signature` route-of-record on each candidate.
+    /// `ModuleAugmentationIndexShape` → consult the snapshot of
+    /// augmentation-index fingerprints captured at view-build time
+    /// (R29 / G1 producer state).
+    ///
+    /// `EffectiveExportSet` → compose
+    /// `EffectiveExportSetKey { provider_canonical,
+    /// project_identity, resolve_env_hash, lib_env_hash }` from the
+    /// fact's `canonical_id` plus the view's `project_identity` +
+    /// `env_hashes`, look up the cached entry in the captured
+    /// `RouteDb` handle, and compare the entry's
+    /// `augmenter_set_fingerprint` to `fact.expected_hash`.
     fn validates_route_surface_domain(
         &self,
         fact: &crate::resolver_core::RouteSurfaceFactRef,
@@ -642,10 +822,31 @@ impl crate::resolver_core::StoreView for HostStoreView {
                     None => false,
                 }
             }
-            // EffectiveExportSet and other route-surface facts are
-            // not snapshotted into the view yet; admit them via the
-            // per-candidate signature alone.
-            FactKey::EffectiveExportSet => true,
+            FactKey::EffectiveExportSet => {
+                let route_db = match self.route_db.as_ref() {
+                    Some(db) => db,
+                    None => return false,
+                };
+                // Compose the `EffectiveExportSetKey` from the fact's
+                // `canonical_id` (provider) + view env. Then walk the
+                // cache slot for `provider_canonical`; we cannot call
+                // `get_effective_export_set(_, view)` here because we
+                // ARE the view — that would recurse on validation.
+                // Permissive cache-state snapshot via `snapshot_all`
+                // is acceptable: the validator only needs to find a
+                // candidate whose `augmenter_set_fingerprint` matches
+                // the consumer's `expected_hash` under the matching
+                // `(provider, project, resolve_env, lib_env)`
+                // quadruple.
+                let target_key = crate::resolver_core::route_db::EffectiveExportSetKey {
+                    provider_canonical: fact.canonical_id.clone(),
+                    project_identity: self.project_identity,
+                    resolve_env_hash: self.env_hashes.resolve_env_hash,
+                    lib_env_hash: self.env_hashes.lib_env_hash,
+                };
+                route_db.lookup_effective_export_set_fingerprint(&target_key)
+                    == Some(fact.expected_hash)
+            }
             // Other parse-domain / resolve-domain keys do not belong
             // to the route-surface domain; the dispatch layer guards
             // against this so the match is exhaustive defensively.
