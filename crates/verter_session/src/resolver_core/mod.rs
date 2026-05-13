@@ -775,10 +775,7 @@ where
         // into a `FactValidationSummary` event at request close-out.
         self.validations_attempted
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let entry = match self.entries.get(key) {
-            Some(e) => e,
-            None => return None,
-        };
+        let entry = self.entries.get(key)?;
         let candidates = entry.candidates.load();
         for candidate in candidates.iter() {
             let modern_ok = candidate
@@ -1018,8 +1015,7 @@ where
     /// R24 instrumentation: stale misses (entry existed but no
     /// candidate validated under the active view).
     pub fn stale_miss_count(&self) -> u64 {
-        self.stale_misses
-            .load(std::sync::atomic::Ordering::Relaxed)
+        self.stale_misses.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// R24 instrumentation: archive-style fallback checks. Always
@@ -1049,17 +1045,11 @@ where
     /// Drains the counters atomically (via `swap`) so a follow-up
     /// pass starts at zero. Callers that want a non-destructive
     /// read can use the four `*_count` accessors directly.
-    pub fn emit_validation_summary_for_request(
-        &self,
-        request_id: u64,
-        cache_kind: &'static str,
-    ) {
-        let validations_attempted = self
-            .validations_attempted
-            .swap(0, std::sync::atomic::Ordering::Relaxed) as u32;
-        let warm_hits = self
-            .warm_hits
-            .swap(0, std::sync::atomic::Ordering::Relaxed) as u32;
+    pub fn emit_validation_summary_for_request(&self, request_id: u64, cache_kind: &'static str) {
+        let validations_attempted =
+            self.validations_attempted
+                .swap(0, std::sync::atomic::Ordering::Relaxed) as u32;
+        let warm_hits = self.warm_hits.swap(0, std::sync::atomic::Ordering::Relaxed) as u32;
         let stale_misses = self
             .stale_misses
             .swap(0, std::sync::atomic::Ordering::Relaxed) as u32;

@@ -205,7 +205,10 @@ fn parity_validator_directly_returns_true_for_populated_candidate() {
     assert_eq!(cache.parity_mismatch_count(), 0);
     // Visibility check: `validate_legacy_signature` and
     // `Candidate` are public on the resolver_core surface.
-    fn _visibility(view: &PermissiveStoreView, c: &verter_session::resolver_core::Candidate<u32>) -> bool {
+    fn _visibility(
+        view: &PermissiveStoreView,
+        c: &verter_session::resolver_core::Candidate<u32>,
+    ) -> bool {
         validate_legacy_signature(view, c)
     }
     let _ = _visibility;
