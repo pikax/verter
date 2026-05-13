@@ -948,22 +948,71 @@ mod tests {
         let view = TestView::accepting_all(1);
         let call_count = std::sync::atomic::AtomicU32::new(0);
 
-        let result = db.get_or_resolve_route("index.ts", "Bar", &view, || {
+        // Stage 10 strict admission migration: the zero-facts
+        // `get_or_resolve_route` helper does NOT cache its result
+        // because the empty signature would refuse strict admission.
+        // Callers that want a cached entry must thread a non-empty
+        // fact signature through `get_or_resolve_route_with_facts`,
+        // as demonstrated below.
+        let dummy_fact = FactVersionRef::FileWholeHash {
+            canonical_id: "bar.ts".to_owned(),
+            hash: [0u8; 16],
+        };
+        let result =
+            db.get_or_resolve_route_with_facts("index.ts", "Bar", &view, || {
+                call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Some((
+                    RouteResult::Resolved {
+                        defining_canonical: "bar.ts".to_owned(),
+                        defining_symbol: "Bar".to_owned(),
+                    },
+                    vec![dummy_fact.clone()],
+                ))
+            });
+        assert!(result.is_some());
+
+        // Second call should hit cache because we admitted with a
+        // non-empty fact signature on the first pass.
+        let result2 =
+            db.get_or_resolve_route_with_facts("index.ts", "Bar", &view, || {
+                call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Some((RouteResult::Miss, vec![dummy_fact.clone()]))
+            });
+        assert!(result2.is_some());
+        assert_eq!(call_count.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn get_or_resolve_route_with_empty_facts_does_not_cache() {
+        // Stage 10 discrimination: the zero-facts variant must NOT
+        // admit a cache entry. The second call re-invokes the
+        // resolver because the first call skipped admission.
+        let db = RouteDb::new();
+        let view = TestView::accepting_all(1);
+        let call_count = std::sync::atomic::AtomicU32::new(0);
+
+        let _result = db.get_or_resolve_route("index.ts", "Bar", &view, || {
             call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Some(RouteResult::Resolved {
                 defining_canonical: "bar.ts".to_owned(),
                 defining_symbol: "Bar".to_owned(),
             })
         });
-        assert!(result.is_some());
-
-        // Second call should hit cache.
-        let result2 = db.get_or_resolve_route("index.ts", "Bar", &view, || {
+        let _result2 = db.get_or_resolve_route("index.ts", "Bar", &view, || {
             call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Some(RouteResult::Miss)
+            Some(RouteResult::Resolved {
+                defining_canonical: "bar.ts".to_owned(),
+                defining_symbol: "Bar".to_owned(),
+            })
         });
-        assert!(result2.is_some());
-        assert_eq!(call_count.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(
+            call_count.load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "Zero-fact route resolves are not cached under Stage 10 \
+             strict admission; the second call MUST re-invoke the \
+             resolver. Migrate to `get_or_resolve_route_with_facts` \
+             with a non-empty fact signature to opt back into caching."
+        );
     }
 
     #[test]

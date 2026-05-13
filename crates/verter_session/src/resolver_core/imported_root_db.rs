@@ -333,25 +333,68 @@ mod tests {
 
     #[test]
     fn get_or_resolve_caches() {
+        // Stage 10 strict admission migration: the zero-facts
+        // `get_or_resolve` helper does NOT admit a fact-validated
+        // entry. To exercise the caching path, callers thread a
+        // non-empty fact signature through `get_or_resolve_with_facts`.
         let db = ImportedRootDb::new();
         let view = TestView::new(1);
         let call_count = std::sync::atomic::AtomicU32::new(0);
 
-        let r1 = db.get_or_resolve("index.ts", "Bar", &view, || {
+        let dummy_fact = FactVersionRef::FileWholeHash {
+            canonical_id: "bar.vue".to_owned(),
+            hash: [0u8; 16],
+        };
+        let r1 = db.get_or_resolve_with_facts("index.ts", "Bar", &view, || {
+            call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Some((
+                ImportedRootResult::Resolved {
+                    canonical_source: "bar.vue".to_owned(),
+                    resolved_symbol: "Bar".to_owned(),
+                },
+                vec![dummy_fact.clone()],
+            ))
+        });
+        assert!(r1.is_some());
+
+        let r2 = db.get_or_resolve_with_facts("index.ts", "Bar", &view, || {
+            call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            None
+        });
+        assert!(r2.is_some());
+        assert_eq!(call_count.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn get_or_resolve_with_empty_facts_does_not_cache() {
+        // Stage 10 discrimination: zero-fact root resolves are NOT
+        // admitted. The second call re-invokes the resolver
+        // because the first skipped admission.
+        let db = ImportedRootDb::new();
+        let view = TestView::new(1);
+        let call_count = std::sync::atomic::AtomicU32::new(0);
+
+        let _ = db.get_or_resolve("index.ts", "Bar", &view, || {
             call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Some(ImportedRootResult::Resolved {
                 canonical_source: "bar.vue".to_owned(),
                 resolved_symbol: "Bar".to_owned(),
             })
         });
-        assert!(r1.is_some());
-
-        let r2 = db.get_or_resolve("index.ts", "Bar", &view, || {
+        let _ = db.get_or_resolve("index.ts", "Bar", &view, || {
             call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            None
+            Some(ImportedRootResult::Resolved {
+                canonical_source: "bar.vue".to_owned(),
+                resolved_symbol: "Bar".to_owned(),
+            })
         });
-        assert!(r2.is_some());
-        assert_eq!(call_count.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(
+            call_count.load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "Zero-fact root resolves are not cached under Stage 10 \
+             strict admission; migrate to \
+             `get_or_resolve_with_facts` to opt back into caching."
+        );
     }
 
     #[test]
