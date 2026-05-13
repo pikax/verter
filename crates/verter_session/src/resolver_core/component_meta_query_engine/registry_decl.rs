@@ -46,7 +46,7 @@ use super::surface::{
     projected_surface_from_semantic_node, projected_surface_to_type_expr,
 };
 use super::{
-    empty_semantic_args, engine_fact_signature_for_canonical_member,
+    empty_semantic_args, engine_fact_signature_for_exported_type,
     local_type_symbol_metadata_for_known_source, ComponentMetaQueryEngine,
     DirectPreparedDeclarationResolver, ResolvedImportedRegistrySymbol, ResolvedTypeDeclaration,
 };
@@ -84,7 +84,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 || self.allow_wildcard_route(),
             );
             let fact_sig =
-                engine_fact_signature_for_canonical_member(self.ctx, canonical_id, exported_name);
+                engine_fact_signature_for_exported_type(self.ctx, canonical_id, exported_name);
             Some((computed, fact_sig))
         });
         let resolved: Option<ResolvedImportedRegistrySymbol> = match host_value {
@@ -209,11 +209,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     self.ctx
                         .resolve_type_declaration_for_dep(canonical_source, requested_name)
                 });
-            let fact_sig = engine_fact_signature_for_canonical_member(
-                self.ctx,
-                canonical_source,
-                requested_name,
-            );
+            let fact_sig =
+                engine_fact_signature_for_exported_type(self.ctx, canonical_source, requested_name);
             Some((computed, fact_sig))
         });
         let declaration = match host_value {
@@ -285,7 +282,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     .is_some()
             };
             let fact_sig =
-                engine_fact_signature_for_canonical_member(self.ctx, source_key, exported_name);
+                engine_fact_signature_for_exported_type(self.ctx, source_key, exported_name);
             Some((computed, fact_sig))
         });
         let resolved = host_value.unwrap_or(false);
@@ -315,8 +312,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             let computed = self
                 .prepared_type_decl(owner_canonical, name)
                 .map(|prepared| prepared.body.clone());
-            let fact_sig =
-                engine_fact_signature_for_canonical_member(self.ctx, owner_canonical, name);
+            let fact_sig = engine_fact_signature_for_exported_type(self.ctx, owner_canonical, name);
             Some((computed, fact_sig))
         });
         let body: Option<verter_type_expr::TypeExpr> = match host_value {

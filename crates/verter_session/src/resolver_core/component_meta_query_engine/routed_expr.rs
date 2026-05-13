@@ -32,7 +32,7 @@ use super::surface::{
 };
 use super::{
     assert_direct_pick_routed_expr_slow_lane_allowed, dispatch_member_for_root_symbol,
-    engine_fact_signature_for_canonical_member, ComponentMetaQueryEngine, PreparedMemberCacheKey,
+    engine_fact_signature_for_exported_type, ComponentMetaQueryEngine, PreparedMemberCacheKey,
     PreparedMemberCacheKind, PreparedProjectionContext, PreparedSubstitutionKey,
     RoutedExprSurfaceCacheKey,
 };
@@ -290,7 +290,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let captured_canonical = scope_canonical_id.to_string();
         let captured_root = root_symbol.to_string();
         let _ = host_db.get_or_compute(&arc_key, ctx, move || {
-            let fact_sig = engine_fact_signature_for_canonical_member(
+            // RoutedExprSurface caches the projected surface of the
+            // root symbol `root_symbol` declared at `scope_canonical_id`
+            // under the route. Observe top-level type identity so the
+            // consumer invalidates on shape changes but not on
+            // unrelated member-body edits.
+            let fact_sig = engine_fact_signature_for_exported_type(
                 ctx,
                 captured_canonical.as_str(),
                 captured_root.as_str(),

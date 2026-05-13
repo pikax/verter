@@ -142,19 +142,42 @@ pub(crate) const SEMANTIC_OBJECT_SURFACE: &str = "semanticObjectSurface";
 pub(crate) const SEMANTIC_SURFACE_MEMBER: &str = "semanticSurfaceMember";
 
 /// Build an R28 path-precise `Arc<[FactVersionRef]>` for a cache
-/// keyed on `(canonical, member_name)` in the `Type` symbol space.
-/// Observes both `MemberPresence` and `Member` facts so the consumer
+/// whose validity depends on a single MEMBER of an exporter type.
+/// Observes `MemberPresence(exporter, member)` and `Member(exporter,
+/// member)` facts in the `Type` symbol space so the consumer
 /// invalidates ONLY when the named member's header or body changes;
 /// sibling-member edits in the same file keep the consumer warm.
 pub(crate) fn engine_fact_signature_for_canonical_member(
     ctx: &dyn ResolverContext,
     canonical_id: &str,
-    member_name: &str,
+    exporter: &str,
+    member: &str,
 ) -> std::sync::Arc<[crate::resolver_core::FactVersionRef]> {
     crate::fact_signature_helpers::fact_signature_for_canonical_member(
         ctx,
         canonical_id,
-        member_name,
+        exporter,
+        member,
+        verter_semantic::facts::registry::SymbolSpace::Type,
+    )
+}
+
+/// Build an R28 signature for a cache whose validity depends on the
+/// IDENTITY of a top-level type at `(canonical, type_name)`. Observes
+/// `Export(name)`, `LocalDecl(name)`, and `MemberShape(exporter=name)`
+/// facts. The consumer invalidates when the type is added, removed,
+/// renamed, or when its member shape changes; editing a single
+/// member's body does NOT invalidate.
+pub(crate) fn engine_fact_signature_for_exported_type(
+    ctx: &dyn ResolverContext,
+    canonical_id: &str,
+    type_name: &str,
+) -> std::sync::Arc<[crate::resolver_core::FactVersionRef]> {
+    crate::fact_signature_helpers::fact_signature_for_exported_type(
+        ctx,
+        canonical_id,
+        type_name,
+        verter_semantic::facts::registry::SymbolSpace::Type,
     )
 }
 

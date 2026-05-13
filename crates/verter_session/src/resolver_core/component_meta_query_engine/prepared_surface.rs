@@ -33,8 +33,9 @@ use super::surface::{
     substitute_function_expr_if_needed, substituted_ref_expr_if_needed, PreparedSurfaceProjection,
 };
 use super::{
-    engine_fact_signature_for_canonical_member, ComponentMetaQueryEngine, PreparedMemberCacheKey,
-    PreparedMemberCacheKind, PreparedSurfaceCacheKey, PreparedTargetCacheKey,
+    engine_fact_signature_for_canonical_member, engine_fact_signature_for_exported_type,
+    ComponentMetaQueryEngine, PreparedMemberCacheKey, PreparedMemberCacheKind,
+    PreparedSurfaceCacheKey, PreparedTargetCacheKey,
 };
 
 impl<'a> ComponentMetaQueryEngine<'a> {
@@ -274,7 +275,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let captured_canonical = scope_canonical_id.to_string();
         let captured_symbol = symbol_name.to_string();
         let _ = host_db.get_or_compute(&arc_key, ctx, move || {
-            let fact_sig = engine_fact_signature_for_canonical_member(
+            let fact_sig = engine_fact_signature_for_exported_type(
                 ctx,
                 captured_canonical.as_str(),
                 captured_symbol.as_str(),
@@ -698,11 +699,17 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let host_db = ctx.project_type_store().prepared_member_db();
         let captured_value = result.clone();
         let captured_canonical = scope_canonical_id.to_string();
+        let captured_symbol = symbol_name.to_string();
         let captured_member = member_name.to_string();
         let _ = host_db.get_or_compute(&arc_key, ctx, move || {
+            // R28 path-precise: observe the exporter+member pair so
+            // sibling-member edits in the same exporter keep the
+            // consumer warm, and a body edit on the specific member
+            // invalidates it.
             let fact_sig = engine_fact_signature_for_canonical_member(
                 ctx,
                 captured_canonical.as_str(),
+                captured_symbol.as_str(),
                 captured_member.as_str(),
             );
             Some((captured_value, fact_sig))
@@ -1001,7 +1008,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             let captured_canonical = scope_canonical_id.to_string();
             let captured_target = name.to_string();
             let _ = host_db.get_or_compute(&arc_key, ctx, move || {
-                let fact_sig = engine_fact_signature_for_canonical_member(
+                // PreparedTarget caches a (scope, target-name) →
+                // resolved (canonical, symbol) mapping. Validity
+                // depends on the top-level type identity of the
+                // target name (declared locally or imported), so
+                // observe the per-name top-level facts in scope.
+                let fact_sig = engine_fact_signature_for_exported_type(
                     ctx,
                     captured_canonical.as_str(),
                     captured_target.as_str(),
