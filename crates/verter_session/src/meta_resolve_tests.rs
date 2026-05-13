@@ -4135,7 +4135,7 @@ defineProps<Props>()
 // ===========================================================================
 
 #[test]
-#[ignore = "consumer paths (get_analysis / get_component_meta / evaluate_types) not yet routed through ResolverContext::view(); R20 multi-candidate substrate landed but view-aware consumer wiring is pending"]
+#[ignore = "stage-6d-followup: get_component_meta_with_resolution resolver path reads dep source from base host; overlay-aware source plumbing through the resolver is Stage 7+ work"]
 fn overlay_queries_do_not_reuse_unsound_base_resolved_meta_cache() {
     let project = make_project();
     project

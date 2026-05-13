@@ -346,22 +346,16 @@ impl VerterHost {
         }
     }
 
-    /// Returns a serializable snapshot of the file's static analysis data.
-    /// Returns `None` if the file doesn't exist.
-    /// When `eager_analysis` is false, computes analysis on demand from stored source.
-    ///
-    /// Template analysis is lazily computed via `CompileTarget::META` when the scope
-    /// includes template analysis and no prior compilation has populated it.
-    ///
-    /// Import `resolved_canonical_id` fields are populated lazily using the host's
-    /// file map, alias map, and parent dependency set.
     pub fn get_analysis(&self, canonical_or_alias: &str) -> Option<FileAnalysisSnapshot> {
-        self.provenance
-            .get_analysis_calls
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
-        let analysis_started = component_meta_debug_enabled().then(Instant::now);
-        self.get_analysis_snapshot_internal(&canonical, analysis_started)
+        // Route through the view-aware entry point with a `HostViewRef`
+        // so the single resolver-tier surface stays view-shaped (R17 / R18).
+        // A base-only view never tombstones and reports the host's
+        // source for every canonical; the overlay-source fast path
+        // inside `get_analysis_via_view` is therefore a no-op for this
+        // case, and the call routes through the existing internal
+        // pipeline.
+        let view = crate::session_view::HostViewRef::new(self);
+        self.get_analysis_via_view(canonical_or_alias, &view)
     }
 
     pub(super) fn get_analysis_snapshot_internal(
@@ -483,6 +477,121 @@ impl VerterHost {
                 analysis_started,
             ))
         }
+    }
+
+
+    /// View-aware variant of [`Self::get_analysis`].
+    ///
+    /// R17 / R18 — Consults the supplied [`SessionView`] for overlay
+    /// source before falling back to the base-host analysis path:
+    ///
+    /// 1. If `view.is_tombstoned(canonical)` → returns `None`
+    ///    (overlay-Deleted canonical is hidden from the consumer).
+    /// 2. If `view.source(canonical)` differs from the base host's
+    ///    source (overlay covers this canonical) → builds the
+    ///    snapshot directly from the overlay source via
+    ///    `build_snapshot_from_source`, then runs the same
+    ///    `finalize_analysis_snapshot` enrichment (import resolution,
+    ///    destructured binding metadata, template analysis on
+    ///    demand). The base host's caches are NOT mutated; the
+    ///    overlay-shaped snapshot is returned by value.
+    /// 3. Otherwise → routes through the existing
+    ///    `get_analysis_snapshot_internal` cold path so cached
+    ///    artefacts on the base host still serve warm reads.
+    ///
+    /// Used by `MetaSession::get_analysis` so an overlayed canonical
+    /// reports the overlay's analysis content (R17 / R18). Base-only
+    /// views (`HostView`, `HostViewRef`) fall through to the existing
+    /// flow because `view.source(canonical)` returns the same Arc the
+    /// host already has.
+    pub fn get_analysis_via_view(
+        &self,
+        canonical_or_alias: &str,
+        view: &dyn crate::session_view::SessionView,
+    ) -> Option<FileAnalysisSnapshot> {
+        self.provenance
+            .get_analysis_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
+        let analysis_started = component_meta_debug_enabled().then(Instant::now);
+
+        // Tombstone short-circuit (R17): an overlay-Delete is the
+        // explicit signal; never inferred from `source().is_none()`
+        // (which also fires for unloaded canonicals).
+        if view.is_tombstoned(canonical.as_str()) {
+            return None;
+        }
+
+        // Overlay-source path: when the view publishes a source for
+        // this canonical that differs from the base host's source,
+        // the canonical is overlayed and the analysis must reflect
+        // the overlay content. Compare by content hash to avoid the
+        // common "same content present in both" case.
+        let overlay_source = view.source(canonical.as_str());
+        let overlay_hash = view.content_hash_for(canonical.as_str());
+        let base_hash = self
+            .scheduler
+            .try_get_source(canonical.as_str())
+            .map(|snap| snap.whole_hash)
+            .or_else(|| {
+                self.project_type_store
+                    .indexed()
+                    .get_any(canonical.as_str())
+                    .map(|facts| facts.whole_hash)
+            });
+        let overlay_covers = match (&overlay_source, overlay_hash) {
+            (Some(_), Some(oh)) => Some(oh) != base_hash,
+            _ => false,
+        };
+
+        if overlay_covers {
+            // Overlay path — parse + analyse the overlay source on
+            // the call-thread, then run the same enrichment passes
+            // the base path uses. The base host's caches are not
+            // mutated (R17 invariant).
+            let source =
+                overlay_source.expect("overlay_covers true implies overlay_source is Some");
+            let snapshot = self.build_snapshot_from_source(canonical.as_str(), &source);
+            return Some(self.finalize_analysis_snapshot(
+                canonical.as_str(),
+                snapshot,
+                self.config.effective_scope().needs_template_analysis(),
+                analysis_started,
+            ));
+        }
+
+        // Base path — no overlay coverage; existing flow.
+        self.get_analysis_snapshot_internal(&canonical, analysis_started)
+    }
+
+    /// View-aware variant of [`Self::evaluate_types`].
+    ///
+    /// R17 / R18 — Consults the supplied [`SessionView`] for
+    /// tombstone detection before delegating to the base-host
+    /// `evaluate_types` path. The resolver does not yet consume the
+    /// view directly for analysis content (the substrate exists
+    /// but cold compute reads source from the base host); the
+    /// view-aware entry point keeps the consumer surface single-
+    /// shaped so future overlay-aware resolver plumbing does not
+    /// require additional consumer churn.
+    pub fn evaluate_types_via_view(
+        &self,
+        canonical_or_alias: &str,
+        view: &dyn crate::session_view::SessionView,
+    ) -> Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes> {
+        self.provenance
+            .evaluate_types_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
+
+        // R17 tombstone short-circuit: an overlay-Delete is the
+        // explicit signal — base host's evaluate_types must not
+        // be consulted.
+        if view.is_tombstoned(canonical.as_str()) {
+            return None;
+        }
+
+        self.evaluate_types(canonical_or_alias)
     }
 
     /// Get the current whole_hash for a file.

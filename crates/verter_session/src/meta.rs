@@ -161,6 +161,20 @@ pub struct MetaProject {
     next_session_id: AtomicU64,
     /// Terminal shutdown flag.
     shutdown: AtomicBool,
+    /// Project-wide serialisation for overlay-aware consumer queries
+    /// (R17 transient-overlay protocol).
+    ///
+    /// Sessions that thread an overlay-covering view through
+    /// [`VerterHost::evaluate_types_via_view`] or
+    /// [`VerterHost::get_component_meta_via_view`] briefly push their
+    /// overlay source onto the host scheduler, run the cold compute,
+    /// then revert the scheduler view. Holding this mutex around
+    /// that bracket serialises overlay-aware queries across sessions
+    /// so two concurrent sessions never observe each other's
+    /// transient overlay state. The base host invariant (R17) is
+    /// preserved at the end of every query — readers outside the
+    /// session see the base content.
+    overlay_query_lock: parking_lot::Mutex<()>,
 }
 
 impl MetaProject {
@@ -173,6 +187,7 @@ impl MetaProject {
             sessions: parking_lot::RwLock::new(HashMap::new()),
             next_session_id: AtomicU64::new(1),
             shutdown: AtomicBool::new(false),
+            overlay_query_lock: parking_lot::Mutex::new(()),
         })
     }
 
@@ -550,57 +565,48 @@ impl MetaSession {
 
     /// Get the analysis snapshot for a file, resolved through this session's overlay.
     ///
-    /// **View wiring (R17).** Consults the session's overlay map for
-    /// tombstone detection: if the canonical is overlay-Deleted,
-    /// returns `Ok(None)` without reading the base host. Where the
-    /// session does not tombstone the canonical, falls through to the
-    /// base host's `get_analysis` (overlay-aware analysis content is
-    /// reserved for the future overlay-aware resolver path).
+    /// **View wiring (R17 / R18).** Threads an [`OverlaidViewRef`] over
+    /// the session's current overlay map into
+    /// [`VerterHost::get_analysis_via_view`]. The host consults the
+    /// view for tombstone detection AND for overlay-source analysis
+    /// content: when the view publishes an overlay source whose
+    /// content hash differs from the base host's source, the host
+    /// builds the snapshot directly from the overlay content. This
+    /// is the consumer side of the R17 contract (the base host's
+    /// caches are not mutated).
+
     pub fn get_analysis(
         &self,
         canonical_or_alias: &str,
     ) -> Result<Option<crate::types::FileAnalysisSnapshot>, MetaError> {
         self.check_alive()?;
         let host = self.project.host();
-        let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
-        // Tombstone short-circuit: a session that deleted the canonical
-        // never sees the base host's analysis for it (R17).
-        if self.is_tombstoned(canonical.as_str()) {
-            return Ok(None);
-        }
-        self.with_session_runtime(canonical_or_alias, |runtime| {
-            runtime.host().get_analysis(canonical_or_alias)
-        })
+        // Route through the view-aware host entry point so overlayed
+        // canonicals report the overlay's analysis content (R17 / R18).
+        // The view is materialised at call time from this session's
+        // overlay map; `get_analysis_via_view` consults it for
+        // tombstone detection AND for overlay-source analysis content.
+        let analysis =
+            self.with_overlay_view(|view| host.get_analysis_via_view(canonical_or_alias, view));
+        Ok(analysis)
     }
 
-    /// Whether this session has an overlay-Delete for the given canonical.
-    ///
-    /// Used by the view-aware consumer paths to short-circuit reads
-    /// against canonicals the session has explicitly tombstoned (R17).
-    pub(crate) fn is_tombstoned(&self, canonical_id: &str) -> bool {
-        let sessions = self.project.sessions.read();
-        sessions
-            .get(&self.id)
-            .map(|state| {
-                matches!(
-                    state.overlays.get(canonical_id),
-                    Some(SessionOverlay::Delete)
-                )
-            })
-            .unwrap_or(false)
-    }
-
-    /// Evaluate component metadata types through this session's overlay view.
-    #[allow(dead_code)]
     pub fn evaluate_types(
         &self,
         canonical_or_alias: &str,
     ) -> Result<Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes>, MetaError>
     {
         self.check_alive()?;
-        self.with_session_runtime(canonical_or_alias, |runtime| {
-            runtime.host().evaluate_types(canonical_or_alias)
-        })
+        let host = self.project.host();
+        // Route through the view-aware host entry point so overlayed
+        // canonicals are surfaced through the same consumer-path
+        // shape as `get_analysis` / `get_component_meta` (R17 / R18).
+        // The view is materialised at call time from this session's
+        // overlay map; `evaluate_types_via_view` consults it for
+        // tombstone detection.
+        let result =
+            self.with_overlay_view(|view| host.evaluate_types_via_view(canonical_or_alias, view));
+        Ok(result)
     }
 
     /// Single native component-meta query through this session's overlay view.

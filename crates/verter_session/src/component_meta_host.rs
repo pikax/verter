@@ -867,7 +867,7 @@ defineProps<ButtonProps>()
     }
 
     #[test]
-    #[ignore = "consumer paths (get_analysis / get_component_meta / evaluate_types) not yet routed through ResolverContext::view(); R20 multi-candidate substrate landed but view-aware consumer wiring is pending"]
+    #[ignore = "stage-6d-followup: get_component_meta resolver path reads helper deps from base host; overlay-only dependency graphs require resolver-tier view.source() consultation (Stage 7+ work)"]
     fn overlay_queries_reapply_owner_after_overlay_only_helper_upserts() {
         let host = make_host();
         let session = host.open_session_batch().unwrap();
