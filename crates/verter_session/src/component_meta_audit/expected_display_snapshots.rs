@@ -66,6 +66,8 @@ pub const EXPECTED_CUSTOM: &str = "Custom(test_name, key=value)";
 pub const EXPECTED_CACHE_DRAINED_AT_UPSERT: &str =
     "CacheDrainedAtUpsert(resolved_type_cache, /probe.vue)";
 pub const EXPECTED_FACT_SIGNATURE_OVERFLOW: &str = "FactSignatureOverflow(size=1100, cap=1024)";
+pub const EXPECTED_FACT_SIGNATURE_ADMISSION_REFUSED: &str =
+    "FactSignatureAdmissionRefused(materialize_structure, EmptySignature)";
 pub const EXPECTED_MODULE_AUGMENTATION_STITCHED_EXTERNAL: &str =
     "ModuleAugmentationStitched(ext=vue, n=2, fp=01020304)";
 pub const EXPECTED_MODULE_AUGMENTATION_INDEX_SHAPE_INSTALL: &str =
@@ -299,6 +301,13 @@ pub fn fixture_fact_signature_overflow() -> Event {
     }
 }
 
+pub fn fixture_fact_signature_admission_refused() -> Event {
+    Event::FactSignatureAdmissionRefused {
+        cache_kind: Arc::from("materialize_structure"),
+        reason: verter_audit::AdmissionRefusalReason::EmptySignature,
+    }
+}
+
 pub fn fixture_module_augmentation_stitched_external() -> Event {
     Event::ModuleAugmentationStitched {
         target_kind_tag: AugmentationTargetKindTag::ExternalSpecifier,
@@ -419,6 +428,10 @@ pub fn all_snapshots() -> Vec<(Event, &'static str)> {
             EXPECTED_FACT_SIGNATURE_OVERFLOW,
         ),
         (
+            fixture_fact_signature_admission_refused(),
+            EXPECTED_FACT_SIGNATURE_ADMISSION_REFUSED,
+        ),
+        (
             fixture_module_augmentation_stitched_external(),
             EXPECTED_MODULE_AUGMENTATION_STITCHED_EXTERNAL,
         ),
@@ -481,6 +494,7 @@ mod tests {
             | Event::MaterializeStructureDepthFuseTripped { .. }
             | Event::CacheDrainedAtUpsert { .. }
             | Event::FactSignatureOverflow { .. }
+            | Event::FactSignatureAdmissionRefused { .. }
             | Event::ModuleAugmentationStitched { .. }
             | Event::ModuleAugmentationIndexShape { .. }
             | Event::Custom { .. } => (),
@@ -513,6 +527,7 @@ mod tests {
             "Custom",
             "CacheDrainedAtUpsert",
             "FactSignatureOverflow",
+            "FactSignatureAdmissionRefused",
             "ModuleAugmentationStitched",
             "ModuleAugmentationIndexShape",
         ];
@@ -548,6 +563,7 @@ mod tests {
                 Event::Custom { .. } => "Custom",
                 Event::CacheDrainedAtUpsert { .. } => "CacheDrainedAtUpsert",
                 Event::FactSignatureOverflow { .. } => "FactSignatureOverflow",
+                Event::FactSignatureAdmissionRefused { .. } => "FactSignatureAdmissionRefused",
                 Event::ModuleAugmentationStitched { .. } => "ModuleAugmentationStitched",
                 Event::ModuleAugmentationIndexShape { .. } => "ModuleAugmentationIndexShape",
             })

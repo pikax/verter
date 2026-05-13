@@ -487,6 +487,12 @@ where
     /// [`FACT_SIGNATURE_CAP`]. Read in tests via
     /// [`ValidatedFactCache::signature_overflow_count`].
     signature_overflow: AtomicU64,
+    /// Stage 6d instrumentation counter: increments every time a
+    /// candidate's admission is refused by the fact-completeness
+    /// guard (today: empty `fact_dep_signature` on a source-
+    /// dependent cache). Read in tests via
+    /// [`ValidatedFactCache::admission_refused_count`].
+    admission_refused: AtomicU64,
     /// Instrumentation counter: increments on every `ArcSwap::store`
     /// call in the cache substrate. Hot-path reads must never
     /// advance this counter.
@@ -501,6 +507,7 @@ where
         Self {
             entries: DashMap::new(),
             signature_overflow: AtomicU64::new(0),
+            admission_refused: AtomicU64::new(0),
             arcswap_stores: AtomicU64::new(0),
         }
     }
@@ -657,6 +664,49 @@ where
     }
 
     pub fn insert_arc(&self, key: K, value: Arc<V>, facts: Vec<FactVersionRef>) {
+        // R20 signature-size bound runs for every admission. The
+        // empty-signature fact-completeness guard is opt-in via
+        // `insert_arc_with_kind` so existing producers that record
+        // stable "miss" candidates with an empty signature
+        // continue to admit (`route_db` / `imported_root_db` etc.).
+        self.insert_arc_inner(key, value, facts, None);
+    }
+
+    /// Admit a candidate with the Stage 6d fact-completeness
+    /// admission guard ENABLED. Producers that opt in pass a
+    /// `'static str` `cache_kind` discriminator carried in the
+    /// `FactSignatureAdmissionRefused` audit event.
+    ///
+    /// **Strict admission contract (R20 + Stage 6d):**
+    /// - Over-cap `fact_dep_signature` → refuse admission, emit
+    ///   `FactSignatureOverflow`, bump `signature_overflow`.
+    /// - Empty `fact_dep_signature` → refuse admission, emit
+    ///   `FactSignatureAdmissionRefused`, bump `admission_refused`.
+    ///   Correctness preserved by cold recompute every time.
+    /// - Otherwise admit via the multi-candidate RCU path.
+    ///
+    /// Loose-mode callers (`insert_arc`) skip the empty-signature
+    /// arm so stable-miss candidates continue to admit. Stage 7's
+    /// canary asserts `admission_refused_count == 0` over the
+    /// steady-state loop — strict callers are expected to observe
+    /// at least one fact.
+    pub fn insert_arc_with_kind(
+        &self,
+        key: K,
+        value: Arc<V>,
+        facts: Vec<FactVersionRef>,
+        cache_kind: &'static str,
+    ) {
+        self.insert_arc_inner(key, value, facts, Some(cache_kind));
+    }
+
+    fn insert_arc_inner(
+        &self,
+        key: K,
+        value: Arc<V>,
+        facts: Vec<FactVersionRef>,
+        strict_cache_kind: Option<&'static str>,
+    ) {
         // R20 signature-size bound. Reject candidates whose fact
         // signature exceeds FACT_SIGNATURE_CAP.
         if facts.len() > FACT_SIGNATURE_CAP {
@@ -673,6 +723,24 @@ where
                 },
             );
             return;
+        }
+        // R20 Stage 6d fact-completeness admission guard. Only
+        // strict callers (`insert_arc_with_kind`) enforce the
+        // empty-signature refusal — they have opted into the
+        // contract that producers must observe at least one fact
+        // before admitting.
+        if let Some(cache_kind) = strict_cache_kind {
+            if facts.is_empty() {
+                self.admission_refused
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                crate::host_manage::push_structured_event(
+                    crate::component_meta_audit::StructuredAuditEvent::FactSignatureAdmissionRefused {
+                        cache_kind: Arc::from(cache_kind),
+                        reason: verter_audit::AdmissionRefusalReason::EmptySignature,
+                    },
+                );
+                return;
+            }
         }
         let fact_arc: Arc<[FactVersionRef]> = Arc::from(facts.into_boxed_slice());
         let fingerprint = compute_signature_fingerprint(&fact_arc);
@@ -774,6 +842,18 @@ where
     /// `fact_dep_signature` was rejected.
     pub fn signature_overflow_count(&self) -> u64 {
         self.signature_overflow
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Stage 6d instrumentation: number of times a candidate
+    /// admission was refused by the fact-completeness guard
+    /// (today: empty `fact_dep_signature` on a source-dependent
+    /// cache). The synthetic admission-guard test asserts this
+    /// counter advances when a producer fails to observe; the
+    /// pre-canary test asserts it stays at 0 over the steady-state
+    /// loop.
+    pub fn admission_refused_count(&self) -> u64 {
+        self.admission_refused
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
