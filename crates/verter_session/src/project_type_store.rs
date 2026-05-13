@@ -2267,6 +2267,32 @@ impl ProjectTypeStore {
         memory_pressure: bool,
         min_floor: usize,
     ) {
+        // Stage 10: the legacy 3-arg API delegates to the policy-aware
+        // variant with policy defaults so existing callers retain
+        // their behaviour unchanged. New callers thread an explicit
+        // `EvictionPolicyConfig` through `evict_unreachable_artifacts_with_policy`.
+        let policy = crate::types::EvictionPolicyConfig {
+            memory_pressure_threshold: usize::MAX,
+            min_floor,
+            ..crate::types::EvictionPolicyConfig::default()
+        };
+        self.evict_unreachable_artifacts_with_policy(live_publish_set, memory_pressure, &policy);
+    }
+
+    /// Policy-aware reachability + LRU floor + per-canonical
+    /// retention sweep. Stage 10 — consumes the full
+    /// [`crate::types::EvictionPolicyConfig`] so callers can opt in
+    /// to per-canonical retention + promotion-aware LRU eviction.
+    ///
+    /// Pass `memory_pressure: true` to trigger the LRU floor +
+    /// per-canonical retention sweep; with `false` only the
+    /// reachability sweep runs (R22 memory-bound default).
+    pub fn evict_unreachable_artifacts_with_policy(
+        &self,
+        live_publish_set: &rustc_hash::FxHashSet<(Arc<str>, Hash16)>,
+        memory_pressure: bool,
+        policy: &crate::types::EvictionPolicyConfig,
+    ) {
         // D33: live-content reachability first. Each full
         // [`FileArtifactKey`] is checked against the live set by its
         // `(canonical, content_hash)` projection; only the unreachable
@@ -2280,16 +2306,21 @@ impl ProjectTypeStore {
                 let _ = self.indexed.remove_artifacts(&key);
             }
         }
+        // Stage 10: per-canonical retention runs on every sweep so
+        // long-lived sessions don't accumulate unbounded variants.
+        // The default retention (3) covers the {current, previous,
+        // baseline} window; `usize::MAX` disables the cap.
+        self.indexed
+            .enforce_per_canonical_retention(policy.per_canonical_content_hash_retention);
         // D40 + D119: LRU floor only under explicit memory pressure.
         // memory_pressure_threshold = usize::MAX by default — never
         // triggered. The capability is preserved for production
         // callers that opt in.
         if memory_pressure {
-            self.indexed.evict_lru(min_floor);
+            self.indexed
+                .evict_lru_promoted(policy.min_floor, policy.promote_threshold);
         }
-    }
-
-    /// D48 matrix row 1 — Source content change for owner.
+    }/// D48 matrix row 1 — Source content change for owner.
     ///
     /// Drops the source-content-domain (`DerivedRawCacheDb`) and
     /// dep-closure-domain (`DependencyCacheDb`) entries for `canonical_id`

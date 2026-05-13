@@ -369,6 +369,12 @@ pub struct FileArtifactStore {
     /// oldest entries down to a configured floor.
     last_access: DashMap<Arc<str>, u64>,
     access_tick: AtomicU64,
+    /// Per-key hit counter — bumped on every warm `get` /
+    /// `get_artifacts` hit. Consumed by the LRU floor's promotion
+    /// predicate (Stage 10): entries whose counter is below
+    /// `promote_threshold` are evicted first regardless of
+    /// `last_access` recency.
+    hit_counters: DashMap<FileArtifactKey, u32>,
     /// Live entry counter.
     live_counter: Arc<AtomicU64>,
     /// Stale-sweep counter.
@@ -435,6 +441,7 @@ impl FileArtifactStore {
             artifacts: DashMap::new(),
             last_access: DashMap::new(),
             access_tick: AtomicU64::new(0),
+            hit_counters: DashMap::new(),
             live_counter: live,
             stale_sweeps: stale,
             schema_version,
@@ -480,6 +487,7 @@ impl FileArtifactStore {
             .map(|entry| Arc::clone(&entry.value().indexed));
         if result.is_some() {
             self.bump_access_tick(canonical_id);
+            self.bump_hit_counter(&key);
         }
         if let Some(ctx) = crate::request_context::current_request_context() {
             if result.is_some() {
@@ -504,14 +512,19 @@ impl FileArtifactStore {
             return None;
         }
         let mut result: Option<Arc<IndexedReady>> = None;
+        let mut matched_key: Option<FileArtifactKey> = None;
         for entry in self.artifacts.iter() {
             if entry.key().canonical.as_ref() == canonical_id {
                 result = Some(Arc::clone(&entry.value().indexed));
+                matched_key = Some(entry.key().clone());
                 break;
             }
         }
         if result.is_some() {
             self.bump_access_tick(canonical_id);
+            if let Some(k) = matched_key.as_ref() {
+                self.bump_hit_counter(k);
+            }
         }
         if let Some(ctx) = crate::request_context::current_request_context() {
             if result.is_some() {
@@ -534,6 +547,23 @@ impl FileArtifactStore {
         self.last_access.insert(Arc::from(canonical_id), tick);
     }
 
+    /// Bump the per-key hit counter — called from every warm
+    /// `get_artifacts` / `get` hit. The counter is consumed by
+    /// [`Self::evict_lru_promoted`] and saturates at `u32::MAX` so
+    /// long-lived hot entries do not overflow.
+    fn bump_hit_counter(&self, key: &FileArtifactKey) {
+        self.hit_counters
+            .entry(key.clone())
+            .and_modify(|c| *c = c.saturating_add(1))
+            .or_insert(1);
+    }
+
+    /// Test-only inspection of the per-key hit counter.
+    #[cfg(any(test, debug_assertions))]
+    pub fn hit_count(&self, key: &FileArtifactKey) -> u32 {
+        self.hit_counters.get(key).map(|c| *c.value()).unwrap_or(0)
+    }
+
     /// Snapshot every `(canonical_id, content_hash)` key in the cache.
     #[must_use]
     pub fn keys(&self) -> Vec<(Arc<str>, Hash16)> {
@@ -545,32 +575,123 @@ impl FileArtifactStore {
 
     /// LRU floor — drop entries down to `min_floor` by oldest-access
     /// order.
+    ///
+    /// Delegates to [`Self::evict_lru_promoted`] with `promote_threshold
+    /// = 0` (no promotion — pure recency LRU). Stage 10 callers thread
+    /// the configured `promote_threshold` directly through
+    /// `evict_lru_promoted` to preserve hot entries.
     pub fn evict_lru(&self, min_floor: usize) {
+        self.evict_lru_promoted(min_floor, 0);
+    }
+
+    /// Promotion-aware LRU floor. Entries whose per-key hit counter
+    /// is **strictly below** `promote_threshold` are considered
+    /// "cold" and age out first regardless of `last_access`
+    /// recency; the floor's recency comparison only applies among
+    /// the surviving cold pool. Hot entries (counter >=
+    /// `promote_threshold`) survive unless every entry is hot, in
+    /// which case the floor falls back to pure recency.
+    ///
+    /// Stage 10 / R22 — memory-bound eviction. The hot/cold split
+    /// is the only behavioural difference from the pure-recency
+    /// [`Self::evict_lru`]; correctness still flows from
+    /// fact-validation (R19).
+    pub fn evict_lru_promoted(&self, min_floor: usize, promote_threshold: u32) {
         let len = self.artifacts.len();
         if len <= min_floor {
             return;
         }
         let drop_count = len - min_floor;
-        let mut tick_pairs: Vec<(FileArtifactKey, u64)> = self
+        // Collect (key, hit_count, tick) for every entry.
+        let mut entries: Vec<(FileArtifactKey, u32, u64)> = self
             .artifacts
             .iter()
             .map(|entry| {
                 let key = entry.key().clone();
+                let hits = self
+                    .hit_counters
+                    .get(&key)
+                    .map(|c| *c.value())
+                    .unwrap_or(0);
                 let tick = self
                     .last_access
                     .get(&key.canonical)
                     .map(|t| *t.value())
                     .unwrap_or(0);
-                (key, tick)
+                (key, hits, tick)
             })
             .collect();
-        tick_pairs.sort_by_key(|(_, tick)| *tick);
-        for (key, _) in tick_pairs.into_iter().take(drop_count) {
+        // Partition: cold (hits < promote_threshold) first, then hot.
+        // Within each partition, oldest tick first.
+        entries.sort_by(|a, b| {
+            let a_cold = a.1 < promote_threshold;
+            let b_cold = b.1 < promote_threshold;
+            match (a_cold, b_cold) {
+                (true, false) => std::cmp::Ordering::Less, // cold first
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => a.2.cmp(&b.2), // within partition, oldest first
+            }
+        });
+        for (key, _hits, _tick) in entries.into_iter().take(drop_count) {
             if self.artifacts.remove(&key).is_some() {
                 self.live_counter.fetch_sub(1, Ordering::Relaxed);
                 self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
             }
-            self.last_access.remove(&key.canonical);
+            self.hit_counters.remove(&key);
+            // Only remove `last_access` if no other version of the
+            // same canonical survives — the access tick is per
+            // canonical, not per FileArtifactKey.
+            let has_more = self
+                .artifacts
+                .iter()
+                .any(|e| e.key().canonical.as_ref() == key.canonical.as_ref());
+            if !has_more {
+                self.last_access.remove(&key.canonical);
+            }
+        }
+    }
+
+    /// Enforce per-canonical content-hash retention. Keeps at most
+    /// `retention` distinct `FileArtifactKey` variants per
+    /// canonical id; older variants (by `last_access` proxy: their
+    /// canonical's tick, then iteration order) are dropped.
+    ///
+    /// Setting `retention == usize::MAX` is a no-op. Setting
+    /// `retention == 0` drops every variant beyond the most
+    /// recently inserted (the live counter's "current generation").
+    ///
+    /// Binds R22: the cap is a memory bound; correctness is still
+    /// owned by fact-validation. Variant ordering uses the entry's
+    /// own `content_hash` as a stable tiebreaker so test runs are
+    /// deterministic across DashMap iteration order.
+    pub fn enforce_per_canonical_retention(&self, retention: usize) {
+        if retention == usize::MAX {
+            return;
+        }
+        // Group keys by canonical.
+        let mut by_canonical: rustc_hash::FxHashMap<Arc<str>, Vec<FileArtifactKey>> =
+            rustc_hash::FxHashMap::default();
+        for entry in self.artifacts.iter() {
+            by_canonical
+                .entry(entry.key().canonical.clone())
+                .or_default()
+                .push(entry.key().clone());
+        }
+        for (_canonical, mut keys) in by_canonical {
+            if keys.len() <= retention {
+                continue;
+            }
+            // Sort by content_hash for deterministic order; we drop
+            // from the front (older / lower-numbered variants).
+            keys.sort_by(|a, b| a.content_hash.cmp(&b.content_hash));
+            let drop_count = keys.len() - retention;
+            for key in keys.into_iter().take(drop_count) {
+                if self.artifacts.remove(&key).is_some() {
+                    self.live_counter.fetch_sub(1, Ordering::Relaxed);
+                    self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
+                }
+                self.hit_counters.remove(&key);
+            }
         }
     }
 
@@ -618,6 +739,7 @@ impl FileArtifactStore {
         let had_prior = !prior_keys.is_empty();
         for prior_key in prior_keys {
             self.artifacts.remove(&prior_key);
+            self.hit_counters.remove(&prior_key);
         }
 
         let key = FileArtifactKey::legacy(canonical_id, whole_hash);
@@ -656,6 +778,7 @@ impl FileArtifactStore {
                 self.live_counter.fetch_sub(1, Ordering::Relaxed);
                 self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
             }
+            self.hit_counters.remove(key);
         }
         self.last_access.remove(canonical_id);
     }
@@ -698,7 +821,11 @@ impl FileArtifactStore {
         if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
-        self.artifacts.get(key).map(|v| v.clone())
+        let v = self.artifacts.get(key).map(|v| v.clone());
+        if v.is_some() {
+            self.bump_hit_counter(key);
+        }
+        v
     }
 
     /// Look up the latest `FileArtifacts` payload for `canonical`
@@ -710,7 +837,11 @@ impl FileArtifactStore {
         }
         for entry in self.artifacts.iter() {
             if entry.key().canonical.as_ref() == canonical {
-                return Some(entry.value().clone());
+                let matched_key = entry.key().clone();
+                let value = entry.value().clone();
+                drop(entry);
+                self.bump_hit_counter(&matched_key);
+                return Some(value);
             }
         }
         None
@@ -806,6 +937,7 @@ impl FileArtifactStore {
         if removed.is_some() {
             self.live_counter.fetch_sub(1, Ordering::Relaxed);
             self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
+            self.hit_counters.remove(key);
             // R23 typed event: a `FileArtifactStore` entry was
             // evicted. Best-effort emission.
             crate::host_manage::push_structured_event(
@@ -842,6 +974,7 @@ impl FileArtifactStore {
             // downstream telemetry can attribute drain footprint
             // per `FileArtifactKey` dimension.
             for key in removed_keys {
+                self.hit_counters.remove(&key);
                 crate::host_manage::push_structured_event(
                     crate::component_meta_audit::StructuredAuditEvent::FileArtifactCache {
                         canonical_id: Arc::clone(&key.canonical),

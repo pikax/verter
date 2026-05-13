@@ -281,6 +281,21 @@ pub struct RecursionBudgetOverrides {
 /// production code path ever pays the LRU compute cost in default
 /// builds. The threshold exists so production deployments can opt in
 /// without a code change.
+///
+/// `per_canonical_content_hash_retention` (R20-adjacent, Stage 10)
+/// bounds the number of distinct `content_hash` variants the host
+/// keeps for a single canonical id. Older variants beyond this
+/// count are dropped on the next reachability sweep regardless of
+/// whether they are still in the live publish set — this is the
+/// concrete memory-bound (R22) for "what happens after a long-lived
+/// session edits the same file 100 times".
+///
+/// `promote_threshold` (Stage 10) is the per-canonical hit count
+/// required before an entry is "hot" for LRU-floor purposes.
+/// Entries below the threshold age out first under memory pressure
+/// even when their `last_access` tick is newer than a hot entry's;
+/// hot entries survive the floor unless every entry has been
+/// promoted.
 #[derive(Debug, Clone)]
 pub struct EvictionPolicyConfig {
     /// Memory-pressure threshold above which a caller may pass
@@ -300,6 +315,37 @@ pub struct EvictionPolicyConfig {
     /// of [`crate::project_type_store::ProjectTypeStore::evict_unreachable_artifacts`].
     /// Default `1024`.
     pub min_floor: usize,
+    /// Per-canonical `content_hash` variant retention. The
+    /// reachability sweep keeps at most this many variants per
+    /// canonical regardless of liveness; older variants are
+    /// dropped. Default `3` — covers the {current, previous, baseline}
+    /// window typical of an interactive editor.
+    ///
+    /// Setting `0` means "keep only the most recently touched
+    /// variant"; setting `usize::MAX` disables the per-canonical
+    /// cap (only the global LRU floor + reachability sweep are
+    /// active). Binds R22 (eviction is memory-bound, not
+    /// correctness-bound) — concurrent variants are still
+    /// correctness-preserving via fact-validation, the cap only
+    /// bounds the steady-state working set.
+    pub per_canonical_content_hash_retention: usize,
+    /// Promotion threshold: number of warm-hit observations
+    /// required before an entry is considered "hot" for LRU-floor
+    /// eviction. Default `2`.
+    ///
+    /// Hot entries survive the LRU floor unless every entry has
+    /// been promoted; cold entries (below the threshold) age out
+    /// first regardless of `last_access` recency. Mirrors the
+    /// "two-strikes-and-you're-warm" pattern: a cache entry must be
+    /// hit at least `promote_threshold` times before it is treated
+    /// as a long-lived candidate.
+    ///
+    /// Setting `0` disables promotion (every entry counts as
+    /// hot — LRU floor falls back to pure recency); setting
+    /// `usize::MAX` disables promotion in the other direction
+    /// (no entry is ever hot — LRU floor falls back to pure
+    /// recency too, because the predicate is never satisfied).
+    pub promote_threshold: u32,
 }
 
 /// Per-method timeout budgets for audited LSP handlers.
@@ -374,6 +420,15 @@ impl Default for EvictionPolicyConfig {
             // for typical project sizes in the corpus baseline; the
             // actual production tuning lives outside the plan scope.
             min_floor: 1024,
+            // R22 / Stage 10 — keep the most recent 3
+            // `content_hash` variants per canonical. Tracks the
+            // {current, previous, baseline} window typical of an
+            // interactive editor.
+            per_canonical_content_hash_retention: 3,
+            // Stage 10 — promote an entry to "hot" after 2 warm
+            // hits; cold entries age out first under memory
+            // pressure regardless of `last_access` recency.
+            promote_threshold: 2,
         }
     }
 }
