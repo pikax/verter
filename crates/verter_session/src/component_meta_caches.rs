@@ -41,6 +41,7 @@ use verter_semantic::analysis::type_solver::query_engine::ProjectedMember;
 use verter_type_expr::TypeExpr;
 
 use crate::cooperative_admission::{cooperative_get_or_insert, InflightTable};
+use crate::fact_signature_helpers::{bubble_fact_signature, validate_fact_signature};
 use crate::instant::Instant;
 use crate::project_semantic_dispatch::raise::MaterializedTypeExpr;
 use crate::resolver_core::cache_keys::{
@@ -48,7 +49,7 @@ use crate::resolver_core::cache_keys::{
     RoutedExprSurfaceCacheKey,
 };
 use crate::resolver_core::component_meta_query_engine::ResolvedImportedRegistrySymbol;
-use crate::resolver_core::{ResolvedTypeDeclaration, ResolverContext};
+use crate::resolver_core::{FactVersionRef, ResolvedTypeDeclaration, ResolverContext};
 use crate::semantic_query::{DepSignature, ProjectionMode};
 
 // ===========================================================================
@@ -58,7 +59,11 @@ use crate::semantic_query::{DepSignature, ProjectionMode};
 #[derive(Clone)]
 pub struct ImportedRegistryEntry {
     pub value: Option<Arc<ResolvedImportedRegistrySymbol>>,
-    pub dep_signature: DepSignature,
+    /// R3/R26/R28 fact-precise dependency signature recorded during the
+    /// cold-compute pass that produced this entry. Validated on every
+    /// warm-hit read against the producer's current fact registry via
+    /// [`crate::fact_signature_helpers::validate_fact_signature`].
+    pub fact_dep_signature: Arc<[FactVersionRef]>,
 }
 
 pub type ImportedRegistryKey = (Arc<str>, Arc<str>);
@@ -109,7 +114,10 @@ impl ImportedRegistryDb {
         compute: F,
     ) -> Option<Option<Arc<ResolvedImportedRegistrySymbol>>>
     where
-        F: FnOnce() -> Option<(Option<ResolvedImportedRegistrySymbol>, DepSignature)>,
+        F: FnOnce() -> Option<(
+            Option<ResolvedImportedRegistrySymbol>,
+            Arc<[FactVersionRef]>,
+        )>,
     {
         let live_counter = Arc::clone(&self.live_counter);
         let key_for_post_publish = key.clone();
@@ -119,24 +127,28 @@ impl ImportedRegistryDb {
             &self.inflight,
             key.clone(),
             |entry: &ImportedRegistryEntry| {
-                if ctx.validate_dep_signature(&entry.dep_signature) {
+                if validate_fact_signature(ctx, &entry.fact_dep_signature) {
+                    bubble_fact_signature(ctx, &entry.fact_dep_signature);
                     Some(entry.value.clone())
                 } else {
                     None
                 }
             },
             move || {
-                compute().map(|(value, dep_signature)| {
+                compute().map(|(value, fact_dep_signature)| {
                     let inserted_value = value.map(Arc::new);
                     live_counter.fetch_add(1, Ordering::Relaxed);
                     ImportedRegistryEntry {
                         value: inserted_value,
-                        dep_signature,
+                        fact_dep_signature,
                     }
                 })
             },
-            |entry: &ImportedRegistryEntry| entry.value.clone(),
-            |entry: &ImportedRegistryEntry| ctx.validate_dep_signature(&entry.dep_signature),
+            |entry: &ImportedRegistryEntry| {
+                bubble_fact_signature(ctx, &entry.fact_dep_signature);
+                entry.value.clone()
+            },
+            |entry: &ImportedRegistryEntry| validate_fact_signature(ctx, &entry.fact_dep_signature),
             |_, _| {
                 // Register the published key in the
                 // canonical reverse index so future
@@ -199,7 +211,7 @@ impl ImportedRegistryDb {
         let key: ImportedRegistryKey = (Arc::from(marker), Arc::from("synthetic"));
         let entry = Arc::new(ImportedRegistryEntry {
             value: None,
-            dep_signature: Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
+            fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
         });
         self.insert_for_test(key, entry);
     }
@@ -275,7 +287,9 @@ impl crate::cache_schema::CacheSchemaVersioned for ImportedRegistryDb {
 #[derive(Clone)]
 pub struct DeclarationLookupEntry {
     pub value: Arc<ResolvedTypeDeclaration>,
-    pub dep_signature: DepSignature,
+    /// R3/R26/R28 fact-precise dependency signature. See
+    /// [`ImportedRegistryEntry::fact_dep_signature`] for contract.
+    pub fact_dep_signature: Arc<[FactVersionRef]>,
 }
 
 pub type DeclarationLookupKey = (Arc<str>, Arc<str>);
@@ -306,7 +320,7 @@ impl DeclarationLookupDb {
         compute: F,
     ) -> Option<Arc<ResolvedTypeDeclaration>>
     where
-        F: FnOnce() -> Option<(ResolvedTypeDeclaration, DepSignature)>,
+        F: FnOnce() -> Option<(ResolvedTypeDeclaration, Arc<[FactVersionRef]>)>,
     {
         let live_counter = Arc::clone(&self.live_counter);
         cooperative_get_or_insert(
@@ -314,23 +328,29 @@ impl DeclarationLookupDb {
             &self.inflight,
             key.clone(),
             |entry: &DeclarationLookupEntry| {
-                if ctx.validate_dep_signature(&entry.dep_signature) {
+                if validate_fact_signature(ctx, &entry.fact_dep_signature) {
+                    bubble_fact_signature(ctx, &entry.fact_dep_signature);
                     Some(entry.value.clone())
                 } else {
                     None
                 }
             },
             move || {
-                compute().map(|(value, dep_signature)| {
+                compute().map(|(value, fact_dep_signature)| {
                     live_counter.fetch_add(1, Ordering::Relaxed);
                     DeclarationLookupEntry {
                         value: Arc::new(value),
-                        dep_signature,
+                        fact_dep_signature,
                     }
                 })
             },
-            |entry: &DeclarationLookupEntry| entry.value.clone(),
-            |entry: &DeclarationLookupEntry| ctx.validate_dep_signature(&entry.dep_signature),
+            |entry: &DeclarationLookupEntry| {
+                bubble_fact_signature(ctx, &entry.fact_dep_signature);
+                entry.value.clone()
+            },
+            |entry: &DeclarationLookupEntry| {
+                validate_fact_signature(ctx, &entry.fact_dep_signature)
+            },
         )
     }
 
@@ -381,7 +401,9 @@ impl Default for DeclarationLookupDb {
 #[derive(Clone)]
 pub struct ResolvabilityEntry {
     pub value: bool,
-    pub dep_signature: DepSignature,
+    /// R3/R26/R28 fact-precise dependency signature. See
+    /// [`ImportedRegistryEntry::fact_dep_signature`] for contract.
+    pub fact_dep_signature: Arc<[FactVersionRef]>,
 }
 
 pub type ResolvabilityKey = (Arc<str>, Arc<str>);
@@ -412,7 +434,7 @@ impl ResolvabilityDb {
         compute: F,
     ) -> Option<bool>
     where
-        F: FnOnce() -> Option<(bool, DepSignature)>,
+        F: FnOnce() -> Option<(bool, Arc<[FactVersionRef]>)>,
     {
         let live_counter = Arc::clone(&self.live_counter);
         cooperative_get_or_insert(
@@ -420,23 +442,27 @@ impl ResolvabilityDb {
             &self.inflight,
             key.clone(),
             |entry: &ResolvabilityEntry| {
-                if ctx.validate_dep_signature(&entry.dep_signature) {
+                if validate_fact_signature(ctx, &entry.fact_dep_signature) {
+                    bubble_fact_signature(ctx, &entry.fact_dep_signature);
                     Some(entry.value)
                 } else {
                     None
                 }
             },
             move || {
-                compute().map(|(value, dep_signature)| {
+                compute().map(|(value, fact_dep_signature)| {
                     live_counter.fetch_add(1, Ordering::Relaxed);
                     ResolvabilityEntry {
                         value,
-                        dep_signature,
+                        fact_dep_signature,
                     }
                 })
             },
-            |entry: &ResolvabilityEntry| entry.value,
-            |entry: &ResolvabilityEntry| ctx.validate_dep_signature(&entry.dep_signature),
+            |entry: &ResolvabilityEntry| {
+                bubble_fact_signature(ctx, &entry.fact_dep_signature);
+                entry.value
+            },
+            |entry: &ResolvabilityEntry| validate_fact_signature(ctx, &entry.fact_dep_signature),
         )
     }
 
@@ -493,7 +519,9 @@ pub struct OwnerCollectionEntry {
     #[allow(dead_code)]
     pub owner_canonical: Arc<str>,
     pub value: Option<Arc<TypeExpr>>,
-    pub dep_signature: DepSignature,
+    /// R3/R26/R28 fact-precise dependency signature. See
+    /// [`ImportedRegistryEntry::fact_dep_signature`] for contract.
+    pub fact_dep_signature: Arc<[FactVersionRef]>,
 }
 
 pub type OwnerCollectionKey = (Arc<str>, Arc<str>); // (owner, name)
@@ -524,7 +552,7 @@ impl OwnerCollectionDb {
         compute: F,
     ) -> Option<Option<Arc<TypeExpr>>>
     where
-        F: FnOnce() -> Option<(Option<TypeExpr>, DepSignature)>,
+        F: FnOnce() -> Option<(Option<TypeExpr>, Arc<[FactVersionRef]>)>,
     {
         let owner_canonical = key.0.clone();
         let live_counter = Arc::clone(&self.live_counter);
@@ -533,24 +561,28 @@ impl OwnerCollectionDb {
             &self.inflight,
             key.clone(),
             |entry: &OwnerCollectionEntry| {
-                if ctx.validate_dep_signature(&entry.dep_signature) {
+                if validate_fact_signature(ctx, &entry.fact_dep_signature) {
+                    bubble_fact_signature(ctx, &entry.fact_dep_signature);
                     Some(entry.value.clone())
                 } else {
                     None
                 }
             },
             move || {
-                compute().map(|(value, dep_signature)| {
+                compute().map(|(value, fact_dep_signature)| {
                     live_counter.fetch_add(1, Ordering::Relaxed);
                     OwnerCollectionEntry {
                         owner_canonical,
                         value: value.map(Arc::new),
-                        dep_signature,
+                        fact_dep_signature,
                     }
                 })
             },
-            |entry: &OwnerCollectionEntry| entry.value.clone(),
-            |entry: &OwnerCollectionEntry| ctx.validate_dep_signature(&entry.dep_signature),
+            |entry: &OwnerCollectionEntry| {
+                bubble_fact_signature(ctx, &entry.fact_dep_signature);
+                entry.value.clone()
+            },
+            |entry: &OwnerCollectionEntry| validate_fact_signature(ctx, &entry.fact_dep_signature),
         )
     }
 
@@ -601,7 +633,9 @@ impl Default for OwnerCollectionDb {
 #[derive(Clone)]
 pub struct PreparedTargetEntry {
     pub value: Option<(Arc<str>, Arc<str>)>,
-    pub dep_signature: DepSignature,
+    /// R3/R26/R28 fact-precise dependency signature. See
+    /// [`ImportedRegistryEntry::fact_dep_signature`] for contract.
+    pub fact_dep_signature: Arc<[FactVersionRef]>,
 }
 
 pub struct PreparedTargetDb {
@@ -642,7 +676,7 @@ impl PreparedTargetDb {
     }
 
     /// Peek-only lookup: returns the cached value only if its
-    /// dep_signature is still valid against `host`.
+    /// fact_dep_signature is still valid against `ctx`.
     pub(crate) fn peek(
         &self,
         key: &PreparedTargetCacheKey,
@@ -652,7 +686,8 @@ impl PreparedTargetDb {
             return None;
         }
         let entry_arc = self.entries.get(key).map(|e| e.clone())?;
-        if ctx.validate_dep_signature(&entry_arc.dep_signature) {
+        if validate_fact_signature(ctx, &entry_arc.fact_dep_signature) {
+            bubble_fact_signature(ctx, &entry_arc.fact_dep_signature);
             Some(entry_arc.value.clone())
         } else {
             None
@@ -666,7 +701,7 @@ impl PreparedTargetDb {
         compute: F,
     ) -> Option<Option<(Arc<str>, Arc<str>)>>
     where
-        F: FnOnce() -> Option<(Option<(Arc<str>, Arc<str>)>, DepSignature)>,
+        F: FnOnce() -> Option<(Option<(Arc<str>, Arc<str>)>, Arc<[FactVersionRef]>)>,
     {
         let live_counter = Arc::clone(&self.live_counter);
         cooperative_get_or_insert(
@@ -674,23 +709,27 @@ impl PreparedTargetDb {
             &self.inflight,
             key.clone(),
             |entry: &PreparedTargetEntry| {
-                if ctx.validate_dep_signature(&entry.dep_signature) {
+                if validate_fact_signature(ctx, &entry.fact_dep_signature) {
+                    bubble_fact_signature(ctx, &entry.fact_dep_signature);
                     Some(entry.value.clone())
                 } else {
                     None
                 }
             },
             move || {
-                compute().map(|(value, dep_signature)| {
+                compute().map(|(value, fact_dep_signature)| {
                     live_counter.fetch_add(1, Ordering::Relaxed);
                     PreparedTargetEntry {
                         value,
-                        dep_signature,
+                        fact_dep_signature,
                     }
                 })
             },
-            |entry: &PreparedTargetEntry| entry.value.clone(),
-            |entry: &PreparedTargetEntry| ctx.validate_dep_signature(&entry.dep_signature),
+            |entry: &PreparedTargetEntry| {
+                bubble_fact_signature(ctx, &entry.fact_dep_signature);
+                entry.value.clone()
+            },
+            |entry: &PreparedTargetEntry| validate_fact_signature(ctx, &entry.fact_dep_signature),
         )
     }
 
@@ -742,7 +781,7 @@ impl PreparedTargetDb {
         };
         let entry = Arc::new(PreparedTargetEntry {
             value: None,
-            dep_signature: Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
+            fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
         });
         self.entries.insert(key, entry);
         self.live_counter.fetch_add(1, Ordering::Relaxed);
@@ -780,7 +819,9 @@ impl crate::cache_schema::CacheSchemaVersioned for PreparedTargetDb {
 #[derive(Clone)]
 pub struct MaterializeMemoEntry {
     pub value: MaterializedTypeExpr,
-    pub dep_signature: DepSignature,
+    /// R3/R26/R28 fact-precise dependency signature. See
+    /// [`ImportedRegistryEntry::fact_dep_signature`] for contract.
+    pub fact_dep_signature: Arc<[FactVersionRef]>,
 }
 
 pub type MaterializeMemoKey = (Arc<str>, Arc<TypeExpr>, ProjectionMode);
@@ -823,7 +864,7 @@ impl MaterializeMemoDb {
     }
 
     /// Peek-only lookup: returns the cached value only if its
-    /// dep_signature is still valid against `host`.
+    /// fact_dep_signature is still valid against `ctx`.
     pub(crate) fn peek(
         &self,
         key: &MaterializeMemoKey,
@@ -834,7 +875,8 @@ impl MaterializeMemoDb {
         }
         let result = (|| -> Option<MaterializedTypeExpr> {
             let entry_arc = self.entries.get(key).map(|e| e.clone())?;
-            if ctx.validate_dep_signature(&entry_arc.dep_signature) {
+            if validate_fact_signature(ctx, &entry_arc.fact_dep_signature) {
+                bubble_fact_signature(ctx, &entry_arc.fact_dep_signature);
                 Some(entry_arc.value.clone())
             } else {
                 None
@@ -863,7 +905,7 @@ impl MaterializeMemoDb {
         compute: F,
     ) -> Option<MaterializedTypeExpr>
     where
-        F: FnOnce() -> Option<(MaterializedTypeExpr, DepSignature)>,
+        F: FnOnce() -> Option<(MaterializedTypeExpr, Arc<[FactVersionRef]>)>,
     {
         let live_counter = Arc::clone(&self.live_counter);
         cooperative_get_or_insert(
@@ -871,23 +913,27 @@ impl MaterializeMemoDb {
             &self.inflight,
             key.clone(),
             |entry: &MaterializeMemoEntry| {
-                if ctx.validate_dep_signature(&entry.dep_signature) {
+                if validate_fact_signature(ctx, &entry.fact_dep_signature) {
+                    bubble_fact_signature(ctx, &entry.fact_dep_signature);
                     Some(entry.value.clone())
                 } else {
                     None
                 }
             },
             move || {
-                compute().map(|(value, dep_signature)| {
+                compute().map(|(value, fact_dep_signature)| {
                     live_counter.fetch_add(1, Ordering::Relaxed);
                     MaterializeMemoEntry {
                         value,
-                        dep_signature,
+                        fact_dep_signature,
                     }
                 })
             },
-            |entry: &MaterializeMemoEntry| entry.value.clone(),
-            |entry: &MaterializeMemoEntry| ctx.validate_dep_signature(&entry.dep_signature),
+            |entry: &MaterializeMemoEntry| {
+                bubble_fact_signature(ctx, &entry.fact_dep_signature);
+                entry.value.clone()
+            },
+            |entry: &MaterializeMemoEntry| validate_fact_signature(ctx, &entry.fact_dep_signature),
         )
     }
 
@@ -941,7 +987,7 @@ impl MaterializeMemoDb {
                 type_expr: TypeExpr::Unknown { raw: String::new() },
                 dep_signature: Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
             },
-            dep_signature: Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
+            fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
         });
         self.entries.insert(key, entry);
         self.live_counter.fetch_add(1, Ordering::Relaxed);
@@ -993,7 +1039,9 @@ pub enum PreparedSurfacePayload {
 #[derive(Clone)]
 pub struct PreparedSurfaceEntry {
     pub value: PreparedSurfacePayload,
-    pub dep_signature: DepSignature,
+    /// R3/R26/R28 fact-precise dependency signature. See
+    /// [`ImportedRegistryEntry::fact_dep_signature`] for contract.
+    pub fact_dep_signature: Arc<[FactVersionRef]>,
 }
 
 pub struct PreparedSurfaceDb {
@@ -1034,7 +1082,7 @@ impl PreparedSurfaceDb {
     }
 
     /// Peek-only lookup: returns the cached payload only if its
-    /// dep_signature is still valid against `host`.
+    /// fact_dep_signature is still valid against `ctx`.
     pub(crate) fn peek(
         &self,
         key: &PreparedSurfaceCacheKey,
@@ -1045,7 +1093,8 @@ impl PreparedSurfaceDb {
         }
         let result = (|| -> Option<PreparedSurfacePayload> {
             let entry_arc = self.entries.get(key).map(|e| e.clone())?;
-            if ctx.validate_dep_signature(&entry_arc.dep_signature) {
+            if validate_fact_signature(ctx, &entry_arc.fact_dep_signature) {
+                bubble_fact_signature(ctx, &entry_arc.fact_dep_signature);
                 Some(entry_arc.value.clone())
             } else {
                 None
@@ -1074,7 +1123,7 @@ impl PreparedSurfaceDb {
         compute: F,
     ) -> Option<PreparedSurfacePayload>
     where
-        F: FnOnce() -> Option<(PreparedSurfacePayload, DepSignature)>,
+        F: FnOnce() -> Option<(PreparedSurfacePayload, Arc<[FactVersionRef]>)>,
     {
         let live_counter = Arc::clone(&self.live_counter);
         cooperative_get_or_insert(
@@ -1082,23 +1131,27 @@ impl PreparedSurfaceDb {
             &self.inflight,
             key.clone(),
             |entry: &PreparedSurfaceEntry| {
-                if ctx.validate_dep_signature(&entry.dep_signature) {
+                if validate_fact_signature(ctx, &entry.fact_dep_signature) {
+                    bubble_fact_signature(ctx, &entry.fact_dep_signature);
                     Some(entry.value.clone())
                 } else {
                     None
                 }
             },
             move || {
-                compute().map(|(value, dep_signature)| {
+                compute().map(|(value, fact_dep_signature)| {
                     live_counter.fetch_add(1, Ordering::Relaxed);
                     PreparedSurfaceEntry {
                         value,
-                        dep_signature,
+                        fact_dep_signature,
                     }
                 })
             },
-            |entry: &PreparedSurfaceEntry| entry.value.clone(),
-            |entry: &PreparedSurfaceEntry| ctx.validate_dep_signature(&entry.dep_signature),
+            |entry: &PreparedSurfaceEntry| {
+                bubble_fact_signature(ctx, &entry.fact_dep_signature);
+                entry.value.clone()
+            },
+            |entry: &PreparedSurfaceEntry| validate_fact_signature(ctx, &entry.fact_dep_signature),
         )
     }
 
@@ -1148,7 +1201,7 @@ impl PreparedSurfaceDb {
         };
         let entry = Arc::new(PreparedSurfaceEntry {
             value: PreparedSurfacePayload::Empty,
-            dep_signature: Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
+            fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
         });
         self.entries.insert(key, entry);
         self.live_counter.fetch_add(1, Ordering::Relaxed);
@@ -1186,7 +1239,9 @@ impl crate::cache_schema::CacheSchemaVersioned for PreparedSurfaceDb {
 #[derive(Clone)]
 pub struct PreparedMemberEntry {
     pub value: Option<Arc<ProjectedMember>>,
-    pub dep_signature: DepSignature,
+    /// R3/R26/R28 fact-precise dependency signature. See
+    /// [`ImportedRegistryEntry::fact_dep_signature`] for contract.
+    pub fact_dep_signature: Arc<[FactVersionRef]>,
 }
 
 pub struct PreparedMemberDb {
@@ -1227,7 +1282,7 @@ impl PreparedMemberDb {
     }
 
     /// Peek-only lookup: returns the cached value only if its
-    /// dep_signature is still valid against `host`.
+    /// fact_dep_signature is still valid against `ctx`.
     pub(crate) fn peek(
         &self,
         key: &PreparedMemberCacheKey,
@@ -1238,7 +1293,8 @@ impl PreparedMemberDb {
         }
         let result = (|| -> Option<Option<Arc<ProjectedMember>>> {
             let entry_arc = self.entries.get(key).map(|e| e.clone())?;
-            if ctx.validate_dep_signature(&entry_arc.dep_signature) {
+            if validate_fact_signature(ctx, &entry_arc.fact_dep_signature) {
+                bubble_fact_signature(ctx, &entry_arc.fact_dep_signature);
                 Some(entry_arc.value.clone())
             } else {
                 None
@@ -1267,7 +1323,7 @@ impl PreparedMemberDb {
         compute: F,
     ) -> Option<Option<Arc<ProjectedMember>>>
     where
-        F: FnOnce() -> Option<(Option<ProjectedMember>, DepSignature)>,
+        F: FnOnce() -> Option<(Option<ProjectedMember>, Arc<[FactVersionRef]>)>,
     {
         let live_counter = Arc::clone(&self.live_counter);
         cooperative_get_or_insert(
@@ -1275,23 +1331,27 @@ impl PreparedMemberDb {
             &self.inflight,
             key.clone(),
             |entry: &PreparedMemberEntry| {
-                if ctx.validate_dep_signature(&entry.dep_signature) {
+                if validate_fact_signature(ctx, &entry.fact_dep_signature) {
+                    bubble_fact_signature(ctx, &entry.fact_dep_signature);
                     Some(entry.value.clone())
                 } else {
                     None
                 }
             },
             move || {
-                compute().map(|(value, dep_signature)| {
+                compute().map(|(value, fact_dep_signature)| {
                     live_counter.fetch_add(1, Ordering::Relaxed);
                     PreparedMemberEntry {
                         value: value.map(Arc::new),
-                        dep_signature,
+                        fact_dep_signature,
                     }
                 })
             },
-            |entry: &PreparedMemberEntry| entry.value.clone(),
-            |entry: &PreparedMemberEntry| ctx.validate_dep_signature(&entry.dep_signature),
+            |entry: &PreparedMemberEntry| {
+                bubble_fact_signature(ctx, &entry.fact_dep_signature);
+                entry.value.clone()
+            },
+            |entry: &PreparedMemberEntry| validate_fact_signature(ctx, &entry.fact_dep_signature),
         )
     }
 
@@ -1343,7 +1403,7 @@ impl PreparedMemberDb {
         };
         let entry = Arc::new(PreparedMemberEntry {
             value: None,
-            dep_signature: Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
+            fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
         });
         self.entries.insert(key, entry);
         self.live_counter.fetch_add(1, Ordering::Relaxed);
@@ -1381,7 +1441,9 @@ impl crate::cache_schema::CacheSchemaVersioned for PreparedMemberDb {
 #[derive(Clone)]
 pub struct RoutedExprSurfaceEntry {
     pub value: Arc<TypeExpr>,
-    pub dep_signature: DepSignature,
+    /// R3/R26/R28 fact-precise dependency signature. See
+    /// [`ImportedRegistryEntry::fact_dep_signature`] for contract.
+    pub fact_dep_signature: Arc<[FactVersionRef]>,
 }
 
 pub struct RoutedExprSurfaceDb {
@@ -1422,7 +1484,7 @@ impl RoutedExprSurfaceDb {
     }
 
     /// Peek-only lookup: returns the cached value only if its
-    /// dep_signature is still valid against `host`.
+    /// fact_dep_signature is still valid against `ctx`.
     pub(crate) fn peek(
         &self,
         key: &RoutedExprSurfaceCacheKey,
@@ -1432,7 +1494,8 @@ impl RoutedExprSurfaceDb {
             return None;
         }
         let entry_arc = self.entries.get(key).map(|e| e.clone())?;
-        if ctx.validate_dep_signature(&entry_arc.dep_signature) {
+        if validate_fact_signature(ctx, &entry_arc.fact_dep_signature) {
+            bubble_fact_signature(ctx, &entry_arc.fact_dep_signature);
             Some(entry_arc.value.clone())
         } else {
             None
@@ -1446,7 +1509,7 @@ impl RoutedExprSurfaceDb {
         compute: F,
     ) -> Option<Arc<TypeExpr>>
     where
-        F: FnOnce() -> Option<(TypeExpr, DepSignature)>,
+        F: FnOnce() -> Option<(TypeExpr, Arc<[FactVersionRef]>)>,
     {
         let live_counter = Arc::clone(&self.live_counter);
         cooperative_get_or_insert(
@@ -1454,23 +1517,29 @@ impl RoutedExprSurfaceDb {
             &self.inflight,
             key.clone(),
             |entry: &RoutedExprSurfaceEntry| {
-                if ctx.validate_dep_signature(&entry.dep_signature) {
+                if validate_fact_signature(ctx, &entry.fact_dep_signature) {
+                    bubble_fact_signature(ctx, &entry.fact_dep_signature);
                     Some(entry.value.clone())
                 } else {
                     None
                 }
             },
             move || {
-                compute().map(|(value, dep_signature)| {
+                compute().map(|(value, fact_dep_signature)| {
                     live_counter.fetch_add(1, Ordering::Relaxed);
                     RoutedExprSurfaceEntry {
                         value: Arc::new(value),
-                        dep_signature,
+                        fact_dep_signature,
                     }
                 })
             },
-            |entry: &RoutedExprSurfaceEntry| entry.value.clone(),
-            |entry: &RoutedExprSurfaceEntry| ctx.validate_dep_signature(&entry.dep_signature),
+            |entry: &RoutedExprSurfaceEntry| {
+                bubble_fact_signature(ctx, &entry.fact_dep_signature);
+                entry.value.clone()
+            },
+            |entry: &RoutedExprSurfaceEntry| {
+                validate_fact_signature(ctx, &entry.fact_dep_signature)
+            },
         )
     }
 
@@ -1520,7 +1589,7 @@ impl RoutedExprSurfaceDb {
         };
         let entry = Arc::new(RoutedExprSurfaceEntry {
             value: Arc::new(TypeExpr::Unknown { raw: String::new() }),
-            dep_signature: Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
+            fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
         });
         self.entries.insert(key, entry);
         self.live_counter.fetch_add(1, Ordering::Relaxed);

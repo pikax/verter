@@ -209,11 +209,11 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
         let captured_value = materialized.clone();
         let captured_canonical = scope_canonical_id.to_string();
         let _ = host_db.get_or_compute(&arc_key, ctx, move || {
-            let dep_sig = crate::resolver_core::component_meta_query_engine::engine_dep_signature_for_canonical(
+            let fact_sig = crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_canonical_surface(
                 ctx,
                 captured_canonical.as_str(),
             );
-            Some((captured_value, dep_sig))
+            Some((captured_value, fact_sig))
         });
     }
 

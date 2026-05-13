@@ -3711,6 +3711,14 @@ mod foundations_guards {
         // via warm-hit fact-validation without eager invalidation.
         "pub(crate) mod compile_fact_emission",
         "pub(crate) mod cooperative_admission",
+        // R3/R26/R28 — fact-validation helpers shared by the inner
+        // component-meta caches (Family A/B). Carries
+        // `validate_fact_signature`, `bubble_fact_signature`, and
+        // the path-precise `fact_signature_for_canonical_member`
+        // / `fact_signature_for_canonical_surface` constructors used
+        // by every cache that migrated from `DepSignature` to
+        // `Arc<[FactVersionRef]>`.
+        "pub(crate) mod fact_signature_helpers",
         "pub(crate) mod host_executor",
         "pub(crate) mod host_test_audit",
         "pub(crate) mod instant",

@@ -46,7 +46,7 @@ use super::surface::{
     projected_surface_from_semantic_node, projected_surface_to_type_expr,
 };
 use super::{
-    empty_semantic_args, engine_dep_signature_for_canonical,
+    empty_semantic_args, engine_fact_signature_for_canonical_member,
     local_type_symbol_metadata_for_known_source, ComponentMetaQueryEngine,
     DirectPreparedDeclarationResolver, ResolvedImportedRegistrySymbol, ResolvedTypeDeclaration,
 };
@@ -83,8 +83,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 exported_name,
                 || self.allow_wildcard_route(),
             );
-            let dep_sig = engine_dep_signature_for_canonical(self.ctx, canonical_id);
-            Some((computed, dep_sig))
+            let fact_sig =
+                engine_fact_signature_for_canonical_member(self.ctx, canonical_id, exported_name);
+            Some((computed, fact_sig))
         });
         let resolved: Option<ResolvedImportedRegistrySymbol> = match host_value {
             Some(opt_arc) => opt_arc.as_deref().cloned(),
@@ -208,8 +209,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     self.ctx
                         .resolve_type_declaration_for_dep(canonical_source, requested_name)
                 });
-            let dep_sig = engine_dep_signature_for_canonical(self.ctx, canonical_source);
-            Some((computed, dep_sig))
+            let fact_sig = engine_fact_signature_for_canonical_member(
+                self.ctx,
+                canonical_source,
+                requested_name,
+            );
+            Some((computed, fact_sig))
         });
         let declaration = match host_value {
             Some(arc_decl) => arc_decl.as_ref().clone(),
@@ -279,8 +284,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 self.resolve_imported_registry_symbol(source_key, exported_name)
                     .is_some()
             };
-            let dep_sig = engine_dep_signature_for_canonical(self.ctx, source_key);
-            Some((computed, dep_sig))
+            let fact_sig =
+                engine_fact_signature_for_canonical_member(self.ctx, source_key, exported_name);
+            Some((computed, fact_sig))
         });
         let resolved = host_value.unwrap_or(false);
         self.resolvable.borrow_mut().insert(key, resolved);
@@ -309,8 +315,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             let computed = self
                 .prepared_type_decl(owner_canonical, name)
                 .map(|prepared| prepared.body.clone());
-            let dep_sig = engine_dep_signature_for_canonical(self.ctx, owner_canonical);
-            Some((computed, dep_sig))
+            let fact_sig =
+                engine_fact_signature_for_canonical_member(self.ctx, owner_canonical, name);
+            Some((computed, fact_sig))
         });
         let body: Option<verter_type_expr::TypeExpr> = match host_value {
             Some(opt_arc) => opt_arc.map(|arc_expr| arc_expr.as_ref().clone()),

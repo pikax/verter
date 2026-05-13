@@ -161,6 +161,35 @@ pub(crate) fn engine_dep_signature_for_canonical(
     std::sync::Arc::from(entries.into_boxed_slice())
 }
 
+/// Build an R28 path-precise `Arc<[FactVersionRef]>` for a cache
+/// keyed on `(canonical, member_name)` in the `Type` symbol space.
+/// Observes both `MemberPresence` and `Member` facts so the consumer
+/// invalidates ONLY when the named member's header or body changes;
+/// sibling-member edits in the same file keep the consumer warm.
+pub(crate) fn engine_fact_signature_for_canonical_member(
+    ctx: &dyn ResolverContext,
+    canonical_id: &str,
+    member_name: &str,
+) -> std::sync::Arc<[crate::resolver_core::FactVersionRef]> {
+    crate::fact_signature_helpers::fact_signature_for_canonical_member(
+        ctx,
+        canonical_id,
+        member_name,
+    )
+}
+
+/// Build an R28 path-precise `Arc<[FactVersionRef]>` for a cache
+/// keyed on a scope canonical whose cold compute enumerates the
+/// file's surface (e.g. expression projection over `scope_canonical`).
+/// Observes `SyntacticExportSet` — adding/removing exports invalidates,
+/// cosmetic edits do not.
+pub(crate) fn engine_fact_signature_for_canonical_surface(
+    ctx: &dyn ResolverContext,
+    canonical_id: &str,
+) -> std::sync::Arc<[crate::resolver_core::FactVersionRef]> {
+    crate::fact_signature_helpers::fact_signature_for_canonical_surface(ctx, canonical_id)
+}
+
 /// Build a two-canonical `DepSignature` (used for DB caches whose
 /// validity depends on both an active scope and a declaration source).
 #[allow(dead_code)]

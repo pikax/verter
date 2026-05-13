@@ -127,43 +127,41 @@ fn parse_fact_ref(
 }
 
 /// Build a path-precise signature for a cache whose lookup is
-/// `(canonical, member_name)` in the `Type` symbol space — the
+/// `(canonical, type_name)` in the `Type` symbol space — the
 /// Family A producer pattern.
 ///
-/// The signature observes both the `MemberPresence` (R10 header)
-/// and the `Member` body (R28 path-precision) for the name. Adding
-/// a sibling member shifts neither fact; removing the named member
-/// removes both facts (validator treats absence as a sentinel-hash
-/// mismatch on `lookup_parse_fact_hash`'s `None`).
+/// The cold-compute reads the type body at `(canonical, type_name)`,
+/// so the signature observes the body fingerprint via the
+/// `Export(name=type_name)` or `LocalDecl(name=type_name)` fact —
+/// whichever the file emits for the named symbol. Both keys are
+/// observed; only the one that actually exists carries a non-zero
+/// hash. Adding sibling members or unrelated exports to the file
+/// keeps these facts stable (R10 / R28); editing the named type's
+/// body shifts the body hash; renaming or removing the type drops
+/// both facts (validator treats absence as a sentinel-hash mismatch).
 pub(crate) fn fact_signature_for_canonical_member(
     ctx: &dyn ResolverContext,
     canonical_id: &str,
-    member_name: &str,
+    type_name: &str,
 ) -> Arc<[FactVersionRef]> {
-    let exporter = InternedName::from(canonical_id);
-    let name = InternedName::from(member_name);
+    let name = InternedName::from(type_name);
     let space = SymbolSpace::Type;
-    let presence_key = FactKey::MemberPresence {
-        exporter: exporter.clone(),
+    let export_key = FactKey::Export {
         name: name.clone(),
         space,
     };
-    let body_key = FactKey::Member {
-        exporter,
-        name,
-        space,
-    };
+    let local_decl_key = FactKey::LocalDecl { name, space };
     let mut entries: Vec<FactVersionRef> = Vec::with_capacity(2);
     entries.push(parse_fact_ref(
         ctx,
         canonical_id,
-        presence_key,
+        export_key,
         FactLane::Semantic,
     ));
     entries.push(parse_fact_ref(
         ctx,
         canonical_id,
-        body_key,
+        local_decl_key,
         FactLane::Semantic,
     ));
     Arc::from(entries)

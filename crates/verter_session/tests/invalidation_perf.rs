@@ -28,7 +28,6 @@ use verter_session::component_meta_caches::{
 };
 use verter_session::for_tests::CaptureToken;
 use verter_session::invalidation_domain::InvalidationByCanonical;
-use verter_session::semantic_query::DepSignature;
 
 #[test]
 fn invalidate_canonical_touches_only_indexed_entries() {
@@ -48,7 +47,7 @@ fn invalidate_canonical_touches_only_indexed_entries() {
         );
         let entry = Arc::new(ImportedRegistryEntry {
             value: None,
-            dep_signature: DepSignature::default(),
+            fact_dep_signature: Arc::from(Vec::new()),
         });
         db.insert_for_test(key, entry);
         inserted += 1;
@@ -63,7 +62,7 @@ fn invalidate_canonical_touches_only_indexed_entries() {
             );
             let entry = Arc::new(ImportedRegistryEntry {
                 value: None,
-                dep_signature: DepSignature::default(),
+                fact_dep_signature: Arc::from(Vec::new()),
             });
             db.insert_for_test(key, entry);
             inserted += 1;

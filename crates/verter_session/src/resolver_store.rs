@@ -45,6 +45,14 @@ pub struct HostStoreView {
     /// been populated — the validator returns `false` so the
     /// downstream cache misses.
     route_surface_index_fingerprints: FxHashMap<RouteSurfaceIndexShapeKey, Hash16>,
+    /// Parse-domain snapshot (R26): per-canonical `Arc<FileFacts>`
+    /// captured at view-build time. The validator for
+    /// `ParseFactRef` reads through this map; one `Arc::clone` per
+    /// tracked file at build time, wait-free hash compares
+    /// thereafter. Files not present in the snapshot are treated as
+    /// untracked (validator returns `false` — a path-precise
+    /// consumer expected its fact to be in the registry).
+    file_facts: FxHashMap<String, std::sync::Arc<crate::file_artifact_store::FileFacts>>,
 }
 
 /// Structural key for snapshotting `ModuleAugmentationIndexShape`
@@ -71,6 +79,7 @@ impl Default for HostStoreView {
             derived_hashes: FxHashMap::default(),
             import_routes: FxHashMap::default(),
             route_surface_index_fingerprints: FxHashMap::default(),
+            file_facts: FxHashMap::default(),
         }
     }
 }
@@ -201,8 +210,30 @@ impl HostStoreView {
 
         view.snapshot_tracked_import_route_hashes(host);
         view.snapshot_augmentation_index(host.project_type_store.indexed());
+        view.snapshot_file_facts(host.project_type_store.indexed());
         view.compat_token = view.compute_compat_token();
         view
+    }
+
+    /// Snapshot `Arc<FileFacts>` per canonical from the indexed
+    /// store. One refcount bump per tracked file at view-build time;
+    /// parse-domain validation reads through these handles
+    /// wait-free against concurrent writers because each entry is
+    /// immutable.
+    ///
+    /// If multiple `(content_hash, parse_env_hash)` variants coexist
+    /// for one canonical (the multi-candidate cache shape under R20),
+    /// the first one encountered wins — subsequent variants do not
+    /// overwrite. The view's `whole_hashes` map records the canonical
+    /// content hash; a path-precise consumer that observed against
+    /// a parse-env-hash variant outside this snapshot will miss
+    /// validation and recompute against the current variant.
+    fn snapshot_file_facts(&mut self, store: &crate::file_artifact_store::FileArtifactStore) {
+        for (key, artifacts) in store.snapshot_artifacts() {
+            self.file_facts
+                .entry(key.canonical.as_ref().to_owned())
+                .or_insert_with(|| std::sync::Arc::clone(&artifacts.facts));
+        }
     }
 
     fn snapshot_tracked_import_route_hashes(&mut self, host: &VerterHost) {
@@ -528,6 +559,49 @@ impl crate::resolver_core::StoreView for HostStoreView {
 
     fn tracks_file(&self, canonical_id: &str) -> bool {
         self.whole_hashes.contains_key(canonical_id)
+    }
+
+    /// Parse-domain validator (R26).
+    ///
+    /// Look up `fact.key` against the file's `FileFacts` registry and
+    /// compare the stored fact's `semantic_hash` / `display_hash`
+    /// (per `fact.lane`) to the observed `expected_hash`. The lookup
+    /// resolves the current `FileArtifacts` for `canonical_id` from
+    /// the project type store; the view snapshot's `whole_hashes`
+    /// already pins the parse-env-hash slice the artifacts derive
+    /// from, so this read is wait-free against concurrent writers.
+    ///
+    /// `None` outcomes — file untracked, artifacts absent, key not
+    /// in registry — all signal "no longer there", which under R3
+    /// must invalidate the consumer's warm hit. The validator
+    /// therefore returns `false` rather than the optimistic-accept
+    /// shape used for `FileWholeHash` untracked files: a path-precise
+    /// `Member`/`MemberPresence` consumer expects the fact to BE in
+    /// the registry it recorded, so absence is a discriminating miss.
+    fn validates_parse_domain(&self, fact: &crate::resolver_core::ParseFactRef) -> bool {
+        const ZERO_HASH: Hash16 = [0u8; 16];
+        let facts = match self.file_facts.get(fact.canonical_id.as_str()) {
+            Some(f) => f,
+            // Untracked file — accept if the observed hash was the
+            // zero sentinel (producer saw the file as unavailable
+            // and recorded the sentinel; absence is consistent).
+            // Otherwise reject — the consumer observed a real fact
+            // hash but the file has dropped out of the index.
+            None => return fact.expected_hash == ZERO_HASH,
+        };
+        match facts.lookup(&fact.key) {
+            Some(stored) => {
+                let stored_hash = match fact.lane {
+                    verter_semantic::facts::registry::FactLane::Semantic => stored.semantic_hash,
+                    verter_semantic::facts::registry::FactLane::Display => stored.display_hash,
+                };
+                stored_hash == fact.expected_hash
+            }
+            // Fact absent in registry — accept iff observed was the
+            // zero sentinel (consistent absence — see
+            // `fact_signature_helpers::parse_fact_ref`).
+            None => fact.expected_hash == ZERO_HASH,
+        }
     }
 
     /// Route-surface-domain validator (R26 + R29 + G1).

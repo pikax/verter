@@ -66,7 +66,6 @@ pub mod host_audit_runtime;
 // tests/invalidation_perf.rs — InvalidationByCanonical impl on
 // ImportedRegistryDb is exercised by the §12.A12 perf gate.
 pub(crate) mod compile_fact_emission;
-pub(crate) mod fact_signature_helpers;
 pub mod component_meta_caches;
 #[cfg(test)]
 mod component_meta_caches_tests;
@@ -106,6 +105,7 @@ pub(crate) mod cooperative_admission;
 pub mod cross_file;
 mod deps;
 pub mod fact_emission;
+pub(crate) mod fact_signature_helpers;
 pub mod file_artifact_store;
 mod hash;
 pub(crate) mod instant;
