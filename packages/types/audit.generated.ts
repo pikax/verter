@@ -2,7 +2,7 @@
 
 /**
  * Reason a `ValidatedFactCache` candidate admission was refused
- * by the Stage 6d fact-completeness guard.
+ * by the fact-completeness guard.
  *
  * Carried by
  * [`super::super::structured_event::StructuredAuditEvent::FactSignatureAdmissionRefused`].
