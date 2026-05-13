@@ -671,6 +671,42 @@ where
         None
     }
 
+    /// Like [`Self::get_if_valid`] but also returns the validating
+    /// candidate's `fact_dep_signature`. Used by producers that must
+    /// thread the recorded facts into a downstream cache entry
+    /// (e.g. `OwnerImportSurfaceDb`) so dependent caches observe
+    /// every chain participant — not only the final value.
+    pub fn get_if_valid_with_facts<TView>(
+        &self,
+        key: &K,
+        view: &TView,
+    ) -> Option<(Arc<V>, Arc<[FactVersionRef]>)>
+    where
+        TView: StoreView,
+    {
+        self.validations_attempted
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let entry = self.entries.get(key)?;
+        let candidates = entry.candidates.load();
+        for candidate in candidates.iter() {
+            let ok = candidate
+                .fact_dep_signature
+                .iter()
+                .all(|fact| view.validates(fact));
+            if ok {
+                self.warm_hits
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return Some((
+                    candidate.value.clone(),
+                    Arc::clone(&candidate.fact_dep_signature),
+                ));
+            }
+        }
+        self.stale_misses
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        None
+    }
+
     pub fn insert(&self, key: K, value: V, facts: Vec<FactVersionRef>) {
         self.insert_arc(key, Arc::new(value), facts);
     }

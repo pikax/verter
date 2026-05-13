@@ -547,6 +547,146 @@ fn owner_import_surface_picks_up_barrel_retargeting_phase2() {
     );
 }
 
+/// R3/R26/R28 Gap 1 discriminator: the producer-side observation
+/// inside `owner_import_surface` must record every barrel-chain
+/// participant in `fact_dep_signature` — not only the owner +
+/// final-target `FileWholeHash`. Without the barrel's
+/// `DerivedFactHash::Route` fact, a retarget that leaves the final
+/// target unchanged (e.g. barrel toggles between two re-exports of
+/// the same name from the same file) would silently validate
+/// against a stale cached surface.
+#[test]
+fn owner_import_surface_fact_signature_includes_barrel_route() {
+    use crate::resolver_core::{DerivedFactKind, FactVersionRef};
+    let host = host();
+    upsert_ts(&host, "/w/a.ts", "export type Foo = { a: number }");
+    upsert_ts(&host, "/w/barrel.ts", "export { Foo } from './a'");
+    upsert_ts(
+        &host,
+        "/w/owner.ts",
+        "import type { Foo } from './barrel'\nexport type Owner = Foo",
+    );
+
+    let resolved = host
+        .resolve_owner_direct_import("/w/owner.ts", "Foo")
+        .expect("owner.ts imports Foo via the barrel");
+    assert_eq!(resolved.0, "/w/a.ts");
+    assert_eq!(resolved.1, "Foo");
+
+    let owner_hash = host
+        .shallow_file_state("/w/owner.ts")
+        .expect("owner.ts must have a shallow snapshot after upsert")
+        .whole_hash;
+    let surface = host
+        .project_type_store()
+        .owner_import_surfaces()
+        .get("/w/owner.ts", owner_hash)
+        .expect("surface populated by the resolution");
+
+    let barrel_route_fact = surface.fact_dep_signature.iter().find(|fact| {
+        matches!(
+            fact,
+            FactVersionRef::DerivedFactHash {
+                canonical_id,
+                kind: DerivedFactKind::Route,
+                ..
+            } if canonical_id == "/w/barrel.ts"
+        )
+    });
+    assert!(
+        barrel_route_fact.is_some(),
+        "OwnerImportSurface.fact_dep_signature MUST include the barrel's \
+         DerivedFactHash::Route fact (Gap 1). Recorded facts: {:?}",
+        surface.fact_dep_signature
+    );
+
+    let final_target_present = surface.fact_dep_signature.iter().any(|fact| {
+        matches!(
+            fact,
+            FactVersionRef::FileWholeHash { canonical_id, .. } if canonical_id == "/w/a.ts"
+        )
+    });
+    assert!(
+        final_target_present,
+        "fact_dep_signature must record /w/a.ts FileWholeHash"
+    );
+}
+
+/// Companion to `owner_import_surface_fact_signature_includes_barrel_route`:
+/// retargeting the barrel between two distinct providers must produce
+/// a different barrel-route hash in the recorded
+/// `fact_dep_signature`. This is the structural prerequisite for
+/// the lazy-invalidation oracle (R3) to detect barrel retargets
+/// without `evict_canonical`.
+#[test]
+fn owner_import_surface_fact_signature_changes_on_barrel_retarget() {
+    use crate::resolver_core::{DerivedFactKind, FactVersionRef};
+    let host = host();
+    upsert_ts(&host, "/w/a.ts", "export type Foo = { a: number }");
+    upsert_ts(&host, "/w/b.ts", "export type Foo = { b: number }");
+    upsert_ts(&host, "/w/barrel.ts", "export { Foo } from './a'");
+    upsert_ts(
+        &host,
+        "/w/owner.ts",
+        "import type { Foo } from './barrel'\nexport type Owner = Foo",
+    );
+
+    let _ = host
+        .resolve_owner_direct_import("/w/owner.ts", "Foo")
+        .expect("initial barrel resolution to /w/a.ts");
+    let owner_hash = host
+        .shallow_file_state("/w/owner.ts")
+        .expect("owner.ts must have a shallow snapshot")
+        .whole_hash;
+    let pre = host
+        .project_type_store()
+        .owner_import_surfaces()
+        .get("/w/owner.ts", owner_hash)
+        .expect("pre-retarget surface");
+    let pre_route_hash = pre
+        .fact_dep_signature
+        .iter()
+        .find_map(|fact| match fact {
+            FactVersionRef::DerivedFactHash {
+                canonical_id,
+                kind: DerivedFactKind::Route,
+                hash,
+            } if canonical_id == "/w/barrel.ts" => Some(*hash),
+            _ => None,
+        })
+        .expect("pre-retarget signature contains the barrel-route fact");
+
+    upsert_ts(&host, "/w/barrel.ts", "export { Foo } from './b'");
+    let refreshed = host
+        .resolve_owner_direct_import("/w/owner.ts", "Foo")
+        .expect("post-retarget resolution must reach /w/b.ts");
+    assert_eq!(refreshed.0, "/w/b.ts");
+
+    let post = host
+        .project_type_store()
+        .owner_import_surfaces()
+        .get("/w/owner.ts", owner_hash)
+        .expect("post-retarget surface lives under the same owner_hash");
+    let post_route_hash = post
+        .fact_dep_signature
+        .iter()
+        .find_map(|fact| match fact {
+            FactVersionRef::DerivedFactHash {
+                canonical_id,
+                kind: DerivedFactKind::Route,
+                hash,
+            } if canonical_id == "/w/barrel.ts" => Some(*hash),
+            _ => None,
+        })
+        .expect("post-retarget signature must still include the barrel-route fact");
+
+    assert_ne!(
+        pre_route_hash, post_route_hash,
+        "barrel retargeting must change the recorded DerivedFactHash::Route \
+         hash so the fact-validation oracle detects the chain shift (Gap 1)"
+    );
+}
+
 /// Phase 2: editing an owner bumps the owner's whole_hash and rebuilds the
 /// surface under the new key. The old surface becomes unreachable at the
 /// key level; the new surface reflects the current import set.

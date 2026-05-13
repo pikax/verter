@@ -116,19 +116,53 @@ impl ImportedRootDb {
         V: StoreView,
         F: FnOnce() -> Option<(ImportedRootResult, Vec<FactVersionRef>)>,
     {
+        self.get_or_resolve_returning_facts(provider_canonical, imported_name, view, resolve)
+            .map(|(arc, _)| arc)
+    }
+
+    /// Like [`Self::get_or_resolve_with_facts`] but ALSO returns the
+    /// `fact_dep_signature` the resolved root was admitted under.
+    /// Producers that thread the recorded facts into a downstream
+    /// cache entry (e.g. `OwnerImportSurfaceDb`) consume this
+    /// variant so the dependent cache observes every chain
+    /// participant — not only the final tuple.
+    pub fn get_or_resolve_returning_facts<V, F>(
+        &self,
+        provider_canonical: &str,
+        imported_name: &str,
+        view: &V,
+        resolve: F,
+    ) -> Option<(Arc<ImportedRootResult>, Arc<[FactVersionRef]>)>
+    where
+        V: StoreView,
+        F: FnOnce() -> Option<(ImportedRootResult, Vec<FactVersionRef>)>,
+    {
         let key = (provider_canonical.to_owned(), imported_name.to_owned());
 
-        if let Some(result) = self.roots.get_if_valid(&key, view) {
-            return Some(result);
+        if let Some(hit) = self.roots.get_if_valid_with_facts(&key, view) {
+            return Some(hit);
         }
 
+        // Capture facts produced during the cold-compute path so we
+        // can return them to the caller after the cache admission.
+        // The cache stores facts on the candidate, but the
+        // singleflight `Ok(arc)` return value only carries the value;
+        // shuttling facts through a closure-shared cell preserves
+        // the path-precise observation while keeping the cache
+        // substrate's admission contract intact.
+        let captured_facts: std::cell::Cell<Option<Arc<[FactVersionRef]>>> =
+            std::cell::Cell::new(None);
+        let captured_facts_ref = &captured_facts;
+
         let flight = self.singleflight.run(key.clone(), view.compat_token(), || {
-            if let Some(result) = self.roots.get_if_valid(&key, view) {
-                return Ok(result);
+            if let Some(hit) = self.roots.get_if_valid_with_facts(&key, view) {
+                captured_facts_ref.set(Some(hit.1));
+                return Ok(hit.0);
             }
             match resolve() {
                 Some((result, facts)) => {
                     let arc = Arc::new(result);
+                    captured_facts_ref.set(Some(Arc::from(facts.clone())));
                     // Strict admission. Imported root entries with
                     // non-empty fact signatures admit through the
                     // strict entry-point; empty-signature resolves stay
@@ -148,10 +182,25 @@ impl ImportedRootDb {
             }
         });
 
-        match flight {
+        let value = match flight {
             Ok(run_result) => Some((*run_result.value).clone()),
             Err(()) => None,
-        }
+        }?;
+        // Cold-compute always populates `captured_facts`; coalesced
+        // singleflight winners (a concurrent caller already inserted)
+        // hit the cache's `get_if_valid_with_facts` re-read on entry.
+        // Coalesced losers reach this point WITHOUT having captured
+        // facts (their closure body did not run); for those we
+        // re-read the cache once to recover the admitted facts.
+        let facts = match captured_facts.take() {
+            Some(facts) => facts,
+            None => self
+                .roots
+                .get_if_valid_with_facts(&key, view)
+                .map(|(_, facts)| facts)
+                .unwrap_or_else(|| Arc::from(Vec::<FactVersionRef>::new())),
+        };
+        Some((value, facts))
     }
 
     /// Insert a pre-resolved root proof. **Test-only**: the empty-facts

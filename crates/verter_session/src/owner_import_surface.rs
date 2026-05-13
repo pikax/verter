@@ -254,14 +254,19 @@ impl crate::invalidation_domain::InvalidationByCanonical for OwnerImportSurfaceD
 }
 
 /// Build a fresh `OwnerImportSurface` from the owner's resolved-import
-/// iterator. Callers provide the owner identity, content hash, and the
+/// iterator. Callers provide the owner identity, content hash, the
 /// pre-resolved `(local_name, canonical_id, exported_name,
-/// target_whole_hash)` tuples; the helper normalizes them into the
-/// host-owned representation.
+/// target_whole_hash)` tuples, and the full chain of route-facts
+/// observed during resolution (one entry per intermediate barrel /
+/// reexport hop). R3/R26/R28 Gap 1: `chain_facts` MUST include every
+/// barrel participant's `DerivedFactHash::Route` so a barrel retarget
+/// that leaves the final target unchanged still invalidates the
+/// cached surface on read.
 pub fn build_owner_import_surface<I>(
     owner_canonical: Arc<str>,
     owner_whole_hash: Hash16,
     resolved_imports: I,
+    chain_facts: Vec<crate::resolver_core::FactVersionRef>,
 ) -> Arc<OwnerImportSurface>
 where
     I: IntoIterator<Item = (Arc<str>, Arc<str>, Arc<str>, Option<Hash16>)>,
@@ -291,8 +296,25 @@ where
     sig_entries.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
 
     let dep_signature: DepSignature = Arc::from(sig_entries.into_boxed_slice());
-    let fact_dep_signature =
+
+    // Path-precise fact_dep_signature: start from the legacy-shape
+    // dep_signature conversion (owner + final-target whole hashes)
+    // and append every chain fact observed by the producer.
+    // De-duplicate so the same `FactVersionRef` does not appear
+    // twice when fast-path + route-walk both emit it.
+    let base_facts =
         crate::component_meta_materialize::fact_signature_from_fence(dep_signature.as_ref());
+    let mut combined: Vec<crate::resolver_core::FactVersionRef> =
+        base_facts.iter().cloned().collect();
+    let mut seen: rustc_hash::FxHashSet<crate::resolver_core::FactVersionRef> =
+        combined.iter().cloned().collect();
+    for fact in chain_facts {
+        if seen.insert(fact.clone()) {
+            combined.push(fact);
+        }
+    }
+    let fact_dep_signature: Arc<[crate::resolver_core::FactVersionRef]> = Arc::from(combined);
+
     Arc::new(OwnerImportSurface {
         owner_canonical,
         owner_whole_hash,
@@ -324,6 +346,7 @@ mod tests {
                     None,
                 ),
             ],
+            Vec::new(),
         )
     }
 
@@ -374,7 +397,8 @@ mod tests {
 
     #[test]
     fn empty_imports_produces_owner_only_signature() {
-        let surface = build_owner_import_surface(Arc::from("/w/o.ts"), [1u8; 16], vec![]);
+        let surface =
+            build_owner_import_surface(Arc::from("/w/o.ts"), [1u8; 16], vec![], Vec::new());
         assert_eq!(surface.bindings.len(), 0);
         assert_eq!(surface.dep_signature.len(), 1);
         assert_eq!(surface.dep_signature[0].0.as_ref(), "/w/o.ts");

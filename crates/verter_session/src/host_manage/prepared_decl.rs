@@ -1305,6 +1305,25 @@ impl VerterHost {
         dep_canonical: &str,
         imported_name: &str,
     ) -> (String, String) {
+        self.resolve_imported_type_root_with_facts(dep_canonical, imported_name)
+            .0
+    }
+
+    /// Like [`Self::resolve_imported_type_root`] but ALSO returns
+    /// the full route-chain fact list the resolution observed.
+    /// Producers that thread the recorded facts into a downstream
+    /// cache entry (e.g. `OwnerImportSurfaceDb` — Gap 1, R3/R26/R28)
+    /// consume this variant so the dependent cache observes every
+    /// barrel/reexport participant — not only the final target's
+    /// `FileWholeHash`.
+    pub(crate) fn resolve_imported_type_root_with_facts(
+        &self,
+        dep_canonical: &str,
+        imported_name: &str,
+    ) -> (
+        (String, String),
+        Arc<[crate::resolver_core::FactVersionRef]>,
+    ) {
         let audit_started = self.config.audit_enabled.then(Instant::now);
 
         let normalized_canonical = self
@@ -1312,11 +1331,11 @@ impl VerterHost {
             .unwrap_or_else(|| dep_canonical.to_string());
         let live_view = self.resolver_store_view();
 
-        let cached_root = self
+        let cached = self
             .resolver
             .runtime
             .imported_roots
-            .get_or_resolve_with_facts(
+            .get_or_resolve_returning_facts(
                 normalized_canonical.as_str(),
                 imported_name,
                 &live_view,
@@ -1370,17 +1389,19 @@ impl VerterHost {
                     Some((root_result, facts))
                 },
             );
-        let (resolved, source_kind) = match cached_root {
-            Some(cached) => match cached.as_tuple() {
-                Some(tuple) => (tuple, "named_export_target"),
+        let (resolved, source_kind, facts) = match cached {
+            Some((cached, facts)) => match cached.as_tuple() {
+                Some(tuple) => (tuple, "named_export_target", facts),
                 None => (
                     (normalized_canonical.clone(), imported_name.to_string()),
                     "miss",
+                    facts,
                 ),
             },
             None => (
                 (normalized_canonical.clone(), imported_name.to_string()),
                 "miss",
+                Arc::from(Vec::<crate::resolver_core::FactVersionRef>::new()),
             ),
         };
 
@@ -1404,7 +1425,7 @@ impl VerterHost {
             );
         }
 
-        resolved
+        (resolved, facts)
     }
 
     /// Get-or-build the [`OwnerImportSurface`](crate::owner_import_surface::OwnerImportSurface)
@@ -1435,6 +1456,14 @@ impl VerterHost {
         // (local_name, final_canonical, final_exported_name, target_whole_hash)
         type SurfaceBuildEntry = (Arc<str>, Arc<str>, Arc<str>, Option<Hash16>);
         let mut entries: Vec<SurfaceBuildEntry> = Vec::with_capacity(shallow.import_targets.len());
+        // R3/R26/R28 Gap 1: accumulate every chain fact observed by
+        // each direct import's route walk. The producer threads these
+        // into the surface's `fact_dep_signature` so dependent caches
+        // detect intermediate barrel changes via fact-validation
+        // alone (no eager invalidation required).
+        let mut chain_facts: Vec<crate::resolver_core::FactVersionRef> = Vec::new();
+        let mut seen_facts: rustc_hash::FxHashSet<crate::resolver_core::FactVersionRef> =
+            rustc_hash::FxHashSet::default();
         for (local_name, target) in shallow.import_targets.iter() {
             let resolved_canonical_id = if target.canonical_id.is_empty() {
                 match self
@@ -1447,10 +1476,28 @@ impl VerterHost {
                 target.canonical_id.clone()
             };
 
-            let (final_canonical, final_name) = self.resolve_imported_type_root(
+            // Observe the producer's dep-side `FileWholeHash` for the
+            // resolved_canonical_id BEFORE following the route walk;
+            // even when the route returns an empty facts list (e.g.
+            // a stable-miss negative result), the surface's
+            // fact_dep_signature still observes the direct hop.
+            self.append_file_whole_and_route_fact_versions(
                 resolved_canonical_id.as_str(),
-                target.imported_name.as_str(),
+                None,
+                &mut chain_facts,
+                &mut seen_facts,
             );
+
+            let ((final_canonical, final_name), route_facts) = self
+                .resolve_imported_type_root_with_facts(
+                    resolved_canonical_id.as_str(),
+                    target.imported_name.as_str(),
+                );
+            for fact in route_facts.iter() {
+                if seen_facts.insert(fact.clone()) {
+                    chain_facts.push(fact.clone());
+                }
+            }
 
             let target_hash = self
                 .shallow_file_state(final_canonical.as_str())
@@ -1468,6 +1515,7 @@ impl VerterHost {
             Arc::from(owner_canonical),
             whole_hash,
             entries,
+            chain_facts,
         );
         surfaces.insert(Arc::from(owner_canonical), Arc::clone(&surface));
         Some(surface)
