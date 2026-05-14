@@ -16,7 +16,9 @@
 //! - `prefer_type_dependency_target_from_resolution` /
 //!   `normalize_live_type_dependency_target` /
 //!   `fallback_relative_type_companion`.
-//! - The cache-write helpers `cache_import_route_result` and
+//! - The cache-write helpers `cache_positive_import_route_result` (the
+//!   canonical positive-only point-admission producer for
+//!   `DerivedRawState.import_routes`) and
 //!   `resolve_workspace_dependency_and_cache`.
 //! - The public `resolve_loaded_dependency_canonical`,
 //!   `resolve_type_dependency_canonical`, and
@@ -259,7 +261,57 @@ impl VerterHost {
         self.resolve_eval_dependency_canonical(direct.as_str())
     }
 
-    pub(super) fn cache_import_route_result(
+    /// Positive-only point-admission producer for
+    /// [`DerivedRawState::import_routes`](crate::types::DerivedRawState).
+    ///
+    /// Constructs a positive
+    /// [`DependencyResolution`](crate::types::DependencyResolution)
+    /// with `resolved_canonical_id: Some(...)` and a single-candidate
+    /// `possible_canonical_ids` vector, then inserts it into the
+    /// owner's `import_routes` map under the supplied
+    /// `import_source` specifier and registers the resolved canonical
+    /// in the owner's flat `dependencies` set on `DependencyState`.
+    ///
+    /// Architectural contract:
+    ///
+    /// * This helper is the **single** positive-route point producer
+    ///   for `DerivedRawState.import_routes`. The complete caller-
+    ///   supplied route-snapshot writer is
+    ///   [`Self::set_import_dependencies`]; lifecycle reset goes
+    ///   through [`Self::configure_projects`] and
+    ///   [`Self::upsert_via_scheduler_with_options`]. A new positive
+    ///   route admission must route through this helper rather than
+    ///   inlining a direct
+    ///   `derived_raw_cache().entry(...).import_routes.insert(...)`.
+    ///
+    /// * The helper **must not** touch
+    ///   `DerivedRawState::import_routes_known_miss_recorded_at_generation`.
+    ///   That sidecar tracks the workspace `content_generation` at
+    ///   which known-miss specifiers (no resolved canonical, no
+    ///   candidates, no effective target) were admitted, and its
+    ///   admission is single-producer at `set_import_dependencies`.
+    ///   Stamping a known-miss generation here would extend a stale
+    ///   negative answer that should re-resolve when content changes.
+    ///   Positive resolutions do not need a generation tag: they stay
+    ///   valid until the owner's own source content changes (which
+    ///   evicts the `DerivedRawState` entry in
+    ///   `upsert_via_scheduler_with_options`).
+    ///
+    /// * Reader correctness:
+    ///   [`Self::import_route_is_known_miss`] requires resolved
+    ///   canonical = `None` AND no effective target AND empty
+    ///   candidate list — a value constructed here can never satisfy
+    ///   that predicate, which is what keeps the architectural
+    ///   invariant local to this body.
+    ///
+    /// The [`import_route_writer_guard`](crate::tests) integration
+    /// test enforces both directions of the contract: the strict
+    /// known-miss sidecar guard rejects any sidecar mutation outside
+    /// `set_import_dependencies` and the two lifecycle reset
+    /// methods; the positive-route allow-list rejects any direct
+    /// `.import_routes` mutation outside this helper, the snapshot
+    /// writer, and the lifecycle reset methods.
+    pub(super) fn cache_positive_import_route_result(
         &self,
         owner_canonical: &str,
         import_source: &str,
@@ -272,7 +324,10 @@ impl VerterHost {
         };
 
         // import_routes is on DerivedRawState; dependencies is on
-        // DependencyState (D48 split).
+        // DependencyState (D48 split). Sidecar field
+        // `import_routes_known_miss_recorded_at_generation` is
+        // intentionally untouched — see docstring for the
+        // architectural invariant.
         {
             let mut derived_ref = self
                 .derived_raw_cache()
@@ -312,7 +367,7 @@ impl VerterHost {
                 },
             )?
             .source_id;
-        self.cache_import_route_result(owner_canonical, import_source, &resolved);
+        self.cache_positive_import_route_result(owner_canonical, import_source, &resolved);
         Some(resolved)
     }
 
@@ -465,7 +520,7 @@ impl VerterHost {
             )
             .unwrap_or(resolved);
 
-        self.cache_import_route_result(owner_canonical, import_source, &preferred);
+        self.cache_positive_import_route_result(owner_canonical, import_source, &preferred);
         Some(preferred)
     }
 }

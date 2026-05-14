@@ -1227,6 +1227,30 @@ impl VerterHost {
     /// Records are merged into the file's `import_routes` map (keyed by
     /// specifier). The flat `dependencies` set is updated in parallel for
     /// reverse-dependency tracking.
+    ///
+    /// **Architectural contract** (see also
+    /// `tests/import_route_writer_guard.rs`):
+    ///
+    /// `set_import_dependencies` is the **complete caller-supplied
+    /// route-snapshot writer** for
+    /// [`DerivedRawState::import_routes`](crate::types::DerivedRawState)
+    /// AND the **single producer** of
+    /// [`DerivedRawState::import_routes_known_miss_recorded_at_generation`].
+    /// For every known-miss specifier in the supplied snapshot (no
+    /// resolved canonical, no candidates, no effective target), the
+    /// current workspace `content_generation` is recorded so the
+    /// reader can detect when a new canonical may now satisfy a
+    /// previously unresolvable specifier. Positive resolutions do
+    /// not need a generation tag — they stay valid until the
+    /// owner's source content changes.
+    ///
+    /// Positive-only route point admission lives in
+    /// [`Self::cache_positive_import_route_result`]: that helper
+    /// must NOT touch the known-miss generation sidecar, and this
+    /// method must NOT be used as a positive-only point cache (doing
+    /// so would risk re-stamping a previously admitted known miss at
+    /// the current `content_generation` and incorrectly extending a
+    /// stale negative answer that should have re-resolved).
     pub fn set_import_dependencies(
         &self,
         canonical_or_alias: &str,

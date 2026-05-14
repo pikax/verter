@@ -61,6 +61,34 @@ via `compute_upsert_changes_from_parse` for LSP / observability
 callers). Invalidation is not propagated; the fact diff is the public
 observability of what changed.
 
+**Import-route admission ownership.** `DerivedRawState.import_routes`
+and `DerivedRawState.import_routes_known_miss_recorded_at_generation`
+have distinct validity models and distinct admission producers:
+
+- `VerterHost::set_import_dependencies` is the **single producer** of
+  the full caller-supplied route snapshot AND the sole admission point
+  for the known-miss generation sidecar. For each known-miss specifier
+  (no resolved canonical, no candidates, no effective target), it
+  records the current workspace `content_generation` so the reader
+  can detect when a new canonical may now satisfy a previously
+  unresolvable specifier.
+- `VerterHost::cache_positive_import_route_result` is the **single
+  positive-only point producer** for `DerivedRawState.import_routes`.
+  Positive resolutions stay valid until the owner's source content
+  changes; they do not need a generation tag and must NOT touch the
+  sidecar.
+- `VerterHost::configure_projects` and
+  `VerterHost::upsert_via_scheduler_with_options` may `.clear()` both
+  fields in lockstep. Leaving the sidecar populated after either reset
+  would extend a stale `content_generation` stamp into the next
+  admission cycle.
+
+The integration guard at
+`crates/verter_session/tests/import_route_writer_guard.rs` enforces
+both halves of the rule statically: no direct `import_routes`
+mutation outside the three named writers, and no known-miss sidecar
+admission outside `set_import_dependencies`.
+
 ### Cache identity & validation
 
 **R5.** Caches divide into two families:

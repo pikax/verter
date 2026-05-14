@@ -96,7 +96,7 @@ impl VerterHost {
                     },
                 )
                 .map(|resolution| {
-                    self.cache_import_route_result(
+                    self.cache_positive_import_route_result(
                         canonical_id,
                         &request.specifier,
                         &resolution.source_id,
@@ -120,7 +120,7 @@ impl VerterHost {
                     },
                 )
                 .inspect(|resolution| {
-                    self.cache_import_route_result(
+                    self.cache_positive_import_route_result(
                         canonical_id,
                         &dep.import_source,
                         &resolution.source_id,
@@ -137,7 +137,7 @@ impl VerterHost {
                             },
                         )
                         .inspect(|resolution| {
-                            self.cache_import_route_result(
+                            self.cache_positive_import_route_result(
                                 canonical_id,
                                 &dep.import_source,
                                 &resolution.source_id,
@@ -232,7 +232,7 @@ impl VerterHost {
                     )
                 });
             if let Some(resolution) = resolved {
-                self.cache_import_route_result(
+                self.cache_positive_import_route_result(
                     owner_canonical,
                     &dep.import_source,
                     &resolution.source_id,
@@ -261,7 +261,7 @@ impl VerterHost {
                     kind,
                 },
             ) {
-                self.cache_import_route_result(
+                self.cache_positive_import_route_result(
                     owner_canonical,
                     import.source.as_str(),
                     &resolution.source_id,

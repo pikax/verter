@@ -71,6 +71,20 @@ Host-backed type/import resolution must treat the canonical file ID as the cache
 - If a later batch requests `MetaB` and `MetaC` again with no file changes, that later batch must reuse the warm cached state for both the owner files and `type.ts`.
 - If `type.ts` changes between batches, `MetaB` and `MetaC` may keep their own-file caches, while `type.ts` is processed exactly once for the new hash and then shared by both later requests.
 
+### Import-Route Admission Ownership
+
+`DerivedRawState.import_routes` and the `DerivedRawState.import_routes_known_miss_recorded_at_generation` sidecar split into two admission modes with distinct validity models:
+
+- **Complete caller-supplied snapshot + known-miss sidecar admission** — `VerterHost::set_import_dependencies` is the **single producer** that admits both the full route snapshot AND the per-specifier `content_generation` stamp for known-miss specifiers. A known miss is a specifier with no resolved canonical, no candidates, and no effective target (`import_route_is_known_miss`). The sidecar tag lets the reader detect when a new canonical (which advances workspace `content_generation`) may now satisfy a previously unresolvable specifier.
+- **Positive route point admission** — `VerterHost::cache_positive_import_route_result` is the **single positive-only point producer**. It constructs `DependencyResolution { resolved_canonical_id: Some(...), possible_canonical_ids: vec![...] }` for the supplied `(owner, specifier, resolved)` tuple and must NOT touch the known-miss sidecar. Positive resolutions stay valid until the owner's source content changes; they do not need a generation tag.
+- **Lifecycle reset** — `VerterHost::configure_projects` (project-graph reconfiguration) and `VerterHost::upsert_via_scheduler_with_options` (owner source update) may `.clear()` both `import_routes` and the known-miss sidecar in lockstep. Resetting only the route map would leave a stale `content_generation` stamp in the sidecar that would suppress re-resolution after the next admission.
+
+Architectural rules carried by the writer guard at `crates/verter_session/tests/import_route_writer_guard.rs`:
+
+- Any new positive-route discovery must call `cache_positive_import_route_result`. A direct `derived_raw_cache().entry(...).import_routes.insert(...)` outside that helper, the snapshot writer, and the lifecycle reset methods is rejected.
+- The known-miss generation sidecar is admission-only inside `set_import_dependencies`. Any sidecar `insert`, `extend`, `retain`, or `remove` outside that writer is rejected.
+- Routing positive-only point inserts through `set_import_dependencies` is wrong: it would synthesize a full snapshot, re-stamp previously admitted known misses at the current `content_generation`, and extend stale negative answers that should have re-resolved.
+
 ## IndexedReady Target Contract
 
 Architectural target for the project-global cache cutover:

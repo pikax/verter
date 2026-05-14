@@ -360,10 +360,22 @@ impl VerterHost {
         projects: Vec<verter_semantic::analysis::project_resolver::IdeProjectConfig>,
     ) {
         self.ws().configure_resolver(projects);
-        // Project-config change drops resolution-derived state: import_routes
-        // (DerivedRawState) and dependencies (DependencyState).
+        // Project-config change drops resolution-derived state:
+        // `import_routes` (DerivedRawState) and `dependencies`
+        // (DependencyState). The `import_routes_known_miss_recorded_at_generation`
+        // sidecar is cleared in lockstep so a stale `content_generation`
+        // stamp does not survive a project-graph reset: leaving it
+        // behind would suppress re-resolution after the next admission
+        // because the reader's `import_route_is_known_miss` predicate
+        // would still consult a generation tag from the previous
+        // project graph. Symmetric with
+        // [`Self::upsert_via_scheduler_with_options`], which clears
+        // both fields when owner source content advances.
         for mut entry in self.derived_raw_cache().iter_mut() {
             entry.import_routes.clear();
+            entry
+                .import_routes_known_miss_recorded_at_generation
+                .clear();
         }
         for mut entry in self.dependency_cache().iter_mut() {
             entry.dependencies.clear();
