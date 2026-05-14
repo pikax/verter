@@ -1725,6 +1725,22 @@ impl SemanticGraphStore {
             if !state.aborted {
                 state.completed = Some(result.clone());
                 state.dep_signature = Some(dep_signature.clone());
+                // Publish the same fact signature `warm_publish_one`
+                // records onto the memo entry so cross-thread joiners
+                // can bubble the winner's observations into their own
+                // active tracer stack. Derived via
+                // `fact_signature_from_fence` — the same helper
+                // `warm_publish_one` uses — so winner and joiner agree
+                // on the identical fact set. Only published on the
+                // non-aborted path; the abort/retry branch above (which
+                // executes `continue`) deliberately bypasses this so
+                // joiners awakened by an abort sweep re-enter dispatch
+                // rather than bubbling a stale signature.
+                state.fact_dep_signature = Some(
+                    crate::component_meta_materialize::fact_signature_from_fence(
+                        dep_signature.as_ref(),
+                    ),
+                );
                 state.walker_diagnostics = Some(std::sync::Arc::clone(&walker_diagnostics));
             }
         }
