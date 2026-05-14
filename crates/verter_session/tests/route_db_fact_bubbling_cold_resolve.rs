@@ -65,7 +65,6 @@ fn resolved_route() -> RouteResult {
 }
 
 #[test]
-#[ignore = "block-1.d RED — closed by same-block implementation"]
 fn cold_resolve_advances_cold_counter_and_bubbles_admitted_facts() {
     let host = make_host();
     let db = RouteDb::new();

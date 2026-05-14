@@ -78,7 +78,6 @@ fn foreign_route() -> RouteResult {
 }
 
 #[test]
-#[ignore = "block-1.d RED — closed by same-block implementation"]
 fn unrelated_route_eviction_keeps_original_warm() {
     let host = make_host();
     let db = RouteDb::new();

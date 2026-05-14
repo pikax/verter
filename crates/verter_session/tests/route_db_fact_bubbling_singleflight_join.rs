@@ -80,7 +80,6 @@ fn resolved_route() -> RouteResult {
 }
 
 #[test]
-#[ignore = "block-1.d RED — closed by same-block implementation"]
 fn follower_bubbles_leader_facts_and_advances_coalesced_counter() {
     let db = Arc::new(RouteDb::new());
 
