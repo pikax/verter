@@ -23,7 +23,6 @@ fn shared_fact() -> FactVersionRef {
 }
 
 #[test]
-#[ignore = "block-0 RED — closed by same-block implementation"]
 fn fan_out_reaches_all_three_levels() {
     let host = make_host();
     let fact = shared_fact();
@@ -35,7 +34,7 @@ fn fan_out_reaches_all_three_levels() {
             // Level 3 (innermost)
             let ((), l3_finalise) = install_fact_tracer_for_tests(&host, || {
                 // Fan-out from level 3 — must reach L3, L2, and L1 cells.
-                observe_fan_out_borrowed_for_tests(&[fact.clone()]);
+                observe_fan_out_borrowed_for_tests(std::slice::from_ref(&fact));
             });
             l3_finalise
         });

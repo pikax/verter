@@ -23,7 +23,6 @@ fn winner_fact() -> FactVersionRef {
 }
 
 #[test]
-#[ignore = "block-0 RED — closed by same-block implementation"]
 fn joiner_thread_receives_winner_fact_dep_signature() {
     // Thread A: simulates the "winner" cold-compute. Installs a tracer, records
     // a fact, and the test collects the finalised signature.
@@ -78,7 +77,6 @@ fn joiner_thread_receives_winner_fact_dep_signature() {
 }
 
 #[test]
-#[ignore = "block-0 RED — closed by same-block implementation"]
 fn each_thread_has_independent_tracer_stack() {
     // Two threads each install their own tracer and observe different facts.
     // The tracer stacks must be thread-local: thread A's facts must NOT appear

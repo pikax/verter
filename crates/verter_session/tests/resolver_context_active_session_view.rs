@@ -19,7 +19,6 @@ fn make_host() -> VerterHost {
 }
 
 #[test]
-#[ignore = "block-0 RED — closed by same-block implementation"]
 fn verter_host_active_session_view_default_is_none() {
     let host = make_host();
 
@@ -32,7 +31,6 @@ fn verter_host_active_session_view_default_is_none() {
 }
 
 #[test]
-#[ignore = "block-0 RED — closed by same-block implementation"]
 fn active_session_view_default_does_not_panic() {
     // Must not panic — the default impl simply returns None.
     let result = std::panic::catch_unwind(|| {
@@ -44,7 +42,6 @@ fn active_session_view_default_does_not_panic() {
 }
 
 #[test]
-#[ignore = "block-0 RED — closed by same-block implementation"]
 fn active_session_view_called_repeatedly_is_stable() {
     let host = make_host();
 

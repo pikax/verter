@@ -17,7 +17,6 @@ fn make_dep_sig(entries: Vec<(&str, DepVersion)>) -> DepSignature {
 }
 
 #[test]
-#[ignore = "block-0 RED — closed by same-block implementation"]
 fn whole_hash_converts_to_file_whole_hash() {
     let hash = [7u8; 16];
     let sig = make_dep_sig(vec![("src/foo.ts", DepVersion::WholeHash(hash))]);
@@ -40,7 +39,6 @@ fn whole_hash_converts_to_file_whole_hash() {
 }
 
 #[test]
-#[ignore = "block-0 RED — closed by same-block implementation"]
 fn route_generation_is_dropped() {
     let sig = make_dep_sig(vec![
         ("a.ts", DepVersion::RouteGeneration(42)),
@@ -66,7 +64,6 @@ fn route_generation_is_dropped() {
 }
 
 #[test]
-#[ignore = "block-0 RED — closed by same-block implementation"]
 fn project_generation_is_dropped() {
     let sig = make_dep_sig(vec![("x.ts", DepVersion::ProjectGeneration(99))]);
 
@@ -79,7 +76,6 @@ fn project_generation_is_dropped() {
 }
 
 #[test]
-#[ignore = "block-0 RED — closed by same-block implementation"]
 fn empty_dep_sig_produces_empty_result() {
     let sig: DepSignature = Arc::from(vec![]);
     let result = dep_signature_to_fact_signature_for_tests(&sig);
@@ -90,7 +86,6 @@ fn empty_dep_sig_produces_empty_result() {
 }
 
 #[test]
-#[ignore = "block-0 RED — closed by same-block implementation"]
 fn multiple_whole_hashes_all_convert() {
     let entries: Vec<(&str, DepVersion)> = (0u8..5)
         .map(|i| {

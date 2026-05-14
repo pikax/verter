@@ -27,7 +27,6 @@ fn resolved_route() -> RouteResult {
 }
 
 #[test]
-#[ignore = "block-0 RED — closed by same-block implementation"]
 fn warm_hit_bubbles_facts_into_active_tracer() {
     let host = make_host();
     let db = RouteDb::new();
@@ -63,7 +62,6 @@ fn warm_hit_bubbles_facts_into_active_tracer() {
 }
 
 #[test]
-#[ignore = "block-0 RED — closed by same-block implementation"]
 fn cold_compute_bubbles_facts_after_resolve() {
     let host = make_host();
     let db = RouteDb::new();
@@ -91,7 +89,6 @@ fn cold_compute_bubbles_facts_after_resolve() {
 }
 
 #[test]
-#[ignore = "block-0 RED — closed by same-block implementation"]
 fn cold_miss_returns_none_and_tracer_empty() {
     let host = make_host();
     let db = RouteDb::new();
@@ -116,7 +113,6 @@ fn cold_miss_returns_none_and_tracer_empty() {
 }
 
 #[test]
-#[ignore = "block-0 RED — closed by same-block implementation"]
 fn no_active_tracer_warm_hit_still_returns_value() {
     let db = RouteDb::new();
     let view = PermissiveStoreView;

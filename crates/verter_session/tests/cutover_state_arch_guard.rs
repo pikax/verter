@@ -24,7 +24,6 @@ fn repo_root() -> PathBuf {
 }
 
 #[test]
-#[ignore = "block-0 RED — closed by same-block implementation"]
 fn cutover_state_active_block_is_zero() {
     let state_path = repo_root().join(".cutover-state");
     assert!(
@@ -55,7 +54,6 @@ fn cutover_state_active_block_is_zero() {
 }
 
 #[test]
-#[ignore = "block-0 RED — closed by same-block implementation"]
 fn cutover_state_has_expected_schema_comment() {
     let state_path = repo_root().join(".cutover-state");
     let content =
@@ -73,7 +71,6 @@ fn cutover_state_has_expected_schema_comment() {
 }
 
 #[test]
-#[ignore = "block-0 RED — closed by same-block implementation"]
 fn active_block_governs_accepted_red_tokens() {
     // When active_block = "0", only `block-0 RED` ignore annotations are
     // expected to appear in the test suite. This test verifies the invariant

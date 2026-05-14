@@ -267,13 +267,17 @@ fn nested_with_fact_tracer_scopes_panic() {
     let (inner_read, outer_set) = host.with_fact_tracer(|| {
         // Observe into the outer scope via fan-out (writes to all
         // active cells — just the outer cell at this point).
-        verter_session::for_tests::observe_fan_out_borrowed_for_tests(&[outer_fact.clone()]);
+        verter_session::for_tests::observe_fan_out_borrowed_for_tests(std::slice::from_ref(
+            &outer_fact,
+        ));
 
         // Inner scope pushes a second cell onto the stack.
         let ((), inner_set) = host.with_fact_tracer(|| {
             // Fan-out from inside the inner scope delivers the observation
             // to BOTH the inner cell and the outer cell.
-            verter_session::for_tests::observe_fan_out_borrowed_for_tests(&[inner_fact.clone()]);
+            verter_session::for_tests::observe_fan_out_borrowed_for_tests(std::slice::from_ref(
+                &inner_fact,
+            ));
         });
         inner_set
     });

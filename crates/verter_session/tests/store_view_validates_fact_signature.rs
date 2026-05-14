@@ -33,7 +33,6 @@ impl StoreView for RejectAllView {
 }
 
 #[test]
-#[ignore = "block-0 RED — closed by same-block implementation"]
 fn permissive_view_validates_any_signature() {
     let view = PermissiveStoreView;
     let sig: Vec<FactVersionRef> = (0..5).map(test_fact).collect();
@@ -46,7 +45,6 @@ fn permissive_view_validates_any_signature() {
 }
 
 #[test]
-#[ignore = "block-0 RED — closed by same-block implementation"]
 fn permissive_view_validates_empty_signature() {
     let view = PermissiveStoreView;
     // Empty slice: trivially true.
@@ -57,7 +55,6 @@ fn permissive_view_validates_empty_signature() {
 }
 
 #[test]
-#[ignore = "block-0 RED — closed by same-block implementation"]
 fn reject_all_view_fails_on_single_fact() {
     let view = RejectAllView;
     let sig = vec![test_fact(99)];
@@ -70,7 +67,6 @@ fn reject_all_view_fails_on_single_fact() {
 }
 
 #[test]
-#[ignore = "block-0 RED — closed by same-block implementation"]
 fn reject_all_view_empty_signature_is_true() {
     let view = RejectAllView;
     // Empty slice always returns true regardless of view (trivially valid).
@@ -81,7 +77,6 @@ fn reject_all_view_empty_signature_is_true() {
 }
 
 #[test]
-#[ignore = "block-0 RED — closed by same-block implementation"]
 fn validates_fact_signature_short_circuits_on_first_failure() {
     // A view that only accepts the first fact and rejects all others.
     struct FirstOnlyView(FactVersionRef);
@@ -104,7 +99,7 @@ fn validates_fact_signature_short_circuits_on_first_failure() {
     let view = FirstOnlyView(first.clone());
 
     // Signature with only the first fact: should pass.
-    assert!(view.validates_fact_signature(&[first.clone()]));
+    assert!(view.validates_fact_signature(std::slice::from_ref(&first)));
     // Signature with first + second: second fails, whole sig fails.
     assert!(!view.validates_fact_signature(&[first, second]));
 }

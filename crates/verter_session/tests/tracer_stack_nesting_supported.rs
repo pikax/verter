@@ -23,7 +23,6 @@ fn test_fact(n: u8) -> FactVersionRef {
 }
 
 #[test]
-#[ignore = "block-0 RED — closed by same-block implementation"]
 fn tracer_stack_nesting_outer_and_inner_both_non_empty() {
     let host = make_host();
 
@@ -33,13 +32,13 @@ fn tracer_stack_nesting_outer_and_inner_both_non_empty() {
     // Install outer tracer scope.
     let (inner_result, outer_finalise) = install_fact_tracer_for_tests(&host, || {
         // Observe one fact in the outer scope before entering the inner scope.
-        observe_fan_out_borrowed_for_tests(&[outer_fact.clone()]);
+        observe_fan_out_borrowed_for_tests(std::slice::from_ref(&outer_fact));
 
         // Install nested inner scope — must NOT panic on the new stack-based impl.
         let ((), inner_finalise) = install_fact_tracer_for_tests(&host, || {
             // Observe the inner fact; it should land in both the inner and outer cells
             // via fan-out.
-            observe_fan_out_borrowed_for_tests(&[inner_fact.clone()]);
+            observe_fan_out_borrowed_for_tests(std::slice::from_ref(&inner_fact));
         });
 
         // Inner finalise must be Ok with exactly the inner fact (plus outer_fact

@@ -18,7 +18,6 @@ fn make_fact() -> FactVersionRef {
 }
 
 #[test]
-#[ignore = "block-0 RED — closed by same-block implementation"]
 fn get_route_with_facts_cold_miss_returns_none() {
     let db = RouteDb::new();
     let view = PermissiveStoreView;
@@ -29,7 +28,6 @@ fn get_route_with_facts_cold_miss_returns_none() {
 }
 
 #[test]
-#[ignore = "block-0 RED — closed by same-block implementation"]
 fn get_route_with_facts_warm_hit_returns_value_and_facts() {
     let db = RouteDb::new();
     let view = PermissiveStoreView;
@@ -58,7 +56,6 @@ fn get_route_with_facts_warm_hit_returns_value_and_facts() {
 }
 
 #[test]
-#[ignore = "block-0 RED — closed by same-block implementation"]
 fn get_route_with_facts_different_key_still_misses() {
     let db = RouteDb::new();
     let view = PermissiveStoreView;

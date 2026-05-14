@@ -31,7 +31,6 @@ fn make_fact(label: &str) -> FactVersionRef {
 }
 
 #[test]
-#[ignore = "block-0 RED — closed by same-block implementation"]
 fn reentrant_observe_does_not_panic_and_both_signatures_non_empty() {
     // The test must NOT panic with BorrowMutError.
     let result = std::panic::catch_unwind(|| {
@@ -49,11 +48,11 @@ fn reentrant_observe_does_not_panic_and_both_signatures_non_empty() {
                 // This fan-out call touches the RefCell while the outer scope
                 // is also registered — the snapshot-before-iterate design must
                 // allow this without a BorrowMutError.
-                observe_fan_out_borrowed_for_tests(&[fact_b.clone()]);
+                observe_fan_out_borrowed_for_tests(std::slice::from_ref(&fact_b));
             });
 
             // Also observe in the outer scope after the inner scope closes.
-            observe_fan_out_borrowed_for_tests(&[fact_a.clone()]);
+            observe_fan_out_borrowed_for_tests(std::slice::from_ref(&fact_a));
             inner_finalise
         });
 
@@ -79,7 +78,6 @@ fn reentrant_observe_does_not_panic_and_both_signatures_non_empty() {
 }
 
 #[test]
-#[ignore = "block-0 RED — closed by same-block implementation"]
 fn observe_fan_out_no_active_tracers_is_noop() {
     // With no tracer installed, fan-out must be a no-op (no panic, no side effects).
     let fact = make_fact("no_tracer_fact");

@@ -23,7 +23,6 @@ fn sig_fact(n: u8) -> FactVersionRef {
 }
 
 #[test]
-#[ignore = "block-0 RED — closed by same-block implementation"]
 fn bubble_fact_signature_reaches_all_three_levels() {
     let host = make_host();
 
@@ -37,7 +36,7 @@ fn bubble_fact_signature_reaches_all_three_levels() {
             let ((), l3_finalise) = install_fact_tracer_for_tests(&host, || {
                 // This call simulates what `bubble_fact_signature` does:
                 // fan-out the signature to ALL active tracers.
-                observe_fan_out_borrowed_for_tests(&[shared_l3.clone()]);
+                observe_fan_out_borrowed_for_tests(std::slice::from_ref(&shared_l3));
             });
             l3_finalise
         });
@@ -65,7 +64,6 @@ fn bubble_fact_signature_reaches_all_three_levels() {
 }
 
 #[test]
-#[ignore = "block-0 RED — closed by same-block implementation"]
 fn observe_fan_out_borrowed_with_multiple_facts() {
     let host = make_host();
 
