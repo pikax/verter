@@ -290,6 +290,16 @@ pub mod for_tests {
     pub fn read_signature_overflow_at_install() -> u64 {
         crate::fact_signature_helpers::read_signature_overflow_at_install()
     }
+
+    /// Returns `true` iff `host.active_session_view()` returns `None`.
+    ///
+    /// This shim is needed because `ResolverContext` is sealed — integration
+    /// tests cannot call the trait method directly. The shim calls through the
+    /// sealed trait on the concrete `VerterHost` impl.
+    pub fn active_session_view_is_none_for_tests(host: &crate::VerterHost) -> bool {
+        use crate::resolver_core::ResolverContext;
+        host.active_session_view().is_none()
+    }
 }
 
 pub use host_audit_runtime::{
