@@ -910,13 +910,22 @@ impl VerterHost {
         // cached_fallthrough lives on DerivedRawState (D48 split).
         {
             if self.effective_file_state(canonical_id, None).is_some() {
+                // R3/R26/R28: lift the resolution's observed fact set
+                // into an `Arc<[FactVersionRef]>` so warm-hit reads
+                // clone a cheap handle.
+                let fact_versions: Arc<[crate::resolver_core::FactVersionRef]> =
+                    Arc::from(resolution.fact_versions.clone().into_boxed_slice());
+                // Fan-out to outer active tracers so the mirrored
+                // fallthrough entry participates in transitive fact
+                // bubbling. Empty signatures are a no-op.
+                crate::fact_signature_helpers::observe_fact_signature(&fact_versions);
                 let mut derived_ref = self
                     .derived_raw_cache()
                     .entry(canonical_id.to_string())
                     .or_default();
                 derived_ref.value_mut().cached_fallthrough =
                     Some(crate::types::CachedFallthroughEntry {
-                        fact_versions: resolution.fact_versions.clone(),
+                        fact_versions,
                         generic_root_propagation: self.config.generic_root_propagation,
                         resolution,
                     });

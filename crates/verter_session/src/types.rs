@@ -1694,13 +1694,21 @@ pub(crate) struct ResolvedTypeCacheEntry {
 /// produced the cached state.
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedComponentMetaCacheEntry {
-    pub fact_versions: Vec<crate::resolver_core::FactVersionRef>,
+    /// Observed cross-file fact signature captured at cold-compute
+    /// publish time. Stored as `Arc<[FactVersionRef]>` so warm-hit
+    /// validation clones the handle without copying the slice
+    /// (R3/R26/R28 fact-validation substrate).
+    pub fact_versions: Arc<[crate::resolver_core::FactVersionRef]>,
     pub state: Arc<crate::meta_resolve::ResolvedComponentMetaState>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct CachedFallthroughEntry {
-    pub fact_versions: Vec<crate::resolver_core::FactVersionRef>,
+    /// Observed cross-file fact signature captured at cold-compute
+    /// publish time. Stored as `Arc<[FactVersionRef]>` so warm-hit
+    /// validation clones the handle without copying the slice
+    /// (R3/R26/R28 fact-validation substrate).
+    pub fact_versions: Arc<[crate::resolver_core::FactVersionRef]>,
     pub generic_root_propagation: bool,
     pub resolution: Arc<FallthroughResolution>,
 }
@@ -1708,7 +1716,11 @@ pub(crate) struct CachedFallthroughEntry {
 /// Cached encoded protobuf payload for a component-meta query.
 #[derive(Debug, Clone)]
 pub(crate) struct CachedMetaPayload {
-    pub fact_versions: Vec<crate::resolver_core::FactVersionRef>,
+    /// Observed cross-file fact signature captured at cold-compute
+    /// publish time. Stored as `Arc<[FactVersionRef]>` so warm-hit
+    /// validation clones the handle without copying the slice
+    /// (R3/R26/R28 fact-validation substrate).
+    pub fact_versions: Arc<[crate::resolver_core::FactVersionRef]>,
     pub payload: Vec<u8>,
 }
 

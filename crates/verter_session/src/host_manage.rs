@@ -932,11 +932,12 @@ impl FallthroughRequestHost for VerterHost {
                 // cached_fallthrough lives on DerivedRawState (D48 split).
                 if let Some(cc) = self.derived_raw_cache().get(canonical_id) {
                     if let Some(ref cached) = cc.cached_fallthrough {
+                        // R3/R26/R28 fast-path: dispatch via
+                        // `StoreView::validates_fact_signature` so
+                        // per-domain validators can short-circuit on
+                        // the first mismatch.
                         if cached.generic_root_propagation == self.config.generic_root_propagation
-                            && cached
-                                .fact_versions
-                                .iter()
-                                .all(|fact| store_view.validates(fact))
+                            && store_view.validates_fact_signature(&cached.fact_versions)
                         {
                             self.mirror_cached_fallthrough_arc(
                                 canonical_id,

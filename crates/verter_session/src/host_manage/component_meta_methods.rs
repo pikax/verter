@@ -2792,11 +2792,17 @@ impl VerterHost {
         // a base reader (view_fingerprint == 0) cannot observe an
         // overlay-derived entry (Codex P1.3, fix-agent P0.1).
         // cached_resolved_meta lives on DerivedRawState (D48 split).
+        use crate::resolver_core::StoreView;
         let entry = self.derived_raw_cache().get(canonical)?;
         let cached = entry.cached_resolved_meta.get(&(mode, view_fingerprint))?;
         let view = self.resolver_store_view();
-        let invalid_details = view.invalid_fact_details(&cached.fact_versions, 6);
-        if !invalid_details.is_empty() {
+        // R3/R26/R28 fast-path: `StoreView::validates_fact_signature`
+        // short-circuits on the first mismatch and dispatches per
+        // domain. Re-emit the structured trace via
+        // `invalid_fact_details` only when validation fails so the
+        // observability path still surfaces the offending facts.
+        if !view.validates_fact_signature(&cached.fact_versions) {
+            let invalid_details = view.invalid_fact_details(&cached.fact_versions, 6);
             component_meta_trace_custom!(
                 "try_get_cached_component_meta_invalid",
                 format!(
@@ -2818,7 +2824,7 @@ impl VerterHost {
             self.resolver_runtime().component_meta.insert_arc_with_kind(
                 cache_key,
                 cached.state.clone(),
-                cached.fact_versions.clone(),
+                cached.fact_versions.to_vec(),
                 "component_meta.results",
             );
         }
@@ -2896,8 +2902,19 @@ impl VerterHost {
         view_fingerprint: u64,
         state: Arc<ResolvedComponentMetaState>,
     ) {
+        // R3/R26/R28: capture the resolved state's observed fact set
+        // as an `Arc<[FactVersionRef]>` so the wrapper's warm-hit
+        // validator can clone the handle without copying the slice.
+        let fact_versions: Arc<[crate::resolver_core::FactVersionRef]> =
+            Arc::from(state.fact_versions.clone().into_boxed_slice());
+        // Fan-out to any active outer fact-tracer scope so transitive
+        // observations bubble through the mirror site. The outer
+        // cold-meta tracer (e.g. `with_fact_tracer` at
+        // `component_meta_entry.rs`) captures the union for downstream
+        // admission to higher-level caches.
+        crate::fact_signature_helpers::observe_fact_signature(&fact_versions);
         let cached = crate::types::ResolvedComponentMetaCacheEntry {
-            fact_versions: state.fact_versions.clone(),
+            fact_versions,
             state,
         };
 
@@ -2932,7 +2949,11 @@ impl VerterHost {
         let entry = self.derived_raw_cache().get(canonical)?;
         let cached = entry.cached_meta_payload.as_ref()?;
         let view = self.resolver_store_view();
-        if cached.fact_versions.iter().all(|fact| view.validates(fact)) {
+        // R3/R26/R28 fast-path: dispatch through
+        // `StoreView::validates_fact_signature` so per-domain validators
+        // can short-circuit on the first mismatch. Empty signatures
+        // trivially validate per the default-impl contract.
+        if view.validates_fact_signature(&cached.fact_versions) {
             return Some(cached.payload.clone());
         }
         None
@@ -2945,8 +2966,17 @@ impl VerterHost {
         fact_versions: &[crate::resolver_core::FactVersionRef],
         payload: Vec<u8>,
     ) {
+        // R3/R26/R28: stash the observed fact signature as an
+        // `Arc<[FactVersionRef]>` so warm-hit validation clones a
+        // cheap handle.
+        let fact_versions: Arc<[crate::resolver_core::FactVersionRef]> =
+            Arc::from(fact_versions.to_vec().into_boxed_slice());
+        // Fan-out to outer active tracers so the encoded-payload
+        // mirror participates in transitive fact bubbling. Empty
+        // signatures are a no-op per `observe_fact_signature`.
+        crate::fact_signature_helpers::observe_fact_signature(&fact_versions);
         let cached = crate::types::CachedMetaPayload {
-            fact_versions: fact_versions.to_vec(),
+            fact_versions,
             payload,
         };
 

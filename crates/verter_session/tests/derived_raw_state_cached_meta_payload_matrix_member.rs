@@ -1,0 +1,61 @@
+//! Block 1A matrix slice — `DerivedRawState.cached_meta_payload`
+//! must carry `FactKey::Member` facts in its
+//! `fact_versions: Arc<[FactVersionRef]>` signature so warm-hit
+//! validation invalidates when a referenced member's BODY
+//! fingerprint changes on a dep (path-precise per R28).
+//!
+//! Pre-1A: wrapper holds `Vec<FactVersionRef>` and the source-grep
+//! arch guard FAILS. Post-1A: substrate is `Arc<[FactVersionRef]>`
+//! and a `Member` fact-kind validates through the per-domain fast-
+//! path.
+
+use std::sync::Arc;
+use std::{fs, path};
+
+use verter_semantic::facts::registry::{InternedName, SymbolSpace};
+use verter_semantic::facts::{FactKey, FactLane};
+use verter_session::resolver_core::{FactVersionRef, ParseFactRef, PermissiveStoreView, StoreView};
+
+fn read_session_src(rel: &str) -> String {
+    let p = path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join(rel);
+    fs::read_to_string(&p).unwrap_or_else(|err| panic!("read {}: {err}", p.display()))
+}
+
+#[test]
+#[ignore = "block-1.a RED — closed by same-block implementation"]
+fn cached_meta_payload_signature_carries_member() {
+    let src = read_session_src("types.rs");
+    let needle = "pub(crate) struct CachedMetaPayload {";
+    let idx = src
+        .find(needle)
+        .unwrap_or_else(|| panic!("expected `{needle}` in types.rs"));
+    let end = src[idx..]
+        .find("\n}")
+        .expect("CachedMetaPayload struct close");
+    let window = &src[idx..idx + end];
+    assert!(
+        window.contains("fact_versions: Arc<[crate::resolver_core::FactVersionRef]>"),
+        "Block 1A matrix slice: CachedMetaPayload must carry \
+         `fact_versions: Arc<[FactVersionRef]>` after the Block 1A migration. \
+         Window:\n{window}"
+    );
+
+    let member_fact = FactVersionRef::Parse(ParseFactRef {
+        canonical_id: "/src/types.ts".to_owned(),
+        key: FactKey::Member {
+            exporter: InternedName::from("Foo"),
+            name: InternedName::from("a"),
+            space: SymbolSpace::Type,
+        },
+        lane: FactLane::Semantic,
+        expected_hash: [9u8; 16],
+    });
+    let signature: Arc<[FactVersionRef]> = Arc::from(vec![member_fact].into_boxed_slice());
+    let view = PermissiveStoreView;
+    assert!(
+        view.validates_fact_signature(&signature),
+        "permissive view must accept a Member fact in the Arc-stored signature"
+    );
+}
