@@ -9,9 +9,12 @@ use verter_audit::{
     RequestTimingAudit, WorkspaceOp,
 };
 
+use verter_scheduler::invalidation::Hash16;
+
 use crate::ambient_lib::{AmbientLibError, AmbientLibSpec, AmbientLibsByProject, AmbientSymbolHit};
 use crate::exact_resolution::DependencySnapshotView;
 use crate::project_key::ProjectStableKey;
+use crate::published_state::ProjectEnvHashArray;
 use crate::types::{
     ExactResolution, ExactResolutionResult, FileKind, PackageManifest, ParsedEdge,
     ProjectOwnership, ResolutionContext, ResolvePhase, ResolveRequestKind, ResolveResult,
@@ -321,6 +324,19 @@ pub trait WorkspaceRead: Send + Sync {
     fn ambient_libs_view(&self) -> Arc<AmbientLibsByProject> {
         Arc::new(AmbientLibsByProject::default())
     }
+
+    /// Currently-published workspace root, if any.
+    ///
+    /// Returns `Some` once `Engine::new()`'s bootstrap publication runs;
+    /// returns `None` for adapter backends that do not maintain a
+    /// published snapshot (e.g., test stubs). Session-side consumers
+    /// read `published_root()` to map canonical ids to owning projects
+    /// via `snapshot.owners_for_file(canonical).first()`.
+    ///
+    /// Default: `None`.
+    fn published_root(&self) -> Option<Arc<crate::published_state::PublishedRoot>> {
+        None
+    }
 }
 
 /// Mutating view of the workspace authority — extends [`WorkspaceRead`]
@@ -539,6 +555,67 @@ pub trait WorkspaceAccess: WorkspaceRead {
     /// `HostFenceValidator` invalidates downstream caches.
     /// **R6: no default; every workspace impl must override.**
     fn record_ambient_dependency(&self, consumer: &str, virtual_id: &str);
+
+    // ── Project-scoped env-hash API ──
+    //
+    // Five-dimensional env-hash composition (R21) is keyed by `ProjectId`,
+    // not by canonical id, so workspaces with overlapping projects can
+    // hold distinct cache identities for a file claimed by multiple
+    // projects. Session-side queries map canonical → ProjectId via
+    // `WorkspaceSnapshot::owners_for_file(canonical).first()`.
+    //
+    // The tables live inside the published `PublishedRoot` snapshot (see
+    // `crate::published_state::PublishedRoot::env_hashes_by_project` and
+    // `project_identity_hashes`) so the snapshot and its env-hash tables
+    // swap atomically on `ArcSwapOption<PublishedRoot>` republish. Lookup
+    // is `O(1)` map access; the tables are computed ONCE at snapshot-build
+    // time in `engine.rs::rebuild_and_publish()`.
+
+    /// Env-hash array `[parse, resolve, type_, lib]` for a published
+    /// project.
+    ///
+    /// Returns `None` when `project_id` is not present in the currently
+    /// published snapshot (e.g., dropped on workspace bump, or no snapshot
+    /// has been published yet). Callers fall back to
+    /// [`Self::workspace_default_env_hash_array`] for canonicals with no
+    /// owning project.
+    ///
+    /// Default body returns `None` — concrete workspaces override to read
+    /// from their published snapshot.
+    fn env_hash_array_for_project(&self, _project_id: ProjectId) -> Option<ProjectEnvHashArray> {
+        None
+    }
+
+    /// Project-identity hash for a published project.
+    ///
+    /// Session callers wrap the returned `Hash16` as
+    /// `verter_session::ProjectIdentity`. Returns `None` when the project
+    /// is not present in the currently published snapshot.
+    ///
+    /// Default body returns `None` — concrete workspaces override.
+    fn project_identity_hash_for_project(&self, _project_id: ProjectId) -> Option<Hash16> {
+        None
+    }
+
+    /// Workspace-wide default env-hash array for canonicals with no
+    /// owning project (e.g., cross-project sweeps over scratch / ambient
+    /// canonicals).
+    ///
+    /// The default body returns all-zero `Hash16`s; concrete workspaces
+    /// override to mix workspace-config + SDK fingerprint into a stable
+    /// non-zero default. Session-side validators that observe an all-zero
+    /// project identity treat it as "no owning project" rather than
+    /// "default project".
+    fn workspace_default_env_hash_array(&self) -> ProjectEnvHashArray {
+        [[0u8; 16]; 4]
+    }
+
+    /// Workspace-wide default project-identity hash for canonicals with
+    /// no owning project. See [`Self::workspace_default_env_hash_array`]
+    /// for the rationale on the all-zero default.
+    fn workspace_default_project_identity_hash(&self) -> Hash16 {
+        [0u8; 16]
+    }
 
     // ── Audit producer ──
 

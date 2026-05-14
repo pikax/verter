@@ -294,7 +294,7 @@ fn build_resolver_from_projects(projects: &[OwnershipProject]) -> ProjectResolve
 }
 
 /// Convert StaticMembershipSpec back to ProjectMembership for the resolver.
-fn spec_to_membership(spec: &StaticMembershipSpec) -> ProjectMembership {
+pub(crate) fn spec_to_membership(spec: &StaticMembershipSpec) -> ProjectMembership {
     if spec.files.is_empty() && spec.include.is_empty() && spec.exclude.is_empty() {
         return ProjectMembership::MatchAll;
     }

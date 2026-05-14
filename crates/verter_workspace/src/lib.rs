@@ -140,7 +140,7 @@ pub use normalized_glob::NormalizedGlob;
 pub use overlay::OverlayStore;
 pub use package_index::PackageIndex;
 pub use project_key::ProjectStableKey;
-pub use published_state::PublishedRoot;
+pub use published_state::{ProjectEnvHashArray, PublishedRoot};
 pub use resolver::{
     IdeProjectCompilerOptions, IdeProjectConfig, NativeProjectResolver, ProjectMembership,
     ProjectResolver, WorkspaceAlias,

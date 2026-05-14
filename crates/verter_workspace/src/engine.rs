@@ -6,21 +6,27 @@ use arc_swap::{ArcSwap, ArcSwapOption};
 use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
 
+use verter_scheduler::invalidation::Hash16;
+
 use crate::ambient_lib::AmbientLibsByProject;
 use crate::changes::{ChangeResult, WorkspaceChange};
 use crate::dir_index::DirIndex;
+use crate::env_hash::EnvHashInputs;
 use crate::exact_resolution::{DependencySnapshotView, EdgeStore};
 use crate::memory::MemorySnapshot;
 use crate::overlay::OverlayStore;
 use crate::package_index::PackageIndex;
 use crate::project_graph::ProjectGraph;
-use crate::published_state::PublishedRoot;
+use crate::published_state::{ProjectEnvHashArray, PublishedRoot};
+use crate::resolver::IdeProjectConfig;
 use crate::traits::WorkspaceResourceSnapshot;
 use crate::types::{
     ExactResolution, ExactResolutionResult, ResolvePhase, ResolveRequestKind, ResolveResult,
     VfsProvenance,
 };
-use crate::workspace_snapshot::{SnapshotGeneration, WorkspaceSnapshot};
+use crate::workspace_snapshot::{
+    OwnershipProject, ProjectId, ProjectPayload, SnapshotGeneration, WorkspaceSnapshot,
+};
 
 /// Path-segment marker used by the package classification helpers to
 /// detect node_modules-rooted paths.
@@ -213,6 +219,13 @@ impl Engine {
     /// Derives a `WorkspaceSnapshot` + `ProjectResolver` from the current
     /// `project_graph` and atomically publishes them to `published_state`.
     /// Called by `set_project_graph()` and `configure_resolver()`.
+    ///
+    /// **Env-hash composition (project-scoped env-hash API).** Computes per-project
+    /// `[parse, resolve, type_, lib]` env-hash arrays and project-identity
+    /// hashes ONCE here, before publication, so the published snapshot
+    /// carries its env-hash tables atomically. Producer reads from the
+    /// project graph's `compiler_options` and the engine-level resolve
+    /// extensions; consumers look up tables on the published snapshot.
     pub(crate) fn rebuild_and_publish(&self) {
         let graph = self.project_graph.read();
         let resolver = graph.to_project_resolver();
@@ -233,6 +246,11 @@ impl Engine {
 
         drop(graph);
 
+        let env_inputs_resolve_extensions = self.default_resolve_extensions.load_full();
+
+        let (env_hashes_by_project, project_identity_hashes) =
+            compose_env_hash_tables(&projects, &env_inputs_resolve_extensions);
+
         let snapshot = WorkspaceSnapshot {
             projects,
             resolver,
@@ -241,9 +259,11 @@ impl Engine {
 
         self.clear_lazy_resolution_cache();
         self.published_state
-            .store(Some(Arc::new(PublishedRoot::new_vfs_only(Arc::new(
-                snapshot,
-            )))));
+            .store(Some(Arc::new(PublishedRoot::with_env_hash_tables(
+                Arc::new(snapshot),
+                env_hashes_by_project,
+                project_identity_hashes,
+            ))));
     }
 
     pub(crate) fn read_package_manifest(
@@ -909,4 +929,145 @@ impl std::fmt::Debug for Engine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Engine").finish_non_exhaustive()
     }
+}
+
+// ── Env-hash composition for published snapshots (project-scoped env-hash API) ──
+
+/// Stable parser-flag identifiers mixed into every project's
+/// `parse_env_hash` regardless of tsconfig. Today the parser feature
+/// surface is a single fixed identifier; new flags extend this slice in
+/// declaration order without breaking determinism.
+const WORKSPACE_PARSER_FLAGS: &[&str] = &["verter-parser-v1"];
+
+/// Workspace-level ambient corpus fingerprint mixed into every project's
+/// `lib_env_hash`. Replaced with the real ambient-registry fingerprint
+/// once the substrate carries one; for now the constant ensures the
+/// composed lib hash is deterministic and distinguishable from
+/// "no lib data".
+const WORKSPACE_AMBIENT_FINGERPRINT: u64 = 0xC0DE_BABE_0000_0001;
+
+/// Compose per-project `[parse, resolve, type_, lib]` env-hash arrays
+/// and project-identity hashes from the published `OwnershipProject`s.
+///
+/// Producer-side composition: reads `compiler_options` directly from each
+/// `Configured` project payload; for `Fallback` projects, uses
+/// `IdeProjectConfig::new(root, workspace_root, None)` so the resulting
+/// `project_identity` distinguishes fallback identities (a fallback
+/// project at root `/A` is not the same identity as a configured project
+/// at root `/A`).
+///
+/// The `resolve_extensions` slice flows through `EnvHashInputs` so
+/// extension-priority changes invalidate every project's
+/// `resolve_env_hash` (single producer site — engine reads
+/// `default_resolve_extensions` once before iterating projects).
+pub(crate) fn compose_env_hash_tables(
+    projects: &[OwnershipProject],
+    resolve_extensions: &[String],
+) -> (
+    FxHashMap<ProjectId, ProjectEnvHashArray>,
+    FxHashMap<ProjectId, Hash16>,
+) {
+    let extensions_refs: Vec<&str> = resolve_extensions.iter().map(String::as_str).collect();
+    let inputs = EnvHashInputs {
+        parser_flags: WORKSPACE_PARSER_FLAGS,
+        resolve_extensions: &extensions_refs,
+        type_strict: false,
+        type_no_implicit_any: false,
+        lib_names: &[],
+        type_roots: &[],
+        ambient_corpus_fingerprint: WORKSPACE_AMBIENT_FINGERPRINT,
+    };
+
+    let mut env_hashes_by_project: FxHashMap<ProjectId, ProjectEnvHashArray> =
+        FxHashMap::default();
+    env_hashes_by_project.reserve(projects.len());
+    let mut project_identity_hashes: FxHashMap<ProjectId, Hash16> = FxHashMap::default();
+    project_identity_hashes.reserve(projects.len());
+
+    for project in projects {
+        let config = ide_project_config_from_ownership(project);
+        let arr: ProjectEnvHashArray = [
+            config.parse_env_hash(&inputs),
+            config.resolve_env_hash(&inputs),
+            config.type_env_hash(&inputs),
+            config.lib_env_hash(&inputs),
+        ];
+        env_hashes_by_project.insert(project.id, arr);
+        project_identity_hashes.insert(project.id, config.project_identity());
+    }
+
+    (env_hashes_by_project, project_identity_hashes)
+}
+
+/// Project the `IdeProjectConfig` shape from an `OwnershipProject` for
+/// env-hash composition. Configured projects carry their own
+/// compiler_options / references / workspace_aliases / membership;
+/// fallback projects produce an empty config rooted at their own root /
+/// workspace root.
+fn ide_project_config_from_ownership(project: &OwnershipProject) -> IdeProjectConfig {
+    match &project.payload {
+        ProjectPayload::Configured {
+            tsconfig_path,
+            compiler_options,
+            references,
+            workspace_aliases,
+            membership,
+        } => {
+            let mut config = IdeProjectConfig::new(
+                project.root.as_str().to_string(),
+                project.workspace_root.as_str().to_string(),
+                Some(tsconfig_path.as_str().to_string()),
+            );
+            config.compiler_options = compiler_options.clone();
+            config.references = references.iter().map(|r| r.as_str().to_string()).collect();
+            config.workspace_aliases = workspace_aliases.clone();
+            config.membership = crate::snapshot_builder::spec_to_membership(&membership.spec);
+            config
+        }
+        ProjectPayload::Fallback { .. } => IdeProjectConfig::new(
+            project.root.as_str().to_string(),
+            project.workspace_root.as_str().to_string(),
+            None,
+        ),
+    }
+}
+
+/// Workspace-default env-hash array used when a canonical has no owning
+/// project. Composed from the engine's resolve-extension list mixed with
+/// a stable "no project" identity so the default is non-zero and changes
+/// when the workspace-level extension list changes.
+pub(crate) fn workspace_default_env_hash_array_for_engine(
+    engine: &Engine,
+) -> ProjectEnvHashArray {
+    let extensions = engine.default_resolve_extensions.load_full();
+    let extensions_refs: Vec<&str> = extensions.iter().map(String::as_str).collect();
+    let inputs = EnvHashInputs {
+        parser_flags: WORKSPACE_PARSER_FLAGS,
+        resolve_extensions: &extensions_refs,
+        type_strict: false,
+        type_no_implicit_any: false,
+        lib_names: &[],
+        type_roots: &[],
+        ambient_corpus_fingerprint: WORKSPACE_AMBIENT_FINGERPRINT,
+    };
+    let config = IdeProjectConfig::new(String::new(), String::new(), None);
+    [
+        config.parse_env_hash(&inputs),
+        config.resolve_env_hash(&inputs),
+        config.type_env_hash(&inputs),
+        config.lib_env_hash(&inputs),
+    ]
+}
+
+/// Workspace-default project-identity hash for canonicals with no owning
+/// project. See [`workspace_default_env_hash_array_for_engine`] for the
+/// rationale on producing a deterministic non-zero default that depends
+/// on workspace configuration rather than collapsing to all-zero.
+pub(crate) fn workspace_default_project_identity_hash_for_engine(_engine: &Engine) -> Hash16 {
+    // Default project identity carries an empty (workspace_root, root,
+    // tsconfig) tuple — distinguishes "no owning project" from any
+    // published project (which always has a non-empty workspace_root /
+    // root) without colliding across workspaces.
+    let config = IdeProjectConfig::new(String::new(), String::new(), None);
+    config.project_identity()
 }

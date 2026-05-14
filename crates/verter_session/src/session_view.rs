@@ -49,16 +49,13 @@ use crate::VerterHost;
 
 /// Five-way environment-hash carrier (R21).
 ///
-/// Today only `parse_env_hash` is wired through the cache substrate;
-/// the remaining four dimensions are carried by value so that callers
-/// can pass an `EnvHashes` value without further plumbing. Future
-/// cache-key composition consumes these fields directly.
-///
-/// **Default-impl carrier:** `HostView::env_hashes()` returns a
-/// static value derived from
-/// [`LEGACY_PARSE_ENV_HASH`](crate::file_artifact_store::LEGACY_PARSE_ENV_HASH).
-/// The trait surface lets producers plumb real values without
-/// changing the read sites.
+/// Carries `[parse, resolve, type_, lib]` env-hash dimensions plus the
+/// implicit project-identity context (held alongside on the view). The
+/// `Default` impl returns an all-zero bundle and is reserved for test
+/// fixtures + arch guards; production view constructors compose the
+/// bundle from the workspace's published env-hash tables (see
+/// [`crate::VerterHost::host_view_env_hashes`] and
+/// [`crate::VerterHost::host_view_env_hashes_for`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct EnvHashes {
     pub parse_env_hash: Hash16,
@@ -207,21 +204,20 @@ pub struct HostView {
 impl HostView {
     /// Construct a `HostView` over the supplied host.
     ///
-    /// The returned view's `env_hashes()` reports static defaults;
-    /// callers that have real env hashes use
-    /// [`HostView::with_env_hashes`] instead.
+    /// The returned view's `env_hashes()` reports the workspace-default
+    /// env-hash bundle (composed from workspace config); callers that
+    /// have per-project env hashes use [`HostView::with_env_hashes`]
+    /// instead.
     pub fn new(base: Arc<VerterHost>) -> Self {
-        Self {
-            base,
-            env_hashes: EnvHashes::default(),
-        }
+        let env_hashes = base.host_view_env_hashes();
+        Self { base, env_hashes }
     }
 
     /// Construct a `HostView` with explicit env hashes.
     ///
-    /// Used by producers that carry real env hashes from the
-    /// workspace config; callers without one pass
-    /// [`EnvHashes::default()`].
+    /// Used by producers that carry real per-project env hashes from
+    /// the workspace; callers without one go through
+    /// [`HostView::new`] which composes the workspace-default bundle.
     #[allow(dead_code)]
     pub fn with_env_hashes(base: Arc<VerterHost>, env_hashes: EnvHashes) -> Self {
         Self { base, env_hashes }
@@ -262,9 +258,9 @@ impl SessionView for HostView {
     }
 
     fn project_identity(&self) -> ProjectIdentity {
-        // Single-project default; multi-project plumbing reads
-        // the host's workspace config when wired.
-        ProjectIdentity([0u8; 16])
+        // View-level (workspace-default) project identity. Per-canonical
+        // resolution callers use `VerterHost::host_view_project_identity_for`.
+        self.base.host_view_project_identity()
     }
 
     fn env_hashes(&self) -> &EnvHashes {
@@ -320,11 +316,12 @@ impl OverlaidView {
             let hash = crate::hash::hash_16(source.as_bytes());
             overlay_hashes.insert(canonical.clone(), hash);
         }
+        let env_hashes = base.host_view_env_hashes();
         Self {
             overlays: Arc::new(overlays),
             overlay_hashes: Arc::new(overlay_hashes),
             base,
-            env_hashes: EnvHashes::default(),
+            env_hashes,
         }
     }
 
@@ -394,7 +391,9 @@ impl SessionView for OverlaidView {
     }
 
     fn project_identity(&self) -> ProjectIdentity {
-        ProjectIdentity([0u8; 16])
+        // View-level (workspace-default) project identity. Per-canonical
+        // resolution callers use `VerterHost::host_view_project_identity_for`.
+        self.base.host_view_project_identity()
     }
 
     fn env_hashes(&self) -> &EnvHashes {
@@ -454,12 +453,10 @@ pub struct HostViewRef<'a> {
 
 impl<'a> HostViewRef<'a> {
     /// Construct a view that borrows `base` and reports the
-    /// default env hashes.
+    /// workspace-default env hashes computed from the host's workspace.
     pub fn new(base: &'a VerterHost) -> Self {
-        Self {
-            base,
-            env_hashes: EnvHashes::default(),
-        }
+        let env_hashes = base.host_view_env_hashes();
+        Self { base, env_hashes }
     }
 
     /// Construct a view with explicit env hashes.
@@ -495,7 +492,9 @@ impl SessionView for HostViewRef<'_> {
     }
 
     fn project_identity(&self) -> ProjectIdentity {
-        ProjectIdentity([0u8; 16])
+        // View-level (workspace-default) project identity. Per-canonical
+        // resolution callers use `VerterHost::host_view_project_identity_for`.
+        self.base.host_view_project_identity()
     }
 
     fn env_hashes(&self) -> &EnvHashes {
@@ -556,12 +555,13 @@ impl<'a> OverlaidViewRef<'a> {
         overlay_hashes: &'a rustc_hash::FxHashMap<String, Hash16>,
         overlay_tombstones: &'a std::collections::HashSet<String>,
     ) -> Self {
+        let env_hashes = base.host_view_env_hashes();
         Self {
             overlays,
             overlay_hashes,
             overlay_tombstones,
             base,
-            env_hashes: EnvHashes::default(),
+            env_hashes,
         }
     }
 
@@ -631,7 +631,9 @@ impl SessionView for OverlaidViewRef<'_> {
     }
 
     fn project_identity(&self) -> ProjectIdentity {
-        ProjectIdentity([0u8; 16])
+        // View-level (workspace-default) project identity. Per-canonical
+        // resolution callers use `VerterHost::host_view_project_identity_for`.
+        self.base.host_view_project_identity()
     }
 
     fn env_hashes(&self) -> &EnvHashes {

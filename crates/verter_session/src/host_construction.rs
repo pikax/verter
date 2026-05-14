@@ -318,23 +318,85 @@ impl VerterHost {
     }
 
     /// Env-hash bundle (R21) attached to a [`HostStoreView`] at
-    /// view-build time. Returns the default `EnvHashes` value today —
-    /// the five-way `(parse_env_hash, resolve_env_hash, type_env_hash,
-    /// lib_env_hash)` carrier is presently default-valued at the host
-    /// boundary; producers that have real env hashes (e.g. owner
-    /// imports, route surface compute) plumb them through their own
-    /// computation paths. Promoting the host-side bundle to a real
-    /// value is tracked under the workspace-config plumbing follow-up.
+    /// view-build time. Returns the workspace-default env-hash bundle
+    /// composed from the workspace's parser fingerprint + resolve
+    /// extensions + project-less identity. Per-canonical resolution
+    /// uses [`Self::host_view_env_hashes_for`] instead so multi-project
+    /// workspaces can pick the right project context.
     pub(crate) fn host_view_env_hashes(&self) -> crate::session_view::EnvHashes {
-        crate::session_view::EnvHashes::default()
+        env_hashes_from_array(self.workspace().workspace_default_env_hash_array())
     }
 
     /// Project identity (R21) attached to a [`HostStoreView`] at
-    /// view-build time. Returns the single-project default identity
-    /// today — multi-project plumbing reads from the host's workspace
-    /// config when the surface ships.
+    /// view-build time. Returns the workspace-default project identity
+    /// (the project-less identity carried by every published workspace);
+    /// per-canonical resolution uses
+    /// [`Self::host_view_project_identity_for`].
     pub(crate) fn host_view_project_identity(&self) -> crate::file_artifact_store::ProjectIdentity {
-        crate::file_artifact_store::ProjectIdentity([0u8; 16])
+        crate::file_artifact_store::ProjectIdentity(
+            self.workspace().workspace_default_project_identity_hash(),
+        )
+    }
+
+    /// Per-canonical env-hash bundle.
+    ///
+    /// Maps `canonical` to its owning project via the published
+    /// snapshot's `owners_for_file().first()`, then looks up the
+    /// project's env-hash array on `PublishedRoot::env_hashes_by_project`.
+    /// Falls back to the workspace-default env-hash array when the
+    /// canonical has no owning project (e.g. ambient libs, scratch
+    /// canonicals, or a workspace that has not yet published a real
+    /// snapshot).
+    #[must_use]
+    pub fn host_view_env_hashes_for(
+        &self,
+        canonical: &str,
+    ) -> crate::session_view::EnvHashes {
+        let workspace = self.workspace();
+        let arr = self
+            .resolve_project_for_canonical(canonical)
+            .and_then(|p| workspace.env_hash_array_for_project(p))
+            .unwrap_or_else(|| workspace.workspace_default_env_hash_array());
+        env_hashes_from_array(arr)
+    }
+
+    /// Per-canonical project identity.
+    ///
+    /// Maps `canonical` to its owning project via the published
+    /// snapshot's `owners_for_file().first()`, then looks up the
+    /// project's identity hash on
+    /// `PublishedRoot::project_identity_hashes`. Falls back to the
+    /// workspace-default project identity when the canonical has no
+    /// owning project.
+    #[must_use]
+    pub fn host_view_project_identity_for(
+        &self,
+        canonical: &str,
+    ) -> crate::file_artifact_store::ProjectIdentity {
+        let workspace = self.workspace();
+        let hash = self
+            .resolve_project_for_canonical(canonical)
+            .and_then(|p| workspace.project_identity_hash_for_project(p))
+            .unwrap_or_else(|| workspace.workspace_default_project_identity_hash());
+        crate::file_artifact_store::ProjectIdentity(hash)
+    }
+
+    /// Resolve `canonical` to its owning project under the currently
+    /// published workspace snapshot. Returns `None` when no snapshot is
+    /// published yet, when no project claims the canonical, or when the
+    /// workspace adapter does not maintain a published snapshot.
+    ///
+    /// Ambiguous owners (multi-project overlap) return the precedence-
+    /// first entry — `WorkspaceSnapshot::owners_for_file` already orders
+    /// owners by precedence (longest root first, Configured before
+    /// Fallback, alphabetical tiebreak).
+    #[must_use]
+    pub fn resolve_project_for_canonical(
+        &self,
+        canonical: &str,
+    ) -> Option<verter_workspace::workspace_snapshot::ProjectId> {
+        let root = self.workspace().published_root()?;
+        root.snapshot.owners_for_file(canonical).first().copied()
     }
 
     /// Host-owned scratch cache for the typeinfo
@@ -445,5 +507,21 @@ impl VerterHost {
         &self,
     ) -> parking_lot::MutexGuard<'_, verter_semantic::db::SemanticDb> {
         self.project_type_store.semantic_db()
+    }
+}
+
+/// Unpack a `[Hash16; 4]` env-hash array (workspace layout
+/// `[parse, resolve, type_, lib]`) into the session-side
+/// [`crate::session_view::EnvHashes`] carrier. Used by the
+/// `host_view_env_hashes*` accessors so the workspace-side layout and
+/// the session-side carrier stay in lockstep.
+fn env_hashes_from_array(
+    arr: verter_workspace::ProjectEnvHashArray,
+) -> crate::session_view::EnvHashes {
+    crate::session_view::EnvHashes {
+        parse_env_hash: arr[0],
+        resolve_env_hash: arr[1],
+        type_env_hash: arr[2],
+        lib_env_hash: arr[3],
     }
 }

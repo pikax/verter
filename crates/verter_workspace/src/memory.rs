@@ -220,6 +220,18 @@ impl MemoryWorkspace {
         self.engine.rebuild_and_publish();
     }
 
+    /// Load the current published state (lock-free).
+    ///
+    /// Always returns `Some` after construction — `Engine::new()`
+    /// publishes an empty bootstrap snapshot eagerly. Mirrors
+    /// `FilesystemWorkspace::load_published` so per-workspace consumers
+    /// (tests, env-hash readers) need not branch on workspace flavour.
+    pub fn load_published(
+        &self,
+    ) -> Option<std::sync::Arc<crate::published_state::PublishedRoot>> {
+        self.engine.load_published()
+    }
+
     /// Add an explicit project to the graph and rebuild the resolver.
     pub fn add_explicit_project(&self, config: VfsProjectConfig) {
         let mut graph = self.engine.project_graph.write();
@@ -496,6 +508,10 @@ impl crate::traits::WorkspaceRead for MemoryWorkspace {
     fn ambient_libs_view(&self) -> Arc<crate::ambient_lib::AmbientLibsByProject> {
         self.engine.ambient_libs_view()
     }
+
+    fn published_root(&self) -> Option<Arc<crate::published_state::PublishedRoot>> {
+        self.engine.load_published()
+    }
 }
 
 impl crate::traits::WorkspaceAccess for MemoryWorkspace {
@@ -701,6 +717,32 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
         // re-records. Previously this routed to `lazy_resolved` which is
         // cleared on every parse re-record.
         self.engine.add_ambient_resolved_dep(consumer, virtual_id);
+    }
+
+    // ── Project-scoped env-hash API ──
+
+    fn env_hash_array_for_project(
+        &self,
+        project_id: crate::workspace_snapshot::ProjectId,
+    ) -> Option<crate::published_state::ProjectEnvHashArray> {
+        let root = self.engine.load_published()?;
+        root.env_hashes_by_project.get(&project_id).copied()
+    }
+
+    fn project_identity_hash_for_project(
+        &self,
+        project_id: crate::workspace_snapshot::ProjectId,
+    ) -> Option<verter_scheduler::invalidation::Hash16> {
+        let root = self.engine.load_published()?;
+        root.project_identity_hashes.get(&project_id).copied()
+    }
+
+    fn workspace_default_env_hash_array(&self) -> crate::published_state::ProjectEnvHashArray {
+        crate::engine::workspace_default_env_hash_array_for_engine(&self.engine)
+    }
+
+    fn workspace_default_project_identity_hash(&self) -> verter_scheduler::invalidation::Hash16 {
+        crate::engine::workspace_default_project_identity_hash_for_engine(&self.engine)
     }
 }
 
