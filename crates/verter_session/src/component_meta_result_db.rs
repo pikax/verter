@@ -328,6 +328,21 @@ impl<P> ComponentMetaResultDb<P> {
     /// on every miss path (absent entry OR fact-validation failure). The
     /// caller threads its own host into the call so the counters live on
     /// the host the entries belong to.
+    ///
+    /// TODO(follow-up — Block 1.B reviewer-substrate P1.3): the
+    /// `_cache_hits` increment fires AFTER the fact-precise oracle
+    /// validates but BEFORE the caller's legacy `dep_signature`
+    /// validator runs. If `view.validates_fact_signature` accepts and
+    /// the caller-side `HostFenceValidator` subsequently rejects, the
+    /// caller treats the lookup as a miss but `_cache_hits` was
+    /// already bumped — over-counting by 1 in the (post-fact-pass)
+    /// AND (legacy-reject) intersection. Today's tests do not trigger
+    /// this case (the two oracles agree on tested workloads). The
+    /// substrate-level fix is best deferred until Block 6.B retires
+    /// the legacy `dep_signature` field altogether and the two
+    /// oracles collapse onto one. Until then, treat `_cache_hits` as
+    /// an upper bound on warm returns served by the fact-precise
+    /// oracle (legacy rejections are not deducted).
     #[must_use]
     pub fn get_with_view<V: StoreView + ?Sized>(
         &self,

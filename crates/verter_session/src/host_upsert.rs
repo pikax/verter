@@ -22,6 +22,34 @@ use crate::upsert::{build_upsert_result, UpsertResultData};
 use crate::VerterHost;
 use verter_scheduler::stage::Priority;
 
+/// Whether [`VerterHost::upsert_via_scheduler_with_options`] should
+/// run the reverse-dep cascade after parsing the upserted canonical.
+///
+/// The production [`VerterHost::upsert`] path always selects
+/// [`UpsertDependentEviction::Drain`]; the test-only
+/// [`VerterHost::upsert_without_dependent_eviction`] selects
+/// [`UpsertDependentEviction::Skip`] so warm `ComponentMetaResultDb`
+/// entries on canonicals whose reverse-dep set includes the upserted
+/// file survive — letting `StoreView::validates_fact_signature` (the
+/// fact-precise oracle) discriminate the dep change instead of the
+/// eager cascade.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UpsertDependentEviction {
+    /// Production behaviour: iterate
+    /// `ws().reverse_deps_for(canonical)` and drain each owner's
+    /// per-canonical compile + derived-raw + resolver-runtime +
+    /// `project_type_store` caches. This is the R3 backstop until
+    /// producer admission carries dep-precise signatures across the
+    /// cross-file boundary.
+    Drain,
+    /// Test-only behaviour: skip the reverse-dep cascade entirely so
+    /// downstream warm hits stay live and observe the dep change via
+    /// fact-precise validation alone (per Block 1.B Block 4
+    /// companion).
+    #[cfg(any(test, debug_assertions))]
+    Skip,
+}
+
 impl VerterHost {
     /// Insert or update a file in the host.
     ///
@@ -90,21 +118,91 @@ impl VerterHost {
         self.upsert_via_scheduler_with_priority(req, priority)
     }
 
-    /// Priority-parameterized inner helper for the scheduler-backed
-    /// upsert path. Body is the same scheduler-submit, wait-for-commit,
-    /// and post-process flow that previously lived in the unparameterized
-    /// inner helper; the only change is the `priority` parameter which
-    /// replaces the previously hard-coded `Priority::Interactive` at the
-    /// scheduler submission site.
+    /// Test-only entry point that runs the full parse + own-canonical
+    /// drain pipeline of [`Self::upsert`] but SKIPS the reverse-dep
+    /// cascade (drains for canonicals whose reverse-dep set includes the
+    /// upserted canonical). Used by characterisation tests (Block 1.B
+    /// Block 4 companion) to assert that fact-validation alone — NOT
+    /// the eager invalidation cascade — invalidates downstream warm
+    /// hits when a referenced dep's facts change.
     ///
-    /// Callers MUST go through `upsert_with_priority` (which performs
-    /// the semantic-db pre-invalidation invariant) — direct callers of
-    /// this inner helper bypass that invariant.
+    /// Concretely, the omitted block iterates
+    /// `ws().reverse_deps_for(canonical)` and on each owner drains
+    /// `compile_cache().compile_slots`, `derived_raw_cache()`'s
+    /// `cached_resolved_meta / cached_meta_payload / cached_fallthrough`,
+    /// `resolver.runtime.invalidate_canonical(owner)`, and
+    /// `project_type_store.evict_canonical(owner)` (which calls
+    /// `component_meta_results.invalidate_owner(owner)`). That eviction
+    /// is precisely the path that nukes the warm
+    /// `ComponentMetaResultDb` entry for a component file whose
+    /// imported type's source bytes have just changed — so omitting it
+    /// keeps the entry in place and lets the next `get_with_view` call
+    /// exercise `StoreView::validates_fact_signature` against the
+    /// freshly-parsed dep facts.
+    ///
+    /// Gated `cfg(any(test, debug_assertions))` so integration tests in
+    /// `crates/verter_session/tests/*.rs` (which compile without
+    /// `cfg(test)` set on the library) can reach the method, but
+    /// release builds (`debug_assertions` OFF) do NOT extend the
+    /// public surface.
+    #[cfg(any(test, debug_assertions))]
+    pub fn upsert_without_dependent_eviction(
+        &self,
+        req: UpsertRequest,
+    ) -> Result<HostUpdateResult, HostError> {
+        self.provenance
+            .host_upsert_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Some(ref id) = req.canonical_id {
+            self.register_facts_for_new_content(id);
+        }
+        #[cfg(test)]
+        {
+            *self.last_upsert_priority.lock() = Some(Priority::Interactive);
+        }
+        self.upsert_via_scheduler_with_options(
+            req,
+            Priority::Interactive,
+            UpsertDependentEviction::Skip,
+        )
+    }
+
+    /// Priority-parameterized inner helper for the scheduler-backed
+    /// upsert path. Forwards to
+    /// [`Self::upsert_via_scheduler_with_options`] with the production
+    /// reverse-dep-cascade behaviour. Callers MUST go through
+    /// `upsert_with_priority` (which performs the semantic-db
+    /// pre-invalidation invariant) — direct callers of this inner
+    /// helper bypass that invariant.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(crate) fn upsert_via_scheduler_with_priority(
         &self,
         req: UpsertRequest,
         priority: Priority,
+    ) -> Result<HostUpdateResult, HostError> {
+        self.upsert_via_scheduler_with_options(req, priority, UpsertDependentEviction::Drain)
+    }
+
+    /// Options-parameterized inner helper for the scheduler-backed
+    /// upsert path. Body is the same scheduler-submit, wait-for-commit,
+    /// and post-process flow that previously lived in the
+    /// `upsert_via_scheduler_with_priority` helper; the additional
+    /// `dependent_eviction` parameter selects whether the reverse-dep
+    /// cascade runs after the own-canonical drain. Production callers
+    /// pass [`UpsertDependentEviction::Drain`]; the test-only
+    /// `upsert_without_dependent_eviction` path passes
+    /// [`UpsertDependentEviction::Skip`].
+    ///
+    /// Callers MUST go through `upsert_with_priority` /
+    /// `upsert_without_dependent_eviction` (which perform the
+    /// semantic-db pre-invalidation invariant) — direct callers of
+    /// this inner helper bypass that invariant.
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    pub(crate) fn upsert_via_scheduler_with_options(
+        &self,
+        req: UpsertRequest,
+        priority: Priority,
+        dependent_eviction: UpsertDependentEviction,
     ) -> Result<HostUpdateResult, HostError> {
         use crate::host_executor::HostSourceData;
         use verter_scheduler::job::CompletionState;
@@ -449,25 +547,37 @@ impl VerterHost {
         // Dependent compile-output drain via per-domain D48 caches.
         // R3 target removes this once producer admission carries
         // dep-precise signatures across the cross-file boundary.
-        let owners: std::collections::BTreeSet<String> = self
-            .ws()
-            .reverse_deps_for(&canonical_id)
-            .into_iter()
-            .collect();
-        for owner in &owners {
-            if let Some(mut cc) = self.compile_cache().get_mut(owner) {
-                cc.compile_slots.clear();
+        //
+        // Skipped when `dependent_eviction == Skip` (test-only path
+        // for the Block 1.B Block 4 companion that asserts
+        // fact-validation alone — without the eager cascade —
+        // invalidates downstream warm hits).
+        let run_dependent_cascade = match dependent_eviction {
+            UpsertDependentEviction::Drain => true,
+            #[cfg(any(test, debug_assertions))]
+            UpsertDependentEviction::Skip => false,
+        };
+        if run_dependent_cascade {
+            let owners: std::collections::BTreeSet<String> = self
+                .ws()
+                .reverse_deps_for(&canonical_id)
+                .into_iter()
+                .collect();
+            for owner in &owners {
+                if let Some(mut cc) = self.compile_cache().get_mut(owner) {
+                    cc.compile_slots.clear();
+                }
+                if let Some(mut derived) = self.derived_raw_cache().get_mut(owner) {
+                    derived.cached_resolved_meta.clear();
+                    derived.cached_meta_payload = None;
+                    derived.cached_fallthrough = None;
+                }
+                self.resolver.runtime.invalidate_canonical(owner);
+                self.project_type_store.evict_canonical(owner);
             }
-            if let Some(mut derived) = self.derived_raw_cache().get_mut(owner) {
-                derived.cached_resolved_meta.clear();
-                derived.cached_meta_payload = None;
-                derived.cached_fallthrough = None;
+            if !owners.is_empty() {
+                self.eval_env_cache().clear();
             }
-            self.resolver.runtime.invalidate_canonical(owner);
-            self.project_type_store.evict_canonical(owner);
-        }
-        if !owners.is_empty() {
-            self.eval_env_cache().clear();
         }
         self.ws().notify_upsert(&canonical_id, req.source.clone());
 
