@@ -284,6 +284,39 @@ impl VerterHost {
         self.semantic_db().invalidate(canonical_id);
     }
 
+    /// Test-only: registers fresh fact versions for `canonical` WITHOUT
+    /// running the eager invalidation cascade ([`crate::VerterHost::upsert`]
+    /// drains `resolver.runtime`, `project_type_store`,
+    /// `resolved_type_cache`, compile slots, derived raw caches, and
+    /// bumps the store-view epoch — none of which happen here).
+    ///
+    /// Used by characterisation tests (Block 1.A / 1.B companions) to
+    /// assert that fact-validation alone — NOT eager invalidation —
+    /// invalidates downstream consumers. The method only invalidates
+    /// the parse-domain fact registry on `canonical_id` so subsequent
+    /// observations see the fresh content's fact hashes; downstream
+    /// caches still hold their stale entries until their own
+    /// `fact_dep_signature` validator catches the version bump.
+    ///
+    /// Gated `cfg(any(test, debug_assertions))` so integration tests in
+    /// `crates/verter_session/tests/*.rs` (which compile without
+    /// `cfg(test)` set on the library) can reach the method, but
+    /// release builds (`debug_assertions` OFF) do NOT extend the
+    /// public surface.
+    #[cfg(any(test, debug_assertions))]
+    pub fn register_facts_for_new_content_without_eviction(&self, canonical_id: &str) {
+        self.register_facts_for_new_content(canonical_id);
+        // Deliberately omit the eviction cascade that
+        // `host_upsert.rs::upsert` performs after parse-domain fact
+        // registration: `resolver.runtime.evict_canonical`,
+        // `project_type_store.evict_canonical`,
+        // `resolved_type_cache().clear()`, owner compile-slot drains,
+        // and the `bump_store_view_epoch` call. The omission is what
+        // makes this hook discriminating: a downstream warm-hit
+        // survives ONLY if fact-validation correctly catches the
+        // version bump.
+    }
+
     /// Invalidate all semantic caches (e.g., after provider restart).
     ///
     /// Per plan: "provider restart, backend switch, project-config change,

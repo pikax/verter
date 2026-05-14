@@ -21,6 +21,50 @@ use super::{
     extract_component_meta_from_resolved, ComponentMetaOptions, HostFenceValidator,
 };
 
+/// Build the publishable `fact_dep_signature` from the cold resolver's
+/// curated `fact_versions`, filtering out the OWNER's
+/// [`crate::resolver_core::DerivedFactKind::Route`] entry.
+///
+/// **Why filter the owner's Route fact.** The owner's `Route` hash on
+/// [`HostStoreView::derived_hashes`] is populated from TWO sources
+/// (`indexed.shallow_state` AND `route_owned_shallow_cache`), with the
+/// `route_owned` source overwriting the `indexed` source when both are
+/// present. The cold-compute path observed the Route hash from
+/// `route_shallow_cache` (which reads from `indexed`) — that hash is
+/// recorded in the candidate's `fact_dep_signature`. After cold
+/// compute, the owner's `route_owned_shallow_cache` entry populates,
+/// shifting the view's Route hash. The next warm-hit lookup builds a
+/// `HostStoreView` whose `derived_hashes[(owner, Route)]` carries the
+/// `route_owned` hash; the recorded `indexed` hash no longer matches
+/// and `validates_fact_signature` returns `false` even though no edit
+/// occurred.
+///
+/// The owner's [`crate::resolver_core::FactVersionRef::FileWholeHash`]
+/// fact remains in the signature, so owner-content edits still
+/// invalidate the warm hit. Dep-file Route facts are kept because
+/// dep files do not race a route-owned-shallow build during the
+/// owner's cold compute.
+fn filter_owner_round_trippable_facts(
+    owner_canonical: &str,
+    fact_versions: &[crate::resolver_core::FactVersionRef],
+) -> Arc<[crate::resolver_core::FactVersionRef]> {
+    let filtered: Vec<crate::resolver_core::FactVersionRef> = fact_versions
+        .iter()
+        .filter(|fact| {
+            !matches!(
+                fact,
+                crate::resolver_core::FactVersionRef::DerivedFactHash {
+                    canonical_id,
+                    kind: crate::resolver_core::DerivedFactKind::Route,
+                    ..
+                } if canonical_id == owner_canonical
+            )
+        })
+        .cloned()
+        .collect();
+    Arc::from(filtered.into_boxed_slice())
+}
+
 impl VerterHost {
     pub fn evaluate_types(
         &self,
@@ -73,16 +117,21 @@ impl VerterHost {
             return Some(warm);
         }
 
-        // Cold build — install a `with_fact_tracer` outer scope so
-        // the materialiser `observe` wiring accumulates a
-        // real `FactReadSet`. The tracer's accumulator becomes the
-        // candidate's `fact_dep_signature` at publish time.
+        // Cold build under the existing `with_fact_tracer` scope.
+        // The tracer continues to fan observations into any outer
+        // scope (R24 fan-out); the finalise step below uses the
+        // overflow status to gate cache admission but the
+        // `fact_dep_signature` itself is sourced from
+        // `resolved.fact_versions` — the cold resolver's curated
+        // observation set, recorded after the corresponding files'
+        // artifacts materialised, so warm-hit re-validation under
+        // `StoreView::validates_fact_signature` round-trips.
         //
         // R24 contract: the tracer is installed on COLD paths only.
         // The warm-hit fast path above returned before reaching
         // here, so no tracer is installed for hot reads (zero
         // allocation per hit).
-        let ((resolved_opt, meta_opt), _read_set) = self.with_fact_tracer(|| {
+        let ((resolved_opt, meta_opt), read_set) = self.with_fact_tracer(|| {
             let resolved = match self
                 .resolve_component_meta(canonical.as_str(), crate::types::ProjectionMode::Expanded)
             {
@@ -100,7 +149,32 @@ impl VerterHost {
         let resolved = resolved_opt?;
         let meta = meta_opt?;
 
-        self.publish_component_meta_cache_entry(canonical.as_str(), &resolved, meta.clone());
+        // Finalise the tracer to detect overflow (R20). The tracer
+        // accumulates every `observe` call including bubbled
+        // sub-cache signatures; the curated cold resolver state
+        // (`resolved.fact_versions`) is the canonical
+        // `fact_dep_signature` source because each entry was
+        // recorded post-materialisation and round-trips through the
+        // store-view validator. On overflow refuse cache admission.
+        match read_set.finalise() {
+            crate::resolver_core::FactReadSetFinalise::Ok(_) => {
+                let fact_dep_signature =
+                    filter_owner_round_trippable_facts(canonical.as_str(), &resolved.fact_versions);
+                self.publish_component_meta_cache_entry(
+                    canonical.as_str(),
+                    &resolved,
+                    meta.clone(),
+                    fact_dep_signature,
+                );
+            }
+            crate::resolver_core::FactReadSetFinalise::Overflow => {
+                tracing::debug!(
+                    target: "verter::audit::record",
+                    file = %canonical,
+                    "skipping component-meta cache promotion: fact-signature overflowed cap",
+                );
+            }
+        };
 
         if let Some(started) = started {
             component_meta_debug(format!(
@@ -182,7 +256,7 @@ impl VerterHost {
         // `observe` wiring accumulates a real `FactReadSet` that
         // becomes the candidate's `fact_dep_signature`. R24: tracer
         // installs on cold-path only; warm-hits returned above.
-        let ((resolved_opt, meta_opt), _read_set) = self.with_fact_tracer(|| {
+        let ((resolved_opt, meta_opt), read_set) = self.with_fact_tracer(|| {
             let resolved = match self.resolve_component_meta_with_view(
                 canonical.as_str(),
                 crate::types::ProjectionMode::Expanded,
@@ -202,12 +276,31 @@ impl VerterHost {
         let resolved = resolved_opt?;
         let meta = meta_opt?;
 
-        self.publish_component_meta_cache_entry_with_view(
-            canonical.as_str(),
-            view,
-            &resolved,
-            meta.clone(),
-        );
+        // Finalise the tracer to detect overflow (R20). Use the
+        // curated `resolved.fact_versions` as the canonical
+        // `fact_dep_signature` source (see comment on the base
+        // `get_component_meta` path above for the round-tripping
+        // rationale).
+        match read_set.finalise() {
+            crate::resolver_core::FactReadSetFinalise::Ok(_) => {
+                let fact_dep_signature =
+                    filter_owner_round_trippable_facts(canonical.as_str(), &resolved.fact_versions);
+                self.publish_component_meta_cache_entry_with_view(
+                    canonical.as_str(),
+                    view,
+                    &resolved,
+                    meta.clone(),
+                    fact_dep_signature,
+                );
+            }
+            crate::resolver_core::FactReadSetFinalise::Overflow => {
+                tracing::debug!(
+                    target: "verter::audit::record",
+                    file = %canonical,
+                    "skipping component-meta cache promotion (view-aware path): fact-signature overflowed cap",
+                );
+            }
+        };
 
         if let Some(started) = started {
             component_meta_debug(format!(
@@ -235,7 +328,6 @@ impl VerterHost {
                 &ComponentMetaOptions::default(),
             ),
         };
-        let entry = self.project_type_store.component_meta_results().get(&key)?;
         // Bind a host-rooted view via the `ResolverContext::view()`
         // trait accessor. The session-less call path has no overlay,
         // so the host's default `view()` impl returns a `HostViewRef`
@@ -246,10 +338,21 @@ impl VerterHost {
         // dead-code analysis sees the production caller (R18 — view is
         // passed by explicit argument, no thread-local).
         let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = self;
-        let view = ctx.view();
+        let session_view = ctx.view();
+        // Block 1.B: fact-precise validation runs first via
+        // `ComponentMetaResultDb::get_with_view`. The view threaded
+        // in here is the resolver-tier `HostStoreView` because
+        // [`StoreView::validates_fact_signature`] is defined on
+        // `StoreView`, not on `SessionView`. The session view
+        // remains in scope below for the legacy whole-hash oracle.
+        let store_view = self.resolver_store_view();
+        let entry = self
+            .project_type_store
+            .component_meta_results()
+            .get_with_view(self, &store_view, &key)?;
         let validator = HostFenceValidator {
             host: self,
-            view: view.as_ref(),
+            view: session_view.as_ref(),
         };
         use crate::completion_fence::FenceValidator;
         let dep_sig_valid = entry
@@ -308,7 +411,16 @@ impl VerterHost {
                 &ComponentMetaOptions::default(),
             ),
         };
-        let entry = self.project_type_store.component_meta_results().get(&key)?;
+        // Block 1.B: fact-precise validation runs first via
+        // `ComponentMetaResultDb::get_with_view`. The view threaded
+        // in here is the resolver-tier `HostStoreView` (matching the
+        // base path); the session-aware view in scope continues to
+        // gate the legacy whole-hash oracle below.
+        let store_view = self.resolver_store_view();
+        let entry = self
+            .project_type_store
+            .component_meta_results()
+            .get_with_view(self, &store_view, &key)?;
         let validator = HostFenceValidator { host: self, view };
         use crate::completion_fence::FenceValidator;
         let dep_sig_valid = entry
@@ -337,6 +449,7 @@ impl VerterHost {
         view: &dyn crate::session_view::SessionView,
         resolved: &crate::meta_resolve::ResolvedComponentMetaState,
         meta: verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+        fact_dep_signature: Arc<[crate::resolver_core::FactVersionRef]>,
     ) {
         if resolved.synthesis_should_suppress {
             tracing::debug!(
@@ -378,6 +491,7 @@ impl VerterHost {
             crate::component_meta_result_db::ComponentMetaResultEntry {
                 payload: Arc::new(cached),
                 dep_signature,
+                fact_dep_signature,
             },
         );
     }
@@ -403,6 +517,7 @@ impl VerterHost {
         canonical: &str,
         resolved: &crate::meta_resolve::ResolvedComponentMetaState,
         meta: verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+        fact_dep_signature: Arc<[crate::resolver_core::FactVersionRef]>,
     ) {
         if resolved.synthesis_should_suppress {
             tracing::debug!(
@@ -442,6 +557,7 @@ impl VerterHost {
             crate::component_meta_result_db::ComponentMetaResultEntry {
                 payload: Arc::new(cached),
                 dep_signature,
+                fact_dep_signature,
             },
         );
     }
@@ -601,44 +717,82 @@ impl VerterHost {
             return Some((analysis, resolution));
         }
 
-        let mut resolved = self
-            .resolve_component_meta(canonical.as_str(), crate::types::ProjectionMode::Expanded)?;
-        resolved.request_id = request_id;
-        // Open the publication-boundary tracing span. Carries the
-        // per-request `trace_id` (from `RequestContext`) so audit
-        // consumers can join `RequestAuditRecord.trace_id` to
-        // captured tracing logs by string match. The
-        // `suppress` field surfaces the synthesis suppression
-        // decision in spans for the same reason.
-        let publish_trace_id = crate::request_context::current_request_context()
-            .map(|ctx| ctx.trace_id.clone())
-            .unwrap_or_default();
-        let publish_span = tracing::info_span!(
-            "publish_component_meta",
-            file = %canonical,
-            trace_id = %publish_trace_id,
-            suppress = resolved.synthesis_should_suppress,
-        );
-        let _publish_enter = publish_span.enter();
-        tracing::info!(
-            trace_id = %publish_trace_id,
-            suppress = resolved.synthesis_should_suppress,
-            "publish_component_meta",
-        );
-        // Always include fallthrough — the solver path does not use walker
-        // overflow as a gating signal.
-        let analysis = extract_component_meta_from_resolved(
-            self,
-            canonical.as_str(),
-            &resolved,
-            true, // include_fallthrough
-        );
+        // Cold compute under a `with_fact_tracer` outer scope so the
+        // resolver's `observe` calls accumulate into a real
+        // `FactReadSet`. The finalised signature becomes the
+        // candidate's `fact_dep_signature` at publish time. The
+        // tracer covers BOTH `resolve_component_meta` and
+        // `extract_component_meta_from_resolved` so cross-file
+        // observations from the extractor are captured. R24: tracer
+        // installs on cold-path only; the warm-hit short-circuit
+        // above returns before this block runs.
+        let (maybe_resolved_analysis, read_set) = self.with_fact_tracer(|| {
+            let mut resolved = match self
+                .resolve_component_meta(canonical.as_str(), crate::types::ProjectionMode::Expanded)
+            {
+                Some(r) => r,
+                None => return None,
+            };
+            resolved.request_id = request_id;
+            // Open the publication-boundary tracing span. Carries the
+            // per-request `trace_id` (from `RequestContext`) so audit
+            // consumers can join `RequestAuditRecord.trace_id` to
+            // captured tracing logs by string match. The
+            // `suppress` field surfaces the synthesis suppression
+            // decision in spans for the same reason.
+            let publish_trace_id = crate::request_context::current_request_context()
+                .map(|ctx| ctx.trace_id.clone())
+                .unwrap_or_default();
+            let publish_span = tracing::info_span!(
+                "publish_component_meta",
+                file = %canonical,
+                trace_id = %publish_trace_id,
+                suppress = resolved.synthesis_should_suppress,
+            );
+            let _publish_enter = publish_span.enter();
+            tracing::info!(
+                trace_id = %publish_trace_id,
+                suppress = resolved.synthesis_should_suppress,
+                "publish_component_meta",
+            );
+            // Always include fallthrough — the solver path does not use walker
+            // overflow as a gating signal.
+            let analysis = extract_component_meta_from_resolved(
+                self,
+                canonical.as_str(),
+                &resolved,
+                true, // include_fallthrough
+            );
+            Some((analysis, resolved))
+        });
+        let (analysis, resolved) = maybe_resolved_analysis?;
 
-        // Cache-write so subsequent identical calls
-        // short-circuit through `try_with_resolution_cache_hit`.
-        // Suppression is enforced inside `publish_component_meta_cache_entry`
-        // via `resolved.synthesis_should_suppress`.
-        self.publish_component_meta_cache_entry(canonical.as_str(), &resolved, analysis.clone());
+        // Finalise the tracer to detect overflow (R20). Use the
+        // curated `resolved.fact_versions` as the canonical
+        // `fact_dep_signature` source.
+        match read_set.finalise() {
+            crate::resolver_core::FactReadSetFinalise::Ok(_) => {
+                let fact_dep_signature =
+                    filter_owner_round_trippable_facts(canonical.as_str(), &resolved.fact_versions);
+                // Cache-write so subsequent identical calls
+                // short-circuit through `try_with_resolution_cache_hit`.
+                // Suppression is enforced inside `publish_component_meta_cache_entry`
+                // via `resolved.synthesis_should_suppress`.
+                self.publish_component_meta_cache_entry(
+                    canonical.as_str(),
+                    &resolved,
+                    analysis.clone(),
+                    fact_dep_signature,
+                );
+            }
+            crate::resolver_core::FactReadSetFinalise::Overflow => {
+                tracing::debug!(
+                    target: "verter::audit::record",
+                    file = %canonical,
+                    "skipping component-meta cache promotion (with-resolution path): fact-signature overflowed cap",
+                );
+            }
+        };
 
         Some((analysis, resolved))
     }
@@ -718,7 +872,16 @@ impl VerterHost {
                 &ComponentMetaOptions::default(),
             ),
         };
-        let entry = self.project_type_store.component_meta_results().get(&key)?;
+        // Block 1.B: fact-precise validation runs first via
+        // `ComponentMetaResultDb::get_with_view`. The view threaded
+        // in here is the resolver-tier `HostStoreView`; the session
+        // view in scope below continues to gate the legacy whole-hash
+        // oracle.
+        let store_view = self.resolver_store_view();
+        let entry = self
+            .project_type_store
+            .component_meta_results()
+            .get_with_view(self, &store_view, &key)?;
         // Bind a host-rooted view; the warm-cache fast path on
         // `VerterHost` has no session context, so the overlay-free
         // `HostViewRef` is the correct read substrate.
@@ -739,7 +902,7 @@ impl VerterHost {
         // Rehydrate the resolution template into a fresh per-request state.
         // Returns None on the bounded eviction race where the snapshot
         // was evicted between dep_signature validation and reload.
-        let cached = entry.payload;
+        let cached = entry.payload.clone();
         let resolution = cached.resolution_template.rehydrate(
             self,
             &cached.canonical_id,

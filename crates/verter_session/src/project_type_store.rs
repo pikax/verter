@@ -2910,6 +2910,7 @@ mod tests {
                     whole_hash: hash,
                 }),
                 dep_signature: Arc::from(Vec::new().into_boxed_slice()),
+                fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
             },
         );
 

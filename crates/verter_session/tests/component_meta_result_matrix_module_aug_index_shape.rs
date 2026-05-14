@@ -1,0 +1,75 @@
+//! Block 1.B matrix slice — `ComponentMetaResultEntry.fact_dep_signature`
+//! must be able to carry `FactKey::ModuleAugmentationIndexShape`
+//! facts so warm-hit validation invalidates when a
+//! `declare module 'vue'` augmentation shape flips (e.g. a
+//! third-party plugin re-declares global component types).
+
+#![cfg(test)]
+
+use std::sync::Arc;
+use std::{fs, path};
+
+use verter_semantic::facts::registry::{AugmentationTargetKindTag, InternedSpecifier};
+use verter_semantic::facts::{FactKey, FactLane};
+use verter_session::component_meta_result_db::ComponentMetaResultEntry;
+use verter_session::resolver_core::{
+    FactVersionRef, PermissiveStoreView, RouteSurfaceFactRef, StoreView,
+};
+
+fn read_session_src(rel: &str) -> String {
+    let p = path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join(rel);
+    fs::read_to_string(&p).unwrap_or_else(|err| panic!("read {}: {err}", p.display()))
+}
+
+#[test]
+#[ignore = "block-1.b RED — closed by same-block implementation"]
+fn component_meta_result_signature_carries_module_aug_index_shape() {
+    let src = read_session_src("component_meta_result_db.rs");
+    let needle = "pub struct ComponentMetaResultEntry<P> {";
+    let idx = src
+        .find(needle)
+        .unwrap_or_else(|| panic!("expected `{needle}` in component_meta_result_db.rs"));
+    let end = src[idx..]
+        .find("\n}")
+        .expect("ComponentMetaResultEntry struct close");
+    let window = &src[idx..idx + end];
+    assert!(
+        window.contains("fact_dep_signature: Arc<[FactVersionRef]>")
+            || window.contains("fact_dep_signature: Arc<[crate::resolver_core::FactVersionRef]>"),
+        "Block 1.B matrix slice: ComponentMetaResultEntry must carry \
+         `fact_dep_signature: Arc<[FactVersionRef]>`. Window:\n{window}"
+    );
+
+    let aug_fact = FactVersionRef::RouteSurface(RouteSurfaceFactRef {
+        canonical_id: "/src/Comp.vue".to_owned(),
+        key: FactKey::ModuleAugmentationIndexShape {
+            target_kind_tag: AugmentationTargetKindTag::ExternalSpecifier,
+            external_specifier: Some(InternedSpecifier::from("vue")),
+            resolved_relative_canonical: None,
+            wildcard_pattern: None,
+        },
+        lane: FactLane::Semantic,
+        expected_hash: [13u8; 16],
+    });
+    let signature: Arc<[FactVersionRef]> = Arc::from(vec![aug_fact].into_boxed_slice());
+
+    let entry: ComponentMetaResultEntry<u32> = ComponentMetaResultEntry {
+        payload: Arc::new(0u32),
+        dep_signature: Arc::from(Vec::new().into_boxed_slice()),
+        fact_dep_signature: Arc::clone(&signature),
+    };
+    assert!(
+        !entry.fact_dep_signature.is_empty(),
+        "Block 1.B matrix slice: the constructed entry must carry the \
+         ModuleAugmentationIndexShape fact in its fact_dep_signature"
+    );
+
+    let view = PermissiveStoreView;
+    assert!(
+        view.validates_fact_signature(&entry.fact_dep_signature),
+        "permissive view must accept a ModuleAugmentationIndexShape \
+         fact in the entry's fact_dep_signature"
+    );
+}

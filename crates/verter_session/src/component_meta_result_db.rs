@@ -27,6 +27,7 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use verter_semantic::analysis::Hash16;
 
+use crate::resolver_core::{FactVersionRef, StoreView};
 use crate::semantic_query::DepSignature;
 use crate::types::ProjectionMode;
 
@@ -46,9 +47,21 @@ pub struct ComponentMetaResultKey {
 
 /// Cache entry — the payload plus the exact dep signature observed during
 /// the build.
+///
+/// `dep_signature` is the legacy whole-hash/project-generation signature
+/// validated through [`crate::host_manage::HostFenceValidator`]; it stays
+/// in place pending the dual-path retirement in a follow-up block.
+///
+/// `fact_dep_signature` is the fact-precise signature produced by the
+/// `with_fact_tracer` scope wrapping the cold compute. Warm-hit reads
+/// gate on [`StoreView::validates_fact_signature`] BEFORE falling through
+/// to the legacy validator so a fact-version bump on any cross-file dep
+/// invalidates the warm hit without consulting the legacy whole-hash
+/// oracle.
 pub struct ComponentMetaResultEntry<P> {
     pub payload: Arc<P>,
     pub dep_signature: DepSignature,
+    pub fact_dep_signature: Arc<[FactVersionRef]>,
 }
 
 /// Sanitized snapshot of a
@@ -180,6 +193,7 @@ impl<P> Clone for ComponentMetaResultEntry<P> {
         Self {
             payload: self.payload.clone(),
             dep_signature: self.dep_signature.clone(),
+            fact_dep_signature: self.fact_dep_signature.clone(),
         }
     }
 }
@@ -296,6 +310,85 @@ impl<P> ComponentMetaResultDb<P> {
         result
     }
 
+    /// View-aware lookup. Returns the cached entry only when the entry's
+    /// `fact_dep_signature` validates under the supplied [`StoreView`];
+    /// otherwise returns `None` (caller falls through to cold recompute).
+    ///
+    /// Fact-precise validation is the primary cache oracle: a fact version
+    /// shift on any transitively observed cross-file dep invalidates the
+    /// warm hit without consulting the legacy `dep_signature` whole-hash
+    /// validator. The legacy signature continues to be carried on the
+    /// entry for the dual-path window pending follow-up retirement, but
+    /// `get_with_view` does NOT consult it — callers that need the
+    /// legacy oracle revalidate separately.
+    ///
+    /// Increments [`crate::types::MetaProvenance::component_meta_result_cache_hits`]
+    /// on a validated warm return and
+    /// [`crate::types::MetaProvenance::component_meta_result_cache_misses`]
+    /// on every miss path (absent entry OR fact-validation failure). The
+    /// caller threads its own host into the call so the counters live on
+    /// the host the entries belong to.
+    #[must_use]
+    pub fn get_with_view<V: StoreView + ?Sized>(
+        &self,
+        host: &crate::VerterHost,
+        view: &V,
+        key: &ComponentMetaResultKey,
+    ) -> Option<Arc<ComponentMetaResultEntry<P>>> {
+        let bump_miss = |host: &crate::VerterHost| {
+            host.provenance()
+                .component_meta_result_cache_misses
+                .fetch_add(1, Ordering::Relaxed);
+            // Keep the per-request `cache_layers.component_meta` audit
+            // counter in sync with the legacy `.get()` accessor so
+            // joiner-accounting assertions (e.g.,
+            // `sixteen_cold_concurrent_identical_requests_attribute_per_joiner_contract`)
+            // continue to attribute a miss to the cold winner.
+            if let Some(ctx) = crate::request_context::current_request_context() {
+                ctx.cache_counters
+                    .component_meta
+                    .misses
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        };
+        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+            bump_miss(host);
+            return None;
+        }
+        let entry = match self.entries.get(key) {
+            Some(v) => v.clone(),
+            None => {
+                bump_miss(host);
+                return None;
+            }
+        };
+        // Fact-precise validation: every entry in the signature must
+        // validate under the live view. An empty signature trivially
+        // passes (entries published outside an installed tracer scope
+        // — typically test fixtures — fall through to the legacy
+        // validator on the caller side).
+        if !view.validates_fact_signature(&entry.fact_dep_signature) {
+            bump_miss(host);
+            return None;
+        }
+        // The legacy per-request cache_counters (separate from
+        // host-level provenance) tracked raw map hits/misses regardless
+        // of fact validation. The view-aware accessor bumps the
+        // host-level provenance counters used by Block 1.B test
+        // discrimination AND keeps the per-request counters in sync
+        // for audit consumers.
+        if let Some(ctx) = crate::request_context::current_request_context() {
+            ctx.cache_counters
+                .component_meta
+                .hits
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        host.provenance()
+            .component_meta_result_cache_hits
+            .fetch_add(1, Ordering::Relaxed);
+        Some(Arc::new(entry))
+    }
+
     /// Insert a final result entry. Cancelled, budget-exceeded, or partial
     /// results must **not** be passed here — callers are responsible for
     /// filtering. The cache does not inspect the payload.
@@ -390,6 +483,7 @@ impl<P> ComponentMetaResultDb<P> {
         let entry = ComponentMetaResultEntry {
             payload: Arc::new(payload),
             dep_signature: Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
+            fact_dep_signature: Arc::from(Vec::<FactVersionRef>::new()),
         };
         self.insert(key, entry);
     }
@@ -549,6 +643,7 @@ mod tests {
                 )]
                 .into_boxed_slice(),
             ),
+            fact_dep_signature: Arc::from(Vec::<FactVersionRef>::new()),
         };
         db.insert(key.clone(), entry);
         let hit = db.get(&key).unwrap();
@@ -574,6 +669,7 @@ mod tests {
             ComponentMetaResultEntry {
                 payload: Arc::new(1u32),
                 dep_signature: Arc::from(Vec::new().into_boxed_slice()),
+                fact_dep_signature: Arc::from(Vec::<FactVersionRef>::new()),
             },
         );
         assert!(db.get(&k1).is_some());
@@ -598,6 +694,7 @@ mod tests {
             ComponentMetaResultEntry {
                 payload: Arc::new(1u32),
                 dep_signature: Arc::from(Vec::new().into_boxed_slice()),
+                fact_dep_signature: Arc::from(Vec::<FactVersionRef>::new()),
             },
         );
         assert!(db.get(&k_v1).is_some());
@@ -617,6 +714,7 @@ mod tests {
             ComponentMetaResultEntry {
                 payload: Arc::new(5u32),
                 dep_signature: Arc::from(Vec::new().into_boxed_slice()),
+                fact_dep_signature: Arc::from(Vec::<FactVersionRef>::new()),
             },
         );
         assert!(db.remove(&key).is_some());
@@ -646,6 +744,7 @@ mod tests {
         let mk_entry = || ComponentMetaResultEntry {
             payload: Arc::new(1u32),
             dep_signature: Arc::from(Vec::new().into_boxed_slice()),
+            fact_dep_signature: Arc::from(Vec::<FactVersionRef>::new()),
         };
 
         // Two entries for /w/a.vue (different hashes), one for /w/b.vue.
