@@ -70,7 +70,6 @@ fn upsert_ts(host: &VerterHost, id: &str, src: &str) {
 }
 
 #[test]
-#[ignore = "block-1.c RED — closed by same-block implementation"]
 fn slot_binding_graph_traversal_emits_paired_fact_tracer_and_legacy_signatures() {
     let host = build_test_host();
     // Cross-file slot type with imports — exercises sites 1

@@ -24,7 +24,6 @@ use verter_session::resolver_core::{FactReadSetFinalise, FactVersionRef, RouteSu
 use verter_session::{HostConfig, VerterHost};
 
 #[test]
-#[ignore = "block-1.c RED — closed by same-block implementation"]
 fn slot_binding_graph_fact_tracer_carries_module_aug_index_shape() {
     let host = VerterHost::new_standalone(HostConfig::default());
 

@@ -57,7 +57,6 @@ fn upsert_ts(host: &VerterHost, id: &str, src: &str) {
 }
 
 #[test]
-#[ignore = "block-1.c RED — closed by same-block implementation"]
 fn unrelated_edit_does_not_advance_slot_binding_graph_emission_counters() {
     let host = build_test_host();
 
