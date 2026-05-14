@@ -376,6 +376,19 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     fn observe_borrowed_signature(&self, sig: &[crate::resolver_core::FactVersionRef]) {
         fact_tracer_tls::observe_fan_out_borrowed(sig);
     }
+
+    /// Return the active session view for overlay-aware reads, if any.
+    ///
+    /// The default impl returns `None`; overlay-bearing session contexts
+    /// override this to return their `SessionView` so resolver-tier
+    /// helpers can read overlay content without carrying an explicit view
+    /// parameter. Block 1.5 adds `SessionResolverContext` which will
+    /// override this method — the default here ensures existing
+    /// `VerterHost`-impl callers compile cleanly in the interim.
+    #[allow(dead_code)]
+    fn active_session_view(&self) -> Option<&dyn crate::session_view::SessionView> {
+        None
+    }
 }
 
 // Sealed marker — only `VerterHost` may implement `ResolverContext`.

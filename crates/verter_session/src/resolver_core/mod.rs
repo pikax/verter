@@ -190,6 +190,17 @@ pub trait StoreView {
     fn tracks_file(&self, _canonical_id: &str) -> bool {
         false
     }
+
+    /// Validate every fact in `sig` under this view; return `true` iff
+    /// all entries validate. Empty signatures trivially return `true`.
+    ///
+    /// Default impl calls [`Self::validates`] on each entry.
+    /// Implementers that can short-circuit (e.g. generation-monotone
+    /// views) may override for performance.
+    #[inline]
+    fn validates_fact_signature(&self, sig: &[FactVersionRef]) -> bool {
+        sig.iter().all(|f| self.validates(f))
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]

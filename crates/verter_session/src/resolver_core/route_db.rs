@@ -313,6 +313,59 @@ impl RouteDb {
         }
     }
 
+    /// Look up a route and return both the result and its recorded
+    /// fact-dep signature. Returns `None` on a cold miss or if the
+    /// candidate's signature fails validation against `view`.
+    ///
+    /// Callers that need to bubble the route's dependencies into an
+    /// active outer tracer scope (R28 fact-bubble-up) use this variant
+    /// instead of [`Self::get_route`] so the facts are visible without a
+    /// second round-trip through the cache.
+    pub fn get_route_with_facts<V: StoreView>(
+        &self,
+        provider_canonical: &str,
+        exported_name: &str,
+        view: &V,
+    ) -> Option<(Arc<RouteResult>, Arc<[FactVersionRef]>)> {
+        let key = (provider_canonical.to_owned(), exported_name.to_owned());
+        self.routes.get_if_valid_with_facts(&key, view)
+    }
+
+    /// Look up or materialize a route, and bubble its fact-dep signature
+    /// into any active tracer on the current thread.
+    ///
+    /// On a warm hit the cached fact-dep signature is fanned out via
+    /// [`crate::fact_signature_helpers::observe_fact_signature`] before
+    /// returning. On a cold miss the inner `resolve` closure is invoked;
+    /// after resolution the freshly-stored facts are read back and also
+    /// fanned out.
+    pub fn get_or_resolve_route_observing_facts<V, F>(
+        &self,
+        provider_canonical: &str,
+        exported_name: &str,
+        view: &V,
+        resolve: F,
+    ) -> Option<Arc<RouteResult>>
+    where
+        V: StoreView,
+        F: FnOnce() -> Option<(RouteResult, Vec<FactVersionRef>)>,
+    {
+        if let Some((value, facts)) =
+            self.get_route_with_facts(provider_canonical, exported_name, view)
+        {
+            crate::fact_signature_helpers::observe_fact_signature(&facts);
+            return Some(value);
+        }
+        let result =
+            self.get_or_resolve_route_with_facts(provider_canonical, exported_name, view, resolve)?;
+        if let Some((_value, facts)) =
+            self.get_route_with_facts(provider_canonical, exported_name, view)
+        {
+            crate::fact_signature_helpers::observe_fact_signature(&facts);
+        }
+        Some(result)
+    }
+
     /// Insert a pre-resolved route. **Test-only**: the empty-facts variant
     /// admits entries that would warm under any [`StoreView`] — production
     /// paths must use [`Self::insert_route_with_facts`].

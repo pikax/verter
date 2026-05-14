@@ -258,6 +258,38 @@ pub mod for_tests {
     pub fn observe_fan_out_borrowed_for_tests(sig: &[crate::resolver_core::FactVersionRef]) {
         crate::resolver_core::resolver_context::observe_fan_out_borrowed(sig);
     }
+
+    /// Bracket one cold-compute closure with a push-style fact tracer.
+    ///
+    /// Thin re-export of [`crate::fact_signature_helpers::install_fact_tracer`]
+    /// for integration tests that need to verify tracer finalisation,
+    /// overflow telemetry, and the returned `FactReadSetFinalise` variant.
+    pub fn install_fact_tracer_for_tests<F, R>(
+        host: &crate::VerterHost,
+        f: F,
+    ) -> (R, crate::resolver_core::FactReadSetFinalise)
+    where
+        F: FnOnce() -> R,
+    {
+        crate::fact_signature_helpers::install_fact_tracer(host, f)
+    }
+
+    /// Convert a legacy `DepSignature` into a `Vec<FactVersionRef>`.
+    ///
+    /// Re-export for integration tests verifying the bridge conversion.
+    pub fn dep_signature_to_fact_signature_for_tests(
+        sig: &crate::semantic_query::DepSignature,
+    ) -> Vec<crate::resolver_core::FactVersionRef> {
+        crate::fact_signature_helpers::dep_signature_to_fact_signature(sig)
+    }
+
+    /// Read the current overflow-at-install counter value.
+    ///
+    /// Integration tests use this to verify that `FactSignatureOverflow`
+    /// telemetry fires and the counter increments on overflow.
+    pub fn read_signature_overflow_at_install() -> u64 {
+        crate::fact_signature_helpers::read_signature_overflow_at_install()
+    }
 }
 
 pub use host_audit_runtime::{

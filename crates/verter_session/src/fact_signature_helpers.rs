@@ -44,12 +44,90 @@
 //! blocks); cross-file member-precise consumers route through this
 //! module's `member_*` helpers.
 
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
 use verter_semantic::facts::registry::{FactKey, FactLane, InternedName, SymbolSpace};
 
-use crate::resolver_core::{FactVersionRef, ParseFactRef, ResolverContext, StoreView};
+use crate::resolver_core::{
+    FactReadSetFinalise, FactVersionRef, ParseFactRef, ResolverContext, StoreView,
+    FACT_SIGNATURE_CAP,
+};
+use crate::semantic_query::{DepSignature, DepVersion};
 use crate::types::Hash16;
+
+/// Counter for `FactReadSetFinalise::Overflow` hits at the
+/// `install_fact_tracer` boundary. Monotonically increasing;
+/// reset only across process restart. Readable from tests via
+/// [`read_signature_overflow_at_install`].
+pub(crate) static SIGNATURE_OVERFLOW_AT_INSTALL: AtomicU64 = AtomicU64::new(0);
+
+/// Bracket one cold-compute closure with a push-style fact tracer.
+///
+/// Installs a fresh [`crate::resolver_core::FactReadSetCell`] onto the
+/// TLS tracer stack, runs `f`, pops the tracer, and finalises the
+/// observation set. On [`FactReadSetFinalise::Overflow`] emits a
+/// [`crate::component_meta_audit::StructuredAuditEvent::FactSignatureOverflow`]
+/// and increments [`SIGNATURE_OVERFLOW_AT_INSTALL`].
+///
+/// Returns `(return_value, finalise_result)` so callers decide whether
+/// to admit the result to cache or treat it as non-cacheable.
+pub(crate) fn install_fact_tracer<F, R>(host: &crate::VerterHost, f: F) -> (R, FactReadSetFinalise)
+where
+    F: FnOnce() -> R,
+{
+    let (value, read_set) = host.with_fact_tracer(f);
+    let finalise = read_set.finalise();
+    if matches!(finalise, FactReadSetFinalise::Overflow) {
+        crate::host_manage::push_structured_event(
+            crate::component_meta_audit::StructuredAuditEvent::FactSignatureOverflow {
+                candidate_size: (FACT_SIGNATURE_CAP as u32).saturating_add(1),
+                cap: FACT_SIGNATURE_CAP as u32,
+            },
+        );
+        SIGNATURE_OVERFLOW_AT_INSTALL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    (value, finalise)
+}
+
+/// Fan `sig` into every active tracer on the current thread's stack.
+///
+/// Thin wrapper around
+/// [`crate::resolver_core::resolver_context::observe_fan_out_borrowed`]
+/// with a more intention-revealing name for callers in the
+/// fact-cache substrate.
+#[inline]
+pub(crate) fn observe_fact_signature(sig: &[FactVersionRef]) {
+    crate::resolver_core::resolver_context::observe_fan_out_borrowed(sig);
+}
+
+/// Convert a legacy [`DepSignature`] into a [`Vec<FactVersionRef>`].
+///
+/// Only `DepVersion::WholeHash` entries are expressible as
+/// `FactVersionRef::FileWholeHash`; all other variants (route-generation
+/// numbers, project-generation numbers) have no direct `FactVersionRef`
+/// equivalent and are silently dropped. Callers that need full fidelity
+/// should migrate to the fact-tracer path.
+pub(crate) fn dep_signature_to_fact_signature(sig: &DepSignature) -> Vec<FactVersionRef> {
+    sig.iter()
+        .filter_map(|(canon, ver)| match ver {
+            DepVersion::WholeHash(h) => Some(FactVersionRef::FileWholeHash {
+                canonical_id: canon.as_ref().to_string(),
+                hash: *h,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Read the current value of [`SIGNATURE_OVERFLOW_AT_INSTALL`].
+///
+/// Exposed for integration tests that verify overflow telemetry.
+#[inline]
+#[allow(dead_code)]
+pub(crate) fn read_signature_overflow_at_install() -> u64 {
+    SIGNATURE_OVERFLOW_AT_INSTALL.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 /// Walk every `FactVersionRef` in `signature` against the current
 /// resolver-store view; return `false` on the first mismatch.
