@@ -79,6 +79,116 @@ impl VerterHost {
         }
     }
 
+    /// View-aware prepared-decl bundle lookup.
+    ///
+    /// When the view carries an overlay source for the canonical
+    /// (overlay-bearing session), the shared bundle cache (keyed by
+    /// canonical alone) cannot store an overlay-specific bundle without
+    /// colliding with the base. The session-tier resolver therefore
+    /// bypasses the shared cache and materialises a per-call bundle
+    /// rooted at `ctx.ensure_indexed_ready(canonical)` — which routes
+    /// through the overlay-priority `ensure_indexed_ready_with_view`
+    /// helper and returns the overlay's [`IndexedReady`] candidate.
+    ///
+    /// When the view carries no overlay for the canonical the call
+    /// transparently delegates to [`Self::prepared_decl_bundle`] so the
+    /// base session path keeps its warm-bundle reuse.
+    pub(crate) fn prepared_decl_bundle_with_context(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        canonical_id: &str,
+    ) -> Option<std::sync::Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle>> {
+        let normalized_canonical_id = self.normalized_analysis_canonical(canonical_id);
+        let canonical_id = normalized_canonical_id.as_ref();
+
+        // If the active view tombstones the canonical, or carries an
+        // overlay whose content hash differs from the base, the host's
+        // shared bundle cache holds the base bundle (keyed by canonical
+        // alone). Materialise a fresh bundle rooted at the overlay's
+        // IndexedReady so the prepared-decl payload reflects overlay
+        // content. Warm-cache reuse stays on the base path when the
+        // view's content hash matches the base host's content hash.
+        if let Some(view) = ctx.active_session_view() {
+            if view.is_tombstoned(canonical_id) {
+                return self.materialize_prepared_decl_bundle_via_ctx(ctx, canonical_id);
+            }
+            // Authoritative base-content-hash source: the scheduler's
+            // `effective_file_state` whole_hash. The
+            // `FileArtifactStore::content_hash_for_canonical` helper
+            // walks the multi-candidate map and is non-deterministic
+            // under concurrent overlay materialisation — using it here
+            // would race the overlay candidate it itself materialised.
+            let base_hash = self
+                .effective_file_state(canonical_id, None)
+                .map(|state| state.whole_hash);
+            let view_hash = view.content_hash_for(canonical_id);
+            let overlay_differs = match (view_hash, base_hash) {
+                (Some(v), Some(b)) => v != b,
+                (Some(_), None) => true,
+                _ => false,
+            };
+            if overlay_differs {
+                return self.materialize_prepared_decl_bundle_via_ctx(ctx, canonical_id);
+            }
+        }
+        self.prepared_decl_bundle(canonical_id)
+    }
+
+    /// Materialise a fresh prepared-decl bundle rooted at
+    /// `ctx.ensure_indexed_ready(canonical)`. Used by the session-tier
+    /// view-aware path when the view carries an overlay for the
+    /// canonical — the shared bundle cache is bypassed because its
+    /// per-canonical slot already holds the base bundle.
+    fn materialize_prepared_decl_bundle_via_ctx(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        canonical_id: &str,
+    ) -> Option<std::sync::Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle>> {
+        let facts = ctx.ensure_indexed_ready(canonical_id)?;
+        let state = &facts.shallow_state;
+        if state.symbols.is_empty()
+            && state.value_symbols.is_empty()
+            && state.exports.is_empty()
+            && state.import_targets.is_empty()
+        {
+            return None;
+        }
+        let (dep_edges, _import_route_hash) =
+            self.prepared_decl_bundle_route_dep_edges(canonical_id, state.as_ref());
+
+        let script_setup_type_bindings = if canonical_id.ends_with(".vue") {
+            self.build_script_setup_type_bindings(canonical_id, state.as_ref(), &dep_edges)
+        } else {
+            rustc_hash::FxHashMap::default()
+        };
+
+        let bundle = std::sync::Arc::new(
+            crate::resolver_core::prepared_decl::build_prepared_decl_bundle(
+                canonical_id,
+                std::sync::Arc::clone(state),
+                dep_edges,
+                script_setup_type_bindings,
+            ),
+        );
+
+        // R17: do NOT insert into the shared `prepared_decl_bundles`
+        // cache from an overlay-bearing materialisation. The shared
+        // slot is keyed by canonical alone and would alias the base
+        // bundle, leaking overlay state to base-only consumers.
+        component_meta_trace_custom!(
+            "materialize_prepared_decl_bundle_via_ctx",
+            format!(
+                "owner={} type_decls={} value_decls={} dep_edges={} source=session_overlay",
+                canonical_id,
+                bundle.prepared_type_decls.len(),
+                bundle.prepared_value_decls.len(),
+                bundle.dep_edges.len(),
+            ),
+        );
+
+        Some(bundle)
+    }
+
     fn prepared_decl_bundle_route_dep_edges(
         &self,
         canonical_id: &str,
@@ -320,12 +430,40 @@ impl VerterHost {
         result
     }
 
+    /// View-aware prepared type declaration lookup. Routes the
+    /// underlying bundle materialisation through
+    /// [`Self::prepared_decl_bundle_with_context`] so overlay-bearing
+    /// sessions observe the overlay's [`IndexedReady`] when extracting
+    /// a `PreparedTypeDecl`.
+    pub(crate) fn prepared_type_decl_with_context(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        canonical_id: &str,
+        symbol_name: &str,
+    ) -> Option<Arc<verter_semantic::analysis::type_solver::PreparedTypeDecl>> {
+        let bundle = self.prepared_decl_bundle_with_context(ctx, canonical_id)?;
+        bundle.prepared_type_decls.get(symbol_name)
+    }
+
     pub(crate) fn prepared_value_decl(
         &self,
         canonical_id: &str,
         symbol_name: &str,
     ) -> Option<Arc<verter_semantic::analysis::type_solver::PreparedValueDecl>> {
         let bundle = self.prepared_decl_bundle(canonical_id)?;
+        bundle.prepared_value_decls.get(symbol_name)
+    }
+
+    /// View-aware prepared value declaration lookup. See
+    /// [`Self::prepared_type_decl_with_context`] for the routing
+    /// rationale.
+    pub(crate) fn prepared_value_decl_with_context(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        canonical_id: &str,
+        symbol_name: &str,
+    ) -> Option<Arc<verter_semantic::analysis::type_solver::PreparedValueDecl>> {
+        let bundle = self.prepared_decl_bundle_with_context(ctx, canonical_id)?;
         bundle.prepared_value_decls.get(symbol_name)
     }
 

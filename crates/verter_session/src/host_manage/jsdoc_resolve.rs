@@ -40,6 +40,7 @@ use crate::meta_resolve::{
 
 pub(crate) struct HostComponentMetaResolver<'a> {
     pub(crate) host: &'a VerterHost,
+    pub(crate) ctx: &'a dyn crate::resolver_core::resolver_context::ResolverContext,
 }
 
 impl crate::resolver_core::DeclarationMetadataResolver for HostComponentMetaResolver<'_> {
@@ -48,7 +49,7 @@ impl crate::resolver_core::DeclarationMetadataResolver for HostComponentMetaReso
         dep_canonical: &str,
         requested_name: &str,
     ) -> Option<crate::resolver_core::ResolvedExportTarget> {
-        self.host
+        self.ctx
             .resolve_named_type_export_target(dep_canonical, requested_name)
             .map(
                 |(canonical, name)| crate::resolver_core::ResolvedExportTarget {
@@ -82,7 +83,7 @@ impl crate::resolver_core::DeclarationMetadataResolver for HostComponentMetaReso
         from_canonical: &str,
         import_source: &str,
     ) -> Option<String> {
-        self.host
+        self.ctx
             .resolve_type_dependency_canonical(from_canonical, import_source)
     }
 
@@ -118,7 +119,7 @@ impl crate::resolver_core::DeclarationMetadataResolver for HostComponentMetaReso
         canonical_source: &str,
         resolved_name: &str,
     ) -> Option<crate::resolver_core::ResolvedLocalTypeSymbolMetadata> {
-        let analysis = self.host.external_type_analysis(canonical_source)?;
+        let analysis = self.ctx.external_type_analysis(canonical_source)?;
         let symbol = analysis.local_type_symbol(resolved_name)?;
         let kind = match symbol.kind {
             verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSymbolKind::TypeAlias => {
@@ -147,7 +148,7 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
         dep_canonical: &str,
         requested_name: &str,
     ) -> ResolvedTypeDeclaration {
-        resolve_type_declaration(self.host, dep_canonical, requested_name)
+        resolve_type_declaration_with_context(self.host, self.ctx, dep_canonical, requested_name)
     }
 
     fn snapshot_imports<'a>(
@@ -201,11 +202,13 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
         let compute_eval_start = component_meta_debug_enabled().then(Instant::now);
         // the retired `shared_owner_engine` path
         // is gone; all callers go through
-        // `compute_evaluated_types_with_tracking_from_owner_context`
-        // which internally builds any needed host bridge.
+        // `compute_evaluated_types_with_tracking_from_owner_context_with_ctx`
+        // which threads the resolver context so overlay-bearing
+        // sessions observe overlay candidates for cross-file types.
         let computed_eval_types = self
             .host
-            .compute_evaluated_types_with_tracking_from_owner_context(
+            .compute_evaluated_types_with_tracking_from_owner_context_with_ctx(
+                self.ctx,
                 owner_canonical,
                 snapshot,
                 eval_context.and_then(|captured| captured.owner_eval_source.as_deref()),
@@ -283,7 +286,7 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
         }
 
         if candidate_roots.is_empty() && macro_lacks_direct_local_surface(mac) {
-            let owner_has_symbol = self.host.route_owned_shallow_state(owner_canonical);
+            let owner_has_symbol = self.ctx.route_owned_shallow_state(owner_canonical);
             for type_name in &mac.type_references {
                 if type_name.contains('.') || !seen.insert(type_name.as_str()) {
                     continue;
@@ -306,7 +309,7 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
         }
 
         // bridge via per-engine helper.
-        let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(self.host);
+        let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(self.ctx);
 
         candidate_roots
             .into_iter()
@@ -339,7 +342,7 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
         macro_kind: verter_semantic::analysis::types::AnalyzedMacroKind,
     ) -> Option<crate::resolver_core::surface_projector::ProjectedMacroSurfaces> {
         // bridge via per-engine helper.
-        let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(self.host);
+        let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(self.ctx);
         let shape = project_prepared_type_surface_shape_via_host_threaded(
             &mut query_engine,
             owner_canonical,
@@ -449,15 +452,29 @@ pub(crate) fn resolve_type_declaration(
     dep_canonical: &str,
     requested_name: &str,
 ) -> ResolvedTypeDeclaration {
-    let resolver = HostComponentMetaResolver { host };
+    let base_ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = host;
+    resolve_type_declaration_with_context(host, base_ctx, dep_canonical, requested_name)
+}
+
+/// Context-aware variant of [`resolve_type_declaration`]. Routes the
+/// resolver-host construction through the supplied `ResolverContext`
+/// so session-bearing entries observe overlay-aware reads when the
+/// declaration walker dereferences cross-file types.
+pub(crate) fn resolve_type_declaration_with_context(
+    host: &VerterHost,
+    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+    dep_canonical: &str,
+    requested_name: &str,
+) -> ResolvedTypeDeclaration {
+    let resolver = HostComponentMetaResolver { host, ctx };
     let key =
         crate::resolver_core::symbol_resolver::declaration_node_key(dep_canonical, requested_name);
-    let mut ctx = crate::resolver_core::symbol_resolver::ResolveContext::new();
+    let mut resolve_ctx = crate::resolver_core::symbol_resolver::ResolveContext::new();
     let permissive_view = crate::resolver_core::PermissiveStoreView;
     let result =
         host.resolver_runtime()
             .symbol
-            .resolve_node(key, &permissive_view, &mut ctx, |_| {
+            .resolve_node(key, &permissive_view, &mut resolve_ctx, |_| {
                 let declaration = crate::resolver_core::resolve_type_declaration(
                     &resolver,
                     dep_canonical,

@@ -594,8 +594,7 @@ impl VerterHost {
         // Overlay-priority pre-warm for owner + every dep the view
         // carries an overlay for.
         {
-            let base_ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = self;
-            crate::host_manage::overlay_priority::prewarm_view_overlays(base_ctx, view);
+            crate::host_manage::overlay_priority::prewarm_view_overlays(self, view);
         }
 
         let resolved = self.resolve_component_meta_with_view(

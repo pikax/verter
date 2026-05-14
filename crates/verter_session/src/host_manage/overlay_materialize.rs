@@ -15,6 +15,64 @@ use crate::VerterHost;
 
 use super::{dep_edges_from_resolutions, is_raw_import_specifier_id, HostShallowImportResolver};
 
+/// Discover an overlay-only candidate for a relative import.
+///
+/// When the workspace cannot resolve a relative `./foo`-style import
+/// (e.g. because the helper file exists only as a session overlay and
+/// has no disk presence yet), this helper consults the session view
+/// for candidates that match common TypeScript/JS extensions and
+/// returns the first one the view carries content for. Used by the
+/// view-aware overlay materialiser to remove prewarm-order dependence
+/// when an owner overlay imports overlay-only helpers.
+///
+/// Returns `None` when `view` is absent, when `specifier` is not a
+/// relative import, or when no extension candidate resolves through
+/// `view.content_hash_for` / `view.source`.
+fn resolve_relative_overlay_candidate(
+    view: Option<&dyn crate::session_view::SessionView>,
+    owner_canonical: &str,
+    specifier: &str,
+) -> Option<String> {
+    let view = view?;
+    if !specifier.starts_with('.') {
+        return None;
+    }
+    let direct = crate::id::resolve_external(owner_canonical, specifier);
+    // Try the directly-joined form first (specifier may already include
+    // an extension).
+    if !direct.is_empty()
+        && (view.content_hash_for(direct.as_str()).is_some()
+            || view.source(direct.as_str()).is_some())
+    {
+        return Some(direct);
+    }
+    // Iterate the standard TS/JS extension probe order. The set
+    // mirrors `effective_target` precedence: `.d.ts` > `.d.cts` >
+    // `.d.mts` > `.ts` > `.tsx` > `.js` > `.jsx` > `.cjs` > `.mjs`.
+    const EXTENSIONS: &[&str] = &[
+        ".d.ts", ".d.cts", ".d.mts", ".ts", ".tsx", ".js", ".jsx", ".cjs", ".mjs",
+    ];
+    for ext in EXTENSIONS {
+        let candidate = format!("{direct}{ext}");
+        if view.content_hash_for(candidate.as_str()).is_some()
+            || view.source(candidate.as_str()).is_some()
+        {
+            return Some(candidate);
+        }
+    }
+    // Index-style resolution (./theme/index.ts) — same extension order
+    // applied to a `/index` suffix.
+    for ext in EXTENSIONS {
+        let candidate = format!("{direct}/index{ext}");
+        if view.content_hash_for(candidate.as_str()).is_some()
+            || view.source(candidate.as_str()).is_some()
+        {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 impl VerterHost {
     /// Materialise an [`IndexedReady`](crate::project_type_store::IndexedReady)
     /// candidate for `canonical_id` from `overlay_source` and publish it
@@ -22,18 +80,57 @@ impl VerterHost {
     /// with different overlays coexist as candidates in
     /// [`FileArtifactStore`](crate::file_artifact_store::FileArtifactStore).
     ///
-    /// The candidate is keyed by
-    /// `(canonical_id, overlay_whole_hash, parse_env_hash, parser_version)`
-    /// via `insert_artifacts`, so the base host's candidate (under its
-    /// own content hash) is not drained. Resolver-tier reads through
-    /// [`SessionResolverContext`](crate::resolver_core::SessionResolverContext)
-    /// hit the overlay's slot via
-    /// [`FileArtifactStore::get`](crate::file_artifact_store::FileArtifactStore::get).
+    /// View-less wrapper: delegates to
+    /// [`Self::materialize_overlay_indexed_ready_with_view`] with no
+    /// active view, so the import-route resolution falls back to the
+    /// workspace-and-disk path. Preserved for callers that have not
+    /// yet been migrated to the view-aware variant.
     pub(crate) fn materialize_overlay_indexed_ready(
         &self,
         canonical_id: &str,
         overlay_source: &Arc<str>,
         overlay_whole_hash: crate::types::Hash16,
+    ) -> Option<Arc<crate::project_type_store::IndexedReady>> {
+        self.materialize_overlay_indexed_ready_inner(
+            canonical_id,
+            overlay_source,
+            overlay_whole_hash,
+            None,
+        )
+    }
+
+    /// View-aware overlay materialiser. Identical to
+    /// [`Self::materialize_overlay_indexed_ready`] except that the
+    /// import-route resolution prefers overlay candidates surfaced by
+    /// the supplied `SessionView`.
+    ///
+    /// Owner overlays that import overlay-only helpers
+    /// (`/src/Button.vue` importing `./theme`, `./schema`, `./tv` where
+    /// none exists on disk) discover the helper's overlay canonical via
+    /// `view.content_hash_for(candidate)` / `view.source(candidate)`,
+    /// removing the prewarm-order dependence that would otherwise force
+    /// helpers to be upserted before the owner.
+    pub(crate) fn materialize_overlay_indexed_ready_with_view(
+        &self,
+        canonical_id: &str,
+        overlay_source: &Arc<str>,
+        overlay_whole_hash: crate::types::Hash16,
+        view: &dyn crate::session_view::SessionView,
+    ) -> Option<Arc<crate::project_type_store::IndexedReady>> {
+        self.materialize_overlay_indexed_ready_inner(
+            canonical_id,
+            overlay_source,
+            overlay_whole_hash,
+            Some(view),
+        )
+    }
+
+    fn materialize_overlay_indexed_ready_inner(
+        &self,
+        canonical_id: &str,
+        overlay_source: &Arc<str>,
+        overlay_whole_hash: crate::types::Hash16,
+        view: Option<&dyn crate::session_view::SessionView>,
     ) -> Option<Arc<crate::project_type_store::IndexedReady>> {
         let normalized_canonical_id = self.normalized_analysis_canonical(canonical_id);
         let canonical_id = normalized_canonical_id.as_ref();
@@ -176,8 +273,13 @@ impl VerterHost {
                                 )
                                 .map(|resolution| resolution.source_id)
                         })
+                        .or_else(|| {
+                            resolve_relative_overlay_candidate(view, canonical_id, specifier)
+                        })
                 } else {
-                    primary
+                    primary.or_else(|| {
+                        resolve_relative_overlay_candidate(view, canonical_id, specifier)
+                    })
                 };
             let mut resolution = DependencyResolution {
                 specifier: specifier.clone(),

@@ -185,7 +185,7 @@ defineProps<Props>()
     let snapshot = host
         .get_raw_analysis_snapshot("/src/App.vue")
         .expect("raw snapshot should exist");
-    let resolver_host = super::HostComponentMetaResolver { host };
+    let resolver_host = super::HostComponentMetaResolver { host, ctx: host };
 
     let parts = crate::resolver_core::resolve_component_meta_parts(
         &resolver_host,
@@ -304,7 +304,7 @@ defineProps<{ modelValue?: ModelValue<R> }>()
     let snapshot = host
         .get_raw_analysis_snapshot("/src/App.vue")
         .expect("raw snapshot should exist");
-    let resolver_host = super::HostComponentMetaResolver { host };
+    let resolver_host = super::HostComponentMetaResolver { host, ctx: host };
 
     let mut parts = crate::resolver_core::resolve_component_meta_parts(
         &resolver_host,
@@ -5646,7 +5646,7 @@ defineSlots<Slots<T>>()
     let snapshot = host
         .get_raw_analysis_snapshot("/src/App.vue")
         .expect("raw snapshot should exist");
-    let resolver_host = super::HostComponentMetaResolver { host };
+    let resolver_host = super::HostComponentMetaResolver { host, ctx: host };
 
     let mut parts = crate::resolver_core::resolve_component_meta_parts(
         &resolver_host,
@@ -7812,7 +7812,7 @@ defineProps<ColorModeSelectProps>()
     let snapshot = host
         .get_raw_analysis_snapshot(component)
         .expect("raw snapshot should exist");
-    let resolver_host = super::HostComponentMetaResolver { host };
+    let resolver_host = super::HostComponentMetaResolver { host, ctx: host };
     let mut parts = crate::resolver_core::resolve_component_meta_parts(
         &resolver_host,
         component,
@@ -7999,7 +7999,7 @@ defineProps<ColorModeSelectProps>()
     let snapshot = host
         .get_raw_analysis_snapshot(component)
         .expect("overlay-backed raw snapshot should exist");
-    let resolver_host = super::HostComponentMetaResolver { host };
+    let resolver_host = super::HostComponentMetaResolver { host, ctx: host };
     let mut parts = crate::resolver_core::resolve_component_meta_parts(
         &resolver_host,
         component,
@@ -8167,7 +8167,7 @@ defineProps<ColorModeSelectProps>()
     let snapshot = host
         .get_raw_analysis_snapshot(component)
         .expect("raw snapshot should exist");
-    let resolver_host = super::HostComponentMetaResolver { host };
+    let resolver_host = super::HostComponentMetaResolver { host, ctx: host };
     let mut parts = crate::resolver_core::resolve_component_meta_parts(
         &resolver_host,
         component,
@@ -9932,7 +9932,7 @@ defineEmits<Emits>()
     let snapshot = host
         .get_raw_analysis_snapshot("/src/App.vue")
         .expect("raw snapshot should exist");
-    let resolver_host = super::HostComponentMetaResolver { host };
+    let resolver_host = super::HostComponentMetaResolver { host, ctx: host };
     let parts = crate::resolver_core::resolve_component_meta_parts(
         &resolver_host,
         "/src/App.vue",

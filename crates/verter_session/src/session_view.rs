@@ -282,10 +282,18 @@ impl SessionView for HostView {
         &self,
         canonical: &str,
     ) -> Option<Arc<crate::file_artifact_store::FileArtifacts>> {
-        self.base
-            .project_type_store()
-            .indexed()
-            .latest_artifacts_for_canonical(canonical)
+        // Strict by `(canonical, content_hash)` — base view only
+        // accepts the artifact bundle that matches the host's
+        // current content hash. Returning `None` here forces
+        // resolver-tier consumers to materialise rather than
+        // observe a sibling overlay candidate published by a
+        // concurrent session under a different content hash.
+        let content_hash = self.content_hash_for(canonical)?;
+        let key = crate::file_artifact_store::FileArtifactKey::legacy(
+            Arc::from(canonical),
+            content_hash,
+        );
+        self.base.project_type_store().indexed().get_artifacts(&key)
     }
 
     fn project_identity(&self) -> ProjectIdentity {
@@ -410,15 +418,20 @@ impl SessionView for OverlaidView {
         &self,
         canonical: &str,
     ) -> Option<Arc<crate::file_artifact_store::FileArtifacts>> {
-        // The artifact store does not yet key on the overlay
-        // content hash, so an overlaid canonical falls through to
-        // the base host's latest artifacts. Wiring the
-        // overlay-aware artifact path is reserved for the future
-        // overlay-aware caches.
-        self.base
-            .project_type_store()
-            .indexed()
-            .latest_artifacts_for_canonical(canonical)
+        // Strict by `(canonical, content_hash_for(canonical))`. An
+        // overlay candidate is published under the overlay's
+        // content hash by `materialize_overlay_indexed_ready`; the
+        // base candidate lives under the base host's content hash.
+        // Reading via the strict `(canonical, hash)` key prevents
+        // an overlay-bearing view from observing the base
+        // candidate (which would be the wrong artifact bundle for
+        // the overlay's source).
+        let content_hash = self.content_hash_for(canonical)?;
+        let key = crate::file_artifact_store::FileArtifactKey::legacy(
+            Arc::from(canonical),
+            content_hash,
+        );
+        self.base.project_type_store().indexed().get_artifacts(&key)
     }
 
     fn project_identity(&self) -> ProjectIdentity {
@@ -524,10 +537,16 @@ impl SessionView for HostViewRef<'_> {
         &self,
         canonical: &str,
     ) -> Option<Arc<crate::file_artifact_store::FileArtifacts>> {
-        self.base
-            .project_type_store()
-            .indexed()
-            .latest_artifacts_for_canonical(canonical)
+        // Strict by `(canonical, content_hash)` — base view only
+        // accepts the artifact bundle matching the host's current
+        // content hash (see `HostView::parse_artifacts` for the
+        // same rationale).
+        let content_hash = self.content_hash_for(canonical)?;
+        let key = crate::file_artifact_store::FileArtifactKey::legacy(
+            Arc::from(canonical),
+            content_hash,
+        );
+        self.base.project_type_store().indexed().get_artifacts(&key)
     }
 
     fn project_identity(&self) -> ProjectIdentity {
@@ -655,18 +674,22 @@ impl SessionView for OverlaidViewRef<'_> {
         &self,
         canonical: &str,
     ) -> Option<Arc<crate::file_artifact_store::FileArtifacts>> {
-        // Overlay artifacts are not yet materialised — fall through to
-        // the base host's latest artifacts so the consumer at least
-        // observes a coherent payload. R17 still holds: this read does
-        // not mutate the host. Overlay-aware artifact materialisation
-        // is reserved for the future cache-aware path.
+        // Strict by `(canonical, content_hash_for(canonical))`. The
+        // overlay candidate is published into `FileArtifactStore`
+        // by `materialize_overlay_indexed_ready` under the overlay's
+        // content hash; this read goes through the same strict key
+        // so the overlay-bearing view observes the overlay bundle
+        // (never the base candidate). Tombstoned canonicals return
+        // `None` regardless of what the base says.
         if self.overlay_tombstones.contains(canonical) {
             return None;
         }
-        self.base
-            .project_type_store()
-            .indexed()
-            .latest_artifacts_for_canonical(canonical)
+        let content_hash = self.content_hash_for(canonical)?;
+        let key = crate::file_artifact_store::FileArtifactKey::legacy(
+            Arc::from(canonical),
+            content_hash,
+        );
+        self.base.project_type_store().indexed().get_artifacts(&key)
     }
 
     fn project_identity(&self) -> ProjectIdentity {

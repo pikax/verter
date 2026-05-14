@@ -152,8 +152,7 @@ impl VerterHost {
         // resolver-tier reads inside the cold compute observe the
         // overlay for deps, not just the owner.
         {
-            let base_ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = self;
-            crate::host_manage::overlay_priority::prewarm_view_overlays(base_ctx, view);
+            crate::host_manage::overlay_priority::prewarm_view_overlays(self, view);
         }
 
         // Try the view-aware warm cache fast path.
@@ -676,8 +675,7 @@ impl VerterHost {
         // Overlay-priority pre-warm for owner + every dep the view
         // carries an overlay for.
         {
-            let base_ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = self;
-            crate::host_manage::overlay_priority::prewarm_view_overlays(base_ctx, view);
+            crate::host_manage::overlay_priority::prewarm_view_overlays(self, view);
         }
 
         // Cold compute through the view-bearing path so the view's

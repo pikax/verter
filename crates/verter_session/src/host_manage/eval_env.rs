@@ -503,13 +503,35 @@ impl VerterHost {
         owner_eval_source: Option<&str>,
         purpose: crate::resolver_core::ComponentMetaResolutionPurpose,
     ) -> Option<ComputedEvaluatedTypes> {
+        let base_ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = self;
+        self.compute_evaluated_types_with_tracking_from_owner_context_with_ctx(
+            base_ctx, canonical, snapshot, owner_eval_source, purpose,
+        )
+    }
+
+    /// Context-aware variant of
+    /// [`Self::compute_evaluated_types_with_tracking_from_owner_context`].
+    /// Routes the resolver-tier reads (query engine, dispatch
+    /// lowering, prepared-decl bundle) through the supplied
+    /// `ResolverContext` so overlay-bearing sessions observe overlay
+    /// candidates for cross-file macro-argument-type expansion.
+    pub(crate) fn compute_evaluated_types_with_tracking_from_owner_context_with_ctx(
+        &self,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+        canonical: &str,
+        snapshot: &FileAnalysisSnapshot,
+        owner_eval_source: Option<&str>,
+        purpose: crate::resolver_core::ComponentMetaResolutionPurpose,
+    ) -> Option<ComputedEvaluatedTypes> {
         let eval_source = owner_eval_source.map(str::to_string).or_else(|| {
             self.current_eval_state(canonical)
                 .map(|(source, cached_parse, _)| {
                     Self::build_eval_script_source(&source, cached_parse.as_deref())
                 })
         })?;
-        self.compute_evaluated_types_from_owner_context(canonical, snapshot, &eval_source, purpose)
+        self.compute_evaluated_types_from_owner_context_with_ctx(
+            ctx, canonical, snapshot, &eval_source, purpose,
+        )
     }
 
     fn component_meta_binding_type_entries(
@@ -539,12 +561,31 @@ impl VerterHost {
         eval_source: &str,
         purpose: crate::resolver_core::ComponentMetaResolutionPurpose,
     ) -> Option<ComputedEvaluatedTypes> {
+        let base_ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = self;
+        self.compute_evaluated_types_from_owner_context_with_ctx(
+            base_ctx, canonical, snapshot, eval_source, purpose,
+        )
+    }
+
+    /// Context-aware variant of
+    /// [`Self::compute_evaluated_types_from_owner_context`]. The
+    /// macro-argument-type expander uses `ctx` for the query-engine
+    /// and dispatch construction so the cross-file type lookups
+    /// observe overlay candidates when the session view carries them.
+    pub(crate) fn compute_evaluated_types_from_owner_context_with_ctx(
+        &self,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+        canonical: &str,
+        snapshot: &FileAnalysisSnapshot,
+        eval_source: &str,
+        purpose: crate::resolver_core::ComponentMetaResolutionPurpose,
+    ) -> Option<ComputedEvaluatedTypes> {
         {
             component_meta_trace_custom!(
                 "compute_evaluated_types_seed_owner_cache",
                 format!("owner={} store_view={}", canonical, false),
             );
-            let _ = self.ensure_indexed_ready(canonical);
+            let _ = ctx.ensure_indexed_ready(canonical);
         }
         let requested_binding_names =
             if purpose == crate::resolver_core::ComponentMetaResolutionPurpose::Full {
@@ -595,7 +636,7 @@ impl VerterHost {
                     false,
                 ),
             );
-            let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(self);
+            let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(ctx);
             verter_semantic::analysis::type_eval_build::expand_macro_types_impl_with_expander(
                 snapshot.macros.as_ref(),
                 Some(eval_source),

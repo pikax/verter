@@ -379,6 +379,57 @@ impl VerterHost {
             None,
             crate::resolver_core::ComponentMetaResolutionPurpose::Full,
             RegistryMaterialization::Full,
+            None,
+        )
+    }
+
+    /// View-aware cold compute entry. Routes resolver-tier reads (and
+    /// every nested dispatcher / query-engine / prepared-decl call)
+    /// through the supplied `SessionResolverContext` so overlay
+    /// candidates published by the prewarm pass are observed by the
+    /// dep-source materialiser. Used by
+    /// [`crate::host_manage::component_meta_request_impl::ViewBoundRequestHost::compute_component_meta`].
+    pub(crate) fn compute_component_meta_state_with_view(
+        &self,
+        canonical: &str,
+        mode: ProjectionMode,
+        whole_hash: Hash16,
+        view: &dyn crate::session_view::SessionView,
+    ) -> Option<ResolvedComponentMetaState> {
+        let session_ctx = crate::resolver_core::SessionResolverContext::new(self, view);
+        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &session_ctx;
+        self.compute_component_meta_state_inner(
+            canonical,
+            mode,
+            whole_hash,
+            None,
+            crate::resolver_core::ComponentMetaResolutionPurpose::Full,
+            RegistryMaterialization::Full,
+            Some(ctx),
+        )
+    }
+
+    /// View-aware variant of
+    /// [`Self::compute_component_meta_state_from_captured`]. See
+    /// [`Self::compute_component_meta_state_with_view`] for the
+    /// routing rationale.
+    pub(crate) fn compute_component_meta_state_from_captured_with_view(
+        &self,
+        canonical: &str,
+        mode: ProjectionMode,
+        captured: &CapturedComponentMetaInputs,
+        view: &dyn crate::session_view::SessionView,
+    ) -> Option<ResolvedComponentMetaState> {
+        let session_ctx = crate::resolver_core::SessionResolverContext::new(self, view);
+        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &session_ctx;
+        self.compute_component_meta_state_inner(
+            canonical,
+            mode,
+            captured.whole_hash,
+            Some(captured),
+            crate::resolver_core::ComponentMetaResolutionPurpose::Full,
+            RegistryMaterialization::Full,
+            Some(ctx),
         )
     }
 
@@ -476,6 +527,7 @@ impl VerterHost {
             Some(captured),
             crate::resolver_core::ComponentMetaResolutionPurpose::Full,
             RegistryMaterialization::Full,
+            None,
         )
     }
 
@@ -491,6 +543,7 @@ impl VerterHost {
             None,
             crate::resolver_core::ComponentMetaResolutionPurpose::Fallthrough,
             RegistryMaterialization::SkipAppend,
+            None,
         )
     }
 
@@ -503,7 +556,16 @@ impl VerterHost {
         captured: Option<&CapturedComponentMetaInputs>,
         purpose: crate::resolver_core::ComponentMetaResolutionPurpose,
         registry_materialization: RegistryMaterialization,
+        ctx_override: Option<&dyn crate::resolver_core::resolver_context::ResolverContext>,
     ) -> Option<ResolvedComponentMetaState> {
+        // Resolve the active resolver context: session-bearing entries
+        // pass a `SessionResolverContext` that surfaces overlay-aware
+        // reads to the query engine + bridges; the base path falls
+        // back to `&self as &dyn ResolverContext` so warm hits keep
+        // their existing semantics.
+        let base_ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = self;
+        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext =
+            ctx_override.unwrap_or(base_ctx);
         // Step 6.6.A: reset the per-request dep-signature accumulator
         // so each compute call starts fresh. Inner materialize_until_stable
         // calls accumulate dispatch-side facts; we drain + merge them
@@ -554,7 +616,7 @@ impl VerterHost {
         // Retired `shared_owner_engine` /
         // `SessionSolverHost` pair; the resolver host is now a thin
         // wrapper around `VerterHost`.
-        let resolver_host = HostComponentMetaResolver { host: self };
+        let resolver_host = HostComponentMetaResolver { host: self, ctx };
         let parts_started = audit_enabled.then(Instant::now);
         let parts = {
             component_meta_trace_custom!(
@@ -592,7 +654,7 @@ impl VerterHost {
         > = Vec::new();
         let mut synthesis_should_suppress = false;
         if let Some(evaluated_types) = parts.evaluated_types.as_mut() {
-            let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(self);
+            let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(ctx);
             let result = slot_binding_graph::resolve_slot_bindings_graph_native(
                 &mut query_engine,
                 canonical,
@@ -610,7 +672,7 @@ impl VerterHost {
         let solver_audit = if should_materialize_registry || should_produce_macro_object_shapes {
             // The retired `shared_owner_engine`
             // is gone — dispatch owns all solve-like operations now.
-            let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(self);
+            let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(ctx);
             if should_materialize_registry {
                 component_meta_trace_custom!(
                     "append_component_meta_registry_entries",
@@ -636,7 +698,7 @@ impl VerterHost {
                     .and_then(|captured| captured.owner_eval_source.as_deref())
                     .map(str::to_string)
                     .or_else(|| {
-                        self.ensure_indexed_ready(canonical).map(|facts| {
+                        ctx.ensure_indexed_ready(canonical).map(|facts| {
                             VerterHost::build_eval_script_source(
                                 &facts.raw_source,
                                 facts.cached_parse.as_deref(),

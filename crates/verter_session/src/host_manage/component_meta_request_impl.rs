@@ -302,17 +302,24 @@ impl<'a> ComponentMetaRequestHost for ViewBoundRequestHost<'a> {
         captured: Option<&Self::CapturedInputs>,
         _store_view: Option<&Self::View>,
     ) -> Option<Self::Resolution> {
+        // View-aware cold compute: thread the session view through a
+        // `SessionResolverContext` so the resolver-tier reads (prepared
+        // declarations, dep-source materialisation, registry+macro
+        // shapes) observe overlay candidates published by the
+        // prewarm pass.
         if let Some(captured) = captured {
             return self
                 .host
-                .compute_component_meta_state_from_captured(canonical, mode, captured);
+                .compute_component_meta_state_from_captured_with_view(
+                    canonical, mode, captured, self.view,
+                );
         }
         let whole_hash = self
             .host
             .current_or_read_whole_hash(canonical)
             .unwrap_or_default();
         self.host
-            .compute_component_meta_state(canonical, mode, whole_hash)
+            .compute_component_meta_state_with_view(canonical, mode, whole_hash, self.view)
     }
 
     fn store_component_meta_result(

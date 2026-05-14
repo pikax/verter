@@ -54,14 +54,19 @@ use crate::HostConfig;
 /// Session-bound [`ResolverContext`] wrapper.
 ///
 /// Delegates every `ResolverContext` method to the inner
-/// `&dyn ResolverContext` except [`ResolverContext::active_session_view`]
+/// [`crate::VerterHost`] except [`ResolverContext::active_session_view`]
 /// (returns `Some(view)`) and [`ResolverContext::view`] (returns the
 /// bound view). Resolver-tier helpers that consult
 /// `active_session_view()` for overlay-aware reads observe the session
 /// view via this wrapper without changing the trait surface or the
 /// call-site signature in [`ProjectSemanticDispatch::new`].
+///
+/// `inner` is the concrete host so the wrapper can reach
+/// view-aware internals (e.g.,
+/// [`crate::VerterHost::prepared_decl_bundle_with_context`]) that the
+/// `ResolverContext` trait surface itself does not expose.
 pub(crate) struct SessionResolverContext<'a> {
-    inner: &'a dyn ResolverContext,
+    inner: &'a crate::VerterHost,
     view: &'a dyn SessionView,
 }
 
@@ -73,7 +78,7 @@ impl<'a> SessionResolverContext<'a> {
     /// the dispatcher, and drop it at the end of the query. The
     /// wrapper does not retain references after the call returns.
     #[must_use]
-    pub(crate) fn new(inner: &'a dyn ResolverContext, view: &'a dyn SessionView) -> Self {
+    pub(crate) fn new(inner: &'a crate::VerterHost, view: &'a dyn SessionView) -> Self {
         Self { inner, view }
     }
 }
@@ -83,7 +88,12 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
 
     #[inline]
     fn prepared_decl_bundle(&self, canonical_id: &str) -> Option<Arc<PreparedDeclBundle>> {
-        self.inner.prepared_decl_bundle(canonical_id)
+        // Route through the host's view-aware variant so an
+        // overlay-bearing view observes overlay-content-rooted
+        // prepared declarations rather than the host's base bundle
+        // cache. Non-overlay canonicals fall through to the warm
+        // bundle cache transparently.
+        self.inner.prepared_decl_bundle_with_context(self, canonical_id)
     }
 
     #[inline]
@@ -92,7 +102,8 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
         canonical_id: &str,
         symbol_name: &str,
     ) -> Option<Arc<PreparedTypeDecl>> {
-        self.inner.prepared_type_decl(canonical_id, symbol_name)
+        self.inner
+            .prepared_type_decl_with_context(self, canonical_id, symbol_name)
     }
 
     #[inline]
@@ -101,7 +112,8 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
         canonical_id: &str,
         symbol_name: &str,
     ) -> Option<Arc<PreparedValueDecl>> {
-        self.inner.prepared_value_decl(canonical_id, symbol_name)
+        self.inner
+            .prepared_value_decl_with_context(self, canonical_id, symbol_name)
     }
 
     #[inline]
@@ -132,12 +144,12 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
         &self,
         canonical_id: &str,
     ) -> Option<Arc<AnalyzedExternalTypeSource>> {
-        self.inner.external_type_analysis(canonical_id)
+        ResolverContext::external_type_analysis(self.inner, canonical_id)
     }
 
     #[inline]
     fn shallow_file_state(&self, canonical_id: &str) -> Option<Arc<ShallowFileState>> {
-        self.inner.shallow_file_state(canonical_id)
+        ResolverContext::shallow_file_state(self.inner, canonical_id)
     }
 
     #[inline]
@@ -146,33 +158,32 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
         canonical_source: &str,
         resolved_name: &str,
     ) -> Option<DeclarationId> {
-        self.inner
-            .local_type_declaration_id(canonical_source, resolved_name)
+        ResolverContext::local_type_declaration_id(self.inner, canonical_source, resolved_name)
     }
 
     #[inline]
     fn get_whole_hash(&self, canonical: &str) -> Option<Hash16> {
-        self.inner.get_whole_hash(canonical)
+        ResolverContext::get_whole_hash(self.inner, canonical)
     }
 
     #[inline]
     fn resolver_store_view(&self) -> HostStoreView {
-        self.inner.resolver_store_view()
+        ResolverContext::resolver_store_view(self.inner)
     }
 
     #[inline]
     fn project_type_store(&self) -> &Arc<ProjectTypeStore> {
-        self.inner.project_type_store()
+        ResolverContext::project_type_store(self.inner)
     }
 
     #[inline]
     fn config(&self) -> &HostConfig {
-        self.inner.config()
+        ResolverContext::config(self.inner)
     }
 
     #[inline]
     fn analyzed_macro_snapshot(&self, canonical_id: &str) -> Option<Arc<ScriptAnalysisSnapshot>> {
-        self.inner.analyzed_macro_snapshot(canonical_id)
+        ResolverContext::analyzed_macro_snapshot(self.inner, canonical_id)
     }
 
     // -------- Symbol / route resolution ----------------------------
@@ -183,8 +194,7 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
         dep_canonical: &str,
         imported_name: &str,
     ) -> (String, String) {
-        self.inner
-            .resolve_imported_type_root(dep_canonical, imported_name)
+        ResolverContext::resolve_imported_type_root(self.inner, dep_canonical, imported_name)
     }
 
     #[inline]
@@ -193,8 +203,11 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
         dep_canonical: &str,
         requested_name: &str,
     ) -> Option<(String, String)> {
-        self.inner
-            .resolve_named_type_export_target(dep_canonical, requested_name)
+        ResolverContext::resolve_named_type_export_target(
+            self.inner,
+            dep_canonical,
+            requested_name,
+        )
     }
 
     #[inline]
@@ -203,8 +216,11 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
         dep_canonical: &str,
         requested_name: &str,
     ) -> Option<(String, String)> {
-        self.inner
-            .resolve_named_type_export_target_shallow(dep_canonical, requested_name)
+        ResolverContext::resolve_named_type_export_target_shallow(
+            self.inner,
+            dep_canonical,
+            requested_name,
+        )
     }
 
     #[inline]
@@ -213,8 +229,7 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
         owner_canonical: &str,
         local_name: &str,
     ) -> Option<(String, String)> {
-        self.inner
-            .resolve_owner_direct_import(owner_canonical, local_name)
+        ResolverContext::resolve_owner_direct_import(self.inner, owner_canonical, local_name)
     }
 
     #[inline]
@@ -223,8 +238,11 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
         owner_canonical: &str,
         import_source: &str,
     ) -> Option<String> {
-        self.inner
-            .resolve_type_dependency_canonical(owner_canonical, import_source)
+        ResolverContext::resolve_type_dependency_canonical(
+            self.inner,
+            owner_canonical,
+            import_source,
+        )
     }
 
     #[inline]
@@ -233,13 +251,12 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
         owner_canonical: &str,
         source_specifier: &str,
     ) -> Option<String> {
-        self.inner
-            .resolve_route_type_edge(owner_canonical, source_specifier)
+        ResolverContext::resolve_route_type_edge(self.inner, owner_canonical, source_specifier)
     }
 
     #[inline]
     fn route_owned_shallow_state(&self, canonical_id: &str) -> Option<Arc<ShallowFileState>> {
-        self.inner.route_owned_shallow_state(canonical_id)
+        ResolverContext::route_owned_shallow_state(self.inner, canonical_id)
     }
 
     #[inline]
@@ -257,8 +274,7 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
         dep_canonical_id: &str,
         imported_name: &str,
     ) -> Option<ValueDeclIdentity> {
-        self.inner
-            .resolve_value_export_target(dep_canonical_id, imported_name)
+        ResolverContext::resolve_value_export_target(self.inner, dep_canonical_id, imported_name)
     }
 
     // -------- Ambient resolution -----------------------------------
@@ -269,28 +285,27 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
         consumer_project: ProjectStableKey,
         symbol: &str,
     ) -> Option<AmbientSymbolHit> {
-        self.inner.lookup_ambient_symbol(consumer_project, symbol)
+        ResolverContext::lookup_ambient_symbol(self.inner, consumer_project, symbol)
     }
 
     #[inline]
     fn record_ambient_dependency(&self, consumer_canonical: &str, virtual_id: &str) {
-        self.inner
-            .record_ambient_dependency(consumer_canonical, virtual_id);
+        ResolverContext::record_ambient_dependency(self.inner, consumer_canonical, virtual_id)
     }
 
     #[inline]
     fn workspace_content_generation(&self) -> u64 {
-        self.inner.workspace_content_generation()
+        ResolverContext::workspace_content_generation(self.inner)
     }
 
     #[inline]
     fn workspace_is_workspace_owned(&self, canonical_id: &str) -> bool {
-        self.inner.workspace_is_workspace_owned(canonical_id)
+        ResolverContext::workspace_is_workspace_owned(self.inner, canonical_id)
     }
 
     #[inline]
     fn workspace_is_package_backed(&self, canonical_id: &str) -> bool {
-        self.inner.workspace_is_package_backed(canonical_id)
+        ResolverContext::workspace_is_package_backed(self.inner, canonical_id)
     }
 
     // -------- Dispatch facade --------------------------------------
@@ -305,14 +320,14 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
 
     #[inline]
     fn dispatch_node_data(&self, node: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
-        self.inner.dispatch_node_data(node)
+        ResolverContext::dispatch_node_data(self.inner, node)
     }
 
     // -------- Cache validation -------------------------------------
 
     #[inline]
     fn validate_dep_signature(&self, signature: &DepSignature) -> bool {
-        self.inner.validate_dep_signature(signature)
+        ResolverContext::validate_dep_signature(self.inner, signature)
     }
 
     // -------- Component-meta-tier bridges --------------------------
@@ -323,8 +338,7 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
         canonical: &str,
         tracked_deps: &BTreeSet<String>,
     ) -> Vec<FactVersionRef> {
-        self.inner
-            .current_dependency_fact_versions(canonical, tracked_deps)
+        ResolverContext::current_dependency_fact_versions(self.inner, canonical, tracked_deps)
     }
 
     #[inline]
@@ -343,7 +357,7 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
 
     #[inline]
     fn current_fact_tracer(&self) -> Option<&FactReadSetCell> {
-        self.inner.current_fact_tracer()
+        ResolverContext::current_fact_tracer(self.inner)
     }
 
     // -------- Overlay-aware session view ---------------------------
@@ -362,10 +376,15 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
         overlay_source: &Arc<str>,
         overlay_whole_hash: Hash16,
     ) -> Option<Arc<IndexedReady>> {
-        self.inner.materialize_overlay_indexed_ready(
+        // Route through the view-aware host helper so overlay-only
+        // helper imports (e.g. `/src/Button.vue` referencing
+        // overlay-only `./theme`, `./schema`, `./tv`) discover their
+        // overlay candidates without depending on prewarm ordering.
+        self.inner.materialize_overlay_indexed_ready_with_view(
             canonical_id,
             overlay_source,
             overlay_whole_hash,
+            self.view,
         )
     }
 }
