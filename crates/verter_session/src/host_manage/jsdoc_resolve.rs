@@ -368,13 +368,19 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
         visiting: &mut rustc_hash::FxHashSet<(String, String)>,
     ) -> Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements> {
         let _ = visiting;
-        self.host.resolve_component_meta_macro_elements(
+        // Route through the view-aware variant so the resolved-type cache
+        // slot, dep-source reads, and the route-frontier closure observe
+        // the active session overlay (when one is present). Base
+        // (non-session) compute paths surface `view = None` and the
+        // helper collapses to the historical behaviour.
+        self.host.resolve_component_meta_macro_elements_with_view(
             owner_canonical,
             import_source,
             exported_name,
             tracked_deps,
             resolution_deps,
             cache,
+            self.ctx.active_session_view(),
         )
     }
 
@@ -389,13 +395,14 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
         visiting: &mut rustc_hash::FxHashSet<(String, String)>,
     ) -> Option<crate::resolver_core::ResolvedImportedMacroSurface> {
         let _ = visiting;
-        self.host.resolve_component_meta_macro_surface(
+        self.host.resolve_component_meta_macro_surface_with_view(
             owner_canonical,
             import_source,
             exported_name,
             tracked_deps,
             resolution_deps,
             cache,
+            self.ctx.active_session_view(),
         )
     }
 

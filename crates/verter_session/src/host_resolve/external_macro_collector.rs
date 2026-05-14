@@ -5,10 +5,15 @@
 //! resolver core.
 
 use super::frontier_helpers::ExternalTypeCache;
+use crate::session_view::SessionView;
 use crate::VerterHost;
 
 pub(super) struct HostExternalMacroTypeCollector<'a> {
     pub host: &'a VerterHost,
+    /// Active session overlay (when the collector is driven from a
+    /// session-bearing cold-compute path). `None` for base callers — the
+    /// underlying type resolution then routes through the base-only path.
+    pub view: Option<&'a dyn SessionView>,
 }
 
 impl crate::resolver_core::ExternalMacroTypeCollectorHost for HostExternalMacroTypeCollector<'_> {
@@ -25,7 +30,7 @@ impl crate::resolver_core::ExternalMacroTypeCollectorHost for HostExternalMacroT
         profile_hash: Option<u64>,
     ) -> Result<Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>, Self::Error>
     {
-        self.host.resolve_external_type_from_loaded_files(
+        self.host.resolve_external_type_from_loaded_files_with_view(
             owner_canonical,
             &dep.import_source,
             &dep.type_name,
@@ -38,6 +43,7 @@ impl crate::resolver_core::ExternalMacroTypeCollectorHost for HostExternalMacroT
             true,
             profile_hash,
             0,
+            self.view,
         )
     }
 

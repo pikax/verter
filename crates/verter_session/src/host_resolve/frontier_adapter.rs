@@ -13,6 +13,7 @@ use std::cell::RefCell;
 use std::sync::Arc;
 
 use super::frontier_helpers::RouteShallowStateCache;
+use crate::session_view::SessionView;
 use crate::VerterHost;
 
 /// Adapter connecting the frontier engine to the real host.
@@ -20,11 +21,19 @@ use crate::VerterHost;
 /// Wraps a `VerterHost` reference with an optional `HostStoreView` for
 /// snapshot-consistent resolution.
 ///
+/// `view` carries the active session overlay when the frontier is driven
+/// from a session-bearing cold-compute path; base-only callers leave it
+/// `None` and the adapter behaves as before.
+///
 /// Consumed by component-meta resolution and frontier integration tests.
 pub(crate) struct HostFrontierAdapter<'a> {
     pub host: &'a VerterHost,
     pub materialize_symbols: bool,
     pub route_exports_only: bool,
+    /// Active session overlay (when the frontier is driven from a
+    /// session-bearing path). `None` for base-only callers — the adapter
+    /// then reads through the bare host as before.
+    pub view: Option<&'a dyn SessionView>,
     /// Request-scoped memoisation of route-only [`ShallowFileState`] entries
     /// for the duration of a single frontier traversal. **NOT a host-side
     /// mirror** of the host's `route_owned_shallow` cache (the
@@ -32,8 +41,7 @@ pub(crate) struct HostFrontierAdapter<'a> {
     /// `RefCell<...>` exists only to dedupe repeated reads of the same
     /// canonical within one request, so request-level callers do not
     /// repeatedly clone the host-cached `Arc`. Lifetime bounded to the
-    /// adapter (`'a`). classification: `scratch`. See sub-plan
-    /// §6b.2.F9.
+    /// adapter (`'a`).
     pub route_shallow_cache: RefCell<RouteShallowStateCache>,
 }
 
@@ -54,7 +62,23 @@ impl crate::resolver_core::FrontierHost for HostFrontierAdapter<'_> {
             );
         }
 
-        // FileArtifactStore fast path.
+        // FileArtifactStore fast path. When the session view carries
+        // parse artifacts for this canonical (overlay candidate), prefer
+        // them so the frontier reads overlay-rooted shallow state.
+        if let Some(view) = self.view {
+            if let Some(facts) = view.parse_artifacts(canonical.as_str()) {
+                if facts.indexed.shallow_state.has_resolvable_surface() || !self.materialize_symbols
+                {
+                    if facts.indexed.shallow_state.has_wildcard_reexports() {
+                        self.host
+                            .provenance
+                            .resolver_barrel_fact_reuse
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    return Some(facts.indexed.shallow_state.clone());
+                }
+            }
+        }
         if let Some(facts) = self
             .host
             .project_type_store
@@ -72,8 +96,17 @@ impl crate::resolver_core::FrontierHost for HostFrontierAdapter<'_> {
             }
         }
 
-        // Materialize through ensure_indexed_ready.
-        let facts = self.host.ensure_indexed_ready(canonical.as_str())?;
+        // Materialize through ensure_indexed_ready (view-aware when a
+        // session view is active).
+        let facts = if let Some(view) = self.view {
+            crate::host_manage::overlay_priority::ensure_indexed_ready_with_view(
+                self.host,
+                view,
+                canonical.as_str(),
+            )?
+        } else {
+            self.host.ensure_indexed_ready(canonical.as_str())?
+        };
         if facts.shallow_state.has_resolvable_surface() || !self.materialize_symbols {
             if facts.shallow_state.has_wildcard_reexports() {
                 self.host

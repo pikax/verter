@@ -489,8 +489,34 @@ impl VerterHost {
         Vec<HostDiagnostic>,
         std::collections::BTreeSet<String>,
     ) {
+        self.collect_external_types_from_loaded_files_with_view(
+            owner_canonical,
+            macro_type_deps,
+            script_imports,
+            profile_hash,
+            None,
+        )
+    }
+
+    /// View-aware variant of [`Self::collect_external_types_from_loaded_files`].
+    ///
+    /// Plumbs `view` into the [`HostExternalMacroTypeCollector`] so the
+    /// per-macro-type-dep loop routes through the session-aware type-resolution
+    /// path. Base callers (`view = None`) get the historical behaviour.
+    pub(super) fn collect_external_types_from_loaded_files_with_view(
+        &self,
+        owner_canonical: &str,
+        macro_type_deps: &[verter_semantic::analysis::MacroTypeDep],
+        script_imports: &[verter_semantic::analysis::AnalyzedImport],
+        profile_hash: Option<u64>,
+        view: Option<&dyn crate::session_view::SessionView>,
+    ) -> (
+        Option<ResolvedExternalTypes>,
+        Vec<HostDiagnostic>,
+        std::collections::BTreeSet<String>,
+    ) {
         let collected = crate::resolver_core::collect_external_macro_types(
-            &HostExternalMacroTypeCollector { host: self },
+            &HostExternalMacroTypeCollector { host: self, view },
             owner_canonical,
             macro_type_deps,
             script_imports,

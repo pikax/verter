@@ -1173,6 +1173,9 @@ impl VerterHost {
         indexed.script_analysis.clone()
     }
 
+    /// Base wrapper that fixes `view = None`. Test-only — production paths
+    /// reach the view-aware variant directly.
+    #[cfg(test)]
     pub(crate) fn resolve_external_type_from_indexed_ready(
         &self,
         dep_canonical: &str,
@@ -1182,6 +1185,30 @@ impl VerterHost {
             verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements,
         >,
     ) -> Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements> {
+        self.resolve_external_type_from_indexed_ready_with_view(
+            dep_canonical,
+            type_name,
+            imported_companions,
+            None,
+        )
+    }
+
+    /// View-aware variant of resolve_external_type_from_indexed_ready.
+    ///
+    /// Reads the dependency's parse artifacts through the session view when
+    /// `view` carries an overlay candidate; this is the path that lets a
+    /// session-bearing component-meta cold compute see overlay-rooted
+    /// resolved elements.
+    pub(crate) fn resolve_external_type_from_indexed_ready_with_view(
+        &self,
+        dep_canonical: &str,
+        type_name: &str,
+        imported_companions: &rustc_hash::FxHashMap<
+            String,
+            verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements,
+        >,
+        view: Option<&dyn crate::session_view::SessionView>,
+    ) -> Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements> {
         component_meta_trace_custom!(
             "resolve_external_type_from_indexed_ready",
             format!(
@@ -1189,7 +1216,7 @@ impl VerterHost {
                 dep_canonical, type_name, false
             ),
         );
-        let inputs = self.external_type_resolution_inputs(dep_canonical)?;
+        let inputs = self.external_type_resolution_inputs_with_view(dep_canonical, view)?;
         let normalized_canonical_id = self.normalized_analysis_canonical(dep_canonical);
         let canonical_id_for_source_type = normalized_canonical_id.as_ref();
         let source_type = self.imported_eval_source_type_for(

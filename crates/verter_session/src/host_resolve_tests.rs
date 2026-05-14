@@ -2017,6 +2017,7 @@ export interface Props {
         host: &host,
         materialize_symbols: false,
         route_exports_only: true,
+        view: None,
         route_shallow_cache: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
     };
     let mut inspected_symbols = rustc_hash::FxHashSet::default();

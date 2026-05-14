@@ -4155,7 +4155,6 @@ defineProps<Props>()
 // host_resolve_type_audit.rs, typeinfo/*). Owned by the follow-up
 // substrate block.
 #[test]
-#[ignore = "block-1.5 RED — escalated: cold-compute dep-source path on /types.ts reads via &VerterHost::ensure_indexed_ready without view in scope; the prewarm publishes the overlay candidate but the dep-read path picks the BASE candidate. Closure requires the cold-compute call-graph view-threading refactor (substrate-reviewer's P0.2)."]
 fn overlay_queries_do_not_reuse_unsound_base_resolved_meta_cache() {
     let project = make_project();
     project

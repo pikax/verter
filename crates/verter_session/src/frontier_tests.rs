@@ -1677,6 +1677,7 @@ defineProps<Props>()
         host: &host,
         materialize_symbols: true,
         route_exports_only: false,
+        view: None,
         route_shallow_cache: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
     };
 
@@ -1738,6 +1739,7 @@ defineProps<Props>()
         host: &host,
         materialize_symbols: true,
         route_exports_only: false,
+        view: None,
         route_shallow_cache: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
     };
 

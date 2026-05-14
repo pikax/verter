@@ -47,6 +47,9 @@ use verter_compiler::utils::oxc::vue::resolve_type::{
 };
 
 impl VerterHost {
+    /// Base wrapper that fixes `view = None`. Test-only — production paths
+    /// flow through the view-aware variant.
+    #[cfg(test)]
     #[allow(clippy::type_complexity)]
     pub(super) fn run_external_type_frontier_closure(
         &self,
@@ -62,6 +65,36 @@ impl VerterHost {
         ),
         crate::types::ExternalTypeResolveError,
     > {
+        self.run_external_type_frontier_closure_with_view(
+            dep_canonical,
+            type_name,
+            requested_routes,
+            companion_plans,
+            None,
+        )
+    }
+
+    /// View-aware variant of run_external_type_frontier_closure.
+    ///
+    /// Constructs the [`HostFrontierAdapter`] with `view` plumbed in so the
+    /// frontier reads shallow state through the session overlay when an
+    /// overlay candidate is published.
+    #[allow(clippy::type_complexity)]
+    pub(super) fn run_external_type_frontier_closure_with_view(
+        &self,
+        dep_canonical: &str,
+        type_name: &str,
+        requested_routes: &mut FrontierRequestedRoutes,
+        companion_plans: &mut FrontierCompanionPlans,
+        view: Option<&dyn crate::session_view::SessionView>,
+    ) -> Result<
+        (
+            crate::resolver_core::ExternalTypeFrontier,
+            Option<(String, String)>,
+            bool,
+        ),
+        crate::types::ExternalTypeResolveError,
+    > {
         assert_route_frontier_allowed();
         let adapter = HostFrontierAdapter {
             host: self,
@@ -69,6 +102,7 @@ impl VerterHost {
             // Frontier discovery stays route-only. Materialization resolves only
             // the demanded companion targets after the route is known.
             route_exports_only: true,
+            view,
             route_shallow_cache: RefCell::new(RouteShallowStateCache::default()),
         };
         let mut frontier = crate::resolver_core::ExternalTypeFrontier::new();
@@ -230,7 +264,13 @@ impl VerterHost {
         seeds
     }
 
-    pub(super) fn materialize_frontier_resolved_type(
+    /// View-aware materializer for resolved frontier elements.
+    ///
+    /// Constructs the [`HostFrontierAdapter`] with `view`, and passes `view`
+    /// down into [`Self::materialize_frontier_resolved_type_with_memo`] so
+    /// the indexed-ready fall-through reads the overlay candidate.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn materialize_frontier_resolved_type_with_view(
         &self,
         frontier: &crate::resolver_core::ExternalTypeFrontier,
         requested_routes: &FrontierRequestedRoutes,
@@ -239,6 +279,7 @@ impl VerterHost {
         exported_name: &str,
         tracked_deps: &mut std::collections::BTreeSet<String>,
         resolution_deps: &mut std::collections::BTreeSet<String>,
+        view: Option<&dyn crate::session_view::SessionView>,
     ) -> Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements> {
         let adapter = HostFrontierAdapter {
             host: self,
@@ -248,6 +289,7 @@ impl VerterHost {
             // materialization while companion targets are selected.
             materialize_symbols: false,
             route_exports_only: true,
+            view,
             route_shallow_cache: RefCell::new(RouteShallowStateCache::default()),
         };
         let mut memo = rustc_hash::FxHashMap::default();
@@ -263,6 +305,7 @@ impl VerterHost {
             resolution_deps,
             &mut memo,
             &mut active,
+            view,
         )
     }
 
@@ -282,6 +325,7 @@ impl VerterHost {
             Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
         >,
         active: &mut rustc_hash::FxHashSet<(String, String)>,
+        view: Option<&dyn crate::session_view::SessionView>,
     ) -> Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements> {
         let cache_key = (canonical_id.to_string(), exported_name.to_string());
         if let Some(cached) = memo.get(&cache_key) {
@@ -337,6 +381,7 @@ impl VerterHost {
                     resolution_deps,
                     memo,
                     active,
+                    view,
                 ) {
                     tracked_deps.insert(target_canonical.clone());
                     resolution_deps.insert(target_canonical.clone());
@@ -357,10 +402,11 @@ impl VerterHost {
                 }
             }
 
-            self.resolve_external_type_from_indexed_ready(
+            self.resolve_external_type_from_indexed_ready_with_view(
                 canonical_id,
                 exported_name,
                 &companion_types,
+                view,
             )
         };
 

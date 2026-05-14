@@ -1660,12 +1660,21 @@ pub enum ExternalTypeResolveError {
 ///
 /// Includes the dependency's source hash to guarantee freshness — when a
 /// dependency file changes, its hash changes and stale entries are never hit.
+///
+/// Includes `view_fingerprint` so per-session overlay slots co-exist with the
+/// base slot (`view_fingerprint = 0`). Concurrent sessions and base reads do
+/// not alias on the same `ResolvedElements` value, and overlay-aware
+/// dependency reads never reuse the unsound base-cache entry.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ResolvedTypeCacheKey {
     pub dep_canonical_id: String,
     pub dep_source_hash: Hash16,
     pub type_name: String,
     pub resolve_kind: verter_workspace::ResolveRequestKind,
+    /// Session-view fingerprint of the active overlay set. `0` means no
+    /// active overlay (base host call). Non-zero values discriminate
+    /// per-session candidates so base and session entries co-exist.
+    pub view_fingerprint: u64,
 }
 
 /// A resolved external type entry in the host-level cache.

@@ -9704,6 +9704,7 @@ fn resolved_type_cache_is_bounded() {
                     dep_source_hash: [0u8; 16],
                     type_name: "T".to_string(),
                     resolve_kind: verter_workspace::ResolveRequestKind::TypeImport,
+                    view_fingerprint: 0,
                 },
                 crate::types::ResolvedTypeCacheEntry {
                     resolved: None,

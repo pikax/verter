@@ -425,8 +425,43 @@ impl VerterHost {
         &self,
         canonical_id: &str,
     ) -> Option<ExternalTypeResolutionInputs> {
+        self.external_type_resolution_inputs_with_view(canonical_id, None)
+    }
+
+    /// View-aware variant of [`Self::external_type_resolution_inputs`].
+    ///
+    /// When the active session view carries parse artifacts for `canonical_id`
+    /// (i.e. an overlay candidate has been published into FileArtifactStore
+    /// under the overlay content hash), the inputs are read from the view's
+    /// artifacts so the session-bearing cold compute sees overlay-rooted
+    /// shallow state and analysis. Base callers (`view = None`) get the
+    /// historical content-agnostic `get_any` fast path followed by the
+    /// route-owned materialiser fall-through.
+    pub(super) fn external_type_resolution_inputs_with_view(
+        &self,
+        canonical_id: &str,
+        view: Option<&dyn crate::session_view::SessionView>,
+    ) -> Option<ExternalTypeResolutionInputs> {
         let normalized_canonical_id = self.normalized_analysis_canonical(canonical_id);
         let canonical_id = normalized_canonical_id.as_ref();
+
+        // Overlay-priority: when the session view carries parse artifacts
+        // for this canonical, return them so the session path sees the
+        // overlay content. `view.parse_artifacts` is strict-by-content-hash,
+        // so this only triggers when an overlay candidate was published.
+        if let Some(view) = view {
+            if let Some(facts) = view.parse_artifacts(canonical_id) {
+                let inputs = ExternalTypeResolutionInputs {
+                    raw_source: Arc::clone(&facts.indexed.raw_source),
+                    cached_parse: facts.indexed.cached_parse.clone(),
+                    whole_hash: facts.indexed.whole_hash,
+                    eval_source: Arc::clone(&facts.indexed.eval_source),
+                    analysis: Arc::clone(&facts.indexed.external_type_analysis),
+                    analysis_cache_hit: true,
+                };
+                return Some(inputs);
+            }
+        }
 
         // The per-request `external_inputs_memo` was.
         // The project-global `FileArtifactStore` already returns cached state,

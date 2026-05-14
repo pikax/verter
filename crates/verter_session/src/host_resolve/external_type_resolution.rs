@@ -1,20 +1,27 @@
 //! `impl VerterHost` — frontier-driven external type resolution and the
 //! component-meta macro element/surface entry points.
 //!
-//! Owns the resolution body for `resolve_external_type_from_loaded_files`
-//! (the BFS frontier driver, depth/step gates, host-cache lookup, route
-//! materialisation, and post-publish cache writes) plus the component-meta
-//! macro hooks that build on it:
-//! - `resolve_component_meta_macro_elements_target`
+//! Owns the resolution body for
+//! `resolve_external_type_from_loaded_files_with_view` (the BFS frontier
+//! driver, depth/step gates, host-cache lookup, route materialisation, and
+//! post-publish cache writes) plus the component-meta macro hooks that
+//! build on it:
+//! - `resolve_component_meta_macro_elements_target_with_view`
 //! - `build_imported_macro_declaration_from_target`
-//! - `resolve_component_meta_macro_surface`
-//! - `resolve_component_meta_macro_elements`
+//! - `resolve_component_meta_macro_surface_with_view`
+//! - `resolve_component_meta_macro_elements_with_view`
 //!
-//! The `current_type_resolution_hash` /
-//! `lookup_resolved_external_type_cache` /
-//! `store_resolved_external_type_cache` helpers are kept here too so the
-//! cache delegation to `ProjectTypeStore::resolved_type_cache()`
-//! (Tier 1C-α invariant) stays adjacent to its only callers.
+//! Each `_with_view` helper has a base wrapper (`#[cfg(test)]`-gated) that
+//! passes `view = None`; production paths reach the view-aware variant via
+//! `HostExternalMacroTypeCollector` and `HostComponentMetaResolver`.
+//!
+//! The `current_type_resolution_hash_with_view` /
+//! `lookup_resolved_external_type_cache_with_view` /
+//! `store_resolved_external_type_cache_with_view` helpers are kept here
+//! too so the cache delegation to `ProjectTypeStore::resolved_type_cache()`
+//! (Tier 1C-α invariant) stays adjacent to its only callers. The cache
+//! key carries `view_fingerprint` so base (`view = None` → 0) and
+//! per-session slots co-exist; neither evicts the other.
 
 use super::frontier_helpers::{
     emit_external_type_from_loaded_files_trace_result, external_type_debug,
@@ -26,6 +33,12 @@ use crate::host_manage::component_meta_trace_custom;
 use crate::VerterHost;
 
 impl VerterHost {
+    /// Base wrapper that fixes `view = None`. Only the integration tests
+    /// under `#[cfg(test)]` modules (`host_resolve_tests`, `frontier_tests`,
+    /// `host_manage_tests`) call this directly; production paths flow
+    /// through [`Self::resolve_external_type_from_loaded_files_with_view`]
+    /// via [`super::external_macro_collector::HostExternalMacroTypeCollector`].
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(crate) fn resolve_external_type_from_loaded_files(
@@ -42,6 +55,50 @@ impl VerterHost {
         use_host_cache: bool,
         profile_hash: Option<u64>,
         depth: usize,
+    ) -> Result<
+        Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
+        crate::types::ExternalTypeResolveError,
+    > {
+        self.resolve_external_type_from_loaded_files_with_view(
+            owner_canonical,
+            import_source,
+            type_name,
+            tracked_deps,
+            resolution_deps,
+            cache,
+            visiting,
+            required_root_dep,
+            kind,
+            use_host_cache,
+            profile_hash,
+            depth,
+            None,
+        )
+    }
+
+    /// View-aware variant of [`Self::resolve_external_type_from_loaded_files`].
+    ///
+    /// When `view` is `Some`, every nested step — dependency resolution, the
+    /// route-frontier closure, dep-source reads, and the resolved-type cache —
+    /// observes the session overlay. Base callers (`view = None`) get the
+    /// historical base-only behaviour.
+    #[allow(clippy::too_many_arguments)]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    pub(crate) fn resolve_external_type_from_loaded_files_with_view(
+        &self,
+        owner_canonical: &str,
+        import_source: &str,
+        type_name: &str,
+        tracked_deps: &mut std::collections::BTreeSet<String>,
+        resolution_deps: &mut std::collections::BTreeSet<String>,
+        cache: &mut ExternalTypeCache,
+        visiting: &mut rustc_hash::FxHashSet<(String, String)>,
+        required_root_dep: bool,
+        kind: verter_workspace::ResolveRequestKind,
+        use_host_cache: bool,
+        profile_hash: Option<u64>,
+        depth: usize,
+        view: Option<&dyn crate::session_view::SessionView>,
     ) -> Result<
         Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
         crate::types::ExternalTypeResolveError,
@@ -143,12 +200,14 @@ impl VerterHost {
         }
 
         let mut companion_plans = FrontierCompanionPlans::default();
-        let (frontier, target, had_route_cycle) = match self.run_external_type_frontier_closure(
-            dep_canonical.as_str(),
-            type_name,
-            &mut requested_routes,
-            &mut companion_plans,
-        ) {
+        let (frontier, target, had_route_cycle) = match self
+            .run_external_type_frontier_closure_with_view(
+                dep_canonical.as_str(),
+                type_name,
+                &mut requested_routes,
+                &mut companion_plans,
+                view,
+            ) {
             Ok(result) => result,
             Err(err) => {
                 emit_trace_result(
@@ -213,10 +272,11 @@ impl VerterHost {
         resolution_deps.insert(effective_dep_canonical.clone());
 
         if use_host_cache {
-            if let Some(entry) = self.lookup_resolved_external_type_cache(
+            if let Some(entry) = self.lookup_resolved_external_type_cache_with_view(
                 effective_dep_canonical.as_str(),
                 effective_type_name.as_str(),
                 kind,
+                view,
             ) {
                 self.provenance
                     .resolved_external_type_cache_hits
@@ -281,7 +341,7 @@ impl VerterHost {
         }
 
         let resolved = self
-            .materialize_frontier_resolved_type(
+            .materialize_frontier_resolved_type_with_view(
                 &frontier,
                 &requested_routes,
                 &mut companion_plans,
@@ -289,23 +349,26 @@ impl VerterHost {
                 effective_type_name.as_str(),
                 tracked_deps,
                 resolution_deps,
+                view,
             )
             .or_else(|| {
-                self.resolve_external_type_from_indexed_ready(
+                self.resolve_external_type_from_indexed_ready_with_view(
                     effective_dep_canonical.as_str(),
                     effective_type_name.as_str(),
                     &ResolvedExternalTypes::default(),
+                    view,
                 )
             });
         visiting.remove(&final_target_key);
 
         if use_host_cache && profile_hash.is_none() {
-            self.store_resolved_external_type_cache(
+            self.store_resolved_external_type_cache_with_view(
                 effective_dep_canonical.as_str(),
                 effective_type_name.as_str(),
                 kind,
                 resolved.clone(),
                 resolution_deps.iter().cloned().collect(),
+                view,
             );
         }
 
@@ -324,7 +387,15 @@ impl VerterHost {
         Ok(resolved)
     }
 
-    fn resolve_component_meta_macro_elements_target(
+    /// View-aware macro-elements-target resolver.
+    ///
+    /// Propagates `view` into the frontier closure, the materialiser, the
+    /// indexed-ready fall-through, and the eventual call out to
+    /// `resolve_external_type_from_loaded_files_with_view` so the
+    /// resolved-type cache slot and the dep-source reads observe the active
+    /// session overlay.
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_component_meta_macro_elements_target_with_view(
         &self,
         owner_canonical: &str,
         import_source: &str,
@@ -332,6 +403,7 @@ impl VerterHost {
         tracked_deps: &mut std::collections::BTreeSet<String>,
         resolution_deps: &mut std::collections::BTreeSet<String>,
         cache: &mut ExternalTypeCache,
+        view: Option<&dyn crate::session_view::SessionView>,
     ) -> Option<(
         String,
         String,
@@ -381,11 +453,12 @@ impl VerterHost {
 
         let mut companion_plans = FrontierCompanionPlans::default();
         let (frontier, target, had_route_cycle) = self
-            .run_external_type_frontier_closure(
+            .run_external_type_frontier_closure_with_view(
                 seed_canonical.as_str(),
                 seed_type_name.as_str(),
                 &mut requested_routes,
                 &mut companion_plans,
+                view,
             )
             .ok()?;
 
@@ -420,7 +493,7 @@ impl VerterHost {
         }
 
         let resolved = self
-            .materialize_frontier_resolved_type(
+            .materialize_frontier_resolved_type_with_view(
                 &frontier,
                 &requested_routes,
                 &mut companion_plans,
@@ -428,12 +501,14 @@ impl VerterHost {
                 effective_type_name.as_str(),
                 tracked_deps,
                 resolution_deps,
+                view,
             )
             .or_else(|| {
-                self.resolve_external_type_from_indexed_ready(
+                self.resolve_external_type_from_indexed_ready_with_view(
                     effective_dep_canonical.as_str(),
                     effective_type_name.as_str(),
                     &ResolvedExternalTypes::default(),
+                    view,
                 )
             });
 
@@ -478,6 +553,8 @@ impl VerterHost {
         declaration
     }
 
+    /// Base wrapper that fixes `view = None`. Test-only.
+    #[cfg(test)]
     pub(crate) fn resolve_component_meta_macro_surface(
         &self,
         owner_canonical: &str,
@@ -486,6 +563,32 @@ impl VerterHost {
         tracked_deps: &mut std::collections::BTreeSet<String>,
         resolution_deps: &mut std::collections::BTreeSet<String>,
         cache: &mut ExternalTypeCache,
+    ) -> Option<crate::resolver_core::ResolvedImportedMacroSurface> {
+        self.resolve_component_meta_macro_surface_with_view(
+            owner_canonical,
+            import_source,
+            type_name,
+            tracked_deps,
+            resolution_deps,
+            cache,
+            None,
+        )
+    }
+
+    /// View-aware variant of [`Self::resolve_component_meta_macro_surface`].
+    ///
+    /// Threads `view` into the macro-target resolver so the resolved-type
+    /// cache slot and dep-source reads honour the active session overlay.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn resolve_component_meta_macro_surface_with_view(
+        &self,
+        owner_canonical: &str,
+        import_source: &str,
+        type_name: &str,
+        tracked_deps: &mut std::collections::BTreeSet<String>,
+        resolution_deps: &mut std::collections::BTreeSet<String>,
+        cache: &mut ExternalTypeCache,
+        view: Option<&dyn crate::session_view::SessionView>,
     ) -> Option<crate::resolver_core::ResolvedImportedMacroSurface> {
         component_meta_trace_custom!(
             "resolve_component_meta_macro_elements",
@@ -500,13 +603,14 @@ impl VerterHost {
         );
 
         let (dep_canonical, effective_dep_canonical, effective_type_name, elements) = self
-            .resolve_component_meta_macro_elements_target(
+            .resolve_component_meta_macro_elements_target_with_view(
                 owner_canonical,
                 import_source,
                 type_name,
                 tracked_deps,
                 resolution_deps,
                 cache,
+                view,
             )?;
         Some(crate::resolver_core::ResolvedImportedMacroSurface {
             declaration: self.build_imported_macro_declaration_from_target(
@@ -519,6 +623,8 @@ impl VerterHost {
         })
     }
 
+    /// Base wrapper that fixes `view = None`. Test-only.
+    #[cfg(test)]
     pub(crate) fn resolve_component_meta_macro_elements(
         &self,
         owner_canonical: &str,
@@ -528,62 +634,120 @@ impl VerterHost {
         resolution_deps: &mut std::collections::BTreeSet<String>,
         cache: &mut ExternalTypeCache,
     ) -> Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements> {
-        self.resolve_component_meta_macro_elements_target(
+        self.resolve_component_meta_macro_elements_with_view(
             owner_canonical,
             import_source,
             type_name,
             tracked_deps,
             resolution_deps,
             cache,
+            None,
+        )
+    }
+
+    /// View-aware variant of [`Self::resolve_component_meta_macro_elements`].
+    ///
+    /// Threads `view` into the macro-target resolver so cross-file macro type
+    /// resolution observes the session overlay.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn resolve_component_meta_macro_elements_with_view(
+        &self,
+        owner_canonical: &str,
+        import_source: &str,
+        type_name: &str,
+        tracked_deps: &mut std::collections::BTreeSet<String>,
+        resolution_deps: &mut std::collections::BTreeSet<String>,
+        cache: &mut ExternalTypeCache,
+        view: Option<&dyn crate::session_view::SessionView>,
+    ) -> Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements> {
+        self.resolve_component_meta_macro_elements_target_with_view(
+            owner_canonical,
+            import_source,
+            type_name,
+            tracked_deps,
+            resolution_deps,
+            cache,
+            view,
         )
         .map(|(_, _, _, elements)| elements)
     }
 
-    fn current_type_resolution_hash(
+    /// View-aware variant of the dep-source resolution hash helper.
+    ///
+    /// When `view` carries an overlay (or content hash) for `canonical`, the
+    /// returned hash reflects the overlay's content so a session-bearing cache
+    /// lookup never aliases the base-host slot.
+    fn current_type_resolution_hash_with_view(
         &self,
         canonical: &str,
+        view: Option<&dyn crate::session_view::SessionView>,
     ) -> Option<crate::resolver_core::ResolverHash16> {
+        if let Some(view) = view {
+            if let Some(hash) = view.content_hash_for(canonical) {
+                return Some(hash);
+            }
+        }
         self.current_or_read_whole_hash(canonical).or_else(|| {
             self.read_dep_source_for_type_resolution(canonical, None)
                 .map(|source| crate::hash::hash_16(source.as_bytes()))
         })
     }
 
-    fn lookup_resolved_external_type_cache(
+    /// View-aware resolved-external-type cache lookup.
+    ///
+    /// The cache key includes `view.fingerprint()` so base (`view = None`)
+    /// and per-session slots co-exist; the dependency source hash is read
+    /// from the active session view so an overlay's resolved-type entry
+    /// never aliases the base entry under the same `(canonical, name, kind)`
+    /// shape.
+    fn lookup_resolved_external_type_cache_with_view(
         &self,
         dep_canonical: &str,
         type_name: &str,
         kind: verter_workspace::ResolveRequestKind,
+        view: Option<&dyn crate::session_view::SessionView>,
     ) -> Option<crate::types::ResolvedTypeCacheEntry> {
-        let dep_source_hash = self.current_type_resolution_hash(dep_canonical)?;
+        let dep_source_hash = self.current_type_resolution_hash_with_view(dep_canonical, view)?;
+        let view_fingerprint = view.map(|v| v.fingerprint()).unwrap_or(0);
         let key = crate::types::ResolvedTypeCacheKey {
             dep_canonical_id: dep_canonical.to_string(),
             dep_source_hash,
             type_name: type_name.to_string(),
             resolve_kind: kind,
+            view_fingerprint,
         };
         // Tier 1C-α — delegate to the rehomed `ResolvedTypeCacheDb`.
         // The DB owns the bounded clear-all-at-cap policy internally.
         self.resolved_type_cache().lookup(&key)
     }
 
-    fn store_resolved_external_type_cache(
+    /// View-aware resolved-external-type cache write.
+    ///
+    /// Writes into the per-view slot. Base callers (no view) write to the
+    /// `view_fingerprint = 0` slot; session-bearing callers write to their
+    /// own fingerprint slot. Slots never evict each other.
+    fn store_resolved_external_type_cache_with_view(
         &self,
         dep_canonical: &str,
         type_name: &str,
         kind: verter_workspace::ResolveRequestKind,
         resolved: Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
         tracked_deps: Vec<String>,
+        view: Option<&dyn crate::session_view::SessionView>,
     ) {
-        let Some(dep_source_hash) = self.current_type_resolution_hash(dep_canonical) else {
+        let Some(dep_source_hash) =
+            self.current_type_resolution_hash_with_view(dep_canonical, view)
+        else {
             return;
         };
+        let view_fingerprint = view.map(|v| v.fingerprint()).unwrap_or(0);
 
         let key = crate::types::ResolvedTypeCacheKey {
             dep_canonical_id: dep_canonical.to_string(),
             dep_source_hash,
             type_name: type_name.to_string(),
             resolve_kind: kind,
+            view_fingerprint,
         };
         // Tier 1C-α — `ResolvedTypeCacheDb::insert` honours the
         // bounded clear-all-at-`RESOLVED_TYPE_CACHE_CAP` policy

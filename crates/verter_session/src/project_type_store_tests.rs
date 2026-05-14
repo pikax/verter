@@ -158,6 +158,7 @@ fn resolved_type_cache_db_present_with_accessor_post_tier_1c_alpha() {
         dep_source_hash: [0u8; 16],
         type_name: "Probe".to_string(),
         resolve_kind: verter_workspace::ResolveRequestKind::TypeImport,
+        view_fingerprint: 0,
     };
     host.resolved_type_cache().insert(
         key.clone(),
@@ -1006,6 +1007,7 @@ fn resolved_type_cache_evict_canonical_drains_dep_canonical() {
         dep_source_hash: [7u8; 16],
         type_name: "ProbeEvictType".to_string(),
         resolve_kind: ResolveRequestKind::TypeImport,
+        view_fingerprint: 0,
     };
     host.resolved_type_cache().insert(
         key.clone(),
@@ -1207,6 +1209,7 @@ fn bump_project_generation_evicts_all_four() {
         dep_source_hash: [9u8; 16],
         type_name: "ProbeBumpType".to_string(),
         resolve_kind: ResolveRequestKind::TypeImport,
+        view_fingerprint: 0,
     };
     host.resolved_type_cache().insert(
         rt_key.clone(),
