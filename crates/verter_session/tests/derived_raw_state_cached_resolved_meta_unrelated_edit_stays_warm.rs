@@ -9,6 +9,8 @@
 //! per-domain fast-path validator preserves the warm entry under
 //! unrelated edits.
 
+use std::sync::atomic::Ordering::Relaxed;
+
 use verter_session::component_meta_host::ComponentMetaHost;
 use verter_session::{CompileErrorPolicy, HostConfig};
 
@@ -45,6 +47,18 @@ fn unrelated_edit_keeps_cached_resolved_meta_warm() {
         .get_component_meta("/src/Comp.vue")
         .expect("Comp meta exists");
 
+    // Capture the cold-compute counter AFTER the prime call so we can
+    // observe in isolation whether the post-edit `get_component_meta`
+    // had to recompute the resolved-meta state.
+    // `component_meta_resolved_state_recomputes` increments inside
+    // `compute_component_meta_state` (host_manage/component_meta_methods.rs:597-599),
+    // i.e. on every cold compute. Warm-hit paths bypass that
+    // function via `try_get_cached_resolved_meta`'s
+    // `validates_fact_signature` short-circuit and therefore do NOT
+    // advance the counter.
+    let prov = mh.host().provenance();
+    let recomputes_before = prov.component_meta_resolved_state_recomputes.load(Relaxed);
+
     // Edit unrelated file; Comp.vue does NOT import it. The
     // cached_resolved_meta entry for /src/Comp.vue must stay alive
     // under fact-precise validation — its signature does not mention
@@ -60,11 +74,30 @@ fn unrelated_edit_keeps_cached_resolved_meta_warm() {
         .get_component_meta("/src/Comp.vue")
         .expect("Comp meta still exists");
 
+    let recomputes_after = prov.component_meta_resolved_state_recomputes.load(Relaxed);
+
+    // Discriminator (per codex P2): comparing `accepted_props.len()`
+    // would NOT prove the cached resolved-meta entry stayed warm — a
+    // regression that eager-invalidates and cold-recomputes the
+    // resolved-meta state would still return the same prop count and
+    // keep this test green. The recomputes counter is the only
+    // observable that distinguishes "served from warm cache" from
+    // "cold-recomputed but produced the same shape".
+    assert_eq!(
+        recomputes_after, recomputes_before,
+        "Block 1A: unrelated edit must NOT invalidate the cached_resolved_meta entry. \
+         `component_meta_resolved_state_recomputes` advanced from {recomputes_before} \
+         to {recomputes_after}, signalling that the cold-compute path ran despite \
+         the edit not touching any dep observed by Comp.vue's fact signature."
+    );
+
+    // The accepted_props lens still match across the two calls — this
+    // is a sanity assertion, not the discriminating one.
     assert_eq!(
         m1.accepted_props.len(),
         m2.accepted_props.len(),
-        "Block 1A: unrelated edit must NOT invalidate the cached_resolved_meta entry. \
-         accepted_props lens differ before={} after={} — this signals over-invalidation.",
+        "Sanity: unrelated edit must not change the published prop set. \
+         before={} after={}",
         m1.accepted_props.len(),
         m2.accepted_props.len()
     );

@@ -2,21 +2,22 @@
 //! discriminator (POSITIVE).
 //!
 //! Pre-1A: `ResolvedComponentMetaCacheEntry.fact_versions:
-//! Vec<FactVersionRef>` and the consumer (`try_resolve_cached_meta`)
+//! Vec<FactVersionRef>` and the consumer (`try_get_cached_resolved_meta`)
 //! used `view.invalid_fact_details(&cached.fact_versions, 6)` instead
 //! of the per-domain fast-path validator. The migration source-grep
 //! arch guard FAILS pre-1A.
 //!
 //! Post-1A: substrate is `Arc<[FactVersionRef]>` and
-//! `try_resolve_cached_meta` short-circuits via
+//! `try_get_cached_resolved_meta` short-circuits via
 //! `view.validates_fact_signature(...)`. Editing a referenced dep
-//! triggers an invalidation observable via the `get_component_meta`
-//! call counter — the second call after the edit must NOT be served
-//! from the resolved-meta warm cache because the validator catches
-//! the version bump.
+//! triggers an invalidation observable via the
+//! `component_meta_resolved_state_recomputes` counter — the second
+//! call after the edit must NOT be served from the resolved-meta
+//! warm cache because the validator catches the version bump.
 
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::Ordering::Relaxed;
 
 use verter_session::component_meta_host::ComponentMetaHost;
 use verter_session::{CompileErrorPolicy, HostConfig};
@@ -59,11 +60,36 @@ fn cached_resolved_meta_substrate_and_consumer_wired() {
          shape after Block 1A. Window:\n{window}"
     );
 
-    // Behavioural smoke: editing a referenced dep advances the
-    // `get_component_meta_calls` counter monotonically (every public
-    // call increments). The second call after an edit must reach the
-    // cold path; the resolved-meta warm cache cannot mask the edit
-    // when the validator is wired.
+    // Consumer-site arch guard (per codex P2): `try_get_cached_resolved_meta`
+    // must dispatch through `validates_fact_signature` so the
+    // per-domain fast-path is the live invalidation oracle. A
+    // regression that reverts to the legacy `.iter().all(view.validates(...))`
+    // form or to `invalid_fact_details` as the gating predicate
+    // would erase this assertion.
+    let consumer_src = read_session_src("host_manage/component_meta_methods.rs");
+    let consumer_needle = "fn try_get_cached_resolved_meta_for_view_fingerprint(";
+    let cidx = consumer_src.find(consumer_needle).unwrap_or_else(|| {
+        panic!("expected `{consumer_needle}` in host_manage/component_meta_methods.rs")
+    });
+    let cend = consumer_src[cidx..]
+        .find("\n    }\n")
+        .expect("try_get_cached_resolved_meta_for_view_fingerprint fn close");
+    let cwindow = &consumer_src[cidx..cidx + cend];
+    assert!(
+        cwindow.contains("view.validates_fact_signature(&cached.fact_versions)"),
+        "Block 1A: try_get_cached_resolved_meta_for_view_fingerprint must \
+         gate the warm-hit return on `view.validates_fact_signature(...)`. \
+         Window:\n{cwindow}"
+    );
+
+    // Behavioural assertion: editing a referenced dep bumps a fact
+    // version, the warm-hit validator catches it, and the cold-compute
+    // path runs again — advancing
+    // `component_meta_resolved_state_recomputes`. Asserting only that
+    // both calls return `Some` would NOT prove the validator caught
+    // the invalidation: a stale warm hit would also return `Some` (with
+    // the same shape pre-edit). The recomputes-counter delta is the
+    // discriminating signal.
     let mh = metahost();
     mh.upsert_base("/src/types.ts", "export interface Foo { a: number; }\n")
         .expect("ts upsert");
@@ -79,15 +105,24 @@ fn cached_resolved_meta_substrate_and_consumer_wired() {
     let m1 = mh.host().get_component_meta("/src/Comp.vue");
     assert!(m1.is_some(), "first call should return a meta");
 
+    let prov = mh.host().provenance();
+    let recomputes_before = prov.component_meta_resolved_state_recomputes.load(Relaxed);
+
     // Edit the referenced type — bumps a fact version.
     mh.upsert_base("/src/types.ts", "export interface Foo { a: string; }\n")
         .expect("ts re-upsert");
 
     let m2 = mh.host().get_component_meta("/src/Comp.vue");
     assert!(m2.is_some(), "second call after edit must still resolve");
-    // The two metas may carry the same observable shape (number→string
-    // doesn't change accepted_props names), but the call must
-    // succeed and cold-recompute. The behavioural delta is in the
-    // counters; the runtime contract is that no stale cached state
-    // survives the dep edit.
+
+    let recomputes_after = prov.component_meta_resolved_state_recomputes.load(Relaxed);
+
+    assert!(
+        recomputes_after > recomputes_before,
+        "Block 1A: editing a referenced dep MUST bypass the warm \
+         resolved-meta cache. `component_meta_resolved_state_recomputes` \
+         did not advance from {recomputes_before} to {recomputes_after}, \
+         which means the validator did not catch the version bump and a \
+         stale warm hit served the second call."
+    );
 }

@@ -2796,11 +2796,16 @@ impl VerterHost {
         let entry = self.derived_raw_cache().get(canonical)?;
         let cached = entry.cached_resolved_meta.get(&(mode, view_fingerprint))?;
         let view = self.resolver_store_view();
-        // R3/R26/R28 fast-path: `StoreView::validates_fact_signature`
-        // short-circuits on the first mismatch and dispatches per
-        // domain. Re-emit the structured trace via
-        // `invalid_fact_details` only when validation fails so the
-        // observability path still surfaces the offending facts.
+        // R3/R26/R28: dispatch through
+        // `StoreView::validates_fact_signature` as a per-domain
+        // override hook. The default impl in `resolver_core/mod.rs`
+        // walks the signature via `.iter().all(self.validates(..))`,
+        // so the live behavior is the same as the legacy per-item
+        // form; the dispatch point exists so future per-domain
+        // implementers can short-circuit on the first mismatch
+        // without changing call sites. Re-emit the structured trace
+        // via `invalid_fact_details` only when validation fails so
+        // the observability path still surfaces the offending facts.
         if !view.validates_fact_signature(&cached.fact_versions) {
             let invalid_details = view.invalid_fact_details(&cached.fact_versions, 6);
             component_meta_trace_custom!(
