@@ -93,7 +93,8 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
         // prepared declarations rather than the host's base bundle
         // cache. Non-overlay canonicals fall through to the warm
         // bundle cache transparently.
-        self.inner.prepared_decl_bundle_with_context(self, canonical_id)
+        self.inner
+            .prepared_decl_bundle_with_context(self, canonical_id)
     }
 
     #[inline]
@@ -203,11 +204,7 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
         dep_canonical: &str,
         requested_name: &str,
     ) -> Option<(String, String)> {
-        ResolverContext::resolve_named_type_export_target(
-            self.inner,
-            dep_canonical,
-            requested_name,
-        )
+        ResolverContext::resolve_named_type_export_target(self.inner, dep_canonical, requested_name)
     }
 
     #[inline]
@@ -365,27 +362,6 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
     #[inline]
     fn active_session_view(&self) -> Option<&dyn SessionView> {
         Some(self.view)
-    }
-
-    // -------- Overlay materialiser ---------------------------------
-
-    #[inline]
-    fn materialize_overlay_indexed_ready(
-        &self,
-        canonical_id: &str,
-        overlay_source: &Arc<str>,
-        overlay_whole_hash: Hash16,
-    ) -> Option<Arc<IndexedReady>> {
-        // Route through the view-aware host helper so overlay-only
-        // helper imports (e.g. `/src/Button.vue` referencing
-        // overlay-only `./theme`, `./schema`, `./tv`) discover their
-        // overlay candidates without depending on prewarm ordering.
-        self.inner.materialize_overlay_indexed_ready_with_view(
-            canonical_id,
-            overlay_source,
-            overlay_whole_hash,
-            self.view,
-        )
     }
 }
 

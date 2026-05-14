@@ -388,32 +388,6 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     fn active_session_view(&self) -> Option<&dyn crate::session_view::SessionView> {
         None
     }
-
-    /// Materialise an overlay [`IndexedReady`] candidate keyed by the
-    /// overlay's content hash and publish it as a multi-candidate
-    /// sibling of the base host's IndexedReady.
-    ///
-    /// Used by
-    /// [`crate::host_manage::overlay_priority::ensure_indexed_ready_with_view`]
-    /// to publish an overlay candidate without mutating the base host
-    /// (R17). The base implementer (`VerterHost`) builds the artifact
-    /// from `overlay_source` and admits it via
-    /// [`FileArtifactStore::insert_artifacts`](crate::file_artifact_store::FileArtifactStore::insert_artifacts);
-    /// wrappers delegate to the inner context.
-    ///
-    /// TODO(follow-up — fix-agent P1.4 / substrate-reviewer P1.4): this
-    /// is a materialiser-side method living on the query-side
-    /// `ResolverContext` trait. The trait sealing contains the risk,
-    /// but a cleaner shape would split into a separate
-    /// `OverlayMaterialiser` trait so the substrate boundary stays
-    /// query-side only. Owned by the follow-up substrate-hygiene
-    /// block.
-    fn materialize_overlay_indexed_ready(
-        &self,
-        canonical_id: &str,
-        overlay_source: &Arc<str>,
-        overlay_whole_hash: Hash16,
-    ) -> Option<Arc<IndexedReady>>;
 }
 
 // Sealed marker — `VerterHost` is the base implementer and
@@ -685,23 +659,6 @@ impl ResolverContext for crate::VerterHost {
     #[inline]
     fn current_fact_tracer(&self) -> Option<&crate::resolver_core::FactReadSetCell> {
         fact_tracer_tls::current_tracer()
-    }
-
-    // Overlay materialiser -------------------------------------------
-
-    #[inline]
-    fn materialize_overlay_indexed_ready(
-        &self,
-        canonical_id: &str,
-        overlay_source: &Arc<str>,
-        overlay_whole_hash: Hash16,
-    ) -> Option<Arc<IndexedReady>> {
-        crate::VerterHost::materialize_overlay_indexed_ready(
-            self,
-            canonical_id,
-            overlay_source,
-            overlay_whole_hash,
-        )
     }
 }
 

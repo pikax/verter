@@ -471,30 +471,32 @@ pub(crate) fn resolve_type_declaration_with_context(
         crate::resolver_core::symbol_resolver::declaration_node_key(dep_canonical, requested_name);
     let mut resolve_ctx = crate::resolver_core::symbol_resolver::ResolveContext::new();
     let permissive_view = crate::resolver_core::PermissiveStoreView;
-    let result =
-        host.resolver_runtime()
-            .symbol
-            .resolve_node(key, &permissive_view, &mut resolve_ctx, |_| {
-                let declaration = crate::resolver_core::resolve_type_declaration(
-                    &resolver,
-                    dep_canonical,
-                    requested_name,
-                );
-                let mut tracked_deps = std::collections::BTreeSet::new();
-                if !declaration.canonical_source.is_empty()
-                    && declaration.canonical_source != dep_canonical
-                {
-                    tracked_deps.insert(declaration.canonical_source.clone());
-                }
+    let result = host.resolver_runtime().symbol.resolve_node(
+        key,
+        &permissive_view,
+        &mut resolve_ctx,
+        |_| {
+            let declaration = crate::resolver_core::resolve_type_declaration(
+                &resolver,
+                dep_canonical,
+                requested_name,
+            );
+            let mut tracked_deps = std::collections::BTreeSet::new();
+            if !declaration.canonical_source.is_empty()
+                && declaration.canonical_source != dep_canonical
+            {
+                tracked_deps.insert(declaration.canonical_source.clone());
+            }
 
-                crate::resolver_core::symbol_resolver::SymbolNodeResult {
-                    value: crate::resolver_core::symbol_resolver::SymbolNodeValue::Declaration(
-                        declaration,
-                    ),
-                    facts: host.current_dependency_fact_versions(dep_canonical, &tracked_deps),
-                    diagnostics: Vec::new(),
-                }
-            });
+            crate::resolver_core::symbol_resolver::SymbolNodeResult {
+                value: crate::resolver_core::symbol_resolver::SymbolNodeValue::Declaration(
+                    declaration,
+                ),
+                facts: host.current_dependency_fact_versions(dep_canonical, &tracked_deps),
+                diagnostics: Vec::new(),
+            }
+        },
+    );
 
     match result.value {
         crate::resolver_core::symbol_resolver::SymbolNodeValue::Declaration(declaration) => {

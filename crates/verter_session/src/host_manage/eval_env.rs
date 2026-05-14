@@ -496,21 +496,7 @@ impl VerterHost {
         candidates
     }
 
-    pub(crate) fn compute_evaluated_types_with_tracking_from_owner_context(
-        &self,
-        canonical: &str,
-        snapshot: &FileAnalysisSnapshot,
-        owner_eval_source: Option<&str>,
-        purpose: crate::resolver_core::ComponentMetaResolutionPurpose,
-    ) -> Option<ComputedEvaluatedTypes> {
-        let base_ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = self;
-        self.compute_evaluated_types_with_tracking_from_owner_context_with_ctx(
-            base_ctx, canonical, snapshot, owner_eval_source, purpose,
-        )
-    }
-
-    /// Context-aware variant of
-    /// [`Self::compute_evaluated_types_with_tracking_from_owner_context`].
+    /// View-aware macro-argument-type expansion entry point.
     /// Routes the resolver-tier reads (query engine, dispatch
     /// lowering, prepared-decl bundle) through the supplied
     /// `ResolverContext` so overlay-bearing sessions observe overlay
@@ -530,7 +516,11 @@ impl VerterHost {
                 })
         })?;
         self.compute_evaluated_types_from_owner_context_with_ctx(
-            ctx, canonical, snapshot, &eval_source, purpose,
+            ctx,
+            canonical,
+            snapshot,
+            &eval_source,
+            purpose,
         )
     }
 
@@ -554,24 +544,10 @@ impl VerterHost {
             .collect()
     }
 
-    pub(crate) fn compute_evaluated_types_from_owner_context(
-        &self,
-        canonical: &str,
-        snapshot: &FileAnalysisSnapshot,
-        eval_source: &str,
-        purpose: crate::resolver_core::ComponentMetaResolutionPurpose,
-    ) -> Option<ComputedEvaluatedTypes> {
-        let base_ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = self;
-        self.compute_evaluated_types_from_owner_context_with_ctx(
-            base_ctx, canonical, snapshot, eval_source, purpose,
-        )
-    }
-
-    /// Context-aware variant of
-    /// [`Self::compute_evaluated_types_from_owner_context`]. The
-    /// macro-argument-type expander uses `ctx` for the query-engine
-    /// and dispatch construction so the cross-file type lookups
-    /// observe overlay candidates when the session view carries them.
+    /// Macro-argument-type expander entry point. The expander uses
+    /// `ctx` for the query-engine and dispatch construction so the
+    /// cross-file type lookups observe overlay candidates when the
+    /// session view carries them.
     pub(crate) fn compute_evaluated_types_from_owner_context_with_ctx(
         &self,
         ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,

@@ -257,30 +257,28 @@ impl VerterHost {
                         })
                 })
                 .clone();
-            let resolved: Option<String> =
-                if kind == verter_workspace::ResolveRequestKind::TypeImport {
-                    primary
-                        .or_else(|| self.fallback_relative_type_companion(canonical_id, specifier))
-                        .or_else(|| {
-                            self.ws()
-                                .resolve_import(
-                                    canonical_id,
-                                    specifier,
-                                    verter_workspace::ResolutionContext {
-                                        phase: verter_workspace::ResolvePhase::CodegenBlocker,
-                                        kind: verter_workspace::ResolveRequestKind::EsmImport,
-                                    },
-                                )
-                                .map(|resolution| resolution.source_id)
-                        })
-                        .or_else(|| {
-                            resolve_relative_overlay_candidate(view, canonical_id, specifier)
-                        })
-                } else {
-                    primary.or_else(|| {
-                        resolve_relative_overlay_candidate(view, canonical_id, specifier)
+            let resolved: Option<String> = if kind
+                == verter_workspace::ResolveRequestKind::TypeImport
+            {
+                primary
+                    .or_else(|| self.fallback_relative_type_companion(canonical_id, specifier))
+                    .or_else(|| {
+                        self.ws()
+                            .resolve_import(
+                                canonical_id,
+                                specifier,
+                                verter_workspace::ResolutionContext {
+                                    phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                                    kind: verter_workspace::ResolveRequestKind::EsmImport,
+                                },
+                            )
+                            .map(|resolution| resolution.source_id)
                     })
-                };
+                    .or_else(|| resolve_relative_overlay_candidate(view, canonical_id, specifier))
+            } else {
+                primary
+                    .or_else(|| resolve_relative_overlay_candidate(view, canonical_id, specifier))
+            };
             let mut resolution = DependencyResolution {
                 specifier: specifier.clone(),
                 resolved_canonical_id: None,

@@ -289,10 +289,8 @@ impl SessionView for HostView {
         // observe a sibling overlay candidate published by a
         // concurrent session under a different content hash.
         let content_hash = self.content_hash_for(canonical)?;
-        let key = crate::file_artifact_store::FileArtifactKey::legacy(
-            Arc::from(canonical),
-            content_hash,
-        );
+        let key =
+            crate::file_artifact_store::FileArtifactKey::legacy(Arc::from(canonical), content_hash);
         self.base.project_type_store().indexed().get_artifacts(&key)
     }
 
@@ -427,10 +425,8 @@ impl SessionView for OverlaidView {
         // candidate (which would be the wrong artifact bundle for
         // the overlay's source).
         let content_hash = self.content_hash_for(canonical)?;
-        let key = crate::file_artifact_store::FileArtifactKey::legacy(
-            Arc::from(canonical),
-            content_hash,
-        );
+        let key =
+            crate::file_artifact_store::FileArtifactKey::legacy(Arc::from(canonical), content_hash);
         self.base.project_type_store().indexed().get_artifacts(&key)
     }
 
@@ -542,10 +538,8 @@ impl SessionView for HostViewRef<'_> {
         // content hash (see `HostView::parse_artifacts` for the
         // same rationale).
         let content_hash = self.content_hash_for(canonical)?;
-        let key = crate::file_artifact_store::FileArtifactKey::legacy(
-            Arc::from(canonical),
-            content_hash,
-        );
+        let key =
+            crate::file_artifact_store::FileArtifactKey::legacy(Arc::from(canonical), content_hash);
         self.base.project_type_store().indexed().get_artifacts(&key)
     }
 
@@ -685,10 +679,8 @@ impl SessionView for OverlaidViewRef<'_> {
             return None;
         }
         let content_hash = self.content_hash_for(canonical)?;
-        let key = crate::file_artifact_store::FileArtifactKey::legacy(
-            Arc::from(canonical),
-            content_hash,
-        );
+        let key =
+            crate::file_artifact_store::FileArtifactKey::legacy(Arc::from(canonical), content_hash);
         self.base.project_type_store().indexed().get_artifacts(&key)
     }
 
