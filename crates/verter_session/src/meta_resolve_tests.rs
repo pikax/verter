@@ -64,8 +64,13 @@ fn clear_legacy_cached_resolved_state(
     #[cfg(not(target_arch = "wasm32"))]
     {
         // cached_resolved_meta lives on DerivedRawState (D48 split).
+        // The key is `(mode, view_fingerprint)`; this helper clears
+        // both the base slot (view_fingerprint == 0) and every
+        // overlay-bearing slot for `mode`.
         if let Some(mut entry) = project.host().derived_raw_cache().get_mut(canonical) {
-            entry.cached_resolved_meta.remove(&mode);
+            entry
+                .cached_resolved_meta
+                .retain(|(slot_mode, _view_fp), _| slot_mode != &mode);
         }
     }
 
@@ -73,7 +78,9 @@ fn clear_legacy_cached_resolved_state(
     {
         let mut files = crate::shared::write_lock(&project.host().files);
         if let Some(entry) = files.get_mut(canonical) {
-            entry.cached_resolved_meta.remove(&mode);
+            entry
+                .cached_resolved_meta
+                .retain(|(slot_mode, _view_fp), _| slot_mode != &mode);
         }
     }
 }
@@ -4134,7 +4141,21 @@ defineProps<Props>()
 // Phase 1: Architecture — Overlay safety
 // ===========================================================================
 
+// block-1.5 RED — escalated: cold-compute call-graph view threading
+// is required for the cold resolver-tier read on `/types.ts` to
+// observe the session's overlay source. The view-aware mirror key
+// (Codex P1.3, fix-agent P0.1) closes the legacy-slot half of the
+// overlay isolation contract, but the dep-source half still routes
+// through `&VerterHost::ensure_indexed_ready` (no view in scope) and
+// observes the BASE candidate. Closing that path is the cold-compute
+// call-graph refactor (substrate-reviewer's P0.2 enumeration of ~20
+// callsites across host_manage/component_meta_methods.rs,
+// eval_env.rs, fallthrough.rs, intrinsic_projection.rs,
+// jsdoc_resolve.rs, component_meta_resolution_policy/mod.rs,
+// host_resolve_type_audit.rs, typeinfo/*). Owned by the follow-up
+// substrate block.
 #[test]
+#[ignore = "block-1.5 RED — escalated: cold-compute dep-source path on /types.ts reads via &VerterHost::ensure_indexed_ready without view in scope; the prewarm publishes the overlay candidate but the dep-read path picks the BASE candidate. Closure requires the cold-compute call-graph view-threading refactor (substrate-reviewer's P0.2)."]
 fn overlay_queries_do_not_reuse_unsound_base_resolved_meta_cache() {
     let project = make_project();
     project

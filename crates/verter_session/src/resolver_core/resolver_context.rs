@@ -400,6 +400,14 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     /// from `overlay_source` and admits it via
     /// [`FileArtifactStore::insert_artifacts`](crate::file_artifact_store::FileArtifactStore::insert_artifacts);
     /// wrappers delegate to the inner context.
+    ///
+    /// TODO(follow-up — fix-agent P1.4 / substrate-reviewer P1.4): this
+    /// is a materialiser-side method living on the query-side
+    /// `ResolverContext` trait. The trait sealing contains the risk,
+    /// but a cleaner shape would split into a separate
+    /// `OverlayMaterialiser` trait so the substrate boundary stays
+    /// query-side only. Owned by the follow-up substrate-hygiene
+    /// block.
     fn materialize_overlay_indexed_ready(
         &self,
         canonical_id: &str,

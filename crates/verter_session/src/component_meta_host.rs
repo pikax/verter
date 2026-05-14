@@ -924,7 +924,7 @@ defineProps<ButtonProps>()
     }
 
     #[test]
-    #[ignore = "consumer paths: get_component_meta resolver reads helper deps from base host; overlay-only dependency graphs require future resolver-tier view.source() consultation"]
+    #[ignore = "block-1.5 RED — escalated: transitive overlay-only helper expansion (`ComponentConfig<typeof theme, AppConfig, 'button'>`) requires the resolver-tier type expander (`shallow_lower_type_expr`, prepared-decl lookups, registry materialiser) to read via `&dyn ResolverContext` rather than `&VerterHost`. Closure requires the cold-compute call-graph view-threading refactor (substrate-reviewer's P0.2 — ~20 callsites across host_manage/component_meta_methods.rs, eval_env.rs, fallthrough.rs, intrinsic_projection.rs, jsdoc_resolve.rs, component_meta_resolution_policy/mod.rs, host_resolve_type_audit.rs, typeinfo/*)."]
     fn overlay_queries_reapply_owner_after_overlay_only_helper_upserts() {
         let host = make_host();
         let session = host.open_session_batch().unwrap();

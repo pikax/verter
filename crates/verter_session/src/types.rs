@@ -1498,8 +1498,14 @@ pub struct DerivedRawState {
     /// Cached TSC extract keyed by whole_hash. On read: stored hash must match
     /// `effective_file_state().whole_hash`. Cleared on upsert when whole_hash changes.
     pub(crate) cached_tsc_extract: Option<(Hash16, Arc<verter_compiler::tsc::ExtractedTscState>)>,
-    /// Mode-aware cached resolved component-meta sidecar keyed by owner/dependency hashes.
-    pub(crate) cached_resolved_meta: FxHashMap<ProjectionMode, ResolvedComponentMetaCacheEntry>,
+    /// View-aware cached resolved component-meta sidecar keyed by
+    /// `(ProjectionMode, view_fingerprint)`. `view_fingerprint == 0`
+    /// is the base-only slot; non-zero fingerprints identify per-
+    /// overlay-set slots so two sessions with conflicting overlays
+    /// cannot observe each other's cached state through the legacy
+    /// fallback path (Codex P1.3, fix-agent P0.1).
+    pub(crate) cached_resolved_meta:
+        FxHashMap<(ProjectionMode, u64), ResolvedComponentMetaCacheEntry>,
     /// Cached encoded protobuf payload for the canonical component-meta query.
     pub(crate) cached_meta_payload: Option<CachedMetaPayload>,
 

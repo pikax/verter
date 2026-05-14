@@ -258,6 +258,28 @@ impl VerterHost {
 
         // Publish via the multi-candidate surface — base candidate (if
         // any) under its own content hash stays untouched.
+        //
+        // TODO(follow-up — Codex P1.2 / fix-agent P1.2): the overlay
+        // candidate is published into the shared `FileArtifactStore`
+        // under the overlay's content hash. Base-host paths that read
+        // via content-agnostic lookups (`get_any` /
+        // `content_hash_for_canonical`, used by `read_analysis_source`
+        // and `HostView`) can therefore observe overlay-published
+        // candidates from a concurrent session. Closure requires
+        // either (a) splitting overlay artifacts into a view-scoped
+        // storage namespace, or (b) tagging overlay-published keys so
+        // base lookups skip them. Owned by the follow-up substrate
+        // block that lands the cold-compute call-graph view-threading
+        // refactor (substrate-reviewer's P0.2).
+        //
+        // TODO(follow-up — substrate-reviewer P1.2): the key uses
+        // `FileArtifactKey::legacy` which zeroes `parse_env_hash` and
+        // sets `parser_version = LEGACY_PARSER_VERSION`. The full R21
+        // env-hash quintuple is available on the bound view
+        // (`view.env_hashes()` + `view.project_identity()`) but is
+        // not threaded into this call. Lift the env hashes into
+        // `materialize_overlay_indexed_ready`'s call signature when
+        // the broader env-hash-migration block lands.
         let key = crate::file_artifact_store::FileArtifactKey::legacy(
             Arc::from(canonical_id),
             overlay_whole_hash,

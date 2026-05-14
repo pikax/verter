@@ -720,6 +720,14 @@ impl SessionView for OverlaidViewRef<'_> {
 /// from the sorted overlay entries, so two views with the same
 /// overlay set return the same fingerprint regardless of insertion
 /// order.
+///
+/// TODO(follow-up — fix-agent P1.3 / substrate-reviewer P1.3): the
+/// fingerprint is recomputed on every `SessionView::fingerprint()`
+/// call. For overlay-bearing views in hot LSP loops the O(N log N)
+/// sort + hash runs once per cache-key construction. Cache the
+/// fingerprint on `OverlaidView` / `OverlaidViewRef` construction
+/// (one `OnceCell<u64>` or one pre-computed field) so subsequent
+/// reads are O(1). Owned by the follow-up substrate-hygiene block.
 fn overlay_set_fingerprint(
     overlay_hashes: &FxHashMap<String, Hash16>,
     tombstones: Option<&std::collections::HashSet<String>>,

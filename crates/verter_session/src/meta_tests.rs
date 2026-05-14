@@ -203,6 +203,37 @@ fn cached_resolved_state(
     canonical: &str,
     mode: crate::types::ProjectionMode,
 ) -> Option<Arc<crate::meta_resolve::ResolvedComponentMetaState>> {
+    // The slot key is `(mode, view_fingerprint)`. Test fixtures
+    // exercise a single session at a time; the helper prefers the
+    // overlay-bearing slot (view_fingerprint != 0) if present and
+    // falls back to the base slot (view_fingerprint == 0) so the
+    // historical "give me the latest cached state for this mode"
+    // semantics are preserved across the view-aware migration
+    // (Codex P1.3, fix-agent P0.1).
+    fn pick<'a>(
+        entries: impl Iterator<
+            Item = (
+                &'a (crate::types::ProjectionMode, u64),
+                &'a crate::types::ResolvedComponentMetaCacheEntry,
+            ),
+        >,
+        mode: crate::types::ProjectionMode,
+    ) -> Option<Arc<crate::meta_resolve::ResolvedComponentMetaState>> {
+        let mut base = None;
+        let mut overlay = None;
+        for ((slot_mode, view_fp), cached) in entries {
+            if slot_mode != &mode {
+                continue;
+            }
+            if *view_fp == 0 {
+                base = Some(Arc::clone(&cached.state));
+            } else if overlay.is_none() {
+                overlay = Some(Arc::clone(&cached.state));
+            }
+        }
+        overlay.or(base)
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     {
         // cached_resolved_meta lives on DerivedRawState (D48 split).
@@ -210,23 +241,15 @@ fn cached_resolved_state(
             .host()
             .derived_raw_cache()
             .get(canonical)
-            .and_then(|entry| {
-                entry
-                    .cached_resolved_meta
-                    .get(&mode)
-                    .map(|cached| Arc::clone(&cached.state))
-            })
+            .and_then(|entry| pick(entry.cached_resolved_meta.iter(), mode))
     }
 
     #[cfg(target_arch = "wasm32")]
     {
         let files = crate::shared::read_lock(&project.host().files);
-        files.get(canonical).and_then(|entry| {
-            entry
-                .cached_resolved_meta
-                .get(&mode)
-                .map(|cached| Arc::clone(&cached.state))
-        })
+        files
+            .get(canonical)
+            .and_then(|entry| pick(entry.cached_resolved_meta.iter(), mode))
     }
 }
 
@@ -235,11 +258,16 @@ fn clear_legacy_cached_resolved_state(
     canonical: &str,
     mode: crate::types::ProjectionMode,
 ) {
+    // Drops every slot matching `mode` regardless of view fingerprint
+    // so a test fixture exercising base / overlay isolation can reset
+    // the cache to a known-empty state for `mode`.
     #[cfg(not(target_arch = "wasm32"))]
     {
         // cached_resolved_meta lives on DerivedRawState (D48 split).
         if let Some(mut entry) = project.host().derived_raw_cache().get_mut(canonical) {
-            entry.cached_resolved_meta.remove(&mode);
+            entry
+                .cached_resolved_meta
+                .retain(|(slot_mode, _view_fp), _| slot_mode != &mode);
         }
     }
 
@@ -247,7 +275,9 @@ fn clear_legacy_cached_resolved_state(
     {
         let mut files = crate::shared::write_lock(&project.host().files);
         if let Some(entry) = files.get_mut(canonical) {
-            entry.cached_resolved_meta.remove(&mode);
+            entry
+                .cached_resolved_meta
+                .retain(|(slot_mode, _view_fp), _| slot_mode != &mode);
         }
     }
 }

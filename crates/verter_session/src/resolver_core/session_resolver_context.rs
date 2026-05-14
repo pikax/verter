@@ -76,12 +76,6 @@ impl<'a> SessionResolverContext<'a> {
     pub(crate) fn new(inner: &'a dyn ResolverContext, view: &'a dyn SessionView) -> Self {
         Self { inner, view }
     }
-
-    /// Borrow the bound session view.
-    #[allow(dead_code)]
-    pub(crate) fn view_ref(&self) -> &'a dyn SessionView {
-        self.view
-    }
 }
 
 impl<'a> ResolverContext for SessionResolverContext<'a> {

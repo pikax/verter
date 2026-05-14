@@ -2720,24 +2720,18 @@ impl VerterHost {
             .component_meta
             .get_if_valid(&cache_key, &view_for_get)
         {
-            self.mirror_cached_resolved_meta_arc(canonical, mode, cached.clone());
+            self.mirror_cached_resolved_meta_arc(canonical, mode, view_fingerprint, cached.clone());
             return Some(cached.as_ref().clone());
         }
 
-        // Overlay-bearing callers (`view_fingerprint != 0`) MUST NOT
-        // pick up the legacy per-canonical cache slot, because the
-        // legacy slot is keyed only by `(canonical, mode)` and does
-        // not discriminate overlay candidates. Falling through here
-        // would let two sessions with conflicting overlays observe
-        // each other's cached state. The base-only path
-        // (`view_fingerprint == 0`) keeps the legacy fallback.
-        if view_fingerprint != 0 {
-            return None;
-        }
-
+        // View-aware legacy fallback: the slot is keyed by
+        // `(mode, view_fingerprint)` so an overlay-bearing reader
+        // (view_fingerprint != 0) hits its own per-overlay slot, and
+        // a base reader (view_fingerprint == 0) cannot observe an
+        // overlay-derived entry (Codex P1.3, fix-agent P0.1).
         // cached_resolved_meta lives on DerivedRawState (D48 split).
         let entry = self.derived_raw_cache().get(canonical)?;
-        let cached = entry.cached_resolved_meta.get(&mode)?;
+        let cached = entry.cached_resolved_meta.get(&(mode, view_fingerprint))?;
         let view = self.resolver_store_view();
         let invalid_details = view.invalid_fact_details(&cached.fact_versions, 6);
         if !invalid_details.is_empty() {
@@ -2824,13 +2818,20 @@ impl VerterHost {
                 "component_meta.results",
             );
         }
-        self.mirror_cached_resolved_meta_arc(canonical, mode, state);
+        // View-aware mirror: the legacy `cached_resolved_meta` slot is
+        // keyed by `(ProjectionMode, view_fingerprint)` so overlay-
+        // bearing publishers (`view_fingerprint != 0`) cannot
+        // overwrite the base slot. A later base `resolve_component_meta`
+        // (view_fingerprint == 0) does NOT fall through to an overlay-
+        // derived entry (Codex P1.3, fix-agent P0.1).
+        self.mirror_cached_resolved_meta_arc(canonical, mode, view_fingerprint, state);
     }
 
     pub(crate) fn mirror_cached_resolved_meta_arc(
         &self,
         canonical: &str,
         mode: ProjectionMode,
+        view_fingerprint: u64,
         state: Arc<ResolvedComponentMetaState>,
     ) {
         let cached = crate::types::ResolvedComponentMetaCacheEntry {
@@ -2839,6 +2840,11 @@ impl VerterHost {
         };
 
         // cached_resolved_meta lives on DerivedRawState (D48 split).
+        // View-aware key: `(mode, view_fingerprint)` prevents an
+        // overlay-bearing publisher (view_fingerprint != 0) from
+        // overwriting the base slot (view_fingerprint == 0) and
+        // contaminating a later base read (Codex P1.3,
+        // fix-agent P0.1).
         {
             let mut derived_ref = self
                 .derived_raw_cache()
@@ -2847,7 +2853,7 @@ impl VerterHost {
             derived_ref
                 .value_mut()
                 .cached_resolved_meta
-                .insert(mode, cached);
+                .insert((mode, view_fingerprint), cached);
         }
     }
 
