@@ -1560,10 +1560,28 @@ impl SemanticGraphStore {
                     )))
                 });
                 let dep_signature = state.dep_signature.clone().unwrap_or_else(empty_signature);
+                let fact_dep_signature = state.fact_dep_signature.clone();
                 let walker_diagnostics = state
                     .walker_diagnostics
                     .clone()
                     .unwrap_or_else(|| std::sync::Arc::from([]));
+                // Drop the mutex guard before calling into the TLS fan-out
+                // so the lock is released before any re-entrant observation
+                // from a nested tracer scope.
+                drop(state);
+                // Bubble the winner's fact signature into the joiner thread's
+                // active tracer stack (if any). This ensures that an outer
+                // cold-compute scope that spawned this joiner sees all the
+                // facts the winner observed, preserving completeness of the
+                // outer scope's accumulated observation set.
+                // Abort-path guard: `state.aborted` was checked above; the
+                // `continue` path retries without reaching here, so we only
+                // bubble on the non-aborted joiner path.
+                if let Some(ref facts) = fact_dep_signature {
+                    if !facts.is_empty() {
+                        crate::resolver_core::resolver_context::observe_fan_out_borrowed(facts);
+                    }
+                }
                 if let Some(prov) = self.provenance.as_ref() {
                     prov.execute_cooperative_joiner_path
                         .fetch_add(1, Ordering::Relaxed);

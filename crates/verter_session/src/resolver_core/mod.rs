@@ -143,6 +143,7 @@ pub struct StoreViewCompatToken {
 /// this is the documented seam for non-`ctx` callers, mirroring
 /// [`crate::VerterHost::current_fact_tracer`] / the
 /// [`ResolverContext::current_fact_tracer`] trait method.
+#[allow(dead_code)]
 #[inline]
 #[must_use]
 pub(crate) fn current_fact_tracer_via_tls<'a>() -> Option<&'a FactReadSetCell> {

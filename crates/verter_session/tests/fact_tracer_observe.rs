@@ -248,34 +248,77 @@ fn finalise_sorts_and_dedups() {
 
 // ── Test 6 ─────────────────────────────────────────────────────────────
 //
-// Nested `with_fact_tracer` scopes panic — the inner scope cannot
-// silently install over an active outer scope because observations
-// from the inner scope would never bubble up to the outer one.
+// Nested `with_fact_tracer` scopes are now supported. An inner scope
+// pushes its cell onto the stack and all outer scopes receive its
+// observations via fan-out. The test verifies both levels capture
+// the observation made inside the inner scope.
 
 #[test]
 fn nested_with_fact_tracer_scopes_panic() {
+    // The test name is kept for git-history continuity; the behaviour
+    // asserted here is the post-refactor SUPPORTED nesting contract:
+    // outer and inner both capture the inner observation.
     let host = make_host();
 
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _ = host.with_fact_tracer(|| {
-            let _inner = host.with_fact_tracer(|| {});
+    let outer_fact = fact("/outer.ts", 1);
+    let inner_fact = fact("/inner.ts", 2);
+
+    // inner_read is returned from the outer scope's closure.
+    let (inner_read, outer_set) = host.with_fact_tracer(|| {
+        // Observe into the outer scope via fan-out (writes to all
+        // active cells — just the outer cell at this point).
+        verter_session::for_tests::observe_fan_out_borrowed_for_tests(&[outer_fact.clone()]);
+
+        // Inner scope pushes a second cell onto the stack.
+        let ((), inner_set) = host.with_fact_tracer(|| {
+            // Fan-out from inside the inner scope delivers the observation
+            // to BOTH the inner cell and the outer cell.
+            verter_session::for_tests::observe_fan_out_borrowed_for_tests(&[inner_fact.clone()]);
         });
-    }));
+        inner_set
+    });
 
-    assert!(
-        outcome.is_err(),
-        "nested `with_fact_tracer` must panic; instead the outer scope completed normally"
+    // Inner set must contain the inner-scope observation.
+    assert_eq!(inner_read.len(), 1, "inner set must have 1 fact");
+    match inner_read.finalise() {
+        FactReadSetFinalise::Ok(arc) => {
+            assert!(
+                arc.iter().any(|f| f == &inner_fact),
+                "inner set must contain the inner_fact"
+            );
+        }
+        FactReadSetFinalise::Overflow => panic!("inner set should not overflow"),
+    }
+
+    // Outer set must contain BOTH the outer-scope and the inner-scope
+    // observations (fan-out delivers inner observations to outer cell).
+    assert_eq!(
+        outer_set.len(),
+        2,
+        "outer set must have 2 facts (outer + inner via fan-out)"
     );
+    match outer_set.finalise() {
+        FactReadSetFinalise::Ok(arc) => {
+            assert!(
+                arc.iter().any(|f| f == &outer_fact),
+                "outer set must contain the outer_fact"
+            );
+            assert!(
+                arc.iter().any(|f| f == &inner_fact),
+                "outer set must contain the inner_fact (fan-out from inner scope)"
+            );
+        }
+        FactReadSetFinalise::Overflow => panic!("outer set should not overflow"),
+    }
 
-    // After the outer panic unwinds, the TLS slot must be clear so
-    // subsequent scopes succeed.
-    let ((), set) = host.with_fact_tracer(|| {
+    // After both scopes complete, a subsequent scope must work cleanly.
+    let ((), post_set) = host.with_fact_tracer(|| {
         let cell = host
             .current_fact_tracer()
-            .expect("subsequent scope must install cleanly after a nested-scope panic");
-        cell.observe(fact("/post-panic.ts", 99));
+            .expect("subsequent scope must install cleanly after nesting");
+        cell.observe(fact("/post-nesting.ts", 99));
     });
-    assert_eq!(set.len(), 1, "tracer must work normally after the unwind");
+    assert_eq!(post_set.len(), 1, "tracer must work normally after nesting");
 }
 
 // ── Bonus discrimination assertion: trait-method short-circuit ────────

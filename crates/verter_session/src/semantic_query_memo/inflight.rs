@@ -32,8 +32,14 @@ pub(super) struct InflightEntry {
 pub(super) struct InflightState {
     /// `None` while building; `Some` after the winner publishes.
     pub(super) completed: Option<QueryResult<SemanticNodeId>>,
-    /// Dep signature the winner observed.
+    /// Dep signature the winner observed (legacy `DepSignature` path).
     pub(super) dep_signature: Option<DepSignature>,
+    /// Fact signature the winner's tracer captured during the cold
+    /// build. Set by the winner alongside `completed`; joiners that
+    /// observe `aborted == false` bubble this into their active TLS
+    /// tracer before returning the warm result — ensuring nested outer
+    /// tracers capture the semantic node's dependencies.
+    pub(super) fact_dep_signature: Option<std::sync::Arc<[crate::resolver_core::FactVersionRef]>>,
     /// Walker diagnostics observed during the winner's cold build.
     /// Joiners read this alongside `completed` so warm-replay parity is
     /// preserved across cooperative-admission joins. Empty for non-

@@ -42,9 +42,7 @@ use verter_semantic::facts::registry::{
 };
 use verter_semantic::facts::FactLane;
 
-use crate::resolver_core::{
-    FactReadSet, FactReadSetCell, FactVersionRef, ParseFactRef, RouteSurfaceFactRef,
-};
+use crate::resolver_core::{FactReadSet, FactVersionRef, ParseFactRef, RouteSurfaceFactRef};
 use crate::types::Hash16;
 use crate::VerterHost;
 
@@ -63,12 +61,6 @@ pub(crate) fn observe_compile_tier_dependencies(
     script_imports: &[AnalyzedImport],
     macro_type_deps: &[MacroTypeDep],
 ) {
-    // No tracer installed → no-op fast path. Warm-hit reads do not
-    // observe.
-    let Some(cell) = host.current_fact_tracer() else {
-        return;
-    };
-
     // 1. Per-import `ImportRef` observation (R12 — parse-domain
     //    fact carrying the unresolved binding shape on the OWNER's
     //    file). Adding / removing the binding on the owner side
@@ -87,7 +79,7 @@ pub(crate) fn observe_compile_tier_dependencies(
                 binding: InternedName::from(local.as_str()),
                 space,
             };
-            observe_parse_fact_present(host, canonical_id, cell, key, FactLane::Semantic);
+            observe_parse_fact_present(host, canonical_id, key, FactLane::Semantic);
 
             // R28 path-precise cross-file: also observe the
             // `Export(binding, space)` fact on the resolved dep so
@@ -105,13 +97,7 @@ pub(crate) fn observe_compile_tier_dependencies(
                     name: InternedName::from(local.as_str()),
                     space,
                 };
-                observe_parse_fact_present(
-                    host,
-                    &resolved_dep,
-                    cell,
-                    dep_export_key,
-                    FactLane::Semantic,
-                );
+                observe_parse_fact_present(host, &resolved_dep, dep_export_key, FactLane::Semantic);
             }
         }
     }
@@ -154,13 +140,7 @@ pub(crate) fn observe_compile_tier_dependencies(
             name: type_name.clone(),
             space,
         };
-        observe_parse_fact_present(
-            host,
-            &resolved_canonical,
-            cell,
-            export_key,
-            FactLane::Semantic,
-        );
+        observe_parse_fact_present(host, &resolved_canonical, export_key, FactLane::Semantic);
 
         // MemberShape(exporter=type_name) — member surface
         // fingerprint. Changes on sibling add / remove.
@@ -168,25 +148,19 @@ pub(crate) fn observe_compile_tier_dependencies(
             exporter: type_name.clone(),
             space,
         };
-        observe_parse_fact_present(
-            host,
-            &resolved_canonical,
-            cell,
-            shape_key,
-            FactLane::Semantic,
-        );
+        observe_parse_fact_present(host, &resolved_canonical, shape_key, FactLane::Semantic);
 
         // Enumerate the type's existing members from the
         // dependency's FactRegistry and emit one
         // `MemberPresence(exporter=type_name, name=m)` per member.
-        observe_member_presences_for_export(host, &resolved_canonical, cell, &type_name, space);
+        observe_member_presences_for_export(host, &resolved_canonical, &type_name, space);
     }
 
     // 3. ModuleAugmentationIndexShape per consumed specifier (R29).
     //    Augmenters for `'vue'` etc. change the compiled prop /
     //    emit validation surface; observe the fingerprint so an
     //    augmenter-set churn invalidates dependent slots.
-    observe_augmentation_fingerprints(host, script_imports, cell);
+    observe_augmentation_fingerprints(host, script_imports);
 }
 
 /// Emit a `ParseFactRef` observation against the producer's current
@@ -207,17 +181,11 @@ pub(crate) fn observe_compile_tier_dependencies(
 ///   specifier without workspace fallback, deleted file, etc.)
 ///   the observation is conservatively skipped so a consumer
 ///   never depends on a fact that the producer cannot publish.
-fn observe_parse_fact_present(
-    host: &VerterHost,
-    canonical_id: &str,
-    cell: &FactReadSetCell,
-    key: FactKey,
-    lane: FactLane,
-) {
+fn observe_parse_fact_present(host: &VerterHost, canonical_id: &str, key: FactKey, lane: FactLane) {
     let Some(expected_hash) = lookup_parse_fact_hash(host, canonical_id, &key, lane) else {
         return;
     };
-    cell.observe(FactVersionRef::Parse(ParseFactRef {
+    crate::resolver_core::resolver_context::observe_fan_out(FactVersionRef::Parse(ParseFactRef {
         canonical_id: canonical_id.to_string(),
         key,
         lane,
@@ -237,7 +205,6 @@ fn observe_parse_fact_present(
 fn observe_member_presences_for_export(
     host: &VerterHost,
     canonical_id: &str,
-    cell: &FactReadSetCell,
     exporter: &InternedName,
     space: SymbolSpace,
 ) {
@@ -261,13 +228,7 @@ fn observe_member_presences_for_export(
                     name: name.clone(),
                     space: *sp,
                 };
-                observe_parse_fact_present(
-                    host,
-                    canonical_id,
-                    cell,
-                    presence_key,
-                    FactLane::Semantic,
-                );
+                observe_parse_fact_present(host, canonical_id, presence_key, FactLane::Semantic);
             }
         }
     }
@@ -324,11 +285,7 @@ fn resolve_import_source_to_canonical(
 /// set when expanding `import X from 'spec'`; consuming macros
 /// (defineProps / defineEmits) depend on the fingerprint via
 /// `RouteSurfaceFactRef::ModuleAugmentationIndexShape` (R29).
-fn observe_augmentation_fingerprints(
-    host: &VerterHost,
-    script_imports: &[AnalyzedImport],
-    cell: &FactReadSetCell,
-) {
+fn observe_augmentation_fingerprints(host: &VerterHost, script_imports: &[AnalyzedImport]) {
     let snapshot = host
         .project_type_store
         .indexed()
@@ -369,12 +326,14 @@ fn observe_augmentation_fingerprints(
                 resolved_relative_canonical: None,
                 wildcard_pattern: None,
             };
-            cell.observe(FactVersionRef::RouteSurface(RouteSurfaceFactRef {
-                canonical_id: import.source.clone(),
-                key: fact_key,
-                lane: FactLane::Semantic,
-                expected_hash: *fingerprint,
-            }));
+            crate::resolver_core::resolver_context::observe_fan_out(FactVersionRef::RouteSurface(
+                RouteSurfaceFactRef {
+                    canonical_id: import.source.clone(),
+                    key: fact_key,
+                    lane: FactLane::Semantic,
+                    expected_hash: *fingerprint,
+                },
+            ));
         }
     }
 }

@@ -7,27 +7,18 @@
 //!
 //! Exits non-zero on schema validation errors.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 struct CutoverState {
     active_block: String,
     landed_blocks: Vec<String>,
 }
 
-impl Default for CutoverState {
-    fn default() -> Self {
-        Self {
-            active_block: String::new(),
-            landed_blocks: Vec::new(),
-        }
-    }
-}
-
-fn state_path(root: &PathBuf) -> PathBuf {
+fn state_path(root: &Path) -> PathBuf {
     root.join(".cutover-state")
 }
 
@@ -40,7 +31,7 @@ fn repo_root() -> PathBuf {
     PathBuf::from(s.trim())
 }
 
-fn read_state(path: &PathBuf) -> CutoverState {
+fn read_state(path: &Path) -> CutoverState {
     match std::fs::read_to_string(path) {
         Ok(content) => match toml::from_str::<CutoverState>(&content) {
             Ok(s) => s,
@@ -53,7 +44,7 @@ fn read_state(path: &PathBuf) -> CutoverState {
     }
 }
 
-fn write_state(path: &PathBuf, state: &CutoverState) {
+fn write_state(path: &Path, state: &CutoverState) {
     let header = "# Stage 7 cutover state. Owned by the cutover-state xtask.\n\
                   # This file is deleted at Block 10 completion.\n";
     let body = toml::to_string_pretty(state).expect("failed to serialise cutover state");
@@ -66,10 +57,13 @@ fn write_state(path: &PathBuf, state: &CutoverState) {
 
 fn validate_block_id(id: &str) -> bool {
     // Block IDs are non-empty strings matching [0-9A-Za-z_.-]+
-    !id.is_empty() && id.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == '-')
+    !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == '-')
 }
 
-fn cmd_dispatch(block_id: &str, root: &PathBuf) {
+fn cmd_dispatch(block_id: &str, root: &Path) {
     if !validate_block_id(block_id) {
         eprintln!("Error: invalid block-id {:?}", block_id);
         process::exit(1);
@@ -81,7 +75,7 @@ fn cmd_dispatch(block_id: &str, root: &PathBuf) {
     println!("active_block = {:?}", state.active_block);
 }
 
-fn cmd_land(block_id: &str, root: &PathBuf) {
+fn cmd_land(block_id: &str, root: &Path) {
     if !validate_block_id(block_id) {
         eprintln!("Error: invalid block-id {:?}", block_id);
         process::exit(1);
@@ -96,7 +90,7 @@ fn cmd_land(block_id: &str, root: &PathBuf) {
     println!("landed_blocks = {:?}", state.landed_blocks);
 }
 
-fn cmd_show(root: &PathBuf) {
+fn cmd_show(root: &Path) {
     let path = state_path(root);
     let state = read_state(&path);
     println!("active_block  = {:?}", state.active_block);

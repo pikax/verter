@@ -71,35 +71,28 @@ pub(crate) fn validate_fact_signature(
     signature.iter().all(|fact| view.validates(fact))
 }
 
-/// Bubble `signature` into the active fact tracer if one is
-/// installed. Called by both cold-compute and warm-hit paths so an
-/// outer compute's accumulated observation set sees every transitive
-/// fact the inner cache hit / produced.
+/// Bubble `signature` into **all** active fact tracers on the current
+/// thread's stack (fan-out). Called by both cold-compute and warm-hit
+/// paths so every outer tracer scope sees every transitive fact the
+/// inner cache hit / produced.
 #[inline]
-pub(crate) fn bubble_fact_signature(ctx: &dyn ResolverContext, signature: &[FactVersionRef]) {
+pub(crate) fn bubble_fact_signature(_ctx: &dyn ResolverContext, signature: &[FactVersionRef]) {
     if signature.is_empty() {
         return;
     }
-    if let Some(cell) = ctx.current_fact_tracer() {
-        cell.observe_borrowed_signature(signature);
-    }
+    crate::resolver_core::resolver_context::observe_fan_out_borrowed(signature);
 }
 
 /// Variant of [`bubble_fact_signature`] for warm-hit paths that
 /// don't carry a `ResolverContext` reference (e.g. the semantic
-/// graph store's `SemanticGraphStore::get` / fast-path warm hit).
-/// Bubbles into the active TLS tracer when one is installed; no-op
-/// otherwise. Required so transitive fact observations from the
-/// semantic memo bubble into any outer cold-compute scope on warm
-/// hits.
+/// graph store's fast-path warm hit). Fans into all active TLS
+/// tracer scopes when any are installed; no-op otherwise.
 #[inline]
 pub(crate) fn bubble_fact_signature_via_tls(signature: &[FactVersionRef]) {
     if signature.is_empty() {
         return;
     }
-    if let Some(cell) = crate::resolver_core::current_fact_tracer_via_tls() {
-        cell.observe_borrowed_signature(signature);
-    }
+    crate::resolver_core::resolver_context::observe_fan_out_borrowed(signature);
 }
 
 /// Sentinel hash returned when the producer requests a fact that the

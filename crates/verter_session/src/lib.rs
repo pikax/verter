@@ -249,6 +249,15 @@ pub mod for_tests {
     pub use crate::semantic_query_memo::{
         empty_signature_for_tests, test_trigger_inflight_abort, TestForceColdAbortGuard,
     };
+
+    /// Fan `sig` into every active tracer on the current thread's TLS
+    /// stack. Integration tests use this to verify that the multi-level
+    /// fan-out delivers observations into all nested tracer scopes without
+    /// going through `FactReadSetCell::observe` directly (which only writes
+    /// to the cell it's called on, not the full stack).
+    pub fn observe_fan_out_borrowed_for_tests(sig: &[crate::resolver_core::FactVersionRef]) {
+        crate::resolver_core::resolver_context::observe_fan_out_borrowed(sig);
+    }
 }
 
 pub use host_audit_runtime::{

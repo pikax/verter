@@ -362,9 +362,7 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     #[inline]
     #[allow(dead_code)]
     fn observe(&self, fact: crate::resolver_core::FactVersionRef) {
-        if let Some(cell) = self.current_fact_tracer() {
-            cell.observe(fact);
-        }
+        fact_tracer_tls::observe_fan_out(fact);
     }
 
     /// Bulk-record a routed-hit's existing dep-signature onto the
@@ -376,9 +374,7 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     #[inline]
     #[allow(dead_code)]
     fn observe_borrowed_signature(&self, sig: &[crate::resolver_core::FactVersionRef]) {
-        if let Some(cell) = self.current_fact_tracer() {
-            cell.observe_borrowed_signature(sig);
-        }
+        fact_tracer_tls::observe_fan_out_borrowed(sig);
     }
 }
 
@@ -655,11 +651,36 @@ impl ResolverContext for crate::VerterHost {
 /// documented seam for callers that do not hold a
 /// `ResolverContext`. Returns `None` when no `with_fact_tracer`
 /// installer is on the stack.
+///
+/// Used by Commit-C helpers (`install_fact_tracer`, etc.). Until
+/// those land the function is reachable only from the re-export in
+/// `resolver_core::mod` — suppress dead-code lint.
+#[allow(dead_code)]
 #[inline]
 #[must_use]
 pub(crate) fn current_fact_tracer_via_tls<'a>() -> Option<&'a crate::resolver_core::FactReadSetCell>
 {
     fact_tracer_tls::current_tracer()
+}
+
+/// Fan `fact` into every active tracer on the current thread's stack.
+///
+/// Used by the rewritten `compile_fact_emission` and any other producer
+/// that must deliver a single observation to all nested tracer scopes.
+/// No-op when the stack is empty.
+#[inline]
+pub(crate) fn observe_fan_out(fact: crate::resolver_core::FactVersionRef) {
+    fact_tracer_tls::observe_fan_out(fact);
+}
+
+/// Fan `sig` into every active tracer on the current thread's stack.
+///
+/// Borrowed-slice variant of [`observe_fan_out`]. Used by
+/// `bubble_fact_signature_via_tls` and other warm-hit bubble-up paths.
+/// No-op when the stack is empty or `sig` is empty.
+#[inline]
+pub(crate) fn observe_fan_out_borrowed(sig: &[crate::resolver_core::FactVersionRef]) {
+    fact_tracer_tls::observe_fan_out_borrowed(sig);
 }
 
 // ── `with_fact_tracer` installer ──────────────────────────────────────
@@ -688,68 +709,116 @@ pub(crate) fn current_fact_tracer_via_tls<'a>() -> Option<&'a crate::resolver_co
 // public surface.
 
 mod fact_tracer_tls {
-    use std::cell::Cell;
-    use std::ptr;
+    use std::cell::RefCell;
 
-    use crate::resolver_core::FactReadSetCell;
+    use smallvec::SmallVec;
+
+    use crate::resolver_core::{FactReadSetCell, FactVersionRef};
 
     thread_local! {
-        /// Active per-compute tracer for this thread, or null when no
-        /// installer is on the stack. Stored as a raw pointer so the
-        /// trait method can hand out a `&FactReadSetCell` borrow whose
-        /// lifetime is tied to the borrow of `&self` on the host.
-        /// The installer guards this pointer's validity for the
-        /// scope's duration.
-        static ACTIVE_TRACER: Cell<*const FactReadSetCell> = const { Cell::new(ptr::null()) };
+        /// Per-thread tracer stack.
+        ///
+        /// Each entry is a raw pointer to the `FactReadSetCell` owned by
+        /// one `with_fact_tracer` scope on this thread. The stack allows
+        /// nested fact-tracer scopes: the innermost scope sits at the top;
+        /// `observe_fan_out*` fans observations into **all** levels so every
+        /// outer scope captures the inner scope's observations.
+        ///
+        /// SAFETY contract: each pointer is valid for exactly the duration of
+        /// the `with_fact_tracer` call that installed it. `install` pushes the
+        /// pointer and `clear` (called in the RAII drop) pops the top.
+        /// Between push and pop no other thread can mutate the TLS slot, and
+        /// the `FactReadSetCell` is stack-allocated in `with_fact_tracer` on
+        /// the same thread — so the pointee outlives its slot entry.
+        ///
+        /// `RefCell` is used because `SmallVec` is not `Copy` (required by
+        /// `Cell`). All access is single-threaded (TLS) so `RefCell` never
+        /// panics from concurrent borrows.
+        static ACTIVE_TRACERS: RefCell<SmallVec<[*const FactReadSetCell; 8]>> =
+            RefCell::new(SmallVec::new());
     }
 
-    /// Plant `cell` into the TLS slot and return the previous value
-    /// for the [`RestoreGuard`] to restore on drop. Panics if a
-    /// tracer is already installed — observations must never
-    /// silently route to a sibling tracer.
-    pub(super) fn install(cell: &FactReadSetCell) {
-        ACTIVE_TRACER.with(|slot| {
-            let prev = slot.get();
-            assert!(
-                prev.is_null(),
-                "FactReadSet tracers must not nest — installer was \
-                 called inside an active `with_fact_tracer` scope. \
-                 Observations from the inner scope would silently \
-                 route to the outer scope and never surface."
-            );
-            slot.set(cell as *const FactReadSetCell);
-        });
-    }
-
-    /// Clear the TLS slot. Called on the installer's `Drop`.
-    pub(super) fn clear() {
-        ACTIVE_TRACER.with(|slot| {
-            slot.set(ptr::null());
-        });
-    }
-
-    /// Return the currently-installed tracer, or `None` when no
-    /// installer is on the stack.
+    /// Push `cell` onto the tracer stack.
     ///
-    /// The returned borrow lives for the lifetime of the trait-method
-    /// call. The installer's RAII guard guarantees the pointer is
-    /// valid for the entire duration of the cold compute that
-    /// installed it.
+    /// Nesting is intentional: a nested `with_fact_tracer` scope adds its
+    /// cell to the stack so `observe_fan_out*` delivers observations to both
+    /// the inner scope and all outer scopes simultaneously.
+    ///
+    /// SAFETY: the caller (`with_fact_tracer`) keeps `cell` alive for the
+    /// entire scope duration. `clear` is called on the RAII guard's drop —
+    /// even on panic — so the pointer is removed before the cell is freed.
+    pub(super) fn install(cell: &FactReadSetCell) {
+        ACTIVE_TRACERS.with(|slot| {
+            slot.borrow_mut().push(cell as *const FactReadSetCell);
+        });
+    }
+
+    /// Pop the top-of-stack entry. Called on the installer's `Drop`.
+    pub(super) fn clear() {
+        ACTIVE_TRACERS.with(|slot| {
+            slot.borrow_mut().pop();
+        });
+    }
+
+    /// Return the top-of-stack tracer, or `None` when the stack is empty.
+    ///
+    /// Used by existing single-tracer callers that only need the innermost
+    /// active scope. These callers write into the top cell; the fan-out
+    /// functions below reach all cells.
     #[inline]
     pub(super) fn current_tracer<'a>() -> Option<&'a FactReadSetCell> {
-        ACTIVE_TRACER.with(|slot| {
-            let ptr = slot.get();
-            if ptr.is_null() {
-                None
-            } else {
-                // SAFETY: the installer (`with_fact_tracer`) keeps
-                // the `FactReadSetCell` alive for the entire scope
-                // and clears the slot on drop. No code outside this
-                // module reads the slot. Therefore, while
-                // `ptr.is_null()` is false, the pointee is valid.
-                Some(unsafe { &*ptr })
+        ACTIVE_TRACERS.with(|slot| {
+            let stack = slot.borrow();
+            let ptr = stack.last().copied();
+            drop(stack);
+            match ptr {
+                Some(p) if !p.is_null() => {
+                    // SAFETY: each live stack entry is installed by
+                    // `with_fact_tracer`; the RAII guard (`TracerScope`)
+                    // calls `clear()` on drop (including on unwind), so
+                    // no dangling pointer can remain on the stack.
+                    Some(unsafe { &*p })
+                }
+                _ => None,
             }
         })
+    }
+
+    /// Fan an observed fact into **every** active tracer on the stack.
+    ///
+    /// Snapshot-then-iterate: collect the pointer set under a borrow,
+    /// drop the borrow, then iterate the collected set. No borrow is held
+    /// during the `observe` calls, so re-entrant `install`/`clear` calls
+    /// from inside a tracer are safe.
+    #[inline]
+    pub(super) fn observe_fan_out(fact: FactVersionRef) {
+        // Collect pointers under a short borrow, then drop the borrow
+        // before calling into FactReadSetCell so re-entrant installs
+        // from inside an observer don't cause RefCell panics.
+        let ptrs: SmallVec<[*const FactReadSetCell; 8]> =
+            ACTIVE_TRACERS.with(|slot| slot.borrow().clone());
+        for ptr in ptrs {
+            if !ptr.is_null() {
+                // SAFETY: see module-level SAFETY contract.
+                unsafe { &*ptr }.observe(fact.clone());
+            }
+        }
+    }
+
+    /// Fan a borrowed signature into **every** active tracer on the stack.
+    #[inline]
+    pub(super) fn observe_fan_out_borrowed(sig: &[FactVersionRef]) {
+        if sig.is_empty() {
+            return;
+        }
+        let ptrs: SmallVec<[*const FactReadSetCell; 8]> =
+            ACTIVE_TRACERS.with(|slot| slot.borrow().clone());
+        for ptr in ptrs {
+            if !ptr.is_null() {
+                // SAFETY: see module-level SAFETY contract.
+                unsafe { &*ptr }.observe_borrowed_signature(sig);
+            }
+        }
     }
 }
 
@@ -775,9 +844,10 @@ impl crate::VerterHost {
     /// [`ResolverContext`] reference derived from this host
     /// inside the closure.
     ///
-    /// Nested scopes panic — a cold compute cannot install a second
-    /// tracer over an active one because observations would route to
-    /// the inner scope and never bubble up to the outer one.
+    /// Nesting is supported: an inner `with_fact_tracer` scope pushes a
+    /// second cell onto the tracer stack. `observe_fan_out*` delivers
+    /// observations into **all** active cells simultaneously, so outer
+    /// scopes see the inner scope's observations.
     ///
     /// The tracer is `!Send + !Sync` and is installed on the caller's
     /// thread only. Worker threads spawned from inside `f` do NOT
@@ -791,15 +861,12 @@ impl crate::VerterHost {
         F: FnOnce() -> R,
     {
         let cell = crate::resolver_core::FactReadSetCell::new();
-        // Install + immediately bind the scope guard so the TLS slot
-        // is cleared on any subsequent panic. `install` itself panics
-        // if a tracer is already on the stack — that panic propagates
-        // BEFORE the guard binds, leaving the outer scope's TLS slot
-        // untouched.
+        // Push onto the tracer stack. The RAII guard pops on drop
+        // (including on panic unwind) so no dangling pointer remains.
         fact_tracer_tls::install(&cell);
         let scope = TracerScope;
         let result = f();
-        // Explicit drop so the slot is cleared before we consume
+        // Explicit drop so the stack is popped before we consume
         // `cell.into_inner()`. After this point no `&FactReadSetCell`
         // can leak out of TLS.
         drop(scope);
