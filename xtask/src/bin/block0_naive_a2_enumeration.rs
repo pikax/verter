@@ -47,9 +47,16 @@ fn create_temp_worktree(root: &Path, branch: &str) -> PathBuf {
         .status()
         .expect("git worktree add failed");
     if !status.success() {
-        panic!("Failed to create temporary worktree at {}", tmp_dir.display());
+        panic!(
+            "Failed to create temporary worktree at {}",
+            tmp_dir.display()
+        );
     }
-    eprintln!("Created temp worktree: {} (branch: {})", tmp_dir.display(), branch);
+    eprintln!(
+        "Created temp worktree: {} (branch: {})",
+        tmp_dir.display(),
+        branch
+    );
     tmp_dir
 }
 
@@ -80,12 +87,13 @@ fn apply_eager_invalidation_deletion(tmp_dir: &Path) -> bool {
     // Strategy: remove lines containing the eager cascade / smart_invalidate call.
     let modified = remove_eager_invalidation_block(&content);
     if modified == content {
-        eprintln!("Warning: eager-invalidation block not found in host_upsert.rs — \
-                   the A2 enumeration may produce incomplete results.");
+        eprintln!(
+            "Warning: eager-invalidation block not found in host_upsert.rs — \
+                   the A2 enumeration may produce incomplete results."
+        );
         return false;
     }
-    std::fs::write(&host_upsert, &modified)
-        .expect("failed to write modified host_upsert.rs");
+    std::fs::write(&host_upsert, &modified).expect("failed to write modified host_upsert.rs");
     eprintln!("Applied eager-invalidation deletion to host_upsert.rs");
     true
 }
@@ -192,7 +200,12 @@ fn write_report(out_path: &Path, applied: bool, success: bool, failures: &[Strin
     writeln!(file, "# Block 0 Naive-A2 Enumeration Report").unwrap();
     writeln!(file).unwrap();
     writeln!(file, "**Eager-invalidation deletion applied**: {applied}").unwrap();
-    writeln!(file, "**Test suite result**: {}", if success { "PASS" } else { "FAIL" }).unwrap();
+    writeln!(
+        file,
+        "**Test suite result**: {}",
+        if success { "PASS" } else { "FAIL" }
+    )
+    .unwrap();
     writeln!(file).unwrap();
     if failures.is_empty() {
         writeln!(file, "No test failures detected.").unwrap();

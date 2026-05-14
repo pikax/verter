@@ -195,7 +195,11 @@ fn write_report(root: &Path, out_path: &Path) -> std::io::Result<()> {
     let mut file = std::fs::File::create(out_path)?;
     writeln!(file, "# Block 0 Substrate Audit")?;
     writeln!(file)?;
-    writeln!(file, "**HEAD verified**: `{sha}` (worktree `{}`)", root.display())?;
+    writeln!(
+        file,
+        "**HEAD verified**: `{sha}` (worktree `{}`)",
+        root.display()
+    )?;
     writeln!(file, "**Date**: {}", chrono_or_now())?;
     writeln!(file)?;
     writeln!(file, "---")?;
@@ -208,7 +212,11 @@ fn write_report(root: &Path, out_path: &Path) -> std::io::Result<()> {
         writeln!(file, "**Status**: {status}")?;
         writeln!(file)?;
         if matches.is_empty() {
-            writeln!(file, "**Evidence**: no grep matches (pattern: `{}`)", claim.grep_pattern)?;
+            writeln!(
+                file,
+                "**Evidence**: no grep matches (pattern: `{}`)",
+                claim.grep_pattern
+            )?;
         } else {
             writeln!(file, "**Evidence** (first 5 matches):")?;
             writeln!(file, "```")?;
