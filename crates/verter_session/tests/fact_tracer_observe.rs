@@ -254,10 +254,14 @@ fn finalise_sorts_and_dedups() {
 // the observation made inside the inner scope.
 
 #[test]
-fn nested_with_fact_tracer_scopes_panic() {
-    // The test name is kept for git-history continuity; the behaviour
-    // asserted here is the post-refactor SUPPORTED nesting contract:
-    // outer and inner both capture the inner observation.
+fn nested_with_fact_tracer_scopes_capture_via_fan_out() {
+    // Post-refactor SUPPORTED nesting contract: when an outer
+    // `with_fact_tracer` brackets an inner `with_fact_tracer`, an
+    // observation emitted from the inner scope reaches BOTH the
+    // inner cell and every outer cell on the stack via
+    // `observe_fan_out_borrowed`. The inner-scope set holds the
+    // inner fact only; the outer-scope set holds the outer fact
+    // plus every inner observation that fanned out into it.
     let host = make_host();
 
     let outer_fact = fact("/outer.ts", 1);

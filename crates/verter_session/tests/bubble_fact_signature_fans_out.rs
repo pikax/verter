@@ -27,7 +27,6 @@ fn bubble_fact_signature_reaches_all_three_levels() {
     let host = make_host();
 
     let shared = sig_fact(42);
-    let shared_l2 = shared.clone();
     let shared_l3 = shared.clone();
 
     // Three nested levels; observation emitted from the innermost.
@@ -40,7 +39,6 @@ fn bubble_fact_signature_reaches_all_three_levels() {
             });
             l3_finalise
         });
-        let _ = shared_l2;
         (l3_ret, l2_finalise)
     });
 

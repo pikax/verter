@@ -192,14 +192,55 @@ fn write_report(root: &Path, out_path: &Path) -> std::io::Result<()> {
     let sha = head_sha(root);
     let results = run_claims(root);
 
+    // The HEAD this audit's grep patterns were calibrated against.
+    // Run on any other HEAD will produce false negatives for claims
+    // whose expected state flipped after the substrate landed
+    // (claims 3, 4, 5, 11, 13, 14 in particular). The header below
+    // states this contract; an optional gate at the bottom of `main`
+    // could refuse to run from a non-baseline tree, but emitting the
+    // header is sufficient for callers who want to re-run the audit
+    // for diagnostic purposes against a known divergence.
+    const BASELINE_HEAD: &str = "4dcf1f92e2cc53e07fe54d819290051e44d28493";
+
     let mut file = std::fs::File::create(out_path)?;
     writeln!(file, "# Block 0 Substrate Audit")?;
     writeln!(file)?;
     writeln!(
         file,
-        "**HEAD verified**: `{sha}` (worktree `{}`)",
+        "> ⚠️ **This audit's claims are valid only at HEAD `{BASELINE_HEAD}`.**"
+    )?;
+    writeln!(
+        file,
+        "> Post-substrate, several \"FALSE\" claims have flipped to TRUE"
+    )?;
+    writeln!(
+        file,
+        "> (e.g., `StoreView::validates_fact_signature` now exists). The audit"
+    )?;
+    writeln!(
+        file,
+        "> is intentionally calibrated for the pre-cutover tree; \"❌\" markers"
+    )?;
+    writeln!(
+        file,
+        "> on a post-cutover run mean the substrate landed (expected), not that"
+    )?;
+    writeln!(file, "> the audit regressed.")?;
+    writeln!(file)?;
+    let head_mismatch = sha != BASELINE_HEAD;
+    if head_mismatch {
+        writeln!(
+            file,
+            "> 🛈 Current HEAD `{sha}` differs from baseline; expect claim flips."
+        )?;
+        writeln!(file)?;
+    }
+    writeln!(
+        file,
+        "**HEAD observed**: `{sha}` (worktree `{}`)",
         root.display()
     )?;
+    writeln!(file, "**Baseline HEAD**: `{BASELINE_HEAD}`")?;
     writeln!(file, "**Date**: {}", chrono_or_now())?;
     writeln!(file)?;
     writeln!(file, "---")?;
