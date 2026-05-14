@@ -27,7 +27,7 @@ use crate::file_artifact_store::{
 };
 use crate::resolver_core::{
     FactVersionRef, PermissiveStoreView, RouteSurfaceFactRef, SingleflightGroup, SingleflightRole,
-    StoreView, ValidatedFactCache,
+    SingleflightRunResult, StoreView, ValidatedFactCache,
 };
 use crate::types::Hash16;
 
@@ -318,8 +318,40 @@ impl RouteDb {
             return Some(result);
         }
 
-        let flight = self
-            .route_singleflight
+        let run_result = self.resolve_route_singleflight_inner(key, view, resolve)?;
+        Some((*run_result.value).clone())
+    }
+
+    /// Shared singleflight orchestrator for the cold-path route resolve used
+    /// by both [`Self::get_or_resolve_route_with_facts`] and
+    /// [`Self::get_or_resolve_route_observing_facts`].
+    ///
+    /// Runs the caller's `resolve` closure under the [`Self::route_singleflight`]
+    /// group so concurrent cold lookups for the same `(provider, exported_name)`
+    /// key coalesce onto a single materialization. The closure inside the
+    /// singleflight first re-checks the validated cache (to absorb races where
+    /// another path warmed the entry between the caller's pre-check and
+    /// admission), then invokes `resolve()`. On success, the entry is admitted
+    /// to [`Self::routes`] under strict admission rules (non-empty fact
+    /// signatures only — empty-signature resolves are the negative-cache
+    /// pattern surfaced from [`Self::get_or_resolve_route`] and are returned
+    /// to the caller without being persisted as a fact-validated cache hit).
+    ///
+    /// Returns `Some(SingleflightRunResult { value, role, .. })` on success
+    /// (callers that need to discriminate leader vs follower for provenance
+    /// counter bumps inspect `role`), or `None` when the resolve closure
+    /// returns `None`.
+    fn resolve_route_singleflight_inner<V, F>(
+        &self,
+        key: (String, String),
+        view: &V,
+        resolve: F,
+    ) -> Option<SingleflightRunResult<Arc<RouteResult>>>
+    where
+        V: StoreView,
+        F: FnOnce() -> Option<(RouteResult, Vec<FactVersionRef>)>,
+    {
+        self.route_singleflight
             .run(key.clone(), view.compat_token(), || {
                 if let Some(result) = self.routes.get_if_valid(&key, view) {
                     return Ok(result);
@@ -330,7 +362,7 @@ impl RouteDb {
                         // Strict admission. Routes resolved with
                         // non-empty fact signatures admit through the
                         // strict entry-point; empty-signature resolves
-                        // are the legacy negative-cache pattern
+                        // are the negative-cache pattern
                         // (`get_or_resolve_route` passes `Vec::new()`)
                         // and are NOT admitted — the route surface is
                         // still returned to the caller, but the entry is
@@ -361,12 +393,8 @@ impl RouteDb {
                     }
                     None => Err(()),
                 }
-            });
-
-        match flight {
-            Ok(run_result) => Some((*run_result.value).clone()),
-            Err(()) => None,
-        }
+            })
+            .ok()
     }
 
     /// Look up a route and return both the result and its recorded
@@ -427,51 +455,11 @@ impl RouteDb {
             return Some(value);
         }
 
-        // Cold path: inline singleflight so we can observe the leader /
-        // follower role and bump the matching provenance counter on the
-        // post-admission re-read.
+        // Cold path: delegate to the shared singleflight helper, then
+        // observe the leader / follower role and bump the matching
+        // provenance counter on the post-admission re-read.
         let key = (provider_canonical.to_owned(), exported_name.to_owned());
-        let flight = self
-            .route_singleflight
-            .run(key.clone(), view.compat_token(), || {
-                if let Some(result) = self.routes.get_if_valid(&key, view) {
-                    return Ok(result);
-                }
-                match resolve() {
-                    Some((result, facts)) => {
-                        let arc = Arc::new(result);
-                        // Strict admission. Routes resolved with
-                        // non-empty fact signatures admit through the
-                        // strict entry-point; empty-signature resolves
-                        // are the negative-cache pattern and are NOT
-                        // admitted — the route surface is still returned
-                        // to the caller, but the entry is not persisted
-                        // as a fact-validated cache hit.
-                        if !facts.is_empty() {
-                            self.routes.insert_arc_with_kind(
-                                key.clone(),
-                                arc.clone(),
-                                facts,
-                                "route_db.routes",
-                            );
-                        }
-                        // R23 typed event: cold-path route admission.
-                        emit_export_route_resolved_event(
-                            &key.0,
-                            &key.1,
-                            arc.as_ref(),
-                            /* augmented = */ false,
-                        );
-                        Ok(arc)
-                    }
-                    None => Err(()),
-                }
-            });
-
-        let run_result = match flight {
-            Ok(r) => r,
-            Err(()) => return None,
-        };
+        let run_result = self.resolve_route_singleflight_inner(key, view, resolve)?;
 
         // Post-admission re-read: fan the just-stored facts into the
         // current thread's tracer stack. Leader: the closure ran here
