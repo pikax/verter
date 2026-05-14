@@ -381,11 +381,10 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     ///
     /// The default impl returns `None`; overlay-bearing session contexts
     /// override this to return their `SessionView` so resolver-tier
-    /// helpers can read overlay content without carrying an explicit view
-    /// parameter. Block 1.5 adds `SessionResolverContext` which will
-    /// override this method — the default here ensures existing
-    /// `VerterHost`-impl callers compile cleanly in the interim.
-    #[allow(dead_code)]
+    /// helpers can read overlay content without carrying an explicit
+    /// view parameter. Default is reached today through the
+    /// `for_tests::active_session_view_is_none_for_tests` shim in
+    /// `lib.rs` (see `tests/resolver_context_active_session_view.rs`).
     fn active_session_view(&self) -> Option<&dyn crate::session_view::SessionView> {
         None
     }
@@ -657,25 +656,6 @@ impl ResolverContext for crate::VerterHost {
     }
 }
 
-/// Module-internal accessor mirroring
-/// [`ResolverContext::current_fact_tracer`] for non-`ctx` callers
-/// (e.g. `SemanticGraphStore::get` warm-hit). The TLS slot itself
-/// is private to the `fact_tracer_tls` sub-module — this is the
-/// documented seam for callers that do not hold a
-/// `ResolverContext`. Returns `None` when no `with_fact_tracer`
-/// installer is on the stack.
-///
-/// Used by Commit-C helpers (`install_fact_tracer`, etc.). Until
-/// those land the function is reachable only from the re-export in
-/// `resolver_core::mod` — suppress dead-code lint.
-#[allow(dead_code)]
-#[inline]
-#[must_use]
-pub(crate) fn current_fact_tracer_via_tls<'a>() -> Option<&'a crate::resolver_core::FactReadSetCell>
-{
-    fact_tracer_tls::current_tracer()
-}
-
 /// Fan `fact` into every active tracer on the current thread's stack.
 ///
 /// Used by the rewritten `compile_fact_emission` and any other producer
@@ -744,9 +724,20 @@ mod fact_tracer_tls {
         /// the `FactReadSetCell` is stack-allocated in `with_fact_tracer` on
         /// the same thread — so the pointee outlives its slot entry.
         ///
-        /// `RefCell` is used because `SmallVec` is not `Copy` (required by
-        /// `Cell`). All access is single-threaded (TLS) so `RefCell` never
-        /// panics from concurrent borrows.
+        /// `RefCell` storage with a clone-then-release-then-iterate
+        /// access pattern (see `observe_fan_out{,_borrowed}` below)
+        /// is what makes this design reentrancy-safe: each fan-out
+        /// borrows the slot only long enough to clone the small
+        /// `SmallVec` of raw pointers, drops the borrow, and iterates
+        /// the clone. No borrow is held when the per-cell `observe`
+        /// runs, so a re-entrant `install` / `clear` inside an
+        /// observer cannot trigger `BorrowMutError`. `Cell::take()`
+        /// + `Cell::set()` would also satisfy this contract — and
+        /// works with non-`Copy` payloads because `Cell::take()`
+        /// internally calls `mem::replace`. The borrow-clone-release
+        /// pattern is exercised by
+        /// `tests/tracer_stack_reentrant_observe_safe.rs`. All access
+        /// is single-threaded (TLS).
         static ACTIVE_TRACERS: RefCell<SmallVec<[*const FactReadSetCell; 8]>> =
             RefCell::new(SmallVec::new());
     }

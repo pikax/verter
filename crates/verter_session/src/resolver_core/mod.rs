@@ -132,24 +132,6 @@ pub struct StoreViewCompatToken {
     pub session: Option<u64>,
 }
 
-/// `pub(crate)` accessor for the active per-compute fact tracer
-/// without requiring a `ResolverContext` reference. Used by warm-hit
-/// paths that lack a ctx (e.g. `SemanticGraphStore::get` /
-/// `try_warm_hit_fast_path`) to bubble path-precise observations
-/// into an outer cold-compute's tracer scope. Returns `None` when no
-/// `with_fact_tracer` installer is on the stack.
-///
-/// The TLS slot itself is private to `resolver_context::fact_tracer_tls`;
-/// this is the documented seam for non-`ctx` callers, mirroring
-/// [`crate::VerterHost::current_fact_tracer`] / the
-/// [`ResolverContext::current_fact_tracer`] trait method.
-#[allow(dead_code)]
-#[inline]
-#[must_use]
-pub(crate) fn current_fact_tracer_via_tls<'a>() -> Option<&'a FactReadSetCell> {
-    crate::resolver_core::resolver_context::current_fact_tracer_via_tls()
-}
-
 pub trait StoreView {
     fn compat_token(&self) -> StoreViewCompatToken;
 

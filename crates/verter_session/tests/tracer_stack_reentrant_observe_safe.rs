@@ -1,20 +1,39 @@
-//! RED test: calling `observe_fan_out` from inside a nested install does not
-//! trigger a `BorrowMutError` panic.
+//! Reentrancy test: nested `with_fact_tracer` scopes can call
+//! `observe_fan_out_borrowed` from inside the inner scope without
+//! triggering a `BorrowMutError` panic.
 //!
-//! The snapshot-then-iterate pattern (clone the SmallVec under short borrow,
-//! drop the RefCell borrow, then iterate) must prevent re-entrancy panics that
-//! would occur if `observe_fan_out` held the RefCell borrow while the inner
-//! `observe` call tried to mutably borrow the same cell.
+//! ## What this test exercises
+//!
+//! The driver installs an outer tracer, installs a nested inner
+//! tracer, calls `observe_fan_out_borrowed` from inside the inner
+//! scope, then calls it again from the outer scope after the inner
+//! scope closes. The fan-out path runs under the snapshot-then-iterate
+//! pattern (clone the `SmallVec` of raw pointers under a short
+//! borrow, drop the `RefCell` borrow, then iterate the clone). The
+//! `RefCell` is never held while individual cells are observed.
+//!
+//! ## What this test does NOT exercise
+//!
+//! The codex F6 contract has a stricter shape: an `observe` callback
+//! that itself re-enters `with_fact_tracer` (installing another scope
+//! inside an active observation) must also be safe. The current
+//! `FactReadSetCell::observe` body has no callback hook, so this
+//! "observe-callback-triggers-install" scenario cannot be expressed
+//! without test-only plumbing on `FactReadSetCell`. This test covers
+//! it indirectly: the snapshot-then-iterate pattern releases the
+//! borrow before any per-cell `observe` runs, so a hypothetical
+//! observer callback that called `install` would not BorrowMutError
+//! either. A direct discriminator would require an observe-callback
+//! hook on `FactReadSetCell` (test-only); the indirect coverage from
+//! the borrow-release timing here is the architecture-design
+//! argument that the pattern would also be safe under direct
+//! observer callbacks.
 
 use verter_session::for_tests::{
     install_fact_tracer_for_tests, observe_fan_out_borrowed_for_tests,
 };
 use verter_session::resolver_core::{FactReadSetFinalise, FactVersionRef};
 use verter_session::VerterHost;
-
-fn make_host() -> VerterHost {
-    VerterHost::new_standalone(Default::default())
-}
 
 fn make_fact(label: &str) -> FactVersionRef {
     let hash: [u8; 16] = {

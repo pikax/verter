@@ -122,9 +122,11 @@ pub(crate) fn dep_signature_to_fact_signature(sig: &DepSignature) -> Vec<FactVer
 
 /// Read the current value of [`SIGNATURE_OVERFLOW_AT_INSTALL`].
 ///
-/// Exposed for integration tests that verify overflow telemetry.
+/// Exposed for integration tests that verify overflow telemetry —
+/// reached through the `for_tests::read_signature_overflow_at_install`
+/// re-export in `lib.rs` (see
+/// `tests/fact_read_set_finalise_overflow.rs`).
 #[inline]
-#[allow(dead_code)]
 pub(crate) fn read_signature_overflow_at_install() -> u64 {
     SIGNATURE_OVERFLOW_AT_INSTALL.load(std::sync::atomic::Ordering::Relaxed)
 }
