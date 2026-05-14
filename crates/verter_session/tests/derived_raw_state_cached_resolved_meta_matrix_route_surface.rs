@@ -24,7 +24,6 @@ fn read_session_src(rel: &str) -> String {
 }
 
 #[test]
-#[ignore = "block-1.a RED — closed by same-block implementation"]
 fn cached_resolved_meta_signature_carries_route_surface() {
     let src = read_session_src("types.rs");
     let needle = "pub(crate) struct ResolvedComponentMetaCacheEntry {";

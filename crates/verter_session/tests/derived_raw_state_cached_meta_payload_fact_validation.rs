@@ -34,7 +34,6 @@ fn metahost() -> ComponentMetaHost {
 /// `StoreView::validates_fact_signature` fast-path catches the
 /// version bump and the payload-cache miss counter advances.
 #[test]
-#[ignore = "block-1.a RED — closed by same-block implementation"]
 fn editing_dep_invalidates_cached_meta_payload() {
     let mh = metahost();
     mh.upsert_base("/src/types.ts", "export interface Foo { a: number; }\n")

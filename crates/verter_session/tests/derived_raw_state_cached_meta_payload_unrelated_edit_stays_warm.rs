@@ -26,16 +26,12 @@ fn metahost() -> ComponentMetaHost {
 }
 
 #[test]
-#[ignore = "block-1.a RED — closed by same-block implementation"]
 fn unrelated_edit_keeps_cached_meta_payload_warm() {
     let mh = metahost();
     mh.upsert_base("/src/types.ts", "export interface Foo { a: number; }\n")
         .expect("types upsert");
-    mh.upsert_base(
-        "/src/other.ts",
-        "export interface Other { x: number; }\n",
-    )
-    .expect("other upsert");
+    mh.upsert_base("/src/other.ts", "export interface Other { x: number; }\n")
+        .expect("other upsert");
     mh.upsert_base(
         "/src/Comp.vue",
         "<script setup lang=\"ts\">\n\

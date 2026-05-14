@@ -21,7 +21,6 @@ fn metahost() -> ComponentMetaHost {
 }
 
 #[test]
-#[ignore = "block-1.a RED — closed by same-block implementation"]
 fn unrelated_edit_keeps_cached_fallthrough_warm() {
     let mh = metahost();
     mh.upsert_base(
@@ -29,11 +28,8 @@ fn unrelated_edit_keeps_cached_fallthrough_warm() {
         "export interface RootProps { foo: number }\n",
     )
     .expect("types upsert");
-    mh.upsert_base(
-        "/src/other.ts",
-        "export interface Other { bar: number }\n",
-    )
-    .expect("other upsert");
+    mh.upsert_base("/src/other.ts", "export interface Other { bar: number }\n")
+        .expect("other upsert");
     mh.upsert_base(
         "/src/Comp.vue",
         "<script setup lang=\"ts\">\n\
@@ -52,11 +48,8 @@ fn unrelated_edit_keeps_cached_fallthrough_warm() {
     // cached_fallthrough entry's fact_versions does not reference
     // /src/other.ts, so the per-domain fast-path validator must NOT
     // invalidate it.
-    mh.upsert_base(
-        "/src/other.ts",
-        "export interface Other { bar: string }\n",
-    )
-    .expect("other re-upsert");
+    mh.upsert_base("/src/other.ts", "export interface Other { bar: string }\n")
+        .expect("other re-upsert");
 
     let r2 = mh.host().resolve_fallthrough_surface("/src/Comp.vue");
     assert!(

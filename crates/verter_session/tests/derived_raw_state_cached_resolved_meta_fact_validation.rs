@@ -22,9 +22,7 @@ use verter_session::component_meta_host::ComponentMetaHost;
 use verter_session::{CompileErrorPolicy, HostConfig};
 
 fn read_session_src(rel: &str) -> String {
-    let p = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
-        .join(rel);
+    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join(rel);
     fs::read_to_string(&p).unwrap_or_else(|err| panic!("read {}: {err}", p.display()))
 }
 
@@ -40,7 +38,6 @@ fn metahost() -> ComponentMetaHost {
 /// carries `Arc<[FactVersionRef]>` and the consumer routes through
 /// the fast-path validator.
 #[test]
-#[ignore = "block-1.a RED — closed by same-block implementation"]
 fn cached_resolved_meta_substrate_and_consumer_wired() {
     let types_src = read_session_src("types.rs");
     let needle = "pub(crate) struct ResolvedComponentMetaCacheEntry {";

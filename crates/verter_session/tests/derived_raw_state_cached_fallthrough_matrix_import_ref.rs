@@ -21,7 +21,6 @@ fn read_session_src(rel: &str) -> String {
 }
 
 #[test]
-#[ignore = "block-1.a RED — closed by same-block implementation"]
 fn cached_fallthrough_signature_carries_import_ref() {
     let src = read_session_src("types.rs");
     let needle = "pub(crate) struct CachedFallthroughEntry {";
