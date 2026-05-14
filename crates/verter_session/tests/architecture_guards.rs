@@ -2578,7 +2578,17 @@ mod resolver_context_seal {
     fn is_seal_bridge_file(path: &Path) -> bool {
         path.file_name()
             .and_then(|n| n.to_str())
-            .map(|n| n == "resolver_context.rs")
+            .map(|n| {
+                // `resolver_context.rs` carries the `impl ResolverContext
+                // for VerterHost` bridge — the trait surface itself.
+                // `session_resolver_context.rs` is the session-bound
+                // wrapper that owns the `&VerterHost` borrow needed to
+                // reach view-aware host internals
+                // (`prepared_decl_bundle_with_context` etc.) without
+                // widening the trait surface. Both are seal-bridge
+                // exemptions per sub-plan §10a.0.A.
+                n == "resolver_context.rs" || n == "session_resolver_context.rs"
+            })
             .unwrap_or(false)
     }
 
@@ -3856,6 +3866,11 @@ mod foundations_guards {
     /// currently exempt while B-C5 / §12.A4 prepares the splits.
     pub fn guard6_exemptions() -> BTreeSet<&'static str> {
         BTreeSet::from([
+            // Block-1.5 substrate split — view-aware prepared-decl
+            // bundle/type/value variants live alongside their base
+            // counterparts so the cache invariants stay in one file.
+            // Pending B-C5 split, this file is exempt.
+            "crates/verter_session/src/host_manage/prepared_decl.rs",
             "crates/verter_compiler/src/compile/template_data.rs",
             "crates/verter_compiler/src/ide/template/mod.rs",
             "crates/verter_compiler/src/template/code_gen/ssr/mod.rs",
