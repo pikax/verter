@@ -226,6 +226,53 @@ impl<'a> Scanner<'a> {
             _ => Self::is_derived_raw_cache_binding_source(expr),
         }
     }
+
+    /// If `expr` is a `MethodCall` whose method is `entry` /
+    /// `iter_mut` / `values_mut` (the entry-chain entry points) and
+    /// whose receiver is a `Field` access on a guarded
+    /// `DerivedRawState` field, return that field plus the inner
+    /// method name. Wrapper methods that sit between the chain and
+    /// the field expression (`value_mut`, `deref_mut`, etc.) are
+    /// transparently peeled so a chain like
+    /// `derived.value_mut().import_routes.entry(_).or_insert(_)`
+    /// is matched.
+    fn entry_chain_field(&self, expr: &Expr) -> Option<(GuardedField, String)> {
+        let inner = match expr {
+            Expr::MethodCall(m) => m,
+            Expr::Paren(p) => return self.entry_chain_field(&p.expr),
+            _ => return None,
+        };
+        let inner_method = inner.method.to_string();
+        if !matches!(inner_method.as_str(), "entry" | "iter_mut" | "values_mut") {
+            return None;
+        }
+        // Peel parentheses off the inner receiver until we reach a
+        // `Field` (or run out of wrappers).
+        let mut base = &*inner.receiver;
+        loop {
+            match base {
+                Expr::Field(recv_field) => {
+                    let field_name = match &recv_field.member {
+                        syn::Member::Named(i) => i.to_string(),
+                        syn::Member::Unnamed(_) => return None,
+                    };
+                    let guarded = match field_name.as_str() {
+                        "import_routes" => GuardedField::Routes,
+                        "import_routes_known_miss_recorded_at_generation" => {
+                            GuardedField::SidecarKnownMissGeneration
+                        }
+                        _ => return None,
+                    };
+                    if self.receiver_is_derived_raw_state(&recv_field.base) {
+                        return Some((guarded, inner_method));
+                    }
+                    return None;
+                }
+                Expr::Paren(p) => base = &p.expr,
+                _ => return None,
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -389,7 +436,30 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
     fn visit_expr_method_call(&mut self, m: &'ast ExprMethodCall) {
         // Detect mutating method-call on `<recv>.import_routes` /
         // `<recv>.import_routes_known_miss_recorded_at_generation`.
-        // The receiver of `m` is the FIELD expression itself.
+        //
+        // Two shapes are caught:
+        //
+        //   1. **Direct method-call on the field expression** —
+        //      `<recv>.import_routes.<method>(...)`. The receiver of
+        //      `m` is the FIELD expression itself. Mutating methods
+        //      (`insert`, `clear`, `remove`, `retain`, `extend`,
+        //      `drain`, `append`, `entry`, `iter_mut`, `values_mut`,
+        //      `get_mut`) are gated; truly read-only accessors
+        //      (`get`, `iter`, `values`, `keys`, `len`, `is_empty`,
+        //      `contains_key`, `clone`) are passthrough.
+        //
+        //   2. **Mutating accessor chained off a `.entry(...)` /
+        //      `.iter_mut()` / `.values_mut()` on the field** —
+        //      e.g. `<recv>.import_routes.entry(_).or_insert(_)`.
+        //      Without explicit chain-handling, the outer method
+        //      call's receiver is a `MethodCall` (not a `Field`), so
+        //      the direct-shape check above misses the outer call.
+        //      The inner `.entry(...)` is already caught by shape (1)
+        //      because `.entry()` is treated as a mutating accessor
+        //      on the field (an Entry hands out `&mut V`); the
+        //      explicit chain rule below provides a discriminating
+        //      message and defends against a future relaxation of
+        //      shape (1).
         if let Expr::Field(recv_field) = &*m.receiver {
             let field_name = match &recv_field.member {
                 syn::Member::Named(i) => i.to_string(),
@@ -422,11 +492,27 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
                         (GuardedField::SidecarKnownMissGeneration, "clear") => {
                             SIDECAR_CLEAR_ALLOWED_FNS.contains(&cur.as_str())
                         }
-                        // Read-only operations — never flagged.
+                        // Mutating map accessors that hand out a
+                        // mutable handle on a value (or build one
+                        // lazily via `Entry::or_*`). `.entry()`
+                        // returns an `Entry` whose `.or_insert*` /
+                        // `.or_default` / `.and_modify` paths perform
+                        // an admission; `.iter_mut()` / `.values_mut()`
+                        // / `.get_mut()` hand out `&mut V` which
+                        // permits arbitrary out-of-band mutation.
+                        // Restricted to the admission allow-list for
+                        // the positive route map; never allowed on
+                        // the strict sidecar (the sidecar admits only
+                        // via direct assignment in
+                        // `set_import_dependencies`).
+                        (GuardedField::Routes, "entry" | "iter_mut" | "values_mut" | "get_mut") => {
+                            ROUTE_MAP_ADMIT_ALLOWED_FNS.contains(&cur.as_str())
+                        }
+                        // Truly read-only operations — never flagged.
                         (
                             _,
-                            "get" | "iter" | "iter_mut" | "values" | "values_mut" | "keys" | "len"
-                            | "is_empty" | "contains_key" | "clone" | "entry",
+                            "get" | "iter" | "values" | "keys" | "len" | "is_empty"
+                            | "contains_key" | "clone",
                         ) => true,
                         // Everything else on the guarded fields is rejected.
                         _ => false,
@@ -452,6 +538,53 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
                         );
                         self.record(&format!(".{method}()"), detail);
                     }
+                }
+            }
+        }
+        // Shape (2): mutating-chain rule. The outer method call
+        // (`or_insert` / `or_insert_with` / `or_insert_with_key` /
+        // `or_default` / `and_modify`) consumes the `Entry` returned
+        // by `.entry()` on a guarded field. The inner `.entry()` is
+        // already caught by shape (1), but the chain rule pins the
+        // out-of-band mutation explicitly so a future relaxation of
+        // `.entry()` (e.g. allowing it for a probe-style read that
+        // intentionally never mutates) cannot silently re-open the
+        // mutating chain for arbitrary callers.
+        const ENTRY_MUTATING_CHAINS: &[&str] = &[
+            "or_insert",
+            "or_insert_with",
+            "or_insert_with_key",
+            "or_default",
+            "and_modify",
+        ];
+        let outer_method = m.method.to_string();
+        if ENTRY_MUTATING_CHAINS.contains(&outer_method.as_str()) {
+            if let Some((field, inner_method)) = self.entry_chain_field(&m.receiver) {
+                let cur = self.current_fn().to_string();
+                let allowed = match field {
+                    GuardedField::Routes => ROUTE_MAP_ADMIT_ALLOWED_FNS.contains(&cur.as_str()),
+                    // The strict sidecar has no entry-chain producer.
+                    // Snapshot admission is direct assignment in
+                    // `set_import_dependencies`; nothing else may
+                    // touch it via `.entry(_).or_*`.
+                    GuardedField::SidecarKnownMissGeneration => false,
+                };
+                if !allowed {
+                    let detail = format!(
+                        "writer `{cur}` chained `.{outer_method}(...)` after `.{inner_method}(...)` on `{}` \
+                         (admission allowed: {}); mutating-map accessors must route through the canonical admission helper",
+                        match field {
+                            GuardedField::Routes => "import_routes",
+                            GuardedField::SidecarKnownMissGeneration =>
+                                "import_routes_known_miss_recorded_at_generation",
+                        },
+                        match field {
+                            GuardedField::Routes => ROUTE_MAP_ADMIT_ALLOWED_FNS.join(", "),
+                            GuardedField::SidecarKnownMissGeneration =>
+                                SIDECAR_ASSIGN_ALLOWED_FNS.join(", "),
+                        },
+                    );
+                    self.record(&format!(".{inner_method}().{outer_method}()"), detail);
                 }
             }
         }
@@ -1014,6 +1147,126 @@ fn scanner_discriminating_property_fixtures() {
         scan_fixture_violations(fixture_g).is_empty(),
         "scanner incorrectly flagged a pure read: {:?}",
         scan_fixture_violations(fixture_g)
+    );
+
+    // Fixture H: arbitrary method admits via `.entry(_).or_insert(_)`
+    // on `import_routes` — REJECTED. This is the false-negative that
+    // motivated tightening the scanner: the outer `.or_insert(_)` has
+    // a `MethodCall` receiver (`.entry(_)`), not a field expression,
+    // so the direct-shape rule never sees the outer call; the inner
+    // `.entry(_)` is what we flag. The mutating-chain rule provides a
+    // second flag with a clearer message.
+    let fixture_h = r#"
+        impl VerterHost {
+            fn arbitrary_entry_or_insert(&self) {
+                let mut derived = self.derived_raw_cache().entry("x".to_string()).or_default();
+                derived
+                    .value_mut()
+                    .import_routes
+                    .entry("y".to_string())
+                    .or_insert(Default::default());
+            }
+        }
+    "#;
+    assert!(
+        !scan_fixture_violations(fixture_h).is_empty(),
+        "scanner failed to flag arbitrary-method `import_routes.entry(_).or_insert(_)` chain"
+    );
+
+    // Fixture I: arbitrary method admits via
+    // `.entry(_).or_default()` on `import_routes` — REJECTED.
+    let fixture_i = r#"
+        impl VerterHost {
+            fn arbitrary_entry_or_default(&self) {
+                let mut derived = self.derived_raw_cache().entry("x".to_string()).or_default();
+                let _ = derived.value_mut().import_routes.entry("y".to_string()).or_default();
+            }
+        }
+    "#;
+    assert!(
+        !scan_fixture_violations(fixture_i).is_empty(),
+        "scanner failed to flag arbitrary-method `import_routes.entry(_).or_default()` chain"
+    );
+
+    // Fixture J: arbitrary method admits via
+    // `.entry(_).and_modify(_)` on the sidecar — REJECTED. The
+    // strict sidecar has no entry-chain producer; only direct
+    // assignment in `set_import_dependencies` is admissible.
+    let fixture_j = r#"
+        impl VerterHost {
+            fn arbitrary_entry_and_modify(&self) {
+                let mut derived = self.derived_raw_cache().entry("x".to_string()).or_default();
+                derived
+                    .value_mut()
+                    .import_routes_known_miss_recorded_at_generation
+                    .entry("y".to_string())
+                    .and_modify(|g| *g = 0);
+            }
+        }
+    "#;
+    assert!(
+        !scan_fixture_violations(fixture_j).is_empty(),
+        "scanner failed to flag arbitrary-method `sidecar.entry(_).and_modify(_)` chain"
+    );
+
+    // Fixture K: arbitrary method mutably iterates `import_routes` —
+    // REJECTED. `iter_mut()` hands out `&mut V` which permits
+    // arbitrary out-of-band mutation; only the admission allow-list
+    // may obtain a mutable iterator on the field.
+    let fixture_k = r#"
+        impl VerterHost {
+            fn arbitrary_iter_mut(&self) {
+                let mut derived = self.derived_raw_cache().entry("x".to_string()).or_default();
+                if let Some((_, v)) = derived.value_mut().import_routes.iter_mut().next() {
+                    *v = Default::default();
+                }
+            }
+        }
+    "#;
+    assert!(
+        !scan_fixture_violations(fixture_k).is_empty(),
+        "scanner failed to flag arbitrary-method `import_routes.iter_mut()` mutable iteration"
+    );
+
+    // Fixture L: canonical positive helper that uses
+    // `.entry(_).or_default()` directly on `import_routes` —
+    // ACCEPTED. This shape isn't used by the production helper today
+    // (it inserts via `.insert(_)` instead) but the scanner must
+    // still permit it inside the admission allow-list so a future
+    // refactor can use the Entry API without re-opening the false
+    // negative.
+    let fixture_l = r#"
+        impl VerterHost {
+            fn cache_positive_import_route_result(&self) {
+                let mut derived = self.derived_raw_cache().entry("x".to_string()).or_default();
+                let _ = derived.value_mut().import_routes.entry("y".to_string()).or_default();
+            }
+        }
+    "#;
+    assert!(
+        scan_fixture_violations(fixture_l).is_empty(),
+        "scanner incorrectly flagged the canonical positive helper entry-chain: {:?}",
+        scan_fixture_violations(fixture_l)
+    );
+
+    // Fixture M: snapshot writer mutably iterates `import_routes`
+    // (e.g. to retroactively tag entries during admission) — ACCEPTED.
+    // `set_import_dependencies` is the snapshot producer and is on
+    // the admission allow-list for the positive route map.
+    let fixture_m = r#"
+        impl VerterHost {
+            fn set_import_dependencies(&self) {
+                let mut derived = self.derived_raw_cache().entry("x".to_string()).or_default();
+                for (_, v) in derived.value_mut().import_routes.iter_mut() {
+                    let _ = v;
+                }
+            }
+        }
+    "#;
+    assert!(
+        scan_fixture_violations(fixture_m).is_empty(),
+        "scanner incorrectly flagged the snapshot writer iter_mut: {:?}",
+        scan_fixture_violations(fixture_m)
     );
 }
 
