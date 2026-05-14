@@ -287,10 +287,34 @@ impl HostStoreView {
     /// a parse-env-hash variant outside this snapshot will miss
     /// validation and recompute against the current variant.
     fn snapshot_file_facts(&mut self, store: &crate::file_artifact_store::FileArtifactStore) {
+        // Snapshot ONLY the `FileFacts` variant whose `content_hash`
+        // matches the view's tracked `whole_hashes[canonical]` —
+        // that is the source-of-truth content hash for the
+        // canonical under this view. Other variants (stale
+        // candidates from prior content generations) coexist in
+        // the multi-candidate store per R20 but must NOT back the
+        // parse-domain validator: a path-precise consumer observed
+        // against the live content, so its validation MUST consult
+        // the live content's facts.
+        //
+        // When the artifact store has not yet been refreshed for
+        // the new content (lazy `ensure_indexed_ready` has not run
+        // yet), the `file_facts` entry for that canonical stays
+        // ABSENT. The parse-domain validator interprets absence as
+        // a miss (`validates_parse_domain` returns `false` for any
+        // observed real-hash fact under an absent entry) — the
+        // consumer falls through to cold recompute, which is the
+        // correct R3 outcome under stale producer state.
         for (key, artifacts) in store.snapshot_artifacts() {
-            self.file_facts
-                .entry(key.canonical.as_ref().to_owned())
-                .or_insert_with(|| std::sync::Arc::clone(&artifacts.facts));
+            let canonical_str = key.canonical.as_ref().to_owned();
+            let matches_live = match self.whole_hashes.get(&canonical_str) {
+                Some(h) => key.content_hash == *h,
+                None => false,
+            };
+            if matches_live {
+                self.file_facts
+                    .insert(canonical_str, std::sync::Arc::clone(&artifacts.facts));
+            }
         }
     }
 
