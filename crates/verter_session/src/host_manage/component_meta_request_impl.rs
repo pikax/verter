@@ -83,6 +83,21 @@ pub struct CapturedComponentMetaInputs {
     pub(crate) audit_direct_import_proof_ms: f64,
 }
 
+/// View-bound [`ComponentMetaRequestHost`] adapter that threads a
+/// [`SessionView`](crate::session_view::SessionView) into the request
+/// orchestration boundary.
+///
+/// `cache_key` folds the view's fingerprint into the resolution key so
+/// two concurrent sessions with different overlays do not coalesce on
+/// the same singleflight slot (R20 multi-candidate isolation). The
+/// view's overlay source is consulted in `capture_component_meta_inputs`
+/// so cold-compute reads observe overlay content for the owner
+/// canonical. All other methods delegate to the inner host.
+pub(crate) struct ViewBoundRequestHost<'a> {
+    pub(crate) host: &'a VerterHost,
+    pub(crate) view: &'a dyn crate::session_view::SessionView,
+}
+
 impl ComponentMetaRequestHost for VerterHost {
     type View = crate::resolver_store::HostStoreView;
     type Mode = ProjectionMode;
@@ -220,6 +235,99 @@ impl ComponentMetaRequestHost for VerterHost {
         result: &Self::Resolution,
     ) {
         self.store_cached_resolved_meta(canonical, mode, result, &result.fact_versions);
+    }
+}
+
+impl<'a> ComponentMetaRequestHost for ViewBoundRequestHost<'a> {
+    type View = crate::resolver_store::HostStoreView;
+    type Mode = ProjectionMode;
+    type Resolution = ResolvedComponentMetaState;
+    type CapturedInputs = CapturedComponentMetaInputs;
+
+    fn cache_key(
+        &self,
+        canonical: &str,
+        mode: Self::Mode,
+    ) -> crate::resolver_core::ResolutionNodeKey {
+        resolved_meta_cache_key_with_view_fingerprint(canonical, mode, self.view.fingerprint())
+    }
+
+    fn snapshot_store_view(&self) -> Self::View {
+        self.host.resolver_store_view()
+    }
+
+    fn view_mutation_epoch(&self, store_view: &Self::View) -> u64 {
+        store_view.mutation_epoch()
+    }
+
+    fn current_store_view_epoch(&self) -> u64 {
+        VerterHost::current_store_view_epoch(self.host)
+    }
+
+    fn capture_component_meta_inputs(
+        &self,
+        canonical: &str,
+        _view: &Self::View,
+    ) -> Option<Self::CapturedInputs> {
+        // Overlay-priority capture: when the session view carries an
+        // overlay source for the owner canonical, the cold-compute
+        // inputs MUST reflect overlay content. The shared
+        // `capture_component_meta_inputs_with_view` helper publishes
+        // the overlay's IndexedReady into FileArtifactStore on first
+        // demand (multi-candidate, keyed by overlay content_hash) so
+        // resolver-tier reads through SessionResolverContext find the
+        // overlay; the helper then constructs CapturedComponentMetaInputs
+        // from the overlay snapshot.
+        self.host
+            .capture_component_meta_inputs_with_view(canonical, self.view)
+    }
+
+    fn try_get_cached_component_meta(
+        &self,
+        canonical: &str,
+        mode: Self::Mode,
+        _store_view: &Self::View,
+    ) -> Option<Self::Resolution> {
+        self.host.try_get_cached_resolved_meta_for_view_fingerprint(
+            canonical,
+            mode,
+            self.view.fingerprint(),
+        )
+    }
+
+    fn compute_component_meta(
+        &self,
+        canonical: &str,
+        mode: Self::Mode,
+        captured: Option<&Self::CapturedInputs>,
+        _store_view: Option<&Self::View>,
+    ) -> Option<Self::Resolution> {
+        if let Some(captured) = captured {
+            return self
+                .host
+                .compute_component_meta_state_from_captured(canonical, mode, captured);
+        }
+        let whole_hash = self
+            .host
+            .current_or_read_whole_hash(canonical)
+            .unwrap_or_default();
+        self.host
+            .compute_component_meta_state(canonical, mode, whole_hash)
+    }
+
+    fn store_component_meta_result(
+        &self,
+        canonical: &str,
+        mode: Self::Mode,
+        result: &Self::Resolution,
+    ) {
+        self.host.store_cached_resolved_meta_for_view_fingerprint(
+            canonical,
+            mode,
+            result,
+            &result.fact_versions,
+            self.view.fingerprint(),
+        );
     }
 }
 
@@ -373,6 +481,23 @@ pub(crate) fn resolved_meta_cache_key(
     canonical: &str,
     mode: ProjectionMode,
 ) -> crate::resolver_core::ResolutionNodeKey {
+    resolved_meta_cache_key_with_view_fingerprint(canonical, mode, 0)
+}
+
+/// View-fingerprint-aware variant of [`resolved_meta_cache_key`].
+///
+/// `view_fingerprint == 0` is the overlay-free base host shape and
+/// matches what `resolved_meta_cache_key` returns. Non-zero values
+/// (produced by overlay-bearing
+/// [`SessionView::fingerprint`](crate::session_view::SessionView::fingerprint)
+/// implementations) admit distinct singleflight slots so two
+/// concurrent sessions with different overlays cannot coalesce on the
+/// same in-flight build (R20 multi-candidate isolation).
+pub(crate) fn resolved_meta_cache_key_with_view_fingerprint(
+    canonical: &str,
+    mode: ProjectionMode,
+    view_fingerprint: u64,
+) -> crate::resolver_core::ResolutionNodeKey {
     crate::resolver_core::ResolutionNodeKey {
         symbol_id: canonical.to_string(),
         node_kind: crate::resolver_core::ResolutionNodeKind::Assemble,
@@ -386,5 +511,6 @@ pub(crate) fn resolved_meta_cache_key(
             ProjectionMode::Expanded => 4,
             ProjectionMode::Skeleton => 5,
         },
+        view_fingerprint,
     }
 }

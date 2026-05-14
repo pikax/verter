@@ -42,9 +42,11 @@ pub mod imported_root_db;
 pub(crate) mod resolver_context;
 pub mod route_db;
 pub(crate) mod scope_shadowing;
+pub(crate) mod session_resolver_context;
 
 pub use fact_read_set::{FactReadSet, FactReadSetCell, FactReadSetFinalise};
 pub(crate) use resolver_context::ResolverContext;
+pub(crate) use session_resolver_context::SessionResolverContext;
 
 pub use fuses::{FuseBudgets, FuseState, FuseTrip};
 pub use imported_root_db::{ImportedRootDb, ImportedRootResult};
@@ -345,6 +347,12 @@ pub struct ResolutionNodeKey {
     pub member_path_hash: u64,
     pub type_args_hash: u64,
     pub behavior_flags: u32,
+    /// Session-view fingerprint (`0` for the overlay-free base host
+    /// view, non-zero for session-bearing query paths). Two concurrent
+    /// sessions with different overlays admit distinct singleflight
+    /// slots under this discriminator (R20 multi-candidate isolation
+    /// for the resolved-meta cache).
+    pub view_fingerprint: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

@@ -151,6 +151,37 @@ pub trait SessionView: Send + Sync {
         &self,
         canonical: &str,
     ) -> Option<Arc<crate::resolved_import_facts::ResolvedImportFacts>>;
+
+    /// Stable fingerprint identifying the overlay set on this view.
+    ///
+    /// Two views with identical overlay sets (same canonical →
+    /// content-hash mapping) return the same fingerprint; two views
+    /// with different overlays return different fingerprints. Base-
+    /// only views (no overlays) return `0`.
+    ///
+    /// Resolver-tier consumers fold the fingerprint into singleflight
+    /// keys so two concurrent sessions with different overlays cannot
+    /// coalesce onto the same in-flight build (R20 multi-candidate
+    /// isolation). The default impl returns `0`; overlay-bearing
+    /// implementations (`OverlaidView`, `OverlaidViewRef`) override
+    /// it to hash their overlay-hash table.
+    fn fingerprint(&self) -> u64 {
+        0
+    }
+
+    /// Enumerate every canonical id the view carries an overlay
+    /// source for. Used by the session-bearing query entry points
+    /// to pre-warm overlay [`IndexedReady`](crate::project_type_store::IndexedReady)
+    /// candidates for the owner and every dep the overlay set
+    /// covers, before the resolver-tier reads kick in.
+    ///
+    /// Default impl returns an empty vector (base-only views have no
+    /// overlays). Overlay-bearing implementations (`OverlaidView`,
+    /// `OverlaidViewRef`) override it to return their overlay map's
+    /// keys.
+    fn overlay_canonicals(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Shared lookup helper used by the base-only views
@@ -423,6 +454,14 @@ impl SessionView for OverlaidView {
             .resolved_import_facts()
             .get(&key)
     }
+
+    fn fingerprint(&self) -> u64 {
+        overlay_set_fingerprint(self.overlay_hashes.as_ref(), None)
+    }
+
+    fn overlay_canonicals(&self) -> Vec<String> {
+        self.overlays.keys().cloned().collect()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -661,6 +700,60 @@ impl SessionView for OverlaidViewRef<'_> {
             .project_type_store()
             .resolved_import_facts()
             .get(&key)
+    }
+
+    fn fingerprint(&self) -> u64 {
+        overlay_set_fingerprint(self.overlay_hashes, Some(self.overlay_tombstones))
+    }
+
+    fn overlay_canonicals(&self) -> Vec<String> {
+        self.overlays.keys().cloned().collect()
+    }
+}
+
+/// Hash the `(canonical, content_hash)` pairs of an overlay map (plus
+/// optional tombstone set) into a single `u64` fingerprint.
+///
+/// Empty overlay maps with no tombstones return `0` so a tombstone-
+/// free, overlay-free view is indistinguishable from a base view at
+/// the fingerprint surface. Non-empty maps produce a value derived
+/// from the sorted overlay entries, so two views with the same
+/// overlay set return the same fingerprint regardless of insertion
+/// order.
+fn overlay_set_fingerprint(
+    overlay_hashes: &FxHashMap<String, Hash16>,
+    tombstones: Option<&std::collections::HashSet<String>>,
+) -> u64 {
+    if overlay_hashes.is_empty() && tombstones.is_none_or(std::collections::HashSet::is_empty) {
+        return 0;
+    }
+    use std::hash::{Hash, Hasher};
+    let mut entries: Vec<(&str, [u8; 16])> = overlay_hashes
+        .iter()
+        .map(|(canonical, hash)| (canonical.as_str(), *hash))
+        .collect();
+    entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
+    let mut hasher = rustc_hash::FxHasher::default();
+    for (canonical, hash) in &entries {
+        canonical.hash(&mut hasher);
+        hash.hash(&mut hasher);
+    }
+    if let Some(set) = tombstones {
+        let mut tombs: Vec<&str> = set.iter().map(String::as_str).collect();
+        tombs.sort_unstable();
+        // Domain separator so an overlay whose canonical equals a
+        // tombstoned canonical in some other view does not collide.
+        b"|tombstones|".hash(&mut hasher);
+        for canonical in &tombs {
+            canonical.hash(&mut hasher);
+        }
+    }
+    let raw = hasher.finish();
+    // Reserve `0` for "no overlays / no tombstones".
+    if raw == 0 {
+        1
+    } else {
+        raw
     }
 }
 

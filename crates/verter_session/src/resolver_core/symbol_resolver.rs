@@ -234,6 +234,7 @@ pub fn type_shape_node_key(
         member_path_hash: 0,
         type_args_hash: 0,
         behavior_flags: 0,
+        view_fingerprint: 0,
     }
 }
 
@@ -245,6 +246,7 @@ pub fn declaration_node_key(canonical_id: &str, type_name: &str) -> ResolutionNo
         member_path_hash: 0,
         type_args_hash: 0,
         behavior_flags: 0,
+        view_fingerprint: 0,
     }
 }
 
@@ -273,6 +275,7 @@ pub fn importer_edge_node_key(
         member_path_hash: hasher.finish(),
         type_args_hash: 0,
         behavior_flags: 0,
+        view_fingerprint: 0,
     }
 }
 
@@ -300,6 +303,7 @@ pub fn provider_export_route_node_key(
         member_path_hash: hasher.finish(),
         type_args_hash: 0,
         behavior_flags: 0,
+        view_fingerprint: 0,
     }
 }
 
@@ -315,6 +319,7 @@ pub fn barrel_node_key(canonical_id: &str, type_name: &str) -> ResolutionNodeKey
         member_path_hash: hasher.finish(),
         type_args_hash: 0,
         behavior_flags: 0,
+        view_fingerprint: 0,
     }
 }
 
@@ -326,6 +331,7 @@ pub fn assemble_node_key(canonical_id: &str, behavior_flags: u32) -> ResolutionN
         member_path_hash: 0,
         type_args_hash: 0,
         behavior_flags,
+        view_fingerprint: 0,
     }
 }
 

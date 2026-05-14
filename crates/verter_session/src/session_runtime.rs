@@ -155,32 +155,6 @@ impl SessionRuntime {
         result.value
     }
 
-    /// Session-scoped combined component-meta + resolution query.
-    /// Routes through `resolve_component_meta` (session-scoped) instead
-    /// of `VerterHost::get_component_meta_with_resolution`.
-    pub fn get_component_meta_with_resolution(
-        &self,
-        canonical_or_alias: &str,
-    ) -> Option<(
-        verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
-        ResolvedComponentMetaState,
-    )> {
-        let host = self.host();
-        host.provenance()
-            .get_component_meta_calls
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
-
-        let resolved = self.resolve_component_meta(canonical.as_str(), ProjectionMode::Expanded)?;
-        let analysis = crate::host_manage::extract_component_meta_from_resolved(
-            host,
-            canonical.as_str(),
-            &resolved,
-            true,
-        );
-        Some((analysis, resolved))
-    }
-
     /// Session-scoped component-meta with fallthrough fact versions for
     /// payload cache storage.
     #[allow(dead_code)]

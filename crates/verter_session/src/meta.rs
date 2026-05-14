@@ -784,9 +784,15 @@ impl MetaSession {
         MetaError,
     > {
         self.check_alive()?;
-        let resolved = self.with_session_runtime(canonical_or_alias, |runtime| {
-            runtime.get_component_meta_with_resolution(canonical_or_alias)
-        })?;
+        // Route through the view-bearing host path so the view's
+        // fingerprint folds into the singleflight cache key and the
+        // overlay-priority pre-warm runs on the owner canonical
+        // (R17 / R18). The view is materialised at call time from
+        // this session's overlay map.
+        let host = self.project.host();
+        let resolved = self.with_overlay_view(|view| {
+            host.get_component_meta_with_resolution_via_view(canonical_or_alias, view)
+        });
         match resolved {
             Some((analysis, resolved)) => {
                 if let Some(err) = component_meta_resolution_budget_error(

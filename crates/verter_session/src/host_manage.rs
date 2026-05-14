@@ -49,6 +49,8 @@ pub(crate) mod fallthrough;
 pub(crate) mod imported_type_root;
 pub(crate) mod intrinsic_projection;
 pub(crate) mod jsdoc_resolve;
+pub(crate) mod overlay_materialize;
+pub(crate) mod overlay_priority;
 pub(crate) mod prepared_decl;
 
 // §11c.5 re-export block — preserves `crate::host_manage::populate_*` /

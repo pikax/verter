@@ -144,6 +144,18 @@ impl VerterHost {
             return None;
         }
 
+        // Overlay-priority pre-warm: thread the view through a
+        // `SessionResolverContext` and pre-warm IndexedReady for the
+        // owner AND every canonical the view carries an overlay for
+        // (R20 multi-candidate isolation). The pre-warm publishes
+        // overlay candidates under their content hashes so cross-file
+        // resolver-tier reads inside the cold compute observe the
+        // overlay for deps, not just the owner.
+        {
+            let base_ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = self;
+            crate::host_manage::overlay_priority::prewarm_view_overlays(base_ctx, view);
+        }
+
         // Try the view-aware warm cache fast path.
         if let Some(warm) = self.try_component_meta_cache_hit_with_view(canonical.as_str(), view) {
             if let Some(started) = started {
@@ -156,23 +168,27 @@ impl VerterHost {
             return Some(warm);
         }
 
-        // Cold build. The resolver does not yet consume the view for
-        // analysis content, so the cold compute runs against the base
-        // host's source. The view's hash, however, IS used to publish
-        // the result so the cache slot is keyed under the overlay
-        // hash. This is the architectural contract for R20
-        // multi-candidate isolation: cold compute may share resolver
-        // work across sessions when overlay semantics are not yet
-        // overlay-aware, but the published cache slot stays per-view.
+        // Cold build. The view's overlay content (when present) has
+        // been pre-warmed into `FileArtifactStore` under the overlay's
+        // content hash via `materialize_overlay_indexed_ready` above,
+        // so resolver-tier reads through
+        // [`SessionResolverContext`](crate::resolver_core::SessionResolverContext)
+        // see the overlay. The view's hash is used to publish the
+        // result so the cache slot is keyed under the overlay hash —
+        // R20 multi-candidate isolation: two sessions with different
+        // overlays admit distinct candidate slots in the resolved-
+        // meta cache.
         //
         // Install `with_fact_tracer` outer scope so the materialiser
         // `observe` wiring accumulates a real `FactReadSet` that
         // becomes the candidate's `fact_dep_signature`. R24: tracer
         // installs on cold-path only; warm-hits returned above.
         let ((resolved_opt, meta_opt), _read_set) = self.with_fact_tracer(|| {
-            let resolved = match self
-                .resolve_component_meta(canonical.as_str(), crate::types::ProjectionMode::Expanded)
-            {
+            let resolved = match self.resolve_component_meta_with_view(
+                canonical.as_str(),
+                crate::types::ProjectionMode::Expanded,
+                view,
+            ) {
                 Some(r) => r,
                 None => return (None, None),
             };
@@ -625,6 +641,55 @@ impl VerterHost {
         // via `resolved.synthesis_should_suppress`.
         self.publish_component_meta_cache_entry(canonical.as_str(), &resolved, analysis.clone());
 
+        Some((analysis, resolved))
+    }
+
+    /// View-aware variant of [`Self::get_component_meta_with_resolution`].
+    ///
+    /// R17 / R18 — Consults the supplied [`SessionView`] for tombstone
+    /// detection and overlay-priority source. When the view carries
+    /// an overlay for the owner canonical, the overlay's
+    /// [`IndexedReady`](crate::project_type_store::IndexedReady) is
+    /// pre-warmed into [`FileArtifactStore`](crate::file_artifact_store::FileArtifactStore)
+    /// via [`crate::resolver_core::SessionResolverContext`] so the
+    /// cold compute reads from the overlay candidate.
+    /// [`Self::resolve_component_meta_with_view`] threads the view
+    /// fingerprint into the singleflight cache key so two sessions
+    /// with different overlays admit distinct candidate slots.
+    pub fn get_component_meta_with_resolution_via_view(
+        &self,
+        canonical_or_alias: &str,
+        view: &dyn crate::session_view::SessionView,
+    ) -> Option<(
+        verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+        crate::meta_resolve::ResolvedComponentMetaState,
+    )> {
+        self.provenance
+            .get_component_meta_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
+
+        if view.is_tombstoned(canonical.as_str()) {
+            return None;
+        }
+
+        // Overlay-priority pre-warm for owner + every dep the view
+        // carries an overlay for.
+        {
+            let base_ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = self;
+            crate::host_manage::overlay_priority::prewarm_view_overlays(base_ctx, view);
+        }
+
+        // Cold compute through the view-bearing path so the view's
+        // fingerprint discriminates the singleflight slot.
+        let mut resolved = self.resolve_component_meta_with_view(
+            canonical.as_str(),
+            crate::types::ProjectionMode::Expanded,
+            view,
+        )?;
+        resolved.request_id = self.next_request_id();
+        let analysis =
+            extract_component_meta_from_resolved(self, canonical.as_str(), &resolved, true);
         Some((analysis, resolved))
     }
 

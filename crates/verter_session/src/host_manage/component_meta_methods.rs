@@ -57,8 +57,8 @@ use crate::meta_resolve::{
 };
 use crate::meta_resolve::{
     next_component_meta_audit_request_id, request_source_performed_compute,
-    resolved_meta_cache_key, should_skip_imported_registry_seed_refresh, trace_request_source,
-    CapturedComponentMetaInputs, ResolvedComponentMetaComputeAudit, ResolvedTypeRegistryMeta,
+    should_skip_imported_registry_seed_refresh, trace_request_source, CapturedComponentMetaInputs,
+    ResolvedComponentMetaComputeAudit, ResolvedTypeRegistryMeta,
 };
 
 // Items that live in the parent shell (`crate::meta_resolve`): the
@@ -101,13 +101,19 @@ impl VerterHost {
         canonical_or_alias: &str,
         mode: ProjectionMode,
     ) -> Option<ResolvedComponentMetaState> {
-        self.resolve_component_meta_with_view(canonical_or_alias, mode)
+        // Base-only path: bind an overlay-free `HostViewRef` so the
+        // shared with-view body sees a session view whose fingerprint
+        // is `0` (no overlays) — this collapses to the historical
+        // base-only request shape.
+        let view = crate::session_view::HostViewRef::new(self);
+        self.resolve_component_meta_with_view(canonical_or_alias, mode, &view)
     }
 
     pub(crate) fn resolve_component_meta_with_view(
         &self,
         canonical_or_alias: &str,
         mode: ProjectionMode,
+        view: &dyn crate::session_view::SessionView,
     ) -> Option<ResolvedComponentMetaState> {
         let started = component_meta_debug_enabled().then(Instant::now);
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
@@ -138,8 +144,16 @@ impl VerterHost {
             "resolve_component_meta",
             format!("owner={} mode={mode:?}", canonical),
         );
+        // Route through `ViewBoundRequestHost` so the view's fingerprint
+        // discriminates the singleflight slot (R20) and overlay source
+        // flows through `capture_component_meta_inputs_with_view` into
+        // the cold compute path.
+        let request_host = crate::host_manage::component_meta_request_impl::ViewBoundRequestHost {
+            host: self,
+            view,
+        };
         let result = run_component_meta_request(
-            self,
+            &request_host,
             self.resolver_runtime().component_meta.singleflight(),
             &canonical,
             mode,
@@ -365,6 +379,87 @@ impl VerterHost {
             None,
             crate::resolver_core::ComponentMetaResolutionPurpose::Full,
             RegistryMaterialization::Full,
+        )
+    }
+
+    /// Overlay-aware variant of
+    /// [`Self::capture_component_meta_inputs`] used by
+    /// [`ViewBoundRequestHost`](crate::host_manage::component_meta_request_impl::ViewBoundRequestHost).
+    ///
+    /// When `view` carries an overlay source for the owner canonical,
+    /// the helper materialises the overlay's IndexedReady candidate
+    /// (multi-candidate, keyed by overlay content_hash) and constructs
+    /// the captured inputs from the overlay's snapshot + eval_source.
+    /// Otherwise falls through to the base-only `capture_component_meta_inputs`
+    /// path. Resolver-tier reads downstream through
+    /// [`SessionResolverContext`](crate::resolver_core::SessionResolverContext)
+    /// observe the overlay candidate via
+    /// [`FileArtifactStore`](crate::file_artifact_store::FileArtifactStore).
+    pub(crate) fn capture_component_meta_inputs_with_view(
+        &self,
+        canonical: &str,
+        view: &dyn crate::session_view::SessionView,
+    ) -> Option<CapturedComponentMetaInputs> {
+        let audit_enabled = self.config.audit_enabled;
+        let capture_started = audit_enabled.then(Instant::now);
+        // Overlay-priority: when the view carries an overlay for the
+        // owner canonical, materialise its IndexedReady candidate
+        // first so the base-host capture below picks it up under the
+        // overlay's content_hash via the multi-candidate file-artifact
+        // store. The base host's scheduler stays untouched (R17).
+        let overlay_facts = if let Some(overlay_source) = view.source(canonical) {
+            view.content_hash_for(canonical).and_then(|overlay_hash| {
+                self.materialize_overlay_indexed_ready(canonical, &overlay_source, overlay_hash)
+            })
+        } else {
+            None
+        };
+
+        if let Some(facts) = overlay_facts {
+            // Overlay snapshot is the authority for the owner canonical;
+            // resolver-tier deps still flow through the base host's
+            // shallow state for canonicals the overlay does not cover.
+            let store_read_started = audit_enabled.then(Instant::now);
+            let mut snapshot = (*facts.snapshot).clone();
+            self.resolve_snapshot_imports(canonical, &mut snapshot);
+            self.enrich_destructured_bindings(&mut snapshot);
+            if self.config.effective_scope().needs_template_analysis() {
+                self.compute_template_analysis_if_missing(canonical, &mut snapshot);
+            }
+            let whole_hash = facts.whole_hash;
+            let store_read_ms = store_read_started
+                .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+                .unwrap_or(0.0);
+            let owner_eval_source = VerterHost::build_eval_script_source(
+                &facts.raw_source,
+                facts.cached_parse.as_deref(),
+            );
+            let direct_import_started = audit_enabled.then(Instant::now);
+            let direct_dependency_candidates =
+                self.cache_dependency_candidates_from_snapshot(canonical, &snapshot);
+            let direct_import_proof_ms = direct_import_started
+                .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+                .unwrap_or(0.0);
+            let capture_inputs_ms = capture_started
+                .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+                .unwrap_or(0.0);
+            return Some(CapturedComponentMetaInputs {
+                whole_hash,
+                snapshot,
+                owner_eval_source: Some(owner_eval_source),
+                direct_dependency_candidates,
+                audit_capture_inputs_ms: capture_inputs_ms,
+                audit_store_read_ms: store_read_ms,
+                audit_direct_import_proof_ms: direct_import_proof_ms,
+            });
+        }
+
+        // No overlay for this canonical — delegate to the base capture
+        // path via the request-host trait impl on `&VerterHost`.
+        <Self as crate::resolver_core::ComponentMetaRequestHost>::capture_component_meta_inputs(
+            self,
+            canonical,
+            &self.resolver_store_view(),
         )
     }
 
@@ -2599,7 +2694,26 @@ impl VerterHost {
         canonical: &str,
         mode: ProjectionMode,
     ) -> Option<ResolvedComponentMetaState> {
-        let cache_key = resolved_meta_cache_key(canonical, mode);
+        self.try_get_cached_resolved_meta_for_view_fingerprint(canonical, mode, 0)
+    }
+
+    /// View-fingerprint-aware variant of [`Self::try_get_cached_resolved_meta`].
+    ///
+    /// Overlay-bearing callers thread their view's fingerprint here so
+    /// the singleflight cache lookup hits the per-view slot rather
+    /// than the base host's slot. Base-only callers pass `0` and the
+    /// behaviour matches the historical entry point.
+    pub(crate) fn try_get_cached_resolved_meta_for_view_fingerprint(
+        &self,
+        canonical: &str,
+        mode: ProjectionMode,
+        view_fingerprint: u64,
+    ) -> Option<ResolvedComponentMetaState> {
+        let cache_key = crate::host_manage::component_meta_request_impl::resolved_meta_cache_key_with_view_fingerprint(
+            canonical,
+            mode,
+            view_fingerprint,
+        );
         let view_for_get = self.resolver_store_view();
         if let Some(cached) = self
             .resolver_runtime()
@@ -2608,6 +2722,17 @@ impl VerterHost {
         {
             self.mirror_cached_resolved_meta_arc(canonical, mode, cached.clone());
             return Some(cached.as_ref().clone());
+        }
+
+        // Overlay-bearing callers (`view_fingerprint != 0`) MUST NOT
+        // pick up the legacy per-canonical cache slot, because the
+        // legacy slot is keyed only by `(canonical, mode)` and does
+        // not discriminate overlay candidates. Falling through here
+        // would let two sessions with conflicting overlays observe
+        // each other's cached state. The base-only path
+        // (`view_fingerprint == 0`) keeps the legacy fallback.
+        if view_fingerprint != 0 {
+            return None;
         }
 
         // cached_resolved_meta lives on DerivedRawState (D48 split).
@@ -2651,6 +2776,24 @@ impl VerterHost {
         state: &ResolvedComponentMetaState,
         fact_versions: &[crate::resolver_core::FactVersionRef],
     ) {
+        self.store_cached_resolved_meta_for_view_fingerprint(
+            canonical,
+            mode,
+            state,
+            fact_versions,
+            0,
+        );
+    }
+
+    /// View-fingerprint-aware variant of [`Self::store_cached_resolved_meta`].
+    pub(crate) fn store_cached_resolved_meta_for_view_fingerprint(
+        &self,
+        canonical: &str,
+        mode: ProjectionMode,
+        state: &ResolvedComponentMetaState,
+        fact_versions: &[crate::resolver_core::FactVersionRef],
+        view_fingerprint: u64,
+    ) {
         component_meta_trace_custom!(
             "store_cached_component_meta_result",
             format!(
@@ -2671,7 +2814,11 @@ impl VerterHost {
         // refused counter on the steady-state baseline).
         if !fact_versions.is_empty() {
             self.resolver_runtime().component_meta.insert_arc_with_kind(
-                resolved_meta_cache_key(canonical, mode),
+                crate::host_manage::component_meta_request_impl::resolved_meta_cache_key_with_view_fingerprint(
+                    canonical,
+                    mode,
+                    view_fingerprint,
+                ),
                 state.clone(),
                 fact_versions.to_vec(),
                 "component_meta.results",

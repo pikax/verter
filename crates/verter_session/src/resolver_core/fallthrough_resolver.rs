@@ -438,6 +438,7 @@ mod tests {
             member_path_hash: 0,
             type_args_hash: 0,
             behavior_flags: 0,
+            view_fingerprint: 0,
         };
         ctx.visiting.insert(symbol_key.clone());
 

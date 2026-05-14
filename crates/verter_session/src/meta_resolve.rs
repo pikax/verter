@@ -145,7 +145,7 @@ pub(crate) use registry_materialize::preserve_package_backed_symbolic_refs_node;
 // `crate::meta_resolve::*` public surface stays intact for callers.
 pub(crate) use crate::host_manage::component_meta_request_impl::{
     next_component_meta_audit_request_id, request_source_performed_compute,
-    resolved_meta_cache_key, should_skip_imported_registry_seed_refresh, trace_request_source,
+    should_skip_imported_registry_seed_refresh, trace_request_source,
 };
 pub use crate::host_manage::component_meta_request_impl::{
     CapturedComponentMetaInputs, ResolvedComponentMetaComputeAudit, ResolvedDeclarationKind,

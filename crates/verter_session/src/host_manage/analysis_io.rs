@@ -566,13 +566,14 @@ impl VerterHost {
     /// View-aware variant of [`Self::evaluate_types`].
     ///
     /// R17 / R18 — Consults the supplied [`SessionView`] for
-    /// tombstone detection before delegating to the base-host
-    /// `evaluate_types` path. The resolver does not yet consume the
-    /// view directly for analysis content (the substrate exists
-    /// but cold compute reads source from the base host); the
-    /// view-aware entry point keeps the consumer surface single-
-    /// shaped so future overlay-aware resolver plumbing does not
-    /// require additional consumer churn.
+    /// tombstone detection and overlay-priority source. When the
+    /// view carries an overlay for the owner canonical, the
+    /// overlay's IndexedReady is pre-warmed into the file-artifact
+    /// store via [`crate::resolver_core::SessionResolverContext`]
+    /// so the cold compute below reads from the overlay candidate.
+    /// The downstream [`Self::resolve_component_meta_with_view`]
+    /// threads the view fingerprint into the singleflight cache key
+    /// so two sessions with different overlays admit distinct slots.
     pub fn evaluate_types_via_view(
         &self,
         canonical_or_alias: &str,
@@ -590,7 +591,19 @@ impl VerterHost {
             return None;
         }
 
-        self.evaluate_types(canonical_or_alias)
+        // Overlay-priority pre-warm for owner + every dep the view
+        // carries an overlay for.
+        {
+            let base_ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = self;
+            crate::host_manage::overlay_priority::prewarm_view_overlays(base_ctx, view);
+        }
+
+        let resolved = self.resolve_component_meta_with_view(
+            canonical_or_alias,
+            crate::types::ProjectionMode::Expanded,
+            view,
+        )?;
+        resolved.evaluated_types
     }
 
     /// Get the current whole_hash for a file.
