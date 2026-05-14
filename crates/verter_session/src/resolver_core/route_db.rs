@@ -26,8 +26,8 @@ use crate::file_artifact_store::{
     AugmentationTargetKey, AugmentationTargetKind, FileArtifactStore, ProjectIdentity,
 };
 use crate::resolver_core::{
-    FactVersionRef, PermissiveStoreView, RouteSurfaceFactRef, SingleflightGroup, StoreView,
-    ValidatedFactCache,
+    FactVersionRef, PermissiveStoreView, RouteSurfaceFactRef, SingleflightGroup, SingleflightRole,
+    StoreView, ValidatedFactCache,
 };
 use crate::types::Hash16;
 
@@ -160,6 +160,27 @@ pub struct RouteDb {
     effective_export_sets: ValidatedFactCache<EffectiveExportSetKey, EffectiveExportSetEntry>,
     effective_export_singleflight:
         SingleflightGroup<EffectiveExportSetKey, Arc<EffectiveExportSetEntry>, ()>,
+    /// Test-only provenance counter — bumped each time
+    /// [`Self::get_or_resolve_route_observing_facts`] returns through
+    /// the warm-hit branch (validated cache lookup succeeded). Pairs
+    /// with the cold + coalesced counters so tests can discriminate
+    /// which branch satisfied a consumer call.
+    #[cfg(any(test, debug_assertions))]
+    route_warm_fact_bubble_emissions: std::sync::atomic::AtomicU64,
+    /// Test-only provenance counter — bumped when
+    /// [`Self::get_or_resolve_route_observing_facts`] returned through
+    /// the singleflight leader branch (this thread won the cold
+    /// resolve and admitted the entry). The freshly-stored facts are
+    /// re-read from the validated cache before this counter advances.
+    #[cfg(any(test, debug_assertions))]
+    route_cold_fact_bubble_emissions: std::sync::atomic::AtomicU64,
+    /// Test-only provenance counter — bumped when
+    /// [`Self::get_or_resolve_route_observing_facts`] returned through
+    /// the singleflight follower branch (another thread won the
+    /// cold resolve, this thread joined and re-read the just-admitted
+    /// facts). Discriminates the coalesced-join path from leader.
+    #[cfg(any(test, debug_assertions))]
+    route_coalesced_fact_bubble_emissions: std::sync::atomic::AtomicU64,
 }
 
 impl RouteDb {
@@ -171,7 +192,42 @@ impl RouteDb {
             barrel_singleflight: SingleflightGroup::default(),
             effective_export_sets: ValidatedFactCache::default(),
             effective_export_singleflight: SingleflightGroup::default(),
+            #[cfg(any(test, debug_assertions))]
+            route_warm_fact_bubble_emissions: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(any(test, debug_assertions))]
+            route_cold_fact_bubble_emissions: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(any(test, debug_assertions))]
+            route_coalesced_fact_bubble_emissions: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// Snapshot the test-only warm fact-bubble emission counter.
+    /// Returns the current value with relaxed ordering. Exposed under
+    /// `cfg(any(test, debug_assertions))` so integration tests in
+    /// `tests/` (which compile without `cfg(test)`) can read it.
+    #[cfg(any(test, debug_assertions))]
+    #[must_use]
+    pub fn route_warm_fact_bubble_emissions(&self) -> u64 {
+        self.route_warm_fact_bubble_emissions
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Snapshot the test-only cold fact-bubble emission counter.
+    /// Returns the current value with relaxed ordering.
+    #[cfg(any(test, debug_assertions))]
+    #[must_use]
+    pub fn route_cold_fact_bubble_emissions(&self) -> u64 {
+        self.route_cold_fact_bubble_emissions
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Snapshot the test-only coalesced fact-bubble emission counter.
+    /// Returns the current value with relaxed ordering.
+    #[cfg(any(test, debug_assertions))]
+    #[must_use]
+    pub fn route_coalesced_fact_bubble_emissions(&self) -> u64 {
+        self.route_coalesced_fact_bubble_emissions
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     // -----------------------------------------------------------------------
@@ -336,9 +392,19 @@ impl RouteDb {
     ///
     /// On a warm hit the cached fact-dep signature is fanned out via
     /// [`crate::fact_signature_helpers::observe_fact_signature`] before
-    /// returning. On a cold miss the inner `resolve` closure is invoked;
-    /// after resolution the freshly-stored facts are read back and also
-    /// fanned out.
+    /// returning. On a cold miss the inner `resolve` closure is invoked
+    /// inside a singleflight group; after resolution the freshly-stored
+    /// facts are read back and also fanned out. When a concurrent thread
+    /// joins the singleflight (follower role), the joiner's re-read picks
+    /// up the leader's just-published facts and fans them into the joiner
+    /// thread's outer tracer scope so cross-thread fact bubbling holds
+    /// for coalesced consumers.
+    ///
+    /// This method is the consumer-facing entry-point: callers that need
+    /// the route's fact-dep signature to participate in outer
+    /// `with_fact_tracer` scopes use it instead of [`Self::get_route`]
+    /// or [`Self::get_or_resolve_route_with_facts`] (the latter remain
+    /// available as low-level primitives for intra-RouteDb code).
     pub fn get_or_resolve_route_observing_facts<V, F>(
         &self,
         provider_canonical: &str,
@@ -350,20 +416,87 @@ impl RouteDb {
         V: StoreView,
         F: FnOnce() -> Option<(RouteResult, Vec<FactVersionRef>)>,
     {
+        // Warm-hit fast path: validated cache lookup with fact bubbling.
         if let Some((value, facts)) =
             self.get_route_with_facts(provider_canonical, exported_name, view)
         {
             crate::fact_signature_helpers::observe_fact_signature(&facts);
+            #[cfg(any(test, debug_assertions))]
+            self.route_warm_fact_bubble_emissions
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return Some(value);
         }
-        let result =
-            self.get_or_resolve_route_with_facts(provider_canonical, exported_name, view, resolve)?;
+
+        // Cold path: inline singleflight so we can observe the leader /
+        // follower role and bump the matching provenance counter on the
+        // post-admission re-read.
+        let key = (provider_canonical.to_owned(), exported_name.to_owned());
+        let flight = self
+            .route_singleflight
+            .run(key.clone(), view.compat_token(), || {
+                if let Some(result) = self.routes.get_if_valid(&key, view) {
+                    return Ok(result);
+                }
+                match resolve() {
+                    Some((result, facts)) => {
+                        let arc = Arc::new(result);
+                        // Strict admission. Routes resolved with
+                        // non-empty fact signatures admit through the
+                        // strict entry-point; empty-signature resolves
+                        // are the negative-cache pattern and are NOT
+                        // admitted — the route surface is still returned
+                        // to the caller, but the entry is not persisted
+                        // as a fact-validated cache hit.
+                        if !facts.is_empty() {
+                            self.routes.insert_arc_with_kind(
+                                key.clone(),
+                                arc.clone(),
+                                facts,
+                                "route_db.routes",
+                            );
+                        }
+                        // R23 typed event: cold-path route admission.
+                        emit_export_route_resolved_event(
+                            &key.0,
+                            &key.1,
+                            arc.as_ref(),
+                            /* augmented = */ false,
+                        );
+                        Ok(arc)
+                    }
+                    None => Err(()),
+                }
+            });
+
+        let run_result = match flight {
+            Ok(r) => r,
+            Err(()) => return None,
+        };
+
+        // Post-admission re-read: fan the just-stored facts into the
+        // current thread's tracer stack. Leader: the closure ran here
+        // and admitted; the re-read finds the freshly-stored entry.
+        // Follower: another thread won the singleflight and admitted;
+        // this thread's re-read picks up the admitted entry and the
+        // bubble fans the leader's facts into this thread's outer
+        // tracer scope.
         if let Some((_value, facts)) =
             self.get_route_with_facts(provider_canonical, exported_name, view)
         {
             crate::fact_signature_helpers::observe_fact_signature(&facts);
+            #[cfg(any(test, debug_assertions))]
+            match run_result.role {
+                SingleflightRole::Leader => {
+                    self.route_cold_fact_bubble_emissions
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                SingleflightRole::Follower => {
+                    self.route_coalesced_fact_bubble_emissions
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
         }
-        Some(result)
+        Some((*run_result.value).clone())
     }
 
     /// Insert a pre-resolved route. **Test-only**: the empty-facts variant
@@ -765,6 +898,17 @@ impl RouteDb {
         self.barrel_singleflight.clear();
         self.effective_export_sets.clear();
         self.effective_export_singleflight.clear();
+        // Reset the test-only fact-bubble provenance counters so each
+        // test sees a clean baseline after a host-wide clear.
+        #[cfg(any(test, debug_assertions))]
+        {
+            self.route_warm_fact_bubble_emissions
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.route_cold_fact_bubble_emissions
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.route_coalesced_fact_bubble_emissions
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     // -----------------------------------------------------------------------

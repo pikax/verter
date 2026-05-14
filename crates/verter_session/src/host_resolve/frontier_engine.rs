@@ -824,11 +824,15 @@ impl VerterHost {
             .unwrap_or_else(|| dep_canonical.to_string());
         let live_view = self.resolver_store_view();
 
+        // Consume the route through the fact-observing entry-point so
+        // the route's `fact_dep_signature` bubbles into any active
+        // outer `with_fact_tracer` scope on the current thread (warm
+        // hits + cold leader resolves + coalesced follower joins).
         let cached_route = self
             .resolver
             .runtime
             .routes
-            .get_or_resolve_route_with_facts(
+            .get_or_resolve_route_observing_facts(
                 normalized_canonical.as_str(),
                 requested_name,
                 &live_view,
