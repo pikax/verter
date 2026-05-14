@@ -55,16 +55,14 @@ impl crate::resolver_core::FrontierHost for HostFrontierAdapter<'_> {
             .resolve_eval_dependency_canonical(canonical_id)
             .unwrap_or_else(|| canonical_id.to_string());
 
-        if self.route_exports_only {
-            return self.host.route_shallow_state(
-                canonical.as_str(),
-                &mut self.route_shallow_cache.borrow_mut(),
-            );
-        }
-
-        // FileArtifactStore fast path. When the session view carries
+        // FileArtifactStore overlay fast path. When the session view carries
         // parse artifacts for this canonical (overlay candidate), prefer
-        // them so the frontier reads overlay-rooted shallow state.
+        // them so the frontier reads overlay-rooted shallow state even in
+        // the `route_exports_only` branch. Without this, route-only frontier
+        // closures driven from a session-bearing path would fall through to
+        // the base `route_shallow_state` and materialise the wrong target
+        // when an overlay changes a barrel/re-export surface or tombstones
+        // a dependency.
         if let Some(view) = self.view {
             if let Some(facts) = view.parse_artifacts(canonical.as_str()) {
                 if facts.indexed.shallow_state.has_resolvable_surface() || !self.materialize_symbols
@@ -78,6 +76,13 @@ impl crate::resolver_core::FrontierHost for HostFrontierAdapter<'_> {
                     return Some(facts.indexed.shallow_state.clone());
                 }
             }
+        }
+
+        if self.route_exports_only {
+            return self.host.route_shallow_state(
+                canonical.as_str(),
+                &mut self.route_shallow_cache.borrow_mut(),
+            );
         }
         if let Some(facts) = self
             .host

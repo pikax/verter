@@ -1460,12 +1460,12 @@ defineProps<Props>()
     );
 }
 
-// evaluate_types resolver path reads source from `read_analysis_source` /
-// `capture_component_meta_inputs`; overlay content for the owner canonical
-// is not visible until the resolver consults the active SessionView for
-// source. `get_analysis_via_view` lands the overlay-aware analysis path in
-// stage 6d-followup; threading view-aware source into the resolver pipeline
-// is future work (resolver-tier `view.source()` consultation).
+// Invariant: `evaluate_types` returns the same `Arc` for repeated calls on
+// an unchanged file and a different `Arc` once the file is upserted. The
+// resolver pipeline reads source through `read_analysis_source` /
+// `capture_component_meta_inputs`, which consult the base host's source
+// store directly rather than the active `SessionView`; overlay-aware
+// source plumbing through the resolver is tracked separately.
 #[test]
 fn evaluate_types_reuses_cached_results_until_the_file_changes() {
     let project = make_project();

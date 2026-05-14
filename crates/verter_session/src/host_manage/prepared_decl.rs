@@ -553,6 +553,99 @@ impl VerterHost {
         )
     }
 
+    /// View-aware variant of [`Self::required_import_routes_for_exported_route`].
+    ///
+    /// Threads the session `view` through the route-owned shallow read and
+    /// the external-type analysis fall-through so an overlay that changes
+    /// a barrel/re-export surface or class-body imports is reflected in
+    /// the required-import map. Base callers (`view = None`) get identical
+    /// behaviour to the historical body.
+    pub(crate) fn required_import_routes_for_exported_route_with_view(
+        &self,
+        canonical_id: &str,
+        exported_name: &str,
+        route: &crate::resolver_core::RouteDemand,
+        view: Option<&dyn crate::session_view::SessionView>,
+    ) -> rustc_hash::FxHashMap<String, crate::resolver_core::RouteDemand> {
+        use crate::resolver_core::shallow_file_state::ExportTarget;
+        use crate::resolver_core::RouteDemand;
+
+        if let Some(state) = self.route_owned_shallow_state_with_view(canonical_id, view) {
+            let budget = crate::resolver_core::shallow_file_state::ResolutionBudgets::default()
+                .local_closure_steps;
+            if let Some((symbol_name, _is_alias_export)) = state
+                .export_target(exported_name)
+                .and_then(|target| match target {
+                    ExportTarget::Local { symbol_name } => {
+                        Some((symbol_name.as_str(), symbol_name != exported_name))
+                    }
+                    ExportTarget::Reexport { .. } => None,
+                })
+            {
+                let closure = state.route_closure(symbol_name, route, budget);
+                let mut result = rustc_hash::FxHashMap::default();
+                for ext in &closure.unresolved_external {
+                    result
+                        .entry(ext.local_name.clone())
+                        .and_modify(|existing| {
+                            *existing =
+                                crate::resolver_core::merge_route_demands(existing, &ext.route);
+                        })
+                        .or_insert_with(|| ext.route.clone());
+                }
+                if state.symbol(symbol_name).is_some_and(|symbol| {
+                    symbol.kind == verter_semantic::analysis::type_eval::TypeDeclKind::Class
+                }) {
+                    if let Some(analysis) =
+                        self.external_type_analysis_with_view(canonical_id, view)
+                    {
+                        for required_name in analysis.required_import_names(exported_name) {
+                            result
+                                .entry(required_name)
+                                .and_modify(|existing| {
+                                    *existing = crate::resolver_core::merge_route_demands(
+                                        existing,
+                                        &RouteDemand::Whole,
+                                    );
+                                })
+                                .or_insert(RouteDemand::Whole);
+                        }
+                    }
+                }
+                return result;
+            }
+
+            if !matches!(route, RouteDemand::Whole) {
+                return self.required_import_routes_for_exported_route_with_view(
+                    canonical_id,
+                    exported_name,
+                    &RouteDemand::Whole,
+                    view,
+                );
+            }
+        }
+
+        if matches!(route, RouteDemand::Whole) {
+            return self
+                .external_type_analysis_with_view(canonical_id, view)
+                .map(|analysis| {
+                    analysis
+                        .required_import_names(exported_name)
+                        .into_iter()
+                        .map(|name| (name, RouteDemand::Whole))
+                        .collect()
+                })
+                .unwrap_or_default();
+        }
+
+        self.required_import_routes_for_exported_route_with_view(
+            canonical_id,
+            exported_name,
+            &RouteDemand::Whole,
+            view,
+        )
+    }
+
     #[allow(dead_code)]
     pub(crate) fn required_import_names_for_exported_route(
         &self,
@@ -723,6 +816,63 @@ impl VerterHost {
         } else {
             component_meta_trace_custom!(
                 "external_type_analysis_built",
+                format!(
+                    "owner={} statements={} bindings={} reexports={} wildcards={} import_locals={} local_type_symbols={} local_export_symbols={}",
+                    canonical_id,
+                    stats.top_level_statement_count,
+                    stats.binding_count,
+                    stats.direct_reexport_count,
+                    stats.wildcard_reexport_count,
+                    stats.import_local_count,
+                    stats.local_type_symbol_count,
+                    stats.local_export_symbol_count,
+                ),
+            );
+        }
+        Some(analysis)
+    }
+
+    /// View-aware variant of [`Self::external_type_analysis`].
+    ///
+    /// When `view: Some(...)` carries parse artifacts for `canonical_id`
+    /// (overlay candidate published into FileArtifactStore under the
+    /// overlay content hash), the analysis is read from the view's
+    /// artifacts so the session-bearing cold-compute path observes
+    /// overlay-rooted external-type analysis. Base callers (`view = None`)
+    /// fall through to the historical content-agnostic `get_any` fast path
+    /// followed by the route-owned materialiser, identical to the base
+    /// `external_type_analysis` behaviour.
+    pub(crate) fn external_type_analysis_with_view(
+        &self,
+        canonical_id: &str,
+        view: Option<&dyn crate::session_view::SessionView>,
+    ) -> Option<Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>>
+    {
+        component_meta_trace_custom!(
+            "external_type_analysis_with_view",
+            format!("owner={} store_view={}", canonical_id, view.is_some()),
+        );
+        let inputs = self.external_type_resolution_inputs_with_view(canonical_id, view)?;
+        let analysis = Arc::clone(&inputs.analysis);
+        let stats = analysis.stats();
+        if inputs.analysis_cache_hit {
+            component_meta_trace_custom!(
+                "external_type_analysis_with_view_cache_hit",
+                format!(
+                    "owner={} statements={} bindings={} reexports={} wildcards={} import_locals={} local_type_symbols={} local_export_symbols={}",
+                    canonical_id,
+                    stats.top_level_statement_count,
+                    stats.binding_count,
+                    stats.direct_reexport_count,
+                    stats.wildcard_reexport_count,
+                    stats.import_local_count,
+                    stats.local_type_symbol_count,
+                    stats.local_export_symbol_count,
+                ),
+            );
+        } else {
+            component_meta_trace_custom!(
+                "external_type_analysis_with_view_built",
                 format!(
                     "owner={} statements={} bindings={} reexports={} wildcards={} import_locals={} local_type_symbols={} local_export_symbols={}",
                     canonical_id,

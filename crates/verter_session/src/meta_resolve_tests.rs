@@ -4141,19 +4141,12 @@ defineProps<Props>()
 // Phase 1: Architecture — Overlay safety
 // ===========================================================================
 
-// block-1.5 RED — escalated: cold-compute call-graph view threading
-// is required for the cold resolver-tier read on `/types.ts` to
-// observe the session's overlay source. The view-aware mirror key
-// (Codex P1.3, fix-agent P0.1) closes the legacy-slot half of the
-// overlay isolation contract, but the dep-source half still routes
-// through `&VerterHost::ensure_indexed_ready` (no view in scope) and
-// observes the BASE candidate. Closing that path is the cold-compute
-// call-graph refactor (substrate-reviewer's P0.2 enumeration of ~20
-// callsites across host_manage/component_meta_methods.rs,
-// eval_env.rs, fallthrough.rs, intrinsic_projection.rs,
-// jsdoc_resolve.rs, component_meta_resolution_policy/mod.rs,
-// host_resolve_type_audit.rs, typeinfo/*). Owned by the follow-up
-// substrate block.
+// Overlay-isolation invariant: a session view carrying an overlay-Upsert
+// must observe the overlay's resolved component-meta, never a base-cache
+// entry computed from the pre-overlay source. The view-aware mirror key
+// (`(canonical, content_hash)`) plus cold-compute view threading keeps
+// base and overlay candidates in distinct cache slots so concurrent
+// sessions cannot coalesce onto each other's results (R20).
 #[test]
 fn overlay_queries_do_not_reuse_unsound_base_resolved_meta_cache() {
     let project = make_project();

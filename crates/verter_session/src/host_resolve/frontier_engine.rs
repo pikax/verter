@@ -241,6 +241,7 @@ impl VerterHost {
                 &exported_name,
                 &requested_route,
                 companion_plans,
+                adapter.view,
             );
             for companion in planned_companions.iter() {
                 let (target_canonical, target_name) = frontier
@@ -351,6 +352,7 @@ impl VerterHost {
                 exported_name,
                 &route,
                 companion_plans,
+                view,
             );
             let mut companion_types = ResolvedExternalTypes::default();
             for companion in planned_companions.iter() {
@@ -421,13 +423,18 @@ impl VerterHost {
         exported_name: &str,
         route: &crate::resolver_core::RouteDemand,
         companion_plans: &mut FrontierCompanionPlans,
+        view: Option<&dyn crate::session_view::SessionView>,
     ) -> Arc<[PlannedFrontierCompanion]> {
         companion_plans.get_or_compute(canonical_id, exported_name, route, || {
-            let Some(analysis) = self.external_type_analysis(canonical_id) else {
+            let Some(analysis) = self.external_type_analysis_with_view(canonical_id, view) else {
                 return Vec::new();
             };
-            let required_import_routes =
-                self.required_import_routes_for_exported_route(canonical_id, exported_name, route);
+            let required_import_routes = self.required_import_routes_for_exported_route_with_view(
+                canonical_id,
+                exported_name,
+                route,
+                view,
+            );
             let required_import_names = required_import_routes
                 .keys()
                 .cloned()
@@ -685,6 +692,27 @@ impl VerterHost {
     ) -> Option<Arc<crate::resolver_core::ShallowFileState>> {
         let mut route_shallow_cache = RouteShallowStateCache::default();
         self.route_shallow_state(canonical_id, &mut route_shallow_cache)
+    }
+
+    /// View-aware variant of [`Self::route_owned_shallow_state`].
+    ///
+    /// When `view: Some(...)` carries parse artifacts for `canonical_id`,
+    /// returns the overlay-rooted shallow state directly so route-aware
+    /// callers driven from a session-bearing path observe overlay surfaces
+    /// (re-export edits, tombstoned dependencies). Base callers
+    /// (`view = None`) fall through to the historical
+    /// `route_owned_shallow_state` body — identical behaviour.
+    pub(crate) fn route_owned_shallow_state_with_view(
+        &self,
+        canonical_id: &str,
+        view: Option<&dyn crate::session_view::SessionView>,
+    ) -> Option<Arc<crate::resolver_core::ShallowFileState>> {
+        if let Some(view) = view {
+            if let Some(facts) = view.parse_artifacts(canonical_id) {
+                return Some(Arc::clone(&facts.indexed.shallow_state));
+            }
+        }
+        self.route_owned_shallow_state(canonical_id)
     }
 
     fn resolve_named_type_export_route_uncached(
