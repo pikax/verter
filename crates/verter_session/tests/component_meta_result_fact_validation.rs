@@ -39,7 +39,7 @@ fn metahost() -> ComponentMetaHost {
 }
 
 #[test]
-#[ignore = "block-1.b RED — closed by same-block implementation"]
+
 fn editing_dep_invalidates_component_meta_result_warm_hit() {
     // Structural arch guard: ensure the type carries the new
     // `fact_dep_signature` field. This compile-time assertion fails

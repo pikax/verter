@@ -56,7 +56,7 @@ fn metahost() -> ComponentMetaHost {
 }
 
 #[test]
-#[ignore = "block-1.b RED — closed by same-block implementation"]
+
 fn fact_validation_alone_invalidates_warm_hit_without_eviction() {
     let _guard = EAGER_INVALIDATION_TEST_LOCK.lock().unwrap();
 

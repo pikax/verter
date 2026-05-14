@@ -21,7 +21,7 @@ fn read_session_src(rel: &str) -> String {
 }
 
 #[test]
-#[ignore = "block-1.b RED — closed by same-block implementation"]
+
 fn component_meta_result_signature_carries_import_ref() {
     let src = read_session_src("component_meta_result_db.rs");
     let needle = "pub struct ComponentMetaResultEntry<P> {";

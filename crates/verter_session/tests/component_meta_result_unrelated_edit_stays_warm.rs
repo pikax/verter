@@ -31,7 +31,7 @@ fn metahost() -> ComponentMetaHost {
 }
 
 #[test]
-#[ignore = "block-1.b RED — closed by same-block implementation"]
+
 fn unrelated_edit_keeps_component_meta_result_warm() {
     let mh = metahost();
     mh.upsert_base("/src/types.ts", "export interface Foo { a: number; }\n")

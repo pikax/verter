@@ -33,7 +33,7 @@ fn read_session_src(rel: &str) -> String {
 }
 
 #[test]
-#[ignore = "block-1.b RED — closed by same-block implementation"]
+
 fn component_meta_result_signature_carries_member_presence() {
     // Structural arch guard: `ComponentMetaResultEntry` must declare
     // `fact_dep_signature: Arc<[FactVersionRef]>` after Block 1.B.
