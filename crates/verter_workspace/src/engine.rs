@@ -978,8 +978,7 @@ pub(crate) fn compose_env_hash_tables(
         ambient_corpus_fingerprint: WORKSPACE_AMBIENT_FINGERPRINT,
     };
 
-    let mut env_hashes_by_project: FxHashMap<ProjectId, ProjectEnvHashArray> =
-        FxHashMap::default();
+    let mut env_hashes_by_project: FxHashMap<ProjectId, ProjectEnvHashArray> = FxHashMap::default();
     env_hashes_by_project.reserve(projects.len());
     let mut project_identity_hashes: FxHashMap<ProjectId, Hash16> = FxHashMap::default();
     project_identity_hashes.reserve(projects.len());
@@ -1036,9 +1035,7 @@ fn ide_project_config_from_ownership(project: &OwnershipProject) -> IdeProjectCo
 /// project. Composed from the engine's resolve-extension list mixed with
 /// a stable "no project" identity so the default is non-zero and changes
 /// when the workspace-level extension list changes.
-pub(crate) fn workspace_default_env_hash_array_for_engine(
-    engine: &Engine,
-) -> ProjectEnvHashArray {
+pub(crate) fn workspace_default_env_hash_array_for_engine(engine: &Engine) -> ProjectEnvHashArray {
     let extensions = engine.default_resolve_extensions.load_full();
     let extensions_refs: Vec<&str> = extensions.iter().map(String::as_str).collect();
     let inputs = EnvHashInputs {

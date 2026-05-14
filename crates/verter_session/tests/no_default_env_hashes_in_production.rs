@@ -231,7 +231,6 @@ fn walk_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 #[test]
-#[ignore = "block-1.6 RED — closed by same-block implementation"]
 fn no_default_env_hashes_in_production_code() {
     let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workspace_root = crate_root
@@ -288,7 +287,6 @@ fn no_default_env_hashes_in_production_code() {
 }
 
 #[test]
-#[ignore = "block-1.6 RED — closed by same-block implementation"]
 fn arch_guard_window_filter_recognises_default_impl_and_cfg_test() {
     // Negative control: a synthetic fixture must classify a Default impl
     // body and a #[cfg(test)] block as EXCLUDED, and a sibling production

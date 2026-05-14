@@ -53,7 +53,6 @@ fn build_host_with_single_project() -> (Arc<VerterHost>, &'static str) {
 }
 
 #[test]
-#[ignore = "block-1.6 RED — closed by same-block implementation"]
 fn host_view_env_hashes_for_canonical_returns_non_default_bundle() {
     let (host, canonical) = build_host_with_single_project();
     let env = host.host_view_env_hashes_for(canonical);
@@ -82,7 +81,6 @@ fn host_view_env_hashes_for_canonical_returns_non_default_bundle() {
 }
 
 #[test]
-#[ignore = "block-1.6 RED — closed by same-block implementation"]
 fn host_view_env_hashes_for_canonical_distinguishes_dimensions() {
     let (host, canonical) = build_host_with_single_project();
     let env = host.host_view_env_hashes_for(canonical);

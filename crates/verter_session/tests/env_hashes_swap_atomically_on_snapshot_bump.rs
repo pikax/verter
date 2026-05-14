@@ -92,7 +92,6 @@ fn bump_workspace_config(workspace: &MemoryWorkspace) {
 }
 
 #[test]
-#[ignore = "block-1.6 RED — closed by same-block implementation"]
 fn pre_bump_published_root_is_internally_coherent() {
     let workspace = build_workspace_at_generation_n();
     let root = workspace.load_published().expect("snapshot published");
@@ -121,7 +120,6 @@ fn pre_bump_published_root_is_internally_coherent() {
 }
 
 #[test]
-#[ignore = "block-1.6 RED — closed by same-block implementation"]
 fn post_bump_published_root_is_internally_coherent() {
     let workspace = build_workspace_at_generation_n();
     bump_workspace_config(&workspace);
@@ -146,7 +144,6 @@ fn post_bump_published_root_is_internally_coherent() {
 }
 
 #[test]
-#[ignore = "block-1.6 RED — closed by same-block implementation"]
 fn pre_and_post_bump_roots_differ_in_env_hash_tables() {
     let workspace = build_workspace_at_generation_n();
     let pre_root = workspace.load_published().expect("pre-bump snapshot");

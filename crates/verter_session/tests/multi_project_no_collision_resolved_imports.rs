@@ -83,7 +83,6 @@ fn build_multi_project_workspace() -> Arc<MemoryWorkspace> {
 }
 
 #[test]
-#[ignore = "block-1.6 RED — closed by same-block implementation"]
 fn two_projects_share_canonical_via_owners_for_file() {
     let workspace = build_multi_project_workspace();
     let root = workspace
@@ -99,7 +98,6 @@ fn two_projects_share_canonical_via_owners_for_file() {
 }
 
 #[test]
-#[ignore = "block-1.6 RED — closed by same-block implementation"]
 fn project_keyed_env_hash_api_yields_distinct_bundles_per_project() {
     let workspace = build_multi_project_workspace();
     let root = workspace.load_published().expect("snapshot published");

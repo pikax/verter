@@ -49,7 +49,6 @@ fn build_host_with_single_project() -> (Arc<VerterHost>, &'static str) {
 }
 
 #[test]
-#[ignore = "block-1.6 RED — closed by same-block implementation"]
 fn host_view_project_identity_for_canonical_returns_real_hash() {
     let (host, canonical) = build_host_with_single_project();
     let identity = host.host_view_project_identity_for(canonical);
@@ -63,7 +62,6 @@ fn host_view_project_identity_for_canonical_returns_real_hash() {
 }
 
 #[test]
-#[ignore = "block-1.6 RED — closed by same-block implementation"]
 fn host_view_project_identity_for_canonical_is_stable_across_calls() {
     let (host, canonical) = build_host_with_single_project();
     let identity_a = host.host_view_project_identity_for(canonical);

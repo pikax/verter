@@ -55,10 +55,7 @@ fn extract_resolved_import_facts_struct_bodies(source: &str) -> Vec<(String, Str
             .find(|c: char| c == '{' || c == '<' || c.is_whitespace())
             .unwrap_or(after.len());
         let header = &after[..name_end];
-        let name = header
-            .trim_start_matches("pub struct ")
-            .trim()
-            .to_string();
+        let name = header.trim_start_matches("pub struct ").trim().to_string();
 
         let Some(open_rel) = after.find('{') else {
             break;
@@ -89,7 +86,6 @@ fn extract_resolved_import_facts_struct_bodies(source: &str) -> Vec<(String, Str
 }
 
 #[test]
-#[ignore = "block-1.6 RED — closed by same-block implementation"]
 fn resolved_import_facts_structs_do_not_carry_lib_env_hash_field() {
     let source = read_resolved_import_facts_source();
     let bodies = extract_resolved_import_facts_struct_bodies(&source);

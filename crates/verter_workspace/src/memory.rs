@@ -226,9 +226,7 @@ impl MemoryWorkspace {
     /// publishes an empty bootstrap snapshot eagerly. Mirrors
     /// `FilesystemWorkspace::load_published` so per-workspace consumers
     /// (tests, env-hash readers) need not branch on workspace flavour.
-    pub fn load_published(
-        &self,
-    ) -> Option<std::sync::Arc<crate::published_state::PublishedRoot>> {
+    pub fn load_published(&self) -> Option<std::sync::Arc<crate::published_state::PublishedRoot>> {
         self.engine.load_published()
     }
 

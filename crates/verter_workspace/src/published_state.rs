@@ -155,7 +155,10 @@ impl std::fmt::Debug for PublishedRoot {
             .field("generation", &self.snapshot.generation)
             .field("has_ext", &self.consumer_ext.is_some())
             .field("ownership_ready", &self.ownership_ready)
-            .field("env_hashes_by_project_count", &self.env_hashes_by_project.len())
+            .field(
+                "env_hashes_by_project_count",
+                &self.env_hashes_by_project.len(),
+            )
             .field(
                 "project_identity_hashes_count",
                 &self.project_identity_hashes.len(),

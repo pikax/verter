@@ -348,10 +348,7 @@ impl VerterHost {
     /// canonicals, or a workspace that has not yet published a real
     /// snapshot).
     #[must_use]
-    pub fn host_view_env_hashes_for(
-        &self,
-        canonical: &str,
-    ) -> crate::session_view::EnvHashes {
+    pub fn host_view_env_hashes_for(&self, canonical: &str) -> crate::session_view::EnvHashes {
         let workspace = self.workspace();
         let arr = self
             .resolve_project_for_canonical(canonical)
