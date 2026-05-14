@@ -38,33 +38,34 @@ use crate::resolver_core::component_meta::ResolvedMacroMeta;
 use crate::resolver_core::component_meta_query_engine::ComponentMetaQueryEngine;
 use crate::resolver_core::ResolverContext;
 
-/// Block 1.C — paired emission helper for the five dispatch-read fact
-/// observation sites in this file.
+/// Paired emission helper for the five dispatch-read fact observation
+/// sites in this file.
 ///
 /// The slot-binding-graph traversal has no result cache of its own;
 /// the dispatch reads' facts reach two downstream channels:
 ///
 /// 1. The legacy `DISPATCH_DEP_SIGNATURE_ACCUMULATOR` (TLS), drained
 ///    at `host_manage/component_meta_methods.rs::compute_component_meta_state_inner`
-///    and folded into `state.fact_versions` → Block 1.B's
+///    and folded into `state.fact_versions` →
 ///    `ComponentMetaResultEntry.fact_dep_signature` (via
 ///    `publish_component_meta_cache_entry`).
 /// 2. The `ACTIVE_TRACERS` stack (also TLS), captured by the outer
 ///    `with_fact_tracer` scope in `component_meta_entry.rs` — used for
-///    R20 overflow detection and (when Block 9 collapses the two
-///    channels) as the canonical `fact_dep_signature` source.
+///    R20 overflow detection and (once the dual channels collapse) as
+///    the canonical `fact_dep_signature` source.
 ///
-/// Dual-emit is the safe migration substrate for this block: both
-/// channels receive the same dispatch facts so Block 1.B's curated
-/// signature retains coverage today AND Block 9 can switch the
-/// `fact_dep_signature` source from `state.fact_versions` to the
-/// tracer's `read_set.finalise()` without losing a single fact.
+/// Dual-emit is the safe migration substrate: both channels receive
+/// the same dispatch facts so the curated signature retains coverage
+/// today AND the `fact_dep_signature` source can later switch from
+/// `state.fact_versions` to the tracer's `read_set.finalise()`
+/// without losing a single fact. The fact-tracer fan-out alone will
+/// suffice once the producer source flips to `read_set.finalise()`.
 ///
 /// The function records two provenance counters
 /// (`slot_binding_graph_fact_tracer_emissions` and
-/// `slot_binding_graph_legacy_accumulator_emissions`) so Block 1.C
-/// tests can discriminate the dual-emit invariant under unrelated /
-/// related dep edits.
+/// `slot_binding_graph_legacy_accumulator_emissions`) so tests can
+/// discriminate the dual-emit invariant under unrelated / related
+/// dep edits.
 fn emit_slot_binding_graph_dispatch_facts(
     ctx: &dyn ResolverContext,
     sig: &crate::semantic_query::DepSignature,
@@ -371,7 +372,7 @@ fn accumulate_lowered_node_carrier_deps(
         .map(|(canonical, hash)| (canonical, DepVersion::WholeHash(hash)))
         .collect();
     let signature: DepSignature = Arc::from(entries.into_boxed_slice());
-    // Block 1.C: dual-emit. Legacy accumulator + fact-tracer fan-out.
+    // Dual-emit: legacy accumulator + fact-tracer fan-out.
     emit_slot_binding_graph_dispatch_facts(ctx, &signature);
 }
 
@@ -443,7 +444,7 @@ fn slot_param_root_is_symbolic_only(
                 body_mode: ProjectionMode::Skeleton,
             };
             let read = dispatch.execute_read(key);
-            // Block 1.C: dual-emit. Legacy accumulator + fact-tracer fan-out.
+            // Dual-emit: legacy accumulator + fact-tracer fan-out.
             emit_slot_binding_graph_dispatch_facts(dispatch.ctx, &read.dep_signature);
             match read.value {
                 QueryResult::Value(body_id) => {
@@ -624,7 +625,7 @@ pub(crate) fn resolve_slot_bindings_graph_native(
             type_args: type_args.clone(),
             mode: ProjectionMode::Navigate,
         });
-        // Block 1.C: dual-emit. Legacy accumulator + fact-tracer fan-out.
+        // Dual-emit: legacy accumulator + fact-tracer fan-out.
         emit_slot_binding_graph_dispatch_facts(dispatch.ctx, &macro_payload_read.dep_signature);
         if !macro_payload_read.walker_diagnostics.is_empty() {
             diag_sink.push(shallow_diagnostics_to_macro_expansion(
@@ -772,7 +773,7 @@ pub(crate) fn compute_bindings_via_graph(
         path: empty_path.clone(),
         mode: ProjectionMode::Shallow,
     });
-    // Block 1.C: dual-emit. Legacy accumulator + fact-tracer fan-out.
+    // Dual-emit: legacy accumulator + fact-tracer fan-out.
     emit_slot_binding_graph_dispatch_facts(ctx, &slot_surface_read.dep_signature);
     if !slot_surface_read.walker_diagnostics.is_empty() {
         diag_sink.push(shallow_diagnostics_to_macro_expansion(
@@ -861,7 +862,7 @@ pub(crate) fn compute_bindings_via_graph(
             path: empty_path.clone(),
             mode: ProjectionMode::Shallow,
         });
-        // Block 1.C: dual-emit. Legacy accumulator + fact-tracer fan-out.
+        // Dual-emit: legacy accumulator + fact-tracer fan-out.
         emit_slot_binding_graph_dispatch_facts(ctx, &param_surface_read.dep_signature);
         if !param_surface_read.walker_diagnostics.is_empty() {
             diag_sink.push(shallow_diagnostics_to_macro_expansion(

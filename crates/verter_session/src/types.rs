@@ -1786,40 +1786,40 @@ pub struct MetaProvenance {
     /// `ComponentMetaResultDb::get_with_view` warm-hit count. Bumped
     /// once per call that returns `Some(entry)` after the entry's
     /// `fact_dep_signature` validates under the supplied
-    /// [`crate::resolver_core::StoreView`]. Used by Block 1.B
-    /// behavioural tests to discriminate fact-validation from
-    /// eager-invalidation: an entry that survives an unrelated edit
-    /// must advance this counter on the second call.
+    /// [`crate::resolver_core::StoreView`]. Used by behavioural
+    /// tests to discriminate fact-validation from eager-invalidation:
+    /// an entry that survives an unrelated edit must advance this
+    /// counter on the second call.
     pub component_meta_result_cache_hits: std::sync::atomic::AtomicU64,
     /// `ComponentMetaResultDb::get_with_view` miss count. Bumped on
     /// every call that returns `None` — whether the entry was absent
     /// from the map OR the entry's `fact_dep_signature` failed
-    /// validation. Used by Block 1.B tests to discriminate
-    /// cache-bypass via the validator: editing a dep MUST advance
-    /// this counter on the second call.
+    /// validation. Used by tests to discriminate cache-bypass via
+    /// the validator: editing a dep MUST advance this counter on
+    /// the second call.
     pub component_meta_result_cache_misses: std::sync::atomic::AtomicU64,
     /// Count of `observe_fact_signature` fan-out calls emitted from
     /// `slot_binding_graph.rs` at the five `accumulate_dispatch_dep_signature`
-    /// pair sites. Block 1.C: the slot-binding-graph traversal has no
-    /// result cache of its own, so its dispatch reads' facts reach the
-    /// outer `with_fact_tracer` scope only by fan-out through
+    /// pair sites. The slot-binding-graph traversal has no result cache
+    /// of its own, so its dispatch reads' facts reach the outer
+    /// `with_fact_tracer` scope only by fan-out through
     /// [`crate::fact_signature_helpers::observe_fact_signature`]. The
     /// counter advances exactly once per dispatch read whose
     /// `dep_signature` is non-empty after legacy → fact-tracer
-    /// bridging. Used by Block 1.C tests to discriminate the
-    /// fact-tracer path from the legacy accumulator path during the
-    /// transitional dual-emit window (Block 9 collapses to a single
-    /// channel).
+    /// bridging. Used by tests to discriminate the fact-tracer path
+    /// from the legacy accumulator path during the transitional
+    /// dual-emit window — the legacy accumulator emission will be
+    /// retired once the producer source flips to
+    /// `read_set.finalise()`.
     pub slot_binding_graph_fact_tracer_emissions: std::sync::atomic::AtomicU64,
     /// Count of `accumulate_dispatch_dep_signature` calls emitted from
     /// `slot_binding_graph.rs`. Pairs with
     /// `slot_binding_graph_fact_tracer_emissions` to verify the
-    /// dual-emit invariant during the Block 1.C → Block 9 cutover
-    /// window: every legacy emission must be paired with a tracer
-    /// emission in the same code path so the curated
-    /// `fact_dep_signature` carried by Block 1.B's
-    /// `ComponentMetaResultEntry` retains coverage when Block 9
-    /// retires the legacy accumulator.
+    /// dual-emit invariant during the transitional dual-emit window:
+    /// every legacy emission must be paired with a tracer emission
+    /// in the same code path so the curated `fact_dep_signature`
+    /// carried by `ComponentMetaResultEntry` retains coverage once
+    /// the legacy accumulator is retired.
     pub slot_binding_graph_legacy_accumulator_emissions: std::sync::atomic::AtomicU64,
     pub indexed_ready_scheduler_snapshot_reuse: std::sync::atomic::AtomicU64,
     pub bundle_cache_hits: std::sync::atomic::AtomicU64,
@@ -2263,16 +2263,18 @@ pub struct MetaProvenanceSnapshot {
     pub payload_encodes: u64,
     pub component_meta_result_cache_hits: u64,
     pub component_meta_result_cache_misses: u64,
-    /// Block 1.C: per-call count of `observe_fact_signature` fan-outs
-    /// emitted from the five `accumulate_dispatch_dep_signature` pair
-    /// sites in `meta_resolve/slot_binding_graph.rs`. Used by the
-    /// Block 1.C behavioural tests to discriminate the fact-tracer
-    /// path from the legacy accumulator path.
+    /// Per-call count of `observe_fact_signature` fan-outs emitted
+    /// from the five `accumulate_dispatch_dep_signature` pair sites
+    /// in `meta_resolve/slot_binding_graph.rs`. Used by behavioural
+    /// tests to discriminate the fact-tracer path from the legacy
+    /// accumulator path.
     pub slot_binding_graph_fact_tracer_emissions: u64,
-    /// Block 1.C: per-call count of `accumulate_dispatch_dep_signature`
-    /// emissions from `meta_resolve/slot_binding_graph.rs`. Pairs with
-    /// `slot_binding_graph_fact_tracer_emissions` for the dual-emit
-    /// invariant. Block 9 deletes the legacy emission entirely.
+    /// Per-call count of `accumulate_dispatch_dep_signature`
+    /// emissions from `meta_resolve/slot_binding_graph.rs`. Pairs
+    /// with `slot_binding_graph_fact_tracer_emissions` for the
+    /// dual-emit invariant. The legacy emission will be deleted
+    /// entirely once the producer source flips to
+    /// `read_set.finalise()`.
     pub slot_binding_graph_legacy_accumulator_emissions: u64,
     pub indexed_ready_scheduler_snapshot_reuse: u64,
     pub bundle_cache_hits: u64,
