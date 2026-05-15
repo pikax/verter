@@ -1242,6 +1242,20 @@ impl VerterHost {
                 .has_resolvable_surface()
                 .then(|| crate::resolver_store::hash_route_surface(shallow_state.as_ref()));
 
+            // Project the AppConfig-interface flag from the merged
+            // analysis snapshot onto IndexedReady. The flag is the
+            // production input the `AppConfigNoOverrideProofDb`
+            // producer consults to short-circuit files that cannot
+            // contribute an override.
+            let declares_interface_app_config = script_analysis
+                .as_ref()
+                .map(|sa| {
+                    sa.flags.contains(
+                        verter_semantic::analysis::AnalysisFlags::DECLARES_INTERFACE_APP_CONFIG,
+                    )
+                })
+                .unwrap_or(false);
+
             // Publish the canonical post-parse artifact into FileArtifactStore.
             // This is the single authoritative cache consumers read from.
             let indexed = Arc::new(crate::project_type_store::IndexedReady {
@@ -1257,6 +1271,7 @@ impl VerterHost {
                 export_signatures,
                 snapshot,
                 external_type_analysis: Arc::clone(&external_type_analysis),
+                declares_interface_app_config,
             });
             self.project_type_store
                 .indexed()
@@ -1705,62 +1720,112 @@ impl VerterHost {
             format!("owner={}", owner_canonical),
         );
 
-        // (local_name, final_canonical, final_exported_name, target_whole_hash)
-        type SurfaceBuildEntry = (Arc<str>, Arc<str>, Arc<str>, Option<Hash16>);
-        let mut entries: Vec<SurfaceBuildEntry> = Vec::with_capacity(shallow.import_targets.len());
-        // R3/R26/R28 Gap 1: accumulate every chain fact observed by
-        // each direct import's route walk. The producer threads these
-        // into the surface's `fact_dep_signature` so dependent caches
-        // detect intermediate barrel changes via fact-validation
-        // alone (no eager invalidation required).
-        let mut chain_facts: Vec<crate::resolver_core::FactVersionRef> = Vec::new();
-        let mut seen_facts: rustc_hash::FxHashSet<crate::resolver_core::FactVersionRef> =
-            rustc_hash::FxHashSet::default();
-        for (local_name, target) in shallow.import_targets.iter() {
-            let resolved_canonical_id = if target.canonical_id.is_empty() {
-                match self
-                    .resolve_type_dependency_canonical(owner_canonical, &target.source_specifier)
-                {
-                    Some(canonical) => canonical,
-                    None => continue,
-                }
-            } else {
-                target.canonical_id.clone()
-            };
+        // Block 1.H: wrap the cold body with `install_fact_tracer` so
+        // the surface's `fact_dep_signature` reflects every fact the
+        // chain walks observed via the resolver's TLS-installed
+        // tracer fan-out. The producer ALSO accumulates `chain_facts`
+        // explicitly for direct-API fan-in (legacy bookkeeping that
+        // the post-Block-1.H build retains). On
+        // `FactReadSetFinalise::Overflow` we refuse to admit the
+        // entry — the next request cold-recomputes.
+        let cold_body = || {
+            // (local_name, final_canonical, final_exported_name, target_whole_hash)
+            type SurfaceBuildEntry = (Arc<str>, Arc<str>, Arc<str>, Option<Hash16>);
+            let mut entries: Vec<SurfaceBuildEntry> =
+                Vec::with_capacity(shallow.import_targets.len());
+            // R3/R26/R28 Gap 1: accumulate every chain fact observed by
+            // each direct import's route walk. The producer threads these
+            // into the surface's `fact_dep_signature` so dependent caches
+            // detect intermediate barrel changes via fact-validation
+            // alone (no eager invalidation required).
+            let mut chain_facts: Vec<crate::resolver_core::FactVersionRef> = Vec::new();
+            let mut seen_facts: rustc_hash::FxHashSet<crate::resolver_core::FactVersionRef> =
+                rustc_hash::FxHashSet::default();
+            for (local_name, target) in shallow.import_targets.iter() {
+                let resolved_canonical_id = if target.canonical_id.is_empty() {
+                    match self.resolve_type_dependency_canonical(
+                        owner_canonical,
+                        &target.source_specifier,
+                    ) {
+                        Some(canonical) => canonical,
+                        None => continue,
+                    }
+                } else {
+                    target.canonical_id.clone()
+                };
 
-            // Observe the producer's dep-side `FileWholeHash` for the
-            // resolved_canonical_id BEFORE following the route walk;
-            // even when the route returns an empty facts list (e.g.
-            // a stable-miss negative result), the surface's
-            // fact_dep_signature still observes the direct hop.
-            self.append_file_whole_and_route_fact_versions(
-                resolved_canonical_id.as_str(),
-                None,
-                &mut chain_facts,
-                &mut seen_facts,
-            );
-
-            let ((final_canonical, final_name), route_facts) = self
-                .resolve_imported_type_root_with_facts(
+                // Observe the producer's dep-side `FileWholeHash` for the
+                // resolved_canonical_id BEFORE following the route walk;
+                // even when the route returns an empty facts list (e.g.
+                // a stable-miss negative result), the surface's
+                // fact_dep_signature still observes the direct hop.
+                self.append_file_whole_and_route_fact_versions(
                     resolved_canonical_id.as_str(),
-                    target.imported_name.as_str(),
+                    None,
+                    &mut chain_facts,
+                    &mut seen_facts,
                 );
-            for fact in route_facts.iter() {
-                if seen_facts.insert(fact.clone()) {
-                    chain_facts.push(fact.clone());
+
+                let ((final_canonical, final_name), route_facts) = self
+                    .resolve_imported_type_root_with_facts(
+                        resolved_canonical_id.as_str(),
+                        target.imported_name.as_str(),
+                    );
+                for fact in route_facts.iter() {
+                    if seen_facts.insert(fact.clone()) {
+                        chain_facts.push(fact.clone());
+                    }
+                }
+
+                let target_hash = self
+                    .shallow_file_state(final_canonical.as_str())
+                    .map(|s| s.whole_hash);
+
+                entries.push((
+                    Arc::from(local_name.as_str()),
+                    Arc::from(final_canonical),
+                    Arc::from(final_name),
+                    target_hash,
+                ));
+            }
+            (entries, chain_facts)
+        };
+        let (cold_output, finalise) =
+            crate::fact_signature_helpers::install_fact_tracer(self, cold_body);
+        self.provenance
+            .owner_import_surface_fact_tracer_installs
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (entries, mut chain_facts) = cold_output;
+        match finalise {
+            crate::resolver_core::FactReadSetFinalise::Ok(fact_dep_signature) => {
+                // Merge traced facts into the producer-side chain_facts
+                // so the surface's fact_dep_signature is the union of
+                // direct-fan-in observations and TLS-traced
+                // sub-query observations.
+                let mut seen: rustc_hash::FxHashSet<crate::resolver_core::FactVersionRef> =
+                    chain_facts.iter().cloned().collect();
+                for fact in fact_dep_signature.iter() {
+                    if seen.insert(fact.clone()) {
+                        chain_facts.push(fact.clone());
+                    }
                 }
             }
-
-            let target_hash = self
-                .shallow_file_state(final_canonical.as_str())
-                .map(|s| s.whole_hash);
-
-            entries.push((
-                Arc::from(local_name.as_str()),
-                Arc::from(final_canonical),
-                Arc::from(final_name),
-                target_hash,
-            ));
+            crate::resolver_core::FactReadSetFinalise::Overflow => {
+                self.provenance
+                    .owner_import_surface_overflow_refusals
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // Refuse cache admission; the caller cold-recomputes
+                // on the next request. Return Some(surface) so the
+                // current call still has a fresh surface to consume
+                // — but do NOT insert into the warm cache.
+                let surface = crate::owner_import_surface::build_owner_import_surface(
+                    Arc::from(owner_canonical),
+                    whole_hash,
+                    entries,
+                    chain_facts,
+                );
+                return Some(surface);
+            }
         }
 
         let surface = crate::owner_import_surface::build_owner_import_surface(

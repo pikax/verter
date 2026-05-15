@@ -150,6 +150,13 @@ bitflags::bitflags! {
         const HAS_OPTIONS_API         = 1 << 19;
         const HAS_STORE_USAGE         = 1 << 20;
         const HAS_STORE_DEFINITION    = 1 << 21;
+        /// Set when the analyzed file declares a `TSInterfaceDeclaration`
+        /// named exactly `AppConfig`. Covers top-level, exported,
+        /// default-exported, and nested-inside-`declare module`/`declare
+        /// global` cases. Used by the `AppConfigNoOverrideProofDb`
+        /// production producer (Track 2.4) to short-circuit the proof
+        /// for files that cannot contribute an override.
+        const DECLARES_INTERFACE_APP_CONFIG = 1 << 22;
     }
 }
 

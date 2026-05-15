@@ -77,6 +77,7 @@ fn build_indexed_with_source(raw: &str) -> Arc<IndexedReady> {
         export_signatures: None,
         snapshot: Arc::new(verter_session::FileAnalysisSnapshot::default()),
         external_type_analysis: empty_external(),
+        declares_interface_app_config: false,
     })
 }
 

@@ -320,6 +320,10 @@ impl VerterHost {
         );
         let shallow_state = Arc::new(shallow_state_inner);
 
+        let analysis_flags =
+            verter_semantic::analysis::AnalysisFlags::from_bits_truncate(snapshot.script_flags);
+        let declares_interface_app_config = analysis_flags
+            .contains(verter_semantic::analysis::AnalysisFlags::DECLARES_INTERFACE_APP_CONFIG);
         let script_analysis = Some(Arc::new(
             verter_semantic::analysis::ScriptAnalysisSnapshot {
                 imports: snapshot.imports.clone(),
@@ -327,9 +331,7 @@ impl VerterHost {
                 bindings: snapshot.bindings.clone(),
                 macros: snapshot.macros.as_ref().clone(),
                 macro_type_deps: snapshot.macro_type_deps.as_ref().clone(),
-                flags: verter_semantic::analysis::AnalysisFlags::from_bits_truncate(
-                    snapshot.script_flags,
-                ),
+                flags: analysis_flags,
                 ..Default::default()
             },
         ));
@@ -354,6 +356,7 @@ impl VerterHost {
             export_signatures,
             snapshot,
             external_type_analysis: Arc::clone(&external_type_analysis),
+            declares_interface_app_config,
         });
 
         // Publish via the multi-candidate surface — base candidate (if

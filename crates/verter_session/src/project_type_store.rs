@@ -152,6 +152,14 @@ pub struct IndexedReady {
     /// Cached external-type analysis used by the shared type resolver.
     pub external_type_analysis:
         Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>,
+    /// Mirror of `script_analysis.flags & DECLARES_INTERFACE_APP_CONFIG`
+    /// projected onto `IndexedReady` so the
+    /// `AppConfigNoOverrideProofDb` production producer can short-circuit
+    /// the proof for files that demonstrably cannot contribute an
+    /// `interface AppConfig` override without re-walking the analysis
+    /// snapshot. Mirrored at materialization time from
+    /// [`verter_semantic::analysis::AnalysisFlags::DECLARES_INTERFACE_APP_CONFIG`].
+    pub declares_interface_app_config: bool,
 }
 
 impl IndexedReady {
@@ -188,6 +196,7 @@ impl IndexedReady {
             export_signatures: None,
             snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
             external_type_analysis: analysis,
+            declares_interface_app_config: false,
         }
     }
 }
@@ -2769,6 +2778,7 @@ mod tests {
                 external_type_analysis: Arc::new(
                     verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(),
                 ),
+                declares_interface_app_config: false,
             }),
         );
         assert!(db.get("/w/a.ts", hash_v1).is_some());
@@ -2822,6 +2832,7 @@ mod tests {
                 export_signatures: None,
                 snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
                 external_type_analysis: Arc::clone(&analysis),
+                declares_interface_app_config: false,
             })
         };
 

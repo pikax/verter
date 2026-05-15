@@ -105,6 +105,18 @@ impl VerterHost {
             .has_resolvable_surface()
             .then(|| crate::resolver_store::hash_route_surface(shallow_state.as_ref()));
 
+        // Project the AppConfig-interface flag onto IndexedReady from
+        // the merged analysis snapshot (test seed path mirrors the
+        // production path's projection logic).
+        let declares_interface_app_config = script_analysis
+            .as_ref()
+            .map(|sa| {
+                sa.flags.contains(
+                    verter_semantic::analysis::AnalysisFlags::DECLARES_INTERFACE_APP_CONFIG,
+                )
+            })
+            .unwrap_or(false);
+
         // Publish the canonical post-parse artifact into FileArtifactStore. This
         // is the single authoritative cache consumers read from.
         let indexed = crate::project_type_store::IndexedReady {
@@ -120,6 +132,7 @@ impl VerterHost {
             export_signatures,
             snapshot,
             external_type_analysis,
+            declares_interface_app_config,
         };
         self.project_type_store
             .indexed()

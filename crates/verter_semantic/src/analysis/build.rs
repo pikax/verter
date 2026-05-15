@@ -20,6 +20,84 @@ use crate::analysis::macros::{
 use crate::analysis::scope::AnalysisScope;
 use crate::analysis::types::*;
 
+/// Walk a `TSModuleDeclaration` body looking for any
+/// `TSInterfaceDeclaration` named exactly `AppConfig`.
+///
+/// Recurses through nested `declare module` / `declare global` blocks
+/// (the OXC AST shape is `TSModuleDeclarationBody::TSModuleDeclaration`
+/// for nested namespaces and `TSModuleDeclarationBody::TSModuleBlock`
+/// for the leaf body). Reads through `ExportNamedDeclaration` so
+/// `export interface AppConfig` inside a `declare module` still
+/// counts. Type aliases (`type AppConfig = ...`) are not interfaces
+/// and are excluded — the AppConfig override surface only merges
+/// across `interface` declarations.
+fn module_declaration_declares_interface_app_config(decl: &TSModuleDeclaration<'_>) -> bool {
+    let Some(body) = decl.body.as_ref() else {
+        return false;
+    };
+    match body {
+        TSModuleDeclarationBody::TSModuleDeclaration(inner) => {
+            module_declaration_declares_interface_app_config(inner)
+        }
+        TSModuleDeclarationBody::TSModuleBlock(block) => {
+            for stmt in &block.body {
+                if statement_declares_interface_app_config(stmt) {
+                    return true;
+                }
+            }
+            false
+        }
+    }
+}
+
+/// Walk a `TSModuleBlock` looking for any `TSInterfaceDeclaration`
+/// named exactly `AppConfig`.
+///
+/// Used by both `TSModuleDeclaration` (`declare module`) and
+/// `TSGlobalDeclaration` (`declare global`) bodies.
+fn module_block_declares_interface_app_config(block: &TSModuleBlock<'_>) -> bool {
+    block
+        .body
+        .iter()
+        .any(statement_declares_interface_app_config)
+}
+
+/// Return `true` if `stmt` contains a `TSInterfaceDeclaration` named
+/// exactly `AppConfig` at the statement level, in an
+/// `ExportNamedDeclaration`, in an `ExportDefaultDeclaration`, or
+/// nested inside a `TSModuleDeclaration` / `TSGlobalDeclaration`
+/// body.
+fn statement_declares_interface_app_config(stmt: &Statement<'_>) -> bool {
+    match stmt {
+        Statement::TSInterfaceDeclaration(iface) => iface.id.name.as_str() == "AppConfig",
+        Statement::ExportNamedDeclaration(export) => match &export.declaration {
+            Some(Declaration::TSInterfaceDeclaration(iface)) => {
+                iface.id.name.as_str() == "AppConfig"
+            }
+            Some(Declaration::TSModuleDeclaration(module)) => {
+                module_declaration_declares_interface_app_config(module)
+            }
+            Some(Declaration::TSGlobalDeclaration(global)) => {
+                module_block_declares_interface_app_config(&global.body)
+            }
+            _ => false,
+        },
+        Statement::ExportDefaultDeclaration(export) => match &export.declaration {
+            ExportDefaultDeclarationKind::TSInterfaceDeclaration(iface) => {
+                iface.id.name.as_str() == "AppConfig"
+            }
+            _ => false,
+        },
+        Statement::TSModuleDeclaration(module) => {
+            module_declaration_declares_interface_app_config(module)
+        }
+        Statement::TSGlobalDeclaration(global) => {
+            module_block_declares_interface_app_config(&global.body)
+        }
+        _ => false,
+    }
+}
+
 fn is_builtin_heritage_utility(name: &str) -> bool {
     matches!(
         name,
@@ -494,6 +572,13 @@ pub fn build_script_analysis_with_scope_from_program(
     }
     if !store_definitions.is_empty() {
         flags |= AnalysisFlags::HAS_STORE_DEFINITION;
+    }
+    if program
+        .body
+        .iter()
+        .any(statement_declares_interface_app_config)
+    {
+        flags |= AnalysisFlags::DECLARES_INTERFACE_APP_CONFIG;
     }
 
     let exported_functions = if scope.contains(AnalysisScope::FUNC_RETURNS) {

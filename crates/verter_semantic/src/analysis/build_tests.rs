@@ -2202,3 +2202,171 @@ fn declaration_entries_empty_for_import_only_file() {
         "import-only file should have no declaration entries"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// `AnalysisFlags::DECLARES_INTERFACE_APP_CONFIG` detection coverage.
+//
+// The flag must fire on every shape the analyzer can encounter that
+// would syntactically declare an `interface AppConfig` whose merged
+// surface could contribute a `ui[<key>]` override. The
+// `AppConfigNoOverrideProofDb` production producer reads this flag
+// to short-circuit the proof for files that demonstrably cannot
+// contribute an override.
+//
+// Positive: top-level, exported, default-exported, nested-in-module,
+// nested-in-declare-global.
+// Negative: `type AppConfig` alias, differently-named interface,
+// unrelated interfaces.
+// ─────────────────────────────────────────────────────────────────────
+
+#[test]
+fn declares_interface_app_config_top_level_interface() {
+    let result = analyze("interface AppConfig { theme: string }");
+    assert!(
+        result
+            .flags
+            .contains(AnalysisFlags::DECLARES_INTERFACE_APP_CONFIG),
+        "top-level `interface AppConfig` must set the flag"
+    );
+}
+
+#[test]
+fn declares_interface_app_config_exported_interface() {
+    let result = analyze("export interface AppConfig { theme: string }");
+    assert!(
+        result
+            .flags
+            .contains(AnalysisFlags::DECLARES_INTERFACE_APP_CONFIG),
+        "`export interface AppConfig` must set the flag"
+    );
+}
+
+#[test]
+fn declares_interface_app_config_default_exported_interface() {
+    let result = analyze("export default interface AppConfig { theme: string }");
+    assert!(
+        result
+            .flags
+            .contains(AnalysisFlags::DECLARES_INTERFACE_APP_CONFIG),
+        "`export default interface AppConfig` must set the flag"
+    );
+}
+
+#[test]
+fn declares_interface_app_config_inside_declare_module() {
+    let code = r#"
+declare module '@nuxt/schema' {
+    interface AppConfig {
+        button: { variants: string[] }
+    }
+}
+"#;
+    let result = analyze(code);
+    assert!(
+        result
+            .flags
+            .contains(AnalysisFlags::DECLARES_INTERFACE_APP_CONFIG),
+        "`interface AppConfig` nested inside `declare module` must set the flag"
+    );
+}
+
+#[test]
+fn declares_interface_app_config_inside_declare_global() {
+    let code = r#"
+declare global {
+    interface AppConfig {
+        button: { variants: string[] }
+    }
+}
+"#;
+    let result = analyze(code);
+    assert!(
+        result
+            .flags
+            .contains(AnalysisFlags::DECLARES_INTERFACE_APP_CONFIG),
+        "`interface AppConfig` nested inside `declare global` must set the flag"
+    );
+}
+
+#[test]
+fn declares_interface_app_config_nested_module_inside_module() {
+    // declare module 'outer' { namespace Inner { interface AppConfig { ... } } }
+    let code = r#"
+declare module 'outer' {
+    namespace Inner {
+        interface AppConfig {
+            button: { variants: string[] }
+        }
+    }
+}
+"#;
+    let result = analyze(code);
+    assert!(
+        result
+            .flags
+            .contains(AnalysisFlags::DECLARES_INTERFACE_APP_CONFIG),
+        "`interface AppConfig` nested two levels deep in module declarations must set the flag"
+    );
+}
+
+#[test]
+fn declares_interface_app_config_type_alias_negative() {
+    // `type AppConfig = ...` is NOT an interface; the merging surface
+    // is interface-only, so the flag must stay clear.
+    let result = analyze("type AppConfig = { theme: string };");
+    assert!(
+        !result
+            .flags
+            .contains(AnalysisFlags::DECLARES_INTERFACE_APP_CONFIG),
+        "`type AppConfig` alias must NOT set the flag (only interfaces merge)"
+    );
+}
+
+#[test]
+fn declares_interface_app_config_different_name_negative() {
+    let result = analyze("interface AppConfiguration { theme: string }");
+    assert!(
+        !result
+            .flags
+            .contains(AnalysisFlags::DECLARES_INTERFACE_APP_CONFIG),
+        "`interface AppConfiguration` (different name) must NOT set the flag"
+    );
+}
+
+#[test]
+fn declares_interface_app_config_unrelated_interface_negative() {
+    let result = analyze("interface Foo { theme: string }");
+    assert!(
+        !result
+            .flags
+            .contains(AnalysisFlags::DECLARES_INTERFACE_APP_CONFIG),
+        "unrelated interface (`Foo`) must NOT set the flag"
+    );
+}
+
+#[test]
+fn declares_interface_app_config_empty_file_negative() {
+    let result = analyze("");
+    assert!(
+        !result
+            .flags
+            .contains(AnalysisFlags::DECLARES_INTERFACE_APP_CONFIG),
+        "empty file must NOT set the flag"
+    );
+}
+
+#[test]
+fn declares_interface_app_config_module_with_unrelated_interface_negative() {
+    let code = r#"
+declare module '@nuxt/schema' {
+    interface Foo { bar: string }
+}
+"#;
+    let result = analyze(code);
+    assert!(
+        !result
+            .flags
+            .contains(AnalysisFlags::DECLARES_INTERFACE_APP_CONFIG),
+        "`declare module` containing unrelated interfaces must NOT set the flag"
+    );
+}
