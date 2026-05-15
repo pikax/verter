@@ -74,15 +74,47 @@ fn family_b_entries_carry_both_signatures() {
     assert_struct_carries_both_fields(&memo, "MemoEntry");
 }
 
-/// Family C/D: OwnerImportSurface + AppConfigNoOverrideProofEntry
-/// each carry both signatures.
+/// Family C: OwnerImportSurface carries both signatures (Block 6.B
+/// owns the legacy `dep_signature` retirement; the AND-gate model is
+/// the architecturally correct transitional state for this cache).
 #[test]
-fn family_cd_entries_carry_both_signatures() {
+fn family_c_entries_carry_both_signatures() {
     let owner = read_session_source("owner_import_surface.rs");
     assert_struct_carries_both_fields(&owner, "OwnerImportSurface");
+}
 
+/// Family D: AppConfigNoOverrideProofEntry was a never-wired cache at
+/// Block 1.H entry. Per codex's architectural decision, Block 1.H
+/// REPLACED the legacy `dep_signature` field with
+/// `fact_dep_signature` directly (no AND-gate transitional state)
+/// because the cache had no production producer or consumer at HEAD,
+/// so the legacy field never had a real role to retire.
+#[test]
+fn family_d_app_config_proof_entry_uses_fact_signature_only() {
     let app_config = read_session_source("app_config_proof_db.rs");
-    assert_struct_carries_both_fields(&app_config, "AppConfigNoOverrideProofEntry");
+    let needle = "pub struct AppConfigNoOverrideProofEntry {";
+    let idx = app_config
+        .find(needle)
+        .expect("expected AppConfigNoOverrideProofEntry struct decl");
+    let after = &app_config[idx..];
+    let end = after
+        .find("\n}")
+        .expect("expected struct close for AppConfigNoOverrideProofEntry");
+    let window = &after[..end];
+    assert!(
+        window.contains("fact_dep_signature: Arc<[FactVersionRef]>")
+            || window.contains("fact_dep_signature: Arc<[crate::resolver_core::FactVersionRef]>"),
+        "AppConfigNoOverrideProofEntry must carry `fact_dep_signature: Arc<[FactVersionRef]>` \
+         (Block 1.H Track 2.4 — codex Option B). Window:\n{window}"
+    );
+    assert!(
+        !window.contains("dep_signature: DepSignature")
+            && !window.contains("dep_signature: crate::semantic_query::DepSignature"),
+        "AppConfigNoOverrideProofEntry must NOT carry the legacy `dep_signature` field — \
+         Block 1.H Track 2.4 replaced it with `fact_dep_signature` per codex's decision \
+         (the cache had no production producer at HEAD so there is no legacy field to retire). \
+         Window:\n{window}"
+    );
 }
 
 /// The `fact_signature_from_fence` materialiser helper exists and

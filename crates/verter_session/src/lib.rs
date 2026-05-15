@@ -49,7 +49,7 @@
 //! - [`shared`] â€” feature-gated `RwLock`/`RefCell` abstraction
 //! - [`upsert`] â€” change detection, result building, export signature diffing
 
-mod app_config_proof_db;
+pub mod app_config_proof_db;
 #[cfg(test)]
 mod audit_warm_cache_tests;
 pub mod audited_request;
@@ -300,6 +300,18 @@ pub mod for_tests {
     pub fn active_session_view_is_none_for_tests(host: &crate::VerterHost) -> bool {
         use crate::resolver_core::ResolverContext;
         host.active_session_view().is_none()
+    }
+
+    /// Drive the AppConfigNoOverrideProofDb production producer
+    /// from integration tests. The producer takes a `&dyn ResolverContext`
+    /// internally (per the seal contract); this wrapper accepts a
+    /// concrete `&VerterHost` reference so integration tests in
+    /// `tests/family_bcd_*.rs` can drive it end-to-end.
+    pub fn app_config_no_override_proof_get_or_compute_for_tests(
+        host: &crate::VerterHost,
+        key: &crate::app_config_proof_db::AppConfigNoOverrideProofKey,
+    ) -> Option<std::sync::Arc<crate::app_config_proof_db::AppConfigNoOverrideProofEntry>> {
+        crate::component_meta_caches::app_config_no_override_proof_get_or_compute(host, key)
     }
 }
 

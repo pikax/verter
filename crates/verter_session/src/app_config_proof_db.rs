@@ -25,37 +25,56 @@
 //!
 //! ## Invariants
 //!
-//! - On invalidation of any contributing file's `content_hash` OR a
-//!   bump of the interface-merging generation, the proof entry is
-//!   evicted.
+//! - Warm-hit reads validate via path-precise
+//!   `fact_dep_signature`. A single stale fact returns `None` and
+//!   the caller cold-recomputes.
 //! - There is NO eager workspace-wide effective-interface resolver.
-//!   The cache is populated demand-driven by the slow path; until
-//!   populated, the fast path declines.
-//! - Cache backend follows the same `(Arc<Entry>, dep_signature)`
-//!   shape as [`crate::component_meta_caches::ImportedRegistryDb`]
-//!   so cooperative-admission is consistent across all
-//!   ProjectTypeStore caches.
+//!   The cache is populated demand-driven by the production
+//!   producer (`app_config_no_override_proof_get_or_compute`).
+//! - Cache backend stores `Arc<Entry>` keyed by
+//!   `AppConfigNoOverrideProofKey`; the producer wraps its cold
+//!   compute in `install_fact_tracer` so admitted entries carry the
+//!   authoritative R28 fact signature.
 //!
-//! ## §17.7 Deviation status
+//! ## Producer wiring
 //!
-//! The proof's dep signature requires the workspace-level
-//! `interface_merging_of_app_config_generation` counter. Its
-//! incrementality contract requires `IndexedReady` to record a
-//! per-file `declares_interface_app_config: bool` shallow flag.
-//! Until that flag lands, slow-path-side population is a no-op (see
-//! the deferred-test marker in
-//! `component_meta_component_config_fast_path_tests::component_config_theme_variant_uses_app_config_no_override_proof_when_present`).
-//! The DB is published on `ProjectTypeStore` so the fast path's
-//! cache-consultation API is in place; it currently always misses
-//! and the fast path falls through to the Path-A Record-AppConfig
-//! check.
+//! The production producer
+//! ([`crate::host_manage::component_meta_methods::app_config_no_override_proof_get_or_compute`])
+//! checks each contributing file's
+//! [`crate::project_type_store::IndexedReady::declares_interface_app_config`]
+//! flag. Files without `interface AppConfig` are trivially
+//! non-contributing; files with the flag participate in the
+//! proof's `fact_dep_signature` so an edit to the interface
+//! invalidates the proof.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use dashmap::DashMap;
 
-use crate::semantic_query::DepSignature;
+use crate::resolver_core::FactVersionRef;
+
+/// Returns `true` if `fact` references `canonical_id` (as a
+/// `FileWholeHash`, `DerivedFactHash`, or one of the domain-scoped
+/// `Parse` / `ResolveImports` / `RouteSurface` variants whose
+/// observed file matches).
+fn fact_references_canonical(fact: &FactVersionRef, canonical_id: &str) -> bool {
+    match fact {
+        FactVersionRef::FileWholeHash {
+            canonical_id: c, ..
+        } => c.as_str() == canonical_id,
+        FactVersionRef::DerivedFactHash {
+            canonical_id: c, ..
+        } => c.as_str() == canonical_id,
+        FactVersionRef::Parse(parse_fact) => parse_fact.canonical_id.as_str() == canonical_id,
+        FactVersionRef::ResolveImports(resolve_fact) => {
+            resolve_fact.canonical_id.as_str() == canonical_id
+        }
+        FactVersionRef::RouteSurface(route_fact) => {
+            route_fact.canonical_id.as_str() == canonical_id
+        }
+    }
+}
 
 /// Cache key: `(app_config_decl_canonical_id, component_key_literal)`.
 ///
@@ -66,20 +85,23 @@ use crate::semantic_query::DepSignature;
 /// theme, AppConfig, key>` — e.g. `"button"` or `"variants"`.
 pub type AppConfigNoOverrideProofKey = (Arc<str>, Arc<str>);
 
-/// Cache entry: just the dep signature. The presence of an entry IS
-/// the proof — we do not need a separate value.
+/// Cache entry: the path-precise fact signature. The presence of an
+/// entry IS the proof — we do not need a separate value.
+///
+/// **Block 1.H change:** the legacy `dep_signature: DepSignature`
+/// field was replaced with `fact_dep_signature` per codex's
+/// architectural decision. The cache was never wired to a production
+/// producer at HEAD, so no legacy callers existed; the API moved
+/// directly to the path-precise fact-signature substrate.
 #[derive(Clone)]
 pub struct AppConfigNoOverrideProofEntry {
-    /// Recorded at slow-path publish time. Includes every contributing
-    /// file's content_hash plus the workspace-level
-    /// `interface_merging_of_app_config_generation` counter.
-    pub dep_signature: DepSignature,
-    /// R3/R26/R28 path-precise dep signature sibling. Bubbles into
-    /// outer fact tracers via
-    /// [`crate::fact_signature_helpers::bubble_fact_signature`].
-    /// AND-gate with the legacy `dep_signature` per codex's Stage
-    /// 7C.A1b guidance.
-    pub fact_dep_signature: Arc<[crate::resolver_core::FactVersionRef]>,
+    /// R3/R26/R28 path-precise dep signature. Captured by the
+    /// production producer's `install_fact_tracer` scope; bubbles
+    /// into outer fact tracers via
+    /// [`crate::fact_signature_helpers::bubble_fact_signature`] on
+    /// warm hit. Validated against the live store view on every
+    /// warm-hit read.
+    pub fact_dep_signature: Arc<[FactVersionRef]>,
 }
 
 /// Host-owned cache. Sole authority for the proof state on
@@ -104,31 +126,25 @@ impl AppConfigNoOverrideProofDb {
     /// Look up a proof entry. Returns `None` on miss; the fast-path
     /// caller declines and the slow path runs.
     ///
-    /// R3 AND-gate: BOTH the caller-supplied `validate` closure
-    /// (legacy whole-hash `dep_signature` consulting
-    /// [`crate::host_manage::HostFenceValidator`]) AND the R28
-    /// path-precise `fact_dep_signature` (validated against the
-    /// current store view through `ctx`) must validate. A stale
-    /// entry on either rail is treated as a miss. On a successful
-    /// warm hit, the path-precise observation set bubbles into any
-    /// active outer fact tracer.
-    #[allow(dead_code)] // wired R3/R26/R28 validator; awaiting production callers
-    pub(crate) fn peek<F>(
+    /// **Block 1.H:** validation is path-precise only. Each warm-hit
+    /// read calls [`crate::fact_signature_helpers::validate_fact_signature`]
+    /// against the live store view through `ctx`. A single
+    /// mismatched fact returns `None` and the caller cold-recomputes.
+    /// On a successful warm hit, the path-precise observation set
+    /// bubbles into any active outer fact tracer.
+    ///
+    /// Called from the production producer
+    /// (`component_meta_caches::app_config_no_override_proof_get_or_compute`)
+    /// on the cold path; the warm-hit fast path inside the
+    /// component-meta ComponentConfig resolver consumes the proof
+    /// via the same `peek` surface.
+    pub(crate) fn peek(
         &self,
         key: &AppConfigNoOverrideProofKey,
         ctx: &dyn crate::resolver_core::ResolverContext,
-        validate: F,
-    ) -> Option<Arc<AppConfigNoOverrideProofEntry>>
-    where
-        F: FnOnce(&DepSignature) -> bool,
-    {
+    ) -> Option<Arc<AppConfigNoOverrideProofEntry>> {
         let entry = self.entries.get(key)?;
-        if validate(&entry.dep_signature)
-            && crate::fact_signature_helpers::validate_fact_signature(
-                ctx,
-                &entry.fact_dep_signature,
-            )
-        {
+        if crate::fact_signature_helpers::validate_fact_signature(ctx, &entry.fact_dep_signature) {
             crate::fact_signature_helpers::bubble_fact_signature(ctx, &entry.fact_dep_signature);
             Some(Arc::clone(entry.value()))
         } else {
@@ -138,29 +154,32 @@ impl AppConfigNoOverrideProofDb {
         }
     }
 
-    /// Publish a freshly-computed proof entry. Called by the slow
-    /// path's canonical materialization side-effect when it confirms
-    /// no `ui[key]` override exists for the given decl + key.
+    /// Publish a freshly-computed proof entry. Called by the
+    /// production producer
+    /// (`app_config_no_override_proof_get_or_compute`) when its
+    /// `install_fact_tracer` scope finalised successfully.
     ///
-    /// `dep_signature` MUST cover every file content hash that
-    /// contributed to the determination plus the workspace-level
-    /// `interface_merging_of_app_config_generation` counter.
-    pub fn publish(&self, key: AppConfigNoOverrideProofKey, dep_signature: DepSignature) {
-        let fact_dep_signature =
-            crate::component_meta_materialize::fact_signature_from_fence(dep_signature.as_ref());
-        let entry = Arc::new(AppConfigNoOverrideProofEntry {
-            dep_signature,
-            fact_dep_signature,
-        });
+    /// `fact_dep_signature` MUST be the
+    /// [`crate::resolver_core::FactReadSetFinalise::Ok`] payload
+    /// produced by the producer's tracer. Legacy `DepSignature`
+    /// derivation is no longer performed at publish time — the
+    /// producer is the single authority for the entry's
+    /// validation contract.
+    pub fn publish(
+        &self,
+        key: AppConfigNoOverrideProofKey,
+        fact_dep_signature: Arc<[FactVersionRef]>,
+    ) {
+        let entry = Arc::new(AppConfigNoOverrideProofEntry { fact_dep_signature });
         if self.entries.insert(key, entry).is_none() {
             self.live_counter.fetch_add(1, Ordering::Relaxed);
         }
     }
 
-    /// Per-canonical eviction: drop every entry whose dep signature
-    /// references `canonical_id` (either as the
+    /// Per-canonical eviction: drop every entry whose
+    /// `fact_dep_signature` references `canonical_id` (either as the
     /// `app_config_decl_canonical_id` key component or anywhere in
-    /// the dep signature). Called from
+    /// the fact signature). Called from
     /// [`crate::project_type_store::ProjectTypeStore::evict_canonical`].
     pub fn invalidate_canonical(&self, canonical_id: &str) {
         let to_remove: Vec<AppConfigNoOverrideProofKey> = self
@@ -170,9 +189,9 @@ impl AppConfigNoOverrideProofDb {
                 let (decl_canonical, _) = entry.key();
                 let dep_hits = entry
                     .value()
-                    .dep_signature
+                    .fact_dep_signature
                     .iter()
-                    .any(|(canonical, _)| canonical.as_ref() == canonical_id);
+                    .any(|fact| fact_references_canonical(fact, canonical_id));
                 if decl_canonical.as_ref() == canonical_id || dep_hits {
                     Some(entry.key().clone())
                 } else {

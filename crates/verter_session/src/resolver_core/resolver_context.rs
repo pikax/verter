@@ -388,6 +388,25 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     fn active_session_view(&self) -> Option<&dyn crate::session_view::SessionView> {
         None
     }
+
+    /// Reach the concrete `VerterHost` underneath this context.
+    ///
+    /// Used by Block 1.H Family B/C/D producers
+    /// (`MaterializeStructureDb`, `RefCycleResultDb`,
+    /// `AppConfigNoOverrideProofDb`, `OwnerImportSurfaceDb`) to call
+    /// [`crate::VerterHost::with_fact_tracer`] from inside their
+    /// cooperative-admission cold-compute closures. The seal trait
+    /// itself cannot expose `with_fact_tracer` directly because
+    /// `FnOnce<R>` is non-dyn-compatible; this accessor lets
+    /// cold-compute closures install the tracer through the existing
+    /// `fact_signature_helpers::install_fact_tracer(host, ...)`
+    /// surface without bypassing the seal.
+    ///
+    /// Both production implementers ([`crate::VerterHost`] and
+    /// [`crate::resolver_core::session_resolver_context::SessionResolverContext`])
+    /// return their inner `&crate::VerterHost`. There is no other
+    /// implementer; the seal guarantees the trait contract.
+    fn host_for_fact_tracer_install(&self) -> &crate::VerterHost;
 }
 
 // Sealed marker — `VerterHost` is the base implementer and
@@ -659,6 +678,11 @@ impl ResolverContext for crate::VerterHost {
     #[inline]
     fn current_fact_tracer(&self) -> Option<&crate::resolver_core::FactReadSetCell> {
         fact_tracer_tls::current_tracer()
+    }
+
+    #[inline]
+    fn host_for_fact_tracer_install(&self) -> &crate::VerterHost {
+        self
     }
 }
 

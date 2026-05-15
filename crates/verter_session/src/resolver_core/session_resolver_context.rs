@@ -363,6 +363,11 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
     fn active_session_view(&self) -> Option<&dyn SessionView> {
         Some(self.view)
     }
+
+    #[inline]
+    fn host_for_fact_tracer_install(&self) -> &crate::VerterHost {
+        self.inner
+    }
 }
 
 /// Borrow adapter that lets [`SessionResolverContext::view`] return a

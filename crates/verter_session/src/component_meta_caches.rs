@@ -2515,6 +2515,11 @@ where
 {
     let key_for_register = id.clone();
     let current_gen = ctx.workspace_content_generation();
+    // Block 1.H: wrap the BFS cold-compute with `install_fact_tracer`.
+    // On `Ok`, override the entry's `fact_dep_signature` with the
+    // traced observation set. On `Overflow`, refuse cache admission.
+    let host = ctx.host_for_fact_tracer_install();
+    let provenance = Arc::clone(&host.provenance);
     cooperative_get_or_insert_with_post_publish(
         db.entries(),
         db.inflight(),
@@ -2544,16 +2549,37 @@ where
         },
         // Compute() -> Option<Entry>
         || -> Option<RefCycleEntry> {
-            let mut compute_fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
-            let result = compute_bfs(&mut compute_fence);
-            let fact_dep_signature =
-                crate::component_meta_materialize::fact_signature_from_fence(&compute_fence);
-            Some(RefCycleEntry {
-                result,
-                dep_signature: Arc::from(compute_fence.into_boxed_slice()),
-                fact_dep_signature,
-                validated_at_generation: AtomicU64::new(current_gen),
-            })
+            let inner = || -> RefCycleEntry {
+                let mut compute_fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> =
+                    Vec::new();
+                let result = compute_bfs(&mut compute_fence);
+                let fact_dep_signature =
+                    crate::component_meta_materialize::fact_signature_from_fence(&compute_fence);
+                RefCycleEntry {
+                    result,
+                    dep_signature: Arc::from(compute_fence.into_boxed_slice()),
+                    fact_dep_signature,
+                    validated_at_generation: AtomicU64::new(current_gen),
+                }
+            };
+            let (entry, finalise) = crate::fact_signature_helpers::install_fact_tracer(host, inner);
+            provenance
+                .ref_cycle_fact_tracer_installs
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            match finalise {
+                crate::resolver_core::FactReadSetFinalise::Ok(fact_dep_signature) => {
+                    let mut entry = entry;
+                    entry.fact_dep_signature = fact_dep_signature;
+                    Some(entry)
+                }
+                crate::resolver_core::FactReadSetFinalise::Overflow => {
+                    provenance
+                        .ref_cycle_overflow_refusals
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    // Refuse cache admission; caller cold-recomputes.
+                    None
+                }
+            }
         },
         // Project(&Entry) -> V — bubble path-precise observation set
         // so outer cold-computes see the BFS's transitive facts.
@@ -2583,4 +2609,121 @@ where
             );
         },
     )
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// AppConfigNoOverrideProofDb production producer (Block 1.H Track 2.4)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Production producer for [`crate::app_config_proof_db::AppConfigNoOverrideProofDb`].
+///
+/// Given a key `(decl_canonical, component_key_literal)`, returns
+/// the cached proof entry if one is valid under the live store
+/// view, OR runs a cold compute (wrapped in `install_fact_tracer`)
+/// and publishes a fresh proof.
+///
+/// The cold compute checks the `IndexedReady.declares_interface_app_config`
+/// flag for `decl_canonical` and observes its `FileWholeHash` fact
+/// through the active tracer. The proof's `fact_dep_signature`
+/// therefore captures (a) the decl-canonical's whole-hash so an
+/// edit to the file invalidates the proof, and (b) any transitive
+/// observations the call-chain made through the resolver substrate.
+///
+/// **Codex Option B contract:** `publish()` accepts
+/// `Arc<[FactVersionRef]>` directly; the legacy `DepSignature`
+/// derivation has been retired (see `app_config_proof_db.rs`).
+///
+/// **Cold-build outcome semantics:**
+/// - `Some(entry)` published — proof is valid. The fast-path
+///   consumer can rely on the fact-signature for warm-hit revalidation.
+/// - On `FactReadSetFinalise::Overflow` — refuse cache admission;
+///   the next call cold-recomputes. The provenance counter
+///   `app_config_proof_overflow_refusals` advances.
+///
+/// Resolver-tier producer that takes `&dyn ResolverContext` to stay
+/// inside the seal contract (`no_concrete_verter_host_in_seal_scope`
+/// arch guard). Integration tests reach this via the
+/// crate-public wrapper
+/// [`crate::for_tests::app_config_no_override_proof_get_or_compute_for_tests`].
+///
+/// The ComponentConfig theme-variant fast-path resolver (a future
+/// re-introduction of the retired rescue cascade) and the
+/// Block-1.H Track-2.5 deferred test both reach this producer.
+pub(crate) fn app_config_no_override_proof_get_or_compute(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    key: &crate::app_config_proof_db::AppConfigNoOverrideProofKey,
+) -> Option<Arc<crate::app_config_proof_db::AppConfigNoOverrideProofEntry>> {
+    let host = ctx.host_for_fact_tracer_install();
+    let db = host.project_type_store.app_config_no_override_proof_db();
+    // Warm-hit peek — validate the cached fact_dep_signature against
+    // the live store view. The peek bubbles the signature into any
+    // active outer tracer on success.
+    if let Some(entry) = db.peek(key, ctx) {
+        return Some(entry);
+    }
+
+    // Cold compute. The closure observes the decl-canonical's whole
+    // hash so an edit invalidates the proof.
+    let (decl_canonical, _component_key_literal) = key;
+    let decl_canonical_for_compute = Arc::clone(decl_canonical);
+    let cold_body = move || -> bool {
+        // Look up the IndexedReady for the decl canonical. The
+        // tracer fan-out picks up any indirect observations the
+        // resolver substrate emits.
+        let ir = ctx
+            .project_type_store()
+            .indexed()
+            .get_any(decl_canonical_for_compute.as_ref());
+        // Observe the file's whole-hash explicitly. If no IndexedReady
+        // is present (file removed), record a sentinel zero hash so
+        // the validator picks up the absence on the next read.
+        let whole_hash = ir.as_ref().map(|ir| ir.whole_hash).unwrap_or_default();
+        ctx.observe(crate::resolver_core::FactVersionRef::FileWholeHash {
+            canonical_id: decl_canonical_for_compute.as_ref().to_string(),
+            hash: whole_hash,
+        });
+        // Block 1.H Track 2.4: the "no override" determination is a
+        // structural query into the interface members. For the
+        // producer's substrate-correctness contract, the
+        // `declares_interface_app_config` flag short-circuits the
+        // walk: a file without `interface AppConfig` cannot
+        // contribute an override.
+        //
+        // Files that DO declare `interface AppConfig` participate in
+        // the proof's fact_dep_signature via the file_whole_hash
+        // observation above; any edit to the interface body shifts
+        // the whole-hash and invalidates the proof. This is the
+        // R3/R26/R28 substrate contract — the producer does NOT
+        // need to walk the interface body to decide the proof's
+        // validation oracle.
+        ir.as_ref()
+            .map(|ir| !ir.declares_interface_app_config)
+            .unwrap_or(true)
+    };
+    let (no_override, finalise) =
+        crate::fact_signature_helpers::install_fact_tracer(host, cold_body);
+    host.provenance
+        .app_config_proof_fact_tracer_installs
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    match finalise {
+        crate::resolver_core::FactReadSetFinalise::Ok(fact_dep_signature) => {
+            if !no_override {
+                // The file declares `interface AppConfig` — we
+                // cannot prove "no override" without walking the
+                // member set. Decline to publish; the fast-path
+                // consumer must take the slow path.
+                return None;
+            }
+            db.publish(key.clone(), Arc::clone(&fact_dep_signature));
+            Some(Arc::new(
+                crate::app_config_proof_db::AppConfigNoOverrideProofEntry { fact_dep_signature },
+            ))
+        }
+        crate::resolver_core::FactReadSetFinalise::Overflow => {
+            host.provenance
+                .app_config_proof_overflow_refusals
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            None
+        }
+    }
 }

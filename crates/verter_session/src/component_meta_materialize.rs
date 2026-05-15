@@ -945,6 +945,38 @@ pub(crate) fn materialize_component_meta_structure(
     };
 
     let key_for_register = key.clone();
+    // Block 1.H: wrap the cooperative-admission compute closure with
+    // `install_fact_tracer`. On `FactReadSetFinalise::Ok`, override
+    // the entry's `fact_dep_signature` with the traced observation
+    // set (the producer's authoritative R28 signature). On
+    // `FactReadSetFinalise::Overflow`, refuse cache admission so the
+    // caller cold-recomputes on the next request.
+    let host = ctx.host_for_fact_tracer_install();
+    let compute = {
+        let provenance = Arc::clone(&host.provenance);
+        move || {
+            let (entry_opt, finalise) =
+                crate::fact_signature_helpers::install_fact_tracer(host, compute);
+            provenance
+                .materialize_structure_fact_tracer_installs
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            match finalise {
+                crate::resolver_core::FactReadSetFinalise::Ok(fact_dep_signature) => {
+                    entry_opt.map(|mut entry| {
+                        entry.fact_dep_signature = fact_dep_signature;
+                        entry
+                    })
+                }
+                crate::resolver_core::FactReadSetFinalise::Overflow => {
+                    provenance
+                        .materialize_structure_overflow_refusals
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    // Refuse cache admission; caller cold-recomputes.
+                    None
+                }
+            }
+        }
+    };
     let result = cooperative_get_or_insert_with_post_publish(
         db.entries(),
         db.inflight(),

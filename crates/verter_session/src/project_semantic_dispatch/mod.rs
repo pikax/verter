@@ -594,6 +594,40 @@ impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {
                     .into(),
             }
         };
+        // Block 1.H: wrap the dispatch's cold-build closure with
+        // `install_fact_tracer` so the `MemoEntry`'s
+        // `fact_dep_signature` reflects every transitive fact the
+        // build read through the resolver substrate. On
+        // `FactReadSetFinalise::Overflow` we mark the build output
+        // `cache_suppress = true` so the memo refuses to publish the
+        // entry — the caller cold-recomputes on the next request.
+        let host = self.ctx.host_for_fact_tracer_install();
+        let provenance = Arc::clone(&host.provenance);
+        let build = move || -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+            let (output, finalise) =
+                crate::fact_signature_helpers::install_fact_tracer(host, build);
+            provenance
+                .memo_entry_fact_tracer_installs
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput = output;
+            match finalise {
+                crate::resolver_core::FactReadSetFinalise::Ok(_fact_dep_signature) => {
+                    // The memo entry stores only the legacy
+                    // `dep_signature`; the path-precise fan-out already
+                    // flowed through the tracer-fan-out path. No mutation
+                    // of `output` required for `Ok` here.
+                    output
+                }
+                crate::resolver_core::FactReadSetFinalise::Overflow => {
+                    provenance
+                        .memo_entry_overflow_refusals
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    // Refuse cache admission via `cache_suppress`.
+                    output.cache_suppress = true;
+                    output
+                }
+            }
+        };
         let cache_read = graph.execute_cooperative(key.clone(), sentinel, build);
         // Dispatch-layer event — emitted once per `execute()` call.
         // The memo's per-call hit/miss/suppress events fire from

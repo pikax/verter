@@ -1888,6 +1888,45 @@ pub struct MetaProvenance {
     /// [`SEMANTIC_NODE_DATA_DISCRIMINANT_COUNT`] for variant headroom.
     pub node_arena_pushes_per_discriminant:
         [std::sync::atomic::AtomicU64; SEMANTIC_NODE_DATA_DISCRIMINANT_COUNT],
+
+    // ── Block 1.H: Family B/C/D producer-install observability ───────────
+    //
+    // `install_fact_tracer` substrate counters for the 5 caches wired
+    // by Block 1.H. Each cache exposes two counters:
+    //
+    // - `<cache>_fact_tracer_installs` — number of cold-compute calls
+    //   wrapped in `install_fact_tracer` (advances once per cold
+    //   producer entry).
+    // - `<cache>_overflow_refusals` — number of cold-compute calls
+    //   whose observation set exceeded `FACT_SIGNATURE_CAP` (1024) and
+    //   were therefore NOT admitted to the warm cache (caller
+    //   cold-recomputes on next request).
+    //
+    // Caches: `MaterializeStructureDb`, `RefCycleResultDb`,
+    // `MemoEntry`, `AppConfigNoOverrideProofDb`, `OwnerImportSurfaceDb`.
+    /// `install_fact_tracer` wrap count for `MaterializeStructureDb`.
+    pub materialize_structure_fact_tracer_installs: std::sync::atomic::AtomicU64,
+    /// `install_fact_tracer` overflow-refusal count for `MaterializeStructureDb`.
+    pub materialize_structure_overflow_refusals: std::sync::atomic::AtomicU64,
+    /// `install_fact_tracer` wrap count for `RefCycleResultDb`.
+    pub ref_cycle_fact_tracer_installs: std::sync::atomic::AtomicU64,
+    /// `install_fact_tracer` overflow-refusal count for `RefCycleResultDb`.
+    pub ref_cycle_overflow_refusals: std::sync::atomic::AtomicU64,
+    /// `install_fact_tracer` wrap count for `MemoEntry` (semantic
+    /// query memo cold builds).
+    pub memo_entry_fact_tracer_installs: std::sync::atomic::AtomicU64,
+    /// `install_fact_tracer` overflow-refusal count for `MemoEntry`.
+    pub memo_entry_overflow_refusals: std::sync::atomic::AtomicU64,
+    /// `install_fact_tracer` wrap count for `AppConfigNoOverrideProofDb`.
+    pub app_config_proof_fact_tracer_installs: std::sync::atomic::AtomicU64,
+    /// `install_fact_tracer` overflow-refusal count for
+    /// `AppConfigNoOverrideProofDb`.
+    pub app_config_proof_overflow_refusals: std::sync::atomic::AtomicU64,
+    /// `install_fact_tracer` wrap count for `OwnerImportSurfaceDb`.
+    pub owner_import_surface_fact_tracer_installs: std::sync::atomic::AtomicU64,
+    /// `install_fact_tracer` overflow-refusal count for
+    /// `OwnerImportSurfaceDb`.
+    pub owner_import_surface_overflow_refusals: std::sync::atomic::AtomicU64,
 }
 
 impl Default for MetaProvenance {
@@ -1947,6 +1986,16 @@ impl Default for MetaProvenance {
             node_arena_pushes_per_discriminant: std::array::from_fn(|_| {
                 std::sync::atomic::AtomicU64::new(0)
             }),
+            materialize_structure_fact_tracer_installs: std::sync::atomic::AtomicU64::new(0),
+            materialize_structure_overflow_refusals: std::sync::atomic::AtomicU64::new(0),
+            ref_cycle_fact_tracer_installs: std::sync::atomic::AtomicU64::new(0),
+            ref_cycle_overflow_refusals: std::sync::atomic::AtomicU64::new(0),
+            memo_entry_fact_tracer_installs: std::sync::atomic::AtomicU64::new(0),
+            memo_entry_overflow_refusals: std::sync::atomic::AtomicU64::new(0),
+            app_config_proof_fact_tracer_installs: std::sync::atomic::AtomicU64::new(0),
+            app_config_proof_overflow_refusals: std::sync::atomic::AtomicU64::new(0),
+            owner_import_surface_fact_tracer_installs: std::sync::atomic::AtomicU64::new(0),
+            owner_import_surface_overflow_refusals: std::sync::atomic::AtomicU64::new(0),
         }
     }
 }
@@ -2183,6 +2232,28 @@ impl MetaProvenance {
             node_arena_pushes_per_discriminant: std::array::from_fn(|i| {
                 self.node_arena_pushes_per_discriminant[i].load(Relaxed)
             }),
+            materialize_structure_fact_tracer_installs: self
+                .materialize_structure_fact_tracer_installs
+                .load(Relaxed),
+            materialize_structure_overflow_refusals: self
+                .materialize_structure_overflow_refusals
+                .load(Relaxed),
+            ref_cycle_fact_tracer_installs: self.ref_cycle_fact_tracer_installs.load(Relaxed),
+            ref_cycle_overflow_refusals: self.ref_cycle_overflow_refusals.load(Relaxed),
+            memo_entry_fact_tracer_installs: self.memo_entry_fact_tracer_installs.load(Relaxed),
+            memo_entry_overflow_refusals: self.memo_entry_overflow_refusals.load(Relaxed),
+            app_config_proof_fact_tracer_installs: self
+                .app_config_proof_fact_tracer_installs
+                .load(Relaxed),
+            app_config_proof_overflow_refusals: self
+                .app_config_proof_overflow_refusals
+                .load(Relaxed),
+            owner_import_surface_fact_tracer_installs: self
+                .owner_import_surface_fact_tracer_installs
+                .load(Relaxed),
+            owner_import_surface_overflow_refusals: self
+                .owner_import_surface_overflow_refusals
+                .load(Relaxed),
         }
     }
 
@@ -2246,6 +2317,20 @@ impl MetaProvenance {
         for slot in &self.node_arena_pushes_per_discriminant {
             slot.store(0, Relaxed);
         }
+        self.materialize_structure_fact_tracer_installs
+            .store(0, Relaxed);
+        self.materialize_structure_overflow_refusals
+            .store(0, Relaxed);
+        self.ref_cycle_fact_tracer_installs.store(0, Relaxed);
+        self.ref_cycle_overflow_refusals.store(0, Relaxed);
+        self.memo_entry_fact_tracer_installs.store(0, Relaxed);
+        self.memo_entry_overflow_refusals.store(0, Relaxed);
+        self.app_config_proof_fact_tracer_installs.store(0, Relaxed);
+        self.app_config_proof_overflow_refusals.store(0, Relaxed);
+        self.owner_import_surface_fact_tracer_installs
+            .store(0, Relaxed);
+        self.owner_import_surface_overflow_refusals
+            .store(0, Relaxed);
     }
 }
 
@@ -2353,6 +2438,28 @@ pub struct MetaProvenanceSnapshot {
     pub scheduler_inbox_depth_max: u64,
     /// Per-`SemanticNodeData` discriminant push count.
     pub node_arena_pushes_per_discriminant: [u64; SEMANTIC_NODE_DATA_DISCRIMINANT_COUNT],
+
+    // ── Block 1.H: Family B/C/D producer-install observability ───────────
+    /// `install_fact_tracer` wrap count for `MaterializeStructureDb`.
+    pub materialize_structure_fact_tracer_installs: u64,
+    /// `install_fact_tracer` overflow-refusal count for `MaterializeStructureDb`.
+    pub materialize_structure_overflow_refusals: u64,
+    /// `install_fact_tracer` wrap count for `RefCycleResultDb`.
+    pub ref_cycle_fact_tracer_installs: u64,
+    /// `install_fact_tracer` overflow-refusal count for `RefCycleResultDb`.
+    pub ref_cycle_overflow_refusals: u64,
+    /// `install_fact_tracer` wrap count for `MemoEntry`.
+    pub memo_entry_fact_tracer_installs: u64,
+    /// `install_fact_tracer` overflow-refusal count for `MemoEntry`.
+    pub memo_entry_overflow_refusals: u64,
+    /// `install_fact_tracer` wrap count for `AppConfigNoOverrideProofDb`.
+    pub app_config_proof_fact_tracer_installs: u64,
+    /// `install_fact_tracer` overflow-refusal count for `AppConfigNoOverrideProofDb`.
+    pub app_config_proof_overflow_refusals: u64,
+    /// `install_fact_tracer` wrap count for `OwnerImportSurfaceDb`.
+    pub owner_import_surface_fact_tracer_installs: u64,
+    /// `install_fact_tracer` overflow-refusal count for `OwnerImportSurfaceDb`.
+    pub owner_import_surface_overflow_refusals: u64,
 }
 
 /// Point-in-time snapshot of host performance metrics.

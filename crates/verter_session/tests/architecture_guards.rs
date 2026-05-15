@@ -3711,6 +3711,12 @@ mod foundations_guards {
         // ImportedRegistryEntry / ImportedRegistryKey for the §12.A12
         // InvalidationByCanonical perf gate)
         "pub mod component_meta_caches",
+        // Block 1.H Track 2.4 — `AppConfigNoOverrideProofKey`,
+        // `AppConfigNoOverrideProofEntry`, `AppConfigNoOverrideProofDb`
+        // surface for the family_bcd_* integration tests that drive
+        // the production producer end-to-end via
+        // `for_tests::app_config_no_override_proof_get_or_compute_for_tests`.
+        "pub mod app_config_proof_db",
         // crates/verter_bench/examples/audit_real_component_meta.rs
         // calls `dump_loop5_instrumentation_counters` to record
         // inner-dispatch counter snapshots alongside the audit JSON.
