@@ -171,9 +171,11 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             mode: ProjectionMode::Expanded,
         };
         let read = materialize_component_meta_structure(self.ctx, key);
-        crate::fact_signature_helpers::observe_fact_signature(
-            &crate::fact_signature_helpers::dep_signature_to_fact_signature(&read.dep_signature),
-        );
+        // Dual-emit dispatch facts into BOTH downstream channels so
+        // the legacy `state.fact_versions` curated signature and the
+        // outer `with_fact_tracer` scope both observe the
+        // materialiser's dep graph.
+        crate::meta_resolve::emit_dispatch_dep_signature_facts(self.ctx, &read.dep_signature);
         let materialised_id = match read.value {
             MaterializeOutcome::Value(id)
             | MaterializeOutcome::Miss(id)

@@ -1,20 +1,28 @@
 //! Architecture guard — `accumulate_dispatch_dep_signature` may be
-//! called only from two allow-listed functions in production source.
+//! called only from three allow-listed functions in production source.
 //!
 //! The legacy `meta_resolve::dep_signature::accumulate_dispatch_dep_signature`
 //! accumulator predates the fact-tracer fan-out substrate. The
-//! component-meta resolver, projector, materialiser, and registry
-//! decl paths have been rewired to fan dispatch facts into every
-//! active `FactReadSet` via
-//! `observe_fact_signature(&dep_signature_to_fact_signature(...))`
-//! rather than push into the legacy thread-local accumulator. The
-//! slot-binding-graph traversal in
-//! `meta_resolve/slot_binding_graph.rs` runs paired dual-emission
-//! through `emit_slot_binding_graph_dispatch_facts`; the helper body
-//! intentionally keeps the legacy `accumulate_dispatch_dep_signature`
-//! call alongside the new tracer fan-out so the curated
-//! `state.fact_versions` channel retains coverage during the dual
-//! window. The legacy helper definition itself remains in
+//! component-meta resolver, projector, materialiser, registry-decl,
+//! and slot-binding-graph traversals all route through a paired
+//! dual-emission helper: every legacy
+//! `accumulate_dispatch_dep_signature(sig)` call must be matched by
+//! an `observe_fact_signature(&dep_signature_to_fact_signature(sig))`
+//! call inside the same helper body so both the curated
+//! `state.fact_versions` channel and the `ACTIVE_TRACERS` fan-out
+//! observe the same dep facts during the dual-emit migration
+//! window. Two helpers carry the dual-emit pairing today:
+//!
+//! - `meta_resolve::slot_binding_graph::emit_slot_binding_graph_dispatch_facts`
+//!   (5 sites in `slot_binding_graph.rs`).
+//! - `meta_resolve::dep_signature::emit_dispatch_dep_signature_facts`
+//!   (6 sites: 3 projector sites in `meta_resolve/projectors/mod.rs`,
+//!   the materialiser in `meta_resolve/materialize/field_types.rs`,
+//!   the BFS-cycle site in `meta_resolve/resolved_state.rs`, and the
+//!   registry-materialise site in
+//!   `resolver_core/component_meta_query_engine/registry_decl.rs`).
+//!
+//! The legacy helper definition itself remains in
 //! `meta_resolve/dep_signature.rs` until the legacy drain in
 //! `compute_component_meta_state_inner` is retired and the symbol
 //! is deleted.
@@ -32,20 +40,28 @@
 //! - `emit_slot_binding_graph_dispatch_facts` (the dual-emit helper
 //!   in `slot_binding_graph.rs` whose body calls
 //!   `accumulate_dispatch_dep_signature(sig);` alongside
-//!   `observe_fact_signature`; tracked by Block 1.C's
+//!   `observe_fact_signature`; tracked by
 //!   `slot_binding_graph_dual_emit_arch_guard.rs`).
+//! - `emit_dispatch_dep_signature_facts` (the dual-emit helper in
+//!   `meta_resolve/dep_signature.rs` whose body calls
+//!   `accumulate_dispatch_dep_signature(sig);` alongside
+//!   `observe_fact_signature`; covers the 6 dispatch-read sites in
+//!   projectors / materialiser / lowered-root-cycle / registry-decl).
 //!
 //! Trigger conditions:
 //!
 //! - Adding `accumulate_dispatch_dep_signature(&x.dep_signature);` in
 //!   a new production function inside `crates/verter_session/src/`
-//!   FAILS the `no_accumulate_dispatch_dep_signature_outside_helpers`
+//!   FAILS the `accumulate_dispatch_dep_signature_call_sites_are_allow_listed`
 //!   test.
-//! - Re-introducing a call site inside `meta_resolve/projectors/mod.rs`,
+//! - Re-introducing a direct call site outside the dual-emit helpers
+//!   (e.g. inside `meta_resolve/projectors/mod.rs`,
 //!   `meta_resolve/materialize/field_types.rs`,
 //!   `meta_resolve/resolved_state.rs`, or
-//!   `resolver_core/component_meta_query_engine/registry_decl.rs`
-//!   FAILS the same test.
+//!   `resolver_core/component_meta_query_engine/registry_decl.rs`)
+//!   FAILS the same test — callers must route through
+//!   `emit_dispatch_dep_signature_facts` so the dual-emit pairing
+//!   stays intact.
 //!
 //! The `*_use_import_allowed_in_helper_files` test pins down where
 //! the `use` import is allowed (the slot-binding-graph helper module
@@ -77,19 +93,27 @@ fn workspace_root() -> PathBuf {
 /// `accumulate_dispatch_dep_signature`. Every other production-source
 /// caller is a regression.
 const ACCUMULATE_DISPATCH_DEP_SIGNATURE_ALLOW: &[&str] = &[
-    // The helper definition itself. Block 9 will retire the legacy
-    // thread-local drain and delete this function; until then it is
-    // the single producer that converts a `DepSignature` into
-    // `FactVersionRef` entries and pushes them onto the request-scoped
-    // accumulator.
+    // The helper definition itself. The legacy thread-local drain in
+    // `compute_component_meta_state_inner` will be retired and this
+    // function deleted once the `fact_dep_signature` producer source
+    // flips from `state.fact_versions` to the tracer's
+    // `read_set.finalise()`; until then it is the single producer
+    // that converts a `DepSignature` into `FactVersionRef` entries
+    // and pushes them onto the request-scoped accumulator.
     "accumulate_dispatch_dep_signature",
     // The slot-binding-graph dual-emit helper. Its body intentionally
     // calls BOTH `accumulate_dispatch_dep_signature(sig)` (legacy
     // drain path) AND `observe_fact_signature(...)` (fact-tracer
     // fan-out) so the curated `state.fact_versions` channel stays
-    // populated alongside the per-tracer fan-out until the legacy
-    // drain is retired.
+    // populated alongside the per-tracer fan-out during the dual-emit
+    // migration window.
     "emit_slot_binding_graph_dispatch_facts",
+    // The companion dual-emit helper for the six dispatch-read
+    // sites that have no result cache of their own (three projector
+    // sites, the materialiser, the lowered-root cycle, and the
+    // registry-materialise site). Same dual-emit semantics as the
+    // slot-binding-graph helper.
+    "emit_dispatch_dep_signature_facts",
 ];
 
 #[derive(Debug)]

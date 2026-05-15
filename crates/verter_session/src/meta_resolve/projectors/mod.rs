@@ -20,10 +20,17 @@
 //!    node back to `TypeExpr` and classifies its exactness via
 //!    `meta_resolve::exactness::classify_node`.
 //!
-//! All `dispatch.execute_read` calls must fan their dep-signature into
-//! every active fact tracer via
-//! `observe_fact_signature(&dep_signature_to_fact_signature(...))` so
-//! the final-result cache can revalidate on warm hits. Cycle and error
+//! All `dispatch.execute_read` calls must dual-emit their
+//! dep-signature into BOTH downstream channels via
+//! `emit_dispatch_dep_signature_facts(dispatch.ctx, &read.dep_signature)`:
+//! (1) the legacy `DISPATCH_DEP_SIGNATURE_ACCUMULATOR` drained at
+//! `compute_component_meta_state_inner` into `state.fact_versions`,
+//! and (2) the `ACTIVE_TRACERS` stack captured by the outer
+//! `with_fact_tracer` scope. Dual-emit is the migration substrate
+//! that lets the `fact_dep_signature` producer source later flip
+//! from `state.fact_versions` to `read_set.finalise()` without
+//! losing coverage. The final-result cache validates warm hits
+//! against `fact_dep_signature` on both branches. Cycle and error
 //! branches publish a `MacroExpansionDiagnostics` envelope into
 //! `diag_sink` (per §7.5 silent-miss prevention).
 //!
@@ -49,9 +56,9 @@ use crate::semantic_query::{
 };
 use crate::types::FileAnalysisSnapshot;
 
+use super::dep_signature::emit_dispatch_dep_signature_facts;
 use super::diagnostic_convert::shallow_diagnostics_to_macro_expansion;
 use super::exactness::classify_node;
-use crate::fact_signature_helpers::{dep_signature_to_fact_signature, observe_fact_signature};
 
 pub(crate) mod emits;
 pub(crate) mod exposed;
@@ -368,9 +375,7 @@ pub(crate) fn resolve_macro_payload(
         type_args,
         mode: ProjectionMode::Navigate,
     });
-    observe_fact_signature(&dep_signature_to_fact_signature(
-        &payload_read.dep_signature,
-    ));
+    emit_dispatch_dep_signature_facts(dispatch.ctx, &payload_read.dep_signature);
     if !payload_read.walker_diagnostics.is_empty() {
         diag_sink.push(shallow_diagnostics_to_macro_expansion(
             &payload_read.walker_diagnostics,
@@ -436,9 +441,7 @@ pub(crate) fn resolve_payload_surface(
         path: empty_path(),
         mode: ProjectionMode::Shallow,
     });
-    observe_fact_signature(&dep_signature_to_fact_signature(
-        &surface_read.dep_signature,
-    ));
+    emit_dispatch_dep_signature_facts(dispatch.ctx, &surface_read.dep_signature);
     if !surface_read.walker_diagnostics.is_empty() {
         diag_sink.push(shallow_diagnostics_to_macro_expansion(
             &surface_read.walker_diagnostics,
@@ -819,7 +822,7 @@ fn resolve_member_value_for_classification(
                 path: empty_path(),
                 mode: ProjectionMode::Shallow,
             });
-            observe_fact_signature(&dep_signature_to_fact_signature(&read.dep_signature));
+            emit_dispatch_dep_signature_facts(dispatch.ctx, &read.dep_signature);
             match read.value {
                 QueryResult::Value(id) => id,
                 _ => value,

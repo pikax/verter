@@ -17,8 +17,8 @@
 
 use crate::instant::Instant;
 
+use super::super::dep_signature::emit_dispatch_dep_signature_facts;
 use super::super::registry_materialize::preserve_package_backed_symbolic_refs_node;
-use crate::fact_signature_helpers::{dep_signature_to_fact_signature, observe_fact_signature};
 
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub(crate) fn materialize_component_meta_type_expr_until_stable(
@@ -179,15 +179,15 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
         );
     }
 
-    // Fan dispatch's dep_signature into every active fact tracer so
-    // the outer compute's read-set captures the materialise pass's
-    // facts. The bridge helper drops route- and project-generation
-    // entries (only `WholeHash` survives the conversion); the
-    // dropped entries are R20-only signals with no `FactVersionRef`
-    // equivalent.
-    observe_fact_signature(&dep_signature_to_fact_signature(
-        &dispatch_materialized.dep_signature,
-    ));
+    // Dual-emit dispatch facts into BOTH downstream channels:
+    // (1) the legacy `DISPATCH_DEP_SIGNATURE_ACCUMULATOR` drained at
+    // `compute_component_meta_state_inner` into `state.fact_versions`,
+    // and (2) the `ACTIVE_TRACERS` stack captured by the outer
+    // `with_fact_tracer` scope. The bridge helper drops route- and
+    // project-generation entries (only `WholeHash` survives the
+    // conversion); the dropped entries are R20-only signals with no
+    // `FactVersionRef` equivalent.
+    emit_dispatch_dep_signature_facts(ctx, &dispatch_materialized.dep_signature);
 
     let materialized = MaterializedTypeExpr {
         node_id: dispatch_materialized.node_id,

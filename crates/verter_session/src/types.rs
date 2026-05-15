@@ -1821,6 +1821,30 @@ pub struct MetaProvenance {
     /// carried by `ComponentMetaResultEntry` retains coverage once
     /// the legacy accumulator is retired.
     pub slot_binding_graph_legacy_accumulator_emissions: std::sync::atomic::AtomicU64,
+    /// Count of `observe_fact_signature` fan-out calls emitted from
+    /// `meta_resolve::dep_signature::emit_dispatch_dep_signature_facts`
+    /// — the dual-emit helper invoked by the six dispatch reads that
+    /// have no result cache of their own (three projector sites,
+    /// `materialize_component_meta_type_expr_until_stable_full`,
+    /// `lowered_root_reaches_transitive_cycle`, and
+    /// `materialize_member_surface_expr`). The helper bumps this
+    /// counter on every `observe_fact_signature` call. Used by tests
+    /// to discriminate the fact-tracer channel from the legacy
+    /// accumulator channel during the dual-emit migration window —
+    /// the legacy emission will be deleted once the
+    /// `fact_dep_signature` producer source flips from
+    /// `state.fact_versions` to `read_set.finalise()`.
+    pub dispatch_dep_signature_fact_tracer_emissions: std::sync::atomic::AtomicU64,
+    /// Count of `accumulate_dispatch_dep_signature` calls emitted
+    /// from
+    /// `meta_resolve::dep_signature::emit_dispatch_dep_signature_facts`.
+    /// Pairs with `dispatch_dep_signature_fact_tracer_emissions` to
+    /// verify the dual-emit invariant: every legacy emission must be
+    /// paired with a tracer emission in the same code path so the
+    /// curated `fact_dep_signature` carried by
+    /// `ComponentMetaResultEntry` retains coverage once the legacy
+    /// accumulator is retired.
+    pub dispatch_dep_signature_legacy_accumulator_emissions: std::sync::atomic::AtomicU64,
     pub indexed_ready_scheduler_snapshot_reuse: std::sync::atomic::AtomicU64,
     pub bundle_cache_hits: std::sync::atomic::AtomicU64,
     pub bundle_materializations: std::sync::atomic::AtomicU64,
@@ -1898,6 +1922,10 @@ impl Default for MetaProvenance {
             component_meta_result_cache_misses: std::sync::atomic::AtomicU64::new(0),
             slot_binding_graph_fact_tracer_emissions: std::sync::atomic::AtomicU64::new(0),
             slot_binding_graph_legacy_accumulator_emissions: std::sync::atomic::AtomicU64::new(0),
+            dispatch_dep_signature_fact_tracer_emissions: std::sync::atomic::AtomicU64::new(0),
+            dispatch_dep_signature_legacy_accumulator_emissions: std::sync::atomic::AtomicU64::new(
+                0,
+            ),
             indexed_ready_scheduler_snapshot_reuse: std::sync::atomic::AtomicU64::new(0),
             bundle_cache_hits: std::sync::atomic::AtomicU64::new(0),
             bundle_materializations: std::sync::atomic::AtomicU64::new(0),
@@ -2124,6 +2152,12 @@ impl MetaProvenance {
             slot_binding_graph_legacy_accumulator_emissions: self
                 .slot_binding_graph_legacy_accumulator_emissions
                 .load(Relaxed),
+            dispatch_dep_signature_fact_tracer_emissions: self
+                .dispatch_dep_signature_fact_tracer_emissions
+                .load(Relaxed),
+            dispatch_dep_signature_legacy_accumulator_emissions: self
+                .dispatch_dep_signature_legacy_accumulator_emissions
+                .load(Relaxed),
             indexed_ready_scheduler_snapshot_reuse: self
                 .indexed_ready_scheduler_snapshot_reuse
                 .load(Relaxed),
@@ -2184,6 +2218,10 @@ impl MetaProvenance {
         self.slot_binding_graph_fact_tracer_emissions
             .store(0, Relaxed);
         self.slot_binding_graph_legacy_accumulator_emissions
+            .store(0, Relaxed);
+        self.dispatch_dep_signature_fact_tracer_emissions
+            .store(0, Relaxed);
+        self.dispatch_dep_signature_legacy_accumulator_emissions
             .store(0, Relaxed);
         self.indexed_ready_scheduler_snapshot_reuse
             .store(0, Relaxed);
@@ -2276,6 +2314,24 @@ pub struct MetaProvenanceSnapshot {
     /// entirely once the producer source flips to
     /// `read_set.finalise()`.
     pub slot_binding_graph_legacy_accumulator_emissions: u64,
+    /// Per-call count of `observe_fact_signature` fan-outs emitted
+    /// from the six dispatch-read sites that route through
+    /// `meta_resolve::dep_signature::emit_dispatch_dep_signature_facts`
+    /// (three projector sites,
+    /// `materialize_component_meta_type_expr_until_stable_full`,
+    /// `lowered_root_reaches_transitive_cycle`, and
+    /// `materialize_member_surface_expr`). Used by behavioural tests
+    /// to discriminate the fact-tracer path from the legacy
+    /// accumulator path.
+    pub dispatch_dep_signature_fact_tracer_emissions: u64,
+    /// Per-call count of `accumulate_dispatch_dep_signature`
+    /// emissions from
+    /// `meta_resolve::dep_signature::emit_dispatch_dep_signature_facts`.
+    /// Pairs with `dispatch_dep_signature_fact_tracer_emissions` for
+    /// the dual-emit invariant. The legacy emission will be deleted
+    /// entirely once the producer source flips from
+    /// `state.fact_versions` to `read_set.finalise()`.
+    pub dispatch_dep_signature_legacy_accumulator_emissions: u64,
     pub indexed_ready_scheduler_snapshot_reuse: u64,
     pub bundle_cache_hits: u64,
     pub bundle_materializations: u64,

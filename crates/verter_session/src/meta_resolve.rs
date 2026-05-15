@@ -57,7 +57,8 @@ pub(crate) use dep_signature::{
     with_bfs_child_refs_observer_for_test, with_visited_counter,
 };
 pub(crate) use dep_signature::{
-    drain_dispatch_dep_signature_accumulator, reset_dispatch_dep_signature_accumulator,
+    drain_dispatch_dep_signature_accumulator, emit_dispatch_dep_signature_facts,
+    reset_dispatch_dep_signature_accumulator,
 };
 pub(crate) use dispatch_helpers::{
     instantiate_local_generic_ref_via_dispatch, lower_and_project_to_expanded_via_host_threaded,

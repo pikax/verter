@@ -6,6 +6,24 @@
 //! The counters are declared `pub(crate)` so test code anywhere in the crate
 //! can probe them. Sibling modules access them via `super::dep_signature::*`
 //! or through the shell's narrow re-exports.
+//!
+//! # Dual-emit migration substrate
+//!
+//! [`emit_dispatch_dep_signature_facts`] is the paired emission helper
+//! used by every component-meta dispatch read whose owner has no
+//! result cache of its own (the projector, materialiser,
+//! lowered-root cycle, and registry-materialise sites). It fans
+//! dispatch facts into BOTH downstream channels in lockstep, mirroring
+//! the [`super::slot_binding_graph::emit_slot_binding_graph_dispatch_facts`]
+//! pattern: the legacy `DISPATCH_DEP_SIGNATURE_ACCUMULATOR` (TLS,
+//! drained at `compute_component_meta_state_inner` and folded into
+//! `state.fact_versions` → `ComponentMetaResultEntry.fact_dep_signature`)
+//! AND the `ACTIVE_TRACERS` stack (captured by the outer
+//! `with_fact_tracer` scope). Dual-emit lets the curated signature
+//! retain coverage today while leaving room for the
+//! `fact_dep_signature` producer source to flip from
+//! `state.fact_versions` to the tracer's `read_set.finalise()` without
+//! losing a single fact.
 
 thread_local! {
     /// Step 6.6.A dep-signature accumulator.
@@ -80,6 +98,72 @@ pub(crate) fn accumulate_dispatch_dep_signature(sig: &crate::semantic_query::Dep
             }
         }
     });
+}
+
+/// Dual-emit helper for the dispatch dep-signature reads that have
+/// no result cache of their own.
+///
+/// The six in-scope dispatch reads — three projector sites in
+/// `meta_resolve/projectors/mod.rs` (`resolve_macro_payload`,
+/// `resolve_payload_surface`, `resolve_member_value_for_classification`),
+/// the materialiser site in
+/// `meta_resolve/materialize/field_types.rs::materialize_component_meta_type_expr_until_stable_full`,
+/// the BFS-cycle site in
+/// `meta_resolve/resolved_state.rs::lowered_root_reaches_transitive_cycle`,
+/// and the registry-materialise site in
+/// `resolver_core/component_meta_query_engine/registry_decl.rs::materialize_member_surface_expr`
+/// — fan their dispatch facts through this helper so the same set of
+/// `DepSignature` entries reaches BOTH downstream channels in lockstep:
+///
+/// 1. The legacy [`DISPATCH_DEP_SIGNATURE_ACCUMULATOR`] (TLS), drained
+///    at `host_manage/component_meta_methods.rs::compute_component_meta_state_inner`
+///    and folded into `ResolvedComponentMetaState.fact_versions` →
+///    `ComponentMetaResultEntry.fact_dep_signature` via
+///    `publish_component_meta_cache_entry`.
+/// 2. The `ACTIVE_TRACERS` stack (also TLS), captured by the outer
+///    `with_fact_tracer` scope in `component_meta_entry.rs` — used for
+///    R20 overflow detection and (once the dual channels collapse) as
+///    the canonical `fact_dep_signature` source.
+///
+/// Dual-emit is the safe migration substrate: both channels receive
+/// the same dispatch facts so the curated signature retains coverage
+/// today AND the `fact_dep_signature` source can later switch from
+/// `state.fact_versions` to the tracer's `read_set.finalise()`
+/// without losing a single fact. The fact-tracer fan-out alone will
+/// suffice once the producer source flips.
+///
+/// Two provenance counters
+/// (`dispatch_dep_signature_fact_tracer_emissions` and
+/// `dispatch_dep_signature_legacy_accumulator_emissions`) advance in
+/// lockstep on every call so tests can discriminate the pairing —
+/// removing either channel would leave one counter at zero while the
+/// other still advanced, and the discriminating regression test
+/// `dispatch_dep_signature_dual_emit_in_lockstep` would FAIL.
+pub(crate) fn emit_dispatch_dep_signature_facts(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    sig: &crate::semantic_query::DepSignature,
+) {
+    use std::sync::atomic::Ordering::Relaxed;
+    // Legacy: feed the per-request accumulator that drains into
+    // `state.fact_versions`.
+    accumulate_dispatch_dep_signature(sig);
+    if let Some(prov) = ctx.project_type_store().semantic_graph().provenance() {
+        prov.dispatch_dep_signature_legacy_accumulator_emissions
+            .fetch_add(1, Relaxed);
+    }
+
+    // New: fan into the `ACTIVE_TRACERS` stack so the outer
+    // `with_fact_tracer` captures the same facts. The bridge helper
+    // converts `DepSignature` → `Vec<FactVersionRef>`; only
+    // `DepVersion::WholeHash` survives the conversion —
+    // route-generation / project-generation entries are R20-only
+    // signals and have no `FactVersionRef` equivalent.
+    let bridged = crate::fact_signature_helpers::dep_signature_to_fact_signature(sig);
+    crate::fact_signature_helpers::observe_fact_signature(&bridged);
+    if let Some(prov) = ctx.project_type_store().semantic_graph().provenance() {
+        prov.dispatch_dep_signature_fact_tracer_emissions
+            .fetch_add(1, Relaxed);
+    }
 }
 
 // =====================================================================
