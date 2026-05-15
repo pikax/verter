@@ -1267,6 +1267,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 walker_diagnostics,
                 cache_suppress,
                 fact_dep_signature: None,
+                pending_prefix_backfills: Vec::new(),
             };
         }
         // Emit a whole-path `ProjectPath` edge on the result so consumers
@@ -1281,26 +1282,31 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 Arc::clone(&fence),
             );
         }
-        // Backfill intermediate path prefixes so a sibling
-        // dispatch sharing the same prefix can short-circuit through
-        // `find_longest_warm_prefix`. Backfill always targets Navigate
-        // (path-precise rule — intermediate hops are Navigate-mode
-        // entries). The terminal full-path key keeps the caller's mode
-        // and is published by `execute_cooperative`'s admission flow,
-        // not by this helper.
-        backfill_prefixes(
-            self.graph(),
-            start_base,
-            &walker_path,
-            &walker.intermediate_nodes,
-            &fence,
-        );
+        // Collect intermediate path-prefix backfill records so a
+        // sibling dispatch sharing the same prefix can short-circuit
+        // through `find_longest_warm_prefix`. Backfill always targets
+        // Navigate (path-precise rule — intermediate hops are
+        // Navigate-mode entries). The terminal full-path key keeps the
+        // caller's mode and is published by `execute_cooperative`'s
+        // admission flow, not by this helper.
+        //
+        // Carrier-aware publication: the records accumulate onto
+        // `QueryBuildOutput.pending_prefix_backfills` and the shared
+        // cold-build helper publishes them AFTER `install_fact_tracer`
+        // returns Ok so each backfilled memo entry's carrier holds the
+        // parent's authoritative path-precise fact signature. Publishing
+        // here before the tracer finalises would attach a legacy-only
+        // signature derived from the fence (the pre-carrier behaviour
+        // codex flagged in `publish_warm_if_absent`).
+        let pending_prefix_backfills =
+            collect_prefix_backfills(start_base, &walker_path, &walker.intermediate_nodes);
         crate::project_semantic_dispatch::walk::QueryBuildOutput {
             result: QueryResult::Value(result),
             dep_signature: fence,
             walker_diagnostics,
             cache_suppress,
             fact_dep_signature: None,
+            pending_prefix_backfills,
         }
     }
 
@@ -2273,13 +2279,17 @@ fn find_longest_warm_prefix(
     None
 }
 
-/// Backfill helper. For each linear-member-step
-/// intermediate captured by the [`PathWalker`] in `intermediates`,
-/// publish the corresponding `(base, path[..i+1], Navigate)` key into
-/// the warm map via the shared
-/// [`SemanticGraphStore::publish_warm_if_absent`] helper (which
-/// internally reuses the same warm-publish path that
-/// `execute_cooperative` uses, gated by an "absent only" check).
+/// Collect per-linear-prefix backfill records for the
+/// `(base, path[..i+1], Navigate)` keys.
+///
+/// **Deferred publication.** Returns a `Vec<PrefixBackfill>` the
+/// caller threads onto `QueryBuildOutput.pending_prefix_backfills`.
+/// The shared cold-build helper publishes those records AFTER
+/// `install_fact_tracer` finalises so each backfilled memo entry's
+/// carrier holds the parent's authoritative path-precise fact
+/// signature (not a fence-derived legacy-only signature that loses
+/// `Parse(...)` / `ResolveImports(...)` / `RouteSurface(...)`
+/// facts).
 ///
 /// Skips the last index — the full key is owned by
 /// `execute_cooperative` (it carries the caller's mode, not Navigate;
@@ -2288,13 +2298,11 @@ fn find_longest_warm_prefix(
 /// Skips `None` entries (arm-splits at Union / Intersection /
 /// open-Conditional positions); those positions have no single
 /// canonical answer for `(base, path[..k], Navigate)`.
-fn backfill_prefixes(
-    graph: &crate::semantic_query_memo::SemanticGraphStore,
+fn collect_prefix_backfills(
     base: SemanticNodeId,
     path: &Arc<[PathSegment]>,
     intermediates: &[Option<SemanticNodeId>],
-    full_dep_signature: &DepSignature,
-) {
+) -> Vec<crate::project_semantic_dispatch::walk::PrefixBackfill> {
     // Backfill is only meaningful for the contiguous LINEAR prefix of
     // the walk — the leading run of `Some(node)` entries before any
     // arm-split. Once the walker hits a Union / Intersection /
@@ -2315,6 +2323,7 @@ fn backfill_prefixes(
     //     longer lines up with `path[..i + 1]` so subsequent entries
     //     are not canonical answers for that key.
     let max_i = intermediates.len().min(path.len()).saturating_sub(1);
+    let mut out = Vec::new();
     for i in 0..max_i {
         let Some(node) = intermediates[i] else { break };
         let prefix_path: Arc<[PathSegment]> = Arc::from(path[..i + 1].to_vec().into_boxed_slice());
@@ -2323,8 +2332,12 @@ fn backfill_prefixes(
             path: prefix_path,
             mode: ProjectionMode::Navigate,
         };
-        graph.publish_warm_if_absent(prefix_key, node, Arc::clone(full_dep_signature));
+        out.push(crate::project_semantic_dispatch::walk::PrefixBackfill {
+            key: prefix_key,
+            node,
+        });
     }
+    out
 }
 
 /// Helper — convert a per-call local fence (one

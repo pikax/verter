@@ -99,6 +99,20 @@ pub enum ShallowDiagnostic {
 /// the legacy fence). When `None`, the memo falls back to
 /// `fact_signature_from_fence(dep_signature)` for backward
 /// compatibility with build paths that do not yet wire the tracer.
+/// One deferred prefix-backfill record. Accumulated during a
+/// `build_project_path` walk; published into the warm map AFTER the
+/// shared cold-build helper finalises the fact tracer so each
+/// backfilled entry's carrier holds the same path-precise fact
+/// signature as the parent entry. See
+/// [`crate::project_semantic_dispatch::build::backfill_prefixes`] for
+/// the producer and the shared cold-build helper for the publication
+/// point.
+#[derive(Debug, Clone)]
+pub struct PrefixBackfill {
+    pub key: crate::semantic_query::SemanticQueryKey,
+    pub node: SemanticNodeId,
+}
+
 #[derive(Debug)]
 pub struct QueryBuildOutput {
     pub result: QueryResult<SemanticNodeId>,
@@ -106,6 +120,14 @@ pub struct QueryBuildOutput {
     pub walker_diagnostics: Vec<ShallowDiagnostic>,
     pub cache_suppress: bool,
     pub fact_dep_signature: Option<Arc<[crate::resolver_core::FactVersionRef]>>,
+    /// Pending prefix-backfill records. The walker pushes one entry
+    /// per linear intermediate; the shared cold-build helper publishes
+    /// them AFTER the fact tracer finalises so backfilled memo entries
+    /// carry the parent's authoritative path-precise fact signature
+    /// (not a fence-derived legacy-only signature that loses
+    /// `Parse(...)` / `ResolveImports(...)` / `RouteSurface(...)`
+    /// facts).
+    pub pending_prefix_backfills: Vec<PrefixBackfill>,
 }
 
 impl QueryBuildOutput {
@@ -129,6 +151,7 @@ impl From<(QueryResult<SemanticNodeId>, DepSignature)> for QueryBuildOutput {
             walker_diagnostics: Vec::new(),
             cache_suppress: false,
             fact_dep_signature: None,
+            pending_prefix_backfills: Vec::new(),
         }
     }
 }

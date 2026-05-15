@@ -59,6 +59,44 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use parking_lot::{Condvar, Mutex};
 
+/// First-class outcome of a cooperative-admission cold compute.
+///
+/// `compute` closures return one of three variants:
+///
+/// - `Cacheable(Entry)` — the result is valid AND cacheable. The
+///   admission flow inserts the entry into the map and broadcasts
+///   the projected `V` to joiners by re-reading the freshly-published
+///   entry.
+/// - `ReturnOnly(V)` — the result is valid but NOT cacheable (e.g.
+///   the producer's fact-signature tracer overflowed). The admission
+///   flow does NOT insert into the map. Joiners receive the
+///   already-projected `V` directly through the slot's broadcast
+///   channel so they observe the same valid outcome as the winner.
+///   The next cold-miss recomputes from scratch.
+/// - `Failed` — compute observed a fatal condition (panic substitute,
+///   missing dep, parse error). Joiners wake to a failed slot and
+///   surface `None`; the next cold-miss retries.
+///
+/// **Why three variants.** Before the carrier consolidation the
+/// "valid-but-non-cacheable" case was modelled with a stack-local
+/// `RefCell<Option<...>>` side channel inside the winner's compute
+/// closure, so cooperative joiners on the same key saw an empty
+/// side channel and returned a Tainted outcome even when the winner
+/// computed a valid result. `ReturnOnly` lifts that case into the
+/// admission contract so all participants observe the same outcome.
+pub enum ComputeAdmission<V, Entry> {
+    /// Result is valid AND cacheable. Cache admits the entry; joiners
+    /// re-read the map and project.
+    Cacheable(Entry),
+    /// Result is valid but NOT cacheable. Cache does NOT admit;
+    /// in-flight slot broadcasts the projected `V` directly to
+    /// joiners while leaving the map empty.
+    ReturnOnly(V),
+    /// Cold-compute failed (panic substitute, missing dep, etc.).
+    /// Joiners surface `None`; subsequent callers retry the cold path.
+    Failed,
+}
+
 /// Per-key in-flight slot. The winner publishes via `state.completed`;
 /// joiners wait on `ready` until publish or fail.
 struct InflightSlot {
@@ -78,6 +116,20 @@ struct InflightSlotState {
     /// Joiners observing `failed = true` return `None`; subsequent calls
     /// retry the cold path.
     failed: bool,
+    /// Broadcast slot for non-cacheable outcomes (`ComputeAdmission::ReturnOnly`).
+    /// When the winner's compute returns a valid-but-non-cacheable
+    /// value, it lands here as a type-erased `Box<dyn Any>` so joiners
+    /// can downcast to the per-call `V` and observe the same outcome
+    /// without re-reading the (empty) map. `None` for cacheable
+    /// outcomes (joiners project from the map entry) and for failures.
+    ///
+    /// **Type-erasure rationale.** `InflightTable<K>` is generic over
+    /// the cache key only, not the per-call projected value `V`. The
+    /// `cooperative_admit_with_post_publish` function downcasts via
+    /// `Any::downcast_ref` on joiner wake; the contract is enforced
+    /// by the function's `V: Clone + Send + Sync + 'static` bound so
+    /// the per-call `V` matches winner and joiners on the same key.
+    return_only: Option<Box<dyn std::any::Any + Send + Sync>>,
 }
 
 impl InflightSlot {
@@ -418,6 +470,176 @@ where
 
     // Retire the inflight slot. Future callers either hit the warm map
     // or start a fresh inflight if the publish was skipped.
+    inflight.table.lock().remove(&key);
+
+    value
+}
+
+/// Cooperative cold-compute admission with a first-class
+/// `ComputeAdmission` outcome. Generalises
+/// [`cooperative_get_or_insert_with_post_publish`] by lifting the
+/// "valid-but-non-cacheable" case (overflowed fact signature, e.g.)
+/// into the admission contract via [`ComputeAdmission::ReturnOnly`].
+///
+/// **Three-way outcome contract.**
+///
+/// - `Cacheable(Entry)` — insert into the map, call `post_publish`,
+///   broadcast the projected `V` to joiners by storing it in the
+///   slot's `return_only` channel. Joiners observe the same outcome
+///   without re-reading the map.
+/// - `ReturnOnly(V)` — do NOT insert; do NOT call `post_publish`;
+///   broadcast `V` directly via the slot's `return_only` channel.
+///   Joiners receive the same `V` and the cache remains empty so
+///   the next cold-miss recomputes.
+/// - `Failed` — mark the slot failed; joiners surface `None`.
+///
+/// **Joiner contract.** Joiners wake on the slot's condvar. If
+/// `state.failed`, they return `None`. Otherwise they consult
+/// `state.return_only` first (downcasting the type-erased `Box<dyn
+/// Any>` to the per-call `V`); a hit means the winner returned a
+/// non-cacheable outcome and joiners use that value directly. A miss
+/// means the entry was inserted into the map; joiners re-read the
+/// map and project.
+///
+/// The `V: Send + Sync + 'static` bound is the substrate for the
+/// type-erased broadcast through `state.return_only`.
+#[allow(clippy::too_many_arguments)]
+pub fn cooperative_admit_with_post_publish<
+    K,
+    Entry,
+    V,
+    Validate,
+    Compute,
+    Project,
+    Revalidate,
+    PostPublish,
+>(
+    map: &DashMap<K, Arc<Entry>>,
+    inflight: &InflightTable<K>,
+    key: K,
+    validate: Validate,
+    compute: Compute,
+    project: Project,
+    revalidate_after_compute: Revalidate,
+    post_publish: PostPublish,
+) -> Option<V>
+where
+    K: Eq + Hash + Clone,
+    Entry: Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
+    Validate: FnOnce(&Entry) -> Option<V>,
+    Compute: FnOnce() -> ComputeAdmission<V, Entry>,
+    Project: FnOnce(&Entry) -> V,
+    Revalidate: FnOnce(&Entry) -> bool,
+    PostPublish: FnOnce(&Arc<Entry>, &K),
+{
+    // Warm-hit + validation. Same shape as the
+    // `cooperative_get_or_insert_with_post_publish` warm path.
+    if let Some(entry_arc) = map.get(&key).map(|e| e.clone()) {
+        if let Some(value) = validate(&entry_arc) {
+            return Some(value);
+        }
+        map.remove(&key);
+    }
+
+    // Claim the inflight slot or join an in-progress build.
+    let slot = {
+        let mut table = inflight.table.lock();
+        table
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(InflightSlot::new()))
+            .clone()
+    };
+
+    let mut state = slot.state.lock();
+    if state.claimed {
+        // Joiner — wait for the winner to publish or fail.
+        slot.ready.wait_while(&mut state, |s| !s.completed);
+        if state.failed {
+            return None;
+        }
+        // Winner completed without failure. Check the broadcast slot
+        // for a non-cacheable outcome BEFORE consulting the map; the
+        // winner emits `ReturnOnly(V)` directly into `return_only` and
+        // leaves the map untouched.
+        if let Some(boxed) = state.return_only.as_ref() {
+            if let Some(value) = boxed.downcast_ref::<V>() {
+                return Some(value.clone());
+            }
+            // Per-call V mismatch — should never happen given the
+            // contract. Fall through to the map path; on miss the
+            // joiner surfaces None.
+        }
+        drop(state);
+        let entry_arc = map.get(&key).map(|e| e.clone())?;
+        return Some(project(&entry_arc));
+    }
+    state.claimed = true;
+    drop(state);
+
+    // Cold winner runs compute under a panic guard.
+    let mut panic_guard = InflightPanicGuard::new(Arc::clone(&slot), &inflight.table, key.clone());
+
+    let admission = compute();
+
+    let value = match admission {
+        ComputeAdmission::Cacheable(entry) => {
+            if !revalidate_after_compute(&entry) {
+                {
+                    let mut state = slot.state.lock();
+                    state.completed = true;
+                    state.failed = true;
+                }
+                slot.ready.notify_all();
+                panic_guard.mark_finished();
+                drop(panic_guard);
+                inflight.table.lock().remove(&key);
+                return None;
+            }
+            let entry_arc = Arc::new(entry);
+            let value = project(&entry_arc);
+            map.insert(key.clone(), Arc::clone(&entry_arc));
+            post_publish(&entry_arc, &key);
+            {
+                let mut state = slot.state.lock();
+                state.completed = true;
+                // Broadcast the projected value to joiners via the
+                // type-erased channel so a joiner that wakes after the
+                // panic_guard retires the slot doesn't lose the value.
+                state.return_only = Some(Box::new(value.clone()));
+            }
+            slot.ready.notify_all();
+            Some(value)
+        }
+        ComputeAdmission::ReturnOnly(value) => {
+            // Valid result but not cacheable — broadcast the value to
+            // joiners through the slot's type-erased channel. The map
+            // stays empty so the next cold-miss recomputes.
+            {
+                let mut state = slot.state.lock();
+                state.completed = true;
+                state.return_only = Some(Box::new(value.clone()));
+            }
+            slot.ready.notify_all();
+            Some(value)
+        }
+        ComputeAdmission::Failed => {
+            {
+                let mut state = slot.state.lock();
+                state.completed = true;
+                state.failed = true;
+            }
+            slot.ready.notify_all();
+            None
+        }
+    };
+
+    panic_guard.mark_finished();
+    drop(panic_guard);
+
+    // Retire the inflight slot. Future callers either hit the warm map
+    // (Cacheable path) or start a fresh inflight (ReturnOnly /
+    // Failed paths leave the map empty).
     inflight.table.lock().remove(&key);
 
     value

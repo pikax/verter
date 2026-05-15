@@ -281,7 +281,11 @@ pub fn convert_dispatch_result(
 use std::cell::{Cell, RefCell};
 
 use crate::component_meta_caches::MaterializeStructureEntry;
-use crate::cooperative_admission::cooperative_get_or_insert_with_post_publish;
+// Migration: this consumer routes through
+// `cooperative_admit_with_post_publish` (the ComputeAdmission API)
+// instead of the legacy `cooperative_get_or_insert_with_post_publish`.
+// The legacy entry-point remains the public API for callers whose
+// compute closures never produce non-cacheable values.
 // Test-only — the in-tree `mod tests { … }` block at the bottom of this
 // file constructs `ProjectSemanticDispatch::new(host)` directly to drive
 // dispatch-pipeline assertions. Gated `#[cfg(test)]` to keep the
@@ -350,11 +354,12 @@ thread_local! {
 /// with the input key + depth.
 pub const MAX_DEPTH: usize = 4096;
 
-/// Side-channel slot used by [`materialize_component_meta_structure`]
-/// to share the compute closure's non-cacheable outcome (Tainted /
-/// Error / Recursive) with the fallback path that runs when
-/// `cooperative_get_or_insert_with_post_publish` returns `None`.
-type NonCacheableSlot = RefCell<Option<(MaterializeOutcome, Vec<(Arc<str>, DepVersion)>)>>;
+// `NonCacheableSlot` was a stack-local `RefCell<Option<...>>` side
+// channel used to broadcast non-cacheable materialisation outcomes
+// to the post-cooperative fallback. The carrier consolidation
+// retired it: cooperative joiners now observe non-cacheable outcomes
+// directly through `ComputeAdmission::ReturnOnly`'s typed broadcast
+// channel inside the in-flight slot (`cooperative_admission.rs`).
 
 /// RAII guard for the per-thread `MATERIALIZE_IN_FLIGHT`
 /// stack and the `MATERIALIZE_DEPTH` counter. Push on construction,
@@ -438,8 +443,10 @@ fn finish_cacheable(
     key: &MaterializeStructureCacheKey,
     outcome: MaterializeOutcome,
     mut local_fence: Vec<(Arc<str>, DepVersion)>,
-    non_cacheable_slot: &NonCacheableSlot,
-) -> Option<MaterializeStructureEntry> {
+) -> crate::cooperative_admission::ComputeAdmission<
+    crate::semantic_query::CacheRead<MaterializeOutcome>,
+    MaterializeStructureEntry,
+> {
     if !key.scope_canonical_id.as_ref().is_empty() {
         if let Some(indexed) = ctx
             .project_type_store()
@@ -451,9 +458,6 @@ fn finish_cacheable(
                 Arc::clone(&key.scope_canonical_id),
                 DepVersion::WholeHash(whole_hash),
             ));
-            // Sub-task E: mirror the scope-canonical fence push onto
-            // the active fact-read tracer. R24 — silent when no
-            // tracer is installed.
             crate::component_meta_audit::observe_fence_entry(
                 ctx,
                 &key.scope_canonical_id,
@@ -462,12 +466,24 @@ fn finish_cacheable(
         }
     }
     if !outcome.is_cacheable() {
-        *non_cacheable_slot.borrow_mut() = Some((outcome, local_fence));
-        return None;
+        // Valid result but cannot be admitted to the cache (the
+        // materialised outcome is intrinsically non-cacheable, e.g.
+        // Tainted). Broadcast via ComputeAdmission::ReturnOnly so
+        // joiners observe the same valid outcome. The CacheRead's
+        // dep_signature is empty: non-cacheable results MUST NOT
+        // propagate as cache deps (R20).
+        return crate::cooperative_admission::ComputeAdmission::ReturnOnly(
+            crate::semantic_query::CacheRead {
+                value: outcome,
+                dep_signature: empty_signature(),
+                walker_diagnostics: Arc::from([]),
+                cache_suppress: false,
+            },
+        );
     }
     let fact_dep_signature = fact_signature_from_fence(&local_fence);
     let legacy = dep_signature_from_fence(local_fence);
-    Some(MaterializeStructureEntry {
+    crate::cooperative_admission::ComputeAdmission::Cacheable(MaterializeStructureEntry {
         outcome,
         read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(
             fact_dep_signature,
@@ -592,16 +608,20 @@ pub(crate) fn materialize_component_meta_structure(
         }
     }
 
-    // Cooperative-admission cold build with post_publish.
-    // The compute closure shares its computed outcome via a side
-    // channel so the post-cooperative fallback (when the entry is
-    // non-cacheable and `cooperative_get_or_insert_with_post_publish`
-    // returns None) can return the correct outcome without
-    // re-dispatching.
-    let non_cacheable_outcome: NonCacheableSlot = RefCell::new(None);
+    // Cooperative-admission cold build with post_publish. The
+    // compute closure returns `ComputeAdmission<MaterializeOutcome,
+    // MaterializeStructureEntry>`: `Cacheable(entry)` for
+    // materialisations that admit to the cache, `ReturnOnly(outcome)`
+    // for valid-but-non-cacheable materialisations (intrinsically
+    // non-cacheable outcomes like Tainted, OR tracer-overflow
+    // refusals). The in-flight slot broadcasts the `ReturnOnly`
+    // outcome to cooperative joiners through the typed return-only
+    // channel — there is no longer a stack-local side channel.
     let key_for_compute = key.clone();
-    let non_cacheable_for_compute = &non_cacheable_outcome;
-    let compute = move || {
+    let compute = move || -> crate::cooperative_admission::ComputeAdmission<
+        crate::semantic_query::CacheRead<MaterializeOutcome>,
+        MaterializeStructureEntry,
+    > {
         let dispatch = ctx.dispatch();
         let graph = ctx.project_type_store().semantic_graph();
         let mut local_fence: Vec<(Arc<str>, DepVersion)> = Vec::new();
@@ -652,13 +672,7 @@ pub(crate) fn materialize_component_meta_structure(
                     key_for_compute.scope_axis,
                     crate::component_meta_audit::MaterializeSkipReason::RegistryRouteCycleGuard,
                 );
-                return finish_cacheable(
-                    ctx,
-                    &key_for_compute,
-                    MaterializeOutcome::Value(key_for_compute.base),
-                    local_fence,
-                    non_cacheable_for_compute,
-                );
+                return finish_cacheable(ctx, &key_for_compute, MaterializeOutcome::Value(key_for_compute.base), local_fence);
             }
             // Package-ref guard on the actual root.
             if crate::meta_resolve::component_meta_ref_resolves_to_package_node(
@@ -670,13 +684,7 @@ pub(crate) fn materialize_component_meta_structure(
                     key_for_compute.scope_axis,
                     crate::component_meta_audit::MaterializeSkipReason::PackageRefTopLevel,
                 );
-                return finish_cacheable(
-                    ctx,
-                    &key_for_compute,
-                    MaterializeOutcome::Value(key_for_compute.base),
-                    local_fence,
-                    non_cacheable_for_compute,
-                );
+                return finish_cacheable(ctx, &key_for_compute, MaterializeOutcome::Value(key_for_compute.base), local_fence);
             }
 
             // Guards passed — let dispatch project the original
@@ -720,13 +728,7 @@ pub(crate) fn materialize_component_meta_structure(
                     let body_id = match body_read.value {
                         QueryResult::Value(id) => id,
                         _ => {
-                            return finish_cacheable(
-                                ctx,
-                                &key_for_compute,
-                                MaterializeOutcome::Value(key_for_compute.base),
-                                local_fence,
-                                non_cacheable_for_compute,
-                            );
+                            return finish_cacheable(ctx, &key_for_compute, MaterializeOutcome::Value(key_for_compute.base), local_fence);
                         }
                     };
                     // Step B: instantiate the builtin carrier on
@@ -765,22 +767,10 @@ pub(crate) fn materialize_component_meta_structure(
                     let projected_id = match projected.value {
                         QueryResult::Value(id) => id,
                         _ => {
-                            return finish_cacheable(
-                                ctx,
-                                &key_for_compute,
-                                MaterializeOutcome::Value(key_for_compute.base),
-                                local_fence,
-                                non_cacheable_for_compute,
-                            );
+                            return finish_cacheable(ctx, &key_for_compute, MaterializeOutcome::Value(key_for_compute.base), local_fence);
                         }
                     };
-                    return finish_cacheable(
-                        ctx,
-                        &key_for_compute,
-                        MaterializeOutcome::Value(projected_id),
-                        local_fence,
-                        non_cacheable_for_compute,
-                    );
+                    return finish_cacheable(ctx, &key_for_compute, MaterializeOutcome::Value(projected_id), local_fence);
                 }
                 RouteDemand::MemberPath(_) => {
                     // IndexedAccess projection is dispatch's
@@ -827,13 +817,7 @@ pub(crate) fn materialize_component_meta_structure(
                     key_for_compute.scope_axis,
                     crate::component_meta_audit::MaterializeSkipReason::RecursiveHelperCycleGuard,
                 );
-                return finish_cacheable(
-                    ctx,
-                    &key_for_compute,
-                    MaterializeOutcome::Value(key_for_compute.base),
-                    local_fence,
-                    non_cacheable_for_compute,
-                );
+                return finish_cacheable(ctx, &key_for_compute, MaterializeOutcome::Value(key_for_compute.base), local_fence);
             }
         }
 
@@ -996,15 +980,23 @@ pub(crate) fn materialize_component_meta_structure(
             }
         }
         if !outcome.is_cacheable() {
-            // Don't publish non-cacheable outcomes — but stash the
-            // computed outcome + fence for the post-cooperative
-            // fallback so it doesn't need to re-dispatch.
-            *non_cacheable_for_compute.borrow_mut() = Some((outcome, local_fence));
-            return None;
+            // Valid result but intrinsically non-cacheable (Tainted
+            // outcome, e.g.). Route through ComputeAdmission::ReturnOnly
+            // so joiners observe the same valid outcome. The
+            // CacheRead's dep_signature is empty per R20 — non-cacheable
+            // results MUST NOT propagate as cache deps.
+            return crate::cooperative_admission::ComputeAdmission::ReturnOnly(
+                crate::semantic_query::CacheRead {
+                    value: outcome,
+                    dep_signature: empty_signature(),
+                    walker_diagnostics: Arc::from([]),
+                    cache_suppress: false,
+                },
+            );
         }
         let fact_dep_signature = fact_signature_from_fence(&local_fence);
         let legacy = dep_signature_from_fence(local_fence);
-        Some(MaterializeStructureEntry {
+        crate::cooperative_admission::ComputeAdmission::Cacheable(MaterializeStructureEntry {
             outcome,
             read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(
                 fact_dep_signature,
@@ -1014,68 +1006,73 @@ pub(crate) fn materialize_component_meta_structure(
     };
 
     let key_for_register = key.clone();
-    // Block 1.H: wrap the cooperative-admission compute closure with
+    // Wrap the cooperative-admission compute closure with
     // `install_fact_tracer`. On `FactReadSetFinalise::Ok`, override
-    // the entry's `fact_dep_signature` with the traced observation
-    // set (the producer's authoritative R28 signature). On
-    // `FactReadSetFinalise::Overflow`, the materialised outcome is
+    // the entry's `read_set_signature.facts` rail with the traced
+    // observation set (the producer's authoritative R28 signature).
+    // On `FactReadSetFinalise::Overflow`, the materialised outcome is
     // still valid — only the path-precise signature is too large to
-    // admit safely. Hand the outcome to the post-cooperative fallback
-    // via the existing `non_cacheable_outcome` side channel (with an
-    // empty fence so no spurious dep edges flow upward) and return
-    // `None` to refuse cache admission. The fallback at the bottom of
-    // `materialize_component_meta_structure` will surface
-    // `CacheRead { value: outcome, dep_signature: empty }` so the
-    // caller observes the valid materialisation and the next request
-    // cold-recomputes.
+    // admit safely. Route the value through `ComputeAdmission::ReturnOnly`
+    // so cooperative joiners observe the same valid outcome via the
+    // slot's typed return-only channel; the cache stays empty and the
+    // next request cold-recomputes.
     let host = ctx.host_for_fact_tracer_install();
-    let non_cacheable_for_overflow = &non_cacheable_outcome;
     let compute = {
         let provenance = Arc::clone(&host.provenance);
-        move || {
-            let (entry_opt, finalise) =
+        move || -> crate::cooperative_admission::ComputeAdmission<
+            crate::semantic_query::CacheRead<MaterializeOutcome>,
+            MaterializeStructureEntry,
+        > {
+            let (admission, finalise) =
                 crate::fact_signature_helpers::install_fact_tracer(host, compute);
             provenance
                 .materialize_structure_fact_tracer_installs
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             match finalise {
                 crate::resolver_core::FactReadSetFinalise::Ok(fact_dep_signature) => {
-                    entry_opt.map(|mut entry| {
-                        // Override the carrier's fact rail with the
-                        // tracer's authoritative observation set.
-                        let legacy = Arc::clone(&entry.read_set_signature.legacy);
-                        entry.read_set_signature =
-                            crate::fact_signature_helpers::ReadSetSignature::new(
-                                fact_dep_signature,
-                                legacy,
-                            );
-                        entry
-                    })
+                    match admission {
+                        crate::cooperative_admission::ComputeAdmission::Cacheable(mut entry) => {
+                            // Override the carrier's fact rail with the
+                            // tracer's authoritative observation set.
+                            let legacy = Arc::clone(&entry.read_set_signature.legacy);
+                            entry.read_set_signature =
+                                crate::fact_signature_helpers::ReadSetSignature::new(
+                                    fact_dep_signature,
+                                    legacy,
+                                );
+                            crate::cooperative_admission::ComputeAdmission::Cacheable(entry)
+                        }
+                        other => other,
+                    }
                 }
                 crate::resolver_core::FactReadSetFinalise::Overflow => {
                     provenance
                         .materialize_structure_overflow_refusals
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    // Stash the computed outcome on the side channel
-                    // so the post-cooperative fallback returns the
-                    // valid materialisation instead of Tainted. Fence
-                    // is intentionally empty: the entry is non-cacheable
-                    // and must not propagate dep edges (R20 — cache
-                    // entries with empty signatures are forbidden, but
-                    // the side-channel surface is NOT a cache entry,
-                    // it flows through `empty_signature()` on the
-                    // returned `CacheRead`).
-                    if let Some(entry) = entry_opt {
-                        *non_cacheable_for_overflow.borrow_mut() =
-                            Some((entry.outcome, Vec::new()));
+                    // Tracer overflowed — the materialised outcome is
+                    // valid but cannot be admitted safely. Convert a
+                    // Cacheable outcome to ReturnOnly so cooperative
+                    // joiners observe the value without admitting the
+                    // entry. Pre-existing ReturnOnly (intrinsically
+                    // non-cacheable) passes through unchanged.
+                    match admission {
+                        crate::cooperative_admission::ComputeAdmission::Cacheable(entry) => {
+                            crate::cooperative_admission::ComputeAdmission::ReturnOnly(
+                                crate::semantic_query::CacheRead {
+                                    value: entry.outcome,
+                                    dep_signature: empty_signature(),
+                                    walker_diagnostics: Arc::from([]),
+                                    cache_suppress: false,
+                                },
+                            )
+                        }
+                        other => other,
                     }
-                    // Refuse cache admission; caller cold-recomputes.
-                    None
                 }
             }
         }
     };
-    let result = cooperative_get_or_insert_with_post_publish(
+    let result = crate::cooperative_admission::cooperative_admit_with_post_publish(
         db.entries(),
         db.inflight(),
         key.clone(),
@@ -1118,23 +1115,10 @@ pub(crate) fn materialize_component_meta_structure(
     match result {
         Some(read) => read,
         None => {
-            // Compute returned None (non-cacheable outcome) OR
-            // revalidation failed. Use the outcome the compute
-            // closure stashed in the side channel — non-cacheable
-            // results don't propagate as cache deps so the fence
-            // is dropped.
-            if let Some((outcome, _fence)) = non_cacheable_outcome.into_inner() {
-                return crate::semantic_query::CacheRead {
-                    value: outcome,
-                    dep_signature: empty_signature(),
-                    walker_diagnostics: Arc::from([]),
-                    cache_suppress: false,
-                };
-            }
-            // Revalidation failed (no compute outcome stashed).
-            // Return Tainted on the input id — the next call will
-            // re-attempt cooperative admission with the fresh
-            // dep-signature.
+            // Cooperative-admission failed (compute returned `Failed`
+            // or revalidate-after-compute rejected). Return Tainted
+            // on the input id — the next call will re-attempt
+            // cooperative admission with the fresh dep-signature.
             crate::semantic_query::CacheRead {
                 value: MaterializeOutcome::Tainted(key.base),
                 dep_signature: empty_signature(),

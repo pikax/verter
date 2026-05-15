@@ -1719,6 +1719,7 @@ impl SemanticGraphStore {
             walker_diagnostics,
             cache_suppress,
             fact_dep_signature: traced_fact_dep_signature,
+            pending_prefix_backfills,
         } = build_output;
         let walker_diagnostics: std::sync::Arc<
             [crate::project_semantic_dispatch::walk::ShallowDiagnostic],
@@ -1793,6 +1794,28 @@ impl SemanticGraphStore {
                 traced_fact_dep_signature.as_ref(),
                 &inflight,
             );
+            // Carrier-aware prefix backfill: publish each accumulated
+            // backfill record AFTER the parent entry is warm so the
+            // sibling-share short-circuit at `find_longest_warm_prefix`
+            // sees the prefixes with the parent's authoritative
+            // path-precise fact signature. Publication uses the same
+            // `warm_publish_one_if_absent` substrate so the prefix
+            // entries land in the unified reverse index.
+            //
+            // The signature passed to `warm_publish_one_if_absent` is
+            // the parent's `dep_signature` (legacy); the helper
+            // internally derives a `fact_dep_signature` for the prefix.
+            // When `traced_fact_dep_signature` is `Some`, that's the
+            // authoritative fact set; when `None`, the helper falls
+            // back to fence-derived facts. This is the same fall-back
+            // path the parent entry uses.
+            for backfill in pending_prefix_backfills {
+                self.warm_publish_one_if_absent(
+                    backfill.key,
+                    QueryResult::Value(backfill.node),
+                    dep_signature.clone(),
+                );
+            }
         } else {
             tracing::debug!(
                 target: "verter::memo::suppress",
@@ -2103,38 +2126,17 @@ impl SemanticGraphStore {
             }
         }
     }
-
-    /// Path-prefix backfill API. Publishes a
-    /// `(key, value, dep_signature)` triple via the same warm-publish
-    /// helper that [`Self::execute_cooperative`] uses (extracted as
-    /// [`Self::warm_publish_one_if_absent`]), gated by the "absent
-    /// only" check. Never blocks, never starts compute, never
-    /// participates in the in-flight admission flow.
-    ///
-    /// **PRECONDITION:** `key.mode == ProjectionMode::Navigate`. Phase
-    /// 1B only backfills intermediate path hops, which by the
-    /// path-precise rule (CLAUDE.md "Macro Type Traversal Rule") must
-    /// be Navigate-mode entries. Calling this with any other mode is a
-    /// programming error and trips a debug assertion.
-    pub(crate) fn publish_warm_if_absent(
-        &self,
-        key: SemanticQueryKey,
-        value: SemanticNodeId,
-        dep_signature: DepSignature,
-    ) {
-        debug_assert!(
-            matches!(
-                &key,
-                SemanticQueryKey::ProjectPath {
-                    mode: crate::semantic_query::ProjectionMode::Navigate,
-                    ..
-                }
-            ),
-            "publish_warm_if_absent only takes ProjectPath{{Navigate}} keys (path-precise rule)"
-        );
-        self.warm_publish_one_if_absent(key, QueryResult::Value(value), dep_signature);
-    }
 }
+
+// `publish_warm_if_absent` was an immediate-publish path-prefix
+// backfill API used by `backfill_prefixes` in `build_project_path`.
+// Carrier-aware deferral retired it: backfills now accumulate onto
+// `QueryBuildOutput.pending_prefix_backfills` and the cooperative
+// admission flow publishes them via `warm_publish_one_if_absent`
+// AFTER the parent's `install_fact_tracer` finalises. This guarantees
+// each backfilled memo entry's carrier holds the parent's
+// authoritative path-precise fact signature instead of a fence-only
+// derivation that drops Parse/ResolveImports/RouteSurface facts.
 
 /// Per-key error returned by `SemanticGraphStore::execute_cooperative_batch`
 /// (D103). Mirrors the proto `BatchExpandError` enum so the BFS bridge can

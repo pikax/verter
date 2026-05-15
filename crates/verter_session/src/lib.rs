@@ -101,7 +101,7 @@ pub mod component_meta_result_db;
 mod component_meta_slot_binding_skip_tests;
 #[cfg(test)]
 mod component_meta_terminal_mode_tests;
-pub(crate) mod cooperative_admission;
+pub mod cooperative_admission;
 pub mod cross_file;
 mod deps;
 pub mod fact_emission;
@@ -256,6 +256,17 @@ pub mod for_tests {
     /// fixtures into `ComponentMetaResultEntry` / `MaterializeStructureEntry` /
     /// `OwnerImportSurface` / `RefCycleEntry` / `MemoEntry`.
     pub use crate::fact_signature_helpers::ReadSetSignature;
+
+    /// Constructs `ComputeAdmission::Failed` for the
+    /// `compute_admission_failed_variant_is_constructible` discriminator
+    /// in `tests/block_1_i_discriminators.rs`. The Failed variant is
+    /// part of the codex three-variant contract for
+    /// `cooperative_admit_with_post_publish`; this helper proves it is
+    /// constructible so the variant cannot be silently dropped.
+    pub fn cooperative_admission_failed_variant_for_tests(
+    ) -> crate::cooperative_admission::ComputeAdmission<(), ()> {
+        crate::cooperative_admission::ComputeAdmission::Failed
+    }
 
     /// Fan `sig` into every active tracer on the current thread's TLS
     /// stack. Integration tests use this to verify that the multi-level
