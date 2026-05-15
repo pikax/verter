@@ -135,15 +135,41 @@ pub(crate) trait ResolverContext: sealed::Sealed {
 
     fn get_whole_hash(&self, canonical: &str) -> Option<Hash16>;
 
+    /// Authoritative current content hash for `canonical` — the hash
+    /// source [`Self::indexed_for_current_content`] pins against.
+    ///
+    /// Unlike [`Self::get_whole_hash`] this accessor has **no
+    /// permissive fallback**: it never derives a hash from
+    /// `FileArtifactStore::get_any` / `content_hash_for_canonical`.
+    /// When only a stale artifact could answer (the canonical was
+    /// evicted/deleted while its `IndexedReady` lingers) it returns
+    /// `None` so the pinned read becomes a miss rather than resolving
+    /// the stale artifact via its own hash.
+    ///
+    /// The default impl delegates to
+    /// [`crate::VerterHost::authoritative_current_content_hash`] on the
+    /// concrete host — the scheduler `parse.whole_hash` gated on the
+    /// `DerivedRawState` entry being non-evicted. The overlay-aware
+    /// [`crate::resolver_core::session_resolver_context::SessionResolverContext`]
+    /// overrides it to consult the active [`SessionView`](crate::session_view::SessionView):
+    /// an overlay-covered canonical resolves to the overlay's content
+    /// hash (the hash the overlay `IndexedReady` was prewarmed under),
+    /// not the base host's hash.
+    fn authoritative_current_content_hash(&self, canonical: &str) -> Option<Hash16> {
+        self.host_for_fact_tracer_install()
+            .authoritative_current_content_hash(canonical)
+    }
+
     /// Content-pinned [`IndexedReady`] lookup.
     ///
-    /// Resolves the canonical's authoritative current content hash
-    /// ([`Self::get_whole_hash`]) and reads the artifact store pinned
-    /// to that hash via
+    /// Resolves the canonical's authoritative current content hash via
+    /// [`Self::authoritative_current_content_hash`] (no `get_any`
+    /// fallback; overlay-aware under `SessionResolverContext`) and
+    /// reads the artifact store pinned to that hash via
     /// [`crate::file_artifact_store::FileArtifactStore::get_for_current_content`].
-    /// Returns `None` when the canonical has no current content hash OR
-    /// when the only cached artifact is a stale candidate for an older
-    /// content hash.
+    /// Returns `None` when the canonical has no authoritative current
+    /// content hash OR when the only cached artifact is a stale
+    /// candidate for an older content hash.
     ///
     /// Correctness-sensitive readers in the seal scope —
     /// materialisation fence seeding (`component_meta_materialize.rs`)
@@ -153,15 +179,18 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     /// a fence (or observing a `FileWholeHash` fact) from a stale
     /// artifact bakes the stale content hash into the cached entry's
     /// `read_set_signature`, so fact validation would later confirm a
-    /// stale cache entry as valid.
+    /// stale cache entry as valid. Resolving the pin from a `get_any`
+    /// hash, or from the base host's hash while an overlay is active,
+    /// reintroduces exactly that staleness — so the pin is derived
+    /// strictly from the authoritative accessor above.
     ///
-    /// Defaulted so the single implementer ([`crate::VerterHost`]) and
-    /// the overlay-aware
-    /// [`crate::resolver_core::session_resolver_context::SessionResolverContext`]
-    /// both inherit the identical pinned-read behaviour without
-    /// per-impl boilerplate.
+    /// Defaulted so the base implementer ([`crate::VerterHost`]) and
+    /// the overlay-aware `SessionResolverContext` both inherit the
+    /// identical pinned-read body; only the hash source differs, and
+    /// that difference lives in
+    /// [`Self::authoritative_current_content_hash`].
     fn indexed_for_current_content(&self, canonical: &str) -> Option<Arc<IndexedReady>> {
-        let current_hash = self.get_whole_hash(canonical)?;
+        let current_hash = self.authoritative_current_content_hash(canonical)?;
         self.project_type_store()
             .indexed()
             .get_for_current_content(canonical, current_hash)

@@ -167,6 +167,36 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
         ResolverContext::get_whole_hash(self.inner, canonical)
     }
 
+    /// Overlay-aware authoritative current-content hash.
+    ///
+    /// The base-host default ([`ResolverContext::authoritative_current_content_hash`])
+    /// reads the scheduler's `parse.whole_hash`, which is the *base*
+    /// content hash. When this context wraps an overlay over an
+    /// existing base file, the overlay `IndexedReady` candidate was
+    /// prewarmed under the *overlay* content hash — so a content-pinned
+    /// read keyed by the base hash would miss the overlay candidate (or
+    /// resolve the stale base artifact) while computing overlay
+    /// component-meta / proof data.
+    ///
+    /// Resolution order:
+    /// 1. An overlay-Upsert covering `canonical` →
+    ///    [`SessionView::overlay_content_hash_for`] (the overlay
+    ///    source's hash). Authoritative for this session.
+    /// 2. A session tombstone for `canonical` → `None` (the session
+    ///    deleted the file; there is no current content).
+    /// 3. Otherwise → the base-host authoritative scheduler hash, with
+    ///    the same no-`get_any` guarantee as the base default.
+    #[inline]
+    fn authoritative_current_content_hash(&self, canonical: &str) -> Option<Hash16> {
+        if let Some(overlay_hash) = self.view.overlay_content_hash_for(canonical) {
+            return Some(overlay_hash);
+        }
+        if self.view.is_tombstoned(canonical) {
+            return None;
+        }
+        self.inner.authoritative_current_content_hash(canonical)
+    }
+
     #[inline]
     fn resolver_store_view(&self) -> HostStoreView {
         ResolverContext::resolver_store_view(self.inner)
@@ -384,6 +414,10 @@ impl<'a> SessionView for BoundSessionViewRef<'a> {
 
     fn content_hash_for(&self, canonical: &str) -> Option<Hash16> {
         self.inner.content_hash_for(canonical)
+    }
+
+    fn overlay_content_hash_for(&self, canonical: &str) -> Option<Hash16> {
+        self.inner.overlay_content_hash_for(canonical)
     }
 
     fn parse_artifacts(

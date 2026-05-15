@@ -93,6 +93,29 @@ pub trait SessionView: Send + Sync {
     /// returns the base host's content hash (or `None`).
     fn content_hash_for(&self, canonical: &str) -> Option<Hash16>;
 
+    /// Content hash of the **explicit overlay** covering `canonical`,
+    /// or `None` when this view carries no overlay for it.
+    ///
+    /// Distinct from [`Self::content_hash_for`]: that method falls
+    /// through to the base host's `FileArtifactStore`-derived content
+    /// hash for unmasked canonicals (a permissive scan that can
+    /// surface a *stale* lingering artifact's hash). This method
+    /// reports `Some` **only** when the session has installed an
+    /// overlay-Upsert for `canonical` — the overlay source's hash,
+    /// which the overlay `IndexedReady` candidate was prewarmed under.
+    ///
+    /// Overlay-tombstoned canonicals report `None` (the session
+    /// deleted the file — there is no overlay content).
+    ///
+    /// Default returns `None` — base-only views ([`HostView`],
+    /// [`HostViewRef`]) never carry overlays. Content-pinned
+    /// resolver-tier readers consult this to pin overlay artifacts
+    /// against the overlay hash while still treating the base
+    /// fallthrough as authoritative-only (no `get_any`).
+    fn overlay_content_hash_for(&self, _canonical: &str) -> Option<Hash16> {
+        None
+    }
+
     /// Return cached file artifacts (indexed-ready + facts +
     /// parsed-edges + parse_stable_hash + augmentations) for a
     /// canonical id, if a content-matching artifact bundle is
@@ -482,6 +505,12 @@ impl SessionView for OverlaidView {
             .content_hash_for_canonical(canonical)
     }
 
+    fn overlay_content_hash_for(&self, canonical: &str) -> Option<Hash16> {
+        // Explicit overlay hash only — no base fallthrough. `OverlaidView`
+        // has no tombstone set, so a present overlay hash is authoritative.
+        self.overlay_hashes.get(canonical).copied()
+    }
+
     fn parse_artifacts(
         &self,
         canonical: &str,
@@ -746,6 +775,15 @@ impl SessionView for OverlaidViewRef<'_> {
             .project_type_store()
             .indexed()
             .content_hash_for_canonical(canonical)
+    }
+
+    fn overlay_content_hash_for(&self, canonical: &str) -> Option<Hash16> {
+        // A tombstoned canonical has no overlay content even if a
+        // stale overlay hash lingered in the map.
+        if self.overlay_tombstones.contains(canonical) {
+            return None;
+        }
+        self.overlay_hashes.get(canonical).copied()
     }
 
     fn is_tombstoned(&self, canonical: &str) -> bool {

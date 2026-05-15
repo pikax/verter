@@ -634,28 +634,74 @@ impl VerterHost {
         }
     }
 
+    /// Authoritative current content hash for a canonical — the
+    /// **scheduler-only** content-hash source with no permissive
+    /// fallback.
+    ///
+    /// Returns the scheduler's `HostSourceData.parse.whole_hash`
+    /// **only** when the canonical's [`DerivedRawState`] entry is
+    /// visible and not evicted (the same gate
+    /// [`Self::get_whole_hash`] applies to its scheduler branch).
+    /// Returns `None` otherwise — in particular when the canonical
+    /// has been evicted or deleted but a stale `IndexedReady` still
+    /// lingers in [`FileArtifactStore`](crate::file_artifact_store::FileArtifactStore).
+    ///
+    /// This is the distinguishing contract: unlike
+    /// [`Self::get_whole_hash`], this accessor never falls back to
+    /// `FileArtifactStore::get_any` / `content_hash_for_canonical`.
+    /// A `get_any`-derived hash is the stale artifact's *own* hash,
+    /// so feeding it into a content-pinned lookup would resolve the
+    /// stale artifact instead of yielding a miss — exactly the
+    /// failure a content pin exists to prevent. Content-pinned
+    /// callers MUST resolve their hash through here; non-pinning
+    /// callers may keep using `get_whole_hash` with its permissive
+    /// fallback.
+    #[must_use]
+    pub(crate) fn authoritative_current_content_hash(&self, canonical: &str) -> Option<Hash16> {
+        use crate::host_executor::HostSourceData;
+        // Eviction gate — mirrors `get_whole_hash`'s scheduler branch.
+        // An evicted entry means the canonical is no longer live; any
+        // artifact still in `FileArtifactStore` is stale and must not
+        // back a "current content" pin.
+        let entry_visible = self
+            .derived_raw_cache()
+            .get(canonical)
+            .is_some_and(|d| !d.evicted);
+        if !entry_visible {
+            return None;
+        }
+        let snap = self.scheduler.try_get_source(canonical)?;
+        let hd = snap.downcast_data::<HostSourceData>()?;
+        Some(hd.parse.whole_hash)
+    }
+
     /// Content-pinned [`crate::project_type_store::IndexedReady`] lookup.
     ///
-    /// Resolves the canonical's authoritative current content hash
-    /// ([`Self::get_whole_hash`] — scheduler `parse.whole_hash` first,
-    /// `FileArtifactStore` content hash as the no-scheduler fallback)
-    /// and reads the artifact store **pinned to that hash** via
+    /// Resolves the canonical's authoritative current content hash via
+    /// [`Self::authoritative_current_content_hash`] (scheduler
+    /// `parse.whole_hash`, gated on the entry being non-evicted; no
+    /// `get_any` fallback) and reads the artifact store **pinned to
+    /// that hash** via
     /// [`crate::file_artifact_store::FileArtifactStore::get_for_current_content`].
     ///
-    /// Returns `None` when the canonical has no current content hash OR
-    /// when the only cached artifact is a stale candidate for an older
-    /// content hash. Correctness-sensitive readers (route-hash /
-    /// import-route-hash fact production) MUST use this instead of the
-    /// permissive `get_any`: with eager `evict_canonical` retired a
-    /// stale `IndexedReady` can coexist with the live content, and
-    /// sampling its `route_hash` / `import_route_hash` as "current"
-    /// would confirm a stale cache entry to the fact validator.
+    /// Returns `None` when the canonical has no authoritative current
+    /// content hash (unloaded / evicted / deleted) OR when the only
+    /// cached artifact is a stale candidate for an older content hash.
+    /// Correctness-sensitive readers (route-hash / import-route-hash
+    /// fact production) MUST use this instead of the permissive
+    /// `get_any`: with eager `evict_canonical` retired a stale
+    /// `IndexedReady` can coexist with the live content, and sampling
+    /// its `route_hash` / `import_route_hash` as "current" would
+    /// confirm a stale cache entry to the fact validator. Deriving the
+    /// pin from a `get_any`-backed hash would let the same stale
+    /// artifact answer its own pin, so the hash source is restricted
+    /// to the authoritative scheduler value.
     #[must_use]
     pub(crate) fn current_content_pinned_indexed(
         &self,
         canonical: &str,
     ) -> Option<Arc<crate::project_type_store::IndexedReady>> {
-        let current_hash = self.get_whole_hash(canonical)?;
+        let current_hash = self.authoritative_current_content_hash(canonical)?;
         self.project_type_store
             .indexed()
             .get_for_current_content(canonical, current_hash)

@@ -125,6 +125,86 @@ fn current_content_pinned_indexed_rejects_stale_artifact() {
     );
 }
 
+/// Codex P1.A discriminator — a content-pinned read MUST NOT resolve a
+/// stale artifact via a `get_any`-derived hash.
+///
+/// When a file is evicted (`VerterHost::evict` sets the
+/// `DerivedRawState.evicted` flag) its `IndexedReady` is NOT removed
+/// from `FileArtifactStore` — the artifact lingers. The pre-fix
+/// `current_content_pinned_indexed` derived its pin from
+/// `get_whole_hash`, which — once the scheduler branch is gated off by
+/// the eviction flag — falls back to `FileArtifactStore::get_any`. That
+/// `get_any` returns the lingering artifact and surfaces *its own*
+/// `whole_hash`; feeding that hash straight back into
+/// `get_for_current_content` re-resolves the very same stale artifact.
+/// The "pin" then confirms the stale artifact as current.
+///
+/// Post-fix the pin is resolved by `authoritative_current_content_hash`,
+/// which is scheduler-only and returns `None` for an evicted canonical.
+/// The content-pinned read therefore returns `None` (a genuine miss →
+/// recompute) instead of the lingering stale artifact.
+///
+/// Discriminator: pre-fix this returns `Some(<lingering artifact>)`;
+/// post-fix it returns `None`.
+#[test]
+fn current_content_pinned_indexed_returns_none_after_eviction() {
+    let canonical = "/pinned/evicted_owner.ts";
+    let (host, real_hash) = host_with_materialized_ts(
+        canonical,
+        "export type Exported = string;\nexport interface Surface { x: number; }\n",
+    );
+
+    // Before eviction the content-pinned read HITS the genuine current
+    // artifact — this anchors the discriminator (the assertion below is
+    // not vacuously satisfied by a systematically-missing read).
+    assert!(
+        host.current_content_pinned_indexed(canonical).is_some(),
+        "fixture invariant: the content-pinned read must HIT the genuine \
+         current artifact before eviction",
+    );
+
+    // Evict the file. `evict` flips `DerivedRawState.evicted` but leaves
+    // the `IndexedReady` in `FileArtifactStore` — the exact
+    // lingering-stale state.
+    host.evict(canonical);
+
+    // Fixture invariant: the artifact still lingers in the store under
+    // its real content hash, so `get_any` (the pre-fix hash source)
+    // still returns it.
+    let lingering = host
+        .project_type_store()
+        .indexed()
+        .get_any(canonical)
+        .expect("evict must NOT remove the IndexedReady from FileArtifactStore");
+    assert_eq!(
+        lingering.whole_hash, real_hash,
+        "fixture invariant: the lingering artifact keeps its real content \
+         hash — a pre-fix `get_whole_hash` would surface THIS hash via \
+         `get_any` and re-resolve the same artifact",
+    );
+
+    // Post-fix: the authoritative hash source is scheduler-only and
+    // gated on the eviction flag, so it reports no current hash for an
+    // evicted canonical.
+    assert!(
+        host.authoritative_current_content_hash(canonical).is_none(),
+        "authoritative_current_content_hash MUST return None for an evicted \
+         canonical — it must not fall back to a `get_any`-derived hash",
+    );
+
+    // The discriminating assertion: the content-pinned read returns
+    // `None` (miss → recompute), NOT the lingering stale artifact. A
+    // pre-fix tree returns `Some(lingering)` here.
+    let pinned = host.current_content_pinned_indexed(canonical);
+    assert!(
+        pinned.is_none(),
+        "current_content_pinned_indexed MUST return None after eviction: a \
+         non-None result means the pin was derived from the lingering \
+         artifact's own `get_any` hash, which re-resolves the stale artifact \
+         and confirms it as current — the exact codex P1.A defect.",
+    );
+}
+
 /// `current_derived_fact_hash(Route)` is the Route fact-validation
 /// oracle. With a stale artifact planted, a `get_any`-based oracle
 /// would return the planted stale `route_hash`; the content-pinned
@@ -230,5 +310,114 @@ fn import_route_derived_fact_hash_ignores_stale_artifact_hash() {
         Some(STALE_HASH),
         "the genuine current ImportRoute hash must never equal the planted \
          stale sentinel",
+    );
+}
+
+/// Codex P1.B discriminator — a content-pinned read through
+/// `SessionResolverContext` MUST pin against the overlay content hash,
+/// not the base host's hash.
+///
+/// When an overlay covers a file that also exists on the base host,
+/// `materialize_overlay_indexed_ready` publishes the overlay
+/// `IndexedReady` into `FileArtifactStore` under the *overlay* content
+/// hash, as a multi-candidate sibling of the base artifact (which lives
+/// under the *base* content hash).
+///
+/// The pre-fix `indexed_for_current_content` derived its pin from
+/// `get_whole_hash`. `SessionResolverContext::get_whole_hash` delegates
+/// straight to the base host, so it returns the BASE content hash — and
+/// the pinned read resolves the BASE artifact (or misses the overlay
+/// entirely) while the session is computing overlay component-meta /
+/// proof data.
+///
+/// Post-fix the pin is resolved by `authoritative_current_content_hash`,
+/// which `SessionResolverContext` overrides to consult the active
+/// `SessionView`: an overlay-covered canonical resolves to the overlay
+/// hash, so the content-pinned read returns the OVERLAY artifact.
+///
+/// Discriminator: pre-fix `indexed_for_current_content` returns the
+/// artifact whose `whole_hash == base_hash`; post-fix it returns the
+/// artifact whose `whole_hash == overlay_hash`.
+#[test]
+fn indexed_for_current_content_pins_overlay_artifact_through_session_context() {
+    use crate::resolver_core::{ResolverContext, SessionResolverContext};
+    use crate::session_view::{OverlaidView, SessionView};
+    use rustc_hash::FxHashMap;
+
+    let canonical = "/overlay/probe.ts";
+    // Base file: materialised on the host under the base content hash.
+    let (host, base_hash) = host_with_materialized_ts(
+        canonical,
+        "export interface Probe { base: number; }\nexport const probe = 1;\n",
+    );
+    let host = Arc::new(host);
+
+    // Overlay source: deliberately different bytes → different content
+    // hash, so the base and overlay artifacts are distinguishable by
+    // `whole_hash`.
+    let overlay_source: Arc<str> =
+        Arc::from("export interface Probe { overlay: string; }\nexport const probe = 2;\n");
+    let mut overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();
+    overlays.insert(canonical.to_string(), Arc::clone(&overlay_source));
+    let view = OverlaidView::new(Arc::clone(&host), overlays);
+
+    // The overlay hash is the view's authoritative overlay-content hash.
+    let overlay_hash = view
+        .overlay_content_hash_for(canonical)
+        .expect("OverlaidView must report an overlay content hash for the masked canonical");
+    assert_ne!(
+        overlay_hash, base_hash,
+        "fixture invariant: the overlay source differs from the base, so its \
+         content hash must differ — otherwise base/overlay are indistinguishable",
+    );
+
+    // Publish the overlay `IndexedReady` candidate under the overlay
+    // hash (multi-candidate sibling of the base artifact).
+    let overlay_indexed = host
+        .materialize_overlay_indexed_ready(canonical, &overlay_source, overlay_hash)
+        .expect("overlay IndexedReady must materialise");
+    assert_eq!(
+        overlay_indexed.whole_hash, overlay_hash,
+        "fixture invariant: the overlay artifact is keyed by the overlay hash",
+    );
+
+    // Sanity: the base artifact is still in the store under the base
+    // hash — both candidates coexist.
+    let base_indexed = host
+        .project_type_store()
+        .indexed()
+        .get(canonical, base_hash)
+        .expect("base artifact must still be cached under the base hash");
+    assert_eq!(base_indexed.whole_hash, base_hash);
+
+    // Drive the content-pinned read through the session context.
+    let ctx = SessionResolverContext::new(&host, &view);
+
+    // The session view's authoritative current-content hash must be the
+    // OVERLAY hash, not the base hash.
+    assert_eq!(
+        ctx.authoritative_current_content_hash(canonical),
+        Some(overlay_hash),
+        "SessionResolverContext::authoritative_current_content_hash MUST \
+         resolve the overlay hash for an overlay-covered canonical, not the \
+         base host's hash",
+    );
+
+    // The discriminating assertion: the content-pinned read returns the
+    // OVERLAY artifact. Pre-fix it returns the base artifact (pinned by
+    // the base host's hash).
+    let pinned = ctx
+        .indexed_for_current_content(canonical)
+        .expect("the content-pinned read must HIT a candidate");
+    assert_eq!(
+        pinned.whole_hash, overlay_hash,
+        "indexed_for_current_content through SessionResolverContext MUST \
+         return the OVERLAY artifact (whole_hash == overlay_hash). A result \
+         keyed by base_hash means the pin was derived from the base host's \
+         hash rather than the session view — the exact codex P1.B defect.",
+    );
+    assert_ne!(
+        pinned.whole_hash, base_hash,
+        "the overlay-pinned read must NOT surface the base artifact",
     );
 }
