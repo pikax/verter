@@ -1,19 +1,13 @@
-//! Block 1.B matrix slice — `ComponentMetaResultEntry.fact_dep_signature`
-//! must be able to carry `FactKey::MemberPresence` facts so warm-hit
-//! validation invalidates when a referenced member is renamed /
-//! added / removed on a dep (path-precise per R28).
+//! `ComponentMetaResultEntry.read_set_signature.facts` must be able
+//! to carry `FactKey::MemberPresence` facts so warm-hit validation
+//! invalidates when a referenced member is renamed / added / removed
+//! on a dep (path-precise per R28).
 //!
-//! Pre-1.B: the entry only carried `dep_signature: DepSignature`
-//! (whole-hash + project-generation pairs); the field
-//! `fact_dep_signature` does not exist, so this test fails to
-//! compile.
-//!
-//! Post-1.B: the entry carries
-//! `fact_dep_signature: Arc<[FactVersionRef]>` and the
-//! `MemberPresence` fact-kind validates through the per-domain
-//! fast-path under a permissive view. The producer-side wiring is
-//! covered by the behavioural tests; this slice asserts the
-//! substrate can hold the matrix variant.
+//! After the carrier consolidation: the entry stores
+//! `read_set_signature: ReadSetSignature` where the `facts: Arc<[FactVersionRef]>`
+//! rail validates through the per-domain fast-path under a permissive
+//! view. The producer-side wiring is covered by the behavioural tests;
+//! this slice asserts the substrate can hold the matrix variant.
 
 #![cfg(test)]
 
@@ -23,6 +17,7 @@ use std::{fs, path};
 use verter_semantic::facts::registry::{InternedName, SymbolSpace};
 use verter_semantic::facts::{FactKey, FactLane};
 use verter_session::component_meta_result_db::ComponentMetaResultEntry;
+use verter_session::for_tests::ReadSetSignature;
 use verter_session::resolver_core::{FactVersionRef, ParseFactRef, PermissiveStoreView, StoreView};
 
 fn read_session_src(rel: &str) -> String {
@@ -36,7 +31,10 @@ fn read_session_src(rel: &str) -> String {
 
 fn component_meta_result_signature_carries_member_presence() {
     // Structural arch guard: `ComponentMetaResultEntry` must declare
-    // `fact_dep_signature: Arc<[FactVersionRef]>` after Block 1.B.
+    // `read_set_signature: ReadSetSignature` after the carrier
+    // consolidation. The carrier's `facts: Arc<[FactVersionRef]>` rail
+    // carries the path-precise fact signature; the legacy rail carries
+    // the whole-hash / project-generation pairs.
     let src = read_session_src("component_meta_result_db.rs");
     let needle = "pub struct ComponentMetaResultEntry<P> {";
     let idx = src
@@ -47,18 +45,16 @@ fn component_meta_result_signature_carries_member_presence() {
         .expect("ComponentMetaResultEntry struct close");
     let window = &src[idx..idx + end];
     assert!(
-        window.contains("fact_dep_signature: Arc<[FactVersionRef]>")
-            || window.contains("fact_dep_signature: Arc<[crate::resolver_core::FactVersionRef]>"),
-        "Block 1.B matrix slice: ComponentMetaResultEntry must carry \
-         `fact_dep_signature: Arc<[FactVersionRef]>`. Window:\n{window}"
+        window.contains("read_set_signature: crate::fact_signature_helpers::ReadSetSignature")
+            || window.contains("read_set_signature: ReadSetSignature"),
+        "ComponentMetaResultEntry must carry \
+         `read_set_signature: ReadSetSignature`. Window:\n{window}"
     );
 
     // Compile-time witness: build a `MemberPresence`-bearing
     // signature and verify the substrate accepts it through the
     // per-domain dispatcher under a permissive view. Constructing
-    // an entry requires both the legacy `dep_signature` and the
-    // new `fact_dep_signature` field — the type-checker enforces
-    // the structural contract.
+    // an entry requires the carrier's `facts` rail to be populated.
     let presence_fact = FactVersionRef::Parse(ParseFactRef {
         canonical_id: "/src/types.ts".to_owned(),
         key: FactKey::MemberPresence {
@@ -73,19 +69,21 @@ fn component_meta_result_signature_carries_member_presence() {
 
     let entry: ComponentMetaResultEntry<u32> = ComponentMetaResultEntry {
         payload: Arc::new(0u32),
-        dep_signature: Arc::from(Vec::new().into_boxed_slice()),
-        fact_dep_signature: Arc::clone(&signature),
+        read_set_signature: ReadSetSignature::new(
+            Arc::clone(&signature),
+            Arc::from(Vec::new().into_boxed_slice()),
+        ),
     };
     assert!(
-        !entry.fact_dep_signature.is_empty(),
-        "Block 1.B matrix slice: the constructed entry must carry the \
-         MemberPresence fact in its fact_dep_signature"
+        !entry.read_set_signature.facts.is_empty(),
+        "the constructed entry must carry the MemberPresence fact in \
+         its `read_set_signature.facts`"
     );
 
     let view = PermissiveStoreView;
     assert!(
-        view.validates_fact_signature(&entry.fact_dep_signature),
+        view.validates_fact_signature(&entry.read_set_signature.facts),
         "permissive view must accept the MemberPresence fact in the \
-         entry's fact_dep_signature"
+         entry's `read_set_signature.facts`"
     );
 }

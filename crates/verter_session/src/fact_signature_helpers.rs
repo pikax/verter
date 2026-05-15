@@ -343,3 +343,338 @@ pub(crate) fn fact_signature_for_canonical_surface(
 pub(crate) fn empty_fact_signature() -> Arc<[FactVersionRef]> {
     Arc::from(Vec::<FactVersionRef>::new())
 }
+
+/// Transition carrier for a cache entry's dependency signature.
+///
+/// `facts` is the path-precise fact signature captured by an
+/// `install_fact_tracer` scope. `legacy` is the whole-hash /
+/// project-generation signature retained for cache entries whose
+/// producers still gate on `validate_dep_signature` (the legacy
+/// validator). The follow-up hygiene block deletes `legacy`; the
+/// carrier's surface (`validate`, `bubble`, `canonical_ids`,
+/// `is_overflow`) is invariant under that deletion.
+///
+/// The carrier is `pub(crate)`. Cache entries store a single
+/// `read_set_signature: ReadSetSignature` field instead of two
+/// separate `dep_signature`/`fact_dep_signature` rails. The shared
+/// cold-build helper builds the carrier when the tracer finalises;
+/// warm-hit paths call `validate(ctx)` BEFORE `bubble(ctx)`.
+///
+/// Invariants:
+/// - `validate(ctx)` returns true only when BOTH rails validate. If
+///   `legacy` is empty (the post-cleanup state of cache producers
+///   wired entirely through `install_fact_tracer`), the legacy gate
+///   is a no-op and the carrier behaves as if `facts` is the sole
+///   oracle.
+/// - `bubble(ctx)` fans `facts` into every active outer tracer on the
+///   current TLS stack. `legacy` does NOT bubble: it is the validator
+///   rail only; the bubble channel is the fact signature.
+/// - `canonical_ids()` returns the union of the canonical IDs
+///   referenced by `legacy` and `facts`, deduplicated by string
+///   identity. The unified reverse index registers a (canonical →
+///   entry) mapping for each yielded ID.
+/// - `is_overflow()` returns true when the producer's tracer finalised
+///   with `FactReadSetFinalise::Overflow` — the materialised result
+///   is valid but the path-precise signature is too large to admit
+///   safely. Cache consumers route overflowed values through
+///   `ComputeAdmission::ReturnOnly` (return without admitting).
+#[derive(Clone, Debug)]
+pub struct ReadSetSignature {
+    pub facts: Arc<[FactVersionRef]>,
+    pub legacy: DepSignature,
+    /// Marks the carrier as constructed from a tracer that returned
+    /// `FactReadSetFinalise::Overflow`. The materialised value is
+    /// valid; the signature is too large to admit. The cooperative
+    /// admission path routes the value through
+    /// `ComputeAdmission::ReturnOnly` and the in-flight slot
+    /// broadcasts the value to joiners.
+    pub overflowed: bool,
+}
+
+impl ReadSetSignature {
+    /// Construct a carrier from explicit components. The legacy rail
+    /// may be empty.
+    #[inline]
+    pub fn new(facts: Arc<[FactVersionRef]>, legacy: DepSignature) -> Self {
+        Self {
+            facts,
+            legacy,
+            overflowed: false,
+        }
+    }
+
+    /// Construct a fact-only carrier. The legacy rail is empty. Used
+    /// by producers that gate validation entirely on the fact
+    /// signature.
+    #[inline]
+    pub fn facts_only(facts: Arc<[FactVersionRef]>) -> Self {
+        Self {
+            facts,
+            legacy: Arc::from(Vec::<(Arc<str>, DepVersion)>::new()),
+            overflowed: false,
+        }
+    }
+
+    /// Construct an overflow carrier. Both rails are empty; the
+    /// `overflowed` flag is set. Cooperative admission consumers
+    /// route values bearing this carrier through
+    /// `ComputeAdmission::ReturnOnly`.
+    #[inline]
+    pub fn overflow() -> Self {
+        Self {
+            facts: empty_fact_signature(),
+            legacy: Arc::from(Vec::<(Arc<str>, DepVersion)>::new()),
+            overflowed: true,
+        }
+    }
+
+    /// Empty carrier. Both rails are empty; the `overflowed` flag is
+    /// false. Used for synthetic publishes that pre-date the
+    /// fact-tracer substrate.
+    #[inline]
+    pub fn empty() -> Self {
+        Self {
+            facts: empty_fact_signature(),
+            legacy: Arc::from(Vec::<(Arc<str>, DepVersion)>::new()),
+            overflowed: false,
+        }
+    }
+
+    /// Validate both rails against the host's live state. Returns
+    /// `true` only when BOTH rails validate (R3 AND-gate). Empty
+    /// rails trivially validate; an entirely-empty carrier validates
+    /// vacuously.
+    #[inline]
+    pub(crate) fn validate(&self, ctx: &dyn ResolverContext) -> bool {
+        if self.overflowed {
+            // Overflow carriers identify values that should never be
+            // cached. A validate on an overflow entry must fail so
+            // the warm-hit path treats the entry as stale.
+            return false;
+        }
+        validate_fact_signature(ctx, &self.facts) && ctx.validate_dep_signature(&self.legacy)
+    }
+
+    /// Bubble the path-precise fact set into every active outer
+    /// tracer on the current TLS stack. No-op when the tracer stack
+    /// is empty or `facts` is empty. The legacy rail is the
+    /// validator-side channel and is NOT bubbled.
+    #[inline]
+    pub(crate) fn bubble(&self, ctx: &dyn ResolverContext) {
+        bubble_fact_signature(ctx, &self.facts);
+    }
+
+    /// Bubble via TLS only — for fast-path warm hits that don't
+    /// thread a `ResolverContext` reference. Equivalent to
+    /// `bubble_fact_signature_via_tls(&self.facts)`.
+    #[inline]
+    pub fn bubble_via_tls(&self) {
+        bubble_fact_signature_via_tls(&self.facts);
+    }
+
+    /// Canonical IDs referenced by this carrier. Yields the union of
+    /// canonicals from `legacy` and `facts`, deduplicated by string
+    /// equality. The reverse index drains via this iterator.
+    pub fn canonical_ids(&self) -> Vec<Arc<str>> {
+        // Small dedup set; cache entries' canonical sets typically
+        // hold fewer than 16 entries each. `FxHashSet` over Arc<str>
+        // keeps comparison O(1) per insertion when arcs are shared.
+        let mut seen: rustc_hash::FxHashSet<Arc<str>> = rustc_hash::FxHashSet::default();
+        let mut out: Vec<Arc<str>> = Vec::new();
+        for (canon, _) in self.legacy.iter() {
+            if seen.insert(Arc::clone(canon)) {
+                out.push(Arc::clone(canon));
+            }
+        }
+        for fact in self.facts.iter() {
+            let canon: Arc<str> = match fact {
+                FactVersionRef::FileWholeHash { canonical_id, .. } => {
+                    Arc::from(canonical_id.as_str())
+                }
+                FactVersionRef::DerivedFactHash { canonical_id, .. } => {
+                    Arc::from(canonical_id.as_str())
+                }
+                FactVersionRef::Parse(p) => Arc::from(p.canonical_id.as_str()),
+                FactVersionRef::ResolveImports(r) => Arc::from(r.canonical_id.as_str()),
+                FactVersionRef::RouteSurface(r) => Arc::from(r.canonical_id.as_str()),
+            };
+            if seen.insert(Arc::clone(&canon)) {
+                out.push(canon);
+            }
+        }
+        out
+    }
+
+    /// True iff the original tracer finalised with `Overflow`. The
+    /// entry's value is valid; cache consumers route it through
+    /// `ComputeAdmission::ReturnOnly` instead of admitting it.
+    #[inline]
+    pub fn is_overflow(&self) -> bool {
+        self.overflowed
+    }
+}
+
+#[cfg(test)]
+mod read_set_signature_unit_tests {
+    use super::*;
+    use crate::resolver_core::DerivedFactKind;
+
+    fn fact_filewhole(canon: &str, byte: u8) -> FactVersionRef {
+        FactVersionRef::FileWholeHash {
+            canonical_id: canon.to_string(),
+            hash: [byte; 16],
+        }
+    }
+
+    fn fact_derived(canon: &str, byte: u8) -> FactVersionRef {
+        FactVersionRef::DerivedFactHash {
+            canonical_id: canon.to_string(),
+            kind: DerivedFactKind::Route,
+            hash: [byte; 16],
+        }
+    }
+
+    fn fact_parse(canon: &str, byte: u8) -> FactVersionRef {
+        FactVersionRef::Parse(ParseFactRef {
+            canonical_id: canon.to_string(),
+            key: FactKey::SyntacticExportSet,
+            lane: FactLane::Semantic,
+            expected_hash: [byte; 16],
+        })
+    }
+
+    #[test]
+    fn read_set_signature_empty_validates_vacuously_via_facts_path() {
+        // Empty carrier: facts empty + legacy empty.
+        // `validate_fact_signature` returns true on empty input.
+        // ctx.validate_dep_signature on empty signature: depends on
+        // the trait impl; the production impls treat empty as valid.
+        let sig = ReadSetSignature::empty();
+        assert!(!sig.is_overflow(), "empty carrier must NOT be overflow");
+        // Don't assert validate without ctx — empty carrier's
+        // `validate` short-circuits via empty fact list. Tested
+        // separately in integration with a `ResolverContext` stub.
+    }
+
+    #[test]
+    fn read_set_signature_overflow_validate_returns_false() {
+        let sig = ReadSetSignature::overflow();
+        assert!(sig.is_overflow(), "overflow carrier must report overflow");
+        // We can't trivially construct a ResolverContext here, but
+        // the overflow short-circuit doesn't even call ctx — it
+        // returns false directly. Integration tests cover the live
+        // `validate(ctx)` call.
+    }
+
+    #[test]
+    fn read_set_signature_canonical_ids_deduplicates_across_rails() {
+        // legacy mentions /a.ts; facts mention /a.ts + /b.ts. Union
+        // should be [/a.ts, /b.ts] in legacy-first order.
+        let legacy: DepSignature = Arc::from(
+            vec![(Arc::from("/a.ts"), DepVersion::WholeHash([0u8; 16]))].into_boxed_slice(),
+        );
+        let facts: Arc<[FactVersionRef]> =
+            Arc::from(vec![fact_filewhole("/a.ts", 1), fact_filewhole("/b.ts", 2)]);
+        let sig = ReadSetSignature {
+            facts,
+            legacy,
+            overflowed: false,
+        };
+        let canons = sig.canonical_ids();
+        assert_eq!(
+            canons.len(),
+            2,
+            "duplicate /a.ts across rails must collapse to one entry"
+        );
+        assert_eq!(canons[0].as_ref(), "/a.ts");
+        assert_eq!(canons[1].as_ref(), "/b.ts");
+    }
+
+    #[test]
+    fn read_set_signature_canonical_ids_covers_all_fact_variants() {
+        let legacy: DepSignature =
+            Arc::from(Vec::<(Arc<str>, DepVersion)>::new().into_boxed_slice());
+        let facts: Arc<[FactVersionRef]> = Arc::from(vec![
+            fact_filewhole("/wholehash.ts", 1),
+            fact_derived("/derived.ts", 2),
+            fact_parse("/parse.ts", 3),
+            FactVersionRef::ResolveImports(crate::resolver_core::ResolveImportsFactRef {
+                canonical_id: "/resolve.ts".to_string(),
+                key: FactKey::SyntacticExportSet,
+                lane: FactLane::Semantic,
+                expected_hash: [0u8; 16],
+            }),
+            FactVersionRef::RouteSurface(crate::resolver_core::RouteSurfaceFactRef {
+                canonical_id: "/route.ts".to_string(),
+                key: FactKey::SyntacticExportSet,
+                lane: FactLane::Semantic,
+                expected_hash: [0u8; 16],
+            }),
+        ]);
+        let sig = ReadSetSignature {
+            facts,
+            legacy,
+            overflowed: false,
+        };
+        let canons: Vec<String> = sig
+            .canonical_ids()
+            .iter()
+            .map(|a| a.as_ref().to_string())
+            .collect();
+        assert!(
+            canons.contains(&"/wholehash.ts".to_string()),
+            "FileWholeHash canonical must surface"
+        );
+        assert!(
+            canons.contains(&"/derived.ts".to_string()),
+            "DerivedFactHash canonical must surface"
+        );
+        assert!(
+            canons.contains(&"/parse.ts".to_string()),
+            "Parse canonical must surface"
+        );
+        assert!(
+            canons.contains(&"/resolve.ts".to_string()),
+            "ResolveImports canonical must surface"
+        );
+        assert!(
+            canons.contains(&"/route.ts".to_string()),
+            "RouteSurface canonical must surface"
+        );
+        assert_eq!(canons.len(), 5, "all 5 distinct canonicals must be present");
+    }
+
+    #[test]
+    fn read_set_signature_canonical_ids_legacy_only_carrier() {
+        let legacy: DepSignature = Arc::from(
+            vec![
+                (Arc::from("/x.ts"), DepVersion::WholeHash([0u8; 16])),
+                (Arc::from("/y.ts"), DepVersion::WholeHash([0u8; 16])),
+            ]
+            .into_boxed_slice(),
+        );
+        let sig = ReadSetSignature {
+            facts: empty_fact_signature(),
+            legacy,
+            overflowed: false,
+        };
+        let canons: Vec<String> = sig
+            .canonical_ids()
+            .iter()
+            .map(|a| a.as_ref().to_string())
+            .collect();
+        assert_eq!(canons, vec!["/x.ts".to_string(), "/y.ts".to_string()]);
+    }
+
+    #[test]
+    fn read_set_signature_facts_only_constructor() {
+        let facts: Arc<[FactVersionRef]> = Arc::from(vec![fact_filewhole("/a.ts", 1)]);
+        let sig = ReadSetSignature::facts_only(Arc::clone(&facts));
+        assert_eq!(sig.facts.len(), 1);
+        assert_eq!(sig.legacy.len(), 0);
+        assert!(!sig.overflowed);
+        let canons = sig.canonical_ids();
+        assert_eq!(canons.len(), 1);
+        assert_eq!(canons[0].as_ref(), "/a.ts");
+    }
+}

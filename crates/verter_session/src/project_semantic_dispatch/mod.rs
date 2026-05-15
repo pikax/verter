@@ -486,6 +486,218 @@ pub(super) fn canonicalize_node_list(members: &[SemanticNodeId]) -> Arc<[Semanti
     Arc::from(sorted.into_boxed_slice())
 }
 
+impl<'a> ProjectSemanticDispatch<'a> {
+    /// Shared cold-build entry point used by BOTH
+    /// [`SemanticQueryApi::execute`] and [`Self::execute_read`].
+    ///
+    /// **Single-call-site invariant.** This method holds the only
+    /// production `graph.execute_cooperative(...)` call site dispatched
+    /// from `ProjectSemanticDispatch`. The architecture guard
+    /// `dispatch_cold_build_has_one_call_site.rs` asserts this with a
+    /// static scan that strips test files + `#[cfg(test)]` regions and
+    /// counts matches. A second production call site would mean a
+    /// second cold-build path slipped through bypassing the tracer.
+    ///
+    /// **Tracer scope.** The fact tracer is installed ONLY around the
+    /// cold-build closure passed to `execute_cooperative`. Warm hits
+    /// (when the slot is already populated) MUST NOT allocate a
+    /// tracer — they short-circuit at the `try_warm_hit_fast_path`
+    /// inside `execute_cooperative`. The closure here only runs on
+    /// cold misses or when the prior winner aborted; the tracer cost
+    /// is bounded by the cold-build cost it observes.
+    ///
+    /// **Build-output threading.** On `FactReadSetFinalise::Ok`, the
+    /// traced fact signature is stored on `QueryBuildOutput.fact_dep_signature`
+    /// so `warm_publish_one` records it verbatim onto the `MemoEntry`
+    /// via `ReadSetSignature::new(facts, legacy)`. On
+    /// `FactReadSetFinalise::Overflow`, the build output is marked
+    /// `cache_suppress = true` so the memo refuses to publish the
+    /// entry — the caller cold-recomputes on the next request.
+    //
+    // arch-guard:single-execute-cooperative-call — the helper holds
+    // the only production `graph.execute_cooperative(` call site. The
+    // arch test parses `crates/verter_session/src/**/*.rs` (excluding
+    // tests, stripping cfg(test) regions) and asserts exactly one
+    // match.
+    fn execute_via_cold_build_helper(
+        &self,
+        key: SemanticQueryKey,
+    ) -> CacheRead<QueryResult<SemanticNodeId>> {
+        // Admission-time canonicalisation per plan B1a:
+        //   - `ProjectMember { base, member, mode }` rewrites to
+        //     `ProjectPath { base, path: [Member(member)], mode }` BEFORE the
+        //     key is hashed into the memo, so sugar and canonical share one
+        //     entry and one in-flight wait graph.
+        //   - `IndexedAccess { base, index, mode }` rewrites the same way to
+        //     `ProjectPath { base, path: [Index(index)], mode }`.
+        //   - `NormalizeUnion` / `NormalizeIntersection` get structural
+        //     member-list canonicalisation so `{A, B}` and `{B, A}` converge.
+        // Other variants key off [`SemanticNodeId`]s that are already hashed
+        // verbatim.
+        let key = match key {
+            SemanticQueryKey::ProjectMember { base, member, mode } => {
+                SemanticQueryKey::ProjectPath {
+                    base,
+                    path: Arc::from(vec![PathSegment::Member(member)].into_boxed_slice()),
+                    mode,
+                }
+            }
+            SemanticQueryKey::IndexedAccess { base, index, mode } => {
+                SemanticQueryKey::ProjectPath {
+                    base,
+                    path: Arc::from(vec![PathSegment::Index(index)].into_boxed_slice()),
+                    mode,
+                }
+            }
+            SemanticQueryKey::NormalizeUnion { members } => SemanticQueryKey::NormalizeUnion {
+                members: canonicalize_node_list(&members),
+            },
+            SemanticQueryKey::NormalizeIntersection { members } => {
+                SemanticQueryKey::NormalizeIntersection {
+                    members: canonicalize_node_list(&members),
+                }
+            }
+            other => other,
+        };
+
+        let graph = Arc::clone(self.graph());
+        // Per-key recursion sentinel: when the memo detects same-path
+        // re-entry on an `Instantiate` key, extract the decl name and
+        // emit `Opaque(RecursiveRef { name })`. The materialiser
+        // recognises `TypeExpr::RecursiveRef` as a leaf and stops
+        // expansion, terminating recursive aliases like `type Tree =
+        // { children: Tree[] }` without stack overflow.
+        // Non-Instantiate re-entry falls back to `Opaque(Miss)`.
+        let sentinel_key = key.clone();
+        let sentinel = {
+            let graph = Arc::clone(&graph);
+            move || {
+                if let SemanticQueryKey::Instantiate { base, .. } = &sentinel_key {
+                    return graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
+                        name: Arc::clone(&base.decl_name),
+                    }));
+                }
+                graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss))
+            }
+        };
+        let key_for_build = key.clone();
+        let raw_build = move || -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+            match &key_for_build {
+                SemanticQueryKey::ResolveDecl(decl_key) => self.build_resolve_decl(decl_key).into(),
+                SemanticQueryKey::TypeOf { value_root } => self.build_typeof(value_root).into(),
+                SemanticQueryKey::Instantiate {
+                    base,
+                    args,
+                    body_mode,
+                } => self.build_instantiate(base, args, *body_mode).into(),
+                // `ProjectMember` / `IndexedAccess` are API sugar that
+                // admission-time canonicalisation rewrites to
+                // `ProjectPath` above. The build closure never observes
+                // these variants on the rewritten key; the arms below
+                // are pure exhaustiveness.
+                SemanticQueryKey::ProjectMember { base, member, mode } => {
+                    let path: Arc<[PathSegment]> =
+                        Arc::from(vec![PathSegment::Member(Arc::clone(member))].into_boxed_slice());
+                    self.build_project_path(*base, &path, *mode)
+                }
+                SemanticQueryKey::IndexedAccess { base, index, mode } => {
+                    let path: Arc<[PathSegment]> =
+                        Arc::from(vec![PathSegment::Index(index.clone())].into_boxed_slice());
+                    self.build_project_path(*base, &path, *mode)
+                }
+                SemanticQueryKey::ProjectPath { base, path, mode } => {
+                    self.build_project_path(*base, path, *mode)
+                }
+                SemanticQueryKey::KeyOf { base } => self.build_key_of(*base).into(),
+                SemanticQueryKey::MappedType { source, mapper } => {
+                    self.build_mapped_type(*source, mapper).into()
+                }
+                SemanticQueryKey::Conditional {
+                    check,
+                    extends,
+                    true_branch,
+                    false_branch,
+                    distributive,
+                } => self
+                    .build_conditional(*check, *extends, *true_branch, *false_branch, *distributive)
+                    .into(),
+                SemanticQueryKey::NormalizeUnion { members } => {
+                    self.build_normalize_union(members).into()
+                }
+                SemanticQueryKey::NormalizeIntersection { members } => {
+                    self.build_normalize_intersection(members).into()
+                }
+                SemanticQueryKey::ResolvedNamedType { key } => {
+                    self.build_resolved_named_type(key).into()
+                }
+                // Phase D §5.4 WIP-S: the relation engine routes through
+                // its own `SemanticGraphStore::relation_memo` DashMap
+                // rather than the family memo. Executing `Relate` through
+                // the family path is a degenerate build that always
+                // produces `Opaque(Miss)`.
+                SemanticQueryKey::Relate { .. } => {
+                    let fence = self.project_generation_signature();
+                    (QueryResult::Error(QueryError::Miss), fence).into()
+                }
+                SemanticQueryKey::ResolveMacroPayload {
+                    owner,
+                    macro_index,
+                    macro_kind,
+                    type_args,
+                    mode,
+                } => self
+                    .build_resolve_macro_payload(owner, *macro_index, *macro_kind, type_args, *mode)
+                    .into(),
+            }
+        };
+        // Wrap the raw cold-build closure with the fact tracer. On
+        // `Ok(facts)` the build output's `fact_dep_signature` is set
+        // so `warm_publish_one` records the path-precise signature
+        // verbatim on the `MemoEntry`. On `Overflow` the build output
+        // is marked `cache_suppress = true` so the memo refuses to
+        // admit the entry — caller cold-recomputes on the next
+        // request.
+        let host = self.ctx.host_for_fact_tracer_install();
+        let provenance = Arc::clone(&host.provenance);
+        let traced_build = move || -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+            let (output, finalise) =
+                crate::fact_signature_helpers::install_fact_tracer(host, || {
+                    // Test-only fact-injection hook. When the
+                    // `dispatch_test_inject_parse_fact` slot is non-None,
+                    // observe the recorded `Parse(...)` fact onto the
+                    // active tracer cell BEFORE running the inner build.
+                    dispatch_test_inject_parse_fact_if_set();
+                    raw_build()
+                });
+            provenance
+                .memo_entry_fact_tracer_installs
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput = output;
+            match finalise {
+                crate::resolver_core::FactReadSetFinalise::Ok(fact_dep_signature) => {
+                    output.fact_dep_signature = Some(fact_dep_signature);
+                    output
+                }
+                crate::resolver_core::FactReadSetFinalise::Overflow => {
+                    provenance
+                        .memo_entry_overflow_refusals
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    output.cache_suppress = true;
+                    output
+                }
+            }
+        };
+        let cache_read = graph.execute_cooperative(key.clone(), sentinel, traced_build);
+        tracing::debug!(
+            target: "verter::dispatch::execute_via_helper",
+            ?key,
+            suppress = cache_read.cache_suppress,
+            "execute_via_cold_build_helper"
+        );
+        cache_read
+    }
+}
+
 impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {
     fn execute(&self, key: SemanticQueryKey) -> QueryResult<SemanticNodeId> {
         // Type-resolution audit: bump the per-request hop / mode /
@@ -529,216 +741,13 @@ impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {
                 }
             }
         }
-        // Admission-time canonicalisation per plan B1a:
-        //   - `ProjectMember { base, member, mode }` rewrites to
-        //     `ProjectPath { base, path: [Member(member)], mode }` BEFORE the
-        //     key is hashed into the memo, so sugar and canonical share one
-        //     entry and one in-flight wait graph.
-        //   - `IndexedAccess { base, index, mode }` rewrites the same way to
-        //     `ProjectPath { base, path: [Index(index)], mode }`.
-        //   - `NormalizeUnion` / `NormalizeIntersection` get structural
-        //     member-list canonicalisation so `{A, B}` and `{B, A}` converge.
-        // Other variants key off [`SemanticNodeId`]s that are already hashed
-        // verbatim.
-        let key = match key {
-            SemanticQueryKey::ProjectMember { base, member, mode } => {
-                SemanticQueryKey::ProjectPath {
-                    base,
-                    path: Arc::from(vec![PathSegment::Member(member)].into_boxed_slice()),
-                    mode,
-                }
-            }
-            SemanticQueryKey::IndexedAccess { base, index, mode } => {
-                SemanticQueryKey::ProjectPath {
-                    base,
-                    path: Arc::from(vec![PathSegment::Index(index)].into_boxed_slice()),
-                    mode,
-                }
-            }
-            SemanticQueryKey::NormalizeUnion { members } => SemanticQueryKey::NormalizeUnion {
-                members: canonicalize_node_list(&members),
-            },
-            SemanticQueryKey::NormalizeIntersection { members } => {
-                SemanticQueryKey::NormalizeIntersection {
-                    members: canonicalize_node_list(&members),
-                }
-            }
-            other => other,
-        };
-
-        let graph = Arc::clone(self.graph());
-        // Per-key recursion sentinel: when the memo detects same-path
-        // re-entry on an `Instantiate` key, extract the decl name from
-        // to its name and emit `Opaque(RecursiveRef { name })`. The
-        // materialiser (`meta_resolve.rs:7447+`) recognises
-        // `TypeExpr::RecursiveRef` as a leaf and stops expansion, which
-        // is how recursive aliases like `type Tree = { children: Tree[] }`
-        // terminate without stack overflow. Non-Instantiate re-entry
-        // falls back to `Opaque(Miss)`.
-        let sentinel_key = key.clone();
-        let sentinel = {
-            let graph = Arc::clone(&graph);
-            move || {
-                // C16: DeclIdentity carries the name directly — no
-                // DeclAnchor node lookup needed.
-                if let SemanticQueryKey::Instantiate { base, .. } = &sentinel_key {
-                    return graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
-                        name: Arc::clone(&base.decl_name),
-                    }));
-                }
-                graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss))
-            }
-        };
-        let key_for_build = key.clone();
-        let build = move || -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
-            match &key_for_build {
-                SemanticQueryKey::ResolveDecl(decl_key) => self.build_resolve_decl(decl_key).into(),
-                SemanticQueryKey::TypeOf { value_root } => self.build_typeof(value_root).into(),
-                SemanticQueryKey::Instantiate {
-                    base,
-                    args,
-                    body_mode,
-                } => self.build_instantiate(base, args, *body_mode).into(),
-                // C4: `ProjectMember` / `IndexedAccess` are API sugar
-                // that admission-time canonicalisation rewrites to
-                // `ProjectPath` above. The build closure never observes
-                // these variants on the rewritten key; the arms below are
-                // pure exhaustiveness: they forward to `build_project_path`
-                // with a length-1 path so any future refactor that skips
-                // admission canonicalisation still gets the correct
-                // path-precise semantics.
-                SemanticQueryKey::ProjectMember { base, member, mode } => {
-                    let path: Arc<[PathSegment]> =
-                        Arc::from(vec![PathSegment::Member(Arc::clone(member))].into_boxed_slice());
-                    self.build_project_path(*base, &path, *mode)
-                }
-                SemanticQueryKey::IndexedAccess { base, index, mode } => {
-                    let path: Arc<[PathSegment]> =
-                        Arc::from(vec![PathSegment::Index(index.clone())].into_boxed_slice());
-                    self.build_project_path(*base, &path, *mode)
-                }
-                SemanticQueryKey::ProjectPath { base, path, mode } => {
-                    self.build_project_path(*base, path, *mode)
-                }
-                SemanticQueryKey::KeyOf { base } => self.build_key_of(*base).into(),
-                SemanticQueryKey::MappedType { source, mapper } => {
-                    self.build_mapped_type(*source, mapper).into()
-                }
-                SemanticQueryKey::Conditional {
-                    check,
-                    extends,
-                    true_branch,
-                    false_branch,
-                    distributive,
-                } => self
-                    .build_conditional(*check, *extends, *true_branch, *false_branch, *distributive)
-                    .into(),
-                SemanticQueryKey::NormalizeUnion { members } => {
-                    self.build_normalize_union(members).into()
-                }
-                SemanticQueryKey::NormalizeIntersection { members } => {
-                    self.build_normalize_intersection(members).into()
-                }
-                SemanticQueryKey::ResolvedNamedType { key } => {
-                    self.build_resolved_named_type(key).into()
-                }
-                // Phase D §5.4 WIP-S: the relation engine routes through its own
-                // `SemanticGraphStore::relation_memo` DashMap rather than the
-                // family memo. Executing `Relate` through the family path is a
-                // degenerate build that always produces an `Opaque(Miss)` node
-                // — callers use `ProjectSemanticDispatch::relate_nodes` directly
-                // (see `relation.rs`) which consults the pairwise memo.
-                SemanticQueryKey::Relate { .. } => {
-                    let fence = self.project_generation_signature();
-                    (QueryResult::Error(QueryError::Miss), fence).into()
-                }
-                // Binding amendment — `ResolveMacroPayload`.
-                SemanticQueryKey::ResolveMacroPayload {
-                    owner,
-                    macro_index,
-                    macro_kind,
-                    type_args,
-                    mode,
-                } => self
-                    .build_resolve_macro_payload(owner, *macro_index, *macro_kind, type_args, *mode)
-                    .into(),
-            }
-        };
-        // Block 1.H: wrap the dispatch's cold-build closure with
-        // `install_fact_tracer` so the `MemoEntry`'s
-        // `fact_dep_signature` reflects every transitive fact the
-        // build read through the resolver substrate. On
-        // `FactReadSetFinalise::Ok`, thread the traced signature into
-        // the `QueryBuildOutput.fact_dep_signature` field so
-        // `warm_publish_one` records it on the published `MemoEntry`
-        // — warm-hit bubble-up then delivers the full path-precise
-        // set (`Parse(...)`, `ResolveImports(...)`, `RouteSurface(...)`
-        // facts the legacy whole-hash fence cannot carry) into any
-        // outer tracer active on the warm-hit thread. On
-        // `FactReadSetFinalise::Overflow` we mark the build output
-        // `cache_suppress = true` so the memo refuses to publish the
-        // entry — the caller cold-recomputes on the next request.
-        let host = self.ctx.host_for_fact_tracer_install();
-        let provenance = Arc::clone(&host.provenance);
-        let build = move || -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
-            let (output, finalise) =
-                crate::fact_signature_helpers::install_fact_tracer(host, || {
-                    // Test-only fact-injection hook. When the
-                    // `dispatch_test_inject_parse_fact` slot is non-None,
-                    // observe the recorded `Parse(...)` fact onto the
-                    // active tracer cell BEFORE running the inner build.
-                    // The inner build then proceeds and the captured
-                    // signature on `Ok` contains the path-precise Parse
-                    // observation — exercising the cold-publish →
-                    // warm-hit Parse-fact survival contract without a
-                    // workspace fixture that organically emits one.
-                    dispatch_test_inject_parse_fact_if_set();
-                    build()
-                });
-            provenance
-                .memo_entry_fact_tracer_installs
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput = output;
-            match finalise {
-                crate::resolver_core::FactReadSetFinalise::Ok(fact_dep_signature) => {
-                    // Persist the traced path-precise signature onto
-                    // the build output so the memo's warm publish path
-                    // records it verbatim on the `MemoEntry`. This
-                    // preserves the full observation set (including
-                    // `Parse(...)` / `ResolveImports(...)` /
-                    // `RouteSurface(...)` facts) across the
-                    // cold-publish → warm-hit boundary. Without this
-                    // wire, `warm_publish_one` would derive
-                    // `fact_dep_signature` from the legacy
-                    // `DepSignature` via `fact_signature_from_fence`,
-                    // which only carries `FileWholeHash` facts and
-                    // silently drops every path-precise observation.
-                    output.fact_dep_signature = Some(fact_dep_signature);
-                    output
-                }
-                crate::resolver_core::FactReadSetFinalise::Overflow => {
-                    provenance
-                        .memo_entry_overflow_refusals
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    // Refuse cache admission via `cache_suppress`.
-                    output.cache_suppress = true;
-                    output
-                }
-            }
-        };
-        let cache_read = graph.execute_cooperative(key.clone(), sentinel, build);
-        // Dispatch-layer event — emitted once per `execute()` call.
-        // The memo's per-call hit/miss/suppress events fire from
-        // inside `execute_cooperative` and are independent. This
-        // event captures the caller's view: the key, whether the
-        // result is suppressed, and the kind of result observed.
-        tracing::debug!(
-            target: "verter::dispatch::execute_read",
-            ?key,
-            suppress = cache_read.cache_suppress,
-            "execute_read"
-        );
-        cache_read.value
+        // Delegate to the shared cold-build helper. Both `execute`
+        // (this method) and `execute_read` route through the helper
+        // so the fact-tracer wrapper, sentinel construction, and
+        // build-output threading live in one place. `execute`
+        // discards the dep-signature rails from the helper's
+        // `CacheRead`; `execute_read` keeps them.
+        self.execute_via_cold_build_helper(key).value
     }
 }
 

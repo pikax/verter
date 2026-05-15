@@ -1234,7 +1234,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let (start_base, start_index) = if path.len() < 2 {
             (base, 0usize)
         } else {
-            find_longest_warm_prefix(self.graph(), base, path).unwrap_or((base, 0))
+            find_longest_warm_prefix(self.graph(), self.ctx, base, path).unwrap_or((base, 0))
         };
         let walker_path: Arc<[PathSegment]> = if start_index == 0 {
             Arc::clone(path)
@@ -2249,6 +2249,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
 /// the warm prefix).
 fn find_longest_warm_prefix(
     graph: &crate::semantic_query_memo::SemanticGraphStore,
+    ctx: &dyn crate::resolver_core::ResolverContext,
     base: SemanticNodeId,
     path: &Arc<[PathSegment]>,
 ) -> Option<(SemanticNodeId, usize)> {
@@ -2259,7 +2260,9 @@ fn find_longest_warm_prefix(
             path: prefix_path,
             mode: ProjectionMode::Navigate,
         };
-        if let Some(hit) = graph.get(&prefix_key) {
+        // Validate-before-bubble: a stale prefix entry must neither
+        // surface as a hit nor pollute the active fact tracer.
+        if let Some(hit) = graph.get_validated(&prefix_key, ctx) {
             if let QueryResult::Value(prefix_node) = hit.value {
                 #[cfg(test)]
                 PREFIX_PEEK_HITS.with(|c| *c.borrow_mut() += 1);

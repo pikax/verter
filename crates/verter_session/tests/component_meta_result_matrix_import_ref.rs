@@ -33,10 +33,10 @@ fn component_meta_result_signature_carries_import_ref() {
         .expect("ComponentMetaResultEntry struct close");
     let window = &src[idx..idx + end];
     assert!(
-        window.contains("fact_dep_signature: Arc<[FactVersionRef]>")
-            || window.contains("fact_dep_signature: Arc<[crate::resolver_core::FactVersionRef]>"),
+        window.contains("read_set_signature: crate::fact_signature_helpers::ReadSetSignature")
+            || window.contains("read_set_signature: ReadSetSignature"),
         "Block 1.B matrix slice: ComponentMetaResultEntry must carry \
-         `fact_dep_signature: Arc<[FactVersionRef]>`. Window:\n{window}"
+         `read_set_signature: ReadSetSignature`. Window:\n{window}"
     );
 
     let import_fact = FactVersionRef::Parse(ParseFactRef {
@@ -53,18 +53,20 @@ fn component_meta_result_signature_carries_import_ref() {
 
     let entry: ComponentMetaResultEntry<u32> = ComponentMetaResultEntry {
         payload: Arc::new(0u32),
-        dep_signature: Arc::from(Vec::new().into_boxed_slice()),
-        fact_dep_signature: Arc::clone(&signature),
+        read_set_signature: verter_session::for_tests::ReadSetSignature::new(
+            Arc::clone(&signature),
+            Arc::from(Vec::new().into_boxed_slice()),
+        ),
     };
     assert!(
-        !entry.fact_dep_signature.is_empty(),
+        !entry.read_set_signature.facts.is_empty(),
         "Block 1.B matrix slice: the constructed entry must carry the \
-         ImportRef fact in its fact_dep_signature"
+         ImportRef fact in its read_set_signature.facts"
     );
 
     let view = PermissiveStoreView;
     assert!(
-        view.validates_fact_signature(&entry.fact_dep_signature),
+        view.validates_fact_signature(&entry.read_set_signature.facts),
         "permissive view must accept an ImportRef fact in the entry's \
          fact_dep_signature"
     );

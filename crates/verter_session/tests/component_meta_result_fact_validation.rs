@@ -41,11 +41,11 @@ fn metahost() -> ComponentMetaHost {
 #[test]
 
 fn editing_dep_invalidates_component_meta_result_warm_hit() {
-    // Structural arch guard: ensure the type carries the new
-    // `fact_dep_signature` field. This compile-time assertion fails
-    // against pre-1.B trees where the field does not exist.
+    // Structural arch guard: ensure the type carries the
+    // `read_set_signature` carrier and the carrier exposes the
+    // `facts: Arc<[FactVersionRef]>` rail.
     fn _assert_field_present<P>(entry: &ComponentMetaResultEntry<P>) -> &[FactVersionRef] {
-        &entry.fact_dep_signature
+        &entry.read_set_signature.facts
     }
 
     let mh = metahost();

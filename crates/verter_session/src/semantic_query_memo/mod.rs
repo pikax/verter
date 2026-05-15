@@ -61,8 +61,8 @@ use arena::{shard_index_for, NUM_SHARDS};
 use derivation::{sorted_percentile, DerivationStore};
 pub use family::AuditEagerKeyRow;
 use family::{
-    dep_signature_references_canonical, family_and_slot, FamilyKey, FamilySlots, MemoEntry,
-    ModeSlot,
+    carrier_facts_reference_canonical, dep_signature_references_canonical, family_and_slot,
+    FamilyKey, FamilySlots, MemoEntry, ModeSlot,
 };
 pub(crate) use inflight::FORCE_COLD_ABORT_SWEEP;
 use inflight::{
@@ -430,7 +430,7 @@ impl SemanticGraphStore {
                 let result_repr = format!("{:?}", slot.result);
                 result_repr.hash(&mut hasher);
                 let result_hash = format!("{:016x}", hasher.finish());
-                let dep_signature = format!("{:?}", slot.dep_signature);
+                let dep_signature = format!("{:?}", slot.read_set_signature.legacy);
                 rows.push(AuditEagerKeyRow {
                     key_repr: format!("{key_repr}/{slot_label}"),
                     result_hash,
@@ -550,13 +550,15 @@ impl SemanticGraphStore {
                 let Some(current_entry) = slots.slot(*slot) else {
                     continue;
                 };
-                let drop = Arc::ptr_eq(&current_entry.dep_signature, registered_sig)
-                    || dep_signature_references_canonical(
-                        &current_entry.dep_signature,
+                let entry_legacy = &current_entry.read_set_signature.legacy;
+                let drop = Arc::ptr_eq(entry_legacy, registered_sig)
+                    || dep_signature_references_canonical(entry_legacy, canonical_id)
+                    || carrier_facts_reference_canonical(
+                        &current_entry.read_set_signature.facts,
                         canonical_id,
                     );
                 if drop {
-                    let entry_sig = Arc::clone(&current_entry.dep_signature);
+                    let entry_sig = Arc::clone(&current_entry.read_set_signature.legacy);
                     *slots.slot_mut(*slot) = None;
                     evicted += 1;
                     evicted_dep_sigs.push(entry_sig);
@@ -1146,12 +1148,23 @@ impl SemanticGraphStore {
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Warm-lookup a key. Returns the memoized result + its recorded
-    /// dependency signature when the requested `(family, mode_slot)` is
-    /// populated. Backfill from broader-mode computes lands in narrower
-    /// slots eagerly at publish time, so a `Navigate` lookup after a
-    /// successful `Expanded` build hits the (backfilled) `Navigate` slot
-    /// directly without any per-call satisfaction logic here.
+    /// Warm-lookup a key without validation. Returns the memoized
+    /// result + its recorded dependency signature when the requested
+    /// `(family, mode_slot)` is populated.
+    ///
+    /// **Unchecked-read contract.** This entry point bubbles the
+    /// entry's path-precise fact signature unconditionally. The
+    /// AND-gate validation against the live store view does NOT run
+    /// here. Production callers that consult the warm map without
+    /// owning a cold-build closure (e.g. the build-side prefix-probe
+    /// at `build_project_path`) must call [`Self::get_validated`]
+    /// instead — `get_validated` validates BEFORE bubbling so a stale
+    /// entry neither returns nor pollutes the outer tracer.
+    ///
+    /// `get` remains as the substrate used by the cold-build helper
+    /// (which performs the validate-before-bubble dance one level up
+    /// inside the cooperative-admission flow) and by audit / debug
+    /// probes that explicitly want the unchecked read.
     #[must_use]
     pub fn get(&self, key: &SemanticQueryKey) -> Option<CacheRead<QueryResult<SemanticNodeId>>> {
         let (family, slot) = family_and_slot(key);
@@ -1163,12 +1176,11 @@ impl SemanticGraphStore {
                 // so transitive memo hits do not lose contributing
                 // fact identities. AND-gate validation happens at
                 // the outer fence revalidation point.
-                crate::fact_signature_helpers::bubble_fact_signature_via_tls(
-                    &entry.fact_dep_signature,
-                );
+                entry.read_set_signature.bubble_via_tls();
+                let dep_signature = Arc::clone(&entry.read_set_signature.legacy);
                 CacheRead {
                     value: entry.result,
-                    dep_signature: entry.dep_signature,
+                    dep_signature,
                     walker_diagnostics: entry.walker_diagnostics,
                     cache_suppress: false,
                 }
@@ -1188,6 +1200,79 @@ impl SemanticGraphStore {
             }
         }
         result
+    }
+
+    /// Carrier-aware warm read that validates BEFORE bubbling. Returns
+    /// the cached value only when the entry's
+    /// [`ReadSetSignature`](crate::fact_signature_helpers::ReadSetSignature)
+    /// validates against the live store view; otherwise `None`. On
+    /// validation failure the bubble channel is NOT exercised — a
+    /// stale entry must not pollute an outer tracer with observations
+    /// that no longer reflect the current state.
+    ///
+    /// This is the production warm-read entry point used by callers
+    /// that consult the warm map outside the cooperative-admission
+    /// flow (e.g. the prefix-probe in `build_project_path`). The
+    /// cold-build helper inside `execute_cooperative` continues to use
+    /// `get` because its own coordination flow performs the validate /
+    /// remove / cold-recompute dance one level up.
+    ///
+    /// Counter semantics: a miss-by-staleness records the same
+    /// `cache_counters.semantic_graph.misses` bump as a true cold
+    /// miss; from the caller's perspective the entry is unavailable
+    /// either way.
+    #[must_use]
+    pub(crate) fn get_validated(
+        &self,
+        key: &SemanticQueryKey,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+    ) -> Option<CacheRead<QueryResult<SemanticNodeId>>> {
+        let (family, slot) = family_and_slot(key);
+        let entries = self.entries_lock_diagnosed();
+        let result = entries.get(&family).and_then(|slots| {
+            slots.slot(slot).cloned().and_then(|entry| {
+                if !entry.read_set_signature.validate(ctx) {
+                    // Stale entry — do NOT bubble; return None.
+                    return None;
+                }
+                entry.read_set_signature.bubble(ctx);
+                let dep_signature = Arc::clone(&entry.read_set_signature.legacy);
+                Some(CacheRead {
+                    value: entry.result,
+                    dep_signature,
+                    walker_diagnostics: entry.walker_diagnostics,
+                    cache_suppress: false,
+                })
+            })
+        });
+        if let Some(rctx) = crate::request_context::current_request_context() {
+            if result.is_some() {
+                rctx.cache_counters
+                    .semantic_graph
+                    .hits
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            } else {
+                rctx.cache_counters
+                    .semantic_graph
+                    .misses
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        result
+    }
+
+    /// Presence probe — true iff the warm map currently holds a
+    /// `(family, slot)` entry for `key`. Does NOT validate, does NOT
+    /// bubble, does NOT bump any counter. Used by the prefix-backfill
+    /// helper in `warm_publish_one_if_absent` to decide whether a
+    /// publish would race a concurrent cold winner.
+    #[must_use]
+    pub(crate) fn contains_key(&self, key: &SemanticQueryKey) -> bool {
+        let (family, slot) = family_and_slot(key);
+        let entries = self.entries_lock_diagnosed();
+        entries
+            .get(&family)
+            .is_some_and(|slots| slots.slot(slot).is_some())
     }
 
     /// Per-key result for the BFS bridge's batch dispatch (D103). Each
@@ -1361,12 +1446,11 @@ impl SemanticGraphStore {
                     // not lose the contributing fact identities. The
                     // AND-gate validation against the current view
                     // happens at the outer fence revalidation point.
-                    crate::fact_signature_helpers::bubble_fact_signature_via_tls(
-                        &entry.fact_dep_signature,
-                    );
+                    entry.read_set_signature.bubble_via_tls();
+                    let dep_signature = Arc::clone(&entry.read_set_signature.legacy);
                     CacheRead {
                         value: entry.result,
-                        dep_signature: entry.dep_signature,
+                        dep_signature,
                         walker_diagnostics: entry.walker_diagnostics,
                         cache_suppress: false,
                     }
@@ -1844,10 +1928,13 @@ impl SemanticGraphStore {
                 crate::component_meta_materialize::fact_signature_from_fence(dep_signature.as_ref())
             }
         };
+        let read_set_signature = crate::fact_signature_helpers::ReadSetSignature::new(
+            fact_dep_signature,
+            dep_signature.clone(),
+        );
         let entry = MemoEntry {
             result: result.clone(),
-            dep_signature: dep_signature.clone(),
-            fact_dep_signature,
+            read_set_signature,
             walker_diagnostics: Arc::clone(walker_diagnostics),
         };
         let mut entries = self.entries_lock_diagnosed();
@@ -1940,7 +2027,11 @@ impl SemanticGraphStore {
         // winner publish that lands between this check and the publish
         // is benign (FamilySlots::publish overrides; both are computing
         // the same canonical prefix node so values agree).
-        if self.get(&key).is_some() {
+        //
+        // Use `contains_key` rather than `get` so the presence probe
+        // does NOT bubble a stale entry's facts into the outer tracer
+        // before declining to publish.
+        if self.contains_key(&key) {
             return;
         }
         if self.inflight.lock().contains_key(&key) {
@@ -1948,10 +2039,13 @@ impl SemanticGraphStore {
         }
         let fact_dep_signature =
             crate::component_meta_materialize::fact_signature_from_fence(dep_signature.as_ref());
+        let read_set_signature = crate::fact_signature_helpers::ReadSetSignature::new(
+            fact_dep_signature,
+            dep_signature.clone(),
+        );
         let entry = MemoEntry {
             result,
-            dep_signature: dep_signature.clone(),
-            fact_dep_signature,
+            read_set_signature,
             walker_diagnostics: Arc::from([]),
         };
         let mut entries = self.entries_lock_diagnosed();

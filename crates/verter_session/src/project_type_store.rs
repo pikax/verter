@@ -2893,8 +2893,7 @@ mod tests {
                 owner_canonical: Arc::from("/w/o.vue"),
                 owner_whole_hash: hash,
                 bindings: Arc::new(FxHashMap::default()),
-                dep_signature: Arc::from(Vec::new().into_boxed_slice()),
-                fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
+                read_set_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
             }),
         );
         store.component_meta_results().insert(
@@ -2920,8 +2919,7 @@ mod tests {
                     canonical_id: Arc::from("/w/o.vue"),
                     whole_hash: hash,
                 }),
-                dep_signature: Arc::from(Vec::new().into_boxed_slice()),
-                fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
+                read_set_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
             },
         );
 

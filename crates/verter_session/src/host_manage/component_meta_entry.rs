@@ -356,7 +356,8 @@ impl VerterHost {
         };
         use crate::completion_fence::FenceValidator;
         let dep_sig_valid = entry
-            .dep_signature
+            .read_set_signature
+            .legacy
             .iter()
             .all(|(canonical_id, version)| validator.validate(canonical_id, version));
         if !dep_sig_valid {
@@ -424,7 +425,8 @@ impl VerterHost {
         let validator = HostFenceValidator { host: self, view };
         use crate::completion_fence::FenceValidator;
         let dep_sig_valid = entry
-            .dep_signature
+            .read_set_signature
+            .legacy
             .iter()
             .all(|(canonical_id, version)| validator.validate(canonical_id, version));
         if !dep_sig_valid {
@@ -490,8 +492,10 @@ impl VerterHost {
             key,
             crate::component_meta_result_db::ComponentMetaResultEntry {
                 payload: Arc::new(cached),
-                dep_signature,
-                fact_dep_signature,
+                read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(
+                    fact_dep_signature,
+                    dep_signature,
+                ),
             },
         );
     }
@@ -556,8 +560,10 @@ impl VerterHost {
             key,
             crate::component_meta_result_db::ComponentMetaResultEntry {
                 payload: Arc::new(cached),
-                dep_signature,
-                fact_dep_signature,
+                read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(
+                    fact_dep_signature,
+                    dep_signature,
+                ),
             },
         );
     }
@@ -892,7 +898,8 @@ impl VerterHost {
         };
         use crate::completion_fence::FenceValidator;
         let dep_sig_valid = entry
-            .dep_signature
+            .read_set_signature
+            .legacy
             .iter()
             .all(|(canonical_id, version)| validator.validate(canonical_id, version));
         if !dep_sig_valid {

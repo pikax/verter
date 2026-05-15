@@ -25,10 +25,9 @@ use crate::resolver_core::component_meta_query_engine::{
     SEMANTIC_OBJECT_SURFACE,
 };
 use crate::semantic_query::{
-    DepSignature, IndexKey, MapperKey, OptionalityMod, PathSegment,
-    PrimitiveKind as SemanticPrimitiveKind, ProjectionMode, QueryError, QueryResult, ReadonlyMod,
-    ResolveDeclKey, ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryKey, SurfaceMember,
-    SurfaceView, TupleElement,
+    DepSignature, IndexKey, MapperKey, OptionalityMod, PrimitiveKind as SemanticPrimitiveKind,
+    ProjectionMode, QueryError, QueryResult, ReadonlyMod, ResolveDeclKey, ScopeId,
+    SemanticNodeData, SemanticNodeId, SemanticQueryKey, SurfaceMember, SurfaceView, TupleElement,
 };
 
 // =====================================================================
@@ -585,123 +584,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
         // Per-key dispatch traffic counter. Records a
         // (variant_discriminant, content_hash) digest so diagnostic
-        // tests can dump the top-N most-dispatched keys (deferred per
-        // §1.C.3 pending an InputMenu corpus fixture).
+        // tests can dump the top-N most-dispatched keys.
         #[cfg(test)]
         record_dispatch_key(&key);
 
-        // Supplement §5.D.0 r17 — cold/warm split is recorded
-        // inside `SemanticGraphStore::execute_cooperative` after
-        // canonicalisation. The digest function in
-        // `SemanticQueryKeyDigest::from_key` canonicalises the key
-        // before hashing so caller-side probes (e.g.
-        // `family_cold(&ProjectMember{..})`) read the same counter
-        // as the canonical form (`ProjectPath{path: [Member(..)]}`)
-        // the warm cache stores.
-
-        // Mirror the canonicalisation done by `execute` so the cache key
-        // identity is stable across the sugar variants.
-        let key = match key {
-            SemanticQueryKey::ProjectMember { base, member, mode } => {
-                SemanticQueryKey::ProjectPath {
-                    base,
-                    path: Arc::from(vec![PathSegment::Member(member)].into_boxed_slice()),
-                    mode,
-                }
-            }
-            SemanticQueryKey::IndexedAccess { base, index, mode } => {
-                SemanticQueryKey::ProjectPath {
-                    base,
-                    path: Arc::from(vec![PathSegment::Index(index)].into_boxed_slice()),
-                    mode,
-                }
-            }
-            SemanticQueryKey::NormalizeUnion { members } => SemanticQueryKey::NormalizeUnion {
-                members: super::canonicalize_node_list(&members),
-            },
-            SemanticQueryKey::NormalizeIntersection { members } => {
-                SemanticQueryKey::NormalizeIntersection {
-                    members: super::canonicalize_node_list(&members),
-                }
-            }
-            other => other,
-        };
-
-        let graph = Arc::clone(self.graph());
-        let sentinel_key = key.clone();
-        let sentinel = {
-            let graph = Arc::clone(&graph);
-            move || {
-                if let SemanticQueryKey::Instantiate { base, .. } = &sentinel_key {
-                    return graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
-                        name: Arc::clone(&base.decl_name),
-                    }));
-                }
-                graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss))
-            }
-        };
-        let key_for_build = key.clone();
-        let build = move || -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
-            match &key_for_build {
-                SemanticQueryKey::ResolveDecl(decl_key) => self.build_resolve_decl(decl_key).into(),
-                SemanticQueryKey::TypeOf { value_root } => self.build_typeof(value_root).into(),
-                SemanticQueryKey::Instantiate {
-                    base,
-                    args,
-                    body_mode,
-                } => self.build_instantiate(base, args, *body_mode).into(),
-                SemanticQueryKey::ProjectMember { base, member, mode } => {
-                    let path: Arc<[PathSegment]> =
-                        Arc::from(vec![PathSegment::Member(Arc::clone(member))].into_boxed_slice());
-                    self.build_project_path(*base, &path, *mode)
-                }
-                SemanticQueryKey::IndexedAccess { base, index, mode } => {
-                    let path: Arc<[PathSegment]> =
-                        Arc::from(vec![PathSegment::Index(index.clone())].into_boxed_slice());
-                    self.build_project_path(*base, &path, *mode)
-                }
-                SemanticQueryKey::ProjectPath { base, path, mode } => {
-                    self.build_project_path(*base, path, *mode)
-                }
-                SemanticQueryKey::KeyOf { base } => self.build_key_of(*base).into(),
-                SemanticQueryKey::MappedType { source, mapper } => {
-                    self.build_mapped_type(*source, mapper).into()
-                }
-                SemanticQueryKey::Conditional {
-                    check,
-                    extends,
-                    true_branch,
-                    false_branch,
-                    distributive,
-                } => self
-                    .build_conditional(*check, *extends, *true_branch, *false_branch, *distributive)
-                    .into(),
-                SemanticQueryKey::NormalizeUnion { members } => {
-                    self.build_normalize_union(members).into()
-                }
-                SemanticQueryKey::NormalizeIntersection { members } => {
-                    self.build_normalize_intersection(members).into()
-                }
-                SemanticQueryKey::ResolvedNamedType { key } => {
-                    self.build_resolved_named_type(key).into()
-                }
-                SemanticQueryKey::Relate { .. } => {
-                    let fence = self.project_generation_signature();
-                    (QueryResult::Error(QueryError::Miss), fence).into()
-                }
-                // Binding amendment — `ResolveMacroPayload`.
-                SemanticQueryKey::ResolveMacroPayload {
-                    owner,
-                    macro_index,
-                    macro_kind,
-                    type_args,
-                    mode,
-                } => self
-                    .build_resolve_macro_payload(owner, *macro_index, *macro_kind, type_args, *mode)
-                    .into(),
-            }
-        };
-        graph.execute_cooperative(key, sentinel, build)
+        // Delegate to the shared cold-build helper. The helper handles
+        // canonicalisation, sentinel construction, the tracer-wrapped
+        // build closure, and the warm-hit fast path inside
+        // `execute_cooperative`. Routing both `execute` and
+        // `execute_read` through one helper ensures fact-tracer
+        // installation never bypasses any cold-build path.
+        self.execute_via_cold_build_helper(key)
     }
 
     /// Reduce a [`SemanticNodeId`] by dispatching the appropriate

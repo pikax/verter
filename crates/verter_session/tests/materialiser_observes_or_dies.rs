@@ -96,13 +96,18 @@ fn materialise_structure_entry_carries_dep_signature() {
         .join("component_meta_caches.rs");
     let src = read(&path);
 
-    // The materialiser entry struct MUST carry a `dep_signature`
-    // field. A refactor that dropped it would mean cached entries
-    // had no observed facts to validate against — i.e., the cache
-    // could not detect staleness.
+    // The materialiser entry struct MUST carry the carrier
+    // `read_set_signature: ReadSetSignature` field. The carrier
+    // consolidates the legacy whole-hash rail and the path-precise
+    // fact-signature rail; cache lookups validate through
+    // `entry.read_set_signature.validate(ctx)`. A refactor that
+    // dropped the carrier would mean cached entries had no observed
+    // facts to validate against — i.e., the cache could not detect
+    // staleness.
     assert!(
-        src.contains("dep_signature: DepSignature"),
-        "MaterializeStructureEntry must carry a `dep_signature: DepSignature` field \
+        src.contains("read_set_signature: crate::fact_signature_helpers::ReadSetSignature")
+            || src.contains("read_set_signature: ReadSetSignature"),
+        "MaterializeStructureEntry must carry a `read_set_signature: ReadSetSignature` field \
          so cache lookups can re-validate. The arch-guard pins this field's presence; \
          dropping it breaks the fact-validation contract."
     );

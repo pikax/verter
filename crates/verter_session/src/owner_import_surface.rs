@@ -54,17 +54,13 @@ pub struct OwnerImportSurface {
     pub owner_whole_hash: Hash16,
     /// Local binding name → resolved root identity.
     pub bindings: Arc<FxHashMap<Arc<str>, ResolvedOwnerImport>>,
-    /// Dep-signature fragment the caller merges into an active
-    /// [`CompletionFence`](crate::completion_fence::CompletionFence). The
-    /// owner's own whole-hash is always included; transitive target hashes
-    /// are appended as they are observed.
-    pub dep_signature: DepSignature,
-    /// R3/R26/R28 path-precise dep signature sibling. Bubbles into
-    /// outer fact tracers via
-    /// [`crate::fact_signature_helpers::bubble_fact_signature`].
-    /// AND-gate with the legacy `dep_signature` per codex's Stage
-    /// 7C.A1b guidance.
-    pub fact_dep_signature: Arc<[crate::resolver_core::FactVersionRef]>,
+    /// Carrier holding both the legacy whole-hash `DepSignature` rail
+    /// (used by `validate_dep_signature` / fence merging) and the
+    /// path-precise R28 fact signature. Warm reads call
+    /// `read_set_signature.validate(ctx)` BEFORE bubbling. The
+    /// owner's own whole-hash is always seeded into the legacy rail;
+    /// transitive target hashes append as they are observed.
+    pub read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
 }
 
 /// Host-owned cache of owner import surfaces. Keyed by owner canonical;
@@ -175,7 +171,8 @@ impl OwnerImportSurfaceDb {
     {
         let candidate = self.get(owner_canonical, expected_owner_whole_hash)?;
         if candidate
-            .fact_dep_signature
+            .read_set_signature
+            .facts
             .iter()
             .all(|fact| view.validates(fact))
         {
@@ -231,8 +228,7 @@ impl OwnerImportSurfaceDb {
             owner_canonical: Arc::clone(&canonical),
             owner_whole_hash: [0u8; 16],
             bindings: Arc::new(FxHashMap::default()),
-            dep_signature: Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
-            fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
+            read_set_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
         });
         self.insert(canonical, surface);
     }
@@ -350,8 +346,10 @@ where
         owner_canonical,
         owner_whole_hash,
         bindings: Arc::new(bindings),
-        dep_signature,
-        fact_dep_signature,
+        read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(
+            fact_dep_signature,
+            dep_signature,
+        ),
     })
 }
 
@@ -411,7 +409,8 @@ mod tests {
         let surface = mk_surface([7u8; 16]);
         // Owner + Foo (known hash); Bar has no hash and is not included.
         let signed: Vec<_> = surface
-            .dep_signature
+            .read_set_signature
+            .legacy
             .iter()
             .map(|(c, v)| (c.as_ref().to_string(), v.clone()))
             .collect();
@@ -431,7 +430,7 @@ mod tests {
         let surface =
             build_owner_import_surface(Arc::from("/w/o.ts"), [1u8; 16], vec![], Vec::new());
         assert_eq!(surface.bindings.len(), 0);
-        assert_eq!(surface.dep_signature.len(), 1);
-        assert_eq!(surface.dep_signature[0].0.as_ref(), "/w/o.ts");
+        assert_eq!(surface.read_set_signature.legacy.len(), 1);
+        assert_eq!(surface.read_set_signature.legacy[0].0.as_ref(), "/w/o.ts");
     }
 }

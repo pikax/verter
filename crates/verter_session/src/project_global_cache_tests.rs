@@ -583,7 +583,7 @@ fn owner_import_surface_fact_signature_includes_barrel_route() {
         .get("/w/owner.ts", owner_hash)
         .expect("surface populated by the resolution");
 
-    let barrel_route_fact = surface.fact_dep_signature.iter().find(|fact| {
+    let barrel_route_fact = surface.read_set_signature.facts.iter().find(|fact| {
         matches!(
             fact,
             FactVersionRef::DerivedFactHash {
@@ -597,10 +597,10 @@ fn owner_import_surface_fact_signature_includes_barrel_route() {
         barrel_route_fact.is_some(),
         "OwnerImportSurface.fact_dep_signature MUST include the barrel's \
          DerivedFactHash::Route fact (Gap 1). Recorded facts: {:?}",
-        surface.fact_dep_signature
+        surface.read_set_signature.facts
     );
 
-    let final_target_present = surface.fact_dep_signature.iter().any(|fact| {
+    let final_target_present = surface.read_set_signature.facts.iter().any(|fact| {
         matches!(
             fact,
             FactVersionRef::FileWholeHash { canonical_id, .. } if canonical_id == "/w/a.ts"
@@ -644,7 +644,8 @@ fn owner_import_surface_fact_signature_changes_on_barrel_retarget() {
         .get("/w/owner.ts", owner_hash)
         .expect("pre-retarget surface");
     let pre_route_hash = pre
-        .fact_dep_signature
+        .read_set_signature
+        .facts
         .iter()
         .find_map(|fact| match fact {
             FactVersionRef::DerivedFactHash {
@@ -668,7 +669,8 @@ fn owner_import_surface_fact_signature_changes_on_barrel_retarget() {
         .get("/w/owner.ts", owner_hash)
         .expect("post-retarget surface lives under the same owner_hash");
     let post_route_hash = post
-        .fact_dep_signature
+        .read_set_signature
+        .facts
         .iter()
         .find_map(|fact| match fact {
             FactVersionRef::DerivedFactHash {

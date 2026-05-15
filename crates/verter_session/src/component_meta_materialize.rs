@@ -466,10 +466,13 @@ fn finish_cacheable(
         return None;
     }
     let fact_dep_signature = fact_signature_from_fence(&local_fence);
+    let legacy = dep_signature_from_fence(local_fence);
     Some(MaterializeStructureEntry {
         outcome,
-        dep_signature: dep_signature_from_fence(local_fence),
-        fact_dep_signature,
+        read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(
+            fact_dep_signature,
+            legacy,
+        ),
     })
 }
 
@@ -1000,10 +1003,13 @@ pub(crate) fn materialize_component_meta_structure(
             return None;
         }
         let fact_dep_signature = fact_signature_from_fence(&local_fence);
+        let legacy = dep_signature_from_fence(local_fence);
         Some(MaterializeStructureEntry {
             outcome,
-            dep_signature: dep_signature_from_fence(local_fence),
-            fact_dep_signature,
+            read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(
+                fact_dep_signature,
+                legacy,
+            ),
         })
     };
 
@@ -1035,7 +1041,14 @@ pub(crate) fn materialize_component_meta_structure(
             match finalise {
                 crate::resolver_core::FactReadSetFinalise::Ok(fact_dep_signature) => {
                     entry_opt.map(|mut entry| {
-                        entry.fact_dep_signature = fact_dep_signature;
+                        // Override the carrier's fact rail with the
+                        // tracer's authoritative observation set.
+                        let legacy = Arc::clone(&entry.read_set_signature.legacy);
+                        entry.read_set_signature =
+                            crate::fact_signature_helpers::ReadSetSignature::new(
+                                fact_dep_signature,
+                                legacy,
+                            );
                         entry
                     })
                 }
@@ -1067,23 +1080,13 @@ pub(crate) fn materialize_component_meta_structure(
         db.inflight(),
         key.clone(),
         |entry: &MaterializeStructureEntry| {
-            // R3 AND-gate: BOTH the legacy whole-hash dep_signature
-            // AND the R28 path-precise fact_dep_signature must
-            // validate. Either rail mismatching fails the warm hit
-            // and forces cold recompute.
-            if ctx.validate_dep_signature(&entry.dep_signature)
-                && crate::fact_signature_helpers::validate_fact_signature(
-                    ctx,
-                    &entry.fact_dep_signature,
-                )
-            {
-                crate::fact_signature_helpers::bubble_fact_signature(
-                    ctx,
-                    &entry.fact_dep_signature,
-                );
+            // Carrier-aware AND-gate: BOTH rails must validate. Stale
+            // entries never bubble.
+            if entry.read_set_signature.validate(ctx) {
+                entry.read_set_signature.bubble(ctx);
                 Some(crate::semantic_query::CacheRead {
                     value: entry.outcome.clone(),
-                    dep_signature: entry.dep_signature.clone(),
+                    dep_signature: Arc::clone(&entry.read_set_signature.legacy),
                     walker_diagnostics: Arc::from([]),
                     cache_suppress: false,
                 })
@@ -1093,31 +1096,21 @@ pub(crate) fn materialize_component_meta_structure(
         },
         compute,
         |entry: &MaterializeStructureEntry| {
-            crate::fact_signature_helpers::bubble_fact_signature(ctx, &entry.fact_dep_signature);
+            entry.read_set_signature.bubble(ctx);
             crate::semantic_query::CacheRead {
                 value: entry.outcome.clone(),
-                dep_signature: entry.dep_signature.clone(),
+                dep_signature: Arc::clone(&entry.read_set_signature.legacy),
                 walker_diagnostics: Arc::from([]),
                 cache_suppress: false,
             }
         },
-        // Race-closer — post-compute revalidation. AND-gate both
-        // rails.
-        |entry: &MaterializeStructureEntry| {
-            ctx.validate_dep_signature(&entry.dep_signature)
-                && crate::fact_signature_helpers::validate_fact_signature(
-                    ctx,
-                    &entry.fact_dep_signature,
-                )
-        },
+        // Race-closer — post-compute revalidation via carrier AND-gate.
+        |entry: &MaterializeStructureEntry| entry.read_set_signature.validate(ctx),
         // post_publish — register reverse-index AFTER
         // entries.insert AND AFTER successful revalidation.
         move |entry_arc: &Arc<MaterializeStructureEntry>, k: &MaterializeStructureCacheKey| {
             db.bump_live_counter();
-            db.register_post_publish(
-                key_for_register.clone(),
-                Arc::clone(&entry_arc.dep_signature),
-            );
+            db.register_post_publish(key_for_register.clone(), &entry_arc.read_set_signature);
             let _ = k; // unused — key_for_register is the same key
         },
     );
@@ -2327,8 +2320,10 @@ export type C<T> = A<T>
         );
         let stale_entry = StdArc::new(MaterializeStructureEntry {
             outcome: MaterializeOutcome::Value(decl_ref_node),
-            dep_signature: stale_signature,
-            fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
+            read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(
+                crate::fact_signature_helpers::empty_fact_signature(),
+                stale_signature,
+            ),
         });
         let db = host.project_type_store().materialize_structure_db();
         db.entries().insert(key.clone(), stale_entry);
@@ -2665,8 +2660,10 @@ export type C<T> = A<T>
         );
         let stale_entry = std::sync::Arc::new(crate::component_meta_caches::RefCycleEntry {
             result: false,
-            dep_signature: stale_signature,
-            fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
+            read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(
+                crate::fact_signature_helpers::empty_fact_signature(),
+                stale_signature,
+            ),
             validated_at_generation: std::sync::atomic::AtomicU64::new(u64::MAX),
         });
         let db = host.project_type_store().ref_cycle_db();

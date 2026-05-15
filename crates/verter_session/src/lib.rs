@@ -251,6 +251,12 @@ pub mod for_tests {
         empty_signature_for_tests, test_trigger_inflight_abort, TestForceColdAbortGuard,
     };
 
+    /// Carrier type for cache-entry dependency signatures. Integration
+    /// tests construct `ReadSetSignature` directly when seeding
+    /// fixtures into `ComponentMetaResultEntry` / `MaterializeStructureEntry` /
+    /// `OwnerImportSurface` / `RefCycleEntry` / `MemoEntry`.
+    pub use crate::fact_signature_helpers::ReadSetSignature;
+
     /// Fan `sig` into every active tracer on the current thread's TLS
     /// stack. Integration tests use this to verify that the multi-level
     /// fan-out delivers observations into all nested tracer scopes without

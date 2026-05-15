@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 
+use crate::fact_signature_helpers::ReadSetSignature;
 use crate::semantic_query::{
     DeclIdentity, DepSignature, HostResolvedNamedTypeKey, IndexKey, MapperKey, PathSegment,
     ProjectionMode, QueryResult, ResolveDeclKey, SemanticNodeId, SemanticQueryKey, ValueRootKey,
@@ -16,16 +17,14 @@ use crate::semantic_query::{
 #[derive(Clone)]
 pub(super) struct MemoEntry {
     pub(super) result: QueryResult<SemanticNodeId>,
-    pub(super) dep_signature: DepSignature,
-    /// R3/R26/R28 path-precise dep signature sibling to
-    /// `dep_signature`. Bubbles into outer fact tracers via
-    /// [`crate::fact_signature_helpers::bubble_fact_signature_via_tls`]
-    /// from `SemanticGraphStore::get` and
-    /// `try_warm_hit_fast_path` so an active outer cold-compute sees
-    /// this memo's observation set on transitive hits. The AND-gate
-    /// against the current view validates at the outer fence
-    /// revalidation point.
-    pub(super) fact_dep_signature: Arc<[crate::resolver_core::FactVersionRef]>,
+    /// Carrier holding both the legacy whole-hash `DepSignature` and
+    /// the path-precise R28 fact signature for this entry. Warm-hit
+    /// reads call `read_set_signature.validate(ctx)` BEFORE bubbling
+    /// `read_set_signature.bubble(ctx)` (or `bubble_via_tls()` on the
+    /// fast path). The unified reverse index registers under every
+    /// canonical yielded by `read_set_signature.canonical_ids()` so
+    /// `invalidate_canonical` drains both legacy- and fact-only deps.
+    pub(super) read_set_signature: ReadSetSignature,
     /// Walker diagnostics observed during the cold build that produced
     /// this entry. Replayed on warm hits via `CacheRead.walker_diagnostics`.
     /// Empty for non-walker queries.
@@ -395,6 +394,34 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
 pub(super) fn dep_signature_references_canonical(sig: &DepSignature, canonical_id: &str) -> bool {
     sig.iter()
         .any(|(canonical, _)| canonical.as_ref() == canonical_id)
+}
+
+/// Returns true iff any [`crate::resolver_core::FactVersionRef`] in
+/// `facts` carries `canonical_id` as its referenced canonical. Used by
+/// `invalidate_canonical` to discriminate entries whose path-precise
+/// fact signature references `canonical_id` even when the legacy
+/// `DepSignature` does not. The unified reverse index (carrier-aware)
+/// registers under both rails' canonicals, so this predicate is the
+/// fact-side complement of [`dep_signature_references_canonical`].
+pub(super) fn carrier_facts_reference_canonical(
+    facts: &[crate::resolver_core::FactVersionRef],
+    canonical_id: &str,
+) -> bool {
+    facts.iter().any(|fact| match fact {
+        crate::resolver_core::FactVersionRef::FileWholeHash {
+            canonical_id: c, ..
+        } => c.as_str() == canonical_id,
+        crate::resolver_core::FactVersionRef::DerivedFactHash {
+            canonical_id: c, ..
+        } => c.as_str() == canonical_id,
+        crate::resolver_core::FactVersionRef::Parse(p) => p.canonical_id.as_str() == canonical_id,
+        crate::resolver_core::FactVersionRef::ResolveImports(r) => {
+            r.canonical_id.as_str() == canonical_id
+        }
+        crate::resolver_core::FactVersionRef::RouteSurface(r) => {
+            r.canonical_id.as_str() == canonical_id
+        }
+    })
 }
 
 /// Every [`ModeSlot`] variant as a static slice. Pre-Γ.B

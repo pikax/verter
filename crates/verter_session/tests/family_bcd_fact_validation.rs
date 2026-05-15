@@ -47,17 +47,39 @@ fn assert_struct_carries_both_fields(src: &str, ty: &str) {
         .find("\n}")
         .unwrap_or_else(|| panic!("expected struct close for {ty}"));
     let window = &after[..end];
+    // Carrier-aware arch guard: the entry must store a single
+    // `read_set_signature: ReadSetSignature` field. The carrier
+    // holds both the legacy whole-hash `DepSignature` rail (legacy)
+    // and the path-precise `Arc<[FactVersionRef]>` rail (facts).
     assert!(
-        window.contains("dep_signature: DepSignature")
-            || window.contains("dep_signature: crate::semantic_query::DepSignature"),
-        "{ty} must carry the legacy `dep_signature: DepSignature` (AND-gate model). \
+        window.contains("read_set_signature: ReadSetSignature")
+            || window
+                .contains("read_set_signature: crate::fact_signature_helpers::ReadSetSignature",),
+        "{ty} must carry the carrier `read_set_signature: ReadSetSignature`. The carrier \
+         consolidates the legacy `DepSignature` rail and the R28 `Arc<[FactVersionRef]>` rail. \
+         Window:\n{window}"
+    );
+    // Negative assertion: no separate dep_signature / fact_dep_signature
+    // fields. The carrier consolidation requires both rails live inside
+    // `ReadSetSignature`.
+    assert!(
+        !window.contains("    pub dep_signature: DepSignature")
+            && !window.contains("    pub dep_signature: crate::semantic_query::DepSignature")
+            && !window.contains("    pub(super) dep_signature: DepSignature"),
+        "{ty} must NOT carry a separate `dep_signature: DepSignature` field after the carrier \
+         consolidation — both rails live inside `read_set_signature.legacy` / .facts now. \
          Window:\n{window}"
     );
     assert!(
-        window.contains("fact_dep_signature: Arc<[FactVersionRef]>")
-            || window.contains("fact_dep_signature: Arc<[crate::resolver_core::FactVersionRef]>"),
-        "{ty} must carry the new `fact_dep_signature: Arc<[FactVersionRef]>` \
-         (R3/R26/R28 substrate). Window:\n{window}"
+        !window.contains("    pub fact_dep_signature: Arc<[FactVersionRef]>")
+            && !window.contains(
+                "    pub fact_dep_signature: Arc<[crate::resolver_core::FactVersionRef]>",
+            )
+            && !window.contains(
+                "    pub(super) fact_dep_signature: Arc<[crate::resolver_core::FactVersionRef]>"
+            ),
+        "{ty} must NOT carry a separate `fact_dep_signature: Arc<[FactVersionRef]>` field after \
+         the carrier consolidation. Window:\n{window}"
     );
 }
 
