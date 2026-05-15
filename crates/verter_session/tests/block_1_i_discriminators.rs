@@ -295,6 +295,192 @@ fn semantic_memo_invalidate_drains_fact_only_canonical_entry() {
     );
 }
 
+/// Behavioural discriminator for codex round-3 P2 —
+/// `semantic_memo_invalidate_preserves_unaffected_shared_legacy_entry`.
+///
+/// Two memo entries A and B share the SAME legacy
+/// `Arc<DepSignature>` Arc (canonicalised by an interner / by
+/// explicit `Arc::clone`) referencing `/test/shared-legacy.ts`. The
+/// entries differ in their path-precise `facts` rails:
+///   - Entry A's facts reference `/test/dep-a.ts` (and NOT
+///     `/test/dep-b.ts`).
+///   - Entry B's facts reference `/test/dep-b.ts` (and NOT
+///     `/test/dep-a.ts`).
+///
+/// Calling `invalidate_canonical("/test/dep-a.ts")` should evict
+/// ONLY entry A. Entry B's facts rail does not reference `dep-a.ts`,
+/// so B's warm slot must survive AND its reverse-index registration
+/// for the shared legacy canonical `/test/shared-legacy.ts` must
+/// remain intact.
+///
+/// Pre-fix shape: the cross-canonical drain in `invalidate_canonical`
+/// used `Arc::ptr_eq` between the stored `Arc<DepSignature>` and the
+/// evicted entry's legacy Arc. Because A and B share the same Arc,
+/// `Arc::ptr_eq(B's registered Arc, A's evicted Arc)` is `true`, so
+/// B's `(family_B, slot_B)` registration is wrongly removed from the
+/// `/test/shared-legacy.ts` shard. A subsequent
+/// `invalidate_canonical("/test/shared-legacy.ts")` then misses
+/// entry B because its reverse-index registration is gone, leaving
+/// B stale in the warm cache.
+///
+/// Post-fix shape: the cross-canonical drain removes by entry
+/// identity `(family, slot)` instead of `Arc::ptr_eq`. Only A's
+/// `(family_A, slot_A)` is removed from the shared shard. B's
+/// registration persists, and the subsequent
+/// `invalidate_canonical("/test/shared-legacy.ts")` correctly
+/// evicts B.
+///
+/// Discriminating signal: after `invalidate_canonical("/test/dep-a.ts")`,
+/// `canonical_to_entries_count("/test/shared-legacy.ts") >= 1`
+/// (B's registration survives). Pre-fix this is 0. The subsequent
+/// `invalidate_canonical("/test/shared-legacy.ts")` returns 1
+/// (evicts B). Pre-fix this returns 0 (B is orphaned).
+#[test]
+fn semantic_memo_invalidate_preserves_unaffected_shared_legacy_entry() {
+    let _serial = DISCRIMINATOR_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    use std::sync::Arc;
+    use verter_session::for_tests::{ReadSetSignature, SemanticGraphStore};
+    use verter_session::resolver_core::{FactVersionRef, ParseFactRef};
+    use verter_session::semantic_query::{
+        DepVersion, PrimitiveKind, QueryResult, ResolveDeclKey, ScopeId, SemanticNodeData,
+        SemanticQueryKey,
+    };
+
+    let store = SemanticGraphStore::new();
+
+    // Construct a SHARED legacy DepSignature Arc that both entries
+    // will use. `Arc::clone` returns Arcs that satisfy `Arc::ptr_eq`,
+    // emulating an interned / canonicalised fence shared between
+    // entries A and B.
+    let shared_legacy: Arc<[(Arc<str>, DepVersion)]> = Arc::from(
+        vec![(
+            Arc::<str>::from("/test/shared-legacy.ts"),
+            DepVersion::WholeHash([0xAAu8; 16]),
+        )]
+        .into_boxed_slice(),
+    );
+
+    // Entry A: facts rail references /test/dep-a.ts (NOT /test/dep-b.ts).
+    let key_a = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        scope: ScopeId {
+            canonical_id: Arc::from("/test/scope-a.ts"),
+            local_scope: None,
+        },
+        name: Arc::from("EntryA"),
+    });
+    let node_a = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let facts_a: Arc<[FactVersionRef]> = Arc::from(vec![FactVersionRef::Parse(ParseFactRef {
+        canonical_id: "/test/dep-a.ts".to_string(),
+        key: verter_semantic::facts::FactKey::SyntacticExportSet,
+        lane: verter_semantic::facts::FactLane::Semantic,
+        expected_hash: [0xA1u8; 16],
+    })]);
+    let carrier_a = ReadSetSignature::new(facts_a, Arc::clone(&shared_legacy));
+
+    // Entry B: facts rail references /test/dep-b.ts (NOT /test/dep-a.ts).
+    let key_b = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        scope: ScopeId {
+            canonical_id: Arc::from("/test/scope-b.ts"),
+            local_scope: None,
+        },
+        name: Arc::from("EntryB"),
+    });
+    let node_b = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let facts_b: Arc<[FactVersionRef]> = Arc::from(vec![FactVersionRef::Parse(ParseFactRef {
+        canonical_id: "/test/dep-b.ts".to_string(),
+        key: verter_semantic::facts::FactKey::SyntacticExportSet,
+        lane: verter_semantic::facts::FactLane::Semantic,
+        expected_hash: [0xB1u8; 16],
+    })]);
+    let carrier_b = ReadSetSignature::new(facts_b, Arc::clone(&shared_legacy));
+
+    // Confirm the legacy Arcs are pointer-equal — this is the
+    // pre-condition that triggers the shared-Arc hazard.
+    assert!(
+        Arc::ptr_eq(&carrier_a.legacy, &carrier_b.legacy),
+        "test setup invariant: carrier_a and carrier_b must share the same legacy Arc \
+         (Arc::ptr_eq) so the shared-Arc hazard is exercised"
+    );
+
+    let populated_a =
+        store.publish_with_carrier_for_tests(key_a.clone(), QueryResult::Value(node_a), carrier_a);
+    assert!(
+        populated_a >= 1,
+        "entry A must publish at least one slot (got {populated_a})"
+    );
+    let populated_b =
+        store.publish_with_carrier_for_tests(key_b.clone(), QueryResult::Value(node_b), carrier_b);
+    assert!(
+        populated_b >= 1,
+        "entry B must publish at least one slot (got {populated_b})"
+    );
+
+    // Sanity: both entries are warm. The shared legacy shard holds
+    // BOTH registrations.
+    assert!(store.get(&key_a).is_some(), "entry A must be warm");
+    assert!(store.get(&key_b).is_some(), "entry B must be warm");
+    let shared_shard_pre = store.canonical_to_entries_count("/test/shared-legacy.ts");
+    assert!(
+        shared_shard_pre >= 2,
+        "shared legacy shard must hold both A and B registrations pre-invalidation \
+         (got {shared_shard_pre})"
+    );
+
+    // Invalidate the canonical referenced only by A's facts rail.
+    let removed_a = store.invalidate_canonical("/test/dep-a.ts");
+    assert_eq!(
+        removed_a, 1,
+        "invalidate_canonical('/test/dep-a.ts') must evict EXACTLY one entry (A). \
+         Got {removed_a}."
+    );
+
+    // A is gone, B survives.
+    assert!(
+        store.get(&key_a).is_none(),
+        "entry A must be evicted (its facts rail referenced /test/dep-a.ts)"
+    );
+    assert!(
+        store.get(&key_b).is_some(),
+        "entry B must SURVIVE — its facts rail did NOT reference /test/dep-a.ts. \
+         If evicted, the cross-canonical drain wrongly invalidated B."
+    );
+
+    // The critical discriminating signal: B's reverse-index
+    // registration under the SHARED legacy canonical must remain
+    // intact. Pre-fix the cross-canonical drain used
+    // `Arc::ptr_eq(B's registered Arc, A's evicted Arc)` which
+    // returned `true` (shared Arc) and removed B's registration
+    // from the shared shard.
+    let shared_shard_post = store.canonical_to_entries_count("/test/shared-legacy.ts");
+    assert!(
+        shared_shard_post >= 1,
+        "B's reverse-index registration under /test/shared-legacy.ts MUST persist \
+         after A is evicted. Got {shared_shard_post}. Pre-fix this is 0 because the \
+         cross-canonical drain used Arc::ptr_eq, removing B's registration when the \
+         legacy Arc is shared between A and B. Codex round-3 P2."
+    );
+
+    // Cross-check: subsequent invalidation of the shared legacy
+    // canonical must find and evict B. Pre-fix this is 0 (B is
+    // orphaned — no reverse-index registration to drain).
+    let removed_b = store.invalidate_canonical("/test/shared-legacy.ts");
+    assert_eq!(
+        removed_b, 1,
+        "invalidate_canonical('/test/shared-legacy.ts') must evict B (got {removed_b}). \
+         Pre-fix this is 0 because B's reverse-index registration was wrongly stripped \
+         when A was evicted. Codex round-3 P2."
+    );
+    assert!(
+        store.get(&key_b).is_none(),
+        "entry B must be evicted after invalidate_canonical of the shared legacy \
+         canonical. If still present, the unified reverse index has stale registrations \
+         that did not drive eviction — codex round-3 P2."
+    );
+}
+
 /// Discriminator 3 (codex 3) — `semantic_memo_warm_hit_validates_before_bubble`.
 ///
 /// The previous tree's `SemanticGraphStore::get` and

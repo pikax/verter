@@ -989,7 +989,8 @@ mod tests {
     #[test]
     fn cacheable_joiner_runs_project_on_its_own_thread() {
         use std::sync::mpsc;
-        use std::time::Duration;
+        use std::sync::Barrier;
+        use std::time::{Duration, Instant};
         let map: Arc<DashMap<u32, Arc<String>>> = Arc::new(DashMap::new());
         let inflight: Arc<InflightTable<u32>> = Arc::new(InflightTable::default());
 
@@ -999,15 +1000,46 @@ mod tests {
         let winner_project_count = Arc::new(AtomicUsize::new(0));
         let joiner_project_count = Arc::new(AtomicUsize::new(0));
 
-        // mpsc channels coordinate the interleave so the joiner
-        // deterministically blocks on the slot's condvar (taking the
-        // joiner branch) rather than racing past as a warm-hit.
+        // Deterministic synchronisation (codex round-3 P3):
+        //
+        //   * `tx_winner_in_compute` — winner signals it has claimed
+        //     the inflight slot and is inside `compute()`. Joiner is
+        //     spawned only after this fires, so the joiner cannot
+        //     race ahead of the winner's claim.
+        //   * `release_barrier` — a `Barrier::new(2)` between winner's
+        //     `compute()` body and the test driver. The winner blocks
+        //     at the barrier AFTER signalling claim, so it CANNOT
+        //     publish (return Cacheable) until the test driver also
+        //     crosses the barrier. This replaces the previous
+        //     `rx_release_winner` channel with an explicit
+        //     `Barrier::wait()` ordering primitive.
+        //
+        // The 50 ms `thread::sleep` heuristic the test previously
+        // used to wait for the joiner to register on the inflight
+        // slot was racy on a loaded test runner: if the joiner had
+        // not yet acquired the slot when the winner published and
+        // retired, the joiner would either claim a fresh inflight
+        // slot itself (becoming a new winner and panicking in its
+        // compute closure) or hit a stale map miss. The Barrier
+        // alone does not solve this — there is no closure hook on
+        // the joiner side between "took the joiner branch" and
+        // "blocked on the condvar". Instead, between
+        // `rx_winner_in_compute.recv()` and the barrier release we
+        // poll the inflight table for the moment the joiner has
+        // acquired its own `Arc<InflightSlot>` (table refcount +
+        // winner refcount + joiner refcount = 3). Once the joiner
+        // holds an Arc to the existing slot, the winner may retire
+        // the table entry without changing the joiner's view of
+        // `state.claimed`/`completed`, and the joiner deterministically
+        // reaches the `map.get(&key) + project(&entry_arc)` branch
+        // that the discriminator measures.
         let (tx_winner_in_compute, rx_winner_in_compute) = mpsc::channel::<()>();
-        let (tx_release_winner, rx_release_winner) = mpsc::channel::<()>();
+        let release_barrier = Arc::new(Barrier::new(2));
 
         let winner_map = Arc::clone(&map);
         let winner_inflight = Arc::clone(&inflight);
         let winner_pc = Arc::clone(&winner_project_count);
+        let release_barrier_w = Arc::clone(&release_barrier);
         let winner = thread::spawn(move || {
             cooperative_admit_with_post_publish(
                 &*winner_map,
@@ -1016,11 +1048,14 @@ mod tests {
                 |_entry: &String| -> Option<String> { None }, // no warm hit
                 || -> ComputeAdmission<String, String> {
                     // Signal we are inside compute (claimed). The
-                    // joiner can now enter and block on the condvar.
+                    // joiner can now enter and acquire the inflight
+                    // slot Arc.
                     tx_winner_in_compute.send(()).expect("signal in-compute");
-                    // Block until the test driver releases us so the
-                    // joiner has time to register on the inflight slot.
-                    rx_release_winner.recv().expect("released");
+                    // Block until the test driver crosses the
+                    // release barrier — i.e. until the test driver
+                    // has confirmed the joiner has acquired its own
+                    // Arc on the inflight slot.
+                    release_barrier_w.wait();
                     ComputeAdmission::Cacheable("payload".to_string())
                 },
                 |entry: &String| -> String {
@@ -1033,9 +1068,10 @@ mod tests {
         });
 
         // Wait for the winner to enter compute (claimed but not yet
-        // published). Now the joiner is guaranteed to take the
-        // joiner-branch and block on the condvar.
-        rx_winner_in_compute.recv().expect("winner in compute");
+        // published).
+        rx_winner_in_compute
+            .recv()
+            .expect("winner must signal claim before joiner spawn");
 
         let joiner_map = Arc::clone(&map);
         let joiner_inflight = Arc::clone(&inflight);
@@ -1049,7 +1085,8 @@ mod tests {
                 || -> ComputeAdmission<String, String> {
                     // The joiner MUST NOT execute compute; if this
                     // panics the test isn't exercising the joiner
-                    // branch.
+                    // branch (which means the deterministic sync
+                    // below is broken, not the production code).
                     panic!("joiner must not run compute");
                 },
                 |entry: &String| -> String {
@@ -1061,14 +1098,64 @@ mod tests {
             )
         });
 
-        // Give the joiner time to register on the inflight slot and
-        // block on the condvar. Same heuristic used by
-        // `cross_thread_joiner_bubbles_facts.rs`.
-        thread::sleep(Duration::from_millis(50));
+        // Deterministic wait: poll the inflight table until the
+        // joiner has acquired its own `Arc<InflightSlot>` for the
+        // key. Strong-count layout for the still-claimed slot:
+        //
+        //   * 1 — table entry holds the slot Arc
+        //   * 1 — winner's `slot` local inside
+        //         `cooperative_admit_with_post_publish`
+        //   * 1 — winner's `panic_guard.slot`, created by
+        //         `InflightPanicGuard::new(Arc::clone(&slot), ...)`
+        //         AFTER `state.claimed = true` (i.e. before the
+        //         winner enters its `compute()` body)
+        //   * 1 — joiner's `slot` local AFTER it executes the
+        //         `table.entry(key).or_insert_with(...).clone()`
+        //         block
+        //
+        // The winner is parked inside its `compute()` body at the
+        // release barrier, so winner.slot and winner.panic_guard.slot
+        // both stay alive — the baseline strong count is 3 before
+        // the joiner arrives and exactly 4 once the joiner has
+        // acquired its Arc on the existing slot. We poll for `>= 4`
+        // so the release barrier crosses only after the joiner has
+        // bumped the refcount. Once the joiner holds its own Arc,
+        // winner can retire the table entry without changing the
+        // joiner's view of `state.claimed = true`; the joiner falls
+        // through to `map.get(&key) + project(&entry_arc)` once
+        // `state.completed = true` is set by the winner's publish.
+        let poll_deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let table_guard = inflight.table.lock();
+            if let Some(slot) = table_guard.get(&42u32) {
+                // strong_count counts table + winner.slot +
+                // winner.panic_guard.slot + joiner.slot. The
+                // `slot` binding above is a `&Arc<...>` from
+                // `HashMap::get`, NOT a fresh clone, so it does
+                // not bump the count.
+                if Arc::strong_count(slot) >= 4 {
+                    break;
+                }
+            }
+            drop(table_guard);
+            if Instant::now() >= poll_deadline {
+                panic!(
+                    "joiner failed to acquire inflight slot Arc within 10s — \
+                     the deterministic-sync poll below the release barrier is broken"
+                );
+            }
+            std::hint::spin_loop();
+        }
 
-        // Release the winner. It publishes, calls project (winner
-        // count = 1), inserts into the map, and notifies the joiner.
-        tx_release_winner.send(()).expect("release");
+        // Release the winner via the barrier. The winner returns
+        // Cacheable, publishes (winner project count = 1), inserts
+        // into the map, sets `state.completed = true`, notifies the
+        // joiner, and retires the inflight table entry. The joiner
+        // is past the slot-acquisition point so it observes the
+        // existing slot via its own Arc and falls through to
+        // `map.get(&key) + project(&entry_arc)` — bumping the joiner
+        // project count by exactly one.
+        release_barrier.wait();
 
         let winner_result = winner.join().expect("winner joined");
         let joiner_result = joiner.join().expect("joiner joined");

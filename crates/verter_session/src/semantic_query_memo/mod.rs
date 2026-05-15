@@ -540,7 +540,28 @@ impl SemanticGraphStore {
         // registered dep_sig was replaced by a fresh build whose
         // dep_sig also references the canonical).
         let mut evicted = 0usize;
-        let mut evicted_dep_sigs: Vec<DepSignature> = Vec::new();
+        // Track each evicted entry's `(family, slot)` key together
+        // with its full carrier so the cross-canonical drain can
+        // remove that exact entry's registrations from every
+        // canonical it referenced — both the legacy `DepSignature`
+        // rail AND the path-precise `facts` rail (the union returned
+        // by `ReadSetSignature::canonical_ids()`).
+        //
+        // Keying the drain by entry identity `(FamilyKey, ModeSlot)`
+        // rather than by `Arc::ptr_eq` on the stored legacy
+        // `DepSignature` prevents the "shared legacy Arc" hazard:
+        // when two memo entries share the same legacy fence Arc and
+        // only one is evicted, the previous `map.retain` walked the
+        // other canonical shards with `Arc::ptr_eq(registered, sig)`
+        // and removed BOTH entries' registrations because they
+        // pointed to the same Arc. The surviving entry then had no
+        // reverse-index registration for its legacy canonicals and a
+        // later `invalidate_canonical` of those canonicals would
+        // miss it, leaving stale warm data. Codex round-3 P2.
+        let mut evicted_entries: Vec<(
+            (FamilyKey, ModeSlot),
+            crate::fact_signature_helpers::ReadSetSignature,
+        )> = Vec::new();
         {
             let mut entries = self.entries_lock_diagnosed();
             for ((family, slot), registered_sig) in &drained {
@@ -558,28 +579,34 @@ impl SemanticGraphStore {
                         canonical_id,
                     );
                 if drop {
-                    let entry_sig = Arc::clone(&current_entry.read_set_signature.legacy);
+                    let entry_carrier = current_entry.read_set_signature.clone();
                     *slots.slot_mut(*slot) = None;
                     evicted += 1;
-                    evicted_dep_sigs.push(entry_sig);
+                    evicted_entries.push(((family.clone(), *slot), entry_carrier));
                 }
             }
             entries.retain(|_, slots| slots.populated_count() > 0);
         }
 
-        // For each evicted entry's
-        // dep_signature, walk every other canonical it referenced and
-        // drop the matching `(family, slot)` registration if it still
-        // ptr_eq-matches our dep_signature. Lock order respected:
-        // `entries` was unlocked at the close of before any
-        // shard mutex is acquired here.
+        // For each evicted entry, walk every canonical its carrier
+        // referenced (union of `legacy` + path-precise `facts` via
+        // `canonical_ids()`) and remove THAT entry's `(family, slot)`
+        // registration from the canonical's shard. Removal is by entry
+        // identity, not by `Arc::ptr_eq` on the stored legacy
+        // signature — see the comment on `evicted_entries` above for
+        // the shared-Arc hazard this avoids. Walking the full
+        // `canonical_ids()` set (not only `legacy.iter()`) also drains
+        // the path-precise fact rail's registrations, matching what
+        // `register_reverse_index` populated. Lock order respected:
+        // `entries` was unlocked at the close of the previous block
+        // before any shard mutex is acquired here.
         let timing_on = verter_scheduler::request_context::current_timing_enabled();
-        for entry_sig in &evicted_dep_sigs {
-            for (other_canonical, _) in entry_sig.iter() {
+        for (evicted_key, evicted_carrier) in &evicted_entries {
+            for other_canonical in evicted_carrier.canonical_ids() {
                 if other_canonical.as_ref() == canonical_id {
                     continue;
                 }
-                if let Some(shard) = self.canonical_to_entries.get(other_canonical) {
+                if let Some(shard) = self.canonical_to_entries.get(&other_canonical) {
                     let lock_start = if timing_on {
                         Some(Instant::now())
                     } else {
@@ -590,13 +617,11 @@ impl SemanticGraphStore {
                         .map(|t| t.elapsed())
                         .unwrap_or(std::time::Duration::ZERO);
                     crate::host_manage::record_family_map_lock_acquisition(lock_wait);
-                    map.retain(|_, registered_sig| {
-                        // Keep entries whose registered_sig is a
-                        // different `Arc` (fresh build) — only drop
-                        // the exact registration tied to this
-                        // evicted entry.
-                        !Arc::ptr_eq(registered_sig, entry_sig)
-                    });
+                    // Remove only the registration keyed by THIS
+                    // evicted entry's `(family, slot)`. Other entries
+                    // sharing the same legacy `Arc<DepSignature>` keep
+                    // their reverse-index registrations intact.
+                    map.remove(evicted_key);
                 } else {
                     // Shard absent: account for the canonical-shard
                     // probe as one observed acquisition with zero wait.
@@ -2138,9 +2163,16 @@ impl SemanticGraphStore {
     /// `dep_signature` rail AND the path-precise `facts` rail
     /// (`Parse(...)`, `ResolveImports(...)`, `RouteSurface(...)`,
     /// `FileWholeHash`, `DerivedFactHash`). The stored value in the
-    /// per-canonical shard remains the legacy `DepSignature` because
-    /// `invalidate_canonical`'s existing ptr-eq tie-break reads from
-    /// that signature. Iterating `read_set_signature.canonical_ids()`
+    /// per-canonical shard is the legacy `DepSignature` (kept as a
+    /// diagnostic stamp of what was registered) but
+    /// `invalidate_canonical`'s cross-canonical drain identifies
+    /// registrations by `(family, slot)` entry identity rather than
+    /// by `Arc::ptr_eq` on the stored signature. This prevents the
+    /// "shared legacy Arc" hazard where two entries sharing a
+    /// canonicalised legacy `Arc<DepSignature>` would have BOTH
+    /// registrations stripped when only one is evicted — see the
+    /// drain implementation in `invalidate_canonical` for the
+    /// rationale. Iterating `read_set_signature.canonical_ids()`
     /// ensures fact-only canonicals (whose canonical does not appear
     /// in the legacy rail) still surface in `invalidate_canonical`'s
     /// shard-drain — without this, a `Parse(MemberPresence(Foo, a))`
