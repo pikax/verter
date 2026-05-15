@@ -68,6 +68,13 @@ fn synthetic_facts() -> Arc<ResolvedImportFacts> {
 }
 
 /// Build a `ResolvedImportFactsKey` with explicit hash components.
+///
+/// Helper defaults `known_miss_generation` to `[0u8; 16]` — the same
+/// value the producer composes when the owner has no recorded
+/// known-misses (empty
+/// `DerivedRawState::import_routes_known_miss_recorded_at_generation`
+/// or no `DerivedRawState` entry yet). Tests that want to vary
+/// `known_miss_generation` construct the literal directly.
 fn key_with(
     canonical: &str,
     content_hash: Hash16,
@@ -81,6 +88,7 @@ fn key_with(
         parse_env_hash,
         resolve_env_hash,
         resolver_version,
+        known_miss_generation: [0u8; 16],
     }
 }
 

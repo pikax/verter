@@ -9,7 +9,8 @@
 //! # Key composition (R5, R12, R21)
 //!
 //! [`ResolvedImportFactsKey`] is content-addressed and scoped to:
-//! `(canonical, content_hash, parse_env_hash, resolve_env_hash, resolver_version)`.
+//! `(canonical, content_hash, parse_env_hash, resolve_env_hash,
+//! resolver_version, known_miss_generation)`.
 //!
 //! - `content_hash` (R5): two parses of the same source coexist; an
 //!   edit re-keys the entry.
@@ -20,6 +21,15 @@
 //!   a given specifier.
 //! - `resolver_version`: substrate bump invalidates (R28). Bumped when
 //!   the resolved-import producer changes shape.
+//! - `known_miss_generation`: stable tag over the owner's
+//!   `DerivedRawState::import_routes_known_miss_recorded_at_generation`
+//!   sidecar. When `set_import_dependencies` is called again for the
+//!   same owner whose source/env did not change but a previously-
+//!   missing target file has now been created, the workspace
+//!   `content_generation` advances and the producer admits under a
+//!   new key value — the stale negative bundle is naturally
+//!   superseded (rather than being pinned by first-writer-wins
+//!   admission on the prior key). Empty known-miss map → `[0u8; 16]`.
 //!
 //! **`lib_env_hash` is intentionally absent.** R21 scoping rule: base
 //! import-target resolution does not depend on TS lib data. A change in
@@ -66,6 +76,17 @@ pub const RESOLVED_IMPORT_FACTS_RESOLVER_VERSION: u32 = 1;
 ///   baseUrl, resolution extensions, package conditions).
 /// - `resolver_version` — substrate version (see
 ///   [`RESOLVED_IMPORT_FACTS_RESOLVER_VERSION`]).
+/// - `known_miss_generation` — stable 16-byte tag derived from the
+///   owner's
+///   [`DerivedRawState::import_routes_known_miss_recorded_at_generation`](crate::types::DerivedRawState)
+///   map via [`compute_known_miss_generation_tag`]. Empty map →
+///   `[0u8; 16]`. Lets a later `set_import_dependencies` call that
+///   re-resolves a previously-missing specifier (after the target
+///   file is created and the workspace `content_generation` has
+///   advanced) admit under a NEW key instead of being silently
+///   discarded by `insert_if_absent` against a stale negative entry.
+///   Both producer and validator/lookup must read the SAME sidecar
+///   map and derive the same tag for cache-key determinism.
 ///
 /// `lib_env_hash` is NOT a key dimension by design (R21 scoping
 /// rule). Tests pin this absence in
@@ -77,6 +98,47 @@ pub struct ResolvedImportFactsKey {
     pub parse_env_hash: Hash16,
     pub resolve_env_hash: Hash16,
     pub resolver_version: u32,
+    pub known_miss_generation: Hash16,
+}
+
+/// Compute a stable 16-byte tag from the owner's
+/// `import_routes_known_miss_recorded_at_generation` sidecar.
+///
+/// Used by both the resolved-import-facts producer
+/// ([`crate::VerterHost::admit_resolved_import_facts_for_owner`])
+/// and the validator/lookup sites
+/// ([`crate::resolver_store::HostStoreView::validates_resolve_imports_domain`],
+/// [`crate::session_view::SessionView::resolved_import_facts`])
+/// when composing [`ResolvedImportFactsKey`]. Determinism (and
+/// therefore cache-key reachability between producer and lookup)
+/// requires:
+///
+/// 1. Sort `(specifier, generation)` pairs lexicographically by
+///    specifier so iteration order of the underlying `FxHashMap` is
+///    not observable in the tag.
+/// 2. Use `[u8; 16]` `xxh3_128` (via [`crate::hash::hash_16`]) so the
+///    tag width matches the rest of the key's `Hash16` fields.
+/// 3. Empty map → `[0u8; 16]` so the owner with no known-misses
+///    composes the SAME tag value at producer time and at lookup
+///    time, regardless of whether the `DerivedRawState` entry exists
+///    yet.
+#[must_use]
+pub fn compute_known_miss_generation_tag(
+    known_miss_generations: &rustc_hash::FxHashMap<String, u64>,
+) -> Hash16 {
+    if known_miss_generations.is_empty() {
+        return [0u8; 16];
+    }
+    let mut pairs: Vec<(&String, &u64)> = known_miss_generations.iter().collect();
+    pairs.sort_by(|a, b| a.0.cmp(b.0));
+    let mut buf: Vec<u8> = Vec::with_capacity(pairs.len() * 32);
+    for (specifier, generation) in pairs {
+        buf.push(0xFE);
+        buf.extend_from_slice(specifier.as_bytes());
+        buf.push(0xFD);
+        buf.extend_from_slice(&generation.to_le_bytes());
+    }
+    crate::hash::hash_16(&buf)
 }
 
 /// One per-specifier resolution entry.

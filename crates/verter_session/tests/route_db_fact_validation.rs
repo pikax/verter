@@ -365,6 +365,7 @@ fn lib_env_hash_change_does_not_invalidate_resolved_import_facts() {
         parse_env_hash: [2u8; 16],
         resolve_env_hash: [3u8; 16],
         resolver_version: RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
+        known_miss_generation: [0u8; 16],
     };
 
     let admitted = db.insert_if_absent(key.clone(), Arc::new(ResolvedImportFacts::new()));
@@ -384,6 +385,7 @@ fn lib_env_hash_change_does_not_invalidate_resolved_import_facts() {
         parse_env_hash: key.parse_env_hash,
         resolve_env_hash: key.resolve_env_hash,
         resolver_version: key.resolver_version,
+        known_miss_generation: key.known_miss_generation,
         // intentionally NO `lib_env_hash: …` here — adding one would
         // be a compile error, which is the R21 invariant.
     };

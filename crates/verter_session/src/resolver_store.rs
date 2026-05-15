@@ -57,10 +57,12 @@ pub struct HostStoreView {
     /// project store's `ResolvedImportFactsDb`. The validator for
     /// `ResolveImportsFactRef` composes
     /// `ResolvedImportFactsKey { canonical, content_hash,
-    /// parse_env_hash, resolve_env_hash, resolver_version }` from
-    /// the fact's `canonical_id`, this view's tracked
-    /// `whole_hashes[canonical]`, and `env_hashes`, then looks up the
-    /// matching `Arc<ResolvedImportFacts>` and compares the per-fact
+    /// parse_env_hash, resolve_env_hash, resolver_version,
+    /// known_miss_generation }` from the fact's `canonical_id`, this
+    /// view's tracked `whole_hashes[canonical]`,
+    /// `resolved_import_facts_known_miss_tags[canonical]`, and
+    /// `env_hashes`, then looks up the matching
+    /// `Arc<ResolvedImportFacts>` and compares the per-fact
     /// `semantic_hash` / `display_hash` of the stored
     /// `ResolvedImportClauseEntry.fact` /
     /// `ResolvedReexportBindingEntry.fact` (per `fact.lane`) against
@@ -71,6 +73,18 @@ pub struct HostStoreView {
     /// per key.
     resolved_import_facts:
         Option<std::sync::Arc<crate::resolved_import_facts::ResolvedImportFactsDb>>,
+    /// Per-canonical known-miss generation tag captured at view-build
+    /// time. Folds the owner's
+    /// `DerivedRawState::import_routes_known_miss_recorded_at_generation`
+    /// map through
+    /// [`crate::resolved_import_facts::compute_known_miss_generation_tag`]
+    /// so the validator composes the same `known_miss_generation`
+    /// key dimension the producer
+    /// (`admit_resolved_import_facts_for_owner`) admitted under.
+    /// Absent entries fall back to `[0u8; 16]` (owners with no
+    /// recorded known-misses or canonicals whose route resolution
+    /// never ran). Codex P2.2 / Block 1.f-fix.
+    resolved_import_facts_known_miss_tags: FxHashMap<String, Hash16>,
     /// Route-surface-domain handle (R26): `Arc` clone of the
     /// project store's `RouteDb`. The validator for
     /// `RouteSurfaceFactRef` with `FactKey::EffectiveExportSet`
@@ -121,6 +135,7 @@ impl Default for HostStoreView {
             route_surface_index_fingerprints: FxHashMap::default(),
             file_facts: FxHashMap::default(),
             resolved_import_facts: None,
+            resolved_import_facts_known_miss_tags: FxHashMap::default(),
             route_db: None,
             env_hashes: crate::session_view::EnvHashes::default(),
             project_identity: crate::file_artifact_store::ProjectIdentity([0u8; 16]),
@@ -194,6 +209,12 @@ impl HostStoreView {
                 }
 
                 // import_routes lives on DerivedRawState (D48 split).
+                // The known-miss generation sidecar (Codex P2.2 /
+                // Block 1.f-fix) lives alongside it; capture both
+                // under the same `derived_raw_cache().get(...)` so
+                // the validator can compose
+                // `ResolvedImportFactsKey.known_miss_generation`
+                // identically to the producer.
                 if let Some(entry) = host.derived_raw_cache().get(&canonical_id) {
                     for (specifier, resolution) in entry.import_routes.iter() {
                         view.import_routes.insert(
@@ -201,6 +222,11 @@ impl HostStoreView {
                             resolution.clone(),
                         );
                     }
+                    let tag = crate::resolved_import_facts::compute_known_miss_generation_tag(
+                        &entry.import_routes_known_miss_recorded_at_generation,
+                    );
+                    view.resolved_import_facts_known_miss_tags
+                        .insert(canonical_id.clone(), tag);
                 }
             }
         }
@@ -710,10 +736,12 @@ impl crate::resolver_core::StoreView for HostStoreView {
     /// Resolve-imports-domain validator (R26).
     ///
     /// Compose `ResolvedImportFactsKey { canonical, content_hash,
-    /// parse_env_hash, resolve_env_hash, resolver_version }` from the
-    /// fact's `canonical_id`, the view's tracked
-    /// `whole_hashes[canonical]`, and the view's `env_hashes`. Look
-    /// up the matching `Arc<ResolvedImportFacts>` from the captured
+    /// parse_env_hash, resolve_env_hash, resolver_version,
+    /// known_miss_generation }` from the fact's `canonical_id`, the
+    /// view's tracked `whole_hashes[canonical]`,
+    /// `resolved_import_facts_known_miss_tags[canonical]`, and the
+    /// view's `env_hashes`. Look up the matching
+    /// `Arc<ResolvedImportFacts>` from the captured
     /// `ResolvedImportFactsDb` handle and compare the per-binding
     /// `semantic_hash` / `display_hash` (per `fact.lane`) of the
     /// matching `ResolvedImportClauseEntry` or
@@ -759,12 +787,27 @@ impl crate::resolver_core::StoreView for HostStoreView {
             None => return fact.expected_hash == ZERO_HASH,
         };
 
+        // `known_miss_generation` (Codex P2.2 / Block 1.f-fix):
+        // captured at view-build time from
+        // `DerivedRawState::import_routes_known_miss_recorded_at_generation`.
+        // Absent entries → `[0u8; 16]` so an owner that never had
+        // `set_import_dependencies` called still composes the same
+        // key value the producer admitted under (the producer also
+        // reads `[0u8; 16]` when there is no `DerivedRawState`
+        // entry yet).
+        let known_miss_generation = self
+            .resolved_import_facts_known_miss_tags
+            .get(fact.canonical_id.as_str())
+            .copied()
+            .unwrap_or(ZERO_HASH);
+
         let key = crate::resolved_import_facts::ResolvedImportFactsKey {
             canonical: std::sync::Arc::from(fact.canonical_id.as_str()),
             content_hash,
             parse_env_hash: self.env_hashes.parse_env_hash,
             resolve_env_hash: self.env_hashes.resolve_env_hash,
             resolver_version: crate::resolved_import_facts::RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
+            known_miss_generation,
         };
 
         let facts = match facts_db.get(&key) {

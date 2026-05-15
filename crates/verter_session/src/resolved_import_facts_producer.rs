@@ -62,8 +62,8 @@ use verter_semantic::facts::registry::{
 use crate::hash::hash_16;
 use crate::host_executor::HostSourceData;
 use crate::resolved_import_facts::{
-    ResolvedImportClauseEntry, ResolvedImportFacts, ResolvedImportFactsKey, ResolvedSpecifier,
-    RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
+    compute_known_miss_generation_tag, ResolvedImportClauseEntry, ResolvedImportFacts,
+    ResolvedImportFactsKey, ResolvedSpecifier, RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
 };
 use crate::VerterHost;
 
@@ -130,13 +130,37 @@ impl VerterHost {
         // 2. Compose the cache key from real env-hashes (Block 1.6
         //    substrate). `content_hash` is the scheduler-cached
         //    `parse.whole_hash` captured above.
+        //
+        //    `known_miss_generation` (Codex P2.2 / Block 1.f-fix)
+        //    is a stable tag over the owner's
+        //    `DerivedRawState::import_routes_known_miss_recorded_at_generation`
+        //    sidecar. `set_import_dependencies` updates the sidecar
+        //    BEFORE calling this producer, so a re-resolution that
+        //    converts a previously-missing specifier into a positive
+        //    target (after the target file is created and the
+        //    workspace `content_generation` advances) admits under a
+        //    NEW key value — the stale negative bundle is naturally
+        //    superseded instead of being pinned by first-writer-wins
+        //    against the prior key. Empty known-miss map →
+        //    `[0u8; 16]`, so an owner with no known-misses produces
+        //    the same key value at producer time and at lookup time.
         let env = self.host_view_env_hashes_for(canonical);
+        let known_miss_generation = {
+            let entry = self.derived_raw_cache().get(canonical);
+            match entry {
+                Some(e) => compute_known_miss_generation_tag(
+                    &e.import_routes_known_miss_recorded_at_generation,
+                ),
+                None => [0u8; 16],
+            }
+        };
         let key = ResolvedImportFactsKey {
             canonical: Arc::from(canonical),
             content_hash,
             parse_env_hash: env.parse_env_hash,
             resolve_env_hash: env.resolve_env_hash,
             resolver_version: RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
+            known_miss_generation,
         };
 
         // 3. Build the per-binding entries. One entry per

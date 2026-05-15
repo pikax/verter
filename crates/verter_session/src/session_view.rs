@@ -213,14 +213,46 @@ fn resolved_import_facts_via_host(
     env_hashes: &EnvHashes,
 ) -> Option<Arc<crate::resolved_import_facts::ResolvedImportFacts>> {
     let content_hash = content_hash_from_scheduler_or_artifacts(base, canonical)?;
+    let known_miss_generation = known_miss_generation_tag_for_owner(base, canonical);
     let key = crate::resolved_import_facts::ResolvedImportFactsKey {
         canonical: Arc::from(canonical),
         content_hash,
         parse_env_hash: env_hashes.parse_env_hash,
         resolve_env_hash: env_hashes.resolve_env_hash,
         resolver_version: crate::resolved_import_facts::RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
+        known_miss_generation,
     };
     base.project_type_store().resolved_import_facts().get(&key)
+}
+
+/// Resolve the owner's known-miss generation tag for composing
+/// [`crate::resolved_import_facts::ResolvedImportFactsKey`].
+///
+/// Reads
+/// [`DerivedRawState::import_routes_known_miss_recorded_at_generation`](crate::types::DerivedRawState)
+/// and folds it via
+/// [`crate::resolved_import_facts::compute_known_miss_generation_tag`].
+/// When no `DerivedRawState` entry exists yet for the canonical (the
+/// owner has never had its routes recorded), returns `[0u8; 16]` so
+/// the lookup composes the same tag value as the producer's "no
+/// known-misses" first call.
+///
+/// Used by the base-only views ([`HostView`], [`HostViewRef`]) AND
+/// the base-fallthrough branch of the overlay views ([`OverlaidView`],
+/// [`OverlaidViewRef`]) so the lookup key matches the producer
+/// (`admit_resolved_import_facts_for_owner`) byte-for-byte
+/// regardless of overlay state.
+fn known_miss_generation_tag_for_owner(
+    base: &VerterHost,
+    canonical: &str,
+) -> verter_semantic::analysis::Hash16 {
+    let entry = base.derived_raw_cache().get(canonical);
+    match entry {
+        Some(e) => crate::resolved_import_facts::compute_known_miss_generation_tag(
+            &e.import_routes_known_miss_recorded_at_generation,
+        ),
+        None => [0u8; 16],
+    }
 }
 
 /// Resolve `canonical`'s content hash from the most authoritative
@@ -486,15 +518,33 @@ impl SessionView for OverlaidView {
         // which is overlay-aware: an overlay that differs from the
         // base source yields a distinct cache slot. The lookup
         // therefore reads the overlay's content hash when an
-        // overlay covers the canonical and the base host's
-        // otherwise.
-        let content_hash = self.content_hash_for(canonical)?;
+        // overlay covers the canonical and falls through to the
+        // base host's scheduler-or-artifacts hash otherwise (Codex
+        // P2.1 / Block 1.f-fix). Using the bare
+        // `content_hash_for` would miss the scheduler hash that
+        // `admit_resolved_import_facts_for_owner` admits under for
+        // fresh upserts where the `FileArtifactStore` has not yet
+        // materialised `IndexedReady`.
+        let content_hash = if let Some(hash) = self.overlay_hashes.get(canonical) {
+            *hash
+        } else {
+            content_hash_from_scheduler_or_artifacts(self.base.as_ref(), canonical)?
+        };
+        // `known_miss_generation` (Codex P2.2): read the owner's
+        // sidecar so the lookup composes the same tag value as the
+        // producer; lets a later route snapshot that re-resolves a
+        // previously-missing specifier reach a fresh cache slot
+        // instead of being pinned by an earlier first-writer-wins
+        // negative entry.
+        let known_miss_generation =
+            known_miss_generation_tag_for_owner(self.base.as_ref(), canonical);
         let key = crate::resolved_import_facts::ResolvedImportFactsKey {
             canonical: Arc::from(canonical),
             content_hash,
             parse_env_hash: self.env_hashes.parse_env_hash,
             resolve_env_hash: self.env_hashes.resolve_env_hash,
             resolver_version: crate::resolved_import_facts::RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
+            known_miss_generation,
         };
         self.base
             .project_type_store()
@@ -741,13 +791,29 @@ impl SessionView for OverlaidViewRef<'_> {
         if self.overlay_tombstones.contains(canonical) {
             return None;
         }
-        let content_hash = self.content_hash_for(canonical)?;
+        // Overlay-bearing read: when an overlay covers the
+        // canonical use its precomputed hash; otherwise fall
+        // through to the base host's scheduler-or-artifacts hash
+        // (Codex P2.1 / Block 1.f-fix). Bare `content_hash_for`
+        // would only consult the file-artifact store on
+        // fallthrough and miss the scheduler hash that
+        // `admit_resolved_import_facts_for_owner` admits under
+        // post-upsert.
+        let content_hash = if let Some(hash) = self.overlay_hashes.get(canonical) {
+            *hash
+        } else {
+            content_hash_from_scheduler_or_artifacts(self.base, canonical)?
+        };
+        // `known_miss_generation` (Codex P2.2): read the owner's
+        // sidecar to match the producer's key.
+        let known_miss_generation = known_miss_generation_tag_for_owner(self.base, canonical);
         let key = crate::resolved_import_facts::ResolvedImportFactsKey {
             canonical: Arc::from(canonical),
             content_hash,
             parse_env_hash: self.env_hashes.parse_env_hash,
             resolve_env_hash: self.env_hashes.resolve_env_hash,
             resolver_version: crate::resolved_import_facts::RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
+            known_miss_generation,
         };
         self.base
             .project_type_store()
