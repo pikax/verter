@@ -28,7 +28,6 @@ use verter_session::{
 };
 
 #[test]
-#[ignore = "block-1.f RED — closed by same-block implementation"]
 fn validator_warms_then_invalidates_after_source_edit() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig {
         dev_mode: false,
@@ -36,23 +35,25 @@ fn validator_warms_then_invalidates_after_source_edit() {
         ..HostConfig::default()
     }));
 
-    let _ = host.upsert(UpsertRequest {
-        canonical_id: None,
-        input_id: "/dep.ts".to_string(),
-        source: Arc::from("export const v = 1;"),
-        file_kind: FileKind::NonSfc,
-        aliases: Vec::new(),
-    })
-    .expect("dep upsert");
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/dep.ts".to_string(),
+            source: Arc::from("export const v = 1;"),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        })
+        .expect("dep upsert");
 
-    let _ = host.upsert(UpsertRequest {
-        canonical_id: None,
-        input_id: "/owner.ts".to_string(),
-        source: Arc::from("import { v } from './dep';\nexport const o = v;\n"),
-        file_kind: FileKind::NonSfc,
-        aliases: Vec::new(),
-    })
-    .expect("owner upsert v1");
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/owner.ts".to_string(),
+            source: Arc::from("import { v } from './dep';\nexport const o = v;\n"),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        })
+        .expect("owner upsert v1");
 
     // Trigger the producer.
     host.set_import_dependencies(
@@ -106,14 +107,15 @@ fn validator_warms_then_invalidates_after_source_edit() {
     // `content_hash`, which moves the cache slot identity — the
     // pinned `ResolveImportsFactRef.expected_hash` is now keyed
     // under a stale `content_hash`.
-    let _ = host.upsert(UpsertRequest {
-        canonical_id: None,
-        input_id: "/owner.ts".to_string(),
-        source: Arc::from("// edited\nimport { v } from './dep';\nexport const o = v;\n"),
-        file_kind: FileKind::NonSfc,
-        aliases: Vec::new(),
-    })
-    .expect("owner upsert v2");
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/owner.ts".to_string(),
+            source: Arc::from("// edited\nimport { v } from './dep';\nexport const o = v;\n"),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        })
+        .expect("owner upsert v2");
 
     let post_edit_view = host.snapshot_view();
     assert!(

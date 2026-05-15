@@ -25,7 +25,6 @@ use verter_session::{
 };
 
 #[test]
-#[ignore = "block-1.f RED — closed by same-block implementation"]
 fn producer_admits_negative_entry_for_unresolved_specifier() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig {
         dev_mode: false,
@@ -35,14 +34,15 @@ fn producer_admits_negative_entry_for_unresolved_specifier() {
 
     // Owner imports from a missing module — no canonical at all.
     let owner_source = "import { Missing } from './gone';\nexport const o = 1;\n";
-    let _ = host.upsert(UpsertRequest {
-        canonical_id: None,
-        input_id: "/owner.ts".to_string(),
-        source: Arc::from(owner_source),
-        file_kind: FileKind::NonSfc,
-        aliases: Vec::new(),
-    })
-    .expect("owner upsert");
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/owner.ts".to_string(),
+            source: Arc::from(owner_source),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        })
+        .expect("owner upsert");
 
     let before = host
         .project_type_store()

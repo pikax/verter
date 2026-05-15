@@ -102,11 +102,20 @@ impl VerterHost {
         canonical: &str,
         import_routes: &rustc_hash::FxHashMap<String, crate::types::DependencyResolution>,
     ) -> bool {
-        // 1. Read the owner's analyzed imports. The scheduler-cached
-        //    source data carries `script_analysis.imports`
-        //    (`AnalyzedImport` with
-        //    `bindings: Vec<AnalyzedImportBinding>` carrying
-        //    `kind: ImportBindingKind { Named, Default, Namespace }`
+        // 1. Read the owner's analyzed imports + content hash from
+        //    the scheduler-cached source data. The scheduler is the
+        //    sole parse authority — `parse.whole_hash` is the
+        //    canonical content hash for the file's current bytes
+        //    (`FileArtifactStore` records the same value as its
+        //    `content_hash` dimension when `IndexedReady` is later
+        //    materialized via `ensure_indexed_ready`). Reading from
+        //    the scheduler lets the producer admit immediately after
+        //    `upsert` without waiting for the lazy `IndexedReady`
+        //    materialization.
+        //
+        //    `script_analysis.imports` carries `AnalyzedImport` with
+        //    `bindings: Vec<AnalyzedImportBinding>`
+        //    (`kind: ImportBindingKind { Named, Default, Namespace }`
         //    + `is_type_only`).
         let Some(source_snap) = self.scheduler.try_get_source(canonical) else {
             return false;
@@ -115,19 +124,12 @@ impl VerterHost {
             return false;
         };
         let imports = hd.parse.script_analysis.imports.clone();
+        let content_hash = hd.parse.whole_hash;
         drop(source_snap);
 
         // 2. Compose the cache key from real env-hashes (Block 1.6
-        //    substrate). `content_hash` comes from the file-artifact
-        //    store; an absent entry means the canonical has not been
-        //    indexed yet — defer.
-        let Some(content_hash) = self
-            .project_type_store()
-            .indexed()
-            .content_hash_for_canonical(canonical)
-        else {
-            return false;
-        };
+        //    substrate). `content_hash` is the scheduler-cached
+        //    `parse.whole_hash` captured above.
         let env = self.host_view_env_hashes_for(canonical);
         let key = ResolvedImportFactsKey {
             canonical: Arc::from(canonical),
@@ -150,8 +152,7 @@ impl VerterHost {
         let bindings = collect_analyzed_bindings(&imports);
 
         let mut import_clauses = Vec::with_capacity(bindings.len());
-        let mut specifier_resolutions: Vec<ResolvedSpecifier> =
-            Vec::with_capacity(bindings.len());
+        let mut specifier_resolutions: Vec<ResolvedSpecifier> = Vec::with_capacity(bindings.len());
         let mut positive_bumps = 0u64;
         let mut negative_bumps = 0u64;
         let mut namespace_bumps = 0u64;
@@ -340,4 +341,3 @@ fn collect_analyzed_bindings(
     }
     out
 }
-

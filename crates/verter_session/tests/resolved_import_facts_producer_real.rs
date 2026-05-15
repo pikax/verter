@@ -25,7 +25,6 @@ use verter_session::{
 };
 
 #[test]
-#[ignore = "block-1.f RED — closed by same-block implementation"]
 fn producer_admits_positive_entry_with_resolved_source_name() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig {
         dev_mode: false,
@@ -36,24 +35,26 @@ fn producer_admits_positive_entry_with_resolved_source_name() {
     // Owner file imports from a relative dep. Both are real `.ts`
     // files so `script_analysis.imports` and the workspace's
     // dependency-target map are both populated.
-    let _ = host.upsert(UpsertRequest {
-        canonical_id: None,
-        input_id: "/dep.ts".to_string(),
-        source: Arc::from("export const used = 1;"),
-        file_kind: FileKind::NonSfc,
-        aliases: Vec::new(),
-    })
-    .expect("dep upsert");
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/dep.ts".to_string(),
+            source: Arc::from("export const used = 1;"),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        })
+        .expect("dep upsert");
 
     let owner_source = "import { used } from './dep';\nexport const o = used;\n";
-    let _ = host.upsert(UpsertRequest {
-        canonical_id: None,
-        input_id: "/owner.ts".to_string(),
-        source: Arc::from(owner_source),
-        file_kind: FileKind::NonSfc,
-        aliases: Vec::new(),
-    })
-    .expect("owner upsert");
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/owner.ts".to_string(),
+            source: Arc::from(owner_source),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        })
+        .expect("owner upsert");
 
     // Pre-snapshot the positive-admission counter.
     let before = host

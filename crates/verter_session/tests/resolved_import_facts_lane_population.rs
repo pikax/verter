@@ -21,7 +21,6 @@ use verter_session::{
 const ZERO_HASH: [u8; 16] = [0u8; 16];
 
 #[test]
-#[ignore = "block-1.f RED — closed by same-block implementation"]
 fn admitted_fact_has_both_lanes_populated_and_distinct() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig {
         dev_mode: false,
@@ -29,22 +28,24 @@ fn admitted_fact_has_both_lanes_populated_and_distinct() {
         ..HostConfig::default()
     }));
 
-    let _ = host.upsert(UpsertRequest {
-        canonical_id: None,
-        input_id: "/util.ts".to_string(),
-        source: Arc::from("export function helper() { return 1; }"),
-        file_kind: FileKind::NonSfc,
-        aliases: Vec::new(),
-    })
-    .expect("util upsert");
-    let _ = host.upsert(UpsertRequest {
-        canonical_id: None,
-        input_id: "/lane.ts".to_string(),
-        source: Arc::from("import { helper } from './util';\nexport const k = helper();\n"),
-        file_kind: FileKind::NonSfc,
-        aliases: Vec::new(),
-    })
-    .expect("lane upsert");
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/util.ts".to_string(),
+            source: Arc::from("export function helper() { return 1; }"),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        })
+        .expect("util upsert");
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/lane.ts".to_string(),
+            source: Arc::from("import { helper } from './util';\nexport const k = helper();\n"),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        })
+        .expect("lane upsert");
 
     host.set_import_dependencies(
         "/lane.ts",

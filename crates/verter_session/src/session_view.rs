@@ -189,21 +189,30 @@ pub trait SessionView: Send + Sync {
 ///
 /// Resolves the `(canonical, content_hash, parse_env_hash,
 /// resolve_env_hash, resolver_version)` quintuple from the host's
-/// file-artifact store + the supplied env hashes, then reads from
-/// [`crate::resolved_import_facts::ResolvedImportFactsDb`].
+/// scheduler-cached source data + the supplied env hashes, then
+/// reads from [`crate::resolved_import_facts::ResolvedImportFactsDb`].
 ///
-/// Returns `None` when the canonical has not been parsed yet
-/// (`content_hash_for_canonical` reports `None`) or when the cache
-/// has not been populated for the resolved quintuple.
+/// The `content_hash` source mirrors the producer
+/// (`admit_resolved_import_facts_for_owner`): both read the
+/// scheduler-cached `parse.whole_hash` so the producer's admission
+/// key and the view's lookup key reach the same `DashMap` slot
+/// immediately after `upsert`, without waiting for the lazy
+/// `IndexedReady` materialization through `ensure_indexed_ready`.
+/// When the scheduler has no source snapshot for the canonical (the
+/// file was never `upsert`-ed or has been closed), falls back to the
+/// file-artifact store's `content_hash_for_canonical` so legacy
+/// callers that materialize through `ensure_indexed_ready` first
+/// still resolve.
+///
+/// Returns `None` when neither the scheduler nor the artifact store
+/// has a content hash for `canonical`, or when the cache has not been
+/// populated for the resolved quintuple.
 fn resolved_import_facts_via_host(
     base: &VerterHost,
     canonical: &str,
     env_hashes: &EnvHashes,
 ) -> Option<Arc<crate::resolved_import_facts::ResolvedImportFacts>> {
-    let content_hash = base
-        .project_type_store()
-        .indexed()
-        .content_hash_for_canonical(canonical)?;
+    let content_hash = content_hash_from_scheduler_or_artifacts(base, canonical)?;
     let key = crate::resolved_import_facts::ResolvedImportFactsKey {
         canonical: Arc::from(canonical),
         content_hash,
@@ -212,6 +221,35 @@ fn resolved_import_facts_via_host(
         resolver_version: crate::resolved_import_facts::RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
     };
     base.project_type_store().resolved_import_facts().get(&key)
+}
+
+/// Resolve `canonical`'s content hash from the most authoritative
+/// source available.
+///
+/// Prefers the scheduler-cached `HostSourceData.parse.whole_hash`
+/// (the sole parse authority — available immediately post-`upsert`)
+/// and falls back to the file-artifact store's
+/// `content_hash_for_canonical` (the lazy view of the same value
+/// once `IndexedReady` has been materialized via
+/// `ensure_indexed_ready`). Both sources record the same hash for a
+/// given canonical's current bytes; the scheduler is just the
+/// earlier-available view.
+///
+/// Used by `resolved_import_facts_via_host` to match the producer
+/// (`admit_resolved_import_facts_for_owner`) on cache-key
+/// `content_hash` composition.
+fn content_hash_from_scheduler_or_artifacts(
+    base: &VerterHost,
+    canonical: &str,
+) -> Option<verter_semantic::analysis::Hash16> {
+    if let Some(snap) = base.scheduler().try_get_source(canonical) {
+        if let Some(hd) = snap.downcast_data::<crate::host_executor::HostSourceData>() {
+            return Some(hd.parse.whole_hash);
+        }
+    }
+    base.project_type_store()
+        .indexed()
+        .content_hash_for_canonical(canonical)
 }
 
 // ---------------------------------------------------------------------------

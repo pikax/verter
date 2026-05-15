@@ -23,7 +23,6 @@ use verter_session::{
 };
 
 #[test]
-#[ignore = "block-1.f RED — closed by same-block implementation"]
 fn namespace_import_admits_namespace_space_fact() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig {
         dev_mode: false,
@@ -31,24 +30,28 @@ fn namespace_import_admits_namespace_space_fact() {
         ..HostConfig::default()
     }));
 
-    let _ = host.upsert(UpsertRequest {
-        canonical_id: None,
-        input_id: "/lib.ts".to_string(),
-        source: Arc::from("export const x = 1;\nexport const y = 2;"),
-        file_kind: FileKind::NonSfc,
-        aliases: Vec::new(),
-    })
-    .expect("lib upsert");
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/lib.ts".to_string(),
+            source: Arc::from("export const x = 1;\nexport const y = 2;"),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        })
+        .expect("lib upsert");
 
     // `import * as ns from "./lib"` — namespace import.
-    let _ = host.upsert(UpsertRequest {
-        canonical_id: None,
-        input_id: "/ns_owner.ts".to_string(),
-        source: Arc::from("import * as lib from './lib';\nexport const total = lib.x + lib.y;\n"),
-        file_kind: FileKind::NonSfc,
-        aliases: Vec::new(),
-    })
-    .expect("ns_owner upsert");
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/ns_owner.ts".to_string(),
+            source: Arc::from(
+                "import * as lib from './lib';\nexport const total = lib.x + lib.y;\n",
+            ),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        })
+        .expect("ns_owner upsert");
 
     let before_ns = host
         .project_type_store()
