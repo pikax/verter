@@ -171,7 +171,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             mode: ProjectionMode::Expanded,
         };
         let read = materialize_component_meta_structure(self.ctx, key);
-        crate::meta_resolve::accumulate_dispatch_dep_signature(&read.dep_signature);
+        crate::fact_signature_helpers::observe_fact_signature(
+            &crate::fact_signature_helpers::dep_signature_to_fact_signature(&read.dep_signature),
+        );
         let materialised_id = match read.value {
             MaterializeOutcome::Value(id)
             | MaterializeOutcome::Miss(id)

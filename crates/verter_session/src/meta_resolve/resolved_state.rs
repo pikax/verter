@@ -4,7 +4,7 @@
 //! `SurfaceNodeIdentities`, type aliases, and 9 standalone TypeExpr
 //! substitution / scope-selection helpers.
 
-use super::dep_signature::accumulate_dispatch_dep_signature;
+use crate::fact_signature_helpers::{dep_signature_to_fact_signature, observe_fact_signature};
 use crate::types::{FileAnalysisSnapshot, Hash16, ProjectionMode};
 use std::sync::Arc;
 
@@ -400,6 +400,8 @@ pub(crate) fn lowered_root_reaches_transitive_cycle(
     let mut fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
     let result =
         super::ref_root_reaches_transitive_cycle_node(&identity, query_engine.ctx, &mut fence);
-    accumulate_dispatch_dep_signature(&Arc::from(fence.into_boxed_slice()));
+    observe_fact_signature(&dep_signature_to_fact_signature(&Arc::from(
+        fence.into_boxed_slice(),
+    )));
     result
 }

@@ -10477,27 +10477,23 @@ defineProps<{ value: Pick<Foo, 'a'> }>()
             .expect("Pick<Foo, 'a'> eval must succeed after E's chain deletion");
     }
 
-    /// characterisation: the canonical graph-native
-    /// cycle predicate `ref_root_reaches_transitive_cycle_node` detects
-    /// generic-helper cycles when reached from a TypeExpr root via the
-    /// `lowered_*` migration path (commits N + P), AND BFS dep-signature
-    /// facts must be accumulated into the per-request thread-local
-    /// accumulator so callers' completion fences capture the cycle dep
-    /// graph.
+    /// Characterisation: the canonical graph-native cycle predicate
+    /// `ref_root_reaches_transitive_cycle_node` detects generic-helper
+    /// cycles when reached from a TypeExpr root via the `lowered_*`
+    /// migration path, AND BFS dep-signature facts must fan into
+    /// every active fact tracer so callers' completion fences
+    /// capture the cycle dep graph.
     ///
-    /// Originally landed as F's TDD for the temporary TypeExpr cycle
-    /// adapter (deleted in P). The test fixture and assertions are
-    /// preserved verbatim — only the entry point has moved from the
-    /// adapter to `expr_needs_projection_rescue`'s migrated
-    /// implementation, which internally calls
-    /// `lowered_root_reaches_transitive_cycle` (the helper that lowers
-    /// + extracts identity + delegates to the graph-native predicate).
+    /// `lowered_root_reaches_transitive_cycle` lowers the TypeExpr,
+    /// extracts the identity, then delegates to the graph-native
+    /// predicate. It drives `expr_needs_projection_rescue`. The site
+    /// converts the BFS fence into a `Vec<FactVersionRef>` via the
+    /// `dep_signature_to_fact_signature` bridge and fans the result
+    /// into every active `FactReadSet` via `observe_fact_signature`,
+    /// so an outer `with_fact_tracer` scope sees the BFS dep facts.
     #[test]
     fn lowered_root_reaches_transitive_cycle_delegates_to_node_predicate() {
-        use crate::meta_resolve::{
-            drain_dispatch_dep_signature_accumulator, expr_needs_projection_rescue,
-            reset_dispatch_dep_signature_accumulator,
-        };
+        use crate::meta_resolve::expr_needs_projection_rescue;
         use crate::resolver_core::ComponentMetaQueryEngine;
         use std::sync::Arc as StdArc;
         use verter_type_expr::TypeExpr;
@@ -10534,7 +10530,6 @@ defineProps<{ value: GetItemKeys<unknown> }>()
         let session = project.open_session_batch().unwrap();
         let _ = session.evaluate_types("/Owner.vue").unwrap();
         let host = session.host();
-        let mut engine = ComponentMetaQueryEngine::new(host);
 
         // GetItemKeys<unknown> — generic helper cycle. The migration
         // helper (called from inside `expr_needs_projection_rescue`)
@@ -10553,32 +10548,42 @@ defineProps<{ value: GetItemKeys<unknown> }>()
                 .into_boxed_slice(),
             ),
         };
-        reset_dispatch_dep_signature_accumulator();
-        let result = expr_needs_projection_rescue(&mut engine, "/Owner.vue", &typeexpr);
+        // Wrap the call in `with_fact_tracer` so we can observe the
+        // fan-out signature. The BFS-cycle site calls
+        // `observe_fact_signature(&dep_signature_to_fact_signature(...))`,
+        // which delivers `FactVersionRef` entries into the active
+        // tracer's `FactReadSet`.
+        let (result, fact_set) = host.with_fact_tracer(|| {
+            let mut engine = ComponentMetaQueryEngine::new(host);
+            expr_needs_projection_rescue(&mut engine, "/Owner.vue", &typeexpr)
+        });
         assert!(
             !result,
             "GetItemKeys cycle must short-circuit expr_needs_projection_rescue \
              (detected via lowered_root_reaches_transitive_cycle → _node predicate)"
         );
-        let drained = drain_dispatch_dep_signature_accumulator();
         assert!(
-            !drained.is_empty(),
-            "BFS dep facts must be accumulated into the thread-local accumulator \
-             so callers' completion fences capture cycle dep-signatures"
+            !fact_set.is_empty(),
+            "BFS dep facts must fan into the active fact tracer so callers' \
+             completion fences capture cycle dep-signatures; observed an empty \
+             FactReadSet inside the with_fact_tracer scope"
         );
     }
 
-    /// G's TDD: `engine.materialize_member_surface_expr`
-    /// (the graph-native replacement for the deleted legacy walker
-    /// shim) must accumulate the materialiser's `dep_signature` into
-    /// the per-request thread-local accumulator, so callers'
-    /// completion fences observe the dep facts captured by the inner
-    /// `materialize_component_meta_structure` call.
+    /// `engine.materialize_member_surface_expr` (the graph-native
+    /// replacement for the deleted legacy walker shim) must fan the
+    /// materialiser's `dep_signature` into every active fact tracer,
+    /// so callers' completion fences observe the dep facts captured
+    /// by the inner `materialize_component_meta_structure` call.
+    ///
+    /// The materialise site
+    /// (`meta_resolve/materialize/field_types.rs::materialize_component_meta_type_expr_until_stable_full`)
+    /// converts the dispatch's `DepSignature` into `FactVersionRef`
+    /// entries via `dep_signature_to_fact_signature` and emits them
+    /// through `observe_fact_signature`, which delivers into every
+    /// active `FactReadSet` on the tracer stack.
     #[test]
     fn engine_materialize_member_surface_expr_accumulates_dep_signature() {
-        use crate::meta_resolve::{
-            drain_dispatch_dep_signature_accumulator, reset_dispatch_dep_signature_accumulator,
-        };
         use crate::resolver_core::ComponentMetaQueryEngine;
         use std::sync::Arc as StdArc;
         use verter_type_expr::TypeExpr;
@@ -10609,21 +10614,28 @@ defineProps<{ value: Foo }>()
         let session = project.open_session_batch().unwrap();
         let _ = session.evaluate_types("/Owner.vue").unwrap();
         let host = session.host();
-        let mut engine = ComponentMetaQueryEngine::new(host);
 
-        reset_dispatch_dep_signature_accumulator();
-        let _ = engine.materialize_member_surface_expr(
-            "/Owner.vue",
-            &TypeExpr::Ref {
-                name: StdArc::from("Foo"),
-                type_arguments: StdArc::from(Vec::new().into_boxed_slice()),
-            },
-            false,
-        );
-        let drained = drain_dispatch_dep_signature_accumulator();
+        // Wrap the engine call in `with_fact_tracer` so we can
+        // observe the fan-out signature. The materialise site emits
+        // its dep_signature through `observe_fact_signature`, which
+        // delivers `FactVersionRef` entries into the active tracer's
+        // `FactReadSet`.
+        let (_result, fact_set) = host.with_fact_tracer(|| {
+            let mut engine = ComponentMetaQueryEngine::new(host);
+            engine.materialize_member_surface_expr(
+                "/Owner.vue",
+                &TypeExpr::Ref {
+                    name: StdArc::from("Foo"),
+                    type_arguments: StdArc::from(Vec::new().into_boxed_slice()),
+                },
+                false,
+            )
+        });
         assert!(
-            !drained.is_empty(),
-            "engine method must accumulate the materialiser's dep_signature"
+            !fact_set.is_empty(),
+            "engine method must fan the materialiser's dep_signature into the \
+             active fact tracer; observed an empty FactReadSet inside the \
+             with_fact_tracer scope"
         );
     }
 

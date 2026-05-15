@@ -20,11 +20,12 @@
 //!    node back to `TypeExpr` and classifies its exactness via
 //!    `meta_resolve::exactness::classify_node`.
 //!
-//! All `dispatch.execute_read` calls must accumulate dep-signature via
-//! `accumulate_dispatch_dep_signature` so the final-result cache can
-//! revalidate on warm hits. Cycle and error branches publish a
-//! `MacroExpansionDiagnostics` envelope into `diag_sink` (per §7.5
-//! silent-miss prevention).
+//! All `dispatch.execute_read` calls must fan their dep-signature into
+//! every active fact tracer via
+//! `observe_fact_signature(&dep_signature_to_fact_signature(...))` so
+//! the final-result cache can revalidate on warm hits. Cycle and error
+//! branches publish a `MacroExpansionDiagnostics` envelope into
+//! `diag_sink` (per §7.5 silent-miss prevention).
 //!
 //! The macro_index inside each projector identifies which macro this
 //! projection corresponds to, for diagnostic correlation and for the
@@ -48,9 +49,9 @@ use crate::semantic_query::{
 };
 use crate::types::FileAnalysisSnapshot;
 
-use super::dep_signature::accumulate_dispatch_dep_signature;
 use super::diagnostic_convert::shallow_diagnostics_to_macro_expansion;
 use super::exactness::classify_node;
+use crate::fact_signature_helpers::{dep_signature_to_fact_signature, observe_fact_signature};
 
 pub(crate) mod emits;
 pub(crate) mod exposed;
@@ -367,7 +368,9 @@ pub(crate) fn resolve_macro_payload(
         type_args,
         mode: ProjectionMode::Navigate,
     });
-    accumulate_dispatch_dep_signature(&payload_read.dep_signature);
+    observe_fact_signature(&dep_signature_to_fact_signature(
+        &payload_read.dep_signature,
+    ));
     if !payload_read.walker_diagnostics.is_empty() {
         diag_sink.push(shallow_diagnostics_to_macro_expansion(
             &payload_read.walker_diagnostics,
@@ -433,7 +436,9 @@ pub(crate) fn resolve_payload_surface(
         path: empty_path(),
         mode: ProjectionMode::Shallow,
     });
-    accumulate_dispatch_dep_signature(&surface_read.dep_signature);
+    observe_fact_signature(&dep_signature_to_fact_signature(
+        &surface_read.dep_signature,
+    ));
     if !surface_read.walker_diagnostics.is_empty() {
         diag_sink.push(shallow_diagnostics_to_macro_expansion(
             &surface_read.walker_diagnostics,
@@ -799,9 +804,9 @@ pub(crate) fn type_expr_contains_reducible_operator(expr: &TypeExpr) -> bool {
 /// other variants the value is returned unchanged — `classify_node`
 /// already alias-unwraps a single `Alias` hop.
 ///
-/// Dep-signature is accumulated unconditionally so the final-result
-/// cache observes the same revalidation surface as the projector's
-/// other dispatches.
+/// Dep-signature is fanned into every active fact tracer
+/// unconditionally so the final-result cache observes the same
+/// revalidation surface as the projector's other dispatches.
 fn resolve_member_value_for_classification(
     dispatch: &ProjectSemanticDispatch<'_>,
     value: SemanticNodeId,
@@ -814,7 +819,7 @@ fn resolve_member_value_for_classification(
                 path: empty_path(),
                 mode: ProjectionMode::Shallow,
             });
-            accumulate_dispatch_dep_signature(&read.dep_signature);
+            observe_fact_signature(&dep_signature_to_fact_signature(&read.dep_signature));
             match read.value {
                 QueryResult::Value(id) => id,
                 _ => value,

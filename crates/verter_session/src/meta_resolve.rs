@@ -51,14 +51,13 @@ mod slot_binding_graph_tests;
 #[cfg(test)]
 #[path = "meta_resolve/typed_ir_consumer_tests.rs"]
 mod typed_ir_consumer_tests;
-pub(crate) use dep_signature::{
-    accumulate_dispatch_dep_signature, drain_dispatch_dep_signature_accumulator,
-    reset_dispatch_dep_signature_accumulator,
-};
 #[cfg(test)]
 pub(crate) use dep_signature::{
     bfs_compute_counter_for_test, reset_bfs_compute_counter_for_test,
     with_bfs_child_refs_observer_for_test, with_visited_counter,
+};
+pub(crate) use dep_signature::{
+    drain_dispatch_dep_signature_accumulator, reset_dispatch_dep_signature_accumulator,
 };
 pub(crate) use dispatch_helpers::{
     instantiate_local_generic_ref_via_dispatch, lower_and_project_to_expanded_via_host_threaded,

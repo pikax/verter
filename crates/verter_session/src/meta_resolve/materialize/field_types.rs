@@ -17,8 +17,8 @@
 
 use crate::instant::Instant;
 
-use super::super::dep_signature::accumulate_dispatch_dep_signature;
 use super::super::registry_materialize::preserve_package_backed_symbolic_refs_node;
+use crate::fact_signature_helpers::{dep_signature_to_fact_signature, observe_fact_signature};
 
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub(crate) fn materialize_component_meta_type_expr_until_stable(
@@ -179,12 +179,15 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
         );
     }
 
-    // Step 6.6.A: accumulate dispatch's dep_signature into the
-    // per-request thread-local so compute_component_meta_state_inner
-    // can merge the facts into ResolvedComponentMetaState.fact_versions
-    // before publish. Each materialize call contributes its own
-    // dispatch-side fact set; the accumulator deduplicates.
-    accumulate_dispatch_dep_signature(&dispatch_materialized.dep_signature);
+    // Fan dispatch's dep_signature into every active fact tracer so
+    // the outer compute's read-set captures the materialise pass's
+    // facts. The bridge helper drops route- and project-generation
+    // entries (only `WholeHash` survives the conversion); the
+    // dropped entries are R20-only signals with no `FactVersionRef`
+    // equivalent.
+    observe_fact_signature(&dep_signature_to_fact_signature(
+        &dispatch_materialized.dep_signature,
+    ));
 
     let materialized = MaterializedTypeExpr {
         node_id: dispatch_materialized.node_id,
