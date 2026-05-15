@@ -1802,18 +1802,36 @@ impl SemanticGraphStore {
             // `warm_publish_one_if_absent` substrate so the prefix
             // entries land in the unified reverse index.
             //
-            // The signature passed to `warm_publish_one_if_absent` is
-            // the parent's `dep_signature` (legacy); the helper
-            // internally derives a `fact_dep_signature` for the prefix.
-            // When `traced_fact_dep_signature` is `Some`, that's the
-            // authoritative fact set; when `None`, the helper falls
-            // back to fence-derived facts. This is the same fall-back
-            // path the parent entry uses.
+            // Codex P2.C: construct the full `ReadSetSignature` from
+            // BOTH the legacy `dep_signature` AND the traced facts
+            // captured under the dispatch's `install_fact_tracer`
+            // wrapper. Pre-fix the call site passed only the legacy
+            // `dep_signature` and `warm_publish_one_if_absent`
+            // reconstructed facts via `fact_signature_from_fence` —
+            // that bridge drops `Parse(...)` / `ResolveImports(...)` /
+            // `RouteSurface(...)` facts, leaving a sibling-share
+            // short-circuit through the prefix unable to validate or
+            // bubble those dependencies. Now the backfilled prefix
+            // entry's carrier matches the parent's traced facts
+            // verbatim (with the same fence-only fallback when the
+            // tracer wrapper was absent for the cold build, matching
+            // the parent's own carrier construction in
+            // `warm_publish_one`).
+            let prefix_fact_dep_signature = match traced_fact_dep_signature.as_ref() {
+                Some(sig) => Arc::clone(sig),
+                None => crate::component_meta_materialize::fact_signature_from_fence(
+                    dep_signature.as_ref(),
+                ),
+            };
+            let prefix_carrier = crate::fact_signature_helpers::ReadSetSignature::new(
+                prefix_fact_dep_signature,
+                dep_signature.clone(),
+            );
             for backfill in pending_prefix_backfills {
                 self.warm_publish_one_if_absent(
                     backfill.key,
                     QueryResult::Value(backfill.node),
-                    dep_signature.clone(),
+                    prefix_carrier.clone(),
                 );
             }
         } else {
@@ -1957,7 +1975,7 @@ impl SemanticGraphStore {
         );
         let entry = MemoEntry {
             result: result.clone(),
-            read_set_signature,
+            read_set_signature: read_set_signature.clone(),
             walker_diagnostics: Arc::clone(walker_diagnostics),
         };
         let mut entries = self.entries_lock_diagnosed();
@@ -2000,18 +2018,22 @@ impl SemanticGraphStore {
                     .fetch_add(populated_slots.len() as u64, Ordering::Relaxed);
             }
         }
-        // Γ.B reverse-index registration. For each populated
-        // slot (the primary plus any backfilled narrower slots),
-        // register the (family, slot) → dep_signature mapping under
-        // every canonical the dep_signature references. Lock order is
-        // `entries → canonical_to_entries shards`: drop the entries lock
-        // before acquiring any per-canonical mutex.
+        // Γ.B reverse-index registration. Carrier-aware: register
+        // each populated slot under EVERY canonical the entry's
+        // carrier references — the union of the legacy `dep_signature`
+        // rail AND the path-precise `facts` rail (`Parse(...)`,
+        // `ResolveImports(...)`, `RouteSurface(...)`, etc.). Lock
+        // order is `entries → canonical_to_entries shards`: drop the
+        // entries lock before acquiring any per-canonical mutex. See
+        // `register_reverse_index`'s docstring for the carrier
+        // contract — codex P2.B closes the fact-only invalidation
+        // hole this widening covers.
         drop(entries);
         Self::register_reverse_index(
             &self.canonical_to_entries,
             &family,
             &populated_slots,
-            dep_signature,
+            &read_set_signature,
         );
     }
 
@@ -2032,11 +2054,24 @@ impl SemanticGraphStore {
     /// 3. `self.get(&key).is_some()` — slot is already warm.
     /// 4. The in-flight table contains `key` — a cold winner is
     ///    currently building this exact key; let it publish.
+    ///
+    /// **Carrier contract.** The published `MemoEntry` stores the
+    /// caller-supplied [`ReadSetSignature`] verbatim. Prefix-backfill
+    /// callers must pass the parent's authoritative carrier (legacy
+    /// rail + path-precise traced facts captured under
+    /// `install_fact_tracer`) so the backfilled entry's facts rail
+    /// contains the parent's `Parse(...)` / `ResolveImports(...)` /
+    /// `RouteSurface(...)` observations. Pre-fix the caller passed
+    /// only a legacy `DepSignature` and this helper reconstructed
+    /// facts via `fact_signature_from_fence` — that bridge drops
+    /// path-precise facts, leaving a sibling-share short-circuit
+    /// through the prefix unable to validate or bubble those
+    /// dependencies (codex P2.C).
     pub(crate) fn warm_publish_one_if_absent(
         &self,
         key: SemanticQueryKey,
         result: QueryResult<SemanticNodeId>,
-        dep_signature: DepSignature,
+        read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
     ) {
         if !matches!(result, QueryResult::Value(_)) {
             return;
@@ -2060,15 +2095,9 @@ impl SemanticGraphStore {
         if self.inflight.lock().contains_key(&key) {
             return;
         }
-        let fact_dep_signature =
-            crate::component_meta_materialize::fact_signature_from_fence(dep_signature.as_ref());
-        let read_set_signature = crate::fact_signature_helpers::ReadSetSignature::new(
-            fact_dep_signature,
-            dep_signature.clone(),
-        );
         let entry = MemoEntry {
             result,
-            read_set_signature,
+            read_set_signature: read_set_signature.clone(),
             walker_diagnostics: Arc::from([]),
         };
         let mut entries = self.entries_lock_diagnosed();
@@ -2086,12 +2115,14 @@ impl SemanticGraphStore {
                     .fetch_add(populated_slots.len() as u64, Ordering::Relaxed);
             }
         }
+        // Carrier-aware reverse-index registration — see
+        // `warm_publish_one` for the full carrier rationale.
         drop(entries);
         Self::register_reverse_index(
             &self.canonical_to_entries,
             &family,
             &populated_slots,
-            &dep_signature,
+            &read_set_signature,
         );
     }
 
@@ -2100,17 +2131,40 @@ impl SemanticGraphStore {
     /// [`Self::warm_publish_one_if_absent`]. Caller must have dropped
     /// the `entries` lock before calling per the `entries →
     /// canonical_to_entries shards` lock order.
+    ///
+    /// **Carrier-aware registration.** The reverse index keys each
+    /// populated slot under EVERY canonical the entry's
+    /// [`ReadSetSignature`] references — the union of the legacy
+    /// `dep_signature` rail AND the path-precise `facts` rail
+    /// (`Parse(...)`, `ResolveImports(...)`, `RouteSurface(...)`,
+    /// `FileWholeHash`, `DerivedFactHash`). The stored value in the
+    /// per-canonical shard remains the legacy `DepSignature` because
+    /// `invalidate_canonical`'s existing ptr-eq tie-break reads from
+    /// that signature. Iterating `read_set_signature.canonical_ids()`
+    /// ensures fact-only canonicals (whose canonical does not appear
+    /// in the legacy rail) still surface in `invalidate_canonical`'s
+    /// shard-drain — without this, a `Parse(MemberPresence(Foo, a))`
+    /// fact for a canonical that the legacy signature does not name
+    /// would leave the memo entry orphaned across invalidation.
+    ///
+    /// **Why match `MaterializeStructureDb::register_post_publish`.**
+    /// Track 4 introduced the same canonical-ids() iteration for
+    /// `MaterializeStructureDb` and `RefCycleResultDb` so their
+    /// reverse-indexes drain on fact-only invalidation. The memo
+    /// equivalent was missed in the original Block 1.I landing
+    /// (codex P2.B). This helper now matches that pattern.
     fn register_reverse_index(
         canonical_to_entries: &CanonicalToEntries,
         family: &FamilyKey,
         populated_slots: &[ModeSlot],
-        dep_signature: &DepSignature,
+        read_set_signature: &crate::fact_signature_helpers::ReadSetSignature,
     ) {
         let timing_on = verter_scheduler::request_context::current_timing_enabled();
+        let registered_legacy = Arc::clone(&read_set_signature.legacy);
         for populated in populated_slots {
-            for (canonical, _) in dep_signature.iter() {
+            for canonical in read_set_signature.canonical_ids() {
                 let shard = canonical_to_entries
-                    .entry(Arc::clone(canonical))
+                    .entry(canonical)
                     .or_insert_with(|| Mutex::new(FxHashMap::default()));
                 let lock_start = if timing_on {
                     Some(Instant::now())
@@ -2122,9 +2176,79 @@ impl SemanticGraphStore {
                     .map(|t| t.elapsed())
                     .unwrap_or(std::time::Duration::ZERO);
                 crate::host_manage::record_family_map_lock_acquisition(lock_wait);
-                map.insert((family.clone(), *populated), Arc::clone(dep_signature));
+                map.insert((family.clone(), *populated), Arc::clone(&registered_legacy));
             }
         }
+    }
+
+    /// Test-only accessor: read the entry's full
+    /// [`ReadSetSignature`] (both rails) for `key`. Returns `None`
+    /// when no entry is present.
+    ///
+    /// Unlike [`Self::get`] (which projects only the legacy
+    /// `dep_signature` into the returned `CacheRead`), this accessor
+    /// surfaces the path-precise `facts` rail so integration tests
+    /// can assert what facts the entry's carrier actually holds.
+    /// Used by the `prefix_backfill_carries_traced_facts` discriminator
+    /// (codex P2.C) to assert that a backfilled prefix entry's
+    /// `facts` rail contains the parent's traced `Parse(...)` fact
+    /// rather than a fence-only reconstruction.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn entry_read_set_signature_for_tests(
+        &self,
+        key: &SemanticQueryKey,
+    ) -> Option<crate::fact_signature_helpers::ReadSetSignature> {
+        let (family, slot) = family_and_slot(key);
+        let entries = self.entries_lock_diagnosed();
+        entries
+            .get(&family)
+            .and_then(|slots| slots.slot(slot).cloned())
+            .map(|entry| entry.read_set_signature)
+    }
+
+    /// Test-only direct publish path. Constructs a `MemoEntry` from the
+    /// caller-supplied `(result, read_set_signature)` pair and routes it
+    /// through the unified reverse-index registration. Mirrors the
+    /// production publish path but accepts an explicit carrier so
+    /// integration tests can seed entries whose `legacy` rail excludes
+    /// canonicals that the `facts` rail names (the fact-only
+    /// invalidation discriminator for codex P2.B).
+    ///
+    /// Returns the number of populated slots after publish (always
+    /// ≥1 for a `Value` result on a previously-empty slot).
+    #[doc(hidden)]
+    pub fn publish_with_carrier_for_tests(
+        &self,
+        key: SemanticQueryKey,
+        result: QueryResult<SemanticNodeId>,
+        read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
+    ) -> usize {
+        if !matches!(result, QueryResult::Value(_)) {
+            return 0;
+        }
+        let (family, slot) = family_and_slot(&key);
+        if matches!(family, FamilyKey::ResolvedNamedType { .. }) {
+            return 0;
+        }
+        let entry = MemoEntry {
+            result,
+            read_set_signature: read_set_signature.clone(),
+            walker_diagnostics: Arc::from([]),
+        };
+        let mut entries = self.entries_lock_diagnosed();
+        let populated_slots = entries
+            .entry(family.clone())
+            .or_default()
+            .publish(slot, entry);
+        drop(entries);
+        Self::register_reverse_index(
+            &self.canonical_to_entries,
+            &family,
+            &populated_slots,
+            &read_set_signature,
+        );
+        populated_slots.len()
     }
 }
 

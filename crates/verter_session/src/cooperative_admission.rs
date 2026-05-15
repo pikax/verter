@@ -603,10 +603,23 @@ where
             {
                 let mut state = slot.state.lock();
                 state.completed = true;
-                // Broadcast the projected value to joiners via the
-                // type-erased channel so a joiner that wakes after the
-                // panic_guard retires the slot doesn't lose the value.
-                state.return_only = Some(Box::new(value.clone()));
+                // Cacheable winner: DO NOT broadcast the projected `V`
+                // through `return_only`. Joiners fall through to the
+                // `map.get(&key) + project(&entry_arc)` path so each
+                // joiner thread runs `project` on its own thread, which
+                // is where carrier-bubbling side effects (e.g.
+                // `entry.read_set_signature.bubble(ctx)` for the
+                // materialiser) deliver the cached entry's facts into
+                // the joiner's outer fact tracer. Routing the value
+                // through `return_only` skipped that side effect and
+                // admitted the outer cache with an incomplete
+                // dependency signature when a joiner ran inside an
+                // outer tracer scope.
+                //
+                // The map entry persists past slot retirement
+                // (`map.insert` above happens before the slot is
+                // removed from the inflight table), so a slow-waking
+                // joiner still observes the entry through `map.get`.
             }
             slot.ready.notify_all();
             Some(value)
@@ -948,5 +961,142 @@ mod tests {
             |_entry: &Entry| true,
         );
         assert_eq!(label.as_deref(), Some("hello"));
+    }
+
+    /// Discriminator for codex P2.A on Block 1.I —
+    /// `cacheable_joiner_runs_project_on_its_own_thread`.
+    ///
+    /// A cacheable winner must NOT broadcast the projected value through
+    /// the inflight slot's `return_only` channel; joiners must fall
+    /// through to `map.get(&key) + project(&entry_arc)` so each joiner
+    /// thread runs `project` on its OWN thread. The materialiser's
+    /// `project` closure is where `entry.read_set_signature.bubble(ctx)`
+    /// is invoked — bubbling the cached entry's facts into the joiner
+    /// thread's active outer fact tracer.
+    ///
+    /// Pre-fix shape: the Cacheable winner branch wrote
+    /// `state.return_only = Some(Box::new(value.clone()))`. The joiner
+    /// then read `return_only` and skipped the `project(&entry_arc)`
+    /// call site. The fact-bubble side effect was lost; outer cache
+    /// admitted with an incomplete dependency signature.
+    ///
+    /// Post-fix shape: Cacheable does NOT set `state.return_only`.
+    /// Joiners run `project` themselves on their own thread.
+    ///
+    /// Discriminating signal: a per-thread `project_count` atomic. The
+    /// JOINER thread's count must increment exactly once. Pre-fix it
+    /// would be zero because the joiner takes the `return_only` branch.
+    #[test]
+    fn cacheable_joiner_runs_project_on_its_own_thread() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let map: Arc<DashMap<u32, Arc<String>>> = Arc::new(DashMap::new());
+        let inflight: Arc<InflightTable<u32>> = Arc::new(InflightTable::default());
+
+        // Per-thread project counters. Pre-fix the joiner's project
+        // count is zero (joiner takes return_only branch). Post-fix
+        // the joiner's project count is exactly one.
+        let winner_project_count = Arc::new(AtomicUsize::new(0));
+        let joiner_project_count = Arc::new(AtomicUsize::new(0));
+
+        // mpsc channels coordinate the interleave so the joiner
+        // deterministically blocks on the slot's condvar (taking the
+        // joiner branch) rather than racing past as a warm-hit.
+        let (tx_winner_in_compute, rx_winner_in_compute) = mpsc::channel::<()>();
+        let (tx_release_winner, rx_release_winner) = mpsc::channel::<()>();
+
+        let winner_map = Arc::clone(&map);
+        let winner_inflight = Arc::clone(&inflight);
+        let winner_pc = Arc::clone(&winner_project_count);
+        let winner = thread::spawn(move || {
+            cooperative_admit_with_post_publish(
+                &*winner_map,
+                &*winner_inflight,
+                42u32,
+                |_entry: &String| -> Option<String> { None }, // no warm hit
+                || -> ComputeAdmission<String, String> {
+                    // Signal we are inside compute (claimed). The
+                    // joiner can now enter and block on the condvar.
+                    tx_winner_in_compute.send(()).expect("signal in-compute");
+                    // Block until the test driver releases us so the
+                    // joiner has time to register on the inflight slot.
+                    rx_release_winner.recv().expect("released");
+                    ComputeAdmission::Cacheable("payload".to_string())
+                },
+                |entry: &String| -> String {
+                    winner_pc.fetch_add(1, Ordering::SeqCst);
+                    entry.clone()
+                },
+                |_entry: &String| -> bool { true },
+                |_entry_arc: &Arc<String>, _k: &u32| {},
+            )
+        });
+
+        // Wait for the winner to enter compute (claimed but not yet
+        // published). Now the joiner is guaranteed to take the
+        // joiner-branch and block on the condvar.
+        rx_winner_in_compute.recv().expect("winner in compute");
+
+        let joiner_map = Arc::clone(&map);
+        let joiner_inflight = Arc::clone(&inflight);
+        let joiner_pc = Arc::clone(&joiner_project_count);
+        let joiner = thread::spawn(move || {
+            cooperative_admit_with_post_publish(
+                &*joiner_map,
+                &*joiner_inflight,
+                42u32,
+                |_entry: &String| -> Option<String> { None },
+                || -> ComputeAdmission<String, String> {
+                    // The joiner MUST NOT execute compute; if this
+                    // panics the test isn't exercising the joiner
+                    // branch.
+                    panic!("joiner must not run compute");
+                },
+                |entry: &String| -> String {
+                    joiner_pc.fetch_add(1, Ordering::SeqCst);
+                    entry.clone()
+                },
+                |_entry: &String| -> bool { true },
+                |_entry_arc: &Arc<String>, _k: &u32| {},
+            )
+        });
+
+        // Give the joiner time to register on the inflight slot and
+        // block on the condvar. Same heuristic used by
+        // `cross_thread_joiner_bubbles_facts.rs`.
+        thread::sleep(Duration::from_millis(50));
+
+        // Release the winner. It publishes, calls project (winner
+        // count = 1), inserts into the map, and notifies the joiner.
+        tx_release_winner.send(()).expect("release");
+
+        let winner_result = winner.join().expect("winner joined");
+        let joiner_result = joiner.join().expect("joiner joined");
+
+        assert_eq!(winner_result.as_deref(), Some("payload"));
+        assert_eq!(joiner_result.as_deref(), Some("payload"));
+        assert_eq!(
+            winner_project_count.load(Ordering::SeqCst),
+            1,
+            "winner thread's project count must be exactly 1 (the \
+             winner-side projection)"
+        );
+        // Pre-fix this is 0 (joiner took return_only branch and
+        // skipped `project`). Post-fix this is 1 (joiner ran
+        // `project(&entry_arc)` on its own thread, which is where
+        // production materialisers run their fact-bubble side
+        // effect — `entry.read_set_signature.bubble(ctx)`).
+        assert_eq!(
+            joiner_project_count.load(Ordering::SeqCst),
+            1,
+            "joiner thread's project count must be exactly 1. If 0, \
+             the Cacheable winner is broadcasting `V` through \
+             `state.return_only` and the joiner is skipping the \
+             `project(&entry_arc)` call site — losing the fact-bubble \
+             side effect that delivers the cached entry's facts into \
+             the joiner's outer tracer. See \
+             `crates/verter_session/src/cooperative_admission.rs` \
+             Cacheable arm and codex P2.A."
+        );
     }
 }

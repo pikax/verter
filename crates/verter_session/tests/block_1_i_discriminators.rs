@@ -146,6 +146,153 @@ fn semantic_memo_fact_only_invalidation_drops_slot() {
          deps invalidate the entry. Pre-fix the sweep dropped the entry only when the \
          legacy DepSignature named the canonical."
     );
+
+    // The memo's reverse-index registration must drive its
+    // canonical iteration from the entry's full carrier (the union
+    // of legacy + facts canonicals), not the legacy `DepSignature`
+    // alone. Without this, a fact-only canonical that the legacy
+    // signature does not name has no shard for
+    // `invalidate_canonical` to drain — leaving the memo entry
+    // orphaned across invalidation. Track 4 fixed the equivalent
+    // path on `MaterializeStructureDb` / `RefCycleResultDb`; codex
+    // P2.B flagged that the memo's `register_reverse_index` was
+    // missed.
+    let register_idx = memo_mod_src
+        .find("fn register_reverse_index(")
+        .expect("memo must declare register_reverse_index");
+    let register_window =
+        &memo_mod_src[register_idx..register_idx + 4000.min(memo_mod_src.len() - register_idx)];
+    assert!(
+        register_window.contains("read_set_signature.canonical_ids()"),
+        "register_reverse_index must iterate \
+         `read_set_signature.canonical_ids()` so the memo's reverse \
+         index drains under every canonical the entry's carrier \
+         references — including fact-only canonicals (Parse / \
+         ResolveImports / RouteSurface). Pre-fix iterated only \
+         `dep_signature` (legacy rail), losing fact-only \
+         invalidation. See codex P2.B and the behavioural test \
+         `semantic_memo_invalidate_drains_fact_only_canonical_entry`."
+    );
+}
+
+/// Behavioural discriminator for codex P2.B —
+/// `semantic_memo_invalidate_drains_fact_only_canonical_entry`.
+///
+/// Publishes a memo entry whose carrier has:
+///   - `legacy` rail referencing ONLY `/test/legacy-only.ts`
+///   - `facts` rail containing a `Parse(...)` fact on
+///     `/test/fact-only.ts` (and no `FileWholeHash` for it)
+///
+/// Then calls `invalidate_canonical("/test/fact-only.ts")` and
+/// asserts the entry was drained from the warm cache.
+///
+/// Pre-fix shape: `register_reverse_index` iterated only the legacy
+/// `dep_signature`. The reverse-index shard for
+/// `/test/fact-only.ts` was empty, so `invalidate_canonical`'s
+/// drain step found nothing to walk, and the memo entry survived.
+///
+/// Post-fix shape: `register_reverse_index` iterates
+/// `read_set_signature.canonical_ids()`. The reverse-index shard
+/// for `/test/fact-only.ts` contains the entry's (family, slot)
+/// registration. `invalidate_canonical` drains the shard, finds
+/// the entry, and (with the existing `carrier_facts_reference_canonical`
+/// helper from `family.rs`) evicts it.
+///
+/// Discriminating signal: post-invalidation, `store.get(&key)` is
+/// `None`. Pre-fix: `Some(...)` (entry survives).
+#[test]
+fn semantic_memo_invalidate_drains_fact_only_canonical_entry() {
+    let _serial = DISCRIMINATOR_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    use std::sync::Arc;
+    use verter_session::for_tests::{ReadSetSignature, SemanticGraphStore};
+    use verter_session::resolver_core::{FactVersionRef, ParseFactRef};
+    use verter_session::semantic_query::{
+        DepVersion, PrimitiveKind, QueryResult, ResolveDeclKey, ScopeId, SemanticNodeData,
+        SemanticQueryKey,
+    };
+
+    let store = SemanticGraphStore::new();
+
+    // Construct the query key. Its scope canonical is unrelated to
+    // either the legacy-only or fact-only canonical — the entry's
+    // canonical reachability comes entirely from the carrier.
+    let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        scope: ScopeId {
+            canonical_id: Arc::from("/test/scope.ts"),
+            local_scope: None,
+        },
+        name: Arc::from("MemoTarget"),
+    });
+
+    // Intern a placeholder node so we have a `Value` to publish.
+    let node = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+
+    // Build the carrier:
+    //   legacy = [("/test/legacy-only.ts", WholeHash(...))]
+    //   facts  = [Parse("/test/fact-only.ts", ...)]
+    // Note `/test/fact-only.ts` does NOT appear in legacy.
+    let legacy: Arc<[(Arc<str>, DepVersion)]> = Arc::from(
+        vec![(
+            Arc::<str>::from("/test/legacy-only.ts"),
+            DepVersion::WholeHash([0x11u8; 16]),
+        )]
+        .into_boxed_slice(),
+    );
+    let facts: Arc<[FactVersionRef]> = Arc::from(vec![FactVersionRef::Parse(ParseFactRef {
+        canonical_id: "/test/fact-only.ts".to_string(),
+        key: verter_semantic::facts::FactKey::SyntacticExportSet,
+        lane: verter_semantic::facts::FactLane::Semantic,
+        expected_hash: [0x22u8; 16],
+    })]);
+    let carrier = ReadSetSignature::new(facts, legacy);
+
+    // Direct publish via the test-only helper.
+    let populated =
+        store.publish_with_carrier_for_tests(key.clone(), QueryResult::Value(node), carrier);
+    assert!(
+        populated >= 1,
+        "publish must populate at least one slot (got {populated})"
+    );
+
+    // Sanity: entry is warm; reverse-index shards are non-empty for
+    // BOTH canonicals (legacy + fact-only). Pre-fix the fact-only
+    // shard would be empty (count == 0).
+    assert!(
+        store.get(&key).is_some(),
+        "entry must be warm pre-invalidation"
+    );
+    assert!(
+        store.canonical_to_entries_count("/test/legacy-only.ts") >= 1,
+        "legacy canonical must have a reverse-index registration"
+    );
+    assert!(
+        store.canonical_to_entries_count("/test/fact-only.ts") >= 1,
+        "fact-only canonical's reverse-index shard MUST be populated. \
+         If 0, `register_reverse_index` is iterating only `dep_signature` \
+         (legacy rail) and dropping fact-only canonicals — codex P2.B."
+    );
+
+    // Invalidate the fact-only canonical. Pre-fix this returns 0
+    // because the shard for `/test/fact-only.ts` is empty.
+    let removed = store.invalidate_canonical("/test/fact-only.ts");
+    assert_eq!(
+        removed, 1,
+        "invalidate_canonical for the fact-only canonical must drain \
+         the memo entry (got {removed}). If 0, `register_reverse_index` \
+         never registered the entry under `/test/fact-only.ts` — \
+         the entry is orphaned across invalidation. Codex P2.B."
+    );
+
+    // Discriminating post-condition: the warm entry is gone.
+    assert!(
+        store.get(&key).is_none(),
+        "entry must be evicted after invalidate_canonical of the \
+         fact-only canonical. If still present, the unified \
+         reverse index is not draining fact-only deps — codex P2.B."
+    );
 }
 
 /// Discriminator 3 (codex 3) — `semantic_memo_warm_hit_validates_before_bubble`.
@@ -312,11 +459,48 @@ fn cooperative_return_only_broadcasts_to_joiners() {
         "cooperative_admission must expose `cooperative_admit_with_post_publish` — \
          the ComputeAdmission-aware admission entry point"
     );
+    // The non-cacheable broadcast path must remain wired so joiners
+    // observe valid-but-non-cacheable outcomes without re-reading the
+    // (intentionally empty) cache map. Scope the check to the
+    // ReturnOnly match arm so the assertion does not false-trigger on
+    // residual text inside the Cacheable arm (whose
+    // `state.return_only = Some(...)` line was deliberately retired
+    // by the joiner-bubble fix — Cacheable joiners now fall through
+    // to `map.get + project(&entry_arc)` so each joiner thread runs
+    // `project` on its own thread to deliver the cached entry's
+    // facts into the joiner's outer fact tracer).
+    let return_only_arm_idx = ca_src
+        .find("ComputeAdmission::ReturnOnly(value) => {")
+        .expect("ReturnOnly admission arm must exist");
+    let cacheable_arm_idx = ca_src
+        .find("ComputeAdmission::Cacheable(entry) => {")
+        .expect("Cacheable admission arm must exist");
+    let return_only_arm_window = &ca_src[return_only_arm_idx..];
     assert!(
-        ca_src.contains("state.return_only = Some(Box::new(value.clone()));"),
-        "the new admission function must broadcast ReturnOnly(V) through the \
-         inflight slot's typed return_only channel so joiners observe the value \
-         without re-reading the (empty) cache map"
+        return_only_arm_window.contains("state.return_only = Some(Box::new(value.clone()));"),
+        "the ReturnOnly admission arm must broadcast `V` through the \
+         inflight slot's typed return_only channel so joiners observe \
+         the value without re-reading the (empty) cache map"
+    );
+    // Critical: the Cacheable arm must NOT set `state.return_only`.
+    // Doing so makes joiners take the ReturnOnly broadcast branch and
+    // skip the `project(&entry_arc)` call site that delivers the
+    // cached entry's facts into the joiner's outer fact tracer —
+    // admitting the outer cache with an incomplete dependency
+    // signature. See `cacheable_joiner_runs_project_on_its_own_thread`
+    // below for the behavioural discriminator.
+    let cacheable_arm_end = cacheable_arm_idx
+        + ca_src[cacheable_arm_idx..]
+            .find("ComputeAdmission::ReturnOnly(value) => {")
+            .expect("ReturnOnly arm follows Cacheable arm");
+    let cacheable_arm_window = &ca_src[cacheable_arm_idx..cacheable_arm_end];
+    assert!(
+        !cacheable_arm_window.contains("state.return_only ="),
+        "the Cacheable admission arm must NOT broadcast `V` through \
+         `state.return_only`. Joiners must fall through to \
+         `map.get(&key) + project(&entry_arc)` so each joiner thread \
+         runs `project` on its own thread and bubbles the cached \
+         entry's facts into the joiner's outer fact tracer."
     );
 
     // The materialiser routes through the new admission API.

@@ -3101,3 +3101,136 @@ fn execute_cooperative_warm_hit_skips_admission_overhead() {
          does not exist)",
     );
 }
+
+/// Discriminator for codex P2.C —
+/// `prefix_backfill_carries_traced_facts`.
+///
+/// The cooperative cold-build path accumulates
+/// `pending_prefix_backfills` on `QueryBuildOutput` and publishes them
+/// AFTER the parent's `install_fact_tracer` finalises. Pre-fix the
+/// publish call site (`semantic_query_memo/mod.rs:1813-1817`) passed
+/// ONLY `dep_signature` (legacy fence) to `warm_publish_one_if_absent`;
+/// the helper then reconstructed `facts` via `fact_signature_from_fence`
+/// — that bridge can only emit `FileWholeHash` from `DepVersion::WholeHash`
+/// entries and drops every `Parse(...)` / `ResolveImports(...)` /
+/// `RouteSurface(...)` fact the parent observed.
+///
+/// Post-fix the call site constructs a full `ReadSetSignature` from
+/// both rails (legacy + traced facts) and passes it to
+/// `warm_publish_one_if_absent`. The backfilled prefix entry's carrier
+/// therefore matches the parent's traced facts verbatim.
+///
+/// Discriminating signal: post-publish, look up the BACKFILLED PREFIX
+/// entry and inspect its `read_set_signature.facts`. It must contain
+/// the parent's traced `Parse(...)` fact. Pre-fix the prefix entry's
+/// `facts` contains only `FileWholeHash` reconstructions; the
+/// `Parse(...)` fact is absent.
+#[test]
+fn prefix_backfill_carries_traced_facts() {
+    use crate::project_semantic_dispatch::walk::{PrefixBackfill, QueryBuildOutput};
+    use crate::resolver_core::{FactVersionRef, ParseFactRef};
+    use crate::semantic_query::PathSegment;
+
+    let store = SemanticGraphStore::new();
+    let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let path: Arc<[PathSegment]> = Arc::from(
+        vec![
+            PathSegment::Member(Arc::from("outer")),
+            PathSegment::Member(Arc::from("inner")),
+        ]
+        .into_boxed_slice(),
+    );
+    let parent_key = SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::clone(&path),
+        mode: ProjectionMode::Navigate,
+    };
+
+    // The PREFIX key the backfill will publish — `path[..1]` =
+    // [Member("outer")]. This is the entry whose carrier we'll
+    // inspect for the discriminating signal.
+    let prefix_path: Arc<[PathSegment]> =
+        Arc::from(vec![PathSegment::Member(Arc::from("outer"))].into_boxed_slice());
+    let prefix_key = SemanticQueryKey::ProjectPath {
+        base,
+        path: prefix_path,
+        mode: ProjectionMode::Navigate,
+    };
+
+    let parent_value = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+    let prefix_node = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+
+    // The parent's traced facts include a `Parse(...)` fact on
+    // `/test/parent-dep.ts`. The legacy `dep_signature` references
+    // a DIFFERENT canonical so `fact_signature_from_fence`
+    // cannot reconstruct the `Parse(...)` fact from it.
+    let parent_dep_signature = dep_sig_for("/test/legacy-dep.ts", 9);
+    let parent_traced_facts: Arc<[FactVersionRef]> =
+        Arc::from(vec![FactVersionRef::Parse(ParseFactRef {
+            canonical_id: "/test/parent-dep.ts".to_string(),
+            key: verter_semantic::facts::FactKey::SyntacticExportSet,
+            lane: verter_semantic::facts::FactLane::Semantic,
+            expected_hash: [0xABu8; 16],
+        })]);
+
+    // Pre-condition: no warm prefix entry yet.
+    assert!(
+        store.get(&prefix_key).is_none(),
+        "prefix key must start cold"
+    );
+
+    let _ = store.execute_cooperative(
+        parent_key.clone(),
+        || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+        || QueryBuildOutput {
+            result: QueryResult::Value(parent_value),
+            dep_signature: Arc::clone(&parent_dep_signature),
+            walker_diagnostics: Vec::new(),
+            cache_suppress: false,
+            fact_dep_signature: Some(Arc::clone(&parent_traced_facts)),
+            pending_prefix_backfills: vec![PrefixBackfill {
+                key: prefix_key.clone(),
+                node: prefix_node,
+            }],
+        },
+    );
+
+    // Sanity: the prefix entry was actually backfilled.
+    let prefix_carrier = store
+        .entry_read_set_signature_for_tests(&prefix_key)
+        .expect("prefix backfill must have published the prefix entry");
+
+    // Discriminating signal: the prefix entry's facts rail contains
+    // the parent's traced `Parse(...)` fact. Pre-fix the facts rail
+    // contains only `FileWholeHash(/test/legacy-dep.ts, ...)`
+    // reconstructed via `fact_signature_from_fence`.
+    let has_parse_fact = prefix_carrier.facts.iter().any(|f| {
+        matches!(
+            f,
+            FactVersionRef::Parse(p) if p.canonical_id == "/test/parent-dep.ts"
+        )
+    });
+    assert!(
+        has_parse_fact,
+        "backfilled prefix entry's `facts` rail MUST contain the \
+         parent's traced `Parse(/test/parent-dep.ts, ...)` fact \
+         (got facts = {facts:?}). If this fails, the prefix-backfill \
+         publish call site is still passing only the legacy \
+         `dep_signature` to `warm_publish_one_if_absent`, dropping \
+         the parent's path-precise facts. Codex P2.C.",
+        facts = prefix_carrier.facts.as_ref()
+    );
+
+    // Cross-check: the legacy rail still carries the parent's
+    // legacy signature for backwards-compat with consumers that read
+    // `dep_signature`.
+    let has_legacy_canonical = prefix_carrier
+        .legacy
+        .iter()
+        .any(|(c, _)| c.as_ref() == "/test/legacy-dep.ts");
+    assert!(
+        has_legacy_canonical,
+        "backfilled prefix entry's legacy rail must include the \
+         parent's legacy canonical (`/test/legacy-dep.ts`)"
+    );
+}
