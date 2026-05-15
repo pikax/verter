@@ -3069,19 +3069,25 @@ impl VerterHost {
                 self.current_or_read_whole_hash(canonical_id)
             }
             crate::resolver_core::DerivedFactKind::Route => {
-                // Step 8 / F5: read the cached `route_hash` from
-                // IndexedReady when available — symmetric to
-                // `import_route_hash`. Falls back to recomputing via
-                // `hash_route_surface` only when the canonical isn't
-                // yet indexed (read-only: this code path must NOT
-                // call ensure_indexed because fact validation is
-                // side-effect-free). Same content-hash invalidation
-                // lifecycle as IndexedReady itself, so the cached
-                // hash is current as long as the entry is.
+                // Read the cached `route_hash` from IndexedReady when
+                // available — symmetric to `import_route_hash`. Falls
+                // back to recomputing via `hash_route_surface` only
+                // when the canonical isn't yet indexed (read-only:
+                // this code path must NOT call ensure_indexed because
+                // fact validation is side-effect-free).
+                //
+                // The lookup is content-pinned. This is a
+                // fact-validation oracle: a permissive `get_any` here
+                // would let a stale `IndexedReady` (one whose content
+                // is no longer current — possible once eager
+                // `evict_canonical` is retired) surface its old
+                // `route_hash` as the "current" Route fact, confirming
+                // a stale dependent cache entry as valid.
+                // `current_content_pinned_indexed` returns `None` for
+                // a stale candidate, so the recompute path below
+                // produces the truly-current route surface hash.
                 if let Some(cached) = self
-                    .project_type_store
-                    .indexed()
-                    .get_any(canonical_id)
+                    .current_content_pinned_indexed(canonical_id)
                     .and_then(|facts| facts.route_hash)
                 {
                     return Some(cached);
@@ -3100,9 +3106,13 @@ impl VerterHost {
     }
 
     pub(crate) fn current_cached_import_route_hash(&self, canonical_id: &str) -> Option<Hash16> {
-        self.project_type_store
-            .indexed()
-            .get_any(canonical_id)
+        // Content-pinned IndexedReady read. This feeds the ImportRoute
+        // fact-validation oracle: a permissive `get_any` would let a
+        // stale `IndexedReady` surface its old `import_route_hash` as
+        // the "current" ImportRoute fact. `current_content_pinned_indexed`
+        // returns `None` for a stale candidate so the DerivedRawState
+        // recompute below answers with the truly-current route table.
+        self.current_content_pinned_indexed(canonical_id)
             .and_then(|facts| facts.import_route_hash)
             .or_else(|| {
                 {

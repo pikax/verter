@@ -557,6 +557,28 @@ impl FileArtifactStore {
         result
     }
 
+    /// Content-pinned lookup: returns the cached artifact for
+    /// `canonical_id` **only** when its stored content hash equals
+    /// `expected_content_hash`; any stale candidate yields `None`.
+    ///
+    /// The correctness-sensitive read surface. Callers feeding a
+    /// cache-validation oracle (route-hash / import-route-hash fact
+    /// production, materialisation fence seeding, component-meta proof
+    /// producers) MUST use this — or the host-level
+    /// `current_content_pinned_indexed` wrapper that resolves the hash
+    /// from the scheduler — instead of the permissive [`Self::get_any`].
+    /// Reading a stale artifact as "current" defeats fact validation.
+    /// Semantically identical to [`Self::get`]; the distinct name makes
+    /// the content-pinning contract explicit at the call site.
+    #[must_use]
+    pub fn get_for_current_content(
+        &self,
+        canonical_id: &str,
+        expected_content_hash: Hash16,
+    ) -> Option<Arc<IndexedReady>> {
+        self.get(canonical_id, expected_content_hash)
+    }
+
     fn bump_access_tick(&self, canonical_id: &str) {
         let tick = self.access_tick.fetch_add(1, Ordering::Relaxed) + 1;
         self.last_access.insert(Arc::from(canonical_id), tick);

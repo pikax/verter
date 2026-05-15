@@ -122,6 +122,10 @@ pub mod resolved_import_facts_producer;
 // single-file `upsert` + `get_virtual_file`.
 #[cfg(test)]
 mod cache_identity_invariants_tests;
+// Block 1.J.1 item 1 — content-pinned artifact-read discriminators.
+#[cfg(test)]
+mod artifact_reads_pinned_tests;
+// Block 1.J.1 item 2 — negative import-route reopen discriminators.
 /// Selective component-meta surface API types and BFS bridge support
 /// (Tier 1B / D102 / D125).
 pub mod component_meta_payload;
@@ -160,6 +164,8 @@ pub mod invalidation_domain;
 pub mod loop5_instrumentation;
 pub mod meta;
 pub mod meta_resolve;
+#[cfg(test)]
+mod negative_import_route_tests;
 pub mod owned_artifacts;
 pub mod owner_import_surface;
 #[cfg(test)]

@@ -148,7 +148,7 @@ impl DispatchTrace {
                     // Intermediate hops are published as Navigate by
                     // `backfill_prefixes`; the terminal hop is
                     // published with the caller's mode.
-                    let actual_mode = if graph.get(&prefix_key).is_some() {
+                    let actual_mode = if graph.get_unvalidated(&prefix_key).is_some() {
                         prefix_mode
                     } else if !is_terminal {
                         // Try the caller's mode as a fall-through —
@@ -160,7 +160,7 @@ impl DispatchTrace {
                             path: std::sync::Arc::from(path[..k].to_vec().into_boxed_slice()),
                             mode: *mode,
                         };
-                        if graph.get(&alt_key).is_some() {
+                        if graph.get_unvalidated(&alt_key).is_some() {
                             *mode
                         } else {
                             // Prefix not in cache at all —

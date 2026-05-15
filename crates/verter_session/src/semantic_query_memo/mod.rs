@@ -1173,25 +1173,47 @@ impl SemanticGraphStore {
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Warm-lookup a key without validation. Returns the memoized
-    /// result + its recorded dependency signature when the requested
-    /// `(family, mode_slot)` is populated.
+    /// Warm-lookup a key **without `ReadSetSignature` validation**.
+    /// Returns the memoized result + its recorded dependency signature
+    /// when the requested `(family, mode_slot)` is populated.
     ///
-    /// **Unchecked-read contract.** This entry point bubbles the
-    /// entry's path-precise fact signature unconditionally. The
-    /// AND-gate validation against the live store view does NOT run
-    /// here. Production callers that consult the warm map without
-    /// owning a cold-build closure (e.g. the build-side prefix-probe
-    /// at `build_project_path`) must call [`Self::get_validated`]
-    /// instead — `get_validated` validates BEFORE bubbling so a stale
-    /// entry neither returns nor pollutes the outer tracer.
+    /// **Unchecked-read contract — do not use as a production warm
+    /// read.** This entry point bubbles the entry's path-precise fact
+    /// signature unconditionally; the AND-gate validation against the
+    /// live store view does NOT run here. A stale entry returns its
+    /// cached value AND pollutes the outer fact tracer with
+    /// observations that no longer reflect the current state.
     ///
-    /// `get` remains as the substrate used by the cold-build helper
-    /// (which performs the validate-before-bubble dance one level up
-    /// inside the cooperative-admission flow) and by audit / debug
-    /// probes that explicitly want the unchecked read.
+    /// Two — and only two — caller classes may use the unvalidated
+    /// read:
+    ///
+    /// 1. The cooperative-admission machinery inside this `impl`
+    ///    ([`Self::execute_cooperative`]'s slow-path warm re-check and
+    ///    [`Self::execute_cooperative_batch`]'s non-admission probe).
+    ///    Those flows own the validate / remove / cold-recompute dance
+    ///    one level up, and the slow-path re-check only ever observes a
+    ///    freshly-published (hence fresh) entry or an empty slot.
+    /// 2. Test and debug probes that explicitly want the unchecked
+    ///    read for cache-state inspection.
+    ///
+    /// Every OTHER production warm read — anything that consults the
+    /// warm map outside the cooperative-admission flow, e.g. the
+    /// build-side prefix-probe at `build_project_path` — MUST call
+    /// [`Self::get_validated`] instead: `get_validated` validates
+    /// BEFORE bubbling so a stale entry neither returns nor pollutes
+    /// the outer tracer. The architecture guard
+    /// `semantic_graph_production_reads_validated`
+    /// (`tests/semantic_graph_production_reads_validated.rs`) enforces
+    /// this — a new seal-scope caller of `get_unvalidated` fails it.
+    ///
+    /// The name carries the contract: `get_unvalidated` returns an entry
+    /// WITHOUT validating its `ReadSetSignature`, so the unvalidated
+    /// nature is explicit at every call site.
     #[must_use]
-    pub fn get(&self, key: &SemanticQueryKey) -> Option<CacheRead<QueryResult<SemanticNodeId>>> {
+    pub fn get_unvalidated(
+        &self,
+        key: &SemanticQueryKey,
+    ) -> Option<CacheRead<QueryResult<SemanticNodeId>>> {
         let (family, slot) = family_and_slot(key);
         let entries = self.entries_lock_diagnosed();
         let result = entries.get(&family).and_then(|slots| {
@@ -1306,16 +1328,17 @@ impl SemanticGraphStore {
     /// errors are returned, NOT panic'd (D41 invariant: one batch entry → N
     /// keys → K admissions).
     ///
-    /// Lookups happen via warm `get(key)` only — `execute_cooperative_batch`
-    /// is a non-admission probe; cold builds stay the responsibility of the
-    /// per-query cooperative path.
+    /// Lookups happen via warm `get_unvalidated(key)` only —
+    /// `execute_cooperative_batch` is a non-admission probe; cold
+    /// builds stay the responsibility of the per-query cooperative
+    /// path.
     pub fn execute_cooperative_batch(
         &self,
         keys: &[crate::semantic_query::SemanticQueryKey],
     ) -> Vec<Result<SemanticNodeId, BatchExpandError>> {
         keys.iter()
             .map(|key| {
-                if let Some(hit) = self.get(key) {
+                if let Some(hit) = self.get_unvalidated(key) {
                     match hit.value {
                         QueryResult::Value(node) => Ok(node),
                         QueryResult::Recursive(node) => Ok(node),
@@ -1404,7 +1427,7 @@ impl SemanticGraphStore {
         // acquisition checks the slot; on hit it returns immediately
         // bypassing the slow path's `entries_lock_diagnosed`
         // `Instant::now`/capture-token wait+hold timing, the
-        // in-flight table mutex, the second `self.get(&key)`
+        // in-flight table mutex, the second `self.get_unvalidated(&key)`
         // invocation inside the loop's step 1, the same-path
         // recursion test, and the joiner-condvar admission entry
         // path. On miss the lock is released and execution falls
@@ -1440,7 +1463,7 @@ impl SemanticGraphStore {
     ///
     /// On miss returns `None` without touching any counter. The
     /// caller's slow path observes the miss exactly once when its
-    /// step 1 `self.get(&key)` returns `None`, preserving slow-path
+    /// step 1 `self.get_unvalidated(&key)` returns `None`, preserving slow-path
     /// counter discipline.
     ///
     /// **Lock discipline.** Acquires `self.entries` directly (no
@@ -1498,8 +1521,8 @@ impl SemanticGraphStore {
         self.stats.hits.fetch_add(1, Ordering::Relaxed);
 
         // Per-request audit hit attribution. Bumped exactly once per
-        // warm call (the slow path's old `let initial_hit = self.get(&key)`
-        // observation plus the loop's step-1 `self.get(&key)` call
+        // warm call (the slow path's old `let initial_hit = self.get_unvalidated(&key)`
+        // observation plus the loop's step-1 `self.get_unvalidated(&key)` call
         // bumped this counter twice; the fast path bumps it once).
         if let Some(rctx) = crate::request_context::current_request_context() {
             rctx.cache_counters
@@ -1588,8 +1611,11 @@ impl SemanticGraphStore {
         let (inflight, key) = loop {
             // 1. Warm memo hit. Reaches here only on the rare race
             //    where another thread published between our fast-path
-            //    check and now (or on retry after an abort sweep).
-            if let Some(hit) = self.get(&key) {
+            //    check and now (or on retry after an abort sweep). The
+            //    unvalidated read is sound here: the cooperative-
+            //    admission flow only ever observes a freshly-published
+            //    (hence fresh) entry or an empty slot at this point.
+            if let Some(hit) = self.get_unvalidated(&key) {
                 self.stats.hits.fetch_add(1, Ordering::Relaxed);
                 if let Some(ctx) = verter_scheduler::request_context::current_context() {
                     ctx.0
@@ -2076,7 +2102,7 @@ impl SemanticGraphStore {
     /// Skip rules (any of which short-circuits without publishing):
     /// 1. `result` is not [`QueryResult::Value`].
     /// 2. The family is [`FamilyKey::ResolvedNamedType`] (per §7.16).
-    /// 3. `self.get(&key).is_some()` — slot is already warm.
+    /// 3. `self.get_unvalidated(&key).is_some()` — slot is already warm.
     /// 4. The in-flight table contains `key` — a cold winner is
     ///    currently building this exact key; let it publish.
     ///

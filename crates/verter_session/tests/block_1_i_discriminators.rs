@@ -198,7 +198,7 @@ fn semantic_memo_fact_only_invalidation_drops_slot() {
 /// the entry, and (with the existing `carrier_facts_reference_canonical`
 /// helper from `family.rs`) evicts it.
 ///
-/// Discriminating signal: post-invalidation, `store.get(&key)` is
+/// Discriminating signal: post-invalidation, `store.get_unvalidated(&key)` is
 /// `None`. Pre-fix: `Some(...)` (entry survives).
 #[test]
 fn semantic_memo_invalidate_drains_fact_only_canonical_entry() {
@@ -261,7 +261,7 @@ fn semantic_memo_invalidate_drains_fact_only_canonical_entry() {
     // BOTH canonicals (legacy + fact-only). Pre-fix the fact-only
     // shard would be empty (count == 0).
     assert!(
-        store.get(&key).is_some(),
+        store.get_unvalidated(&key).is_some(),
         "entry must be warm pre-invalidation"
     );
     assert!(
@@ -288,7 +288,7 @@ fn semantic_memo_invalidate_drains_fact_only_canonical_entry() {
 
     // Discriminating post-condition: the warm entry is gone.
     assert!(
-        store.get(&key).is_none(),
+        store.get_unvalidated(&key).is_none(),
         "entry must be evicted after invalidate_canonical of the \
          fact-only canonical. If still present, the unified \
          reverse index is not draining fact-only deps — codex P2.B."
@@ -420,8 +420,14 @@ fn semantic_memo_invalidate_preserves_unaffected_shared_legacy_entry() {
 
     // Sanity: both entries are warm. The shared legacy shard holds
     // BOTH registrations.
-    assert!(store.get(&key_a).is_some(), "entry A must be warm");
-    assert!(store.get(&key_b).is_some(), "entry B must be warm");
+    assert!(
+        store.get_unvalidated(&key_a).is_some(),
+        "entry A must be warm"
+    );
+    assert!(
+        store.get_unvalidated(&key_b).is_some(),
+        "entry B must be warm"
+    );
     let shared_shard_pre = store.canonical_to_entries_count("/test/shared-legacy.ts");
     assert!(
         shared_shard_pre >= 2,
@@ -439,11 +445,11 @@ fn semantic_memo_invalidate_preserves_unaffected_shared_legacy_entry() {
 
     // A is gone, B survives.
     assert!(
-        store.get(&key_a).is_none(),
+        store.get_unvalidated(&key_a).is_none(),
         "entry A must be evicted (its facts rail referenced /test/dep-a.ts)"
     );
     assert!(
-        store.get(&key_b).is_some(),
+        store.get_unvalidated(&key_b).is_some(),
         "entry B must SURVIVE — its facts rail did NOT reference /test/dep-a.ts. \
          If evicted, the cross-canonical drain wrongly invalidated B."
     );
@@ -474,7 +480,7 @@ fn semantic_memo_invalidate_preserves_unaffected_shared_legacy_entry() {
          when A was evicted. Codex round-3 P2."
     );
     assert!(
-        store.get(&key_b).is_none(),
+        store.get_unvalidated(&key_b).is_none(),
         "entry B must be evicted after invalidate_canonical of the shared legacy \
          canonical. If still present, the unified reverse index has stale registrations \
          that did not drive eviction — codex round-3 P2."
@@ -528,9 +534,9 @@ fn semantic_memo_warm_hit_validates_before_bubble() {
          prefix-probe never returns a stale entry's facts."
     );
     assert!(
-        !build_src.contains("graph.get(&prefix_key)"),
-        "find_longest_warm_prefix must NOT use the unchecked `graph.get(...)` \
-         — the bubble-without-validate is the stale-entry hole."
+        !build_src.contains("graph.get(&prefix_key)")
+            && !build_src.contains("graph.get_unvalidated(&prefix_key)"),
+        "find_longest_warm_prefix must NOT use the unchecked `graph.get(...)` / `graph.get_unvalidated(...)` — the bubble-without-validate is the stale-entry hole."
     );
 }
 

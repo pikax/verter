@@ -75,7 +75,7 @@ fn resolve_decl_warm_node_survives_between_execute_calls() {
     let warm = host
         .project_type_store()
         .semantic_graph()
-        .get(&SemanticQueryKey::ResolveDecl(key.clone()))
+        .get_unvalidated(&SemanticQueryKey::ResolveDecl(key.clone()))
         .expect("warm memo entry must exist after first query");
     match warm.value {
         QueryResult::Value(id) => assert_eq!(id, first_id),
@@ -118,7 +118,7 @@ fn resolve_decl_dep_signature_captures_file_hash_and_project_gen() {
     let warm = host
         .project_type_store()
         .semantic_graph()
-        .get(&SemanticQueryKey::ResolveDecl(key))
+        .get_unvalidated(&SemanticQueryKey::ResolveDecl(key))
         .expect("warm entry must exist");
     let mut has_whole_hash = false;
     let mut has_project_gen = false;
@@ -465,7 +465,7 @@ fn project_path_of_length_one_dedups_with_project_member_at_memo() {
         mode: ProjectionMode::Identity,
     };
     let warm = graph
-        .get(&canonical_key)
+        .get_unvalidated(&canonical_key)
         .expect("canonical ProjectPath must be warm");
     match &warm.value {
         QueryResult::Value(id) => assert_eq!(*id, sugar_id),
@@ -480,7 +480,7 @@ fn project_path_of_length_one_dedups_with_project_member_at_memo() {
         mode: ProjectionMode::Identity,
     };
     assert!(
-        graph.get(&sugar_key).is_none(),
+        graph.get_unvalidated(&sugar_key).is_none(),
         "raw ProjectMember key should not appear in the memo — admission rewrite folds it into ProjectPath"
     );
 }
@@ -537,7 +537,7 @@ fn indexed_access_canonicalises_to_project_path_before_admission() {
         mode: ProjectionMode::Identity,
     };
     assert!(
-        graph.get(&raw_sugar_key).is_none(),
+        graph.get_unvalidated(&raw_sugar_key).is_none(),
         "raw IndexedAccess key must not appear in the memo — admission rewrite folds it into ProjectPath"
     );
 }
@@ -908,7 +908,7 @@ fn concurrent_sugar_and_canonical_requests_share_in_flight_entry() {
         mode: ProjectionMode::Identity,
     };
     let warm = graph
-        .get(&canonical_key)
+        .get_unvalidated(&canonical_key)
         .expect("canonical ProjectPath warm after concurrent dispatch");
     match &warm.value {
         QueryResult::Value(id) => assert_eq!(*id, id1),
@@ -920,7 +920,7 @@ fn concurrent_sugar_and_canonical_requests_share_in_flight_entry() {
         mode: ProjectionMode::Identity,
     };
     assert!(
-        graph.get(&raw_sugar).is_none(),
+        graph.get_unvalidated(&raw_sugar).is_none(),
         "raw ProjectMember key should not appear in the memo"
     );
 }
@@ -1149,7 +1149,7 @@ fn instantiate_is_mode_free_one_entry_across_depth_requests() {
     // The `Instantiate` family has exactly one warm entry regardless
     // of the two different-mode ProjectPath queries on the result.
     let warm = graph
-        .get(&key)
+        .get_unvalidated(&key)
         .expect("Instantiate entry must be warm after execute");
     match warm.value {
         QueryResult::Value(_) => {}
@@ -4996,7 +4996,7 @@ fn project_path_prefix_peek_short_circuits_sibling_walk() {
 
     // BEFORE any dispatch: prefix key is NOT warm.
     assert!(
-        graph.get(&prefix_key).is_none(),
+        graph.get_unvalidated(&prefix_key).is_none(),
         "prefix key must not be warm before any dispatch — graph memo must start empty for this prefix"
     );
 
@@ -5027,7 +5027,7 @@ fn project_path_prefix_peek_short_circuits_sibling_walk() {
     // `variants_obj`, which must be published under
     // `(table_obj, [variants], Navigate)` so the sibling dispatch can
     // peek it.
-    let warm_prefix = graph.get(&prefix_key).expect(
+    let warm_prefix = graph.get_unvalidated(&prefix_key).expect(
         "prefix key must be warm after first dispatch — Phase 1B backfill should have published it",
     );
     match warm_prefix.value {
@@ -6835,7 +6835,7 @@ fn read_shallow_metadata(
     // is always false on warm reads, that's the no-poison contract).
     host.project_type_store()
         .semantic_graph()
-        .get(&key)
+        .get_unvalidated(&key)
         .expect("memo must have an entry after a successful dispatch (or none for suppressed)")
 }
 
@@ -6988,7 +6988,10 @@ fn memo_refuses_insertion_on_cache_suppress_true_via_pathological_input() {
         intern_object_with_members(&graph, vec![surface_member("a", str_id, false, false)]);
     let key = empty_path_shallow_key(object);
     let _ = dispatch.execute(key.clone());
-    let warm = host.project_type_store().semantic_graph().get(&key);
+    let warm = host
+        .project_type_store()
+        .semantic_graph()
+        .get_unvalidated(&key);
     assert!(
         warm.is_some(),
         "non-suppressed dispatch must publish a warm memo entry"

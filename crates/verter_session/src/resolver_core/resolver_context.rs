@@ -135,6 +135,38 @@ pub(crate) trait ResolverContext: sealed::Sealed {
 
     fn get_whole_hash(&self, canonical: &str) -> Option<Hash16>;
 
+    /// Content-pinned [`IndexedReady`] lookup.
+    ///
+    /// Resolves the canonical's authoritative current content hash
+    /// ([`Self::get_whole_hash`]) and reads the artifact store pinned
+    /// to that hash via
+    /// [`crate::file_artifact_store::FileArtifactStore::get_for_current_content`].
+    /// Returns `None` when the canonical has no current content hash OR
+    /// when the only cached artifact is a stale candidate for an older
+    /// content hash.
+    ///
+    /// Correctness-sensitive readers in the seal scope —
+    /// materialisation fence seeding (`component_meta_materialize.rs`)
+    /// and the component-meta proof producers
+    /// (`component_meta_caches.rs`) — MUST use this instead of the
+    /// permissive `project_type_store().indexed().get_any(..)`. Seeding
+    /// a fence (or observing a `FileWholeHash` fact) from a stale
+    /// artifact bakes the stale content hash into the cached entry's
+    /// `read_set_signature`, so fact validation would later confirm a
+    /// stale cache entry as valid.
+    ///
+    /// Defaulted so the single implementer ([`crate::VerterHost`]) and
+    /// the overlay-aware
+    /// [`crate::resolver_core::session_resolver_context::SessionResolverContext`]
+    /// both inherit the identical pinned-read behaviour without
+    /// per-impl boilerplate.
+    fn indexed_for_current_content(&self, canonical: &str) -> Option<Arc<IndexedReady>> {
+        let current_hash = self.get_whole_hash(canonical)?;
+        self.project_type_store()
+            .indexed()
+            .get_for_current_content(canonical, current_hash)
+    }
+
     fn resolver_store_view(&self) -> HostStoreView;
 
     fn project_type_store(&self) -> &Arc<ProjectTypeStore>;

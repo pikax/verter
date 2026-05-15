@@ -448,11 +448,12 @@ fn finish_cacheable(
     MaterializeStructureEntry,
 > {
     if !key.scope_canonical_id.as_ref().is_empty() {
-        if let Some(indexed) = ctx
-            .project_type_store()
-            .indexed()
-            .get_any(key.scope_canonical_id.as_ref())
-        {
+        // Content-pinned read: the fence seed becomes part of the
+        // materialised entry's `read_set_signature`. A permissive
+        // `get_any` could seed the fence with a stale artifact's
+        // `whole_hash`, baking a stale content hash into the cache
+        // entry's validation oracle.
+        if let Some(indexed) = ctx.indexed_for_current_content(key.scope_canonical_id.as_ref()) {
             let whole_hash = indexed.whole_hash;
             local_fence.push((
                 Arc::clone(&key.scope_canonical_id),
@@ -957,12 +958,12 @@ pub(crate) fn materialize_component_meta_structure(
         };
 
         // Seed local_fence with the root scope's whole_hash if
-        // available.9 dep-signature accumulation contract.
+        // available. Content-pinned: a permissive `get_any` could seed
+        // the fence with a stale artifact's `whole_hash`, baking a
+        // stale content hash into the cache entry's validation oracle.
         if !key_for_compute.scope_canonical_id.as_ref().is_empty() {
-            if let Some(indexed) = ctx
-                .project_type_store()
-                .indexed()
-                .get_any(key_for_compute.scope_canonical_id.as_ref())
+            if let Some(indexed) =
+                ctx.indexed_for_current_content(key_for_compute.scope_canonical_id.as_ref())
             {
                 let whole_hash = indexed.whole_hash;
                 local_fence.push((

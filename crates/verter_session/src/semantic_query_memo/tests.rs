@@ -290,7 +290,7 @@ fn dep_signature_is_returned_with_warm_hits() {
             (QueryResult::Value(id), sig.clone())
         },
     );
-    let warm = store.get(&key).unwrap();
+    let warm = store.get_unvalidated(&key).unwrap();
     assert_eq!(warm.dep_signature.len(), 1);
     assert_eq!(warm.dep_signature[0].0.as_ref(), "/w/a.ts");
 }
@@ -394,9 +394,9 @@ fn invalidate_canonical_removes_only_matching_scope_keys() {
     assert_eq!(store.memo_entry_count(), 1);
 
     // B.ts still warm (its dep-sig never mentioned /w/a.ts).
-    assert!(store.get(&b_key).is_some());
+    assert!(store.get_unvalidated(&b_key).is_some());
     // A.ts gone — next call re-runs build.
-    assert!(store.get(&a_key).is_none());
+    assert!(store.get_unvalidated(&a_key).is_none());
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -588,7 +588,7 @@ fn warm_publish_one_inserts_warm_map_and_registers_reverse_index() {
     // Pre-condition: warm map empty for this key, reverse index
     // empty for the canonical.
     assert!(
-        store.get(&key).is_none(),
+        store.get_unvalidated(&key).is_none(),
         "warm map must start empty for the test key"
     );
     assert_eq!(
@@ -612,7 +612,7 @@ fn warm_publish_one_inserts_warm_map_and_registers_reverse_index() {
 
     // Post-condition 1: warm map contains the slot.
     let hit = store
-        .get(&key)
+        .get_unvalidated(&key)
         .expect("warm map must contain the published key after warm_publish_one");
     match hit.value {
         QueryResult::Value(id) => assert_eq!(
@@ -751,9 +751,12 @@ fn family_map_invalidate_canonical_uses_reverse_index_to_find_affected_pairs() {
 
     let removed = store.invalidate_canonical("/w/a.ts");
     assert_eq!(removed, 1);
-    assert!(store.get(&a_key).is_none(), "a.ts entry must be evicted");
     assert!(
-        store.get(&b_key).is_some(),
+        store.get_unvalidated(&a_key).is_none(),
+        "a.ts entry must be evicted"
+    );
+    assert!(
+        store.get_unvalidated(&b_key).is_some(),
         "b.ts entry survives — its dep_sig never referenced /w/a.ts"
     );
     assert_eq!(
@@ -920,7 +923,7 @@ fn invalidate_canonical_evicts_instantiate_entries_that_read_that_canonical_body
         || (QueryResult::Value(value_id), dep_sig_for("/w/body.ts", 1)),
     );
     assert!(
-        store.get(&key).is_some(),
+        store.get_unvalidated(&key).is_some(),
         "entry must be warm pre-invalidation"
     );
     assert_eq!(
@@ -935,7 +938,7 @@ fn invalidate_canonical_evicts_instantiate_entries_that_read_that_canonical_body
         "Expanded plus its three backfilled narrower slots all reference /w/body.ts",
     );
     assert!(
-        store.get(&key).is_none(),
+        store.get_unvalidated(&key).is_none(),
         "Instantiate entry whose dep-sig references /w/body.ts must be evicted",
     );
 }
@@ -972,7 +975,7 @@ fn invalidate_canonical_keeps_instantiate_entries_whose_bases_are_unrelated() {
         "no eviction: entry dep-sig references /w/unrelated.ts, not /w/changed.ts",
     );
     assert!(
-        store.get(&key).is_some(),
+        store.get_unvalidated(&key).is_some(),
         "unrelated Instantiate entry must remain warm after sweep",
     );
 }
@@ -1020,7 +1023,7 @@ fn invalidate_canonical_evicts_project_path_entries_through_touched_subtree() {
         "Shallow plus its two backfilled narrower slots all reference the touched subtree",
     );
     assert!(
-        store.get(&key).is_none(),
+        store.get_unvalidated(&key).is_none(),
         "ProjectPath Shallow entry through touched subtree must be evicted",
     );
     let narrower_key = SemanticQueryKey::ProjectPath {
@@ -1029,7 +1032,7 @@ fn invalidate_canonical_evicts_project_path_entries_through_touched_subtree() {
         mode: ProjectionMode::Identity,
     };
     assert!(
-        store.get(&narrower_key).is_none(),
+        store.get_unvalidated(&narrower_key).is_none(),
         "backfilled Identity slot inherits the dep-sig and must evict too",
     );
 }
@@ -1089,11 +1092,11 @@ fn invalidate_canonical_evicts_in_flight_entries_per_mode_slot_and_joiners_retry
         "per-mode-slot invalidation: only the Identity slot is evicted",
     );
     assert!(
-        store.get(&key_identity).is_none(),
+        store.get_unvalidated(&key_identity).is_none(),
         "Identity slot must be evicted (dep-sig /w/a.ts)",
     );
     assert!(
-        store.get(&key_expanded).is_some(),
+        store.get_unvalidated(&key_expanded).is_some(),
         "Expanded slot preserved (dep-sig /w/b.ts, unrelated)",
     );
 
@@ -1185,7 +1188,7 @@ fn backfilled_slot_with_wider_dep_sig_over_invalidates_conservatively_not_incorr
             mode,
         };
         assert!(
-            store.get(&key).is_none(),
+            store.get_unvalidated(&key).is_none(),
             "{mode:?} slot evicted by conservative sweep",
         );
     }
@@ -1218,7 +1221,7 @@ fn backfilled_slot_with_wider_dep_sig_over_invalidates_conservatively_not_incorr
         "narrow-only dep-sig does not reference /w/wide.ts — no false eviction",
     );
     assert!(
-        store.get(&key_navigate).is_some(),
+        store.get_unvalidated(&key_navigate).is_some(),
         "narrower independent build survives unrelated invalidation",
     );
 }
@@ -1324,7 +1327,7 @@ fn winner_skips_warm_publish_when_aborted_by_invalidation_during_build() {
         },
     );
     assert!(
-        store.get(&key_identity).is_some(),
+        store.get_unvalidated(&key_identity).is_some(),
         "Expanded's backfill must populate Identity before invalidation runs",
     );
 
@@ -1348,7 +1351,7 @@ fn winner_skips_warm_publish_when_aborted_by_invalidation_during_build() {
     let _ = a_thread.join().expect("A thread must not panic");
 
     assert!(
-        store.get(&key_identity).is_none(),
+        store.get_unvalidated(&key_identity).is_none(),
         "aborted winner must skip warm publish — Identity slot stays evicted",
     );
 }
@@ -1626,7 +1629,7 @@ fn assert_warm_at(
     expected_id: SemanticNodeId,
 ) {
     let warm = store
-        .get(&family_test_key(base, mode))
+        .get_unvalidated(&family_test_key(base, mode))
         .unwrap_or_else(|| panic!("expected warm hit at mode {mode:?}"));
     match warm.value {
         QueryResult::Value(id) => assert_eq!(id, expected_id, "wrong node id at {mode:?}"),
@@ -1641,7 +1644,9 @@ fn assert_warm_at(
 
 fn assert_cold_at(store: &SemanticGraphStore, base: SemanticNodeId, mode: ProjectionMode) {
     assert!(
-        store.get(&family_test_key(base, mode)).is_none(),
+        store
+            .get_unvalidated(&family_test_key(base, mode))
+            .is_none(),
         "{mode:?} slot must NOT be backfilled",
     );
 }
@@ -2450,7 +2455,7 @@ fn resolved_named_type_refcount_path_unchanged_after_family_rewrite() {
         "ResolvedNamedType warm-publish must NOT populate the family memo",
     );
     assert!(
-        store.get(&formal_key).is_none(),
+        store.get_unvalidated(&formal_key).is_none(),
         "store.get must return None for ResolvedNamedType — it is bypassed"
     );
 }
@@ -3175,7 +3180,7 @@ fn prefix_backfill_carries_traced_facts() {
 
     // Pre-condition: no warm prefix entry yet.
     assert!(
-        store.get(&prefix_key).is_none(),
+        store.get_unvalidated(&prefix_key).is_none(),
         "prefix key must start cold"
     );
 

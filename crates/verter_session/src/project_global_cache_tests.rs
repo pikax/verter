@@ -1298,7 +1298,7 @@ fn semantic_query_invalidates_on_owner_edit_slice11() {
     let warm_before_edit = host
         .project_type_store()
         .semantic_graph()
-        .get(&SemanticQueryKey::ResolveDecl(key.clone()))
+        .get_unvalidated(&SemanticQueryKey::ResolveDecl(key.clone()))
         .expect("entry must be warm after first ask");
     let hash_v1 = warm_before_edit
         .dep_signature
@@ -1317,7 +1317,7 @@ fn semantic_query_invalidates_on_owner_edit_slice11() {
     assert!(
         host.project_type_store()
             .semantic_graph()
-            .get(&SemanticQueryKey::ResolveDecl(key.clone()))
+            .get_unvalidated(&SemanticQueryKey::ResolveDecl(key.clone()))
             .is_none(),
         "post-edit: warm entry for the edited canonical must be invalidated"
     );
@@ -1330,7 +1330,7 @@ fn semantic_query_invalidates_on_owner_edit_slice11() {
     let warm_after_edit = host
         .project_type_store()
         .semantic_graph()
-        .get(&SemanticQueryKey::ResolveDecl(key))
+        .get_unvalidated(&SemanticQueryKey::ResolveDecl(key))
         .expect("post-edit entry must be warm after rebuild");
     let hash_v2 = warm_after_edit
         .dep_signature
@@ -1367,7 +1367,7 @@ fn semantic_query_unrelated_edit_keeps_memo_warm_slice11() {
     let warm_before = host
         .project_type_store()
         .semantic_graph()
-        .get(&SemanticQueryKey::ResolveDecl(a_key.clone()))
+        .get_unvalidated(&SemanticQueryKey::ResolveDecl(a_key.clone()))
         .expect("entry must be warm after first ask");
 
     // Edit an unrelated file — a.ts must remain warm.
@@ -1380,7 +1380,7 @@ fn semantic_query_unrelated_edit_keeps_memo_warm_slice11() {
     let warm_after = host
         .project_type_store()
         .semantic_graph()
-        .get(&SemanticQueryKey::ResolveDecl(a_key.clone()))
+        .get_unvalidated(&SemanticQueryKey::ResolveDecl(a_key.clone()))
         .expect("unrelated edit must not invalidate a.ts entry");
     match (warm_before.value, warm_after.value) {
         (QueryResult::Value(x), QueryResult::Value(y)) => assert_eq!(x, y, "same node id"),
@@ -1413,7 +1413,7 @@ fn semantic_query_warm_entry_has_non_empty_dep_signature_slice11() {
     let warm = host
         .project_type_store()
         .semantic_graph()
-        .get(&SemanticQueryKey::ResolveDecl(key))
+        .get_unvalidated(&SemanticQueryKey::ResolveDecl(key))
         .expect("warm entry must exist");
     assert!(
         !warm.dep_signature.is_empty(),
@@ -1469,7 +1469,7 @@ fn derived_semantic_query_records_project_generation_anchor_slice11() {
     let warm = host
         .project_type_store()
         .semantic_graph()
-        .get(&lookup_key)
+        .get_unvalidated(&lookup_key)
         .expect("warm entry must exist");
     let mut has_project_gen = false;
     for (_, dv) in warm.dep_signature.iter() {

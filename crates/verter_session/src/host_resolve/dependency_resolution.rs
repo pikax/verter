@@ -89,15 +89,37 @@ impl VerterHost {
         let (resolution, source_kind) = if let Some(resolution) =
             self.cached_import_route_resolution(owner_canonical, import_source)
         {
+            // `DerivedRawState.import_routes` path — `cached_import_route_resolution`
+            // already revalidates known-miss entries against the
+            // `import_routes_known_miss_recorded_at_generation` sidecar,
+            // so anything it returns is generation-current.
             (Some(resolution), "host-cache")
         } else {
-            (
-                self.ensure_indexed_ready(owner_canonical)?
-                    .import_routes
-                    .get(import_source)
-                    .cloned(),
-                "indexed_ready",
-            )
+            // `IndexedReady.import_routes` fallback. This snapshot is
+            // built once at materialisation time and carries NO
+            // generation tag. A NEGATIVE (known-miss) entry in it is a
+            // stale-by-construction snapshot: once a new file appears,
+            // the workspace `content_generation` advances but the
+            // owner's content (hence its `IndexedReady`) does not, so
+            // the negative snapshot would otherwise be served forever
+            // and every caller — which maps a known-miss resolution to
+            // an unconditional `return None` — would treat the import
+            // as permanently unresolvable.
+            //
+            // Negative entries are therefore NOT served from this
+            // fallback: the miss is recomputed cheaply by the caller's
+            // `resolve_workspace_dependency_and_cache` path, which
+            // re-resolves against the current workspace and reopens the
+            // route the moment the target file exists. Positive
+            // resolutions stay valid (a new file never invalidates an
+            // already-resolved positive) and are served unchanged.
+            let from_indexed = self
+                .ensure_indexed_ready(owner_canonical)?
+                .import_routes
+                .get(import_source)
+                .cloned()
+                .filter(|resolution| !Self::import_route_is_known_miss(resolution));
+            (from_indexed, "indexed_ready")
         };
 
         component_meta_trace_custom!(

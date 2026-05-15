@@ -2665,10 +2665,16 @@ pub(crate) fn app_config_no_override_proof_get_or_compute(
         // Look up the IndexedReady for the decl canonical. The
         // tracer fan-out picks up any indirect observations the
         // resolver substrate emits.
-        let ir = ctx
-            .project_type_store()
-            .indexed()
-            .get_any(decl_canonical_for_compute.as_ref());
+        //
+        // Content-pinned: the observed `FileWholeHash` fact becomes
+        // part of this proof entry's `read_set_signature`. A permissive
+        // `get_any` could observe a stale artifact's `whole_hash`,
+        // sealing the proof against a content hash that is no longer
+        // current. A stale candidate is treated identically to "file
+        // removed" — `current_content_pinned_indexed` returns `None`,
+        // the sentinel-zero hash is observed, and the validator
+        // re-derives the proof on the next read.
+        let ir = ctx.indexed_for_current_content(decl_canonical_for_compute.as_ref());
         // Observe the file's whole-hash explicitly. If no IndexedReady
         // is present (file removed), record a sentinel zero hash so
         // the validator picks up the absence on the next read.

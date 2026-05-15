@@ -634,6 +634,33 @@ impl VerterHost {
         }
     }
 
+    /// Content-pinned [`crate::project_type_store::IndexedReady`] lookup.
+    ///
+    /// Resolves the canonical's authoritative current content hash
+    /// ([`Self::get_whole_hash`] — scheduler `parse.whole_hash` first,
+    /// `FileArtifactStore` content hash as the no-scheduler fallback)
+    /// and reads the artifact store **pinned to that hash** via
+    /// [`crate::file_artifact_store::FileArtifactStore::get_for_current_content`].
+    ///
+    /// Returns `None` when the canonical has no current content hash OR
+    /// when the only cached artifact is a stale candidate for an older
+    /// content hash. Correctness-sensitive readers (route-hash /
+    /// import-route-hash fact production) MUST use this instead of the
+    /// permissive `get_any`: with eager `evict_canonical` retired a
+    /// stale `IndexedReady` can coexist with the live content, and
+    /// sampling its `route_hash` / `import_route_hash` as "current"
+    /// would confirm a stale cache entry to the fact validator.
+    #[must_use]
+    pub(crate) fn current_content_pinned_indexed(
+        &self,
+        canonical: &str,
+    ) -> Option<Arc<crate::project_type_store::IndexedReady>> {
+        let current_hash = self.get_whole_hash(canonical)?;
+        self.project_type_store
+            .indexed()
+            .get_for_current_content(canonical, current_hash)
+    }
+
     /// Return the scheduler's authoritative [`oxc_span::SourceType`] for a loaded
     /// canonical file, or `None` if the canonical has not been processed by the
     /// scheduler (WASM / unloaded / pre-parse routing).
