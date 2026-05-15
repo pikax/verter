@@ -1333,6 +1333,14 @@ impl VerterHost {
 
         self.sync_transitive_macro_type_dependencies(&canonical, &old_transitive_deps);
 
+        // Admit the resolved-import facts bundle for the owner so
+        // downstream consumers (`RouteDb`, materialiser, etc.) can
+        // read resolved facts directly instead of re-walking the
+        // AST. First-writer-wins on the cache key composed of the
+        // owner's per-canonical env hashes. Skipping on duplicate
+        // keys keeps `Arc` identity stable for in-flight readers.
+        let _ = self.admit_resolved_import_facts_for_owner(&canonical, &import_routes);
+
         // Sync exact resolutions to workspace.
         self.ws().set_exact_resolutions(&canonical, vfs_resolutions);
         // Soft-invalidate: file content didn't change, only import routes.

@@ -41,6 +41,9 @@ use dashmap::DashMap;
 use verter_semantic::analysis::Hash16;
 use verter_semantic::facts::registry::{Fact, InternedName, InternedSpecifier, SymbolSpace};
 
+#[cfg(any(test, debug_assertions))]
+use std::sync::atomic::{AtomicU64, Ordering};
+
 /// Substrate version for [`ResolvedImportFactsDb`] entries.
 ///
 /// Bumped whenever the resolved-import producer changes the value
@@ -199,9 +202,37 @@ impl ResolvedImportFacts {
 /// [`Self::insert_if_absent`] (first-writer-wins). The store hands
 /// out `Arc<ResolvedImportFacts>` so consumers cheaply clone
 /// references without re-validating.
+///
+/// The production producer
+/// (`VerterHost::admit_resolved_import_facts_for_owner`) reads the
+/// owner's `script_analysis.imports` + admitted route-resolutions
+/// and constructs one [`ResolvedImportClauseEntry`] per
+/// `(binding, space)` pair, then admits the bundle through
+/// [`Self::insert_if_absent`].
 #[derive(Debug, Default)]
 pub struct ResolvedImportFactsDb {
     entries: DashMap<ResolvedImportFactsKey, Arc<ResolvedImportFacts>>,
+    /// Producer-admission provenance counter — positive (resolved)
+    /// entries successfully admitted (first-writer-wins).
+    ///
+    /// Test-only: counter exists exclusively to discriminate the
+    /// producer in DISCRIMINATING tests. Bumped from
+    /// `VerterHost::admit_resolved_import_facts_for_owner` after a
+    /// successful `insert_if_absent`. Snapshot via
+    /// [`Self::positive_admissions`].
+    #[cfg(any(test, debug_assertions))]
+    positive_admissions: AtomicU64,
+    /// Producer-admission provenance counter — negative (unresolved)
+    /// entries admitted as facts so the validator can detect when a
+    /// previously unresolved binding becomes resolved on workspace
+    /// bump.
+    #[cfg(any(test, debug_assertions))]
+    negative_admissions: AtomicU64,
+    /// Producer-admission provenance counter — namespace
+    /// (`import * as ns from "X"`) entries admitted. Subset of
+    /// positive admissions for v8 AMENDMENT-S discrimination.
+    #[cfg(any(test, debug_assertions))]
+    namespace_admissions: AtomicU64,
 }
 
 impl ResolvedImportFactsDb {
@@ -261,5 +292,59 @@ impl ResolvedImportFactsDb {
     /// Drop every cached entry. Used by GC sweeps and test setup.
     pub fn clear(&self) {
         self.entries.clear();
+    }
+
+    /// Bump the positive-admission provenance counter. Called by the
+    /// production producer
+    /// (`VerterHost::admit_resolved_import_facts_for_owner`) after
+    /// each per-binding positive entry it constructs and admits.
+    ///
+    /// Test-only — the snapshot accessor
+    /// [`Self::resolved_import_facts_positive_admissions`] reads
+    /// this counter from discriminating tests.
+    #[cfg(any(test, debug_assertions))]
+    pub(crate) fn record_positive_admission(&self) {
+        self.positive_admissions.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Bump the negative-admission provenance counter. Called by the
+    /// production producer after each per-binding negative
+    /// (unresolved) entry it admits.
+    #[cfg(any(test, debug_assertions))]
+    pub(crate) fn record_negative_admission(&self) {
+        self.negative_admissions.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Bump the namespace-admission provenance counter. Called by
+    /// the production producer when the admitted entry's `space`
+    /// is [`SymbolSpace::Namespace`].
+    #[cfg(any(test, debug_assertions))]
+    pub(crate) fn record_namespace_admission(&self) {
+        self.namespace_admissions.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Snapshot the positive-admission provenance counter (relaxed
+    /// load — counter is a discriminator, not a synchronisation
+    /// primitive). Used by `discriminating tests to verify the
+    /// production producer ran (delta > 0 against pre-state).
+    #[cfg(any(test, debug_assertions))]
+    #[must_use]
+    pub fn resolved_import_facts_positive_admissions(&self) -> u64 {
+        self.positive_admissions.load(Ordering::Relaxed)
+    }
+
+    /// Snapshot the negative-admission provenance counter.
+    #[cfg(any(test, debug_assertions))]
+    #[must_use]
+    pub fn resolved_import_facts_negative_admissions(&self) -> u64 {
+        self.negative_admissions.load(Ordering::Relaxed)
+    }
+
+    /// Snapshot the namespace-admission provenance counter (subset
+    /// of positive admissions where `space == SymbolSpace::Namespace`).
+    #[cfg(any(test, debug_assertions))]
+    #[must_use]
+    pub fn resolved_import_facts_namespace_admissions(&self) -> u64 {
+        self.namespace_admissions.load(Ordering::Relaxed)
     }
 }

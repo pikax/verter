@@ -3615,6 +3615,27 @@ mod foundations_guards {
         // fact-validation, materialiser observations) reach the
         // same module.
         "pub mod resolved_import_facts",
+        // tests/resolved_import_facts_producer_real.rs +
+        // tests/resolved_import_facts_unresolved_admitted.rs +
+        // tests/resolved_import_facts_validator_real_path.rs +
+        // tests/resolved_import_facts_lane_population.rs +
+        // tests/resolved_import_facts_namespace_space_admitted.rs —
+        // production producer for
+        // `ResolvedImportFactsDb`. Reads
+        // `script_analysis.imports` (with `is_type_only` +
+        // `ImportBindingKind::{Named, Default, Namespace}`),
+        // classifies each binding into
+        // `SymbolSpace::{Type, Value, Namespace}` (v8
+        // AMENDMENT-S), composes the cache key from the
+        // per-canonical env hashes, constructs one
+        // `ResolvedImportClauseEntry` per `(binding, space)` pair,
+        // and admits the bundle through
+        // `ResolvedImportFactsDb::insert_if_absent`. Negative
+        // (unresolved) imports are admitted as entries with
+        // `resolved_canonical: None` and a sentinel-keyed `Fact`
+        // so the validator can detect when an unresolved binding
+        // becomes resolved on workspace bump.
+        "pub mod resolved_import_facts_producer",
         // tests/semantic_analysis_audit_e2e.rs +
         // tests/semantic_analysis_audit_tls_propagation.rs — public
         // audited entry-point that wires

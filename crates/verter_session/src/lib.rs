@@ -115,6 +115,7 @@ pub mod parse_stable_hash;
 #[cfg(test)]
 mod project_semantic_dispatch_invariants_tests;
 pub mod resolved_import_facts;
+pub mod resolved_import_facts_producer;
 // `host_compile` is the host-backed parallel SFC batch compile module.
 // It is bundler/runtime-only and uses Rayon, which is not available on
 // WASM, so the module is gated to native targets. WASM continues to use
