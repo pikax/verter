@@ -334,6 +334,76 @@ pub(super) fn empty_signature() -> DepSignature {
     Arc::from(Vec::new().into_boxed_slice())
 }
 
+/// Test-only fact-injection slot for the dispatch's
+/// `install_fact_tracer`-wrapped cold-build closure. When `Some`,
+/// `dispatch_test_inject_parse_fact_if_set` observes the recorded
+/// `Parse(...)` fact onto the active tracer BEFORE the inner build
+/// runs, exercising the cold-publish → warm-hit path-precise fact
+/// survival contract without a workspace fixture that organically
+/// emits `Parse` observations through the resolver substrate.
+///
+/// The slot uses a `Relaxed` atomic flag for the fast-path
+/// no-injection check (~1 ns per cold build) and the
+/// [`std::sync::Mutex`] only when the flag is set. Production traffic
+/// reads only the atomic; the mutex stays cold under normal load.
+#[doc(hidden)]
+pub(crate) static DISPATCH_TEST_INJECT_PARSE_FACT_ARMED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[doc(hidden)]
+pub(crate) static DISPATCH_TEST_INJECT_PARSE_FACT: std::sync::Mutex<
+    Option<crate::resolver_core::FactVersionRef>,
+> = std::sync::Mutex::new(None);
+
+/// Observe the injected `Parse(...)` fact onto every active tracer
+/// when the slot is armed. Fast path: single relaxed atomic load when
+/// the slot is unarmed (production traffic never takes the mutex).
+#[inline]
+pub(crate) fn dispatch_test_inject_parse_fact_if_set() {
+    if !DISPATCH_TEST_INJECT_PARSE_FACT_ARMED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let injected = {
+        let guard = DISPATCH_TEST_INJECT_PARSE_FACT.lock().unwrap();
+        guard.clone()
+    };
+    if let Some(fact) = injected {
+        crate::resolver_core::resolver_context::observe_fan_out(fact);
+    }
+}
+
+/// RAII guard for the test-only Parse-fact injection slot. Sets the
+/// fact on arm; clears on drop. Concurrent tests must serialise via a
+/// shared `Mutex` because the slot is process-global.
+#[doc(hidden)]
+#[cfg(any(test, debug_assertions))]
+pub struct DispatchInjectParseFactGuard;
+
+#[cfg(any(test, debug_assertions))]
+impl DispatchInjectParseFactGuard {
+    /// Arm the dispatch's test-only Parse-fact injection slot with
+    /// `fact`. The next cold build observes `fact` onto every active
+    /// tracer before the inner build runs. The returned guard clears
+    /// the slot on drop.
+    pub fn arm(fact: crate::resolver_core::FactVersionRef) -> Self {
+        {
+            let mut slot = DISPATCH_TEST_INJECT_PARSE_FACT.lock().unwrap();
+            *slot = Some(fact);
+        }
+        DISPATCH_TEST_INJECT_PARSE_FACT_ARMED.store(true, std::sync::atomic::Ordering::Relaxed);
+        Self
+    }
+}
+
+#[cfg(any(test, debug_assertions))]
+impl Drop for DispatchInjectParseFactGuard {
+    fn drop(&mut self) {
+        DISPATCH_TEST_INJECT_PARSE_FACT_ARMED.store(false, std::sync::atomic::Ordering::Relaxed);
+        let mut slot = DISPATCH_TEST_INJECT_PARSE_FACT.lock().unwrap();
+        *slot = None;
+    }
+}
+
 /// Tri-state result of [`ProjectSemanticDispatch::shallow_relation_check`].
 /// The relation authority is [`ProjectSemanticDispatch::relate_nodes`];
 /// this enum only carries the hot-path fast-decision cases handled
@@ -598,6 +668,13 @@ impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {
         // `install_fact_tracer` so the `MemoEntry`'s
         // `fact_dep_signature` reflects every transitive fact the
         // build read through the resolver substrate. On
+        // `FactReadSetFinalise::Ok`, thread the traced signature into
+        // the `QueryBuildOutput.fact_dep_signature` field so
+        // `warm_publish_one` records it on the published `MemoEntry`
+        // — warm-hit bubble-up then delivers the full path-precise
+        // set (`Parse(...)`, `ResolveImports(...)`, `RouteSurface(...)`
+        // facts the legacy whole-hash fence cannot carry) into any
+        // outer tracer active on the warm-hit thread. On
         // `FactReadSetFinalise::Overflow` we mark the build output
         // `cache_suppress = true` so the memo refuses to publish the
         // entry — the caller cold-recomputes on the next request.
@@ -605,17 +682,38 @@ impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {
         let provenance = Arc::clone(&host.provenance);
         let build = move || -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
             let (output, finalise) =
-                crate::fact_signature_helpers::install_fact_tracer(host, build);
+                crate::fact_signature_helpers::install_fact_tracer(host, || {
+                    // Test-only fact-injection hook. When the
+                    // `dispatch_test_inject_parse_fact` slot is non-None,
+                    // observe the recorded `Parse(...)` fact onto the
+                    // active tracer cell BEFORE running the inner build.
+                    // The inner build then proceeds and the captured
+                    // signature on `Ok` contains the path-precise Parse
+                    // observation — exercising the cold-publish →
+                    // warm-hit Parse-fact survival contract without a
+                    // workspace fixture that organically emits one.
+                    dispatch_test_inject_parse_fact_if_set();
+                    build()
+                });
             provenance
                 .memo_entry_fact_tracer_installs
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput = output;
             match finalise {
-                crate::resolver_core::FactReadSetFinalise::Ok(_fact_dep_signature) => {
-                    // The memo entry stores only the legacy
-                    // `dep_signature`; the path-precise fan-out already
-                    // flowed through the tracer-fan-out path. No mutation
-                    // of `output` required for `Ok` here.
+                crate::resolver_core::FactReadSetFinalise::Ok(fact_dep_signature) => {
+                    // Persist the traced path-precise signature onto
+                    // the build output so the memo's warm publish path
+                    // records it verbatim on the `MemoEntry`. This
+                    // preserves the full observation set (including
+                    // `Parse(...)` / `ResolveImports(...)` /
+                    // `RouteSurface(...)` facts) across the
+                    // cold-publish → warm-hit boundary. Without this
+                    // wire, `warm_publish_one` would derive
+                    // `fact_dep_signature` from the legacy
+                    // `DepSignature` via `fact_signature_from_fence`,
+                    // which only carries `FileWholeHash` facts and
+                    // silently drops every path-precise observation.
+                    output.fact_dep_signature = Some(fact_dep_signature);
                     output
                 }
                 crate::resolver_core::FactReadSetFinalise::Overflow => {

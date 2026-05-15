@@ -291,6 +291,47 @@ use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::resolver_core::ResolverContext;
 use crate::semantic_query::{PathSegment, SemanticQueryKey};
 
+/// Test-only fact-injection knob. When set to `N > 0`, the materialiser's
+/// cold-compute closure observes `N` synthetic `FileWholeHash` facts via
+/// `observe_fan_out` BEFORE returning, deterministically forcing the
+/// installed fact tracer to either overflow (when `N >
+/// FACT_SIGNATURE_CAP`) or accumulate a large signature. Drives the
+/// discriminating Overflow-returns-valid-result test without requiring a
+/// pathological workspace fixture that organically produces > 1024 facts.
+///
+/// The flag is reset to 0 by the RAII guard [`MaterializeForceOverflowGuard`]
+/// after the test completes so concurrent tests are not affected.
+/// Production reads it once per cold compute as a relaxed atomic load
+/// (~1 ns); the load path lives on the cooperative-admission cold-build
+/// path which already takes locks, so the cost is in the noise.
+#[doc(hidden)]
+pub(crate) static MATERIALIZE_TEST_FORCE_OVERFLOW_OBSERVATIONS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// RAII guard that clears [`MATERIALIZE_TEST_FORCE_OVERFLOW_OBSERVATIONS`]
+/// on drop. Test setup loads the desired observation count; the guard
+/// drops at scope exit and restores the baseline so a panic / early
+/// return does not leak the forced state into concurrent tests.
+#[doc(hidden)]
+#[cfg(any(test, debug_assertions))]
+pub struct MaterializeForceOverflowGuard;
+
+#[cfg(any(test, debug_assertions))]
+impl MaterializeForceOverflowGuard {
+    /// Set the forced observation count to `n` and return the guard.
+    pub(crate) fn arm(n: usize) -> Self {
+        MATERIALIZE_TEST_FORCE_OVERFLOW_OBSERVATIONS.store(n, std::sync::atomic::Ordering::Relaxed);
+        Self
+    }
+}
+
+#[cfg(any(test, debug_assertions))]
+impl Drop for MaterializeForceOverflowGuard {
+    fn drop(&mut self) {
+        MATERIALIZE_TEST_FORCE_OVERFLOW_OBSERVATIONS.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 thread_local! {
     /// Per-thread stack of in-flight materialiser keys.
     /// Used for same-key recursion detection. Push on entry, pop on
@@ -561,6 +602,28 @@ pub(crate) fn materialize_component_meta_structure(
         let dispatch = ctx.dispatch();
         let graph = ctx.project_type_store().semantic_graph();
         let mut local_fence: Vec<(Arc<str>, DepVersion)> = Vec::new();
+
+        // Test-only fact-injection hook. When the
+        // `MATERIALIZE_TEST_FORCE_OVERFLOW_OBSERVATIONS` knob is non-zero,
+        // emit that many synthetic `FileWholeHash` observations onto
+        // the active fact tracer. Forces the discriminating
+        // Overflow-returns-valid-result scenario without a pathological
+        // workspace fixture. The fan-out target is the tracer cell the
+        // outer `install_fact_tracer` wrapper installed via TLS; the
+        // inner cell's `finalise()` reports `Overflow` once the per-
+        // signature cap is exceeded.
+        let force_n =
+            MATERIALIZE_TEST_FORCE_OVERFLOW_OBSERVATIONS.load(std::sync::atomic::Ordering::Relaxed);
+        if force_n > 0 {
+            for n in 0..force_n {
+                crate::resolver_core::resolver_context::observe_fan_out(
+                    crate::resolver_core::FactVersionRef::FileWholeHash {
+                        canonical_id: format!("__materialize_force_overflow_{n}.ts"),
+                        hash: [(n & 0xff) as u8; 16],
+                    },
+                );
+            }
+        }
 
         // Registry-route branch.
         //
@@ -949,9 +1012,18 @@ pub(crate) fn materialize_component_meta_structure(
     // `install_fact_tracer`. On `FactReadSetFinalise::Ok`, override
     // the entry's `fact_dep_signature` with the traced observation
     // set (the producer's authoritative R28 signature). On
-    // `FactReadSetFinalise::Overflow`, refuse cache admission so the
-    // caller cold-recomputes on the next request.
+    // `FactReadSetFinalise::Overflow`, the materialised outcome is
+    // still valid — only the path-precise signature is too large to
+    // admit safely. Hand the outcome to the post-cooperative fallback
+    // via the existing `non_cacheable_outcome` side channel (with an
+    // empty fence so no spurious dep edges flow upward) and return
+    // `None` to refuse cache admission. The fallback at the bottom of
+    // `materialize_component_meta_structure` will surface
+    // `CacheRead { value: outcome, dep_signature: empty }` so the
+    // caller observes the valid materialisation and the next request
+    // cold-recomputes.
     let host = ctx.host_for_fact_tracer_install();
+    let non_cacheable_for_overflow = &non_cacheable_outcome;
     let compute = {
         let provenance = Arc::clone(&host.provenance);
         move || {
@@ -971,6 +1043,19 @@ pub(crate) fn materialize_component_meta_structure(
                     provenance
                         .materialize_structure_overflow_refusals
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    // Stash the computed outcome on the side channel
+                    // so the post-cooperative fallback returns the
+                    // valid materialisation instead of Tainted. Fence
+                    // is intentionally empty: the entry is non-cacheable
+                    // and must not propagate dep edges (R20 — cache
+                    // entries with empty signatures are forbidden, but
+                    // the side-channel surface is NOT a cache entry,
+                    // it flows through `empty_signature()` on the
+                    // returned `CacheRead`).
+                    if let Some(entry) = entry_opt {
+                        *non_cacheable_for_overflow.borrow_mut() =
+                            Some((entry.outcome, Vec::new()));
+                    }
                     // Refuse cache admission; caller cold-recomputes.
                     None
                 }
@@ -2608,5 +2693,140 @@ export type C<T> = A<T>
             live_after, 0,
             "stale removal must decrement live_counter to prevent leak (R8-5 fix)"
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // P1.B regression — `FactReadSetFinalise::Overflow` returns the
+    // valid materialisation outcome (NOT Tainted) and refuses cache
+    // admission. Discriminates the bug fix by:
+    //  1. Cold compute observes > FACT_SIGNATURE_CAP facts (forced via
+    //     `MATERIALIZE_TEST_FORCE_OVERFLOW_OBSERVATIONS`); the installed
+    //     fact tracer's `finalise()` reports `Overflow`.
+    //  2. Pre-fix the materialiser returned `None` from the
+    //     cooperative-admission compute closure, causing the caller to
+    //     interpret the cooperative result as a non-cacheable miss → the
+    //     materialiser surfaced `MaterializeOutcome::Tainted(key.base)`
+    //     (the legacy fallback at the bottom of
+    //     `materialize_component_meta_structure` had no stash from the
+    //     Overflow path).
+    //  3. Post-fix the Overflow arm stashes the computed entry's outcome
+    //     into `non_cacheable_outcome` BEFORE returning `None`, so the
+    //     fallback surfaces `MaterializeOutcome::Value(...)` and the
+    //     cache stays empty so the next request cold-recomputes.
+    //
+    // Test serialisation: the forced observation knob is process-global,
+    // so a serialisation mutex prevents concurrent overflow-driving
+    // tests from racing on the shared atomic.
+    static MATERIALIZE_OVERFLOW_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn overflow_returns_valid_outcome_and_refuses_cache_admission() {
+        let _serial = MATERIALIZE_OVERFLOW_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let project = a0_make_project();
+        project
+            .upsert_base("/types.ts", "export type Foo = { x: number };")
+            .unwrap();
+        let host = project.host();
+
+        // Construct a key whose base is a real DeclRef lowered from the
+        // workspace. The cold compute walks the Foo body (small) but
+        // the forced observation hook fires > 1024 synthetic facts onto
+        // the active tracer, deterministically driving the tracer to
+        // `FactReadSetFinalise::Overflow`. Without the forced
+        // observations the build would publish a normal Value entry.
+        let dispatch = ProjectSemanticDispatch::new(host);
+        let decl_ref_node = dispatch
+            .lower_type_expr_in_scope_with_mode(
+                "/types.ts",
+                &verter_type_expr::TypeExpr::Ref {
+                    name: StdArc::from("Foo"),
+                    type_arguments: StdArc::from(Vec::new()),
+                },
+                crate::semantic_query::ProjectionMode::Navigate,
+            )
+            .expect("lowering Foo via Navigate must succeed");
+        let key = MaterializeStructureCacheKey {
+            scope_canonical_id: StdArc::from("/types.ts"),
+            base: decl_ref_node,
+            scope_axis: MaterializationScope::TopLevel,
+            mode: crate::semantic_query::ProjectionMode::Expanded,
+        };
+
+        // Snapshot the per-host overflow-refusal counter so the post
+        // delta confirms the Overflow arm fired (independent of the
+        // returned `CacheRead.value` discriminant).
+        let refusals_before = host
+            .provenance
+            .materialize_structure_overflow_refusals
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let db = host.project_type_store().materialize_structure_db();
+        let entries_before = db.entries().len();
+
+        // Arm the forced-observation hook. 1100 > FACT_SIGNATURE_CAP
+        // (1024) — guarantees the cold compute's installed tracer
+        // overflows.
+        let _force_guard = MaterializeForceOverflowGuard::arm(1100);
+
+        let read = materialize_component_meta_structure(host, key.clone());
+
+        // Discrimination #1: the returned outcome MUST NOT be Tainted.
+        // Pre-fix the bug surfaced `MaterializeOutcome::Tainted(key.base)`
+        // because the cooperative-admission fallback ran without a
+        // stashed outcome. Post-fix the Overflow arm stashes the
+        // computed entry's outcome into the side channel.
+        match read.value {
+            MaterializeOutcome::Value(_) | MaterializeOutcome::Miss(_) => {
+                // expected — Overflow refused admission but the
+                // materialiser still returned the cacheable outcome
+                // the cold compute produced.
+            }
+            MaterializeOutcome::Tainted(_) => {
+                panic!(
+                    "P1.B regression: Overflow path returned Tainted instead of the \
+                     computed Value/Miss outcome. The cooperative-admission compute \
+                     closure must stash the entry's outcome onto the \
+                     non_cacheable_outcome side channel BEFORE returning None, so \
+                     the fallback path at the bottom of \
+                     materialize_component_meta_structure surfaces the valid \
+                     materialisation."
+                );
+            }
+            other => panic!("unexpected outcome on Overflow path: {other:?}"),
+        }
+
+        // Discrimination #2: the materialise-structure cache MUST NOT
+        // contain the key. Refusing admission on Overflow is the whole
+        // point — admission with an unbounded fact signature would
+        // poison the cache.
+        assert_eq!(
+            db.entries().len(),
+            entries_before,
+            "Overflow MUST NOT admit the entry to the MaterializeStructureDb \
+             cache; cache size must stay at the pre-call value to ensure \
+             the next request cold-recomputes"
+        );
+        assert!(
+            !db.entries().contains_key(&key),
+            "MaterializeStructureDb cache MUST NOT contain the key whose cold \
+             compute overflowed the fact tracer"
+        );
+
+        // Discrimination #3: the overflow-refusal counter advanced.
+        let refusals_after = host
+            .provenance
+            .materialize_structure_overflow_refusals
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            refusals_after > refusals_before,
+            "materialize_structure_overflow_refusals must advance on Overflow; \
+             before={refusals_before}, after={refusals_after}"
+        );
+
+        // Drop the force guard before any subsequent operations so a
+        // panic in the test driver does not leak the forced state.
+        drop(_force_guard);
     }
 }

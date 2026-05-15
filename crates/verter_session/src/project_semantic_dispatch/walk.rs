@@ -89,12 +89,23 @@ pub enum ShallowDiagnostic {
 /// `Instantiate`, `KeyOf`, etc.), the existing `(QueryResult, DepSignature)`
 /// shape coerces via `From` — those builds preserve their tuple
 /// signature unchanged.
+///
+/// `fact_dep_signature` carries the path-precise R28 fact observation
+/// set captured by the dispatch's outer `install_fact_tracer` wrapper.
+/// When `Some`, the memo stores the traced signature on the published
+/// [`crate::semantic_query_memo::MemoEntry`] verbatim so warm-hit
+/// bubble-up delivers the full set of path-precise facts the cold
+/// build observed (NOT just the `FileWholeHash` subset reachable via
+/// the legacy fence). When `None`, the memo falls back to
+/// `fact_signature_from_fence(dep_signature)` for backward
+/// compatibility with build paths that do not yet wire the tracer.
 #[derive(Debug)]
 pub struct QueryBuildOutput {
     pub result: QueryResult<SemanticNodeId>,
     pub dep_signature: DepSignature,
     pub walker_diagnostics: Vec<ShallowDiagnostic>,
     pub cache_suppress: bool,
+    pub fact_dep_signature: Option<Arc<[crate::resolver_core::FactVersionRef]>>,
 }
 
 impl QueryBuildOutput {
@@ -117,6 +128,7 @@ impl From<(QueryResult<SemanticNodeId>, DepSignature)> for QueryBuildOutput {
             dep_signature,
             walker_diagnostics: Vec::new(),
             cache_suppress: false,
+            fact_dep_signature: None,
         }
     }
 }

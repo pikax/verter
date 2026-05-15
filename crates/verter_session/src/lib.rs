@@ -292,6 +292,65 @@ pub mod for_tests {
         crate::fact_signature_helpers::read_signature_overflow_at_install()
     }
 
+    /// Arm the materialiser's test-only fact-injection knob with `n`
+    /// synthetic `FileWholeHash` observations per cold-compute call.
+    /// When `n > FACT_SIGNATURE_CAP` (1024), the cold compute's
+    /// installed fact tracer finalises with `Overflow`, exercising the
+    /// `materialize_structure_overflow_refusals` admission-refusal path
+    /// without requiring a workspace fixture that organically emits
+    /// thousands of facts. The returned guard zeroes the knob on drop.
+    ///
+    /// Integration tests in
+    /// `crates/verter_session/tests/family_bcd_*_overflow*.rs` use this
+    /// to discriminate the
+    /// `MaterializeOutcome::Value` vs `Tainted` distinction on
+    /// admission refusal.
+    pub fn materialize_force_overflow_observations_for_tests(
+        n: usize,
+    ) -> crate::component_meta_materialize::MaterializeForceOverflowGuard {
+        crate::component_meta_materialize::MaterializeForceOverflowGuard::arm(n)
+    }
+
+    /// Read the materialiser's `materialize_structure_overflow_refusals`
+    /// counter for the given host. Test surface; production callers reach
+    /// this through the `host_audit_runtime().snapshot()` provenance
+    /// surface.
+    pub fn read_materialize_structure_overflow_refusals(host: &crate::VerterHost) -> u64 {
+        host.provenance
+            .materialize_structure_overflow_refusals
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Arm the dispatch's test-only Parse-fact injection slot. The
+    /// next cold build through `ProjectSemanticDispatch::execute()`
+    /// observes the supplied `Parse(...)` fact onto every active
+    /// tracer BEFORE the inner build runs. The returned guard clears
+    /// the slot on drop. Integration tests in
+    /// `crates/verter_session/tests/dispatch_*_fact_*.rs` use this to
+    /// discriminate the cold-publish → warm-hit path-precise survival
+    /// contract.
+    pub fn dispatch_inject_parse_fact_for_tests(
+        fact: crate::resolver_core::FactVersionRef,
+    ) -> crate::project_semantic_dispatch::DispatchInjectParseFactGuard {
+        crate::project_semantic_dispatch::DispatchInjectParseFactGuard::arm(fact)
+    }
+
+    /// Drive [`crate::project_semantic_dispatch::ProjectSemanticDispatch::execute`]
+    /// from integration tests. Constructs a `ProjectSemanticDispatch`
+    /// from the `host` (the standard internal pattern) and forwards
+    /// the call. Used by tests that need to exercise the dispatch's
+    /// `install_fact_tracer` wrapper directly — the dispatch is
+    /// `pub(crate)` so integration test crates cannot reach it
+    /// otherwise.
+    pub fn dispatch_execute_for_tests(
+        host: &crate::VerterHost,
+        key: crate::semantic_query::SemanticQueryKey,
+    ) -> crate::semantic_query::QueryResult<crate::semantic_query::SemanticNodeId> {
+        use crate::semantic_query::SemanticQueryApi;
+        let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+        dispatch.execute(key)
+    }
+
     /// Returns `true` iff `host.active_session_view()` returns `None`.
     ///
     /// This shim is needed because `ResolverContext` is sealed — integration

@@ -1266,6 +1266,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 dep_signature: fence,
                 walker_diagnostics,
                 cache_suppress,
+                fact_dep_signature: None,
             };
         }
         // Emit a whole-path `ProjectPath` edge on the result so consumers
@@ -1299,6 +1300,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             dep_signature: fence,
             walker_diagnostics,
             cache_suppress,
+            fact_dep_signature: None,
         }
     }
 

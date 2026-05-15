@@ -606,6 +606,7 @@ fn warm_publish_one_inserts_warm_map_and_registers_reverse_index() {
         &QueryResult::Value(value),
         &dep_sig,
         &walker_diagnostics,
+        None,
         &inflight,
     );
 

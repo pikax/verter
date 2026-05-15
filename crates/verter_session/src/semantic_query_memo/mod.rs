@@ -1634,6 +1634,7 @@ impl SemanticGraphStore {
             dep_signature,
             walker_diagnostics,
             cache_suppress,
+            fact_dep_signature: traced_fact_dep_signature,
         } = build_output;
         let walker_diagnostics: std::sync::Arc<
             [crate::project_semantic_dispatch::walk::ShallowDiagnostic],
@@ -1705,6 +1706,7 @@ impl SemanticGraphStore {
                 &result,
                 &dep_signature,
                 &walker_diagnostics,
+                traced_fact_dep_signature.as_ref(),
                 &inflight,
             );
         } else {
@@ -1748,11 +1750,20 @@ impl SemanticGraphStore {
                 // executes `continue`) deliberately bypasses this so
                 // joiners awakened by an abort sweep re-enter dispatch
                 // rather than bubbling a stale signature.
-                state.fact_dep_signature = Some(
-                    crate::component_meta_materialize::fact_signature_from_fence(
+                // Prefer the traced path-precise signature when the
+                // dispatch's `install_fact_tracer` wrapper observed
+                // one — it carries the full `Parse(...)` /
+                // `ResolveImports(...)` / `RouteSurface(...)` set
+                // that the legacy `fact_signature_from_fence` bridge
+                // cannot reconstruct from `DepSignature`. Fall back
+                // to the legacy fence conversion for build paths
+                // that have not yet been wired through the tracer.
+                state.fact_dep_signature = Some(match traced_fact_dep_signature {
+                    Some(ref sig) => Arc::clone(sig),
+                    None => crate::component_meta_materialize::fact_signature_from_fence(
                         dep_signature.as_ref(),
                     ),
-                );
+                });
                 state.walker_diagnostics = Some(std::sync::Arc::clone(&walker_diagnostics));
             }
         }
@@ -1805,6 +1816,7 @@ impl SemanticGraphStore {
         result: &QueryResult<SemanticNodeId>,
         dep_signature: &DepSignature,
         walker_diagnostics: &Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
+        traced_fact_dep_signature: Option<&Arc<[crate::resolver_core::FactVersionRef]>>,
         inflight: &Arc<InflightEntry>,
     ) {
         let publishable = matches!(result, QueryResult::Value(_));
@@ -1817,8 +1829,21 @@ impl SemanticGraphStore {
         if matches!(family, FamilyKey::ResolvedNamedType { .. }) {
             return;
         }
-        let fact_dep_signature =
-            crate::component_meta_materialize::fact_signature_from_fence(dep_signature.as_ref());
+        // Prefer the traced path-precise signature captured by the
+        // dispatch's `install_fact_tracer` wrapper when present; fall
+        // back to deriving from the legacy `DepSignature` for build
+        // paths that have not yet been wired through the tracer. The
+        // traced signature carries `Parse(...)` / `ResolveImports(...)`
+        // / `RouteSurface(...)` facts that the legacy fence cannot
+        // reconstruct, so warm-hit bubble-up via
+        // `bubble_fact_signature_via_tls` delivers the complete
+        // observation set into any outer tracer on the warm-hit thread.
+        let fact_dep_signature = match traced_fact_dep_signature {
+            Some(sig) => Arc::clone(sig),
+            None => {
+                crate::component_meta_materialize::fact_signature_from_fence(dep_signature.as_ref())
+            }
+        };
         let entry = MemoEntry {
             result: result.clone(),
             dep_signature: dep_signature.clone(),
