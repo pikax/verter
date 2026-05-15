@@ -218,7 +218,7 @@ defineProps<BoundaryProps>()
 /// the helper's invalidation contract is closed; the deviation is
 /// surfaced for orchestrator review.
 #[test]
-#[ignore = "§17.7 deviation: canonical-reuse helper invalidation gap on body edit; see test docstring"]
+#[ignore = "§17.7 deviation: canonical-reuse helper invalidation gap on body edit. Block 1.B fact-validation did not close this specific case; a future substrate block must wire the canonical-reuse helper's invalidation through the unified reverse index. See test docstring."]
 fn invalidation_workspace_package_boundary_edit() {
     let (workspace, host) = build_host_with_files(&[
         ("/workspace/src/types.ts", WP_BOUNDARY_OWNED_TS),
