@@ -97,7 +97,7 @@ have distinct validity models and distinct admission producers:
   changes; they do not need a generation tag and must NOT touch the
   sidecar.
 - `VerterHost::configure_projects` and
-  `VerterHost::upsert_via_scheduler_with_options` may `.clear()` both
+  `VerterHost::upsert_via_scheduler_with_priority` may `.clear()` both
   fields in lockstep. Leaving the sidecar populated after either reset
   would extend a stale `content_generation` stamp into the next
   admission cycle.
