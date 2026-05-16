@@ -50,11 +50,30 @@ beyond the quintuple check.
 **R2.** `upsert` means "the source changed." Cache eviction is an
 explicit method with a stated scope; never a side effect of `upsert`.
 
-**R3.** Eager dependent cache invalidation is forbidden. Cache entries
-validate on read against the exact facts they recorded; staleness is
-detected lazily. `smart_invalidate_dependents`, `evict_canonical`
-cascades from upsert, and `*_db::invalidate_canonical` as a public API
-are all banned in production code paths.
+**R3.** Eager *reverse-dependent* cache invalidation is forbidden.
+Cache entries validate on read against the exact facts they recorded;
+cross-file staleness is detected lazily through `fact_dep_signature`
+checks. An owner upsert does NOT iterate `reverse_deps_for` to drain
+its dependents — there is no reverse-dependent cascade.
+`smart_invalidate_dependents`, a `reverse_deps_for`-driven eviction
+loop, `invalidate_canonical` from upsert, and `*_db::invalidate_canonical`
+as a public API are all banned in production code paths (the
+`reverse_graph_not_wired_to_invalidation` +
+`host_upsert_performs_no_reverse_dependent_eviction` guards enforce
+this).
+
+Distinct from the banned reverse-dependent cascade: the **own-canonical
+drain**. `upsert_via_scheduler_with_priority` still drains the upserted
+canonical's *own* query-identity caches at upsert time
+(`resolver.runtime.evict_canonical(&canonical_id)`,
+`project_type_store.evict_canonical(&canonical_id)`,
+`resolved_type_cache().clear()`). This is retained until the
+query-identity caches (`semantic_graph`, `declaration_lookup_db`,
+`materialize_structure_db`, `ref_cycle_db`, `routed_expr_surface_db`,
+`route_owned_shallow`) self-version-root a same-canonical content
+edit — they do not yet detect a same-canonical edit on the
+cold-recompute path, so dropping the own-canonical drain would serve
+stale output for the edited file itself.
 
 **R4.** Source-content changes produce a semantic fact diff (publishable
 via `compute_upsert_changes_from_parse` for LSP / observability
@@ -294,10 +313,11 @@ paths use typed `StructuredAuditEvent` variants (`FileArtifactCache`,
 these paths are forbidden.
 
 The `CacheDrainedAtUpsert { layer, canonical_id }` variant fires at
-every cache-cascade drain site reached by the full
-`host.upsert(...)` path. The quintuple-unchanged fast path (R1)
-emits ZERO `CacheDrainedAtUpsert` events; that absence is the
-direct read-side proof that the fast path is a cache-state no-op.
+every own-canonical drain site reached by the full
+`host.upsert(...)` path (the upserted canonical's own caches —
+there is no reverse-dependent cascade). The quintuple-unchanged fast
+path (R1) emits ZERO `CacheDrainedAtUpsert` events; that absence is
+the direct read-side proof that the fast path is a cache-state no-op.
 The variant is emitted via the in-tree helper
 `verter_session::host_manage::push_cache_drained_at_upsert(layer,
 canonical_id)` so all drain sites in `host_upsert.rs` flow through
