@@ -270,6 +270,24 @@ pub enum FactVersionRef {
     RouteSurface(RouteSurfaceFactRef),
 }
 
+impl FactVersionRef {
+    /// The canonical file id this fact references, regardless of
+    /// variant. Used by callers that need to scope a fact set by
+    /// owning file (e.g. excluding the owner's own facts when fanning
+    /// a curated dependency set into the fact tracer).
+    #[inline]
+    #[must_use]
+    pub fn canonical_id(&self) -> &str {
+        match self {
+            FactVersionRef::FileWholeHash { canonical_id, .. }
+            | FactVersionRef::DerivedFactHash { canonical_id, .. } => canonical_id.as_str(),
+            FactVersionRef::Parse(p) => p.canonical_id.as_str(),
+            FactVersionRef::ResolveImports(r) => r.canonical_id.as_str(),
+            FactVersionRef::RouteSurface(r) => r.canonical_id.as_str(),
+        }
+    }
+}
+
 /// Parse-domain fact reference. Lane is recorded explicitly so
 /// validators know whether to check `semantic_hash` (cosmetic edits
 /// invariant) or `display_hash` (cosmetic-sensitive). See R13 lane

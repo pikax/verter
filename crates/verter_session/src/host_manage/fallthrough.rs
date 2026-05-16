@@ -270,6 +270,46 @@ impl VerterHost {
             visiting,
         );
 
+        // R28 producer completeness — observe the fallthrough
+        // resolver's CROSS-FILE dependency facts into the active fact
+        // tracer. `resolver_resolve_fallthrough_surface` walks
+        // recursive child-component surfaces and accumulates a
+        // `fact_versions` set covering every child it followed (via
+        // `current_dependency_fact_versions` + each child resolution's
+        // own facts), but those reads go through the curated path and
+        // never reach the tracer on their own. A fallthrough node
+        // CACHE HIT for a child likewise returns without bubbling the
+        // child's facts. Fanning the cross-file facts into every
+        // active tracer scope here closes the gap: the component-meta
+        // cold compute's `with_fact_tracer` scope (this method runs
+        // inside `extract_component_meta_from_resolved`) captures the
+        // recursive child deps, so the published
+        // `ComponentMetaResultEntry` signature invalidates correctly
+        // when a child component's root changes.
+        //
+        // The owner's OWN facts are excluded from the fan-out: the
+        // owner's content is already observed by the cold compute's
+        // dispatch reads and gated by the result cache's legacy
+        // whole-hash rail. Excluding them also keeps the owner's
+        // dual-sourced `DerivedFactHash{Route}` (populated from both
+        // `indexed.shallow_state` and `route_owned_shallow_cache`,
+        // which can disagree — see `resolver_store.rs`
+        // `HostStoreView::build`) out of the tracer-owned signature,
+        // so a fallthrough query does not reintroduce a
+        // non-round-tripping owner Route fact. Child / dep `Route`
+        // facts DO round-trip — a dep does not race a
+        // route-owned-shallow build during the owner's cold compute —
+        // so they are kept. Empty signatures and an absent tracer
+        // stack are both a no-op.
+        let cross_file_fallthrough_facts: Vec<crate::resolver_core::FactVersionRef> =
+            resolved_surface
+                .fact_versions
+                .iter()
+                .filter(|fact| fact.canonical_id() != canonical_id)
+                .cloned()
+                .collect();
+        crate::fact_signature_helpers::observe_fact_signature(&cross_file_fallthrough_facts);
+
         Some(crate::types::FallthroughResolution {
             accepted_props: resolved_surface.accepted_props,
             accepted_events: resolved_surface.accepted_events,
@@ -916,9 +956,23 @@ impl VerterHost {
                 let fact_versions: Arc<[crate::resolver_core::FactVersionRef]> =
                     Arc::from(resolution.fact_versions.clone().into_boxed_slice());
                 // Fan-out to outer active tracers so the mirrored
-                // fallthrough entry participates in transitive fact
-                // bubbling. Empty signatures are a no-op.
-                crate::fact_signature_helpers::observe_fact_signature(&fact_versions);
+                // fallthrough entry participates in transitive
+                // CROSS-FILE fact bubbling. The owner's own facts are
+                // excluded: they are not transitive dependencies of
+                // the owner's surface, and the curated
+                // `DerivedFactHash{owner, Route}` carried in
+                // `resolution.fact_versions` is dual-sourced on
+                // `HostStoreView::derived_hashes` and does not
+                // round-trip on warm validation (see
+                // `mirror_cached_resolved_meta_arc`). The stored
+                // `CachedFallthroughEntry` keeps the FULL set for its
+                // own warm validation. Empty signatures are a no-op.
+                let cross_file_facts: Vec<crate::resolver_core::FactVersionRef> = fact_versions
+                    .iter()
+                    .filter(|fact| fact.canonical_id() != canonical_id)
+                    .cloned()
+                    .collect();
+                crate::fact_signature_helpers::observe_fact_signature(&cross_file_facts);
                 let mut derived_ref = self
                     .derived_raw_cache()
                     .entry(canonical_id.to_string())

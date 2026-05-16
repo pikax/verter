@@ -395,6 +395,70 @@ pub mod for_tests {
     ) -> Option<std::sync::Arc<crate::app_config_proof_db::AppConfigNoOverrideProofEntry>> {
         crate::component_meta_caches::app_config_no_override_proof_get_or_compute(host, key)
     }
+
+    /// Return the published `ComponentMetaResultEntry`'s
+    /// `ReadSetSignature` for `owner_canonical`, or `None` when no
+    /// entry is cached for the owner's current content.
+    ///
+    /// The lookup key is composed exactly as
+    /// `publish_component_meta_cache_entry` composes it — owner
+    /// canonical + current `IndexedReady` whole-hash + the default
+    /// `ComponentMetaOptions` fingerprint — so it matches the
+    /// published entry. Integration tests in
+    /// `tests/component_meta_signature_is_tracer_owned.rs` and
+    /// `tests/component_meta_family_producers_observe_cross_file_deps.rs`
+    /// use it to inspect the tracer-owned `facts` rail of the
+    /// published signature.
+    pub fn component_meta_result_signature_for_owner(
+        host: &crate::VerterHost,
+        owner_canonical: &str,
+    ) -> Option<crate::fact_signature_helpers::ReadSetSignature> {
+        let whole_hash = host
+            .ensure_indexed_ready(owner_canonical)
+            .map(|ir| ir.whole_hash)?;
+        let key = crate::component_meta_result_db::ComponentMetaResultKey {
+            owner_canonical: std::sync::Arc::from(owner_canonical),
+            owner_whole_hash: whole_hash,
+            options_fingerprint: crate::host_manage::component_meta_options_fingerprint(
+                &crate::host_manage::ComponentMetaOptions::default(),
+            ),
+        };
+        host.project_type_store()
+            .component_meta_results()
+            .get(&key)
+            .map(|entry| entry.read_set_signature.clone())
+    }
+
+    /// Compute the FINALIZED fact-tracer read set for a cold
+    /// `get_component_meta` of `owner_canonical`. Installs a fresh
+    /// `with_fact_tracer` scope around `resolve_component_meta` +
+    /// `extract_component_meta_from_resolved` (the exact body the
+    /// production `get_component_meta` cold path traces) and returns
+    /// `read_set.finalise()`.
+    ///
+    /// Returns `None` when the owner does not resolve to a component.
+    /// Integration tests use this to assert the published
+    /// `ComponentMetaResultEntry` signature EQUALS the finalized
+    /// tracer read set (codex item 3 — tracer-owned signature).
+    pub fn component_meta_cold_traced_read_set_for_tests(
+        host: &crate::VerterHost,
+        owner_canonical: &str,
+    ) -> Option<crate::resolver_core::FactReadSetFinalise> {
+        let canonical = host.resolve_alias_or_canonical(owner_canonical);
+        let (resolved_opt, read_set) = host.with_fact_tracer(|| {
+            host.resolve_component_meta(canonical.as_str(), crate::types::ProjectionMode::Expanded)
+                .map(|resolved| {
+                    let _ = crate::host_manage::extract_component_meta_from_resolved(
+                        host,
+                        canonical.as_str(),
+                        &resolved,
+                        true,
+                    );
+                })
+        });
+        resolved_opt?;
+        Some(read_set.finalise())
+    }
 }
 
 pub use host_audit_runtime::{

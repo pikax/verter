@@ -260,27 +260,29 @@ impl HostStoreView {
             }
         }
 
-        // TODO(follow-up — Block 1.B reviewer-substrate P1.2):
-        // substrate-level fix in `HostStoreView::build` — skip the
-        // route_owned_shallow snapshot for canonicals that already
-        // have an `IndexedReady` entry. The materialiser at
-        // `route_owned_shallow.rs:188-193` aborts NEW publishes when
-        // `IndexedReady` exists, but pre-existing route_owned_shallow
-        // entries persist and overwrite the indexed Route hash that
-        // the loop above inserted. The owner's cold-compute observes
-        // the indexed Route hash via `accumulate_route_fact_for`
+        // TODO(follow-up): substrate-level fix in
+        // `HostStoreView::build` — skip the route_owned_shallow
+        // snapshot for canonicals that already have an `IndexedReady`
+        // entry. The materialiser at `route_owned_shallow.rs:188-193`
+        // aborts NEW publishes when `IndexedReady` exists, but
+        // pre-existing route_owned_shallow entries persist and
+        // overwrite the indexed Route hash that the loop above
+        // inserted. A cold-compute that observes the indexed Route
+        // hash via `accumulate_route_fact_for`
         // (`frontier_engine.rs:489-527` — `route_shallow_cache` /
-        // `route_shallow_state` lookup), while the validator's later
-        // view-build sees the (different) route-owned-derived hash.
-        // The current consumer-side mitigation via
-        // `filter_owner_round_trippable_facts`
-        // (`host_manage/component_meta_entry.rs:24-66`) is sound for
-        // Block 1.B scope, but every future cache that reads Route
-        // from `HostStoreView::derived_hashes` will need a parallel
-        // consumer-side filter unless this substrate site is fixed.
-        // Defer to Block 6.B (which retires legacy `dep_signature`)
-        // or earlier when the substrate cleanup is cheap; current
-        // mitigation is intentional.
+        // `route_shallow_state` lookup) records a hash the
+        // validator's later view-build cannot reproduce
+        // (route-owned-derived hash differs).
+        //
+        // The component-meta final-result cache no longer trips this:
+        // its signature is sourced from the finalised fact tracer
+        // read set, which observes route surfaces as `RouteSurface`
+        // facts (validated against `RouteDb`, not the dual-source
+        // `derived_hashes`). Any cache that places a
+        // `DerivedFactHash{Route}` produced by the curated
+        // `current_dependency_fact_versions` path into its signature
+        // still needs care here until the substrate site is fixed.
+        // Defer to Block 6.B (which retires legacy `dep_signature`).
         for snapshot in host.snapshot_route_owned_shallow_cache_entries() {
             let tracked_whole_hash = *view
                 .whole_hashes

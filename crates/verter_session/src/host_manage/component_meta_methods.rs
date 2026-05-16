@@ -2913,11 +2913,34 @@ impl VerterHost {
         let fact_versions: Arc<[crate::resolver_core::FactVersionRef]> =
             Arc::from(state.fact_versions.clone().into_boxed_slice());
         // Fan-out to any active outer fact-tracer scope so transitive
-        // observations bubble through the mirror site. The outer
-        // cold-meta tracer (e.g. `with_fact_tracer` at
-        // `component_meta_entry.rs`) captures the union for downstream
-        // admission to higher-level caches.
-        crate::fact_signature_helpers::observe_fact_signature(&fact_versions);
+        // CROSS-FILE observations bubble through the mirror site. The
+        // outer cold-meta tracer (`with_fact_tracer` at
+        // `component_meta_entry.rs`) captures the union and sources
+        // the published `ComponentMetaResultEntry` signature from it.
+        //
+        // The owner's OWN facts are excluded from the fan-out. The
+        // owner's content is already observed by the cold compute's
+        // dispatch reads and gated by the result cache's legacy
+        // whole-hash rail; bubbling them is redundant. Critically,
+        // `state.fact_versions` carries the curated
+        // `DerivedFactHash{owner, Route}` entry from
+        // `current_dependency_fact_versions` — the owner's export
+        // route is NOT a dependency of the owner's own component-meta
+        // result, and its hash is dual-sourced on
+        // `HostStoreView::derived_hashes` (see `resolver_store.rs`
+        // `HostStoreView::build`), so it does not round-trip on warm
+        // validation. Excluding owner-scoped facts from the tracer
+        // fan-out keeps that non-dependency noise out of the
+        // tracer-owned signature. The stored
+        // `ResolvedComponentMetaCacheEntry` below retains the FULL
+        // `fact_versions` (its own `cached_resolved_meta` warm
+        // validation depends on the owner whole-hash).
+        let cross_file_facts: Vec<crate::resolver_core::FactVersionRef> = fact_versions
+            .iter()
+            .filter(|fact| fact.canonical_id() != canonical)
+            .cloned()
+            .collect();
+        crate::fact_signature_helpers::observe_fact_signature(&cross_file_facts);
         let cached = crate::types::ResolvedComponentMetaCacheEntry {
             fact_versions,
             state,

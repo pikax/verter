@@ -21,50 +21,6 @@ use super::{
     extract_component_meta_from_resolved, ComponentMetaOptions, HostFenceValidator,
 };
 
-/// Build the publishable `fact_dep_signature` from the cold resolver's
-/// curated `fact_versions`, filtering out the OWNER's
-/// [`crate::resolver_core::DerivedFactKind::Route`] entry.
-///
-/// **Why filter the owner's Route fact.** The owner's `Route` hash on
-/// [`HostStoreView::derived_hashes`] is populated from TWO sources
-/// (`indexed.shallow_state` AND `route_owned_shallow_cache`), with the
-/// `route_owned` source overwriting the `indexed` source when both are
-/// present. The cold-compute path observed the Route hash from
-/// `route_shallow_cache` (which reads from `indexed`) — that hash is
-/// recorded in the candidate's `fact_dep_signature`. After cold
-/// compute, the owner's `route_owned_shallow_cache` entry populates,
-/// shifting the view's Route hash. The next warm-hit lookup builds a
-/// `HostStoreView` whose `derived_hashes[(owner, Route)]` carries the
-/// `route_owned` hash; the recorded `indexed` hash no longer matches
-/// and `validates_fact_signature` returns `false` even though no edit
-/// occurred.
-///
-/// The owner's [`crate::resolver_core::FactVersionRef::FileWholeHash`]
-/// fact remains in the signature, so owner-content edits still
-/// invalidate the warm hit. Dep-file Route facts are kept because
-/// dep files do not race a route-owned-shallow build during the
-/// owner's cold compute.
-fn filter_owner_round_trippable_facts(
-    owner_canonical: &str,
-    fact_versions: &[crate::resolver_core::FactVersionRef],
-) -> Arc<[crate::resolver_core::FactVersionRef]> {
-    let filtered: Vec<crate::resolver_core::FactVersionRef> = fact_versions
-        .iter()
-        .filter(|fact| {
-            !matches!(
-                fact,
-                crate::resolver_core::FactVersionRef::DerivedFactHash {
-                    canonical_id,
-                    kind: crate::resolver_core::DerivedFactKind::Route,
-                    ..
-                } if canonical_id == owner_canonical
-            )
-        })
-        .cloned()
-        .collect();
-    Arc::from(filtered.into_boxed_slice())
-}
-
 impl VerterHost {
     pub fn evaluate_types(
         &self,
@@ -119,13 +75,16 @@ impl VerterHost {
 
         // Cold build under the existing `with_fact_tracer` scope.
         // The tracer continues to fan observations into any outer
-        // scope (R24 fan-out); the finalise step below uses the
-        // overflow status to gate cache admission but the
-        // `fact_dep_signature` itself is sourced from
-        // `resolved.fact_versions` — the cold resolver's curated
-        // observation set, recorded after the corresponding files'
-        // artifacts materialised, so warm-hit re-validation under
-        // `StoreView::validates_fact_signature` round-trips.
+        // scope (R24 fan-out). The FINALISED tracer read set is the
+        // authoritative `fact_dep_signature` source: it records the
+        // exact, deduplicated union of every cross-file fact the cold
+        // compute observed — dispatch dual-emit `FileWholeHash` facts,
+        // resolver-tier `Parse` / `ResolveImports` / `RouteSurface`
+        // facts, and every sub-cache's bubbled signature. The curated
+        // `resolved.fact_versions` is NOT consulted for the published
+        // signature (it carries the dual-source `DerivedFactHash{Route}`
+        // owner fact that necessitated the now-deleted route-fact
+        // filter; the traced set never observes that fact).
         //
         // R24 contract: the tracer is installed on COLD paths only.
         // The warm-hit fast path above returned before reaching
@@ -149,17 +108,12 @@ impl VerterHost {
         let resolved = resolved_opt?;
         let meta = meta_opt?;
 
-        // Finalise the tracer to detect overflow (R20). The tracer
-        // accumulates every `observe` call including bubbled
-        // sub-cache signatures; the curated cold resolver state
-        // (`resolved.fact_versions`) is the canonical
-        // `fact_dep_signature` source because each entry was
-        // recorded post-materialisation and round-trips through the
-        // store-view validator. On overflow refuse cache admission.
+        // Finalise the tracer (R20). On `Ok` the returned
+        // `Arc<[FactVersionRef]>` is the tracer-owned signature; on
+        // `Overflow` the signature exceeded the cap and cache
+        // admission is refused.
         match read_set.finalise() {
-            crate::resolver_core::FactReadSetFinalise::Ok(_) => {
-                let fact_dep_signature =
-                    filter_owner_round_trippable_facts(canonical.as_str(), &resolved.fact_versions);
+            crate::resolver_core::FactReadSetFinalise::Ok(fact_dep_signature) => {
                 self.publish_component_meta_cache_entry(
                     canonical.as_str(),
                     &resolved,
@@ -276,15 +230,12 @@ impl VerterHost {
         let resolved = resolved_opt?;
         let meta = meta_opt?;
 
-        // Finalise the tracer to detect overflow (R20). Use the
-        // curated `resolved.fact_versions` as the canonical
-        // `fact_dep_signature` source (see comment on the base
-        // `get_component_meta` path above for the round-tripping
-        // rationale).
+        // Finalise the tracer (R20). The `Ok` payload is the
+        // tracer-owned signature — the authoritative cross-file
+        // dependency set (see the base `get_component_meta` path
+        // above for the source rationale).
         match read_set.finalise() {
-            crate::resolver_core::FactReadSetFinalise::Ok(_) => {
-                let fact_dep_signature =
-                    filter_owner_round_trippable_facts(canonical.as_str(), &resolved.fact_versions);
+            crate::resolver_core::FactReadSetFinalise::Ok(fact_dep_signature) => {
                 self.publish_component_meta_cache_entry_with_view(
                     canonical.as_str(),
                     view,
@@ -773,13 +724,11 @@ impl VerterHost {
         });
         let (analysis, resolved) = maybe_resolved_analysis?;
 
-        // Finalise the tracer to detect overflow (R20). Use the
-        // curated `resolved.fact_versions` as the canonical
-        // `fact_dep_signature` source.
+        // Finalise the tracer (R20). The `Ok` payload is the
+        // tracer-owned signature — the authoritative cross-file
+        // dependency set captured during the cold compute.
         match read_set.finalise() {
-            crate::resolver_core::FactReadSetFinalise::Ok(_) => {
-                let fact_dep_signature =
-                    filter_owner_round_trippable_facts(canonical.as_str(), &resolved.fact_versions);
+            crate::resolver_core::FactReadSetFinalise::Ok(fact_dep_signature) => {
                 // Cache-write so subsequent identical calls
                 // short-circuit through `try_with_resolution_cache_hit`.
                 // Suppression is enforced inside `publish_component_meta_cache_entry`
