@@ -3750,11 +3750,14 @@ mod foundations_guards {
         "pub mod cooperative_admission",
         // R3/R26/R28 — fact-validation helpers shared by the inner
         // component-meta caches (Family A/B). Carries
-        // `validate_fact_signature`, `bubble_fact_signature`, and
-        // the path-precise `fact_signature_for_canonical_member`
-        // / `fact_signature_for_canonical_surface` constructors used
-        // by every cache that migrated from `DepSignature` to
-        // `Arc<[FactVersionRef]>`.
+        // `validate_fact_signature`, `bubble_fact_signature`, and the
+        // path-precise `fact_signature_for_canonical_member` /
+        // `fact_signature_for_exported_type` constructors used by
+        // every cache that migrated from `DepSignature` to
+        // `Arc<[FactVersionRef]>`, plus the provenance-pure
+        // `parse_fact_ref_for_observed_current_content` primitive the
+        // `MaterializeMemoDb` producer pins its observed-version parse
+        // fact through.
         "pub(crate) mod fact_signature_helpers",
         "pub(crate) mod host_executor",
         "pub(crate) mod host_test_audit",

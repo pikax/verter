@@ -20,7 +20,7 @@
 //! — the strict self-root validator, passing the entry's keyed
 //! canonical(s) as the self-root set — and the producer through
 //! [`engine_fact_signature_for_canonical_member`] /
-//! [`engine_fact_signature_for_canonical_surface`] /
+//! [`engine_fact_signature_for_exported_type`] /
 //! [`engine_fact_signature_for_prepared_target`] /
 //! [`engine_fact_signature_for_materialize_memo`] on cold compute.
 //!
@@ -94,9 +94,10 @@ fn family_a_entries_carry_fact_dep_signature() {
 /// - `engine_fact_signature_for_exported_type` — for caches keyed
 ///   on a top-level type identity
 ///   (`Export + LocalDecl + MemberShape`).
-/// - `engine_fact_signature_for_canonical_surface` — for caches
-///   whose validity depends on the file's surface fingerprint
-///   (`SyntacticExportSet`).
+/// - `engine_fact_signature_for_materialize_memo` — for the
+///   `MaterializeMemoDb` producer; provenance-pure, it roots the
+///   keyed scope on the observed materialisation-time content hash
+///   plus the observed-version `SyntacticExportSet` parse fact.
 #[test]
 fn family_a_producers_call_new_fact_helpers() {
     let registry =

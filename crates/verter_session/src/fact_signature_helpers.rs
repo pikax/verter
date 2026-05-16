@@ -290,6 +290,65 @@ fn parse_fact_ref(
     })
 }
 
+/// Build a [`ParseFactRef`] for `(canonical_id, key, lane)` pinned to a
+/// caller-supplied **observed** content hash — a provenance-pure parse
+/// fact that records the file identity a producer actually observed,
+/// not whatever content is current at signature-build time.
+///
+/// Unlike [`parse_fact_ref`] this does NOT consult
+/// [`ResolverContext::authoritative_current_content_hash`] or
+/// [`ResolverContext::current_file_facts`]. It performs a
+/// content-addressed [`FileArtifactStore`](crate::file_artifact_store::FileArtifactStore)
+/// lookup keyed on the passed `observed_content_hash`: the parse
+/// registry it reads is the one published for exactly that content
+/// version. The emitted fact's `expected_hash` is therefore the fact
+/// hash that was live when the producer observed the file, regardless
+/// of any edit that has landed since.
+///
+/// `None` is returned when no artifact is cached for the
+/// `(canonical_id, observed_content_hash)` identity — the observed
+/// version's parse facts cannot be recovered, so the caller must
+/// refuse shared-cache admission rather than emit a fact rooted on a
+/// guessed hash.
+///
+/// This is the construction primitive for a cache entry whose value
+/// was materialised against a specific observed file version: the
+/// entry's parse fact MUST be pinned to that same observed version so
+/// a warm read after a content edit genuinely misses, instead of
+/// validating the observed-version fact against post-edit content. The
+/// bare `ParseFactRef` (not a wrapped `FactVersionRef`) is returned so
+/// a producer that roots the same canonical multiple ways can place it
+/// exactly once.
+pub(crate) fn parse_fact_ref_for_observed_current_content(
+    ctx: &dyn ResolverContext,
+    canonical_id: &str,
+    observed_content_hash: Hash16,
+    key: FactKey,
+    lane: FactLane,
+) -> Option<ParseFactRef> {
+    let artifact_key = crate::file_artifact_store::FileArtifactKey::legacy(
+        Arc::from(canonical_id),
+        observed_content_hash,
+    );
+    let artifacts = ctx
+        .project_type_store()
+        .indexed()
+        .get_artifacts(&artifact_key)?;
+    let expected_hash = match artifacts.facts.lookup(&key) {
+        Some(fact) => match lane {
+            FactLane::Semantic => fact.semantic_hash,
+            FactLane::Display => fact.display_hash,
+        },
+        None => zero_hash(),
+    };
+    Some(ParseFactRef {
+        canonical_id: canonical_id.to_string(),
+        key,
+        lane,
+        expected_hash,
+    })
+}
+
 /// Build a `FileWholeHash` fact for `canonical_id` at its authoritative
 /// current content hash, or `None` when the canonical has no current
 /// content (unloaded / evicted at signature-build time).
@@ -472,7 +531,7 @@ pub(crate) fn fact_signature_for_exported_type(
     Arc::from(entries)
 }
 
-/// Build a self-rooted whole-canonical signature for caches whose
+/// Build a self-rooted whole-canonical signature for a cache whose
 /// cold-compute reads the file's surface fingerprint (e.g. a
 /// binding-walker that enumerates every export).
 ///
@@ -481,6 +540,16 @@ pub(crate) fn fact_signature_for_exported_type(
 /// entry — the correctness-first floor), then observes
 /// `SyntacticExportSet`: adding or removing exports shifts that parse
 /// fact, which remains a refinement for cross-file consumers.
+///
+/// Test-only: no production producer composes a whole-surface
+/// signature this way. A producer whose value was computed against a
+/// specific observed file version must pin its self-root and
+/// `SyntacticExportSet` parse fact to that observed content hash via
+/// [`parse_fact_ref_for_observed_current_content`] — re-reading the
+/// current content here would open a publish race. The
+/// `query_identity_self_root_substrate_tests` substrate suite
+/// exercises this helper to characterise the self-root prepend.
+#[cfg(test)]
 pub(crate) fn fact_signature_for_canonical_surface(
     ctx: &dyn ResolverContext,
     canonical_id: &str,

@@ -749,6 +749,32 @@ fn empty_dep_signature() -> crate::semantic_query::DepSignature {
     Arc::from(Vec::<(Arc<str>, crate::semantic_query::DepVersion)>::new())
 }
 
+/// Observe `scope`'s `SyntacticExportSet` parse fact pinned to a
+/// specific content hash — the provenance-pure observation the
+/// materialize-memo signature builder consumes. Tests call this with
+/// the hash the keyed scope was loaded at to mirror the production
+/// write-through, which observes the scope content version once and
+/// threads it in.
+fn observed_scope_export_set(
+    ctx: &dyn ResolverContext,
+    scope: &str,
+    observed_whole_hash: [u8; 16],
+) -> crate::resolver_core::ParseFactRef {
+    crate::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
+        ctx,
+        scope,
+        observed_whole_hash,
+        verter_semantic::facts::FactKey::SyntacticExportSet,
+        verter_semantic::facts::FactLane::Semantic,
+    )
+    .unwrap_or_else(|| {
+        panic!(
+            "fixture invariant: scope {scope} must have a content-addressed artifact \
+             at its observed whole hash so its SyntacticExportSet parse fact is recoverable",
+        )
+    })
+}
+
 /// `MaterializeMemoDb` validates the keyed scope canonical's self-root
 /// strictly.
 ///
@@ -869,6 +895,11 @@ fn materialize_memo_db_observed_dependency_edit_rejects_warm_entry() {
         Arc::<str>::from(dep),
         DepVersion::WholeHash(dep_indexed.whole_hash),
     )]);
+    // The materialize write-through observes the scope content version
+    // once and threads both the observed whole hash and the
+    // observed-version `SyntacticExportSet` parse fact into the
+    // provenance-pure signature builder.
+    let observed_scope_hash = scope_indexed.whole_hash;
     let scope_owned = scope.to_string();
     let primed_dep_sig = Arc::clone(&dep_sig);
     let primed = db
@@ -877,8 +908,9 @@ fn materialize_memo_db_observed_dependency_edit_rejects_warm_entry() {
             // signature builder returns `Some` and the entry is
             // admitted.
             let sig = engine_fact_signature_for_materialize_memo(
-                ctx,
                 scope_owned.as_str(),
+                observed_scope_hash,
+                observed_scope_export_set(ctx, scope_owned.as_str(), observed_scope_hash),
                 &primed_dep_sig,
             )?;
             Some((materialized("stale", Arc::clone(&primed_dep_sig)), sig))
@@ -1430,11 +1462,13 @@ fn prepared_target_db_self_root_sibling_edit_rejects_warm_entry() {
 
 /// `MaterializeMemoDb` — producer-level self-root canary. The
 /// production producer is [`engine_fact_signature_for_materialize_memo`]
-/// (called by the materialize write-through), which roots the keyed
-/// scope canonical via `engine_fact_signature_for_canonical_surface`.
-/// An unrelated-sibling body edit to the scope canonical shifts only
-/// the self-root `FileWholeHash` — `engine_fact_signature_for_canonical_surface`
-/// records `SyntacticExportSet`, which fingerprints the export NAME set
+/// (called by the materialize write-through). It is provenance-pure:
+/// the publish site observes the scope content version once and threads
+/// the observed whole hash plus the observed-version `SyntacticExportSet`
+/// parse fact in; the builder roots the keyed scope's self-root
+/// `FileWholeHash` on that observed hash. An unrelated-sibling body edit
+/// to the scope canonical shifts only the self-root `FileWholeHash` —
+/// the `SyntacticExportSet` parse fact fingerprints the export NAME set
 /// (unchanged when an existing `Sibling`'s member body is edited).
 ///
 /// This canary complements
@@ -1442,8 +1476,11 @@ fn prepared_target_db_self_root_sibling_edit_rejects_warm_entry() {
 /// that test edits an observed *dependency* and so discriminates the
 /// producer's observed-dep merge; this one edits the keyed *scope*
 /// canonical and so discriminates the producer's self-root
-/// `FileWholeHash`. Verified: neutering `self_root_fact` flips this
-/// canary RED.
+/// `FileWholeHash`. The cold publish roots the entry on the scope hash
+/// observed at cold-publish time; the sibling edit shifts that hash, so
+/// the strict warm-read self-root validation misses. A builder that
+/// emitted no scope self-root `FileWholeHash` would leave the entry
+/// valid and serve stale.
 #[test]
 fn materialize_memo_db_self_root_sibling_edit_rejects_warm_entry() {
     use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo;
@@ -1453,6 +1490,13 @@ fn materialize_memo_db_self_root_sibling_edit_rejects_warm_entry() {
     let c = "/self_root_e2e/memo.ts";
     load_tracked_keyed(&host, c);
     let ctx: &dyn ResolverContext = &host;
+    // The scope content version observed at materialisation/cold-publish
+    // time — `ensure_indexed_ready` is idempotent so this is the same
+    // `IndexedReady` `load_tracked_keyed` produced.
+    let observed_scope_hash = host
+        .ensure_indexed_ready(c)
+        .expect("scope IndexedReady is available")
+        .whole_hash;
     let db = host.project_type_store().materialize_memo_db();
     let probe_expr = Arc::new(TypeExpr::Ref {
         name: Arc::from("Probe"),
@@ -1469,10 +1513,12 @@ fn materialize_memo_db_self_root_sibling_edit_rejects_warm_entry() {
         .get_or_compute(&key, ctx, || {
             // No observed dependencies — the signature builder returns
             // `Some` (no `RouteGeneration` entry) and the discriminator
-            // is the scope canonical's own self-root `FileWholeHash`.
+            // is the scope canonical's own self-root `FileWholeHash`,
+            // rooted on the observed cold-publish-time content version.
             let sig = engine_fact_signature_for_materialize_memo(
-                ctx,
                 owned.as_str(),
+                observed_scope_hash,
+                observed_scope_export_set(ctx, owned.as_str(), observed_scope_hash),
                 &empty_dep_signature(),
             )?;
             Some((materialized("stale", empty_dep_signature()), sig))
@@ -1647,10 +1693,10 @@ fn materialize_memo_db_route_generation_observed_dependency_refuses_admission() 
     let dep = "/self_root_e2e/memo_rg_dep.ts";
     upsert(&host, scope, "export type Probe = number;\n");
     upsert(&host, dep, "export interface Helper { a: number; }\n");
-    assert!(
-        host.ensure_indexed_ready(scope).is_some(),
-        "scope IndexedReady materialises",
-    );
+    let observed_scope_hash = host
+        .ensure_indexed_ready(scope)
+        .expect("scope IndexedReady materialises")
+        .whole_hash;
     assert!(
         host.ensure_indexed_ready(dep).is_some(),
         "dep IndexedReady materialises",
@@ -1675,18 +1721,26 @@ fn materialize_memo_db_route_generation_observed_dependency_refuses_admission() 
         DepVersion::RouteGeneration(1),
     )]);
 
-    // The signature builder MUST refuse admission — `None`. A producer
-    // that re-reads `dep`'s current-content hash returns `Some(...)`
-    // and this assertion trips.
-    let sig = engine_fact_signature_for_materialize_memo(ctx, scope, &dep_sig);
+    // The signature builder MUST refuse admission — `None`. The scope's
+    // observed identity is supplied (the builder is provenance-pure),
+    // so the refusal here is driven solely by the `RouteGeneration`
+    // dependency, not by a missing scope observation. A producer that
+    // rooted the `RouteGeneration` dependency by any fact returns
+    // `Some(...)` and this assertion trips.
+    let sig = engine_fact_signature_for_materialize_memo(
+        scope,
+        observed_scope_hash,
+        observed_scope_export_set(ctx, scope, observed_scope_hash),
+        &dep_sig,
+    );
     assert!(
         sig.is_none(),
         "engine_fact_signature_for_materialize_memo MUST return None when an observed \
          dependency carries DepVersion::RouteGeneration — route generation has no \
          validating source, so the entry must not be admitted to the shared memo. A \
-         producer that re-reads the dependency's current-content FileWholeHash returns \
-         Some and admits the entry; that current-content re-read is the edit/publish \
-         race this refusal closes.",
+         producer that roots the RouteGeneration dependency by any fact returns \
+         Some and admits the entry; that admission is the unsoundness this refusal \
+         closes.",
     );
 
     // Drive the publish path exactly as the production write-through
@@ -1696,8 +1750,12 @@ fn materialize_memo_db_route_generation_observed_dependency_refuses_admission() 
     let scope_owned = scope.to_string();
     let primed_dep_sig = Arc::clone(&dep_sig);
     let cold_value = db.get_or_compute(&key, ctx, move || {
-        let fact_sig =
-            engine_fact_signature_for_materialize_memo(ctx, scope_owned.as_str(), &primed_dep_sig)?;
+        let fact_sig = engine_fact_signature_for_materialize_memo(
+            scope_owned.as_str(),
+            observed_scope_hash,
+            observed_scope_export_set(ctx, scope_owned.as_str(), observed_scope_hash),
+            &primed_dep_sig,
+        )?;
         Some((materialized("fresh", Arc::clone(&primed_dep_sig)), fact_sig))
     });
     // The publish path declined the entry — `get_or_compute` returns
@@ -1783,10 +1841,10 @@ fn materialize_memo_db_project_generation_observed_dependency_roots_on_observed_
     let dep = "/self_root_e2e/memo_pg_dep.ts";
     upsert(&host, scope, "export type Probe = number;\n");
     upsert(&host, dep, "export interface Helper { a: number; }\n");
-    assert!(
-        host.ensure_indexed_ready(scope).is_some(),
-        "scope IndexedReady materialises",
-    );
+    let observed_scope_hash = host
+        .ensure_indexed_ready(scope)
+        .expect("scope IndexedReady materialises")
+        .whole_hash;
     assert!(
         host.ensure_indexed_ready(dep).is_some(),
         "dep IndexedReady materialises",
@@ -1813,8 +1871,13 @@ fn materialize_memo_db_project_generation_observed_dependency_roots_on_observed_
     )]);
 
     // Half 1 — signature shape.
-    let sig = engine_fact_signature_for_materialize_memo(ctx, scope, &dep_sig)
-        .expect("a ProjectGeneration dep signature is admissible (Some)");
+    let sig = engine_fact_signature_for_materialize_memo(
+        scope,
+        observed_scope_hash,
+        observed_scope_export_set(ctx, scope, observed_scope_hash),
+        &dep_sig,
+    )
+    .expect("a ProjectGeneration dep signature is admissible (Some)");
     assert!(
         sig.iter().any(|f| matches!(
             f,
@@ -1841,8 +1904,9 @@ fn materialize_memo_db_project_generation_observed_dependency_roots_on_observed_
     let primed = db
         .get_or_compute(&key, ctx, move || {
             let fact_sig = engine_fact_signature_for_materialize_memo(
-                ctx,
                 scope_owned.as_str(),
+                observed_scope_hash,
+                observed_scope_export_set(ctx, scope_owned.as_str(), observed_scope_hash),
                 &primed_dep_sig,
             )?;
             Some((materialized("stale", Arc::clone(&primed_dep_sig)), fact_sig))
@@ -1983,10 +2047,19 @@ fn materialize_memo_db_observed_whole_hash_dependency_preserves_observed_hash() 
     // current content emits H2; one that preserves the observed hash
     // emits H1.
     let ctx: &dyn ResolverContext = &host;
+    // The scope canonical is untouched by the dependency edit, so its
+    // observed whole hash (and the content-addressed artifact backing
+    // its `SyntacticExportSet` parse fact) is still recoverable.
+    let observed_scope_hash = scope_indexed.whole_hash;
     // `dep` is recorded as `DepVersion::WholeHash`, so the signature
     // builder admits the entry (`Some`).
-    let sig = engine_fact_signature_for_materialize_memo(ctx, scope, &dep_sig)
-        .expect("a WholeHash-only dep signature must produce an admissible fact signature");
+    let sig = engine_fact_signature_for_materialize_memo(
+        scope,
+        observed_scope_hash,
+        observed_scope_export_set(ctx, scope, observed_scope_hash),
+        &dep_sig,
+    )
+    .expect("a WholeHash-only dep signature must produce an admissible fact signature");
 
     let dep_fact_hash = sig.iter().find_map(|f| match f {
         FactVersionRef::FileWholeHash { canonical_id, hash } if canonical_id == dep => Some(*hash),
@@ -2010,5 +2083,352 @@ fn materialize_memo_db_observed_whole_hash_dependency_preserves_observed_hash() 
         dep_fact_hash, current_hash_h2,
         "the emitted dependency fact must NOT carry the dependency's post-edit current \
          content hash (H2) — re-reading the current hash is the race-window defect.",
+    );
+}
+
+/// `engine_fact_signature_for_materialize_memo` roots the keyed scope's
+/// self-root `FileWholeHash` on the caller-supplied OBSERVED hash — it
+/// must never re-read the scope's current content hash.
+///
+/// Discrimination property: the builder is provenance-pure. It is
+/// handed `observed_scope_whole_hash = H_observed` while the scope
+/// canonical's CURRENT content hash is a distinct `H_current`
+/// (`H_current != H_observed`). The emitted scope `FileWholeHash` MUST
+/// carry `H_observed`. A builder that ignored the parameter and
+/// re-read the scope's current content (the round-3 P1 defect: the
+/// scope hash was read twice non-atomically — once for the value, once
+/// for the signature) would emit `H_current`; the stale value would
+/// then be published rooted by a fresh-looking current hash and
+/// validate on every warm read, permanently masking an edit landing in
+/// the materialise -> write-through race window.
+///
+/// RED proof (this fix changed the builder signature): with the body
+/// reverted to re-read the scope's current content hash for the
+/// self-root (the round-3 P1 defect), the emitted scope `FileWholeHash`
+/// carries `H_current` and the `assert_eq!(.., H_observed)` trips. The
+/// post-fix body emits the caller-supplied parameter and the assertion
+/// holds.
+///
+/// The observed-version `SyntacticExportSet` parse fact is captured
+/// BEFORE the scope edit — exactly as the production publish site does
+/// (it observes the scope content version once, synchronously, at
+/// materialisation time, then threads the observation in). A re-upsert
+/// removes the prior content-hash artifact from the content-addressed
+/// `FileArtifactStore`, so a parse fact observed AFTER the edit would
+/// be unrecoverable; the production ordering observes it first.
+#[test]
+fn materialize_memo_db_scope_self_root_carries_observed_hash_not_current() {
+    use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let scope = "/self_root_race/memo_scope_observed.ts";
+    // Load the scope at content version A — the hash the materialiser
+    // observes when it lowers the value.
+    upsert(&host, scope, "export type Probe = number;\n");
+    let observed_hash = host
+        .ensure_indexed_ready(scope)
+        .expect("scope indexed at observed version")
+        .whole_hash;
+
+    let ctx: &dyn ResolverContext = &host;
+    // Capture the observed-version parse fact NOW — before any edit —
+    // mirroring the production publish site, which observes the scope
+    // content version once at materialisation time.
+    let observed_export_set = observed_scope_export_set(ctx, scope, observed_hash);
+
+    // The scope is edited AFTER materialisation but BEFORE the memo
+    // signature is built — the race window. Its CURRENT content hash
+    // shifts. The skip-drain hook keeps the scope-keyed entry undrained
+    // (irrelevant here — no entry is published — but keeps the fixture
+    // isolated from the own-canonical drain).
+    upsert_skip_drain(&host, scope, "export type Probe = string;\n");
+    let current_hash = host
+        .ensure_indexed_ready(scope)
+        .expect("scope re-indexed at current version")
+        .whole_hash;
+    assert_ne!(
+        observed_hash, current_hash,
+        "fixture invariant: the scope edit shifts its whole hash (observed != current)",
+    );
+
+    // Build the signature NOW — after the edit — passing the OBSERVED
+    // (pre-edit) hash and the pre-edit parse fact, exactly as the
+    // publish site does after observing the scope content version once
+    // at materialisation time.
+    let sig = engine_fact_signature_for_materialize_memo(
+        scope,
+        observed_hash,
+        observed_export_set,
+        &empty_dep_signature(),
+    )
+    .expect("a dep-free materialize-memo signature is admissible");
+
+    let scope_fact_hash = sig
+        .iter()
+        .find_map(|f| match f {
+            FactVersionRef::FileWholeHash { canonical_id, hash } if canonical_id == scope => {
+                Some(*hash)
+            }
+            _ => None,
+        })
+        .expect("the materialize-memo signature MUST root the keyed scope by a FileWholeHash");
+
+    assert_eq!(
+        scope_fact_hash, observed_hash,
+        "engine_fact_signature_for_materialize_memo MUST root the keyed scope's self-root \
+         FileWholeHash on the caller-supplied OBSERVED hash — it must NOT re-read the \
+         scope's current content. Emitting the current hash publishes the stale \
+         MaterializedTypeExpr rooted by a fresh-looking hash that validates on every warm \
+         read, masking an edit in the materialise -> write-through race window.",
+    );
+    assert_ne!(
+        scope_fact_hash, current_hash,
+        "the emitted scope self-root must NOT carry the scope's post-edit current content \
+         hash — re-reading the current hash is the round-3 P1 publish-race defect.",
+    );
+}
+
+/// End-to-end: a scope edit landing between the value's hash
+/// observation and the `MaterializeMemoDb` write-through is caught by
+/// the `revalidate_after_compute` hook, so the stale entry is NOT
+/// admitted and a follow-up request cold-recomputes.
+///
+/// Discrimination property: this drives the publish-path
+/// `get_or_compute` closure exactly as the production write-through
+/// does, but with the scope edited in the race window — the value is
+/// built against the observed pre-edit hash `H1`; the scope is then
+/// upserted to `H2`; only THEN is the fact signature built (passing the
+/// observed `H1`). The provenance-pure builder roots the entry's
+/// self-root on `H1`; `revalidate_after_compute` validates that `H1`
+/// self-root strictly against the scope's current `H2`, mismatches, and
+/// the entry is NOT admitted — `get_or_compute` returns `None`. A
+/// follow-up request therefore cold-recomputes and the fresh value
+/// surfaces.
+///
+/// A builder that re-read the scope's current content at
+/// signature-build time would root the self-root on `H2`;
+/// `revalidate_after_compute` would then validate `H2` against the
+/// current `H2`, the entry WOULD be admitted, and the follow-up request
+/// would be a warm hit serving the stale value — `cold_ran` stays
+/// `false`. This test FAILS against that body and PASSES against the
+/// provenance-pure builder.
+#[test]
+fn materialize_memo_db_scope_edit_in_race_window_rejects_stale_entry_end_to_end() {
+    use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo;
+    use crate::semantic_query::ProjectionMode;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let scope = "/self_root_race/memo_scope_e2e.ts";
+    upsert(&host, scope, "export type Probe = number;\n");
+    // The materialiser observes the scope at content version H1 — the
+    // hash baked into the value's NodeScopeId.
+    let observed_hash_h1 = host
+        .ensure_indexed_ready(scope)
+        .expect("scope indexed at H1")
+        .whole_hash;
+
+    let ctx: &dyn ResolverContext = &host;
+    let db = host.project_type_store().materialize_memo_db();
+    let probe_expr = Arc::new(TypeExpr::Ref {
+        name: Arc::from("Probe"),
+        type_arguments: Arc::from(Vec::<TypeExpr>::new()),
+    });
+    let key = (
+        Arc::<str>::from(scope),
+        Arc::clone(&probe_expr),
+        ProjectionMode::Expanded,
+    );
+
+    // The publish site observes the scope content version once,
+    // synchronously, at materialisation time — BEFORE any racing edit.
+    // Capture the observed-version parse fact now to mirror that
+    // ordering (a re-upsert removes the prior content-hash artifact
+    // from the content-addressed store).
+    let observed_export_set_h1 = observed_scope_export_set(ctx, scope, observed_hash_h1);
+
+    // The scope is edited AFTER the value's hash observation but BEFORE
+    // the write-through builds the fact signature — the exact race
+    // window the round-3 P1 describes.
+    upsert_skip_drain(&host, scope, "export type Probe = string;\n");
+    let current_hash_h2 = host
+        .ensure_indexed_ready(scope)
+        .expect("scope re-indexed at H2")
+        .whole_hash;
+    assert_ne!(
+        observed_hash_h1, current_hash_h2,
+        "fixture invariant: the race-window scope edit shifts its whole hash (H1 != H2)",
+    );
+
+    // Drive the publish closure exactly as the production write-through
+    // does: the value was materialised against the OBSERVED H1, so the
+    // signature is built passing H1 plus the H1 parse fact (the publish
+    // site threads the single observation in). The provenance-pure
+    // builder roots the scope self-root on H1.
+    let scope_owned = scope.to_string();
+    let cold_value = db.get_or_compute(&key, ctx, move || {
+        let fact_sig = engine_fact_signature_for_materialize_memo(
+            scope_owned.as_str(),
+            observed_hash_h1,
+            observed_export_set_h1,
+            &empty_dep_signature(),
+        )?;
+        Some((materialized("stale", empty_dep_signature()), fact_sig))
+    });
+    assert!(
+        cold_value.is_none(),
+        "the publish path MUST NOT admit a MaterializeMemoDb entry whose value was \
+         materialised against the pre-edit scope content — revalidate_after_compute \
+         validates the H1 self-root against the scope's current H2, mismatches, and \
+         declines the insert. A builder that re-read the current hash would root the \
+         self-root on H2, revalidate H2-vs-H2 successfully, and admit the stale entry.",
+    );
+    assert_eq!(
+        db.live_count(),
+        0,
+        "no entry may be admitted — the stale value materialised against pre-edit content \
+         must not warm the shared memo",
+    );
+
+    // A follow-up request cold-recomputes because no entry was admitted.
+    let ctx2: &dyn ResolverContext = &host;
+    let mut cold_ran = false;
+    let value = db
+        .get_or_compute(&key, ctx2, || {
+            cold_ran = true;
+            Some((
+                materialized("recomputed", empty_dep_signature()),
+                empty_fact_signature(),
+            ))
+        })
+        .expect("the follow-up request still computes a value");
+    assert!(
+        cold_ran,
+        "the follow-up request's cold closure MUST run — the race-window staleness was \
+         rejected, so there is no warm hit to short-circuit it. A builder that re-read \
+         the current hash would have admitted the stale entry and this would be a warm \
+         hit instead.",
+    );
+    assert!(
+        matches!(&value.type_expr, TypeExpr::Unknown { raw } if raw == "recomputed"),
+        "the rejected race-window entry must not bubble its stale materialised expression",
+    );
+}
+
+/// `engine_fact_signature_for_materialize_memo` REFUSES shared-memo
+/// admission when an observed dependency names the keyed scope itself
+/// with a `WholeHash` that disagrees with the caller-supplied observed
+/// scope hash — a torn / mixed observation of the scope.
+///
+/// Discrimination property: the `materialized_dep_signature` carries a
+/// `(scope, DepVersion::WholeHash(h_disagree))` entry where
+/// `h_disagree != observed_scope_whole_hash`. The builder's
+/// scope-collapse branch MUST detect the disagreement and return
+/// `None`. A builder that unconditionally `continue`s on a
+/// scope-named dependency (skipping the equality check) would return
+/// `Some` and admit an entry whose self-root and dep observation
+/// disagree on the scope's content version. This test FAILS against
+/// that body (`assert!(sig.is_none())` trips) and PASSES against the
+/// post-fix body that performs the equality check.
+#[test]
+fn materialize_memo_db_mixed_scope_observation_refuses_admission() {
+    use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo;
+    use crate::semantic_query::DepVersion;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let scope = "/self_root_race/memo_mixed_scope.ts";
+    upsert(&host, scope, "export type Probe = number;\n");
+    let observed_scope_hash = host
+        .ensure_indexed_ready(scope)
+        .expect("scope indexed")
+        .whole_hash;
+
+    // A disagreeing hash for the SAME scope canonical — distinct from
+    // the observed scope hash, simulating a sub-dispatch that recorded
+    // the scope at a different content version than the one the
+    // publish site observed.
+    let mut h_disagree = observed_scope_hash;
+    h_disagree[0] ^= 0xFF;
+    assert_ne!(
+        h_disagree, observed_scope_hash,
+        "fixture invariant: the disagreeing scope hash differs from the observed one",
+    );
+
+    // The materialisation walk recorded the scope itself with a
+    // WholeHash that disagrees with the observed scope hash.
+    let dep_sig: crate::semantic_query::DepSignature = Arc::from(vec![(
+        Arc::<str>::from(scope),
+        DepVersion::WholeHash(h_disagree),
+    )]);
+
+    let ctx: &dyn ResolverContext = &host;
+    let sig = engine_fact_signature_for_materialize_memo(
+        scope,
+        observed_scope_hash,
+        observed_scope_export_set(ctx, scope, observed_scope_hash),
+        &dep_sig,
+    );
+    assert!(
+        sig.is_none(),
+        "engine_fact_signature_for_materialize_memo MUST return None when an observed \
+         dependency names the keyed scope with a WholeHash disagreeing with the \
+         caller-supplied observed scope hash — a torn read of the scope's content \
+         version. A builder that unconditionally skips a scope-named dependency admits \
+         an entry whose self-root and dep observation disagree.",
+    );
+}
+
+/// `engine_fact_signature_for_materialize_memo` REFUSES shared-memo
+/// admission when the caller-supplied `SyntacticExportSet` parse fact
+/// describes a canonical OTHER than the keyed scope.
+///
+/// Discrimination property: the builder is handed an
+/// `observed_scope_syntactic_export_set` whose `canonical_id` is a
+/// different file than `scope_canonical_id`. The builder MUST reject
+/// the mismatched observation and return `None` — a `Parse` fact for
+/// the wrong file would mis-root the entry. A builder that pushed the
+/// supplied parse fact without checking its canonical would return
+/// `Some` and emit a self-root signature describing two different
+/// files. This test FAILS against that body and PASSES against the
+/// post-fix body that performs the canonical-equality guard.
+#[test]
+fn materialize_memo_db_scope_export_set_canonical_mismatch_refuses_admission() {
+    use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let scope = "/self_root_race/memo_canon_scope.ts";
+    let other = "/self_root_race/memo_canon_other.ts";
+    upsert(&host, scope, "export type Probe = number;\n");
+    upsert(&host, other, "export type Other = number;\n");
+    let observed_scope_hash = host
+        .ensure_indexed_ready(scope)
+        .expect("scope indexed")
+        .whole_hash;
+    let observed_other_hash = host
+        .ensure_indexed_ready(other)
+        .expect("other indexed")
+        .whole_hash;
+
+    let ctx: &dyn ResolverContext = &host;
+    // The parse fact describes `other`, NOT the keyed `scope` — a
+    // mismatched observation that must refuse admission.
+    let mismatched_export_set = observed_scope_export_set(ctx, other, observed_other_hash);
+    assert_eq!(
+        mismatched_export_set.canonical_id, other,
+        "fixture invariant: the supplied parse fact describes `other`, not the keyed scope",
+    );
+
+    let sig = engine_fact_signature_for_materialize_memo(
+        scope,
+        observed_scope_hash,
+        mismatched_export_set,
+        &empty_dep_signature(),
+    );
+    assert!(
+        sig.is_none(),
+        "engine_fact_signature_for_materialize_memo MUST return None when the supplied \
+         SyntacticExportSet parse fact describes a canonical other than the keyed scope — \
+         a Parse fact for the wrong file mis-roots the entry. A builder that pushes the \
+         supplied parse fact without a canonical-equality guard emits a self-root \
+         signature describing two different files.",
     );
 }

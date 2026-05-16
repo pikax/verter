@@ -126,10 +126,30 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
     let ctx = query_engine.ctx();
     let dispatch = ProjectSemanticDispatch::new(ctx);
     let env: FxHashMap<String, crate::semantic_query::SemanticNodeId> = FxHashMap::default();
-    let whole_hash = ctx
+    // Observe the scope canonical's content version EXACTLY ONCE. The
+    // same observation roots BOTH the value (the `NodeScopeId::File`
+    // the materialiser lowers against, below) AND the entry's fact
+    // signature (the `MaterializeMemoDb` write-through, further down).
+    // A second, later read of the scope hash would open a publish race:
+    // an edit landing between materialisation and signature-build would
+    // root a stale value by a fresh-looking current hash.
+    let observed_scope_whole_hash = ctx
         .shallow_file_state(scope_canonical_id)
-        .map(|state| state.whole_hash)
-        .unwrap_or_default();
+        .map(|state| state.whole_hash);
+    // Pin the scope's `SyntacticExportSet` parse fact to the SAME
+    // observed content version (content-addressed, never re-read from
+    // current content). `None` when the observed version's artifact is
+    // not recoverable — the write-through then refuses shared admission.
+    let observed_scope_syntactic_export_set = observed_scope_whole_hash.and_then(|hash| {
+        crate::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
+            ctx,
+            scope_canonical_id,
+            hash,
+            verter_semantic::facts::FactKey::SyntacticExportSet,
+            verter_semantic::facts::FactLane::Semantic,
+        )
+    });
+    let whole_hash = observed_scope_whole_hash.unwrap_or_default();
     let scope = NodeScopeId::File {
         canonical_id: Arc::from(scope_canonical_id),
         whole_hash,
@@ -211,23 +231,39 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
         let host_db = ctx.project_type_store().materialize_memo_db();
         let captured_value = materialized.clone();
         let captured_canonical = scope_canonical_id.to_string();
+        // Thread the SINGLE scope-content observation taken above into
+        // the write-through. The signature builder is provenance-pure:
+        // it roots the keyed scope on these observed values, never on a
+        // re-read of current content. The value lowered against
+        // `whole_hash` and the signature self-root therefore agree on
+        // exactly one scope content version.
+        let captured_observed_scope_whole_hash = observed_scope_whole_hash;
+        let captured_observed_scope_syntactic_export_set =
+            observed_scope_syntactic_export_set.clone();
         let _ = host_db.get_or_compute(&arc_key, ctx, move || {
-            // The keyed scope canonical is the entry's self-root; every
-            // canonical the materialisation walk observed (carried on
-            // the materialised value's `dep_signature`) is rooted by
+            // The keyed scope canonical is the entry's self-root, rooted
+            // on the observed materialisation-time content version;
+            // every canonical the materialisation walk observed (carried
+            // on the materialised value's `dep_signature`) is rooted by
             // the fact matching its recorded `DepVersion` so an edit to
             // any contributing file invalidates the memo.
             //
             // `engine_fact_signature_for_materialize_memo` returns
-            // `None` when an observed dependency carries a
-            // `RouteGeneration` version — route generation has no real
-            // validating source, so the entry must not be admitted to
-            // the shared memo. The freshly-computed `materialized`
+            // `None` when the observed scope identity cannot be
+            // recovered or when an observed dependency carries a
+            // `RouteGeneration` version (route generation has no real
+            // validating source). On a `None` observation here the
+            // closure `?`-returns `None`, so the entry is not admitted
+            // to the shared memo. The freshly-computed `materialized`
             // value is still returned to the caller below; only the
             // shared-cache admission is refused.
+            let observed_scope_whole_hash = captured_observed_scope_whole_hash?;
+            let observed_scope_syntactic_export_set =
+                captured_observed_scope_syntactic_export_set?;
             let fact_sig = crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo(
-                ctx,
                 captured_canonical.as_str(),
+                observed_scope_whole_hash,
+                observed_scope_syntactic_export_set,
                 &captured_value.dep_signature,
             )?;
             Some((captured_value, fact_sig))
