@@ -233,8 +233,19 @@ pub(crate) fn engine_fact_signature_for_prepared_target(
 /// with a current-content `FileWholeHash` for it). The materialised
 /// value also depends on every canonical the materialisation walk
 /// observed — `materialized_dep_signature` carries those — so each is
-/// merged as a cross-file dependency `FileWholeHash`: an edit to any
+/// rooted as a cross-file dependency `FileWholeHash`: an edit to any
 /// contributing file invalidates the memo.
+///
+/// Each observed canonical's dependency `FileWholeHash` is sourced
+/// directly from the authoritative current-content oracle
+/// ([`crate::fact_signature_helpers::current_content_whole_hash_fact`]),
+/// independent of the canonical's [`crate::semantic_query::DepVersion`]
+/// variant on `materialized_dep_signature`. A `DepVersion::RouteGeneration`
+/// or `DepVersion::ProjectGeneration` entry has no `FileWholeHash` of
+/// its own — the legacy `dep_signature_to_fact_signature` bridge drops
+/// such entries entirely — but the canonical it names is still a
+/// contributing file whose content edit must invalidate the memo, so
+/// it is rooted here by its current whole hash rather than skipped.
 pub(crate) fn engine_fact_signature_for_materialize_memo(
     ctx: &dyn ResolverContext,
     scope_canonical_id: &str,
@@ -242,9 +253,24 @@ pub(crate) fn engine_fact_signature_for_materialize_memo(
 ) -> std::sync::Arc<[crate::resolver_core::FactVersionRef]> {
     let mut entries: Vec<crate::resolver_core::FactVersionRef> =
         engine_fact_signature_for_canonical_surface(ctx, scope_canonical_id).to_vec();
-    entries.extend(
-        crate::fact_signature_helpers::dep_signature_to_fact_signature(materialized_dep_signature),
-    );
+    // Root every observed canonical by its CURRENT-content whole hash —
+    // regardless of the `DepVersion` variant recorded for it. Relying
+    // on `dep_signature_to_fact_signature`'s `WholeHash`-only filter
+    // would leave a canonical observed via a `RouteGeneration` /
+    // `ProjectGeneration` dependency unrooted.
+    for (observed_canonical, _dep_version) in materialized_dep_signature.iter() {
+        if observed_canonical.as_ref() == scope_canonical_id {
+            // The keyed scope is already self-rooted by the surface
+            // signature above; do not double-root it.
+            continue;
+        }
+        if let Some(fact) = crate::fact_signature_helpers::current_content_whole_hash_fact(
+            ctx,
+            observed_canonical.as_ref(),
+        ) {
+            entries.push(fact);
+        }
+    }
     std::sync::Arc::from(entries)
 }
 

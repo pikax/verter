@@ -817,13 +817,22 @@ fn materialize_memo_db_untracked_self_root_rejects_warm_entry() {
 /// [`engine_fact_signature_for_materialize_memo`], the named helper
 /// the materialize write-through calls — which merges every observed
 /// canonical from the dep signature as a dependency `FileWholeHash`.
-/// The dependency file is then edited through the skip-own-drain hook
-/// (so neither the scope's nor the dependency's own-canonical drain
-/// removes the memo entry), shifting `dep`'s whole hash. A producer
-/// helper that recorded only the scope self-root would leave the entry
-/// valid and serve stale; with the observed-dep fact recorded, the
-/// warm read misses and recomputes. Reverting the helper to drop the
-/// observed-dep merge flips this test.
+/// The dependency file is then edited through the skip-own-drain hook,
+/// shifting `dep`'s whole hash. A producer helper that recorded only
+/// the scope self-root would leave the entry valid and serve stale;
+/// with the observed-dep fact recorded, the warm read misses and
+/// recomputes. Reverting the helper to drop the observed-dep merge
+/// flips this test.
+///
+/// On the skip-own-drain hook: `MaterializeMemoDb::invalidate_canonical`
+/// matches only entries whose keyed *scope* equals the upserted
+/// canonical, so a normal `upsert(dep)` would NOT drain this entry —
+/// the entry is keyed on `scope`, not `dep`. The skip-drain hook is
+/// used here for consistency with the sibling skip-drain canaries and
+/// to keep the test isolated from any own-canonical drain side-effect;
+/// the entry's survival across the dependency edit does not depend on
+/// it. (The hook would matter for an edit to the keyed *scope*, whose
+/// own-canonical drain does match the entry.)
 #[test]
 fn materialize_memo_db_observed_dependency_edit_rejects_warm_entry() {
     use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo;
@@ -878,8 +887,10 @@ fn materialize_memo_db_observed_dependency_edit_rejects_warm_entry() {
     );
 
     // Edit ONLY the observed dependency through the skip-own-drain
-    // hook so neither the scope's nor the dependency's own-canonical
-    // drain removes the memo entry.
+    // hook. (`MaterializeMemoDb::invalidate_canonical` matches only the
+    // keyed scope, so a normal `upsert(dep)` would not drain this
+    // scope-keyed entry anyway — the hook keeps the test isolated from
+    // any own-canonical drain side-effect; see the docstring.)
     upsert_skip_drain(
         &host,
         dep,
@@ -906,6 +917,806 @@ fn materialize_memo_db_observed_dependency_edit_rejects_warm_entry() {
          every observed canonical into the fact signature as a dependency \
          FileWholeHash. A helper that recorded only the scope self-root would leave \
          the entry valid and serve stale.",
+    );
+    assert!(
+        matches!(&warm.type_expr, TypeExpr::Unknown { raw } if raw == "recomputed"),
+        "the rejected warm entry must not bubble its stale materialized expression",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// End-to-end self-root skip-drain canaries.
+//
+// The `*_untracked_self_root_rejects_warm_entry` tests above prime each
+// query-identity entry with a *synthetic* one-fact signature
+// ([`planted_self_root`]) on a never-loaded canonical. They discriminate
+// the strict-vs-lazy untracked-`FileWholeHash` validator behavior, but
+// they bypass the producer helpers entirely — neutering the producer's
+// self-root prepend does not flip them.
+//
+// The canaries below close that gap. Each one:
+//
+//  1. Loads a real `.ts` keyed canonical and `ensure_indexed_ready`s it
+//     so it is TRACKED by the live store view. The keyed canonical
+//     declares the cache's keyed type `Probe` PLUS an unrelated
+//     sibling declaration `Sibling`.
+//  2. Cold-publishes a query-identity entry whose signature is built by
+//     the EXACT production producer helper the cache's real producer
+//     calls (`engine_fact_signature_for_exported_type` /
+//     `_for_canonical_member` / `_for_prepared_target` /
+//     `_for_materialize_memo`).
+//  3. Edits the keyed canonical through
+//     [`crate::VerterHost::upsert_skipping_own_canonical_drain_for_tests`]
+//     — so the upserted canonical's own-canonical drain does NOT remove
+//     the entry — with an **unrelated-sibling-body edit**: a member of
+//     the `Sibling` declaration changes type while `Probe` and the
+//     file's export name set are left untouched.
+//  4. Issues the warm read and asserts it MISSED (the cold closure ran)
+//     and the recomputed value surfaced.
+//
+// Why an unrelated-sibling-body edit is the discriminator: the producer
+// helpers emit a self-root `FileWholeHash` for the keyed canonical PLUS
+// path-precise parse facts ABOUT THE KEYED TYPE. R14 makes those parse
+// facts deliberately ignore an edit that the keyed type's declaration
+// graph does not reach: `Export(Probe)` / `LocalDecl(Probe)` /
+// `MemberShape(Probe)` / `Member(Probe, field)` / `MemberPresence(Probe,
+// field)` all fingerprint `Probe` (or one keyed member of it), and
+// `SyntacticExportSet` fingerprints the file's export NAME set. An edit
+// to an *unrelated* `Sibling` declaration's member body shifts NONE of
+// those — `Probe`'s body and reference-shape edges are unchanged, and
+// `Sibling`'s export name is unchanged. ONLY the keyed canonical's
+// whole-file hash shifts. So the warm read rejects the stale entry
+// *iff* the producer recorded the self-root `FileWholeHash`. Reverting
+// the `self_root_fact` prepend in the central fact-signature helpers
+// makes every canary below FAIL — the stale entry validates
+// (its path-precise parse facts are all unchanged) and is served warm,
+// so the cold closure never runs. Each canary's docstring restates
+// this property; the discrimination was verified by neutering
+// `self_root_fact` and observing every canary flip RED.
+//
+// Scope note: these canaries drive the production producer + warm
+// validator of each of the nine query-identity caches end-to-end. A
+// canary that instead drove the full `get_component_meta` cold
+// recompute over a skip-drain dependency edit would surface staleness
+// in `FileArtifactStore` (a content-addressed cache, NOT one of the
+// nine query-identity caches) before the nine caches are reached — see
+// the feedback log's `[debt]` entry on `FileArtifactStore`
+// content-pinning under the skip-drain hook. The comprehensive
+// per-failing-class `get_component_meta`-level skip-drain canary
+// closure is owned by the dedicated canary-closure work that follows;
+// these nine producer-level canaries prove the self-version-root
+// wiring end-to-end for its own scope.
+
+/// The keyed canonical's source: the cache's keyed type `Probe` plus an
+/// unrelated `Sibling` declaration whose body the canary edits.
+fn keyed_source_with_sibling(sibling_member_ty: &str) -> String {
+    format!(
+        "export interface Probe {{ a: number; b: string; }}\n\
+         export interface Sibling {{ x: {sibling_member_ty}; }}\n"
+    )
+}
+
+/// Load `canonical` with `keyed_source_with_sibling("number")` and
+/// `ensure_indexed_ready` it so the live store view tracks it; assert
+/// the tracked invariant.
+fn load_tracked_keyed(host: &VerterHost, canonical: &str) {
+    upsert(host, canonical, &keyed_source_with_sibling("number"));
+    assert!(
+        host.ensure_indexed_ready(canonical).is_some(),
+        "IndexedReady must materialise for {canonical}",
+    );
+    let ctx: &dyn ResolverContext = host;
+    let view = ctx.resolver_store_view();
+    assert!(
+        StoreView::tracks_file(&view, canonical),
+        "fixture invariant: {canonical} must be TRACKED so the unrelated-sibling-body \
+         edit shifts only the self-root FileWholeHash, isolating the self-root as the \
+         sole discriminating fact",
+    );
+}
+
+/// Edit `canonical`'s unrelated `Sibling` declaration body through the
+/// skip-drain hook (so the own-canonical drain does NOT remove the
+/// entry) and re-`ensure_indexed_ready` it. `Probe` and the file's
+/// export name set are untouched — only the whole-file hash shifts.
+fn skip_drain_sibling_edit(host: &VerterHost, canonical: &str) {
+    upsert_skip_drain(host, canonical, &keyed_source_with_sibling("string"));
+    assert!(
+        host.ensure_indexed_ready(canonical).is_some(),
+        "IndexedReady must re-materialise for {canonical} after the sibling edit",
+    );
+}
+
+/// `DeclarationLookupDb` — producer-level self-root canary.
+///
+/// Discriminating property: the entry is cold-published with the EXACT
+/// production producer signature — [`engine_fact_signature_for_exported_type`],
+/// the helper `resolve_type_declaration` calls. The keyed canonical is
+/// then edited through the skip-drain hook with an unrelated-sibling
+/// body edit. The producer signature's parse facts (`Export(Probe)`,
+/// `LocalDecl(Probe)`, `MemberShape(Probe)`) all fingerprint `Probe`
+/// (R14) and do NOT shift when an unrelated `Sibling` declaration is
+/// edited — only the self-root `FileWholeHash` does. The warm read
+/// therefore misses iff the producer recorded the self-root. Reverting
+/// the `self_root_fact` prepend leaves the entry valid and serves it
+/// stale (verified: neutering `self_root_fact` flips this canary RED).
+#[test]
+fn declaration_lookup_db_self_root_sibling_edit_rejects_warm_entry() {
+    use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_exported_type;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let c = "/self_root_e2e/decl.ts";
+    load_tracked_keyed(&host, c);
+    let ctx: &dyn ResolverContext = &host;
+    let db = host.project_type_store().declaration_db();
+    let key = (Arc::<str>::from(c), Arc::<str>::from("Probe"));
+
+    let owned = c.to_string();
+    let primed = db
+        .get_or_compute(&key, ctx, || {
+            let sig = engine_fact_signature_for_exported_type(ctx, owned.as_str(), "Probe");
+            Some((decl("stale", c), sig))
+        })
+        .expect("cold publish succeeds — keyed canonical tracked");
+    assert_eq!(
+        primed.text.as_deref(),
+        Some("stale"),
+        "fixture invariant: cold publish stores the primed declaration",
+    );
+
+    skip_drain_sibling_edit(&host, c);
+
+    let ctx2: &dyn ResolverContext = &host;
+    let mut cold_ran = false;
+    let warm = db
+        .get_or_compute(&key, ctx2, || {
+            cold_ran = true;
+            Some((decl("recomputed", c), empty_fact_signature()))
+        })
+        .expect("warm path produces a value");
+
+    assert!(
+        cold_ran,
+        "DeclarationLookupDb warm read MUST reject the entry after an unrelated-sibling \
+         edit to its keyed canonical — only the producer's self-root FileWholeHash \
+         catches an edit the keyed type's declaration graph does not reach (the \
+         Export/LocalDecl/MemberShape parse facts all fingerprint Probe). Reverting the \
+         self_root_fact prepend leaves the entry valid and serves stale.",
+    );
+    assert_eq!(
+        warm.text.as_deref(),
+        Some("recomputed"),
+        "the rejected warm entry must not bubble its stale declaration",
+    );
+}
+
+/// `ImportedRegistryDb` — producer-level self-root canary. Identical
+/// discrimination shape to the `DeclarationLookupDb` canary: the
+/// production producer is [`engine_fact_signature_for_exported_type`]
+/// (called by `resolve_imported_registry_symbol`) and an
+/// unrelated-sibling edit shifts only the self-root `FileWholeHash`.
+/// Verified: neutering `self_root_fact` flips this canary RED.
+#[test]
+fn imported_registry_db_self_root_sibling_edit_rejects_warm_entry() {
+    use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_exported_type;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let c = "/self_root_e2e/imported.ts";
+    load_tracked_keyed(&host, c);
+    let ctx: &dyn ResolverContext = &host;
+    let db = host.project_type_store().imported_registry_db();
+    let key = (Arc::<str>::from(c), Arc::<str>::from("Probe"));
+
+    let owned = c.to_string();
+    let _ = db
+        .get_or_compute(&key, ctx, || {
+            let sig = engine_fact_signature_for_exported_type(ctx, owned.as_str(), "Probe");
+            Some((Some(imported_symbol(c, "stale")), sig))
+        })
+        .expect("cold publish succeeds");
+
+    skip_drain_sibling_edit(&host, c);
+
+    let ctx2: &dyn ResolverContext = &host;
+    let mut cold_ran = false;
+    let warm = db
+        .get_or_compute(&key, ctx2, || {
+            cold_ran = true;
+            Some((
+                Some(imported_symbol(c, "recomputed")),
+                empty_fact_signature(),
+            ))
+        })
+        .expect("warm path produces a value");
+
+    assert!(
+        cold_ran,
+        "ImportedRegistryDb warm read MUST reject the entry after an unrelated-sibling \
+         edit to its keyed canonical — only the producer's self-root FileWholeHash \
+         catches it. Reverting the self_root_fact prepend serves stale.",
+    );
+    assert_eq!(
+        warm.map(|s| s.exported_name.clone()),
+        Some("recomputed".to_string()),
+        "the rejected warm entry must not bubble its stale resolved symbol",
+    );
+}
+
+/// `ResolvabilityDb` — producer-level self-root canary. The production
+/// producer is [`engine_fact_signature_for_exported_type`] (called by
+/// `can_resolve_registry_symbol`); an unrelated-sibling edit shifts
+/// only the self-root `FileWholeHash`. The primed value is `false`; the
+/// recompute produces `true` — a directly observable boolean flip.
+/// Verified: neutering `self_root_fact` flips this canary RED.
+#[test]
+fn resolvability_db_self_root_sibling_edit_rejects_warm_entry() {
+    use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_exported_type;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let c = "/self_root_e2e/resolvable.ts";
+    load_tracked_keyed(&host, c);
+    let ctx: &dyn ResolverContext = &host;
+    let db = host.project_type_store().resolvable_db();
+    let key = (Arc::<str>::from(c), Arc::<str>::from("Probe"));
+
+    let owned = c.to_string();
+    let _ = db
+        .get_or_compute(&key, ctx, || {
+            let sig = engine_fact_signature_for_exported_type(ctx, owned.as_str(), "Probe");
+            Some((false, sig))
+        })
+        .expect("cold publish succeeds");
+
+    skip_drain_sibling_edit(&host, c);
+
+    let ctx2: &dyn ResolverContext = &host;
+    let mut cold_ran = false;
+    let warm = db
+        .get_or_compute(&key, ctx2, || {
+            cold_ran = true;
+            Some((true, empty_fact_signature()))
+        })
+        .expect("warm path produces a value");
+
+    assert!(
+        cold_ran,
+        "ResolvabilityDb warm read MUST reject the entry after an unrelated-sibling \
+         edit to its keyed canonical — only the producer's self-root FileWholeHash \
+         catches it. Reverting the self_root_fact prepend serves stale.",
+    );
+    assert!(
+        warm,
+        "the rejected warm entry must not bubble its stale `false` — the recomputed \
+         `true` must surface",
+    );
+}
+
+/// `OwnerCollectionDb` — producer-level self-root canary. The
+/// production producer is [`engine_fact_signature_for_exported_type`]
+/// (called by `owner_collection_expr`); this cache is body-bearing
+/// (stores a `TypeExpr`), so the self-root `FileWholeHash` is the
+/// correctness floor. An unrelated-sibling edit shifts only the
+/// self-root. Verified: neutering `self_root_fact` flips this canary
+/// RED.
+#[test]
+fn owner_collection_db_self_root_sibling_edit_rejects_warm_entry() {
+    use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_exported_type;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let c = "/self_root_e2e/owner.ts";
+    load_tracked_keyed(&host, c);
+    let ctx: &dyn ResolverContext = &host;
+    let db = host.project_type_store().owner_collection_db();
+    let key = (Arc::<str>::from(c), Arc::<str>::from("Probe"));
+
+    let owned = c.to_string();
+    let _ = db
+        .get_or_compute(&key, ctx, || {
+            let sig = engine_fact_signature_for_exported_type(ctx, owned.as_str(), "Probe");
+            Some((
+                Some(TypeExpr::Unknown {
+                    raw: "stale".to_string(),
+                }),
+                sig,
+            ))
+        })
+        .expect("cold publish succeeds");
+
+    skip_drain_sibling_edit(&host, c);
+
+    let ctx2: &dyn ResolverContext = &host;
+    let mut cold_ran = false;
+    let warm = db
+        .get_or_compute(&key, ctx2, || {
+            cold_ran = true;
+            Some((
+                Some(TypeExpr::Unknown {
+                    raw: "recomputed".to_string(),
+                }),
+                empty_fact_signature(),
+            ))
+        })
+        .expect("warm path produces a value");
+
+    assert!(
+        cold_ran,
+        "OwnerCollectionDb warm read MUST reject the entry after an unrelated-sibling \
+         edit to its keyed canonical — only the producer's self-root FileWholeHash \
+         catches it. Reverting the self_root_fact prepend serves stale.",
+    );
+    assert!(
+        matches!(warm.as_deref(), Some(TypeExpr::Unknown { raw }) if raw == "recomputed"),
+        "the rejected warm entry must not bubble its stale body expression",
+    );
+}
+
+/// `PreparedSurfaceDb` — producer-level self-root canary. The
+/// production producer is [`engine_fact_signature_for_exported_type`]
+/// (called by `publish_prepared_surface_to_host_db`); the prepared
+/// surface encodes body-sensitive structure, so the self-root
+/// `FileWholeHash` is the correctness floor. An unrelated-sibling edit
+/// shifts only the self-root. Verified: neutering `self_root_fact`
+/// flips this canary RED.
+#[test]
+fn prepared_surface_db_self_root_sibling_edit_rejects_warm_entry() {
+    use crate::component_meta_caches::PreparedSurfacePayload;
+    use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_exported_type;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let c = "/self_root_e2e/psurf.ts";
+    load_tracked_keyed(&host, c);
+    let ctx: &dyn ResolverContext = &host;
+    let db = host.project_type_store().prepared_surface_db();
+    let key = prepared_surface_key(c);
+
+    let owned = c.to_string();
+    let _ = db
+        .get_or_compute(&key, ctx, || {
+            let sig = engine_fact_signature_for_exported_type(ctx, owned.as_str(), "Probe");
+            Some((PreparedSurfacePayload::Empty, sig))
+        })
+        .expect("cold publish succeeds");
+
+    skip_drain_sibling_edit(&host, c);
+
+    let ctx2: &dyn ResolverContext = &host;
+    let mut cold_ran = false;
+    let warm = db
+        .get_or_compute(&key, ctx2, || {
+            cold_ran = true;
+            Some((PreparedSurfacePayload::Unsupported, empty_fact_signature()))
+        })
+        .expect("warm path produces a value");
+
+    assert!(
+        cold_ran,
+        "PreparedSurfaceDb warm read MUST reject the entry after an unrelated-sibling \
+         edit to its keyed canonical — only the producer's self-root FileWholeHash \
+         catches it. Reverting the self_root_fact prepend serves stale.",
+    );
+    assert!(
+        matches!(warm, PreparedSurfacePayload::Unsupported),
+        "the rejected warm entry must not bubble its stale `Empty` payload",
+    );
+}
+
+/// `RoutedExprSurfaceDb` — producer-level self-root canary. The
+/// production producer is [`engine_fact_signature_for_exported_type`]
+/// (called by `cache_routed_expr_surface_expr`); an unrelated-sibling
+/// edit shifts only the self-root `FileWholeHash`. Verified: neutering
+/// `self_root_fact` flips this canary RED.
+#[test]
+fn routed_expr_surface_db_self_root_sibling_edit_rejects_warm_entry() {
+    use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_exported_type;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let c = "/self_root_e2e/routed.ts";
+    load_tracked_keyed(&host, c);
+    let ctx: &dyn ResolverContext = &host;
+    let db = host.project_type_store().routed_expr_surface_db();
+    let key = routed_expr_key(c);
+
+    let owned = c.to_string();
+    let _ = db
+        .get_or_compute(&key, ctx, || {
+            let sig = engine_fact_signature_for_exported_type(ctx, owned.as_str(), "Probe");
+            Some((
+                TypeExpr::Unknown {
+                    raw: "stale".to_string(),
+                },
+                sig,
+            ))
+        })
+        .expect("cold publish succeeds");
+
+    skip_drain_sibling_edit(&host, c);
+
+    let ctx2: &dyn ResolverContext = &host;
+    let mut cold_ran = false;
+    let warm = db
+        .get_or_compute(&key, ctx2, || {
+            cold_ran = true;
+            Some((
+                TypeExpr::Unknown {
+                    raw: "recomputed".to_string(),
+                },
+                empty_fact_signature(),
+            ))
+        })
+        .expect("warm path produces a value");
+
+    assert!(
+        cold_ran,
+        "RoutedExprSurfaceDb warm read MUST reject the entry after an unrelated-sibling \
+         edit to its keyed canonical — only the producer's self-root FileWholeHash \
+         catches it. Reverting the self_root_fact prepend serves stale.",
+    );
+    assert!(
+        matches!(warm.as_ref(), TypeExpr::Unknown { raw } if raw == "recomputed"),
+        "the rejected warm entry must not bubble its stale routed expression",
+    );
+}
+
+/// `PreparedTargetDb` — producer-level self-root canary. The production
+/// producer is [`engine_fact_signature_for_prepared_target`] (called by
+/// `resolve_prepared_surface_target`), which roots BOTH the active
+/// scope and the declaring canonical via
+/// `engine_fact_signature_for_exported_type`. Here the active scope and
+/// the declaring canonical are the same file; an unrelated-sibling edit
+/// shifts only the self-root `FileWholeHash`.
+///
+/// This canary complements
+/// [`prepared_target_db_declaring_canonical_edit_rejects_warm_entry`]:
+/// that test edits the declaring canonical with a member-*shape* edit
+/// (adds a member to `Probe`) and so discriminates the producer's
+/// declaring-canonical `MemberShape` parse fact; this one edits an
+/// unrelated `Sibling` declaration and so discriminates the producer's
+/// self-root `FileWholeHash`. Verified: neutering `self_root_fact`
+/// flips this canary RED.
+#[test]
+fn prepared_target_db_self_root_sibling_edit_rejects_warm_entry() {
+    use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_prepared_target;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let c = "/self_root_e2e/ptgt.ts";
+    load_tracked_keyed(&host, c);
+    let ctx: &dyn ResolverContext = &host;
+    let db = host.project_type_store().prepared_target_db();
+    let key = prepared_target_key(c, c);
+
+    let owned = c.to_string();
+    let _ = db
+        .get_or_compute(&key, ctx, || {
+            let sig = engine_fact_signature_for_prepared_target(
+                ctx,
+                owned.as_str(),
+                "Probe",
+                owned.as_str(),
+                "Probe",
+            );
+            Some((Some((Arc::<str>::from(c), Arc::<str>::from("stale"))), sig))
+        })
+        .expect("cold publish succeeds");
+
+    skip_drain_sibling_edit(&host, c);
+
+    let ctx2: &dyn ResolverContext = &host;
+    let mut cold_ran = false;
+    let warm = db
+        .get_or_compute(&key, ctx2, || {
+            cold_ran = true;
+            Some((
+                Some((Arc::<str>::from(c), Arc::<str>::from("recomputed"))),
+                empty_fact_signature(),
+            ))
+        })
+        .expect("warm path produces a value");
+
+    assert!(
+        cold_ran,
+        "PreparedTargetDb warm read MUST reject the entry after an unrelated-sibling \
+         edit to its keyed canonical — only the producer's self-root FileWholeHash \
+         catches it. Reverting the self_root_fact prepend serves stale.",
+    );
+    assert_eq!(
+        warm.map(|(_, n)| n.as_ref().to_string()),
+        Some("recomputed".to_string()),
+        "the rejected warm entry must not bubble its stale resolved target",
+    );
+}
+
+/// `MaterializeMemoDb` — producer-level self-root canary. The
+/// production producer is [`engine_fact_signature_for_materialize_memo`]
+/// (called by the materialize write-through), which roots the keyed
+/// scope canonical via `engine_fact_signature_for_canonical_surface`.
+/// An unrelated-sibling body edit to the scope canonical shifts only
+/// the self-root `FileWholeHash` — `engine_fact_signature_for_canonical_surface`
+/// records `SyntacticExportSet`, which fingerprints the export NAME set
+/// (unchanged when an existing `Sibling`'s member body is edited).
+///
+/// This canary complements
+/// [`materialize_memo_db_observed_dependency_edit_rejects_warm_entry`]:
+/// that test edits an observed *dependency* and so discriminates the
+/// producer's observed-dep merge; this one edits the keyed *scope*
+/// canonical and so discriminates the producer's self-root
+/// `FileWholeHash`. Verified: neutering `self_root_fact` flips this
+/// canary RED.
+#[test]
+fn materialize_memo_db_self_root_sibling_edit_rejects_warm_entry() {
+    use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo;
+    use crate::semantic_query::ProjectionMode;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let c = "/self_root_e2e/memo.ts";
+    load_tracked_keyed(&host, c);
+    let ctx: &dyn ResolverContext = &host;
+    let db = host.project_type_store().materialize_memo_db();
+    let probe_expr = Arc::new(TypeExpr::Ref {
+        name: Arc::from("Probe"),
+        type_arguments: Arc::from(Vec::<TypeExpr>::new()),
+    });
+    let key = (
+        Arc::<str>::from(c),
+        Arc::clone(&probe_expr),
+        ProjectionMode::Expanded,
+    );
+
+    let owned = c.to_string();
+    let _ = db
+        .get_or_compute(&key, ctx, || {
+            // No observed dependencies — the discriminator is the
+            // scope canonical's own self-root `FileWholeHash`.
+            let sig = engine_fact_signature_for_materialize_memo(
+                ctx,
+                owned.as_str(),
+                &empty_dep_signature(),
+            );
+            Some((materialized("stale", empty_dep_signature()), sig))
+        })
+        .expect("cold publish succeeds");
+
+    skip_drain_sibling_edit(&host, c);
+
+    let ctx2: &dyn ResolverContext = &host;
+    let mut cold_ran = false;
+    let warm = db
+        .get_or_compute(&key, ctx2, || {
+            cold_ran = true;
+            Some((
+                materialized("recomputed", empty_dep_signature()),
+                empty_fact_signature(),
+            ))
+        })
+        .expect("warm path produces a value");
+
+    assert!(
+        cold_ran,
+        "MaterializeMemoDb warm read MUST reject the entry after an unrelated-sibling \
+         edit to its keyed scope canonical — only the producer's self-root \
+         FileWholeHash catches it (the SyntacticExportSet parse fact fingerprints the \
+         export name set, unchanged). Reverting the self_root_fact prepend serves \
+         stale.",
+    );
+    assert!(
+        matches!(&warm.type_expr, TypeExpr::Unknown { raw } if raw == "recomputed"),
+        "the rejected warm entry must not bubble its stale materialized expression",
+    );
+}
+
+/// `PreparedMemberDb` — producer-level self-root canary. The production
+/// producer is [`engine_fact_signature_for_canonical_member`] (called
+/// by `publish_prepared_member_to_host_db`), which records the keyed
+/// member's `MemberPresence` + `Member` parse facts PLUS the keyed
+/// canonical's self-root `FileWholeHash`.
+///
+/// Discriminating property: the canary edits an unrelated `Sibling`
+/// declaration's member body, NOT the keyed `Probe.field` member. The
+/// keyed member's `MemberPresence(Probe, field)` and `Member(Probe,
+/// field)` parse facts are path-precise (R28) and stay unchanged by an
+/// edit `Probe.field`'s declaration graph does not reach — only the
+/// keyed canonical's self-root `FileWholeHash` shifts. The warm read
+/// therefore misses iff the producer recorded the self-root; reverting
+/// the `self_root_fact` prepend leaves the entry valid and serves the
+/// stale projected member. Verified: neutering `self_root_fact` flips
+/// this canary RED.
+#[test]
+fn prepared_member_db_self_root_sibling_edit_rejects_warm_entry() {
+    use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_canonical_member;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let c = "/self_root_e2e/pmem.ts";
+    // `Probe` carries the keyed member `field`; `Sibling` is the
+    // unrelated declaration the canary edits.
+    upsert(
+        &host,
+        c,
+        "export interface Probe { field: number; }\n\
+         export interface Sibling { x: number; }\n",
+    );
+    assert!(
+        host.ensure_indexed_ready(c).is_some(),
+        "IndexedReady must materialise for {c}",
+    );
+    let ctx: &dyn ResolverContext = &host;
+    {
+        let view = ctx.resolver_store_view();
+        assert!(
+            StoreView::tracks_file(&view, c),
+            "fixture invariant: {c} must be TRACKED",
+        );
+    }
+    let db = host.project_type_store().prepared_member_db();
+    let key = prepared_member_key(c);
+
+    let owned = c.to_string();
+    let _ = db
+        .get_or_compute(&key, ctx, || {
+            let sig =
+                engine_fact_signature_for_canonical_member(ctx, owned.as_str(), "Probe", "field");
+            Some((Some(projected_member("stale")), sig))
+        })
+        .expect("cold publish succeeds");
+
+    // Unrelated-sibling body edit: `Sibling.x` changes type; the keyed
+    // member `Probe.field` is untouched, so `MemberPresence(Probe,
+    // field)` and `Member(Probe, field)` are unchanged — only the
+    // self-root `FileWholeHash` shifts.
+    upsert_skip_drain(
+        &host,
+        c,
+        "export interface Probe { field: number; }\n\
+         export interface Sibling { x: string; }\n",
+    );
+    assert!(
+        host.ensure_indexed_ready(c).is_some(),
+        "IndexedReady must re-materialise for {c}",
+    );
+
+    let ctx2: &dyn ResolverContext = &host;
+    let mut cold_ran = false;
+    let warm = db
+        .get_or_compute(&key, ctx2, || {
+            cold_ran = true;
+            Some((Some(projected_member("recomputed")), empty_fact_signature()))
+        })
+        .expect("warm path produces a value");
+
+    assert!(
+        cold_ran,
+        "PreparedMemberDb warm read MUST reject the entry after an unrelated-sibling \
+         edit to its keyed canonical — the keyed member's MemberPresence/Member parse \
+         facts are path-precise and do not shift on an edit Probe.field's declaration \
+         graph does not reach, so only the producer's self-root FileWholeHash catches \
+         it. Reverting the self_root_fact prepend serves the stale projected member.",
+    );
+    assert!(
+        matches!(
+            warm.as_deref().map(|m| &m.ty),
+            Some(TypeExpr::Unknown { raw }) if raw == "recomputed"
+        ),
+        "the rejected warm entry must not bubble its stale projected member",
+    );
+}
+
+/// `MaterializeMemoDb`'s producer roots every observed canonical by its
+/// CURRENT-content `FileWholeHash`, independent of the
+/// [`crate::semantic_query::DepVersion`] variant recorded for it.
+///
+/// Discriminating property: the entry is keyed on `scope`, and its
+/// `materialized_dep_signature` lists an observed dependency `dep` with
+/// a NON-`WholeHash` `DepVersion` (`DepVersion::RouteGeneration`). The
+/// entry is cold-published with the EXACT production producer signature
+/// — [`engine_fact_signature_for_materialize_memo`]. The legacy
+/// `dep_signature_to_fact_signature` bridge keeps only
+/// `DepVersion::WholeHash` entries and would drop a `RouteGeneration`
+/// dependency entirely, leaving `dep` unrooted. The producer instead
+/// roots `dep` by its current-content `FileWholeHash`. `dep` is then
+/// edited through the skip-drain hook, shifting `dep`'s whole hash. A
+/// producer that relied on the `WholeHash`-only filter would leave the
+/// entry valid (no fact mentions `dep`) and serve it stale; with `dep`
+/// rooted by its current whole hash, the warm read misses and
+/// recomputes. (`MaterializeMemoDb::invalidate_canonical` matches only
+/// the keyed scope, so a normal `upsert(dep)` would not drain this
+/// scope-keyed entry regardless — the hook keeps the test isolated
+/// from any own-canonical drain side-effect.)
+#[test]
+fn materialize_memo_db_non_whole_hash_observed_dependency_edit_rejects_warm_entry() {
+    use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo;
+    use crate::semantic_query::{DepVersion, ProjectionMode};
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let scope = "/self_root_e2e/memo_rg_scope.ts";
+    let dep = "/self_root_e2e/memo_rg_dep.ts";
+    upsert(&host, scope, "export type Probe = number;\n");
+    upsert(&host, dep, "export interface Helper { a: number; }\n");
+    assert!(
+        host.ensure_indexed_ready(scope).is_some(),
+        "scope IndexedReady materialises",
+    );
+    assert!(
+        host.ensure_indexed_ready(dep).is_some(),
+        "dep IndexedReady materialises",
+    );
+
+    let ctx: &dyn ResolverContext = &host;
+    let db = host.project_type_store().materialize_memo_db();
+    let probe_expr = Arc::new(TypeExpr::Ref {
+        name: Arc::from("Probe"),
+        type_arguments: Arc::from(Vec::<TypeExpr>::new()),
+    });
+    let key = (
+        Arc::<str>::from(scope),
+        Arc::clone(&probe_expr),
+        ProjectionMode::Expanded,
+    );
+
+    // The materialization walk observed `dep` via a NON-`WholeHash`
+    // dependency — a `RouteGeneration` entry. The legacy
+    // `dep_signature_to_fact_signature` bridge would drop this entry;
+    // the producer must root `dep` by its current whole hash anyway.
+    let dep_sig: crate::semantic_query::DepSignature = Arc::from(vec![(
+        Arc::<str>::from(dep),
+        DepVersion::RouteGeneration(1),
+    )]);
+    let scope_owned = scope.to_string();
+    let primed_dep_sig = Arc::clone(&dep_sig);
+    let primed = db
+        .get_or_compute(&key, ctx, move || {
+            let sig = engine_fact_signature_for_materialize_memo(
+                ctx,
+                scope_owned.as_str(),
+                &primed_dep_sig,
+            );
+            // The signature MUST mention `dep` — a `RouteGeneration`
+            // observed canonical is still rooted by its whole hash.
+            assert!(
+                sig.iter().any(|f| matches!(
+                    f,
+                    crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, .. }
+                        if canonical_id == dep
+                )),
+                "producer must root the RouteGeneration-observed canonical {dep} by its \
+                 current-content FileWholeHash — the WholeHash-only bridge would drop it",
+            );
+            Some((materialized("stale", Arc::clone(&primed_dep_sig)), sig))
+        })
+        .expect("cold publish succeeds");
+    assert!(
+        matches!(&primed.type_expr, TypeExpr::Unknown { raw } if raw == "stale"),
+        "fixture invariant: cold publish stores the primed materialized expression",
+    );
+
+    // Edit ONLY the observed dependency through the skip-drain hook.
+    upsert_skip_drain(
+        &host,
+        dep,
+        "export interface Helper { a: string; b: number; }\n",
+    );
+    assert!(
+        host.ensure_indexed_ready(dep).is_some(),
+        "dep IndexedReady re-materialises",
+    );
+
+    let ctx2: &dyn ResolverContext = &host;
+    let mut cold_ran = false;
+    let warm = db
+        .get_or_compute(&key, ctx2, || {
+            cold_ran = true;
+            Some((
+                materialized("recomputed", empty_dep_signature()),
+                empty_fact_signature(),
+            ))
+        })
+        .expect("warm path produces a value");
+
+    assert!(
+        cold_ran,
+        "MaterializeMemoDb warm read MUST reject the entry after a content edit to a \
+         canonical the materialization walk observed via a NON-WholeHash DepVersion — \
+         the producer roots every observed canonical by its current-content \
+         FileWholeHash regardless of DepVersion variant. A producer that relied on the \
+         WholeHash-only dep_signature_to_fact_signature filter would leave the entry \
+         valid and serve stale.",
     );
     assert!(
         matches!(&warm.type_expr, TypeExpr::Unknown { raw } if raw == "recomputed"),

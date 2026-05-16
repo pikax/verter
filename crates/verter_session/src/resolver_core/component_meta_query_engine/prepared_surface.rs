@@ -1013,8 +1013,28 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 // PreparedTarget caches a (scope, target-name) →
                 // resolved (canonical, symbol) mapping. The entry is
                 // keyed on the active scope AND the declaring
-                // canonical, so the signature roots both — a content
-                // edit to either file rejects the entry.
+                // canonical (`root_identity.canonical_id`), so the
+                // signature roots both — a content edit to either file
+                // rejects the entry.
+                //
+                // Re-route boundary: `resolve_prepared_target` (the
+                // closure above) can re-route `canonical_source` to a
+                // THIRD declaring file via
+                // `resolve_named_type_export_target_shallow` when the
+                // requested name re-exports through an intermediate
+                // module. The cache key (`PreparedTargetCacheKey`) is
+                // keyed on `root_identity.canonical_id`, NOT the
+                // re-routed file, so the re-routed canonical is rooted
+                // by neither self-root here. A content edit to that
+                // third file is therefore not detected by this entry's
+                // signature. This is a pre-existing key-design
+                // boundary — the cache key never encoded the re-routed
+                // canonical — not a self-version-root regression. A
+                // future change that wants the re-routed declaring file
+                // to invalidate this entry must encode the re-routed
+                // canonical in `PreparedTargetCacheKey` (so it becomes a
+                // third self-root); widening the signature alone cannot
+                // close it without that key change.
                 let fact_sig = super::engine_fact_signature_for_prepared_target(
                     ctx,
                     captured_canonical.as_str(),

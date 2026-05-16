@@ -290,6 +290,34 @@ fn parse_fact_ref(
     })
 }
 
+/// Build a `FileWholeHash` fact for `canonical_id` at its authoritative
+/// current content hash, or `None` when the canonical has no current
+/// content (unloaded / evicted at signature-build time).
+///
+/// The hash is sourced through the authoritative current-content oracle
+/// [`ResolverContext::authoritative_current_content_hash`] (the same
+/// oracle [`ResolverContext::current_file_facts`] pins on), never the
+/// permissive `get_any` hash: a hash sourced from a stale artifact
+/// would let the validator confirm a stale cache entry once the upsert
+/// own-canonical drain is retired.
+///
+/// This is the construction primitive for both a cache entry's
+/// *self-root* (the whole-hash of its OWN keyed canonical — see
+/// [`self_root_fact`]) and an *observed cross-file dependency*
+/// whole-hash. A cache entry that carries a `FileWholeHash` for a
+/// canonical it depends on detects a content edit to that canonical:
+/// any byte change shifts the whole hash and a warm read mismatches.
+pub(crate) fn current_content_whole_hash_fact(
+    ctx: &dyn ResolverContext,
+    canonical_id: &str,
+) -> Option<FactVersionRef> {
+    let hash = ctx.authoritative_current_content_hash(canonical_id)?;
+    Some(FactVersionRef::FileWholeHash {
+        canonical_id: canonical_id.to_string(),
+        hash,
+    })
+}
+
 /// Build a self-root `FileWholeHash` fact for `canonical_id` at its
 /// authoritative current content hash, or `None` when the canonical
 /// has no current content (unloaded / evicted at signature-build
@@ -300,16 +328,10 @@ fn parse_fact_ref(
 /// same-canonical content edit: any byte change to `canonical_id`
 /// shifts its whole hash, so a warm read that validates this fact
 /// strictly (via [`validate_fact_signature_with_self_roots`]) misses
-/// and recomputes. The fact is sourced through
-/// [`ResolverContext::current_file_facts`]'s hash oracle —
-/// [`ResolverContext::authoritative_current_content_hash`] — never
-/// the permissive `get_any` hash.
+/// and recomputes. Thin alias of [`current_content_whole_hash_fact`]
+/// with a name that records the *self-root* role at the call site.
 fn self_root_fact(ctx: &dyn ResolverContext, canonical_id: &str) -> Option<FactVersionRef> {
-    let hash = ctx.authoritative_current_content_hash(canonical_id)?;
-    Some(FactVersionRef::FileWholeHash {
-        canonical_id: canonical_id.to_string(),
-        hash,
-    })
+    current_content_whole_hash_fact(ctx, canonical_id)
 }
 
 /// Build a self-rooted, path-precise signature for a cache whose
