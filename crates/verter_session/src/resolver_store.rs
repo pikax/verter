@@ -249,7 +249,18 @@ impl HostStoreView {
                     hash_route_surface(&indexed.shallow_state),
                 );
             }
-            if let Some(hash) = indexed.import_route_hash {
+            // The `ImportRoute` derived fact must reflect the
+            // generation-current import-target surface. A file with
+            // an unresolvable specifier carries a known-miss in its
+            // content-pinned `IndexedReady.import_route_hash`; that
+            // snapshot would otherwise be served unchanged after a
+            // new file satisfies the specifier (the importer's
+            // content, hence its `IndexedReady`, does not change), so
+            // a dependent cache entry would validate against a stale
+            // miss. `generation_current_import_route_hash`
+            // re-resolves the miss specifiers against the current
+            // workspace so the validator observes the appearance.
+            if let Some(hash) = host.generation_current_import_route_hash(&canonical_str) {
                 view.derived_hashes.insert(
                     (
                         canonical_str,
@@ -380,19 +391,12 @@ impl HostStoreView {
                 continue;
             }
 
-            let import_route_hash = {
-                {
-                    // import_routes lives on DerivedRawState (D48 split).
-                    host.derived_raw_cache()
-                        .get(&canonical_id)
-                        .and_then(|entry| {
-                            (!entry.import_routes.is_empty())
-                                .then(|| hash_import_route_targets(&entry.import_routes))
-                        })
-                }
-
-                // WASM-only: scheduler is unavailable on web; see CLAUDE.md "Scheduler as Sole Compile Authority".
-            };
+            // Generation-current `ImportRoute` fact for files not
+            // covered by the `IndexedReady` snapshot loop above —
+            // re-resolves known-miss specifiers against the current
+            // workspace so a previously-unresolvable dependency's
+            // appearance is observable by the validator.
+            let import_route_hash = host.generation_current_import_route_hash(&canonical_id);
 
             self.derived_hashes.insert(
                 (

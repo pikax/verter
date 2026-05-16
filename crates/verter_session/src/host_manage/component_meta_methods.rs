@@ -3129,27 +3129,90 @@ impl VerterHost {
     }
 
     pub(crate) fn current_cached_import_route_hash(&self, canonical_id: &str) -> Option<Hash16> {
-        // Content-pinned IndexedReady read. This feeds the ImportRoute
-        // fact-validation oracle: a permissive `get_any` would let a
-        // stale `IndexedReady` surface its old `import_route_hash` as
-        // the "current" ImportRoute fact. `current_content_pinned_indexed`
-        // returns `None` for a stale candidate so the DerivedRawState
-        // recompute below answers with the truly-current route table.
-        self.current_content_pinned_indexed(canonical_id)
-            .and_then(|facts| facts.import_route_hash)
+        self.generation_current_import_route_hash(canonical_id)
+    }
+
+    /// Generation-current `ImportRoute` derived-fact hash for a file.
+    ///
+    /// The `ImportRoute` derived fact records a file's effective
+    /// import-target surface: which specifiers it imports and what
+    /// each one resolves to. A file's positive resolutions only
+    /// change when the file's own content changes (which re-keys its
+    /// content-addressed `IndexedReady`), so for a fully-resolved file
+    /// the cached `IndexedReady.import_route_hash` is authoritative.
+    ///
+    /// A file with an **unresolvable** specifier is different: the
+    /// cached route table records that specifier as a known-miss, but
+    /// the miss is a snapshot of one workspace generation. When a new
+    /// file later satisfies the previously-unresolvable specifier the
+    /// workspace `content_generation` advances while the importer's
+    /// content — hence its `IndexedReady` — does not. The
+    /// content-pinned `import_route_hash` would then keep reporting
+    /// the stale miss, so a cache entry whose `fact_versions` carry
+    /// the importer's `ImportRoute` fact would validate against its
+    /// own stale snapshot and never observe the appearance.
+    ///
+    /// This oracle closes that gap: when the cached route table has a
+    /// known-miss entry, the miss specifiers are re-resolved against
+    /// the *current* workspace before hashing. A specifier that has
+    /// since become resolvable folds its new target into the hash, so
+    /// the hash differs from the stored snapshot, the `ImportRoute`
+    /// fact mismatches on warm validation, and the dependent cache
+    /// entry recomputes. Fully-resolved files take the cached-hash
+    /// fast path with no re-resolution.
+    pub(crate) fn generation_current_import_route_hash(
+        &self,
+        canonical_id: &str,
+    ) -> Option<Hash16> {
+        // Content-pinned IndexedReady read. A permissive `get_any`
+        // would let a stale `IndexedReady` surface its old route
+        // table; `current_content_pinned_indexed` returns `None` for
+        // a stale candidate so the `DerivedRawState` fallback answers
+        // with the live-tracked route table.
+        let routes = self
+            .current_content_pinned_indexed(canonical_id)
+            .map(|facts| std::sync::Arc::clone(&facts.import_routes))
             .or_else(|| {
-                {
-                    // import_routes lives on DerivedRawState (D48 split).
-                    self.derived_raw_cache()
-                        .get(canonical_id)
-                        .and_then(|entry| {
-                            (!entry.import_routes.is_empty()).then(|| {
-                                crate::resolver_store::hash_import_route_targets(
-                                    &entry.import_routes,
-                                )
-                            })
-                        })
-                }
-            })
+                // import_routes lives on DerivedRawState (D48 split).
+                self.derived_raw_cache()
+                    .get(canonical_id)
+                    .map(|entry| std::sync::Arc::new(entry.import_routes.clone()))
+            })?;
+        if routes.is_empty() {
+            return None;
+        }
+
+        let has_known_miss = routes.values().any(Self::import_route_is_known_miss);
+        if !has_known_miss {
+            // Every specifier resolved — the route table is stable
+            // until the importer's own content changes.
+            return Some(crate::resolver_store::hash_import_route_targets(&routes));
+        }
+
+        // Re-resolve the known-miss specifiers against the current
+        // workspace so the hash reflects appearance of a previously
+        // unresolvable dependency.
+        let mut generation_current: rustc_hash::FxHashMap<
+            String,
+            crate::types::DependencyResolution,
+        > = rustc_hash::FxHashMap::default();
+        for (specifier, resolution) in routes.iter() {
+            if Self::import_route_is_known_miss(resolution) {
+                let current = self.resolve_type_dependency_canonical(canonical_id, specifier);
+                generation_current.insert(
+                    specifier.clone(),
+                    crate::types::DependencyResolution {
+                        specifier: specifier.clone(),
+                        resolved_canonical_id: current.clone(),
+                        possible_canonical_ids: current.into_iter().collect(),
+                    },
+                );
+            } else {
+                generation_current.insert(specifier.clone(), resolution.clone());
+            }
+        }
+        Some(crate::resolver_store::hash_import_route_targets(
+            &generation_current,
+        ))
     }
 }
