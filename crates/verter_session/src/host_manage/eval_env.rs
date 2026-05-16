@@ -27,14 +27,20 @@ impl VerterHost {
         whole_hash: Hash16,
         cached_env: Arc<verter_semantic::analysis::type_eval::EvalEnv>,
     ) -> Arc<verter_semantic::analysis::type_eval::EvalEnv> {
-        // Tier 1C-α — delegate to the rehomed `EvalEnvCacheDb`. The
-        // legacy `(canonical_id, whole_hash) -> Arc<EvalEnv>` storage
-        // lives inside the DB; per D46 the long-term contract caches
-        // `Arc<OwnedEvalProgram>` and derives `EvalEnv` ad-hoc, but
-        // until lowering produces owned programs for live parses the
-        // legacy env-arc cache stays warm under the same wrapper.
+        // Delegate to the rehomed `EvalEnvCacheDb`. The legacy
+        // `Arc<EvalEnv>` storage is keyed by the full R21
+        // parse-artifact identity (`FileArtifactKey`); compose one key
+        // per candidate canonical so a parse-env change is a key miss.
+        // Per D46 the long-term contract caches `Arc<OwnedEvalProgram>`
+        // and derives `EvalEnv` ad-hoc, but until lowering produces
+        // owned programs for live parses the legacy env-arc cache
+        // stays warm under the same wrapper.
+        let keys: Vec<crate::file_artifact_store::FileArtifactKey> = cache_keys
+            .iter()
+            .map(|canonical| self.legacy_eval_env_key(canonical, whole_hash))
+            .collect();
         self.eval_env_cache()
-            .legacy_env_cache_or_insert(cache_keys, whole_hash, cached_env)
+            .legacy_env_cache_or_insert(&keys, cached_env)
     }
 
     pub(crate) fn base_eval_env_arc(

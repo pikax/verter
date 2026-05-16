@@ -31,6 +31,27 @@
 //! augmentation, the compile output's prop-validation surface
 //! changes; the augmentation-index fingerprint observation makes
 //! the dependent slot invalidate when the augmenter set churns.
+//!
+//! ## Whole-hash observation for runtime imports + external `src=` deps
+//!
+//! A path-precise `Export` fact fingerprints a value declaration's
+//! *signature*, not its body — `export function helper() { return 1 }`
+//! and `{ return 2 }` carry the same `() => number` signature, so the
+//! `Export` hash is identical across that edit. A *runtime* import
+//! (`import { helper } from '@/utils'`) re-emits the dependency in the
+//! assembled module and the compiled output's correctness depends on
+//! the dependency's full content, not just its public type signature.
+//! The producer therefore also observes `FileWholeHash` of the
+//! resolved dependency for every value (non-type-only) import binding.
+//!
+//! External `src=` blocks (`<template src="./tpl.html">`) are spliced
+//! verbatim into the merged compile source by `merge_external_sources`
+//! — the entire external file content lands in the compiled output.
+//! The producer observes `FileWholeHash` of each resolved external
+//! source canonical so any edit to it invalidates the dependent slot.
+//! Without this, an SFC whose only cross-file dependency is an external
+//! `src=` block produces a completely empty `fact_dep_signature`, which
+//! trivially validates forever once eager invalidation is removed.
 
 use std::sync::Arc;
 
@@ -43,7 +64,7 @@ use verter_semantic::facts::registry::{
 use verter_semantic::facts::FactLane;
 
 use crate::resolver_core::{FactReadSet, FactVersionRef, ParseFactRef, RouteSurfaceFactRef};
-use crate::types::Hash16;
+use crate::types::{ExternalSourceRequest, Hash16};
 use crate::VerterHost;
 
 /// Observe the compile-tier fact-dependency set for a single SFC
@@ -60,17 +81,27 @@ pub(crate) fn observe_compile_tier_dependencies(
     canonical_id: &str,
     script_imports: &[AnalyzedImport],
     macro_type_deps: &[MacroTypeDep],
+    external_requests: &[ExternalSourceRequest],
 ) {
     // 1. Per-import `ImportRef` observation (R12 — parse-domain
     //    fact carrying the unresolved binding shape on the OWNER's
     //    file). Adding / removing the binding on the owner side
     //    invalidates the compile output that references it.
     let mut seen_imports = FxHashSet::default();
+    // Resolved deps reached through a value (runtime) import binding —
+    // each one needs a `FileWholeHash` observation (step 1b below).
+    let mut runtime_dep_canonicals = FxHashSet::default();
     for import in script_imports {
         let space = symbol_space_for_import(import);
         let specifier = InternedSpecifier::from(import.source.as_str());
+        let resolved_dep =
+            resolve_import_source_to_canonical(host, canonical_id, import.source.as_str());
         for binding in import.bindings.iter() {
             let local = binding.name.clone();
+            // A binding is a *value* (runtime) binding iff neither the
+            // declaration-level `import type { ... }` nor the
+            // per-specifier `import { type X }` form marks it type-only.
+            let binding_is_value = !import.is_type_only && !binding.is_type_only;
             if !seen_imports.insert((specifier.clone(), local.clone(), space)) {
                 continue;
             }
@@ -90,16 +121,34 @@ pub(crate) fn observe_compile_tier_dependencies(
             // declaration's body fingerprint. Path-precise: editing
             // a sibling export in the dep does not invalidate this
             // consumer.
-            if let Some(resolved_dep) =
-                resolve_import_source_to_canonical(host, canonical_id, import.source.as_str())
-            {
+            if let Some(resolved_dep) = resolved_dep.as_deref() {
                 let dep_export_key = FactKey::Export {
                     name: InternedName::from(local.as_str()),
                     space,
                 };
-                observe_parse_fact_present(host, &resolved_dep, dep_export_key, FactLane::Semantic);
+                observe_parse_fact_present(host, resolved_dep, dep_export_key, FactLane::Semantic);
+
+                // Runtime imports: the `Export` fact above is
+                // signature-pinned (a value declaration hashes its
+                // signature, not its body), so a body-only edit to
+                // the imported module would NOT invalidate the
+                // consumer through `Export` alone. The compiled
+                // output re-emits the runtime dependency, so its
+                // full content matters — record the dep for a
+                // whole-hash observation.
+                if binding_is_value && resolved_dep != canonical_id {
+                    runtime_dep_canonicals.insert(resolved_dep.to_string());
+                }
             }
         }
+    }
+
+    // 1b. `FileWholeHash` observation for each runtime-imported dep.
+    //     Any edit to the runtime module (including a body-only edit
+    //     the signature-pinned `Export` fact cannot see) invalidates
+    //     the dependent compile slot.
+    for dep_canonical in &runtime_dep_canonicals {
+        observe_file_whole_hash(host, dep_canonical);
     }
 
     // 2. Per-`macro_type_deps` cross-file observation. The macro
@@ -161,6 +210,48 @@ pub(crate) fn observe_compile_tier_dependencies(
     //    emit validation surface; observe the fingerprint so an
     //    augmenter-set churn invalidates dependent slots.
     observe_augmentation_fingerprints(host, script_imports);
+
+    // 4. External `src=` block deps. `merge_external_sources` splices
+    //    the WHOLE content of each external file verbatim into the
+    //    merged compile source, so any edit to an external template /
+    //    script / style / custom block invalidates the dependent
+    //    compile output. Whole-hash is the correct granularity — the
+    //    entire file is embedded, not a path-precise slice. Each
+    //    external request is resolved through the owner's import-route
+    //    sub-mirror (populated by the cold-compute prefetch) with the
+    //    request's own pre-resolved canonical as the fallback.
+    let mut seen_external = FxHashSet::default();
+    for request in external_requests {
+        let resolved = resolve_import_source_to_canonical(host, canonical_id, &request.specifier)
+            .unwrap_or_else(|| request.resolved_canonical_id.clone());
+        if resolved.is_empty() || resolved == canonical_id {
+            continue;
+        }
+        if !seen_external.insert(resolved.clone()) {
+            continue;
+        }
+        observe_file_whole_hash(host, &resolved);
+    }
+}
+
+/// Observe a `FactVersionRef::FileWholeHash` for `canonical_id`
+/// against the host's current scheduler whole-hash. Used by the
+/// compile-tier producer for runtime imports and external `src=`
+/// dependency files, whose ENTIRE content (not just a path-precise
+/// type slice) influences the compiled output.
+///
+/// When the whole-hash is unavailable (file not loaded, unresolvable
+/// specifier) the observation is skipped — consistent with the
+/// `observe_parse_fact_present` skip-on-miss contract: a consumer
+/// must never depend on a fact the producer cannot publish.
+fn observe_file_whole_hash(host: &VerterHost, canonical_id: &str) {
+    let Some(whole_hash) = host.current_or_read_whole_hash(canonical_id) else {
+        return;
+    };
+    crate::resolver_core::resolver_context::observe_fan_out(FactVersionRef::FileWholeHash {
+        canonical_id: canonical_id.to_string(),
+        hash: whole_hash,
+    });
 }
 
 /// Emit a `ParseFactRef` observation against the producer's current

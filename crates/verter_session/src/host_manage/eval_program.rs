@@ -298,10 +298,40 @@ impl VerterHost {
         cache_key: &str,
         whole_hash: Hash16,
     ) -> Option<Arc<verter_semantic::analysis::type_eval::EvalEnv>> {
-        // Tier 1C-α — delegate to the rehomed `EvalEnvCacheDb`'s legacy
-        // `Arc<EvalEnv>` storage. The DB validates `whole_hash` against
-        // the cached entry internally.
-        self.eval_env_cache().legacy_env_for(cache_key, whole_hash)
+        // The legacy `Arc<EvalEnv>` storage is keyed by the full R21
+        // parse-artifact identity. Compose the `FileArtifactKey` for
+        // this `(canonical, content_hash)` pair from the canonical's
+        // per-project `parse_env_hash` so a parse-env change is a key
+        // miss rather than a stale hit.
+        let key = self.legacy_eval_env_key(cache_key, whole_hash);
+        self.eval_env_cache().legacy_env_for(&key)
+    }
+
+    /// Compose the full R21 [`crate::file_artifact_store::FileArtifactKey`]
+    /// under which the legacy `Arc<EvalEnv>` for `(canonical,
+    /// content_hash)` is cached.
+    ///
+    /// `EvalEnv` is a pure parse artifact, so its cache identity is
+    /// the same `(canonical, content_hash, parse_env_hash,
+    /// parser_version)` quadruple every other parse artifact uses.
+    /// `parse_env_hash` is the canonical's per-project parse-env
+    /// dimension; `parser_version` is the live-path parser version
+    /// (the `FileArtifactStore` legacy surface uses the same
+    /// constant). Because both the content hash AND the parse-env
+    /// hash are part of the key, a stale entry under a different
+    /// content or parse-env cannot be hit — the cache is correct by
+    /// key identity alone, with no eviction sweep required.
+    pub(super) fn legacy_eval_env_key(
+        &self,
+        canonical: &str,
+        content_hash: Hash16,
+    ) -> crate::file_artifact_store::FileArtifactKey {
+        crate::file_artifact_store::FileArtifactKey {
+            canonical: Arc::from(canonical),
+            content_hash,
+            parse_env_hash: self.host_view_env_hashes_for(canonical).parse_env_hash,
+            parser_version: crate::file_artifact_store::LEGACY_PARSER_VERSION,
+        }
     }
 
     /// Tier 1A — produces a fresh `ParsedEvalProgram` per call.

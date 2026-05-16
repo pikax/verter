@@ -198,6 +198,7 @@ impl VerterHost {
         owner_canonical: &str,
         script_imports: &[verter_semantic::analysis::AnalyzedImport],
         macro_type_deps: &[verter_semantic::analysis::MacroTypeDep],
+        external_requests: &[ExternalSourceRequest],
     ) {
         // Owner's indexed-ready must be present so the tracer can
         // resolve owner-relative import surfaces; the owner's own
@@ -272,6 +273,63 @@ impl VerterHost {
             }
         }
 
+        // External `src=` blocks. The compile-tier producer observes
+        // a `FileWholeHash` of each external canonical, so each
+        // external dep must reach the store before the tracer runs.
+        //
+        // A pre-existing import-route for the `src=` specifier is
+        // AUTHORITATIVE — it was placed by `set_import_dependencies`
+        // (caller-supplied exact resolution) or by an earlier
+        // resolution pass. This prefetch must NOT overwrite it: an
+        // aliased `src=` (`@/partials/panel.html`) does not resolve
+        // through `workspace.resolve_import`, so re-resolving and
+        // caching the fallback would clobber the correct caller route
+        // and break external-source merging. The prefetch only
+        // authors a route when none exists yet.
+        for request in external_requests {
+            let existing_route = self
+                .derived_raw_cache()
+                .get(owner_canonical)
+                .and_then(|d| d.import_routes.get(&request.specifier).cloned());
+            let resolved = if let Some(route) = existing_route {
+                // Use the authoritative route's canonical for the
+                // indexed-ready prefetch; leave the route untouched.
+                route
+                    .resolved_canonical_id
+                    .clone()
+                    .or_else(|| route.effective_target().map(str::to_string))
+                    .unwrap_or_else(|| request.resolved_canonical_id.clone())
+            } else {
+                // No route yet — resolve through the SfcSrcAttr phase
+                // and cache the result so the producer's
+                // `resolve_import_source_to_canonical` finds it. Fall
+                // back to the parse-time canonical when the workspace
+                // cannot resolve the specifier.
+                let resolved = workspace
+                    .resolve_import(
+                        owner_canonical,
+                        &request.specifier,
+                        verter_workspace::ResolutionContext {
+                            phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                            kind: verter_workspace::ResolveRequestKind::SfcSrcAttr,
+                        },
+                    )
+                    .map(|resolution| resolution.source_id)
+                    .unwrap_or_else(|| request.resolved_canonical_id.clone());
+                if !resolved.is_empty() && resolved != owner_canonical {
+                    self.cache_positive_import_route_result(
+                        owner_canonical,
+                        &request.specifier,
+                        &resolved,
+                    );
+                }
+                resolved
+            };
+            if !resolved.is_empty() && resolved != owner_canonical {
+                resolved_deps.insert(resolved);
+            }
+        }
+
         // Drive each resolved dep to IndexedReady so its
         // `FileArtifactStore` entry (including the `facts` registry)
         // is published before the tracer queries fact hashes. Calls
@@ -313,9 +371,28 @@ impl VerterHost {
                         .get(&profile_hash)
                         .map(|o| o.hash)
                         .unwrap_or(0);
+                    let coh = cc
+                        .content_overrides
+                        .get(&profile_hash)
+                        .map(|o| o.layer.hash)
+                        .unwrap_or(0);
                     if let Some(slot) = cc.compile_slots.get(&profile_hash) {
+                        // R3/R26/R28: the warm hit must validate the
+                        // SAME predicate `get_virtual_file` /
+                        // `compile_slot_is_warm` use — own-content
+                        // identity (`semantic_hash`), both override
+                        // hashes, AND the cross-file fact signature.
+                        // `semantic_hash` only covers this canonical's
+                        // own content; a cross-file dependency edit
+                        // (runtime import, macro type dep, external
+                        // `src=` file) surfaces solely through
+                        // `compile_slot_fact_signature_validates`.
+                        // Omitting it here would serve a stale slot
+                        // and return `Ok(())` without recompiling.
                         if slot.semantic_hash == hd.parse.semantic_hash
                             && slot.style_override_hash == soh
+                            && slot.content_override_hash == coh
+                            && self.compile_slot_fact_signature_validates(slot)
                         {
                             return Ok(());
                         }
@@ -681,6 +758,7 @@ impl VerterHost {
             &canonical_id,
             &compile_input.script_imports,
             &compile_input.macro_type_deps,
+            &compile_input.external_requests,
         );
 
         // R3/R26/R28 cold-compute fact-observation scope. The tracer
@@ -696,6 +774,7 @@ impl VerterHost {
                 &canonical_id,
                 &compile_input.script_imports,
                 &compile_input.macro_type_deps,
+                &compile_input.external_requests,
             );
             self.compile_entry(&compile_input, &query.compile_profile)
         });

@@ -940,12 +940,27 @@ pub struct EvalEnvCacheDb {
     /// pipeline produces `OwnedEvalProgram` for live parses; tests
     /// populate it directly today.
     entries: DashMap<OwnedArtifactKey, Arc<crate::owned_artifacts::OwnedEvalProgram>>,
-    /// 1C-α legacy storage — the rehomed
-    /// `Mutex<FxHashMap<String, (Hash16, Arc<EvalEnv>)>>` body.
-    /// Existing `cache_eval_env_arc` / `clone_cached_eval_env_arc`
-    /// callers route through this map.
+    /// Legacy `Arc<EvalEnv>` storage, keyed by the full per-file
+    /// parse-artifact identity (R21).
+    ///
+    /// `EvalEnv` is a pure parse artifact — it is the local
+    /// type/value symbol table built by re-parsing one file's eval
+    /// source, with no resolution / lib / type-env input. Per R21 a
+    /// cache keys ONLY on the dimensions it depends on; the eval-env
+    /// therefore shares the exact identity shape of every other
+    /// parse artifact, [`crate::file_artifact_store::FileArtifactKey`]
+    /// = `(canonical, content_hash, parse_env_hash, parser_version)`.
+    ///
+    /// Both the content hash AND the parse-env hash are part of the
+    /// key, so a stale entry is physically un-hittable: a content
+    /// change OR a parse-env change yields a key miss, not a stale
+    /// hit. The cache is correct by key identity alone — it does not
+    /// rely on an external eviction sweep for correctness.
     legacy_env_entries: parking_lot::Mutex<
-        FxHashMap<String, (Hash16, Arc<verter_semantic::analysis::type_eval::EvalEnv>)>,
+        FxHashMap<
+            crate::file_artifact_store::FileArtifactKey,
+            Arc<verter_semantic::analysis::type_eval::EvalEnv>,
+        >,
     >,
     /// Cache-cluster schema version this Db was constructed under. See
     /// [`crate::cache_schema`] for the contract.
@@ -1019,40 +1034,38 @@ impl EvalEnvCacheDb {
         Arc::clone(entry.value())
     }
 
-    /// Look up a cached env arc by canonical id, validating against
-    /// `whole_hash`. Returns `None` if the cached entry is stale or
-    /// missing. Used by the rehomed
-    /// `clone_cached_eval_env_arc` accessor.
+    /// Look up a cached env arc by its full parse-artifact identity
+    /// (R21). The `FileArtifactKey` carries `(canonical, content_hash,
+    /// parse_env_hash, parser_version)`, so this is an exact-match
+    /// lookup: a content change OR a parse-env change is a key miss,
+    /// never a stale hit. Used by the `clone_cached_eval_env_arc`
+    /// accessor.
     #[must_use]
     pub fn legacy_env_for(
         &self,
-        canonical_id: &str,
-        whole_hash: Hash16,
+        key: &crate::file_artifact_store::FileArtifactKey,
     ) -> Option<Arc<verter_semantic::analysis::type_eval::EvalEnv>> {
         let guard = self.legacy_env_entries.lock();
-        let (cached_hash, env) = guard.get(canonical_id)?;
-        (*cached_hash == whole_hash).then(|| Arc::clone(env))
+        guard.get(key).map(Arc::clone)
     }
 
     /// Atomically read-or-insert a cached env arc across multiple
-    /// candidate keys. Replaces the off-store
-    /// `cache_eval_env_arc` lock-and-mutate path.
+    /// candidate keys (e.g. a barrel-aliased canonical + its resolved
+    /// target). Each key is a full R21 `FileArtifactKey`; a stale
+    /// entry under any key cannot collide with a fresh request.
     pub fn legacy_env_cache_or_insert(
         &self,
-        cache_keys: &[String],
-        whole_hash: Hash16,
+        cache_keys: &[crate::file_artifact_store::FileArtifactKey],
         cached_env: Arc<verter_semantic::analysis::type_eval::EvalEnv>,
     ) -> Arc<verter_semantic::analysis::type_eval::EvalEnv> {
         let mut guard = self.legacy_env_entries.lock();
         for cache_key in cache_keys {
-            if let Some((cached_hash, existing_env)) = guard.get(cache_key) {
-                if *cached_hash == whole_hash {
-                    return Arc::clone(existing_env);
-                }
+            if let Some(existing_env) = guard.get(cache_key) {
+                return Arc::clone(existing_env);
             }
         }
         for cache_key in cache_keys {
-            guard.insert(cache_key.clone(), (whole_hash, Arc::clone(&cached_env)));
+            guard.insert(cache_key.clone(), Arc::clone(&cached_env));
         }
         cached_env
     }
@@ -1091,9 +1104,8 @@ impl EvalEnvCacheDb {
     #[cfg(any(test, debug_assertions))]
     pub fn insert_synthetic_for_schema_test(&self, marker: &str) {
         let env = Arc::new(verter_semantic::analysis::type_eval::EvalEnv::default());
-        self.legacy_env_entries
-            .lock()
-            .insert(marker.to_string(), ([0u8; 16], env));
+        let key = crate::file_artifact_store::FileArtifactKey::legacy(Arc::from(marker), [0u8; 16]);
+        self.legacy_env_entries.lock().insert(key, env);
     }
 }
 

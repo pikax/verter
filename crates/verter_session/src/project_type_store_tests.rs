@@ -208,6 +208,94 @@ fn eval_env_cache_db_stores_owned_eval_program_arc() {
     );
 }
 
+/// Block 1.J.3 discriminator — the legacy `Arc<EvalEnv>` storage is
+/// keyed by the full R21 `FileArtifactKey` (`canonical`,
+/// `content_hash`, `parse_env_hash`, `parser_version`), NOT by
+/// `canonical_id` with `whole_hash` validated post-lookup.
+///
+/// The `EvalEnv` is a pure parse artifact: it depends on the parser
+/// configuration (`parse_env_hash`). Pre-1.J.3 the legacy storage was
+/// `FxHashMap<String, (Hash16, Arc<EvalEnv>)>` — a `parse_env_hash`
+/// dimension was absent from the key entirely, so the same
+/// `(canonical, content_hash)` under two parser configs would alias
+/// to one entry. That signature-less keying is exactly why the cache
+/// needed `eval_env_cache().clear()` as a backstop.
+///
+/// Discriminating: this test inserts an env under `parse_env_hash = A`
+/// and asserts a lookup under `parse_env_hash = B` (same canonical,
+/// same content hash) MISSES. Against the pre-1.J.3 canonical-only
+/// key the entry would be HIT (stale); against the post-1.J.3
+/// full-dimension key it is a key miss → recompute.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn eval_env_cache_legacy_env_keyed_by_full_env_dimensions() {
+    use crate::file_artifact_store::{FileArtifactKey, LEGACY_PARSER_VERSION};
+    use verter_semantic::analysis::type_eval::EvalEnv;
+
+    let db = EvalEnvCacheDb::new();
+    let canonical: Arc<str> = Arc::from("/src/types.ts");
+    let content_hash = [7u8; 16];
+
+    // Two keys differing ONLY in `parse_env_hash` — same canonical,
+    // same content hash. Under the pre-1.J.3 canonical-only key these
+    // would collide; under the full R21 key they are distinct.
+    let key_parse_env_a = FileArtifactKey {
+        canonical: Arc::clone(&canonical),
+        content_hash,
+        parse_env_hash: [1u8; 16],
+        parser_version: LEGACY_PARSER_VERSION,
+    };
+    let key_parse_env_b = FileArtifactKey {
+        canonical: Arc::clone(&canonical),
+        content_hash,
+        parse_env_hash: [2u8; 16],
+        parser_version: LEGACY_PARSER_VERSION,
+    };
+
+    let env_a = Arc::new(EvalEnv::default());
+    let admitted =
+        db.legacy_env_cache_or_insert(std::slice::from_ref(&key_parse_env_a), Arc::clone(&env_a));
+    assert!(
+        Arc::ptr_eq(&admitted, &env_a),
+        "first insert returns the inserted env"
+    );
+
+    // Same-key lookup HITS.
+    let hit = db
+        .legacy_env_for(&key_parse_env_a)
+        .expect("same-parse-env lookup MUST hit");
+    assert!(
+        Arc::ptr_eq(&hit, &env_a),
+        "matching FileArtifactKey returns the cached Arc"
+    );
+
+    // Different-`parse_env_hash` lookup MISSES — this is the
+    // discriminator. Pre-1.J.3 (`canonical_id`-keyed, `whole_hash`
+    // value-validated) this would HIT because `parse_env_hash` was
+    // not part of the cache identity at all.
+    assert!(
+        db.legacy_env_for(&key_parse_env_b).is_none(),
+        "B1.j.3: a lookup whose parse_env_hash differs from the cached \
+         entry MUST miss. A hit here means the eval-env cache key omits \
+         the parse-env dimension — the signature-less keying that \
+         forced `eval_env_cache().clear()` as a correctness backstop."
+    );
+
+    // A different content hash also misses (content dimension still
+    // discriminates, now as part of the key rather than a value-side
+    // post-lookup check).
+    let key_other_content = FileArtifactKey {
+        canonical: Arc::clone(&canonical),
+        content_hash: [9u8; 16],
+        parse_env_hash: [1u8; 16],
+        parser_version: LEGACY_PARSER_VERSION,
+    };
+    assert!(
+        db.legacy_env_for(&key_other_content).is_none(),
+        "B1.j.3: a content-hash change MUST miss the legacy env cache."
+    );
+}
+
 #[test]
 fn type_resolution_context_db_stores_owned_arc() {
     // Discriminator: the rehomed `TypeResolutionContextDb` stores
