@@ -1723,3 +1723,113 @@ fn materialize_memo_db_non_whole_hash_observed_dependency_edit_rejects_warm_entr
         "the rejected warm entry must not bubble its stale materialized expression",
     );
 }
+
+/// `MaterializeMemoDb`'s producer preserves the OBSERVED `WholeHash`
+/// for a dependency the materialiser recorded as
+/// [`crate::semantic_query::DepVersion::WholeHash`] — it must NOT
+/// re-read the dependency's current content hash.
+///
+/// Discriminating property — the materialise → write-through race
+/// window. The materialiser observes `dep` at content hash `H1` and
+/// records `DepVersion::WholeHash(H1)` on the materialised value's
+/// `dep_signature`. `dep` is then edited so its CURRENT content hash
+/// becomes `H2` (`H2 != H1`). Only AFTER that edit is the
+/// materialize-memo fact signature built — exactly the ordering of an
+/// edit that lands between materialisation and the
+/// [`engine_fact_signature_for_materialize_memo`] write-through.
+///
+/// The emitted `FileWholeHash` fact for `dep` MUST carry the observed
+/// `H1`, not the current `H2`:
+///
+/// - A producer that re-reads `dep`'s current content hash emits `H2`.
+///   The stale `MaterializedTypeExpr` would then be published rooted by
+///   a fresh-looking current hash and would VALIDATE on every warm read
+///   — the staleness is permanently masked.
+/// - A producer that preserves the observed hash emits `H1`. A warm
+///   read validates `H1` against `dep`'s current `H2`, mismatches, and
+///   the memo correctly misses.
+///
+/// This test does not exercise warm-read admission (the sibling
+/// `materialize_memo_db_observed_dependency_edit_rejects_warm_entry`
+/// covers that, but only when the signature is built BEFORE the edit,
+/// so it cannot see the race-window bug). It inspects the emitted fact
+/// signature directly: it FAILS against a producer that re-reads the
+/// current hash (asserts `H1`, gets `H2`) and PASSES against a producer
+/// that preserves the observed hash.
+#[test]
+fn materialize_memo_db_observed_whole_hash_dependency_preserves_observed_hash() {
+    use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo;
+    use crate::semantic_query::DepVersion;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let scope = "/self_root_race/memo_scope.ts";
+    let dep = "/self_root_race/memo_dep.ts";
+    upsert(&host, scope, "export type Probe = number;\n");
+    upsert(&host, dep, "export interface Helper { a: number; }\n");
+    let scope_indexed = host.ensure_indexed_ready(scope).expect("scope indexed");
+    let dep_indexed_h1 = host.ensure_indexed_ready(dep).expect("dep indexed at H1");
+    let observed_hash_h1 = dep_indexed_h1.whole_hash;
+    assert_ne!(
+        scope_indexed.whole_hash, observed_hash_h1,
+        "fixture invariant: scope and dependency have distinct whole hashes",
+    );
+
+    // The materialiser observed `dep` at content hash H1 and recorded a
+    // `DepVersion::WholeHash(H1)` entry on the materialised value's
+    // `dep_signature`.
+    let dep_sig: crate::semantic_query::DepSignature = Arc::from(vec![(
+        Arc::<str>::from(dep),
+        DepVersion::WholeHash(observed_hash_h1),
+    )]);
+
+    // The dependency is edited AFTER materialisation but BEFORE the
+    // memo signature is built — the race window. Its current content
+    // hash shifts to H2. The skip-drain hook keeps the test isolated
+    // from any own-canonical drain side-effect (`MaterializeMemoDb`
+    // keys on the scope, not `dep`, so this is purely defensive).
+    upsert_skip_drain(
+        &host,
+        dep,
+        "export interface Helper { a: string; b: number; }\n",
+    );
+    let dep_indexed_h2 = host
+        .ensure_indexed_ready(dep)
+        .expect("dep re-indexed at H2");
+    let current_hash_h2 = dep_indexed_h2.whole_hash;
+    assert_ne!(
+        observed_hash_h1, current_hash_h2,
+        "fixture invariant: the dependency edit shifts its whole hash (H1 != H2)",
+    );
+
+    // Build the materialize-memo fact signature NOW — after the edit —
+    // from the materialised value's `dep_signature` (which still
+    // carries the observed H1). A producer that re-reads `dep`'s
+    // current content emits H2; one that preserves the observed hash
+    // emits H1.
+    let ctx: &dyn ResolverContext = &host;
+    let sig = engine_fact_signature_for_materialize_memo(ctx, scope, &dep_sig);
+
+    let dep_fact_hash = sig.iter().find_map(|f| match f {
+        FactVersionRef::FileWholeHash { canonical_id, hash } if canonical_id == dep => Some(*hash),
+        _ => None,
+    });
+    let dep_fact_hash = dep_fact_hash.expect(
+        "the materialize-memo signature MUST root the observed dependency by a \
+         FileWholeHash fact",
+    );
+
+    assert_eq!(
+        dep_fact_hash, observed_hash_h1,
+        "MaterializeMemoDb's producer MUST preserve the OBSERVED WholeHash (H1) the \
+         materialiser recorded for a DepVersion::WholeHash dependency — it must NOT \
+         re-read the dependency's current content hash. Emitting the current hash (H2) \
+         would publish the stale MaterializedTypeExpr rooted by a fresh-looking hash \
+         that validates on every warm read, permanently masking an edit landing in the \
+         materialise -> write-through race window.",
+    );
+    assert_ne!(
+        dep_fact_hash, current_hash_h2,
+        "the emitted dependency fact must NOT carry the dependency's post-edit current \
+         content hash (H2) — re-reading the current hash is the race-window defect.",
+    );
+}
