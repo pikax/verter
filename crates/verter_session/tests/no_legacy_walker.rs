@@ -278,6 +278,20 @@ const RETIRED_SYMBOLS: &[&str] = &[
     // `is_props_suffix` at any production site would resurrect
     // nominal classification.
     "is_props_suffix",
+    // The reverse-dependent upsert-time invalidation cascade and its
+    // test-only gate are DELETED. An owner upsert drains only the
+    // upserted canonical's own caches; cross-file consumers
+    // revalidate lazily on read through their `fact_dep_signature`
+    // checks. Re-introducing any of these names would resurrect the
+    // eager reverse-dependent cascade. (`UpsertDependentEviction` was
+    // the cascade's on/off enum; `dependent_eviction` its parameter;
+    // `run_dependent_cascade` the gating local; the two
+    // `*_without_*` entry points existed only to skip the cascade.)
+    "UpsertDependentEviction",
+    "upsert_without_dependent_eviction",
+    "dependent_eviction",
+    "run_dependent_cascade",
+    "register_facts_for_new_content_without_eviction",
 ];
 
 /// File names whose presence at the head of the path should make us

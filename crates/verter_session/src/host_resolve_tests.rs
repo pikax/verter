@@ -1239,66 +1239,6 @@ fn candidate_list_resolves_to_first_loaded() {
     );
 }
 
-/// Exact resolution invalidates on dep change.
-#[test]
-fn exact_resolution_invalidates_on_dep_change() {
-    let host = strict_host();
-    let source = "<script setup lang=\"ts\">\nimport type { Props } from '@/types'\nconst props = defineProps<Props>()\n</script>\n<template><div>{{ props.msg }}</div></template>";
-    upsert_vue(&host, "/src/Comp.vue", source);
-    upsert_non_sfc(
-        &host,
-        "/src/types/index.ts",
-        "export interface Props { msg: string }",
-    );
-    host.set_import_dependencies(
-        "/src/Comp.vue",
-        vec![crate::DependencyResolution {
-            specifier: "@/types".to_string(),
-            resolved_canonical_id: Some("/src/types/index.ts".to_string()),
-            possible_canonical_ids: Vec::new(),
-        }],
-    );
-
-    // First compile
-    let _ = host
-        .get_virtual_file(VirtualQuery {
-            raw_id: None,
-            canonical_id: Some("/src/Comp.vue".to_string()),
-            node_kind: Some(VirtualNodeKind::Main),
-            compile_profile: profile(),
-        })
-        .expect("first compile should succeed");
-
-    // Change the dependency — should trigger invalidation
-    upsert_non_sfc(
-        &host,
-        "/src/types/index.ts",
-        "export interface Props { msg: string; count: number }",
-    );
-
-    // Compile slots should be cleared
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let cc = host
-            .compile_cache()
-            .get("/src/Comp.vue")
-            .expect("compile_cache entry exists");
-        assert!(
-            cc.compile_slots.is_empty(),
-            "compile slots should be cleared after dep change"
-        );
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        let files = read_lock(&host.files);
-        let entry = files.get("/src/Comp.vue").expect("entry exists");
-        assert!(
-            entry.compile_slots.is_empty(),
-            "compile slots should be cleared after dep change"
-        );
-    }
-}
-
 /// Barrel chain ending at a `.vue` SFC resolves the exported type.
 /// Chain: Consumer.vue → base.ts (export *) → Drawer.ts (export type) → drawer.vue (defines type)
 #[test]

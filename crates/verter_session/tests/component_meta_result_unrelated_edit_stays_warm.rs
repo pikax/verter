@@ -1,19 +1,16 @@
-//! Block 1.B — `ComponentMetaResultDb` fact-validation NEGATIVE
-//! discriminator: an UNRELATED file edit must NOT invalidate the warm
-//! hit.
+//! `ComponentMetaResultDb` fact-validation NEGATIVE discriminator: an
+//! UNRELATED file edit must NOT invalidate the warm hit.
 //!
-//! Pre-1.B: with only the legacy `dep_signature` whole-hash oracle,
-//! the cache stayed warm only because the eager-invalidation
-//! cascade in `host_upsert::upsert` cleared cross-file dependents.
-//! After Block 4 retires eager invalidation, fact-validation is the
-//! sole correctness oracle — and that oracle must keep unrelated
-//! edits OUT of the validation set so warm hits survive non-dep
-//! activity.
+//! The owner-upsert path has no eager reverse-dependent invalidation
+//! cascade — a file edit never physically clears a downstream owner's
+//! warm result. Fact-validation is the sole correctness oracle, and
+//! that oracle must keep unrelated edits OUT of the validation set so
+//! warm hits survive non-dep activity.
 //!
-//! Post-1.B: editing an UNRELATED file (no edge from the owner)
-//! leaves the warm `fact_dep_signature` intact. The
-//! `component_meta_result_cache_hits` counter advances; the
-//! `component_meta_result_cache_misses` counter does NOT.
+//! Editing an UNRELATED file (no edge from the owner) leaves the warm
+//! `fact_dep_signature` intact. The `component_meta_result_cache_hits`
+//! counter advances; the `component_meta_result_cache_misses` counter
+//! does NOT.
 
 #![cfg(test)]
 
@@ -54,16 +51,13 @@ fn unrelated_edit_keeps_component_meta_result_warm() {
     let hits_before = prov.component_meta_result_cache_hits.load(Relaxed);
     let misses_before = prov.component_meta_result_cache_misses.load(Relaxed);
 
-    // Edit an unrelated file the owner does NOT import. Note: the
-    // upsert pipeline still triggers the eager-invalidation
-    // cascade today (Block 4 retires it). The behavioural assertion
-    // here is whether the warm hit survives via fact-validation —
-    // i.e. the captured signature does not include this unrelated
-    // file's whole-hash, so the validator continues to accept the
-    // entry. Once eager invalidation lands behind a
-    // `register_facts_for_new_content_without_eviction` hook (see
-    // `component_meta_result_eager_invalidation_defeating.rs`),
-    // this assertion holds in isolation.
+    // Edit an unrelated file the owner does NOT import. The
+    // owner-upsert path has no eager reverse-dependent cascade — a
+    // dependency edit never physically clears a downstream owner's
+    // warm result. The behavioural assertion here is that the warm
+    // hit survives via fact-validation: the captured signature does
+    // not include this unrelated file's whole-hash, so the validator
+    // continues to accept the entry.
     mh.upsert_base(
         "/src/other.ts",
         "export interface Other { x: number; y: number; }\n",

@@ -1,18 +1,16 @@
 //! Block 2 canary suite — compile-tier cross-file lazy invalidation.
 //!
-//! The Block 2 cutover removes the eager reverse-dependent
-//! invalidation cascade from the owner-upsert path. These canary
-//! tests are the coherent named gate that proves the lazy
-//! fact-validation substrate backs every compile-tier cross-file
-//! invalidation scenario WITHOUT that cascade.
+//! The owner-upsert path has no eager reverse-dependent invalidation
+//! cascade. These canary tests are the coherent named gate that proves
+//! the lazy fact-validation substrate backs every compile-tier
+//! cross-file invalidation scenario.
 //!
 //! Each test:
 //!  1. Sets up an owner SFC + dependency file and primes a warm
 //!     compile slot.
-//!  2. Mutates the dependency through
-//!     [`VerterHost::upsert_without_dependent_eviction`] — the eager
-//!     cascade does NOT run, so the consumer's warm slot physically
-//!     survives the staging step. The ONLY mechanism that can
+//!  2. Mutates the dependency through the plain [`VerterHost::upsert`]
+//!     — no eager cascade runs, so the consumer's warm slot physically
+//!     survives the dependency edit. The ONLY mechanism that can
 //!     invalidate it is the warm-hit fact-signature check.
 //!  3. Asserts the lazy semantics: the stale warm slot is REJECTED by
 //!     fact-validation (`!compile_slot_is_warm`), `ensure_compiled`
@@ -20,8 +18,8 @@
 //!     the new dependency content.
 //!
 //! These tests deliberately do NOT assert physical cache emptiness
-//! (`compile_slots.is_empty()`): a warm slot can survive the staging
-//! step and still be lazily rejected on read. The gate is
+//! (`compile_slots.is_empty()`): a warm slot can survive the
+//! dependency edit and still be lazily rejected on read. The gate is
 //! stale-miss + recompute + correct user-visible output.
 
 #![cfg(test)]
@@ -31,7 +29,7 @@ use verter_session::{CompileProfile, FileKind};
 #[path = "block_2_canary/harness.rs"]
 mod harness;
 
-use harness::{compile_main, prime_compile, standalone_host, upsert, upsert_no_evict};
+use harness::{compile_main, prime_compile, standalone_host, upsert};
 
 /// Canary — cross-file macro type member edit.
 ///
@@ -75,8 +73,9 @@ fn cross_file_macro_type_member_edit_invalidates_compile_slot() {
         "precondition: Comp.vue must have a warm compile slot after prime"
     );
 
-    // Edit the imported member's type WITHOUT the eager cascade.
-    upsert_no_evict(
+    // Edit the imported member's type — no eager cascade; the
+    // consumer's warm slot survives the dependency edit.
+    upsert(
         &host,
         "/src/types.ts",
         "export interface Foo { a: string; }\n",
@@ -154,7 +153,7 @@ fn runtime_import_body_edit_invalidates_compile_slot() {
     );
 
     // Edit ONLY the body of `helper` — signature stays `() => number`.
-    upsert_no_evict(
+    upsert(
         &host,
         "/src/utils.ts",
         "export function helper() { return 2; }\n",
@@ -235,8 +234,9 @@ fn external_src_template_edit_invalidates_compile_slot() {
         before.code
     );
 
-    // Edit the external template WITHOUT the eager cascade.
-    upsert_no_evict(
+    // Edit the external template — no eager cascade; the consumer's
+    // warm slot survives the dependency edit.
+    upsert(
         &host,
         "/src/tpl.html",
         "<section>BETA</section>\n",
@@ -308,8 +308,9 @@ fn side_effect_import_body_edit_invalidates_compile_slot() {
         "precondition: Comp.vue must have a warm compile slot after prime"
     );
 
-    // Edit ONLY the body of `setup.ts` WITHOUT the eager cascade.
-    upsert_no_evict(
+    // Edit ONLY the body of `setup.ts` — no eager cascade; the
+    // consumer's warm slot survives the dependency edit.
+    upsert(
         &host,
         "/src/setup.ts",
         "globalThis.__verter_setup = 2;\n",
@@ -389,8 +390,9 @@ fn custom_resolve_extensions_dep_edit_invalidates_compile_slot() {
          resolve_extensions list must still resolve `./types` to `.ts`"
     );
 
-    // Edit MyType WITHOUT the eager cascade.
-    upsert_no_evict(
+    // Edit MyType — no eager cascade; the consumer's warm slot
+    // survives the dependency edit.
+    upsert(
         &host,
         "/src/types.ts",
         "export interface MyType { foo: string; bar: number }\n",
@@ -463,8 +465,9 @@ fn tier3_dep_type_member_added_invalidates_compile_slot() {
         "precondition: Comp.vue must have a warm compile slot after prime"
     );
 
-    // ADD a sibling member WITHOUT the eager cascade.
-    upsert_no_evict(
+    // ADD a sibling member — no eager cascade; the consumer's warm
+    // slot survives the dependency edit.
+    upsert(
         &host,
         "/src/types.ts",
         "export interface MyType { foo: string; bar: number }\n",
@@ -532,8 +535,9 @@ fn tier3_dep_type_member_type_changed_invalidates_compile_slot() {
         "precondition: Comp.vue must have a warm compile slot after prime"
     );
 
-    // CHANGE the member's type WITHOUT the eager cascade.
-    upsert_no_evict(
+    // CHANGE the member's type — no eager cascade; the consumer's
+    // warm slot survives the dependency edit.
+    upsert(
         &host,
         "/src/types.ts",
         "export interface MyType { foo: number }\n",

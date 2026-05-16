@@ -1,11 +1,11 @@
 //! Shared harness for the Block 2 canary suite.
 //!
 //! The canary suite proves that the lazy fact-validation substrate
-//! backs every cross-file invalidation scenario WITHOUT the eager
-//! reverse-dependent invalidation cascade. Every canary test mutates
-//! the dependency through [`VerterHost::upsert_without_dependent_eviction`]
-//! so the eager cascade does NOT run — only fact-validation can
-//! invalidate a warm consumer result.
+//! backs every cross-file invalidation scenario. The owner-upsert path
+//! has no eager reverse-dependent invalidation cascade — a warm
+//! consumer result is invalidated only by fact-validation on read.
+//! Every canary test mutates the dependency through the plain
+//! [`VerterHost::upsert`] (the no-cascade production path).
 //!
 //! Helpers:
 //! - [`standalone_host`] — a hermetic `new_standalone` host (relative
@@ -13,8 +13,8 @@
 //! - [`workspace_host`] — a workspace-backed host rooted at
 //!   `/workspace`, for scenarios that need barrel / absolute-specifier
 //!   resolution.
-//! - [`upsert`] / [`upsert_no_evict`] — owner / dependency upserts;
-//!   `upsert_no_evict` is the cascade-suppressing dependency edit.
+//! - [`upsert`] — owner / dependency upsert through the plain
+//!   no-cascade `VerterHost::upsert`.
 //! - [`prime_compile`] — primes a warm compile slot via
 //!   `get_virtual_file`.
 //! - [`compile_main`] — reads the assembled `Main` virtual node, the
@@ -53,8 +53,16 @@ pub fn workspace_host(files: &[(&str, &str)]) -> (Arc<MemoryWorkspace>, Arc<Vert
     (workspace, host)
 }
 
-/// Upsert a file through the normal path (the eager cascade runs).
-/// Used for the initial owner + dependency setup before priming.
+/// Upsert a file through the plain [`VerterHost::upsert`] path.
+///
+/// `upsert` has no eager reverse-dependent invalidation cascade: an
+/// owner edit drains only the owner's own caches. A downstream
+/// consumer's warm slot / result physically survives an upstream
+/// dependency edit — the ONLY mechanism that can invalidate it is
+/// fact-validation against the freshly emitted dependency facts on the
+/// next read. That is exactly the lazy substrate the canary suite
+/// exercises, both for owner / dependency setup and for the
+/// dependency edit under test.
 pub fn upsert(host: &VerterHost, canonical: &str, source: &str, kind: FileKind) {
     let _ = host
         .upsert(UpsertRequest {
@@ -65,26 +73,6 @@ pub fn upsert(host: &VerterHost, canonical: &str, source: &str, kind: FileKind) 
             aliases: Vec::new(),
         })
         .expect("upsert");
-}
-
-/// Upsert a dependency WITHOUT the eager reverse-dependent cascade.
-///
-/// This is the canary suite's core mechanism: the dependency's own
-/// caches are drained (so the resolver re-emits fresh facts) but the
-/// reverse-dep cascade — the path that would physically evict the
-/// consumer's warm slot / result — is skipped. With the cascade
-/// suppressed, the ONLY mechanism that can invalidate the consumer is
-/// fact-validation against the freshly emitted dependency facts.
-pub fn upsert_no_evict(host: &VerterHost, canonical: &str, source: &str, kind: FileKind) {
-    let _ = host
-        .upsert_without_dependent_eviction(UpsertRequest {
-            canonical_id: Some(canonical.to_string()),
-            input_id: canonical.to_string(),
-            source: source.into(),
-            file_kind: kind,
-            aliases: Vec::new(),
-        })
-        .expect("upsert_without_dependent_eviction");
 }
 
 /// Prime a warm compile slot for `canonical` at the default profile.

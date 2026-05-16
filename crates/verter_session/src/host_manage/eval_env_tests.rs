@@ -66,23 +66,20 @@ fn eval_env_cache_db_clear_drains_all_entries() {
     assert!(db.get(&key).is_none(), "post-clear lookup MUST miss");
 }
 
-/// Block 1.J.3 production-path discriminator — the legacy
-/// `Arc<EvalEnv>` cache reflects a content edit through KEY identity,
-/// not through `eval_env_cache().clear()`.
+/// Production-path discriminator — the `Arc<EvalEnv>` cache reflects
+/// a content edit through KEY identity, not through an eager
+/// `eval_env_cache().clear()`.
 ///
-/// `upsert_without_dependent_eviction` runs the full own-canonical
-/// upsert pipeline but SKIPS the reverse-dep cascade — and the
-/// upsert's `eval_env_cache().clear()` lives inside that cascade
-/// block. So after this upsert the eval-env cache is NOT cleared.
-/// With the legacy storage keyed by the full R21 `FileArtifactKey`
-/// (content hash folded into the key), the edited file's new content
-/// hash yields a fresh key → cache miss → recompute. The freshly
-/// built env therefore reflects the new declaration.
+/// The owner-upsert path has no eager reverse-dependent cascade and
+/// never clears the eval-env cache. With the storage keyed by the
+/// full R21 `FileArtifactKey` (content hash folded into the key), the
+/// edited file's new content hash yields a fresh key → cache miss →
+/// recompute. The freshly built env therefore reflects the new
+/// declaration.
 ///
-/// Discriminating: the assertion checks the env exposes the
-/// post-edit type declaration. The eager `clear()` is intentionally
-/// not exercised here — this proves cache CORRECTNESS comes from the
-/// key, which is the precondition for Block 2 removing the clear.
+/// Discriminating: the assertion checks the env exposes the post-edit
+/// type declaration. This proves cache CORRECTNESS comes from the key
+/// alone — no eager clear participates.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn base_eval_env_reflects_content_edit_without_eager_clear() {
@@ -115,12 +112,11 @@ fn base_eval_env_reflects_content_edit_without_eager_clear() {
         "precondition: initial eval-env does NOT know Bar"
     );
 
-    // Edit the file — add a second interface. Crucially via
-    // `upsert_without_dependent_eviction`, which SKIPS the reverse-dep
-    // cascade where the upsert's `eval_env_cache().clear()` lives. The
-    // eval-env cache is therefore NOT cleared by this upsert.
+    // Edit the file — add a second interface. The owner-upsert path
+    // has no eager reverse-dependent cascade and never clears the
+    // eval-env cache.
     let _ = host
-        .upsert_without_dependent_eviction(UpsertRequest {
+        .upsert(UpsertRequest {
             canonical_id: Some("/src/types.ts".to_string()),
             input_id: "/src/types.ts".to_string(),
             source: Arc::from(
@@ -139,8 +135,8 @@ fn base_eval_env_reflects_content_edit_without_eager_clear() {
         .expect("eval-env builds for edited content");
     assert!(
         env_after.type_declaration_id("Bar").is_some(),
-        "B1.j.3: the eval-env cache MUST reflect a content edit via \
-         key identity (the new content hash is part of the \
+        "the eval-env cache MUST reflect a content edit via key \
+         identity (the new content hash is part of the \
          FileArtifactKey), NOT via eager `eval_env_cache().clear()`. \
          A missing `Bar` here means a stale env was served."
     );

@@ -2029,10 +2029,9 @@ defineProps<{
 }
 
 /// Lazy-substrate discriminator for the same `typeof` import recovery
-/// scenario as [`imported_default_typeof_recovers_after_dependency_is_added`],
-/// but the late dependency is added via
-/// [`VerterHost::upsert_without_dependent_eviction`] — so the eager
-/// reverse-dependent cascade does NOT evict `/Comp.vue`'s artifacts.
+/// scenario as [`imported_default_typeof_recovers_after_dependency_is_added`].
+/// The owner-upsert path has no eager reverse-dependent cascade, so
+/// adding the late dependency does NOT evict `/Comp.vue`'s artifacts.
 ///
 /// This isolates the fact-validation substrate: when `./theme` first
 /// appears, `/Comp.vue` (which never changed) keeps its content-pinned
@@ -2049,7 +2048,7 @@ defineProps<{
 /// validates against its own stale `ImportRoute` snapshot and the
 /// re-evaluation keeps returning `Unknown { raw: "semanticMiss" }`.
 #[test]
-fn imported_typeof_recovers_when_dependency_added_without_dependent_eviction() {
+fn imported_typeof_recovers_when_dependency_added() {
     let project = make_project();
     project
         .upsert_base(
@@ -2072,13 +2071,13 @@ defineProps<{
         "missing dependency should not resolve imported typeof exactly"
     );
 
-    // Add `/theme.ts` WITHOUT the eager reverse-dependent cascade. The
-    // cascade is precisely the path that would evict `/Comp.vue`'s
-    // artifacts; skipping it forces the lazy fact-validation substrate
-    // to detect that `./theme` is now resolvable.
+    // Add `/theme.ts`. The owner-upsert path has no eager
+    // reverse-dependent cascade, so `/Comp.vue`'s artifacts are not
+    // evicted — the lazy fact-validation substrate is what must detect
+    // that `./theme` is now resolvable.
     let _theme_update = project
         .host()
-        .upsert_without_dependent_eviction(crate::UpsertRequest {
+        .upsert(crate::UpsertRequest {
             canonical_id: Some("/theme.ts".to_string()),
             input_id: "/theme.ts".to_string(),
             source: Arc::from(

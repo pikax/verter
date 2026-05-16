@@ -1,17 +1,15 @@
 //! Block 2 canary suite — component-meta cross-file lazy invalidation.
 //!
-//! The Block 2 cutover removes the eager reverse-dependent
-//! invalidation cascade from the owner-upsert path. These canary
-//! tests are the coherent named gate that proves the lazy
-//! fact-validation substrate backs every `getComponentMeta`
-//! cross-file invalidation scenario WITHOUT that cascade.
+//! The owner-upsert path has no eager reverse-dependent invalidation
+//! cascade. These canary tests are the coherent named gate that proves
+//! the lazy fact-validation substrate backs every `getComponentMeta`
+//! cross-file invalidation scenario.
 //!
 //! Each test:
 //!  1. Sets up an owner SFC + dependency file(s) and primes a warm
 //!     `get_component_meta` result.
-//!  2. Mutates the dependency through
-//!     [`VerterHost::upsert_without_dependent_eviction`] — the eager
-//!     cascade does NOT run, so the owner's warm
+//!  2. Mutates the dependency through the plain [`VerterHost::upsert`]
+//!     — no eager cascade runs, so the owner's warm
 //!     `ComponentMetaResultDb` entry physically survives. The ONLY
 //!     mechanism that can invalidate it is `validates_fact_signature`
 //!     on the warm-hit path.
@@ -22,7 +20,7 @@
 //!
 //! These tests deliberately do NOT assert physical cache emptiness
 //! (`cached_meta_payload.is_none()`): a warm entry can survive the
-//! staging step and still be lazily rejected on read. The gate is
+//! dependency edit and still be lazily rejected on read. The gate is
 //! stale-miss + recompute + correct user-visible props.
 
 #![cfg(test)]
@@ -32,7 +30,7 @@ use verter_session::FileKind;
 #[path = "block_2_canary/harness.rs"]
 mod harness;
 
-use harness::{meta_hits, meta_misses, upsert_no_evict, workspace_host};
+use harness::{meta_hits, meta_misses, upsert, workspace_host};
 
 /// Assert an unedited second `get_component_meta` is a warm hit, then
 /// return the pre-edit miss counter — establishes the baseline that
@@ -85,13 +83,14 @@ fn imported_prop_type_edit_misses_warm_component_meta() {
 
     let misses_before = warm_sanity_then_misses(&host, "/workspace/src/Comp.vue");
 
-    // Edit the imported member's type WITHOUT the eager cascade.
+    // Edit the imported member's type — no eager cascade; the owner's
+    // warm ComponentMetaResultDb entry survives the dependency edit.
     let edited = "export interface Foo { a: string; }\n";
     workspace.inject_file(
         "/workspace/src/types.ts".into(),
         std::sync::Arc::from(edited),
     );
-    upsert_no_evict(&host, "/workspace/src/types.ts", edited, FileKind::NonSfc);
+    upsert(&host, "/workspace/src/types.ts", edited, FileKind::NonSfc);
 
     let after = host
         .get_component_meta("/workspace/src/Comp.vue")
@@ -189,13 +188,14 @@ fn barrel_reexport_leaf_edit_recomputes_with_new_content() {
 
     let misses_before = meta_misses(&host);
 
-    // Edit the barrel LEAF (rename the member) WITHOUT the eager cascade.
+    // Edit the barrel LEAF (rename the member) — no eager cascade; the
+    // owner's warm result survives the dependency edit.
     let edited_leaf = "export interface ButtonProps { renamed: string }\n";
     workspace.inject_file(
         "/workspace/src/types.ts".into(),
         std::sync::Arc::from(edited_leaf),
     );
-    upsert_no_evict(
+    upsert(
         &host,
         "/workspace/src/types.ts",
         edited_leaf,
@@ -286,13 +286,14 @@ fn transitive_type_dep_edit_misses_warm_component_meta() {
 
     let misses_before = warm_sanity_then_misses(&host, "/workspace/src/App.vue");
 
-    // Edit the TRANSITIVE grandparent `nested.ts` WITHOUT the eager cascade.
+    // Edit the TRANSITIVE grandparent `nested.ts` — no eager cascade;
+    // the owner's warm result survives the dependency edit.
     let edited_nested = "export type Nested = number\n";
     workspace.inject_file(
         "/workspace/src/nested.ts".into(),
         std::sync::Arc::from(edited_nested),
     );
-    upsert_no_evict(
+    upsert(
         &host,
         "/workspace/src/nested.ts",
         edited_nested,
@@ -365,14 +366,14 @@ fn route_surface_dep_edit_misses_warm_component_meta() {
 
     let misses_before = warm_sanity_then_misses(&host, "/workspace/src/Comp.vue");
 
-    // Edit the route source type — `RProps` gains `b`. WITHOUT the
-    // eager cascade.
+    // Edit the route source type — `RProps` gains `b`. No eager
+    // cascade; the owner's warm result survives the dependency edit.
     let edited = "export interface RProps { a: number; b: string; }\n";
     workspace.inject_file(
         "/workspace/src/types.ts".into(),
         std::sync::Arc::from(edited),
     );
-    upsert_no_evict(&host, "/workspace/src/types.ts", edited, FileKind::NonSfc);
+    upsert(&host, "/workspace/src/types.ts", edited, FileKind::NonSfc);
 
     let after = host
         .get_component_meta("/workspace/src/Comp.vue")

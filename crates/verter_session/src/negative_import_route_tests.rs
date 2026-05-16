@@ -32,10 +32,11 @@
 //! Discriminating fixture: an owner imports `./late_dep`, which does
 //! not exist when the owner's `IndexedReady` is materialised — so
 //! `IndexedReady.import_routes['./late_dep']` is a known-miss snapshot.
-//! `./late_dep.ts` is then upserted via `upsert_without_dependent_eviction`,
-//! so the owner's `IndexedReady` (and its stale negative snapshot)
-//! survives. Pre-fix `resolve_type_dependency_canonical` keeps
-//! returning `None`; post-fix it recomputes and resolves the new file.
+//! `./late_dep.ts` is then upserted; the owner-upsert path has no
+//! eager reverse-dependent cascade, so the owner's `IndexedReady`
+//! (and its stale negative snapshot) survives. Pre-fix
+//! `resolve_type_dependency_canonical` keeps returning `None`;
+//! post-fix it recomputes and resolves the new file.
 use std::sync::Arc;
 
 use crate::{FileKind, HostConfig, UpsertRequest, VerterHost};
@@ -98,21 +99,21 @@ fn negative_import_route_reopens_after_target_file_appears() {
         "the import must not resolve before the target file exists",
     );
 
-    // The target file appears. `upsert_without_dependent_eviction`
-    // SKIPS the reverse-dep cascade, so the owner's `IndexedReady`
+    // The target file appears. The owner-upsert path has no eager
+    // reverse-dependent cascade, so the owner's `IndexedReady`
     // (carrying the stale `./late_dep` known-miss snapshot) is NOT
     // evicted — exactly the lingering-stale state that exposes the
     // negative-snapshot defect.
     let late_dep = "/neg_route/late_dep.ts";
     let _ = host
-        .upsert_without_dependent_eviction(UpsertRequest {
+        .upsert(UpsertRequest {
             canonical_id: Some(late_dep.to_string()),
             input_id: late_dep.to_string(),
             source: Arc::from("export type LateType = { resolved: true };\n"),
             file_kind: FileKind::from_path(late_dep),
             aliases: Vec::new(),
         })
-        .expect("late_dep upsert without dependent eviction");
+        .expect("late_dep upsert");
 
     // Sanity: the owner's `IndexedReady` survived the staging step and
     // STILL carries the stale known-miss snapshot. If this is `None`,

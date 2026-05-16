@@ -300,10 +300,9 @@ fn cache_invalidation_after_dep_edit_surfaces_new_content() {
 }
 
 /// Lazy-substrate discriminator for the evict/reload invariant in the
-/// same scenario as [`cache_invalidation_after_dep_edit_surfaces_new_content`],
-/// but the dependency edit is routed through
-/// [`VerterHost::upsert_without_dependent_eviction`] so the eager
-/// reverse-dependent cascade does NOT clear `/workspace/src/Comp.vue`'s
+/// same scenario as [`cache_invalidation_after_dep_edit_surfaces_new_content`].
+/// The owner-upsert path has no eager reverse-dependent cascade, so
+/// the dependency edit does NOT clear `/workspace/src/Comp.vue`'s
 /// artifacts. After the dep edit the owner is explicitly evicted with
 /// `host.evict`.
 ///
@@ -320,7 +319,7 @@ fn cache_invalidation_after_dep_edit_surfaces_new_content() {
 /// what breaks this test if reverted — pre-fix the warm
 /// `get_component_meta` returns `None`.
 #[test]
-fn evicted_owner_reloads_after_dep_edit_without_dependent_eviction() {
+fn evicted_owner_reloads_after_dep_edit() {
     #[allow(deprecated)]
     let project_graph =
         verter_workspace::ProjectGraph::from_configs(vec![make_project_config("/workspace")]);
@@ -350,9 +349,9 @@ fn evicted_owner_reloads_after_dep_edit_without_dependent_eviction() {
         "cold resolution must include `count` prop (got {prop_names_pre:?})"
     );
 
-    // Edit the upstream types file WITHOUT the eager reverse-dependent
-    // cascade. The cascade is precisely the path that would evict
-    // `/workspace/src/Comp.vue`'s artifacts.
+    // Edit the upstream types file. The owner-upsert path has no
+    // eager reverse-dependent cascade, so `/workspace/src/Comp.vue`'s
+    // artifacts are not evicted by this dependency edit.
     let edited_types = r#"export interface Props {
   message: string,
   newProp: boolean,
@@ -360,7 +359,7 @@ fn evicted_owner_reloads_after_dep_edit_without_dependent_eviction() {
 "#;
     workspace.inject_file("/workspace/src/types.ts".into(), Arc::from(edited_types));
     let _dep_update = host
-        .upsert_without_dependent_eviction(UpsertRequest {
+        .upsert(UpsertRequest {
             canonical_id: Some("/workspace/src/types.ts".into()),
             input_id: "/workspace/src/types.ts".into(),
             source: Arc::from(edited_types),

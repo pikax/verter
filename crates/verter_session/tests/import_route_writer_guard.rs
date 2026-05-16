@@ -12,7 +12,7 @@
 //!    single-producer: only [`VerterHost::set_import_dependencies`]
 //!    may insert, extend, or assign entries. Lifecycle reset methods
 //!    ([`VerterHost::configure_projects`] and
-//!    [`VerterHost::upsert_via_scheduler_with_options`]) may `clear()`
+//!    [`VerterHost::upsert_via_scheduler_with_priority`]) may `clear()`
 //!    the field, but never produce new entries. Any other writer is a
 //!    correctness defect: extending the sidecar from a non-snapshot
 //!    producer risks stamping a stale known-miss with a fresh
@@ -89,7 +89,7 @@ const ROUTE_MAP_ADMIT_ALLOWED_FNS: &[&str] = &[
 
 /// Whitelisted reset methods for the positive route map.
 const ROUTE_MAP_CLEAR_ALLOWED_FNS: &[&str] =
-    &["configure_projects", "upsert_via_scheduler_with_options"];
+    &["configure_projects", "upsert_via_scheduler_with_priority"];
 
 /// The only writer allowed to admit known-miss sidecar entries
 /// (snapshot assignment).
@@ -97,7 +97,7 @@ const SIDECAR_ASSIGN_ALLOWED_FNS: &[&str] = &["set_import_dependencies"];
 
 /// Whitelisted reset methods for the known-miss sidecar.
 const SIDECAR_CLEAR_ALLOWED_FNS: &[&str] =
-    &["configure_projects", "upsert_via_scheduler_with_options"];
+    &["configure_projects", "upsert_via_scheduler_with_priority"];
 
 /// Visitor that tracks the current enclosing `fn` name and the local
 /// variables in scope that are bound from
@@ -685,7 +685,7 @@ fn format_violations(violations: &[Violation]) -> String {
 ///   * `VerterHost::cache_positive_import_route_result` — positive-only
 ///     point admission;
 ///   * `VerterHost::configure_projects` — lifecycle clear;
-///   * `VerterHost::upsert_via_scheduler_with_options` — lifecycle clear.
+///   * `VerterHost::upsert_via_scheduler_with_priority` — lifecycle clear.
 ///
 /// Any other writer flagged here means a new admission path was added
 /// without being routed through the canonical helper. The fix is to
@@ -719,7 +719,7 @@ fn import_routes_writer_allow_list() {
          `DerivedRawState.import_routes` is a two-mode admission field.\n\
            * Positive route point admission: `cache_positive_import_route_result`.\n\
            * Full caller-supplied snapshot: `set_import_dependencies`.\n\
-           * Lifecycle clear: `configure_projects`, `upsert_via_scheduler_with_options`.\n\
+           * Lifecycle clear: `configure_projects`, `upsert_via_scheduler_with_priority`.\n\
          If you need to publish a host-resolved positive route from a\n\
          new caller, route through `cache_positive_import_route_result`.\n\
          If you need to publish a bundler-supplied snapshot with known\n\
@@ -740,7 +740,7 @@ fn import_routes_writer_allow_list() {
 /// (`set_import_dependencies`) computes the per-specifier generation
 /// table from the caller's snapshot and assigns the whole map. The
 /// two lifecycle reset methods (`configure_projects` and
-/// `upsert_via_scheduler_with_options`) may `.clear()` the sidecar
+/// `upsert_via_scheduler_with_priority`) may `.clear()` the sidecar
 /// alongside `import_routes`. No other writer is allowed —
 /// admitting from a non-snapshot producer would re-stamp a known
 /// miss at the current `content_generation` and incorrectly extend a
@@ -768,7 +768,7 @@ fn known_miss_generation_sidecar_strict() {
          `DerivedRawState.import_routes_known_miss_recorded_at_generation`\n\
          is single-producer. Snapshot assignment only inside\n\
          `set_import_dependencies`; `.clear()` only inside\n\
-         `configure_projects` and `upsert_via_scheduler_with_options`.\n\
+         `configure_projects` and `upsert_via_scheduler_with_priority`.\n\
          Any other writer admits a known-miss generation stamp from a\n\
          non-snapshot producer, which incorrectly extends a stale\n\
          negative answer. If you need to admit known misses, route\n\
@@ -888,7 +888,7 @@ fn quote_block_source(block: &Block) -> String {
 // Guard 4: lifecycle reset symmetry sentinel.
 // ---------------------------------------------------------------------------
 
-/// `configure_projects` and `upsert_via_scheduler_with_options` are the
+/// `configure_projects` and `upsert_via_scheduler_with_priority` are the
 /// two lifecycle reset producers. Both clear `import_routes` AND the
 /// known-miss generation sidecar — leaving the sidecar populated after
 /// either reset would carry a stale generation stamp into the next
@@ -913,8 +913,8 @@ fn lifecycle_reset_clears_both_route_and_sidecar() {
 
     let cp_body = find_fn_body(&lifecycle_parsed, "configure_projects")
         .expect("`configure_projects` must exist in host_lifecycle.rs");
-    let ups_body = find_fn_body(&upsert_parsed, "upsert_via_scheduler_with_options")
-        .expect("`upsert_via_scheduler_with_options` must exist in host_upsert.rs");
+    let ups_body = find_fn_body(&upsert_parsed, "upsert_via_scheduler_with_priority")
+        .expect("`upsert_via_scheduler_with_priority` must exist in host_upsert.rs");
 
     // `quote::ToTokens` renders the body as space-separated tokens,
     // so `entry.import_routes.clear()` becomes
@@ -937,12 +937,12 @@ fn lifecycle_reset_clears_both_route_and_sidecar() {
 
     assert!(
         ups_body.contains("import_routes . clear ("),
-        "`upsert_via_scheduler_with_options` must clear `import_routes` on \
+        "`upsert_via_scheduler_with_priority` must clear `import_routes` on \
          owner source update; got body:\n{ups_body}"
     );
     assert!(
         ups_body.contains("import_routes_known_miss_recorded_at_generation . clear ("),
-        "`upsert_via_scheduler_with_options` must clear \
+        "`upsert_via_scheduler_with_priority` must clear \
          `import_routes_known_miss_recorded_at_generation` alongside \
          `import_routes`; got body:\n{ups_body}"
     );

@@ -217,17 +217,17 @@ fn cross_file_type_edit_invalidates_consumer_via_fact_validation() {
 
 // ── Block 1.J.3 discriminators ────────────────────────────────────
 //
-// These tests upsert the dependency via
-// `upsert_without_dependent_eviction` so the eager reverse-dep
-// cascade does NOT physically clear the consumer's compile slot.
-// With the cascade suppressed, the ONLY mechanism that can
-// invalidate the consumer is the warm-hit fact-signature check
-// (`compile_slot_fact_signature_validates`). That isolation is what
-// makes each test discriminating: against the pre-1.J.3 producer
-// (no `FileWholeHash` for runtime imports / external `src=` deps)
-// the consumer's signature carries no fact for the edited dep, so
-// the warm hit is served stale; against the post-1.J.3 producer the
-// whole-hash fact mismatches and the warm hit misses.
+// These tests upsert the dependency through the plain `upsert`. The
+// owner-upsert path has no eager reverse-dependent cascade, so the
+// consumer's compile slot is not physically cleared by a dependency
+// edit. The ONLY mechanism that can invalidate the consumer is the
+// warm-hit fact-signature check (`compile_slot_fact_signature_validates`).
+// That isolation is what makes each test discriminating: against the
+// pre-1.J.3 producer (no `FileWholeHash` for runtime imports /
+// external `src=` deps) the consumer's signature carries no fact for
+// the edited dep, so the warm hit is served stale; against the
+// post-1.J.3 producer the whole-hash fact mismatches and the warm
+// hit misses.
 
 /// Discriminator 1 — compile-slot invalidation on a runtime-import
 /// body edit.
@@ -295,10 +295,10 @@ fn compile_slot_invalidates_on_runtime_import_body_edit() {
     );
 
     // Edit ONLY the body of `helper` — signature stays `() => number`.
-    // Suppress the eager cascade so fact-validation is the sole
-    // invalidation path.
+    // The owner-upsert path has no eager cascade, so fact-validation
+    // is the sole invalidation path.
     let _ = host
-        .upsert_without_dependent_eviction(UpsertRequest {
+        .upsert(UpsertRequest {
             canonical_id: Some("/src/utils.ts".to_string()),
             input_id: "/src/utils.ts".to_string(),
             source: "export function helper() { return 2; }\n".into(),
@@ -375,10 +375,11 @@ fn ensure_compiled_warm_path_validates_compile_slot_fact_signature() {
         "precondition: Comp.vue warm after first ensure_compiled."
     );
 
-    // Edit the imported type — change the member's type. Suppress the
-    // eager cascade so only fact-validation can invalidate.
+    // Edit the imported type — change the member's type. The
+    // owner-upsert path has no eager cascade, so only fact-validation
+    // can invalidate.
     let _ = host
-        .upsert_without_dependent_eviction(UpsertRequest {
+        .upsert(UpsertRequest {
             canonical_id: Some("/src/types.ts".to_string()),
             input_id: "/src/types.ts".to_string(),
             source: "export interface Foo { a: string; }\n".into(),
@@ -470,9 +471,10 @@ fn compile_slot_invalidates_on_external_src_template_edit() {
             .collect::<Vec<_>>()
     );
 
-    // Edit the external template. Suppress the eager cascade.
+    // Edit the external template. The owner-upsert path has no eager
+    // cascade.
     let _ = host
-        .upsert_without_dependent_eviction(UpsertRequest {
+        .upsert(UpsertRequest {
             canonical_id: Some("/src/tpl.html".to_string()),
             input_id: "/src/tpl.html".to_string(),
             source: "<section>B</section>\n".into(),
@@ -558,10 +560,10 @@ fn compile_slot_invalidates_on_side_effect_import_body_edit() {
             .collect::<Vec<_>>()
     );
 
-    // Edit ONLY the body of `setup.ts`. Suppress the eager cascade so
-    // fact-validation is the sole invalidation path.
+    // Edit ONLY the body of `setup.ts`. The owner-upsert path has no
+    // eager cascade, so fact-validation is the sole invalidation path.
     let _ = host
-        .upsert_without_dependent_eviction(UpsertRequest {
+        .upsert(UpsertRequest {
             canonical_id: Some("/src/setup.ts".to_string()),
             input_id: "/src/setup.ts".to_string(),
             source: "globalThis.__verter_setup = 2;\n".into(),

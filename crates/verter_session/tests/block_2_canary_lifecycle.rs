@@ -1,10 +1,9 @@
 //! Block 2 canary suite — negative-result recovery, evicted-owner
 //! reload, and the over-invalidation guard.
 //!
-//! The Block 2 cutover removes the eager reverse-dependent
-//! invalidation cascade from the owner-upsert path. These canary
-//! tests are the coherent named gate for the lifecycle slices of the
-//! lazy fact-validation substrate:
+//! The owner-upsert path has no eager reverse-dependent invalidation
+//! cascade. These canary tests are the coherent named gate for the
+//! lifecycle slices of the lazy fact-validation substrate:
 //!
 //!  - **Negative-result recovery** — a previously-missing dependency
 //!    appears; the consumer's stale `semanticMiss` is invalidated and
@@ -17,9 +16,8 @@
 //!    warm and unchanged (negative: the substrate must NOT
 //!    over-invalidate).
 //!
-//! Every mutation routes through
-//! [`VerterHost::upsert_without_dependent_eviction`] so the eager
-//! cascade does NOT run — only fact-validation drives invalidation
+//! Every mutation routes through the plain [`VerterHost::upsert`] —
+//! no eager cascade runs, so only fact-validation drives invalidation
 //! (and, for the over-invalidation guard, only fact-validation may
 //! decide to leave a warm result alone).
 
@@ -31,9 +29,7 @@ use verter_type_expr::{PrimitiveName, TypeExpr};
 #[path = "block_2_canary/harness.rs"]
 mod harness;
 
-use harness::{
-    meta_hits, meta_misses, prime_compile, standalone_host, upsert, upsert_no_evict, workspace_host,
-};
+use harness::{meta_hits, meta_misses, prime_compile, standalone_host, upsert, workspace_host};
 
 /// Resolve the evaluated type of a single prop from an
 /// `ExpandedComponentTypes` snapshot.
@@ -94,11 +90,10 @@ fn negative_result_recovers_when_missing_dependency_appears() {
         evaluated_prop(&initial, "ui")
     );
 
-    // ADD `./theme` WITHOUT the eager cascade — the cascade is the
-    // path that would evict `/src/Comp.vue`'s artifacts; skipping it
-    // forces the lazy fact-validation substrate to detect that
-    // `./theme` is now resolvable.
-    upsert_no_evict(
+    // ADD `./theme` through the plain `upsert` — no eager cascade
+    // evicts `/src/Comp.vue`'s artifacts, so the lazy fact-validation
+    // substrate is what must detect that `./theme` is now resolvable.
+    upsert(
         &host,
         "/src/theme.ts",
         "export default {\n  item: \"item\",\n  body: \"body\",\n}\n",
@@ -139,11 +134,10 @@ fn negative_result_recovers_when_missing_dependency_appears() {
 /// dependency edit.
 ///
 /// `Comp.vue` imports `Props` from `types.ts`. After a `types.ts`
-/// edit routed through `upsert_without_dependent_eviction` (the eager
-/// cascade does NOT evict the owner's artifacts) the owner is
-/// EXPLICITLY evicted with `host.evict`. The next `get_component_meta`
-/// must reload the evicted owner to authoritative state and reflect
-/// the edit.
+/// edit through the plain `upsert` (no eager cascade evicts the
+/// owner's artifacts) the owner is EXPLICITLY evicted with
+/// `host.evict`. The next `get_component_meta` must reload the evicted
+/// owner to authoritative state and reflect the edit.
 ///
 /// Discrimination property: an evicted owner must reload through
 /// `ensure_loaded` rather than honour a stale
@@ -184,14 +178,14 @@ fn evicted_owner_reloads_to_authoritative_state_after_dep_edit() {
         a_pre.type_expr
     );
 
-    // Edit `types.ts` WITHOUT the eager cascade, then explicitly
-    // evict the owner.
+    // Edit `types.ts` through the plain `upsert` (no eager cascade),
+    // then explicitly evict the owner.
     let edited = "export interface Props { a: string; }\n";
     workspace.inject_file(
         "/workspace/src/types.ts".into(),
         std::sync::Arc::from(edited),
     );
-    upsert_no_evict(&host, "/workspace/src/types.ts", edited, FileKind::NonSfc);
+    upsert(&host, "/workspace/src/types.ts", edited, FileKind::NonSfc);
     host.evict("/workspace/src/Comp.vue");
 
     // The evicted owner must reload to authoritative state and reflect
@@ -217,8 +211,8 @@ fn evicted_owner_reloads_to_authoritative_state_after_dep_edit() {
 ///
 /// `Comp.vue` imports a macro type from `types.ts`. Adding AND then
 /// editing a wholly UNRELATED file `unrelated.ts` (which `Comp.vue`
-/// does NOT import) through `upsert_without_dependent_eviction` must
-/// leave `Comp.vue`'s warm compile slot warm and unchanged.
+/// does NOT import) through the plain `upsert` must leave `Comp.vue`'s
+/// warm compile slot warm and unchanged.
 ///
 /// Discrimination property: the compile slot's `fact_dep_signature`
 /// records ONLY the facts of files the consumer actually imports;
@@ -254,8 +248,8 @@ fn unrelated_file_upsert_keeps_compile_slot_warm() {
         "precondition: Comp.vue must have a warm compile slot after prime"
     );
 
-    // ADD a wholly unrelated file WITHOUT the eager cascade.
-    upsert_no_evict(
+    // ADD a wholly unrelated file through the plain `upsert`.
+    upsert(
         &host,
         "/src/unrelated.ts",
         "export const x = 1;\n",
@@ -267,8 +261,8 @@ fn unrelated_file_upsert_keeps_compile_slot_warm() {
          compile slot warm — fact-validation is path-precise"
     );
 
-    // EDIT that unrelated file WITHOUT the eager cascade.
-    upsert_no_evict(
+    // EDIT that unrelated file through the plain `upsert`.
+    upsert(
         &host,
         "/src/unrelated.ts",
         "export const x = 2;\n",
@@ -303,10 +297,9 @@ fn unrelated_file_upsert_keeps_compile_slot_warm() {
 ///
 /// `Comp.vue` imports `Foo` from `types.ts` and warm-caches a
 /// `get_component_meta` result. Adding a wholly UNRELATED file
-/// `other.ts` through `upsert_without_dependent_eviction` must leave
-/// the owner's warm `ComponentMetaResultDb` entry warm — the next
-/// `get_component_meta` HITS the warm cache and returns the unchanged
-/// props.
+/// `other.ts` through the plain `upsert` must leave the owner's warm
+/// `ComponentMetaResultDb` entry warm — the next `get_component_meta`
+/// HITS the warm cache and returns the unchanged props.
 ///
 /// Discrimination property: the published `ComponentMetaResultEntry`
 /// signature records only the facts of files the owner's resolution
@@ -349,13 +342,13 @@ fn unrelated_file_upsert_keeps_component_meta_warm() {
     );
     let misses_before = meta_misses(&host);
 
-    // ADD a wholly unrelated file WITHOUT the eager cascade.
+    // ADD a wholly unrelated file through the plain `upsert`.
     let unrelated = "export interface Other { z: boolean }\n";
     workspace.inject_file(
         "/workspace/src/other.ts".into(),
         std::sync::Arc::from(unrelated),
     );
-    upsert_no_evict(
+    upsert(
         &host,
         "/workspace/src/other.ts",
         unrelated,

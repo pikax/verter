@@ -10,7 +10,7 @@
 //!   per-file invalidation of compile slots (canonical-keyed).
 //!
 //! Internal lifecycle reset producers (`configure_projects`,
-//! `upsert_via_scheduler_with_options`, `clear_compile_cache`, etc.)
+//! `upsert_via_scheduler_with_priority`, `clear_compile_cache`, etc.)
 //! are explicitly allow-listed below — those are the documented
 //! lifecycle / project-graph reset entry points and they have always
 //! lived on the public `VerterHost` surface.
