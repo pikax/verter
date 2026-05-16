@@ -275,7 +275,7 @@ impl FactReadSetCell {
 ///
 /// Order: enum discriminant first, then per-variant field order.
 /// `FileWholeHash` < `DerivedFactHash` < `Parse` < `ResolveImports` <
-/// `RouteSurface`.
+/// `RouteSurface` < `ProjectGeneration`.
 fn compare_fact_refs(a: &FactVersionRef, b: &FactVersionRef) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     let da = discriminant_rank(a);
@@ -317,6 +317,10 @@ fn compare_fact_refs(a: &FactVersionRef, b: &FactVersionRef) -> std::cmp::Orderi
         (FactVersionRef::RouteSurface(a), FactVersionRef::RouteSurface(b)) => {
             compare_route_surface_fact(a, b)
         }
+        (
+            FactVersionRef::ProjectGeneration { generation: ga },
+            FactVersionRef::ProjectGeneration { generation: gb },
+        ) => ga.cmp(gb),
         // Cross-variant ordering already handled by discriminant_rank.
         _ => Ordering::Equal,
     }
@@ -330,6 +334,7 @@ fn discriminant_rank(fact: &FactVersionRef) -> u8 {
         FactVersionRef::Parse(_) => 2,
         FactVersionRef::ResolveImports(_) => 3,
         FactVersionRef::RouteSurface(_) => 4,
+        FactVersionRef::ProjectGeneration { .. } => 5,
     }
 }
 

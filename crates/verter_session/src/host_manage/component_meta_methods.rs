@@ -2937,7 +2937,7 @@ impl VerterHost {
         // validation depends on the owner whole-hash).
         let cross_file_facts: Vec<crate::resolver_core::FactVersionRef> = fact_versions
             .iter()
-            .filter(|fact| fact.canonical_id() != canonical)
+            .filter(|fact| fact.canonical_id() != Some(canonical))
             .cloned()
             .collect();
         crate::fact_signature_helpers::observe_fact_signature(&cross_file_facts);

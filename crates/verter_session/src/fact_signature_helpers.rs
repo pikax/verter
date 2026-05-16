@@ -653,17 +653,12 @@ impl ReadSetSignature {
             }
         }
         for fact in self.facts.iter() {
-            let canon: Arc<str> = match fact {
-                FactVersionRef::FileWholeHash { canonical_id, .. } => {
-                    Arc::from(canonical_id.as_str())
-                }
-                FactVersionRef::DerivedFactHash { canonical_id, .. } => {
-                    Arc::from(canonical_id.as_str())
-                }
-                FactVersionRef::Parse(p) => Arc::from(p.canonical_id.as_str()),
-                FactVersionRef::ResolveImports(r) => Arc::from(r.canonical_id.as_str()),
-                FactVersionRef::RouteSurface(r) => Arc::from(r.canonical_id.as_str()),
+            // `ProjectGeneration` references no canonical — it
+            // contributes nothing to the reverse index.
+            let Some(canon_str) = fact.canonical_id() else {
+                continue;
             };
+            let canon: Arc<str> = Arc::from(canon_str);
             if seen.insert(Arc::clone(&canon)) {
                 out.push(canon);
             }

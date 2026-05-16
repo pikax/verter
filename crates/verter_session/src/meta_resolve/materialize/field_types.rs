@@ -214,14 +214,22 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
         let _ = host_db.get_or_compute(&arc_key, ctx, move || {
             // The keyed scope canonical is the entry's self-root; every
             // canonical the materialisation walk observed (carried on
-            // the materialised value's `dep_signature`) is merged as a
-            // cross-file dependency fact so an edit to any contributing
-            // file invalidates the memo.
+            // the materialised value's `dep_signature`) is rooted by
+            // the fact matching its recorded `DepVersion` so an edit to
+            // any contributing file invalidates the memo.
+            //
+            // `engine_fact_signature_for_materialize_memo` returns
+            // `None` when an observed dependency carries a
+            // `RouteGeneration` version — route generation has no real
+            // validating source, so the entry must not be admitted to
+            // the shared memo. The freshly-computed `materialized`
+            // value is still returned to the caller below; only the
+            // shared-cache admission is refused.
             let fact_sig = crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo(
                 ctx,
                 captured_canonical.as_str(),
                 &captured_value.dep_signature,
-            );
+            )?;
             Some((captured_value, fact_sig))
         });
     }

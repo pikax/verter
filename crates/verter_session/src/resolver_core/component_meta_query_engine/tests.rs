@@ -3324,6 +3324,8 @@ defineProps<Pick<HelperProps, 'size'>>()
             r.canonical_id == "/src/Helper.ts"
         }
         crate::resolver_core::FactVersionRef::RouteSurface(r) => r.canonical_id == "/src/Helper.ts",
+        // Not file-scoped — references no canonical.
+        crate::resolver_core::FactVersionRef::ProjectGeneration { .. } => false,
     });
 
     assert!(

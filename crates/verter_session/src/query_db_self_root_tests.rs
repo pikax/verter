@@ -873,11 +873,14 @@ fn materialize_memo_db_observed_dependency_edit_rejects_warm_entry() {
     let primed_dep_sig = Arc::clone(&dep_sig);
     let primed = db
         .get_or_compute(&key, ctx, move || {
+            // `dep` is recorded as `DepVersion::WholeHash`, so the
+            // signature builder returns `Some` and the entry is
+            // admitted.
             let sig = engine_fact_signature_for_materialize_memo(
                 ctx,
                 scope_owned.as_str(),
                 &primed_dep_sig,
-            );
+            )?;
             Some((materialized("stale", Arc::clone(&primed_dep_sig)), sig))
         })
         .expect("cold publish succeeds");
@@ -1464,13 +1467,14 @@ fn materialize_memo_db_self_root_sibling_edit_rejects_warm_entry() {
     let owned = c.to_string();
     let _ = db
         .get_or_compute(&key, ctx, || {
-            // No observed dependencies — the discriminator is the
-            // scope canonical's own self-root `FileWholeHash`.
+            // No observed dependencies — the signature builder returns
+            // `Some` (no `RouteGeneration` entry) and the discriminator
+            // is the scope canonical's own self-root `FileWholeHash`.
             let sig = engine_fact_signature_for_materialize_memo(
                 ctx,
                 owned.as_str(),
                 &empty_dep_signature(),
-            );
+            )?;
             Some((materialized("stale", empty_dep_signature()), sig))
         })
         .expect("cold publish succeeds");
@@ -1598,29 +1602,43 @@ fn prepared_member_db_self_root_sibling_edit_rejects_warm_entry() {
     );
 }
 
-/// `MaterializeMemoDb`'s producer roots every observed canonical by its
-/// CURRENT-content `FileWholeHash`, independent of the
-/// [`crate::semantic_query::DepVersion`] variant recorded for it.
+/// `MaterializeMemoDb`'s producer REFUSES shared-memo admission for an
+/// entry whose materialisation walk observed a dependency via
+/// `DepVersion::RouteGeneration`.
 ///
-/// Discriminating property: the entry is keyed on `scope`, and its
-/// `materialized_dep_signature` lists an observed dependency `dep` with
-/// a NON-`WholeHash` `DepVersion` (`DepVersion::RouteGeneration`). The
-/// entry is cold-published with the EXACT production producer signature
-/// — [`engine_fact_signature_for_materialize_memo`]. The legacy
-/// `dep_signature_to_fact_signature` bridge keeps only
-/// `DepVersion::WholeHash` entries and would drop a `RouteGeneration`
-/// dependency entirely, leaving `dep` unrooted. The producer instead
-/// roots `dep` by its current-content `FileWholeHash`. `dep` is then
-/// edited through the skip-drain hook, shifting `dep`'s whole hash. A
-/// producer that relied on the `WholeHash`-only filter would leave the
-/// entry valid (no fact mentions `dep`) and serve it stale; with `dep`
-/// rooted by its current whole hash, the warm read misses and
-/// recomputes. (`MaterializeMemoDb::invalidate_canonical` matches only
-/// the keyed scope, so a normal `upsert(dep)` would not drain this
-/// scope-keyed entry regardless — the hook keeps the test isolated
-/// from any own-canonical drain side-effect.)
+/// Route generation is not a real production-validating fact: there is
+/// no authoritative route-generation counter, no production emitter,
+/// and `HostFenceValidator` treats `RouteGeneration` as always-valid.
+/// Rooting a `RouteGeneration`-observed dependency with any fact would
+/// be unsound — no fact can detect a content edit to that file — so
+/// [`engine_fact_signature_for_materialize_memo`] returns `None` and
+/// the publish site declines to insert the entry. The freshly-computed
+/// `MaterializedTypeExpr` is still returned to the caller; only the
+/// shared-cache admission is refused.
+///
+/// This test was previously
+/// `materialize_memo_db_non_whole_hash_observed_dependency_edit_rejects_warm_entry`
+/// and asserted the OLD behavior — that the producer rooted a
+/// `RouteGeneration`-observed canonical by re-reading its
+/// current-content `FileWholeHash`. That rooting was the edit/publish
+/// race: a current-content hash re-read at signature-build time roots
+/// the entry by the POST-edit hash of a dependency edited between
+/// materialisation and publish, so the stale value warm-validates. The
+/// strict-validation behavior legitimately changed — a
+/// `RouteGeneration` dependency now refuses admission outright — so the
+/// test is rewritten to assert the new, correct behavior.
+///
+/// Discriminating property: the `materialized_dep_signature` carries a
+/// `(dep, DepVersion::RouteGeneration(_))` entry.
+/// `engine_fact_signature_for_materialize_memo` MUST return `None`. A
+/// producer that re-reads `dep`'s current-content hash (the old body)
+/// returns `Some` and admits the entry — this test FAILS against that
+/// body (`assert!(sig.is_none())` trips, and `db.live_count()` is `1`
+/// not `0`). A producer that refuses `RouteGeneration` returns `None`,
+/// admits nothing, and a follow-up request cold-recomputes — this test
+/// PASSES.
 #[test]
-fn materialize_memo_db_non_whole_hash_observed_dependency_edit_rejects_warm_entry() {
+fn materialize_memo_db_route_generation_observed_dependency_refuses_admission() {
     use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo;
     use crate::semantic_query::{DepVersion, ProjectionMode};
 
@@ -1650,51 +1668,211 @@ fn materialize_memo_db_non_whole_hash_observed_dependency_edit_rejects_warm_entr
         ProjectionMode::Expanded,
     );
 
-    // The materialization walk observed `dep` via a NON-`WholeHash`
-    // dependency — a `RouteGeneration` entry. The legacy
-    // `dep_signature_to_fact_signature` bridge would drop this entry;
-    // the producer must root `dep` by its current whole hash anyway.
+    // The materialisation walk observed `dep` via a `RouteGeneration`
+    // dependency — route generation has no validating source.
     let dep_sig: crate::semantic_query::DepSignature = Arc::from(vec![(
         Arc::<str>::from(dep),
         DepVersion::RouteGeneration(1),
     )]);
+
+    // The signature builder MUST refuse admission — `None`. A producer
+    // that re-reads `dep`'s current-content hash returns `Some(...)`
+    // and this assertion trips.
+    let sig = engine_fact_signature_for_materialize_memo(ctx, scope, &dep_sig);
+    assert!(
+        sig.is_none(),
+        "engine_fact_signature_for_materialize_memo MUST return None when an observed \
+         dependency carries DepVersion::RouteGeneration — route generation has no \
+         validating source, so the entry must not be admitted to the shared memo. A \
+         producer that re-reads the dependency's current-content FileWholeHash returns \
+         Some and admits the entry; that current-content re-read is the edit/publish \
+         race this refusal closes.",
+    );
+
+    // Drive the publish path exactly as the production write-through
+    // does: the closure threads the `None` signature through `?`, so
+    // `get_or_compute`'s compute returns `None` and nothing is
+    // admitted.
+    let scope_owned = scope.to_string();
+    let primed_dep_sig = Arc::clone(&dep_sig);
+    let cold_value = db.get_or_compute(&key, ctx, move || {
+        let fact_sig =
+            engine_fact_signature_for_materialize_memo(ctx, scope_owned.as_str(), &primed_dep_sig)?;
+        Some((materialized("fresh", Arc::clone(&primed_dep_sig)), fact_sig))
+    });
+    // The publish path declined the entry — `get_or_compute` returns
+    // `None` because its compute closure short-circuited.
+    assert!(
+        cold_value.is_none(),
+        "the publish path threads the None signature through `?`, so get_or_compute \
+         declines to insert and returns None",
+    );
+    assert_eq!(
+        db.live_count(),
+        0,
+        "no MaterializeMemoDb entry may be admitted when the fact signature is refused \
+         — the shared memo stays empty",
+    );
+
+    // A get_component_meta-style follow-up request still produces the
+    // correct freshly-computed value — refusing shared-cache admission
+    // does NOT change observable request output, it only forgoes the
+    // memo. The cold closure runs because no entry was admitted.
+    let ctx2: &dyn ResolverContext = &host;
+    let mut cold_ran = false;
+    let value = db
+        .get_or_compute(&key, ctx2, || {
+            cold_ran = true;
+            Some((
+                materialized("recomputed", empty_dep_signature()),
+                empty_fact_signature(),
+            ))
+        })
+        .expect("the follow-up request still computes and returns a value");
+    assert!(
+        cold_ran,
+        "the follow-up request's cold closure MUST run — no entry was admitted, so there \
+         is no warm hit to short-circuit it",
+    );
+    assert!(
+        matches!(&value.type_expr, TypeExpr::Unknown { raw } if raw == "recomputed"),
+        "the refused-admission path still returns the freshly-computed value to the \
+         caller — user-visible request output is unaffected",
+    );
+}
+
+/// `MaterializeMemoDb`'s producer roots a dependency the materialiser
+/// observed as `DepVersion::ProjectGeneration` by a
+/// [`crate::resolver_core::FactVersionRef::ProjectGeneration`] carrying
+/// the OBSERVED generation — NOT by a `FileWholeHash`.
+///
+/// A `ProjectGeneration` dependency means the materialised value
+/// observed the project-wide resolver/config/lib generation, not that
+/// file's content. The correct root is therefore the observed
+/// generation: a project-shape change (`tsconfig`, path-alias, SDK,
+/// workspace-folder, project-graph) bumps the counter and rejects the
+/// memo; a pure file-content edit does not bump it and so does not
+/// over-invalidate.
+///
+/// Discriminating property — two halves:
+///
+/// 1. Signature shape. The produced signature MUST carry a
+///    `FactVersionRef::ProjectGeneration { generation: g_observed }`
+///    and MUST NOT carry any `FileWholeHash` for `dep`. The old body
+///    rooted a non-`WholeHash` dependency by re-reading its
+///    current-content `FileWholeHash`; this test FAILS against that
+///    body (the negative `FileWholeHash`-for-`dep` assertion trips,
+///    and no `ProjectGeneration` fact is found).
+/// 2. Warm rejection on generation advance. A memo entry rooted on
+///    observed generation `g` is REJECTED on warm read once the
+///    project generation advances past `g`. The generation is advanced
+///    with the bare `bump_project_generation()` (NOT
+///    `bump_project_generation_and_evict()`), so the entry is NOT
+///    evicted by the bump itself — the warm read misses purely because
+///    the `ProjectGeneration` fact's observed generation no longer
+///    equals the current one. A producer that emitted no
+///    `ProjectGeneration` fact (or rooted by `FileWholeHash` instead)
+///    would leave the entry valid and serve it stale.
+#[test]
+fn materialize_memo_db_project_generation_observed_dependency_roots_on_observed_generation() {
+    use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo;
+    use crate::semantic_query::{DepVersion, ProjectionMode};
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let scope = "/self_root_e2e/memo_pg_scope.ts";
+    let dep = "/self_root_e2e/memo_pg_dep.ts";
+    upsert(&host, scope, "export type Probe = number;\n");
+    upsert(&host, dep, "export interface Helper { a: number; }\n");
+    assert!(
+        host.ensure_indexed_ready(scope).is_some(),
+        "scope IndexedReady materialises",
+    );
+    assert!(
+        host.ensure_indexed_ready(dep).is_some(),
+        "dep IndexedReady materialises",
+    );
+
+    let ctx: &dyn ResolverContext = &host;
+    let db = host.project_type_store().materialize_memo_db();
+    let probe_expr = Arc::new(TypeExpr::Ref {
+        name: Arc::from("Probe"),
+        type_arguments: Arc::from(Vec::<TypeExpr>::new()),
+    });
+    let key = (
+        Arc::<str>::from(scope),
+        Arc::clone(&probe_expr),
+        ProjectionMode::Expanded,
+    );
+
+    // The materialiser observed `dep` against the project-wide
+    // generation `g_observed` — the host's current project generation.
+    let g_observed = host.project_type_store().project_generation();
+    let dep_sig: crate::semantic_query::DepSignature = Arc::from(vec![(
+        Arc::<str>::from(dep),
+        DepVersion::ProjectGeneration(g_observed),
+    )]);
+
+    // Half 1 — signature shape.
+    let sig = engine_fact_signature_for_materialize_memo(ctx, scope, &dep_sig)
+        .expect("a ProjectGeneration dep signature is admissible (Some)");
+    assert!(
+        sig.iter().any(|f| matches!(
+            f,
+            FactVersionRef::ProjectGeneration { generation } if *generation == g_observed
+        )),
+        "the producer MUST root a ProjectGeneration-observed dependency by a \
+         FactVersionRef::ProjectGeneration carrying the OBSERVED generation \
+         ({g_observed})",
+    );
+    assert!(
+        !sig.iter().any(|f| matches!(
+            f,
+            FactVersionRef::FileWholeHash { canonical_id, .. } if canonical_id == dep
+        )),
+        "the producer MUST NOT root a ProjectGeneration-observed dependency by a \
+         FileWholeHash for {dep} — a ProjectGeneration dependency observed the \
+         project-wide generation, not the file's content. Re-reading the current \
+         content hash is the edit/publish-race defect.",
+    );
+
+    // Prime the memo with the production signature.
     let scope_owned = scope.to_string();
     let primed_dep_sig = Arc::clone(&dep_sig);
     let primed = db
         .get_or_compute(&key, ctx, move || {
-            let sig = engine_fact_signature_for_materialize_memo(
+            let fact_sig = engine_fact_signature_for_materialize_memo(
                 ctx,
                 scope_owned.as_str(),
                 &primed_dep_sig,
-            );
-            // The signature MUST mention `dep` — a `RouteGeneration`
-            // observed canonical is still rooted by its whole hash.
-            assert!(
-                sig.iter().any(|f| matches!(
-                    f,
-                    crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, .. }
-                        if canonical_id == dep
-                )),
-                "producer must root the RouteGeneration-observed canonical {dep} by its \
-                 current-content FileWholeHash — the WholeHash-only bridge would drop it",
-            );
-            Some((materialized("stale", Arc::clone(&primed_dep_sig)), sig))
+            )?;
+            Some((materialized("stale", Arc::clone(&primed_dep_sig)), fact_sig))
         })
         .expect("cold publish succeeds");
     assert!(
         matches!(&primed.type_expr, TypeExpr::Unknown { raw } if raw == "stale"),
-        "fixture invariant: cold publish stores the primed materialized expression",
+        "fixture invariant: cold publish stores the primed materialised expression",
+    );
+    assert_eq!(
+        db.live_count(),
+        1,
+        "fixture invariant: the ProjectGeneration-rooted entry is admitted",
     );
 
-    // Edit ONLY the observed dependency through the skip-drain hook.
-    upsert_skip_drain(
-        &host,
-        dep,
-        "export interface Helper { a: string; b: number; }\n",
-    );
+    // Half 2 — advance the project generation WITHOUT evicting any
+    // cache. The bare `bump_project_generation()` increments the
+    // counter only; the entry stays in the DB, so the warm read must
+    // miss purely because the ProjectGeneration fact's observed
+    // generation no longer matches the current one.
+    let g_after = host.project_type_store().bump_project_generation();
     assert!(
-        host.ensure_indexed_ready(dep).is_some(),
-        "dep IndexedReady re-materialises",
+        g_after > g_observed,
+        "fixture invariant: the project generation advanced past the observed value",
+    );
+    assert_eq!(
+        db.live_count(),
+        1,
+        "fixture invariant: bump_project_generation does NOT evict the entry — the warm \
+         read must reject it on the ProjectGeneration fact alone",
     );
 
     let ctx2: &dyn ResolverContext = &host;
@@ -1708,19 +1886,17 @@ fn materialize_memo_db_non_whole_hash_observed_dependency_edit_rejects_warm_entr
             ))
         })
         .expect("warm path produces a value");
-
     assert!(
         cold_ran,
-        "MaterializeMemoDb warm read MUST reject the entry after a content edit to a \
-         canonical the materialization walk observed via a NON-WholeHash DepVersion — \
-         the producer roots every observed canonical by its current-content \
-         FileWholeHash regardless of DepVersion variant. A producer that relied on the \
-         WholeHash-only dep_signature_to_fact_signature filter would leave the entry \
-         valid and serve stale.",
+        "MaterializeMemoDb warm read MUST reject the entry once the project generation \
+         advances past the observed generation — the ProjectGeneration fact's observed \
+         value no longer equals the current generation. A producer that emitted no \
+         ProjectGeneration fact (or rooted by FileWholeHash instead) would leave the \
+         entry valid and serve stale.",
     );
     assert!(
         matches!(&warm.type_expr, TypeExpr::Unknown { raw } if raw == "recomputed"),
-        "the rejected warm entry must not bubble its stale materialized expression",
+        "the rejected warm entry must not bubble its stale materialised expression",
     );
 }
 
@@ -1807,7 +1983,10 @@ fn materialize_memo_db_observed_whole_hash_dependency_preserves_observed_hash() 
     // current content emits H2; one that preserves the observed hash
     // emits H1.
     let ctx: &dyn ResolverContext = &host;
-    let sig = engine_fact_signature_for_materialize_memo(ctx, scope, &dep_sig);
+    // `dep` is recorded as `DepVersion::WholeHash`, so the signature
+    // builder admits the entry (`Some`).
+    let sig = engine_fact_signature_for_materialize_memo(ctx, scope, &dep_sig)
+        .expect("a WholeHash-only dep signature must produce an admissible fact signature");
 
     let dep_fact_hash = sig.iter().find_map(|f| match f {
         FactVersionRef::FileWholeHash { canonical_id, hash } if canonical_id == dep => Some(*hash),

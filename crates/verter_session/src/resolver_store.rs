@@ -107,6 +107,14 @@ pub struct HostStoreView {
     /// Project identity captured at view-build time. Participates in
     /// `EffectiveExportSetKey` composition (R21).
     project_identity: crate::file_artifact_store::ProjectIdentity,
+    /// Monotonic project generation captured at view-build time. The
+    /// validator for `FactVersionRef::ProjectGeneration` compares a
+    /// fact's observed generation against this snapshot: a cached
+    /// value rooted on generation `g` validates iff `g` still equals
+    /// the current generation. The generation advances on `tsconfig`,
+    /// path-alias, SDK, workspace-folder, and project-graph changes
+    /// (never on a pure file-content edit).
+    project_generation: u64,
 }
 
 /// Structural key for snapshotting `ModuleAugmentationIndexShape`
@@ -139,6 +147,7 @@ impl Default for HostStoreView {
             route_db: None,
             env_hashes: crate::session_view::EnvHashes::default(),
             project_identity: crate::file_artifact_store::ProjectIdentity([0u8; 16]),
+            project_generation: 0,
         }
     }
 }
@@ -329,6 +338,12 @@ impl HostStoreView {
         // composition inside the per-domain validators.
         view.env_hashes = host.host_view_env_hashes();
         view.project_identity = host.host_view_project_identity();
+        // Project-generation capture for the
+        // `FactVersionRef::ProjectGeneration` validator. The host /
+        // workspace layer owns this counter; the view records it
+        // unchanged so a warm read rejects a value rooted on a
+        // superseded generation.
+        view.project_generation = host.project_type_store.project_generation();
         view.compat_token = view.compute_compat_token();
         view
     }
@@ -518,6 +533,16 @@ impl HostStoreView {
                 "RouteSurfaceFactRef canonical={} key={:?} lane={:?} expected={:?}",
                 r.canonical_id, r.key, r.lane, r.expected_hash
             )),
+            crate::resolver_core::FactVersionRef::ProjectGeneration { generation } => {
+                if self.project_generation == *generation {
+                    None
+                } else {
+                    Some(format!(
+                        "ProjectGeneration mismatch expected={generation} actual={}",
+                        self.project_generation
+                    ))
+                }
+            }
         }
     }
 
@@ -688,6 +713,15 @@ impl crate::resolver_core::StoreView for HostStoreView {
             }
             crate::resolver_core::FactVersionRef::RouteSurface(r) => {
                 crate::resolver_core::StoreView::validates_route_surface_domain(self, r)
+            }
+            // Project-generation fact: the cached value observed the
+            // project-wide generation `generation`. It validates iff
+            // the generation snapshotted at this view's build time
+            // still matches — a project-shape change (`tsconfig`,
+            // path-alias, SDK, workspace-folder, project-graph) bumps
+            // the counter and rejects the entry.
+            crate::resolver_core::FactVersionRef::ProjectGeneration { generation } => {
+                self.project_generation == *generation
             }
         }
     }

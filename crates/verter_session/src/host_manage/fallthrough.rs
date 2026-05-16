@@ -305,7 +305,7 @@ impl VerterHost {
             resolved_surface
                 .fact_versions
                 .iter()
-                .filter(|fact| fact.canonical_id() != canonical_id)
+                .filter(|fact| fact.canonical_id() != Some(canonical_id))
                 .cloned()
                 .collect();
         crate::fact_signature_helpers::observe_fact_signature(&cross_file_fallthrough_facts);
@@ -969,7 +969,7 @@ impl VerterHost {
                 // own warm validation. Empty signatures are a no-op.
                 let cross_file_facts: Vec<crate::resolver_core::FactVersionRef> = fact_versions
                     .iter()
-                    .filter(|fact| fact.canonical_id() != canonical_id)
+                    .filter(|fact| fact.canonical_id() != Some(canonical_id))
                     .cloned()
                     .collect();
                 crate::fact_signature_helpers::observe_fact_signature(&cross_file_facts);

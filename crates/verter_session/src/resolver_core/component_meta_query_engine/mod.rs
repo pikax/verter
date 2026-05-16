@@ -232,75 +232,76 @@ pub(crate) fn engine_fact_signature_for_prepared_target(
 /// self-root (the `SyntacticExportSet` surface signature already leads
 /// with a current-content `FileWholeHash` for it). The materialised
 /// value also depends on every canonical the materialisation walk
-/// observed — `materialized_dep_signature` carries those — so each is
-/// rooted as a cross-file dependency `FileWholeHash`: an edit to any
-/// contributing file invalidates the memo.
+/// observed — `materialized_dep_signature` carries those, each tagged
+/// with the [`crate::semantic_query::DepVersion`] the materialiser
+/// recorded — so each observed dependency is rooted by the fact that
+/// matches its recorded version.
 ///
-/// The dependency `FileWholeHash` for an observed canonical is sourced
-/// by the canonical's [`crate::semantic_query::DepVersion`] variant on
-/// `materialized_dep_signature`:
+/// Returns `None` when the signature cannot be built strictly enough
+/// to admit the entry to the shared memo (see `RouteGeneration`
+/// below). A `None` result refuses cache admission only — the caller
+/// still returns the freshly-computed `MaterializedTypeExpr`.
 ///
-/// - `DepVersion::WholeHash(observed)` — the materialiser already read
-///   and recorded the exact content hash it observed. That OBSERVED
-///   hash is preserved verbatim in the emitted `FileWholeHash`; the
-///   current-content oracle is NOT consulted. Re-reading the
-///   canonical's *current* hash here would be wrong: an edit landing in
-///   the race window between materialisation and this signature
-///   write-through would otherwise publish the stale
-///   `MaterializedTypeExpr` rooted by a fresh-looking current hash,
-///   which then validates on warm reads.
-/// - `DepVersion::RouteGeneration` / `DepVersion::ProjectGeneration` —
-///   the canonical has no observed `FileWholeHash` of its own (the
-///   legacy `dep_signature_to_fact_signature` bridge drops such entries
-///   entirely), but it is still a contributing file whose content edit
-///   must invalidate the memo, so it is rooted by its current whole
-///   hash via the authoritative current-content oracle
-///   ([`crate::fact_signature_helpers::current_content_whole_hash_fact`])
-///   rather than skipped.
+/// Per-`DepVersion` rooting:
+///
+/// - `DepVersion::WholeHash(observed)` — the materialiser observed
+///   that file's content version. The OBSERVED hash is preserved
+///   verbatim in the emitted `FileWholeHash`; the current-content
+///   oracle is NOT consulted. Re-reading the canonical's *current*
+///   hash would be wrong: an edit landing in the race window between
+///   materialisation and this signature write-through would otherwise
+///   publish the stale `MaterializedTypeExpr` rooted by a
+///   fresh-looking current hash, which then validates on warm reads.
+/// - `DepVersion::ProjectGeneration(observed)` — the materialiser
+///   observed the project-wide resolver/config/lib generation, not
+///   that file's content. It is rooted by a
+///   [`crate::resolver_core::FactVersionRef::ProjectGeneration`]
+///   carrying the OBSERVED generation: a project-shape change bumps
+///   the counter and rejects the memo. A pure file-content edit does
+///   not bump the generation, so this fact does not over-invalidate.
+/// - `DepVersion::RouteGeneration(_)` — route generation is not a
+///   real production-validating fact: there is no authoritative
+///   route-generation counter and no production emitter, and
+///   `HostFenceValidator` treats `RouteGeneration` as always-valid.
+///   Rooting it would be unsound (it cannot detect a content edit to
+///   the observed file). The function therefore returns `None` so the
+///   entry is NOT admitted to the shared `MaterializeMemoDb` until
+///   route generation has a real validating source.
 pub(crate) fn engine_fact_signature_for_materialize_memo(
     ctx: &dyn ResolverContext,
     scope_canonical_id: &str,
     materialized_dep_signature: &crate::semantic_query::DepSignature,
-) -> std::sync::Arc<[crate::resolver_core::FactVersionRef]> {
+) -> Option<std::sync::Arc<[crate::resolver_core::FactVersionRef]>> {
     let mut entries: Vec<crate::resolver_core::FactVersionRef> =
         engine_fact_signature_for_canonical_surface(ctx, scope_canonical_id).to_vec();
-    // Root every observed canonical by a dependency `FileWholeHash`.
-    // The hash source depends on the recorded `DepVersion`:
-    //
-    // - `WholeHash(observed)` — preserve the OBSERVED hash the
-    //   materialiser actually read. Re-reading the canonical's current
-    //   hash would publish a stale memo rooted by a fresh-looking hash
-    //   if the dependency is edited in the materialise → write-through
-    //   race window.
-    // - `RouteGeneration` / `ProjectGeneration` — no observed
-    //   `FileWholeHash` exists (the `dep_signature_to_fact_signature`
-    //   bridge drops these), so fall back to the current-content oracle
-    //   so the contributing file is still rooted at all.
     for (observed_canonical, dep_version) in materialized_dep_signature.iter() {
-        if observed_canonical.as_ref() == scope_canonical_id {
-            // The keyed scope is already self-rooted by the surface
-            // signature above; do not double-root it.
-            continue;
-        }
         match dep_version {
             crate::semantic_query::DepVersion::WholeHash(observed_hash) => {
+                if observed_canonical.as_ref() == scope_canonical_id {
+                    // The keyed scope is already self-rooted by the
+                    // surface signature above; do not double-root it.
+                    continue;
+                }
                 entries.push(crate::resolver_core::FactVersionRef::FileWholeHash {
                     canonical_id: observed_canonical.as_ref().to_string(),
                     hash: *observed_hash,
                 });
             }
-            crate::semantic_query::DepVersion::RouteGeneration(_)
-            | crate::semantic_query::DepVersion::ProjectGeneration(_) => {
-                if let Some(fact) = crate::fact_signature_helpers::current_content_whole_hash_fact(
-                    ctx,
-                    observed_canonical.as_ref(),
-                ) {
-                    entries.push(fact);
-                }
+            crate::semantic_query::DepVersion::ProjectGeneration(observed_generation) => {
+                entries.push(crate::resolver_core::FactVersionRef::ProjectGeneration {
+                    generation: *observed_generation,
+                });
+            }
+            crate::semantic_query::DepVersion::RouteGeneration(_) => {
+                // Route generation has no real validating source —
+                // refuse shared memo admission rather than rooting
+                // the entry with a fact that cannot catch a content
+                // edit to the observed canonical.
+                return None;
             }
         }
     }
-    std::sync::Arc::from(entries)
+    Some(std::sync::Arc::from(entries))
 }
 
 /// Build a two-canonical `DepSignature` (used for DB caches whose

@@ -421,6 +421,8 @@ pub(super) fn carrier_facts_reference_canonical(
         crate::resolver_core::FactVersionRef::RouteSurface(r) => {
             r.canonical_id.as_str() == canonical_id
         }
+        // Not file-scoped — references no canonical.
+        crate::resolver_core::FactVersionRef::ProjectGeneration { .. } => false,
     })
 }
 

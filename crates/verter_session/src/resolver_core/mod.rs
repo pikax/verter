@@ -297,22 +297,41 @@ pub enum FactVersionRef {
     /// effective-export-set / augmentation-index fingerprint. The
     /// `RouteDb` producer populates the underlying store.
     RouteSurface(RouteSurfaceFactRef),
+    /// Project-generation reference: the observed monotonic project
+    /// generation a cached value depended on. Validates iff the
+    /// host's current project generation equals `generation`.
+    ///
+    /// Unlike the file-scoped variants above this carries no
+    /// canonical id — it roots a value against the project-wide
+    /// resolver/config/lib generation rather than any single file's
+    /// content. The generation advances on `tsconfig`, path-alias,
+    /// SDK, workspace-folder, and project-graph changes (never on a
+    /// pure file-content edit).
+    ProjectGeneration { generation: u64 },
 }
 
 impl FactVersionRef {
-    /// The canonical file id this fact references, regardless of
-    /// variant. Used by callers that need to scope a fact set by
+    /// The canonical file id this fact references, when the variant is
+    /// file-scoped. Used by callers that need to scope a fact set by
     /// owning file (e.g. excluding the owner's own facts when fanning
     /// a curated dependency set into the fact tracer).
+    ///
+    /// Returns `None` for [`FactVersionRef::ProjectGeneration`], which
+    /// is not file-scoped — it roots a value against the project-wide
+    /// generation rather than a single canonical's content. A
+    /// project-generation fact is therefore never equal to any
+    /// excluded owner canonical, so owner-scoped fan-out filters keep
+    /// it.
     #[inline]
     #[must_use]
-    pub fn canonical_id(&self) -> &str {
+    pub fn canonical_id(&self) -> Option<&str> {
         match self {
             FactVersionRef::FileWholeHash { canonical_id, .. }
-            | FactVersionRef::DerivedFactHash { canonical_id, .. } => canonical_id.as_str(),
-            FactVersionRef::Parse(p) => p.canonical_id.as_str(),
-            FactVersionRef::ResolveImports(r) => r.canonical_id.as_str(),
-            FactVersionRef::RouteSurface(r) => r.canonical_id.as_str(),
+            | FactVersionRef::DerivedFactHash { canonical_id, .. } => Some(canonical_id.as_str()),
+            FactVersionRef::Parse(p) => Some(p.canonical_id.as_str()),
+            FactVersionRef::ResolveImports(r) => Some(r.canonical_id.as_str()),
+            FactVersionRef::RouteSurface(r) => Some(r.canonical_id.as_str()),
+            FactVersionRef::ProjectGeneration { .. } => None,
         }
     }
 }
@@ -686,9 +705,11 @@ fn compute_signature_fingerprint(facts: &[FactVersionRef]) -> [u8; 16] {
             }
             FactVersionRef::Parse(_)
             | FactVersionRef::ResolveImports(_)
-            | FactVersionRef::RouteSurface(_) => {
-                // Per-domain refs serialise to their Debug form; the
-                // fingerprint is approximate but stable.
+            | FactVersionRef::RouteSurface(_)
+            | FactVersionRef::ProjectGeneration { .. } => {
+                // Per-domain refs and the project-generation ref
+                // serialise to their Debug form; the fingerprint is
+                // approximate but stable.
                 let s = format!("{f:?}");
                 h_lo.write(s.as_bytes());
                 h_hi.write(s.as_bytes());

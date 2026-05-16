@@ -57,7 +57,9 @@ impl StoreView for TestView {
             FactVersionRef::Parse(p) => self.validates_parse_domain(p),
             FactVersionRef::ResolveImports(r) => self.validates_resolve_imports_domain(r),
             FactVersionRef::RouteSurface(r) => self.validates_route_surface_domain(r),
-            FactVersionRef::FileWholeHash { .. } | FactVersionRef::DerivedFactHash { .. } => false,
+            FactVersionRef::FileWholeHash { .. }
+            | FactVersionRef::DerivedFactHash { .. }
+            | FactVersionRef::ProjectGeneration { .. } => false,
         }
     }
 
