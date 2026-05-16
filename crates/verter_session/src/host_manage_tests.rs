@@ -926,6 +926,128 @@ fn generation_current_import_route_hash_oracle_is_side_effect_free() {
     );
 }
 
+/// `generation_current_import_route_hash` reads a file's route table
+/// from two sources: the content-pinned `IndexedReady.import_routes`
+/// snapshot, and — when the indexed snapshot is unavailable — the
+/// live-tracked `DerivedRawState.import_routes` table.
+///
+/// `IndexedReady.import_routes` is the import-target surface captured
+/// at index time. It is empty for a file with no statically-routed
+/// imports. A route can still be added to that file *after* indexing:
+/// on-demand resolutions (compile prefetch, external `src=` handling)
+/// route through `resolve_workspace_dependency_and_cache` →
+/// `cache_positive_import_route_result`, which writes only
+/// `DerivedRawState.import_routes` (and the dependency set) — it does
+/// NOT back-fill or re-materialise the already-published `IndexedReady`.
+///
+/// So an indexed file can simultaneously hold an EMPTY content-pinned
+/// `IndexedReady.import_routes` and a POPULATED
+/// `DerivedRawState.import_routes`. The oracle must fall through the
+/// empty indexed snapshot to the populated `DerivedRawState` table,
+/// otherwise it returns `None`, no `ImportRoute` derived fact is
+/// recorded for the file, and dependent caches keyed on that fact
+/// cannot observe a route change.
+///
+/// Discrimination property: this test fixes the route table into the
+/// empty-`IndexedReady` + populated-`DerivedRawState` state and asserts
+/// the oracle returns `Some(hash)` matching the `DerivedRawState`
+/// routes. It FAILS if the oracle treats a present-but-empty
+/// `IndexedReady.import_routes` as the authoritative (empty) route
+/// table and short-circuits to `None`; it PASSES once the empty
+/// indexed table defers to the `DerivedRawState` fallback.
+#[test]
+fn generation_current_import_route_hash_empty_indexed_falls_through_to_derived_raw() {
+    let host = make_host();
+
+    // The dependency exists before anything else, so an on-demand
+    // resolution against it produces a POSITIVE route.
+    let dep = "/workspace/src/prefetch_dep.ts";
+    upsert_non_sfc(&host, dep, "export interface Dep { ok: boolean }\n");
+
+    // The owner has NO `import` statements — nothing the indexer can
+    // route into `IndexedReady.import_routes`. Its indexed route table
+    // is therefore empty.
+    let owner = "/workspace/src/prefetch_owner.ts";
+    upsert_non_sfc(&host, owner, "export const marker = 1\n");
+
+    // Materialise the owner's `IndexedReady` BEFORE any route is
+    // recorded. Because the owner imports nothing, `import_routes` is
+    // empty and `import_route_hash` is `None`.
+    let indexed = host
+        .ensure_indexed_ready(owner)
+        .expect("owner IndexedReady must materialise");
+    assert!(
+        indexed.import_routes.is_empty(),
+        "fixture invariant: an import-free owner must materialise an EMPTY \
+         IndexedReady.import_routes — otherwise the empty-indexed path is \
+         not exercised",
+    );
+    assert!(
+        indexed.import_route_hash.is_none(),
+        "fixture invariant: an empty IndexedReady.import_routes carries no \
+         import_route_hash (every producer gates it on !is_empty())",
+    );
+
+    // A compile-prefetch-style on-demand resolution. This routes
+    // through `resolve_workspace_dependency_and_cache` →
+    // `cache_positive_import_route_result`, which writes the positive
+    // route into `DerivedRawState.import_routes` ONLY — it does not
+    // evict or re-materialise the owner's `IndexedReady`.
+    let resolved = host.resolve_type_dependency_canonical(owner, "./prefetch_dep");
+    assert_eq!(
+        resolved.as_deref(),
+        Some(dep),
+        "precondition: the on-demand resolution must resolve ./prefetch_dep",
+    );
+
+    // The owner's content-pinned `IndexedReady` survived the resolution
+    // and STILL carries an empty route table — the prefetch landed only
+    // in `DerivedRawState`. If this is non-empty the fixture has been
+    // invalidated and the empty-indexed path is no longer exercised.
+    let indexed_after = host
+        .current_content_pinned_indexed(owner)
+        .expect("owner IndexedReady must still be content-pinned-current");
+    assert!(
+        indexed_after.import_routes.is_empty(),
+        "fixture invariant: cache_positive_import_route_result must NOT \
+         back-fill IndexedReady.import_routes — it stays empty while the \
+         route lands in DerivedRawState",
+    );
+
+    // `DerivedRawState.import_routes` now carries the positive route.
+    let derived_routes = host
+        .derived_raw_cache()
+        .get(owner)
+        .map(|entry| entry.import_routes.clone())
+        .expect("fixture invariant: DerivedRawState entry must exist for the owner");
+    let derived_route = derived_routes
+        .get("./prefetch_dep")
+        .expect("fixture invariant: ./prefetch_dep must be recorded in DerivedRawState");
+    assert!(
+        !VerterHost::import_route_is_known_miss(derived_route),
+        "fixture invariant: ./prefetch_dep resolves to an existing file, so \
+         its DerivedRawState route is a POSITIVE resolution",
+    );
+
+    // Discriminator: with an EMPTY content-pinned IndexedReady route
+    // table and a POPULATED DerivedRawState route table, the oracle
+    // must fall through to the DerivedRawState routes and return
+    // `Some(hash)`. Pre-fix the present-but-empty IndexedReady snapshot
+    // shadows the DerivedRawState fallback and the oracle returns
+    // `None` — no ImportRoute fact, dependent caches miss the change.
+    let oracle_hash = host.generation_current_import_route_hash(owner);
+    let expected_hash = crate::resolver_store::hash_import_route_targets(&derived_routes);
+    assert_eq!(
+        oracle_hash,
+        Some(expected_hash),
+        "an empty content-pinned IndexedReady.import_routes must NOT hide a \
+         populated DerivedRawState route table: the oracle must fall through \
+         to DerivedRawState and return its route hash. Pre-fix the empty \
+         IndexedReady snapshot wins the route-source selection and the \
+         oracle short-circuits to None.",
+    );
+}
+
 #[test]
 fn resolve_imported_type_root_caches_stable_miss_in_imported_root_db() {
     let host = make_host();

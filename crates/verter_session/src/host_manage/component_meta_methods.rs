@@ -3139,7 +3139,12 @@ impl VerterHost {
     /// each one resolves to. A file's positive resolutions only
     /// change when the file's own content changes (which re-keys its
     /// content-addressed `IndexedReady`), so for a fully-resolved file
-    /// the cached `IndexedReady.import_route_hash` is authoritative.
+    /// indexed with a non-empty route table the content-pinned
+    /// `IndexedReady.import_routes` is authoritative. A file whose
+    /// route table was populated *after* indexing keeps an empty
+    /// `IndexedReady` route table; the populated `DerivedRawState`
+    /// route table answers for it instead (see the source comment on
+    /// the route-source selection below).
     ///
     /// A file with an **unresolvable** specifier is different: the
     /// cached route table records that specifier as a known-miss, but
@@ -3169,15 +3174,32 @@ impl VerterHost {
         // table; `current_content_pinned_indexed` returns `None` for
         // a stale candidate so the `DerivedRawState` fallback answers
         // with the live-tracked route table.
+        //
+        // The IndexedReady route table is the import-target surface
+        // captured when the file was indexed. It can be empty even
+        // when the file does have resolved imports: routes recorded
+        // *after* indexing — e.g. a compile-prefetch or external
+        // `src=` resolution that lands in `DerivedRawState` via
+        // `cache_positive_import_route_result` — do not back-fill the
+        // already-materialised `IndexedReady`. An empty IndexedReady
+        // route table must therefore fall through to the
+        // `DerivedRawState` table rather than shadow it, otherwise a
+        // file whose routes were populated post-indexing yields no
+        // `ImportRoute` fact and dependent caches miss route changes.
+        // The `.filter(non-empty)` makes an empty content-pinned table
+        // behave the same as a missing one and defer to the fallback.
         let routes = self
             .current_content_pinned_indexed(canonical_id)
             .map(|facts| std::sync::Arc::clone(&facts.import_routes))
+            .filter(|routes| !routes.is_empty())
             .or_else(|| {
                 // import_routes lives on DerivedRawState (D48 split).
                 self.derived_raw_cache()
                     .get(canonical_id)
                     .map(|entry| std::sync::Arc::new(entry.import_routes.clone()))
             })?;
+        // Backstop: a genuinely route-less file (no indexed routes and
+        // no `DerivedRawState` routes) has no `ImportRoute` surface.
         if routes.is_empty() {
             return None;
         }
