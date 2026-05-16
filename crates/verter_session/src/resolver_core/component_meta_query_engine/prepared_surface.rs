@@ -1007,16 +1007,20 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 });
             let captured_canonical = scope_canonical_id.to_string();
             let captured_target = name.to_string();
+            let captured_decl_canonical = prepared.root_identity.canonical_id.clone();
+            let captured_decl_symbol = prepared.root_identity.symbol_name.clone();
             let _ = host_db.get_or_compute(&arc_key, ctx, move || {
                 // PreparedTarget caches a (scope, target-name) →
-                // resolved (canonical, symbol) mapping. Validity
-                // depends on the top-level type identity of the
-                // target name (declared locally or imported), so
-                // observe the per-name top-level facts in scope.
-                let fact_sig = engine_fact_signature_for_exported_type(
+                // resolved (canonical, symbol) mapping. The entry is
+                // keyed on the active scope AND the declaring
+                // canonical, so the signature roots both — a content
+                // edit to either file rejects the entry.
+                let fact_sig = super::engine_fact_signature_for_prepared_target(
                     ctx,
                     captured_canonical.as_str(),
                     captured_target.as_str(),
+                    captured_decl_canonical.as_str(),
+                    captured_decl_symbol.as_str(),
                 );
                 Some((captured_value, fact_sig))
             });

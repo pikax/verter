@@ -193,6 +193,61 @@ pub(crate) fn engine_fact_signature_for_canonical_surface(
     crate::fact_signature_helpers::fact_signature_for_canonical_surface(ctx, canonical_id)
 }
 
+/// Build the fact signature for a `PreparedTargetDb` entry.
+///
+/// A `PreparedTargetDb` entry maps `(active_scope, target_name)` to a
+/// resolved `(canonical, symbol)` pair. The entry is keyed on BOTH the
+/// active scope and the declaring canonical, so both are self-roots:
+/// the resolved target depends on the top-level identity of
+/// `target_name` in `active_scope` AND on the declaring file's own
+/// decl identity. The signature observes the top-level-identity facts
+/// for the target name in `active_scope`, and — when the declaring
+/// canonical/symbol differs from the active-scope target — also for
+/// the declaring `(decl_canonical, decl_symbol)`. A content edit to
+/// either file shifts its self-root `FileWholeHash` and rejects the
+/// entry.
+pub(crate) fn engine_fact_signature_for_prepared_target(
+    ctx: &dyn ResolverContext,
+    active_scope: &str,
+    target_name: &str,
+    decl_canonical: &str,
+    decl_symbol: &str,
+) -> std::sync::Arc<[crate::resolver_core::FactVersionRef]> {
+    let mut entries: Vec<crate::resolver_core::FactVersionRef> =
+        engine_fact_signature_for_exported_type(ctx, active_scope, target_name).to_vec();
+    if decl_canonical != active_scope || decl_symbol != target_name {
+        entries.extend(
+            engine_fact_signature_for_exported_type(ctx, decl_canonical, decl_symbol)
+                .iter()
+                .cloned(),
+        );
+    }
+    std::sync::Arc::from(entries)
+}
+
+/// Build the fact signature for a `MaterializeMemoDb` entry.
+///
+/// A `MaterializeMemoDb` entry caches the materialised form of a type
+/// expression in a `scope` canonical. The keyed `scope` is the entry's
+/// self-root (the `SyntacticExportSet` surface signature already leads
+/// with a current-content `FileWholeHash` for it). The materialised
+/// value also depends on every canonical the materialisation walk
+/// observed — `materialized_dep_signature` carries those — so each is
+/// merged as a cross-file dependency `FileWholeHash`: an edit to any
+/// contributing file invalidates the memo.
+pub(crate) fn engine_fact_signature_for_materialize_memo(
+    ctx: &dyn ResolverContext,
+    scope_canonical_id: &str,
+    materialized_dep_signature: &crate::semantic_query::DepSignature,
+) -> std::sync::Arc<[crate::resolver_core::FactVersionRef]> {
+    let mut entries: Vec<crate::resolver_core::FactVersionRef> =
+        engine_fact_signature_for_canonical_surface(ctx, scope_canonical_id).to_vec();
+    entries.extend(
+        crate::fact_signature_helpers::dep_signature_to_fact_signature(materialized_dep_signature),
+    );
+    std::sync::Arc::from(entries)
+}
+
 /// Build a two-canonical `DepSignature` (used for DB caches whose
 /// validity depends on both an active scope and a declaration source).
 #[allow(dead_code)]

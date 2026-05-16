@@ -67,13 +67,34 @@ drain**. `upsert_via_scheduler_with_priority` still drains the upserted
 canonical's *own* query-identity caches at upsert time
 (`resolver.runtime.evict_canonical(&canonical_id)`,
 `project_type_store.evict_canonical(&canonical_id)`,
-`resolved_type_cache().clear()`). This is retained until the
-query-identity caches (`semantic_graph`, `declaration_lookup_db`,
-`materialize_structure_db`, `ref_cycle_db`, `routed_expr_surface_db`,
-`route_owned_shallow`) self-version-root a same-canonical content
-edit — they do not yet detect a same-canonical edit on the
-cold-recompute path, so dropping the own-canonical drain would serve
-stale output for the edited file itself.
+`resolved_type_cache().clear()`).
+
+**Self-version rooting of query-identity caches.** Each query-identity
+cache entry carries a self-root `FileWholeHash` for its keyed
+canonical(s) inside `fact_dep_signature` (prepended by the central
+fact-signature helpers). The warm-read validator decides how strictly
+that self-root is checked:
+
+- The **component-meta query DBs** — `declaration_lookup_db`,
+  `imported_registry_db`, `resolvability_db`, `owner_collection_db`,
+  `prepared_target_db`, `prepared_surface_db`, `prepared_member_db`,
+  `routed_expr_surface_db`, `materialize_memo_db` — validate the
+  self-root **strictly** via `validate_fact_signature_with_self_roots`
+  (passing the entry's keyed canonical(s)): a same-canonical content
+  edit, or a keyed canonical the live store view no longer tracks,
+  rejects the entry on both the warm-hit and post-compute-revalidation
+  paths. `prepared_target_db` roots both the active scope and the
+  declaring canonical; `materialize_memo_db` additionally merges every
+  canonical observed during materialization as a cross-file dependency
+  fact. Cross-file *dependency* facts keep the lazy
+  "untracked → accept" permissiveness — only the self-roots are strict.
+- The remaining query-identity caches (`semantic_graph`,
+  `materialize_structure_db`, `ref_cycle_db`, `route_owned_shallow`)
+  do not yet validate their self-root strictly.
+
+The own-canonical drain is retained until every query-identity cache
+validates its self-root strictly; dropping it before then would serve
+stale output for the edited file itself from a not-yet-strict cache.
 
 **R4.** Source-content changes produce a semantic fact diff (publishable
 via `compute_upsert_changes_from_parse` for LSP / observability

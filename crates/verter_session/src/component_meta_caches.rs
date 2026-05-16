@@ -41,7 +41,9 @@ use verter_semantic::analysis::type_solver::query_engine::ProjectedMember;
 use verter_type_expr::TypeExpr;
 
 use crate::cooperative_admission::{cooperative_get_or_insert, InflightTable};
-use crate::fact_signature_helpers::{bubble_fact_signature, validate_fact_signature};
+use crate::fact_signature_helpers::{
+    bubble_fact_signature, validate_fact_signature_with_self_roots,
+};
 use crate::instant::Instant;
 use crate::project_semantic_dispatch::raise::MaterializedTypeExpr;
 use crate::resolver_core::cache_keys::{
@@ -61,8 +63,13 @@ pub struct ImportedRegistryEntry {
     pub value: Option<Arc<ResolvedImportedRegistrySymbol>>,
     /// R3/R26/R28 fact-precise dependency signature recorded during the
     /// cold-compute pass that produced this entry. Validated on every
-    /// warm-hit read against the producer's current fact registry via
-    /// [`crate::fact_signature_helpers::validate_fact_signature`].
+    /// warm-hit read — and on post-compute revalidation — against the
+    /// producer's current fact registry via
+    /// [`crate::fact_signature_helpers::validate_fact_signature_with_self_roots`].
+    /// The entry's keyed canonical(s) are passed as the self-root set,
+    /// so the leading self-root `FileWholeHash` is validated strictly:
+    /// a same-canonical content edit, or a keyed canonical untracked by
+    /// the live store view, rejects the entry.
     pub fact_dep_signature: Arc<[FactVersionRef]>,
 }
 
@@ -122,12 +129,20 @@ impl ImportedRegistryDb {
         let live_counter = Arc::clone(&self.live_counter);
         let key_for_post_publish = key.clone();
         let canonical_index = &self.canonical_index;
+        // The keyed canonical is the entry's self-root — validated
+        // strictly on warm read (same-canonical edit / untracked keyed
+        // canonical → miss).
+        let self_roots: [&str; 1] = [key.0.as_ref()];
         crate::cooperative_admission::cooperative_get_or_insert_with_post_publish(
             &self.entries,
             &self.inflight,
             key.clone(),
             |entry: &ImportedRegistryEntry| {
-                if validate_fact_signature(ctx, &entry.fact_dep_signature) {
+                if validate_fact_signature_with_self_roots(
+                    ctx,
+                    &entry.fact_dep_signature,
+                    &self_roots,
+                ) {
                     bubble_fact_signature(ctx, &entry.fact_dep_signature);
                     Some(entry.value.clone())
                 } else {
@@ -148,7 +163,9 @@ impl ImportedRegistryDb {
                 bubble_fact_signature(ctx, &entry.fact_dep_signature);
                 entry.value.clone()
             },
-            |entry: &ImportedRegistryEntry| validate_fact_signature(ctx, &entry.fact_dep_signature),
+            |entry: &ImportedRegistryEntry| {
+                validate_fact_signature_with_self_roots(ctx, &entry.fact_dep_signature, &self_roots)
+            },
             |_, _| {
                 // Register the published key in the
                 // canonical reverse index so future
@@ -323,12 +340,22 @@ impl DeclarationLookupDb {
         F: FnOnce() -> Option<(ResolvedTypeDeclaration, Arc<[FactVersionRef]>)>,
     {
         let live_counter = Arc::clone(&self.live_counter);
+        // The entry's keyed canonical is its self-root: the warm-read
+        // validator validates the self-root `FileWholeHash` strictly so
+        // a same-canonical content edit (or a keyed canonical that
+        // became untracked) rejects the entry instead of riding the
+        // lazy "untracked → accept" rule.
+        let self_roots: [&str; 1] = [key.0.as_ref()];
         cooperative_get_or_insert(
             &self.entries,
             &self.inflight,
             key.clone(),
             |entry: &DeclarationLookupEntry| {
-                if validate_fact_signature(ctx, &entry.fact_dep_signature) {
+                if validate_fact_signature_with_self_roots(
+                    ctx,
+                    &entry.fact_dep_signature,
+                    &self_roots,
+                ) {
                     bubble_fact_signature(ctx, &entry.fact_dep_signature);
                     Some(entry.value.clone())
                 } else {
@@ -349,7 +376,7 @@ impl DeclarationLookupDb {
                 entry.value.clone()
             },
             |entry: &DeclarationLookupEntry| {
-                validate_fact_signature(ctx, &entry.fact_dep_signature)
+                validate_fact_signature_with_self_roots(ctx, &entry.fact_dep_signature, &self_roots)
             },
         )
     }
@@ -437,12 +464,20 @@ impl ResolvabilityDb {
         F: FnOnce() -> Option<(bool, Arc<[FactVersionRef]>)>,
     {
         let live_counter = Arc::clone(&self.live_counter);
+        // The keyed source canonical is the entry's self-root — strict
+        // warm-read validation rejects a same-canonical edit or an
+        // untracked keyed canonical.
+        let self_roots: [&str; 1] = [key.0.as_ref()];
         cooperative_get_or_insert(
             &self.entries,
             &self.inflight,
             key.clone(),
             |entry: &ResolvabilityEntry| {
-                if validate_fact_signature(ctx, &entry.fact_dep_signature) {
+                if validate_fact_signature_with_self_roots(
+                    ctx,
+                    &entry.fact_dep_signature,
+                    &self_roots,
+                ) {
                     bubble_fact_signature(ctx, &entry.fact_dep_signature);
                     Some(entry.value)
                 } else {
@@ -462,7 +497,9 @@ impl ResolvabilityDb {
                 bubble_fact_signature(ctx, &entry.fact_dep_signature);
                 entry.value
             },
-            |entry: &ResolvabilityEntry| validate_fact_signature(ctx, &entry.fact_dep_signature),
+            |entry: &ResolvabilityEntry| {
+                validate_fact_signature_with_self_roots(ctx, &entry.fact_dep_signature, &self_roots)
+            },
         )
     }
 
@@ -556,12 +593,21 @@ impl OwnerCollectionDb {
     {
         let owner_canonical = key.0.clone();
         let live_counter = Arc::clone(&self.live_counter);
+        // The owner canonical is the entry's self-root. This cache is
+        // body-bearing (stores a `TypeExpr`), so strict self-root
+        // validation is the correctness floor — a content edit to the
+        // owner file invalidates the cached collection expression.
+        let self_roots: [&str; 1] = [key.0.as_ref()];
         cooperative_get_or_insert(
             &self.entries,
             &self.inflight,
             key.clone(),
             |entry: &OwnerCollectionEntry| {
-                if validate_fact_signature(ctx, &entry.fact_dep_signature) {
+                if validate_fact_signature_with_self_roots(
+                    ctx,
+                    &entry.fact_dep_signature,
+                    &self_roots,
+                ) {
                     bubble_fact_signature(ctx, &entry.fact_dep_signature);
                     Some(entry.value.clone())
                 } else {
@@ -582,7 +628,9 @@ impl OwnerCollectionDb {
                 bubble_fact_signature(ctx, &entry.fact_dep_signature);
                 entry.value.clone()
             },
-            |entry: &OwnerCollectionEntry| validate_fact_signature(ctx, &entry.fact_dep_signature),
+            |entry: &OwnerCollectionEntry| {
+                validate_fact_signature_with_self_roots(ctx, &entry.fact_dep_signature, &self_roots)
+            },
         )
     }
 
@@ -685,8 +733,16 @@ impl PreparedTargetDb {
         if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
+        // Both the active scope and the declaring canonical are
+        // self-roots: the resolved target depends on the content of
+        // each, so an edit to either rejects the entry.
+        let self_roots: [&str; 2] = [
+            key.active_scope_canonical_id.as_ref(),
+            key.decl_canonical_id.as_ref(),
+        ];
         let entry_arc = self.entries.get(key).map(|e| e.clone())?;
-        if validate_fact_signature(ctx, &entry_arc.fact_dep_signature) {
+        if validate_fact_signature_with_self_roots(ctx, &entry_arc.fact_dep_signature, &self_roots)
+        {
             bubble_fact_signature(ctx, &entry_arc.fact_dep_signature);
             Some(entry_arc.value.clone())
         } else {
@@ -704,12 +760,22 @@ impl PreparedTargetDb {
         F: FnOnce() -> Option<(Option<(Arc<str>, Arc<str>)>, Arc<[FactVersionRef]>)>,
     {
         let live_counter = Arc::clone(&self.live_counter);
+        // Both keyed canonicals (active scope + declaring file) are
+        // self-roots — strict warm-read validation.
+        let self_roots: [&str; 2] = [
+            key.active_scope_canonical_id.as_ref(),
+            key.decl_canonical_id.as_ref(),
+        ];
         cooperative_get_or_insert(
             &self.entries,
             &self.inflight,
             key.clone(),
             |entry: &PreparedTargetEntry| {
-                if validate_fact_signature(ctx, &entry.fact_dep_signature) {
+                if validate_fact_signature_with_self_roots(
+                    ctx,
+                    &entry.fact_dep_signature,
+                    &self_roots,
+                ) {
                     bubble_fact_signature(ctx, &entry.fact_dep_signature);
                     Some(entry.value.clone())
                 } else {
@@ -729,7 +795,9 @@ impl PreparedTargetDb {
                 bubble_fact_signature(ctx, &entry.fact_dep_signature);
                 entry.value.clone()
             },
-            |entry: &PreparedTargetEntry| validate_fact_signature(ctx, &entry.fact_dep_signature),
+            |entry: &PreparedTargetEntry| {
+                validate_fact_signature_with_self_roots(ctx, &entry.fact_dep_signature, &self_roots)
+            },
         )
     }
 
@@ -873,9 +941,16 @@ impl MaterializeMemoDb {
         if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
+        // The keyed scope canonical is the entry's self-root — strict
+        // warm-read validation rejects a same-scope content edit.
+        let self_roots: [&str; 1] = [key.0.as_ref()];
         let result = (|| -> Option<MaterializedTypeExpr> {
             let entry_arc = self.entries.get(key).map(|e| e.clone())?;
-            if validate_fact_signature(ctx, &entry_arc.fact_dep_signature) {
+            if validate_fact_signature_with_self_roots(
+                ctx,
+                &entry_arc.fact_dep_signature,
+                &self_roots,
+            ) {
                 bubble_fact_signature(ctx, &entry_arc.fact_dep_signature);
                 Some(entry_arc.value.clone())
             } else {
@@ -908,12 +983,19 @@ impl MaterializeMemoDb {
         F: FnOnce() -> Option<(MaterializedTypeExpr, Arc<[FactVersionRef]>)>,
     {
         let live_counter = Arc::clone(&self.live_counter);
+        // The keyed scope canonical is the entry's self-root — strict
+        // warm-read validation.
+        let self_roots: [&str; 1] = [key.0.as_ref()];
         cooperative_get_or_insert(
             &self.entries,
             &self.inflight,
             key.clone(),
             |entry: &MaterializeMemoEntry| {
-                if validate_fact_signature(ctx, &entry.fact_dep_signature) {
+                if validate_fact_signature_with_self_roots(
+                    ctx,
+                    &entry.fact_dep_signature,
+                    &self_roots,
+                ) {
                     bubble_fact_signature(ctx, &entry.fact_dep_signature);
                     Some(entry.value.clone())
                 } else {
@@ -933,7 +1015,9 @@ impl MaterializeMemoDb {
                 bubble_fact_signature(ctx, &entry.fact_dep_signature);
                 entry.value.clone()
             },
-            |entry: &MaterializeMemoEntry| validate_fact_signature(ctx, &entry.fact_dep_signature),
+            |entry: &MaterializeMemoEntry| {
+                validate_fact_signature_with_self_roots(ctx, &entry.fact_dep_signature, &self_roots)
+            },
         )
     }
 
@@ -1091,9 +1175,18 @@ impl PreparedSurfaceDb {
         if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
+        // The keyed canonical is the entry's self-root. The prepared
+        // surface encodes body-sensitive structure, so strict self-root
+        // validation is the correctness floor — any content edit to the
+        // keyed file rejects the cached projection.
+        let self_roots: [&str; 1] = [key.canonical_id.as_ref()];
         let result = (|| -> Option<PreparedSurfacePayload> {
             let entry_arc = self.entries.get(key).map(|e| e.clone())?;
-            if validate_fact_signature(ctx, &entry_arc.fact_dep_signature) {
+            if validate_fact_signature_with_self_roots(
+                ctx,
+                &entry_arc.fact_dep_signature,
+                &self_roots,
+            ) {
                 bubble_fact_signature(ctx, &entry_arc.fact_dep_signature);
                 Some(entry_arc.value.clone())
             } else {
@@ -1126,12 +1219,19 @@ impl PreparedSurfaceDb {
         F: FnOnce() -> Option<(PreparedSurfacePayload, Arc<[FactVersionRef]>)>,
     {
         let live_counter = Arc::clone(&self.live_counter);
+        // The keyed canonical is the entry's self-root — strict
+        // warm-read validation (body-sensitive surface).
+        let self_roots: [&str; 1] = [key.canonical_id.as_ref()];
         cooperative_get_or_insert(
             &self.entries,
             &self.inflight,
             key.clone(),
             |entry: &PreparedSurfaceEntry| {
-                if validate_fact_signature(ctx, &entry.fact_dep_signature) {
+                if validate_fact_signature_with_self_roots(
+                    ctx,
+                    &entry.fact_dep_signature,
+                    &self_roots,
+                ) {
                     bubble_fact_signature(ctx, &entry.fact_dep_signature);
                     Some(entry.value.clone())
                 } else {
@@ -1151,7 +1251,9 @@ impl PreparedSurfaceDb {
                 bubble_fact_signature(ctx, &entry.fact_dep_signature);
                 entry.value.clone()
             },
-            |entry: &PreparedSurfaceEntry| validate_fact_signature(ctx, &entry.fact_dep_signature),
+            |entry: &PreparedSurfaceEntry| {
+                validate_fact_signature_with_self_roots(ctx, &entry.fact_dep_signature, &self_roots)
+            },
         )
     }
 
@@ -1291,9 +1393,16 @@ impl PreparedMemberDb {
         if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
+        // The keyed canonical is the entry's self-root — strict
+        // warm-read validation rejects a same-canonical content edit.
+        let self_roots: [&str; 1] = [key.canonical_id.as_ref()];
         let result = (|| -> Option<Option<Arc<ProjectedMember>>> {
             let entry_arc = self.entries.get(key).map(|e| e.clone())?;
-            if validate_fact_signature(ctx, &entry_arc.fact_dep_signature) {
+            if validate_fact_signature_with_self_roots(
+                ctx,
+                &entry_arc.fact_dep_signature,
+                &self_roots,
+            ) {
                 bubble_fact_signature(ctx, &entry_arc.fact_dep_signature);
                 Some(entry_arc.value.clone())
             } else {
@@ -1326,12 +1435,19 @@ impl PreparedMemberDb {
         F: FnOnce() -> Option<(Option<ProjectedMember>, Arc<[FactVersionRef]>)>,
     {
         let live_counter = Arc::clone(&self.live_counter);
+        // The keyed canonical is the entry's self-root — strict
+        // warm-read validation.
+        let self_roots: [&str; 1] = [key.canonical_id.as_ref()];
         cooperative_get_or_insert(
             &self.entries,
             &self.inflight,
             key.clone(),
             |entry: &PreparedMemberEntry| {
-                if validate_fact_signature(ctx, &entry.fact_dep_signature) {
+                if validate_fact_signature_with_self_roots(
+                    ctx,
+                    &entry.fact_dep_signature,
+                    &self_roots,
+                ) {
                     bubble_fact_signature(ctx, &entry.fact_dep_signature);
                     Some(entry.value.clone())
                 } else {
@@ -1351,7 +1467,9 @@ impl PreparedMemberDb {
                 bubble_fact_signature(ctx, &entry.fact_dep_signature);
                 entry.value.clone()
             },
-            |entry: &PreparedMemberEntry| validate_fact_signature(ctx, &entry.fact_dep_signature),
+            |entry: &PreparedMemberEntry| {
+                validate_fact_signature_with_self_roots(ctx, &entry.fact_dep_signature, &self_roots)
+            },
         )
     }
 
@@ -1493,8 +1611,12 @@ impl RoutedExprSurfaceDb {
         if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
+        // The keyed scope canonical is the entry's self-root — strict
+        // warm-read validation rejects a same-scope content edit.
+        let self_roots: [&str; 1] = [key.scope_canonical_id.as_ref()];
         let entry_arc = self.entries.get(key).map(|e| e.clone())?;
-        if validate_fact_signature(ctx, &entry_arc.fact_dep_signature) {
+        if validate_fact_signature_with_self_roots(ctx, &entry_arc.fact_dep_signature, &self_roots)
+        {
             bubble_fact_signature(ctx, &entry_arc.fact_dep_signature);
             Some(entry_arc.value.clone())
         } else {
@@ -1512,12 +1634,19 @@ impl RoutedExprSurfaceDb {
         F: FnOnce() -> Option<(TypeExpr, Arc<[FactVersionRef]>)>,
     {
         let live_counter = Arc::clone(&self.live_counter);
+        // The keyed scope canonical is the entry's self-root — strict
+        // warm-read validation.
+        let self_roots: [&str; 1] = [key.scope_canonical_id.as_ref()];
         cooperative_get_or_insert(
             &self.entries,
             &self.inflight,
             key.clone(),
             |entry: &RoutedExprSurfaceEntry| {
-                if validate_fact_signature(ctx, &entry.fact_dep_signature) {
+                if validate_fact_signature_with_self_roots(
+                    ctx,
+                    &entry.fact_dep_signature,
+                    &self_roots,
+                ) {
                     bubble_fact_signature(ctx, &entry.fact_dep_signature);
                     Some(entry.value.clone())
                 } else {
@@ -1538,7 +1667,7 @@ impl RoutedExprSurfaceDb {
                 entry.value.clone()
             },
             |entry: &RoutedExprSurfaceEntry| {
-                validate_fact_signature(ctx, &entry.fact_dep_signature)
+                validate_fact_signature_with_self_roots(ctx, &entry.fact_dep_signature, &self_roots)
             },
         )
     }

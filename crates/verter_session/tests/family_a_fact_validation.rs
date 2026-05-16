@@ -15,11 +15,14 @@
 //!
 //! Each entry MUST carry `fact_dep_signature: Arc<[FactVersionRef]>`
 //! and MUST NOT carry the legacy `dep_signature: DepSignature`. The
-//! validator routes through
-//! [`crate::fact_signature_helpers::validate_fact_signature`] on
-//! warm hits and the producer through
+//! warm-read validator routes through
+//! [`crate::fact_signature_helpers::validate_fact_signature_with_self_roots`]
+//! — the strict self-root validator, passing the entry's keyed
+//! canonical(s) as the self-root set — and the producer through
 //! [`engine_fact_signature_for_canonical_member`] /
-//! [`engine_fact_signature_for_canonical_surface`] on cold compute.
+//! [`engine_fact_signature_for_canonical_surface`] /
+//! [`engine_fact_signature_for_prepared_target`] /
+//! [`engine_fact_signature_for_materialize_memo`] on cold compute.
 //!
 //! ## Source-grep arch guards
 //!
@@ -117,12 +120,20 @@ fn family_a_producers_call_new_fact_helpers() {
         "prepared_surface.rs must NOT call engine_dep_signature_for_canonical after the R28 \
          migration — use the engine_fact_signature_* helpers instead."
     );
-    // PreparedSurface and PreparedTarget observe top-level identity;
-    // PreparedMember observes per-member facts.
+    // PreparedSurface observes top-level identity directly;
+    // PreparedTarget observes top-level identity for both keyed
+    // canonicals via the engine_fact_signature_for_prepared_target
+    // helper; PreparedMember observes per-member facts.
     assert!(
         prepared_surface.contains("engine_fact_signature_for_exported_type("),
         "prepared_surface.rs must call engine_fact_signature_for_exported_type for the \
-         prepared_surface_db and prepared_target_db cache producers (top-level identity)."
+         prepared_surface_db cache producer (top-level identity)."
+    );
+    assert!(
+        prepared_surface.contains("engine_fact_signature_for_prepared_target("),
+        "prepared_surface.rs must call engine_fact_signature_for_prepared_target for the \
+         prepared_target_db cache producer — it roots BOTH the active scope and the \
+         declaring canonical as self-roots."
     );
     assert!(
         prepared_surface.contains("engine_fact_signature_for_canonical_member("),
@@ -148,37 +159,58 @@ fn family_a_producers_call_new_fact_helpers() {
         !materialize.contains("engine_dep_signature_for_canonical("),
         "meta_resolve/materialize/field_types.rs must NOT call \
          engine_dep_signature_for_canonical after the R28 migration — use \
-         engine_fact_signature_for_canonical_surface for the materialize_memo_db producer."
+         engine_fact_signature_for_materialize_memo for the materialize_memo_db producer."
     );
     assert!(
-        materialize.contains("engine_fact_signature_for_canonical_surface("),
+        materialize.contains("engine_fact_signature_for_materialize_memo("),
         "meta_resolve/materialize/field_types.rs must call \
-         engine_fact_signature_for_canonical_surface for the materialize_memo_db producer."
+         engine_fact_signature_for_materialize_memo for the materialize_memo_db \
+         producer — it roots the keyed scope canonical AND merges every canonical \
+         observed during materialization as a cross-file dependency fact."
     );
 }
 
 /// The legacy `ctx.validate_dep_signature` warm-hit validator is no
-/// longer called for Family A entries. The new
-/// `validate_fact_signature` covers every site.
+/// longer called for Family A entries. Every Family A warm-read and
+/// post-compute revalidation site validates the `fact_dep_signature`
+/// through `validate_fact_signature_with_self_roots` — the strict
+/// self-root validator: the entry's keyed canonical(s) are passed as
+/// the self-root set, so the leading self-root `FileWholeHash` is
+/// validated strictly (a same-canonical edit, or a keyed canonical
+/// untracked by the live store view, rejects the entry) while
+/// cross-file dependency facts keep lazy permissiveness.
 #[test]
 fn family_a_warm_hit_uses_fact_validation() {
     let src = read_session_source("component_meta_caches.rs");
-    // Family A get_or_compute closures must validate the
-    // fact_dep_signature, not the legacy dep_signature. The 9
-    // get_or_compute methods each ought to call validate_fact_signature
-    // at least once (the warm-hit predicate). Count occurrences as a
-    // structural gate; the migration commit lands exactly 18
-    // (validator + post-publish revalidator per cache × 9 caches) +
-    // the per-peek validators on caches that expose `peek()` (5
-    // caches: PreparedTarget, MaterializeMemo, PreparedSurface,
-    // PreparedMember, RoutedExprSurface). Use a lower bound to keep
-    // the gate stable against minor refactors.
-    let validate_count = src.matches("validate_fact_signature(ctx,").count();
+    // Family A warm-read closures must validate the fact_dep_signature
+    // strictly via `validate_fact_signature_with_self_roots`, NOT the
+    // lazy `validate_fact_signature` (which would route a self-root
+    // `FileWholeHash` through the untracked-accept rule). The 9
+    // get_or_compute methods each carry a warm-hit predicate AND a
+    // post-compute revalidator; the 5 caches exposing `peek()`
+    // (PreparedTarget, MaterializeMemo, PreparedSurface,
+    // PreparedMember, RoutedExprSurface) carry one more. Use a lower
+    // bound to keep the gate stable against minor refactors.
+    let strict_count = src
+        .matches("validate_fact_signature_with_self_roots(")
+        .count();
     assert!(
-        validate_count >= 18,
-        "expected at least 18 `validate_fact_signature(ctx, ...)` call sites in \
-         component_meta_caches.rs (validator + post-publish per Family A cache), \
-         got {validate_count}"
+        strict_count >= 18,
+        "expected at least 18 `validate_fact_signature_with_self_roots(...)` call \
+         sites in component_meta_caches.rs (strict self-root validator + post-publish \
+         revalidator per Family A cache), got {strict_count}"
+    );
+    // The lazy `validate_fact_signature` must NOT be used for a Family
+    // A warm/revalidation site: it would accept a self-root
+    // `FileWholeHash` for an untracked keyed canonical and serve a
+    // stale entry. Only the strict self-root variant is permitted.
+    assert!(
+        !src.contains("validate_fact_signature(ctx,"),
+        "component_meta_caches.rs must NOT call the lazy `validate_fact_signature(ctx, \
+         ...)` for any Family A cache — the lazy validator routes a self-root \
+         FileWholeHash through the untracked-accept rule and serves stale entries. \
+         Use `validate_fact_signature_with_self_roots` with the entry's keyed \
+         canonical(s) as the self-root set."
     );
     // The bubble-up helper ALSO appears on every warm-hit path so
     // outer tracers see the inner observation set.

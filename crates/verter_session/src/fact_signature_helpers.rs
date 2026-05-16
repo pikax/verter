@@ -185,13 +185,12 @@ pub(crate) fn validate_fact_signature(
 /// cross-file lazy permissiveness is preserved. Empty signatures
 /// trivially validate.
 ///
-/// `#[allow(dead_code)]`: this is the strict-validation substrate.
-/// The per-query-identity-cache warm-read sites that pass their own
-/// keyed canonical(s) as `self_root_canonicals` land in the follow-up
-/// cache-wiring work; until then the only callers are the substrate
-/// discriminator tests.
+/// This is the warm-read validation entry point for the
+/// component-meta query-identity caches: each cache passes its own
+/// keyed canonical(s) as `self_root_canonicals`, so a same-canonical
+/// content edit — or a keyed canonical that became untracked — fails
+/// validation strictly and the warm read recomputes.
 #[inline]
-#[allow(dead_code)]
 pub(crate) fn validate_fact_signature_with_self_roots(
     ctx: &dyn ResolverContext,
     signature: &[FactVersionRef],
