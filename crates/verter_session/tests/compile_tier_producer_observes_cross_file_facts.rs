@@ -490,3 +490,102 @@ fn compile_slot_invalidates_on_external_src_template_edit() {
          fact for the external dependency."
     );
 }
+
+/// Discriminator 4 — compile-slot invalidation on a *side-effect*
+/// runtime-import body edit.
+///
+/// `Comp.vue` has a side-effect import `import './setup'` — a runtime
+/// (non-type-only) import with ZERO bindings. The dependency's content
+/// is re-emitted in the assembled module, so editing `setup.ts`'s body
+/// must invalidate `Comp.vue`'s warm compile slot.
+///
+/// Pre-fix: the producer's `FileWholeHash` admission ran only inside
+/// the `for binding in import.bindings.iter()` loop. A side-effect
+/// import has empty `bindings`, so the loop body never executed and no
+/// `FileWholeHash` fact was recorded for `./setup` — the consumer's
+/// signature carried no fact for the dep, so a warm hit was served
+/// stale.
+/// Post-fix: a non-type-only import with a resolved dep contributes
+/// its `FileWholeHash` fact even with zero bindings → the edit
+/// mismatches → warm hit misses.
+#[test]
+fn compile_slot_invalidates_on_side_effect_import_body_edit() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert_ts(&host, "/src/setup.ts", "globalThis.__verter_setup = 1;\n");
+    upsert_vue(
+        &host,
+        "/src/Comp.vue",
+        "<script setup lang=\"ts\">\n\
+         import './setup';\n\
+         const n = 1;\n\
+         </script>\n\
+         <template><div>{{ n }}</div></template>\n",
+    );
+
+    let profile = CompileProfile::default();
+    prime_compile(&host, "/src/Comp.vue");
+    let warm_before = host.compile_slot_is_warm("/src/Comp.vue", &profile);
+
+    // If prime did not admit a warm slot the behaviour delta cannot
+    // be measured — surface it loudly rather than passing vacuously.
+    assert!(
+        warm_before,
+        "precondition: Comp.vue MUST have a warm compile slot after \
+         the initial compile (warm_before=false means prime failed to \
+         admit a slot — the discriminator cannot run)."
+    );
+
+    // Fact-presence half of the discriminator: the compile slot's
+    // signature MUST carry a `FileWholeHash` for the side-effect dep.
+    let signature = read_signature(&host, "/src/Comp.vue");
+    let observes_setup_whole_hash = signature.iter().any(|fact| {
+        matches!(
+            fact,
+            FactVersionRef::FileWholeHash { canonical_id, .. }
+                if canonical_id == "/src/setup.ts"
+        )
+    });
+    assert!(
+        observes_setup_whole_hash,
+        "R3/B1.j.3: the compile-tier producer MUST observe a \
+         FileWholeHash for a side-effect (bindings-empty) runtime \
+         import. Pre-fix the whole-hash admission ran only inside the \
+         per-binding loop, which never executes for a side-effect \
+         import. Signature observed: {:?}",
+        signature
+            .iter()
+            .map(|f| format!("{f:?}"))
+            .collect::<Vec<_>>()
+    );
+
+    // Edit ONLY the body of `setup.ts`. Suppress the eager cascade so
+    // fact-validation is the sole invalidation path.
+    let _ = host
+        .upsert_without_dependent_eviction(UpsertRequest {
+            canonical_id: Some("/src/setup.ts".to_string()),
+            input_id: "/src/setup.ts".to_string(),
+            source: "globalThis.__verter_setup = 2;\n".into(),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        })
+        .expect("dep upsert");
+
+    let warm_after = host.compile_slot_is_warm("/src/Comp.vue", &profile);
+    assert!(
+        !warm_after,
+        "B1.j.3: a side-effect import body edit MUST invalidate the \
+         consumer compile slot via FileWholeHash fact-validation. \
+         warm_after=true means the producer recorded no whole-hash \
+         fact for the side-effect dep (its empty `bindings` skipped \
+         the per-binding whole-hash admission)."
+    );
+
+    // ensure_compiled's warm path must agree: it recompiles rather
+    // than returning Ok on the stale slot.
+    host.ensure_compiled("/src/Comp.vue", &profile)
+        .expect("recompile after dep edit");
+    assert!(
+        host.compile_slot_is_warm("/src/Comp.vue", &profile),
+        "after ensure_compiled the slot is warm again (recompiled)"
+    );
+}

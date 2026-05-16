@@ -44,6 +44,14 @@
 //! The producer therefore also observes `FileWholeHash` of the
 //! resolved dependency for every value (non-type-only) import binding.
 //!
+//! Side-effect imports (`import './setup'`) carry no bindings but are
+//! still runtime imports whose entire content is re-emitted in the
+//! assembled module. The producer observes `FileWholeHash` of the
+//! resolved dependency for every non-type-only import that has no
+//! bindings, mirroring the per-binding admission — without this, an
+//! SFC whose only cross-file dependency is a side-effect import
+//! produces an empty `fact_dep_signature` that trivially validates.
+//!
 //! External `src=` blocks (`<template src="./tpl.html">`) are spliced
 //! verbatim into the merged compile source by `merge_external_sources`
 //! — the entire external file content lands in the compiled output.
@@ -137,6 +145,23 @@ pub(crate) fn observe_compile_tier_dependencies(
                 // full content matters — record the dep for a
                 // whole-hash observation.
                 if binding_is_value && resolved_dep != canonical_id {
+                    runtime_dep_canonicals.insert(resolved_dep.to_string());
+                }
+            }
+        }
+
+        // Side-effect imports (`import './setup'`) carry ZERO
+        // bindings, so the per-binding loop above never runs and no
+        // whole-hash dep is recorded for them. They are still
+        // *runtime* imports — `is_type_only == false` — whose entire
+        // content is re-emitted in the assembled module, so an edit
+        // to the imported file changes the compiled output. Record
+        // the resolved dep for a whole-hash observation whenever the
+        // declaration is non-type-only and has no bindings, mirroring
+        // the per-binding `binding_is_value` admission above.
+        if import.bindings.is_empty() && !import.is_type_only {
+            if let Some(resolved_dep) = resolved_dep.as_deref() {
+                if resolved_dep != canonical_id {
                     runtime_dep_canonicals.insert(resolved_dep.to_string());
                 }
             }
