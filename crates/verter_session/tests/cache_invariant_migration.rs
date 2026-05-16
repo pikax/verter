@@ -299,6 +299,93 @@ fn cache_invalidation_after_dep_edit_surfaces_new_content() {
     );
 }
 
+/// Lazy-substrate discriminator for the evict/reload invariant in the
+/// same scenario as [`cache_invalidation_after_dep_edit_surfaces_new_content`],
+/// but the dependency edit is routed through
+/// [`VerterHost::upsert_without_dependent_eviction`] so the eager
+/// reverse-dependent cascade does NOT clear `/workspace/src/Comp.vue`'s
+/// artifacts. After the dep edit the owner is explicitly evicted with
+/// `host.evict`.
+///
+/// An evicted owner must reload to authoritative state before a query
+/// proceeds. The defect this discriminates: `current_or_read_whole_hash`
+/// previously accepted a stale `FileArtifactStore::get_any`-derived
+/// whole-hash for the evicted owner, so `get_component_meta` ran on
+/// the stale identity and returned `None` instead of forcing a fresh
+/// reload.
+///
+/// Discrimination property: the fix that makes
+/// `current_or_read_whole_hash` route an evicted canonical through
+/// `ensure_loaded` (rather than honouring a stale `get_any` hash) is
+/// what breaks this test if reverted — pre-fix the warm
+/// `get_component_meta` returns `None`.
+#[test]
+fn evicted_owner_reloads_after_dep_edit_without_dependent_eviction() {
+    #[allow(deprecated)]
+    let project_graph =
+        verter_workspace::ProjectGraph::from_configs(vec![make_project_config("/workspace")]);
+    let workspace = Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
+    workspace.set_project_graph(project_graph);
+    workspace.inject_file("/workspace/src/types.ts".into(), Arc::from(SHARED_TYPES_TS));
+    workspace.inject_file("/workspace/src/Comp.vue".into(), Arc::from(COMP_VUE));
+
+    let ws_access: Arc<dyn WorkspaceAccess> = workspace.clone();
+    let host = VerterHost::new(HostConfig::default(), ws_access);
+    host.configure_projects(vec![
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+    ]);
+    let host = Arc::new(host);
+
+    // Cold pass — captures the pre-edit shape into all caches.
+    let meta_pre = host
+        .get_component_meta("/workspace/src/Comp.vue")
+        .expect("cold get_component_meta must succeed");
+    let prop_names_pre: Vec<String> = meta_pre.props.iter().map(|p| p.name.clone()).collect();
+    assert!(
+        prop_names_pre.contains(&"count".to_string()),
+        "cold resolution must include `count` prop (got {prop_names_pre:?})"
+    );
+
+    // Edit the upstream types file WITHOUT the eager reverse-dependent
+    // cascade. The cascade is precisely the path that would evict
+    // `/workspace/src/Comp.vue`'s artifacts.
+    let edited_types = r#"export interface Props {
+  message: string,
+  newProp: boolean,
+}
+"#;
+    workspace.inject_file("/workspace/src/types.ts".into(), Arc::from(edited_types));
+    let _dep_update = host
+        .upsert_without_dependent_eviction(UpsertRequest {
+            canonical_id: Some("/workspace/src/types.ts".into()),
+            input_id: "/workspace/src/types.ts".into(),
+            source: Arc::from(edited_types),
+            file_kind: FileKind::NonSfc,
+            aliases: vec![],
+        })
+        .expect("dep upsert must succeed");
+    host.evict("/workspace/src/Comp.vue");
+
+    // Warm pass — the evicted owner must reload to authoritative state
+    // and reflect the new shape.
+    let meta_post = host
+        .get_component_meta("/workspace/src/Comp.vue")
+        .expect("get_component_meta on an evicted owner must reload and succeed");
+    let prop_names_post: Vec<String> = meta_post.props.iter().map(|p| p.name.clone()).collect();
+    assert!(
+        prop_names_post.contains(&"newProp".to_string()),
+        "post-edit resolution must include `newProp` prop (got {prop_names_post:?})"
+    );
+    assert!(
+        !prop_names_post.contains(&"count".to_string()),
+        "post-edit resolution must NOT include `count` prop (got {prop_names_post:?})"
+    );
+}
+
 // ──────────────────────────────────────────────────────────────────
 // MS-4 : post_publish dep_signature acceptance
 // ──────────────────────────────────────────────────────────────────

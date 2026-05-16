@@ -1465,11 +1465,25 @@ impl VerterHost {
     }
 
     pub(crate) fn current_or_read_whole_hash(&self, canonical_id: &str) -> Option<Hash16> {
-        // Post-cut: live-host probe. Resolvers that need to load a canonical
+        // Live-host probe. Resolvers that need to load a canonical
         // mid-resolution must call `ensure_loaded` explicitly; only the
         // top-level / test-scaffold path auto-loads on miss.
-        if let Some(hash) = self.get_whole_hash(canonical_id) {
-            return Some(hash);
+        //
+        // An evicted canonical must reload to authoritative state
+        // before its whole-hash is reported: `get_whole_hash` has a
+        // permissive `FileArtifactStore::get_any` fallback that
+        // surfaces the *stale* artifact's own hash for an evicted
+        // owner. Honouring that hash would let a query proceed on the
+        // pre-eviction identity instead of forcing the reload the
+        // evict marker demands. Route an evicted canonical through
+        // `ensure_loaded` first — it clears the evict marker and
+        // re-integrates authoritative scheduler state, after which
+        // `get_whole_hash` returns the current content hash.
+        let evicted = self.is_canonical_evicted(canonical_id);
+        if !evicted {
+            if let Some(hash) = self.get_whole_hash(canonical_id) {
+                return Some(hash);
+            }
         }
         if canonical_id.is_empty() || is_raw_import_specifier_id(canonical_id) {
             return None;
