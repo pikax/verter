@@ -794,6 +794,138 @@ export type { FancyProps }"#,
     );
 }
 
+/// The generation-current `ImportRoute` hash is consulted on a
+/// cache-VALIDATION / read path (`HostStoreView` derived-hash
+/// construction). Building that hash must be side-effect-free: it may
+/// re-resolve a known-miss specifier to observe whether the dependency
+/// has appeared, but it must not materialize a shallow-only importer
+/// into the indexed `FileArtifactStore`, nor mutate the importer's
+/// host-owned import-route / dependency caches.
+///
+/// Scenario: `/workspace/src/importer.ts` records `./theme` as a
+/// known-miss in `DerivedRawState.import_routes` (the importer has no
+/// indexed `IndexedReady` — only the route table). `./theme.ts` is then
+/// added, so the workspace `content_generation` advances and the
+/// previously-unresolvable specifier now resolves.
+///
+/// Discrimination property: a known-miss re-resolve that routes through
+/// the full `resolve_type_dependency_canonical` path falls through
+/// `cached_import_route_resolution` to `authoritative_import_route`
+/// (which calls `ensure_indexed_ready` and materializes the shallow-only
+/// importer into the indexed store) and then `resolve_workspace_dependency_and_cache`
+/// → `cache_positive_import_route_result` (which rewrites the known-miss
+/// entry to a positive resolution and registers the new dependency).
+/// This test fails if the oracle re-resolves through that side-effecting
+/// path: post-call the importer would be in the indexed store and
+/// `import_routes["./theme"]` would be a positive resolution. A
+/// side-effect-free workspace re-resolve keeps the indexed store and
+/// the route/dependency caches untouched while still folding the
+/// now-resolvable target into the returned hash.
+#[test]
+fn generation_current_import_route_hash_oracle_is_side_effect_free() {
+    let host = make_host();
+    let importer = "/workspace/src/importer.ts";
+    upsert_non_sfc(
+        &host,
+        importer,
+        "import { Theme } from './theme'\nexport type Re = Theme\n",
+    );
+
+    // Record `./theme` as a known-miss in `DerivedRawState.import_routes`
+    // — `./theme.ts` does not exist yet. `set_import_dependencies`
+    // stamps the miss with the current workspace `content_generation`.
+    let known_miss = DependencyResolution {
+        specifier: "./theme".to_string(),
+        resolved_canonical_id: None,
+        possible_canonical_ids: Vec::new(),
+    };
+    host.set_import_dependencies(importer, vec![known_miss]);
+
+    let route_is_known_miss = |label: &str| {
+        let derived = host
+            .derived_raw_cache()
+            .get(importer)
+            .unwrap_or_else(|| panic!("{label}: importer must have a DerivedRawState entry"));
+        let resolution = derived
+            .import_routes
+            .get("./theme")
+            .unwrap_or_else(|| panic!("{label}: ./theme must be recorded in import_routes"));
+        VerterHost::import_route_is_known_miss(resolution)
+    };
+    assert!(
+        route_is_known_miss("after set_import_dependencies"),
+        "./theme must start as a known-miss before the dependency is added"
+    );
+    let hash_before_dep = host
+        .generation_current_import_route_hash(importer)
+        .expect("oracle must produce a hash while ./theme is unresolved");
+
+    // Add `./theme.ts`, advancing the workspace `content_generation` so
+    // the previously-unresolvable specifier now resolves. The
+    // precondition check goes through the bare workspace VFS resolve so
+    // it does not itself mutate the importer's import-route cache.
+    upsert_non_sfc(
+        &host,
+        "/workspace/src/theme.ts",
+        "export interface Theme { item: string }\n",
+    );
+    assert_eq!(
+        host.ws()
+            .resolve_import(
+                importer,
+                "./theme",
+                verter_workspace::ResolutionContext {
+                    phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                    kind: verter_workspace::ResolveRequestKind::TypeImport,
+                },
+            )
+            .map(|r| r.source_id),
+        Some("/workspace/src/theme.ts".to_string()),
+        "precondition: ./theme must be workspace-resolvable once theme.ts exists"
+    );
+
+    let importer_indexed_before = host.project_type_store().indexed().get_any(importer);
+    let dependencies_before = host
+        .dependency_cache()
+        .get(importer)
+        .map(|entry| entry.dependencies.clone())
+        .unwrap_or_default();
+
+    // Invoke the oracle on the cache-validation read path. It must
+    // re-resolve `./theme` against the current workspace generation
+    // WITHOUT materializing the importer or mutating its caches.
+    let hash_after_dep = host
+        .generation_current_import_route_hash(importer)
+        .expect("oracle must produce a hash after ./theme becomes resolvable");
+
+    let importer_indexed_after = host.project_type_store().indexed().get_any(importer);
+    assert_eq!(
+        importer_indexed_before.is_some(),
+        importer_indexed_after.is_some(),
+        "oracle must NOT change whether the importer is materialized in the indexed store"
+    );
+    assert!(
+        route_is_known_miss("after oracle"),
+        "oracle must NOT rewrite the ./theme known-miss to a positive import-route resolution"
+    );
+    let dependencies_after = host
+        .dependency_cache()
+        .get(importer)
+        .map(|entry| entry.dependencies.clone())
+        .unwrap_or_default();
+    assert_eq!(
+        dependencies_before, dependencies_after,
+        "oracle must NOT register theme.ts in the importer's dependency set"
+    );
+
+    // The re-resolve must still be absence-sensitive: the appearance of
+    // theme.ts folds into the hash so dependent caches invalidate.
+    assert_ne!(
+        hash_before_dep, hash_after_dep,
+        "oracle hash must change once the previously-unresolvable ./theme resolves"
+    );
+}
+
 #[test]
 fn resolve_imported_type_root_caches_stable_miss_in_imported_root_db() {
     let host = make_host();

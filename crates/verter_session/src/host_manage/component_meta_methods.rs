@@ -3191,14 +3191,22 @@ impl VerterHost {
 
         // Re-resolve the known-miss specifiers against the current
         // workspace so the hash reflects appearance of a previously
-        // unresolvable dependency.
+        // unresolvable dependency. This runs on a cache-validation read
+        // path, so the re-resolve uses the side-effect-free
+        // `generation_current_known_miss_resolution` rather than
+        // `resolve_type_dependency_canonical` — the latter can
+        // materialize a shallow-only importer (`ensure_indexed_ready`)
+        // and rewrite the `import_routes` known-miss entry to a positive
+        // (`cache_positive_import_route_result`) while merely building
+        // the hash.
         let mut generation_current: rustc_hash::FxHashMap<
             String,
             crate::types::DependencyResolution,
         > = rustc_hash::FxHashMap::default();
         for (specifier, resolution) in routes.iter() {
             if Self::import_route_is_known_miss(resolution) {
-                let current = self.resolve_type_dependency_canonical(canonical_id, specifier);
+                let current =
+                    self.generation_current_known_miss_resolution(canonical_id, specifier);
                 generation_current.insert(
                     specifier.clone(),
                     crate::types::DependencyResolution {

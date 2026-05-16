@@ -545,4 +545,61 @@ impl VerterHost {
         self.cache_positive_import_route_result(owner_canonical, import_source, &preferred);
         Some(preferred)
     }
+
+    /// Side-effect-free type-dependency re-resolve for a known-miss
+    /// specifier.
+    ///
+    /// Answers the same question as
+    /// [`Self::resolve_type_dependency_canonical`] — "what canonical id
+    /// does this type import resolve to under the current workspace?" —
+    /// but is safe to call from a cache-validation / read path. It does
+    /// NOT consult [`Self::authoritative_import_route`] (whose
+    /// `IndexedReady` fallback can call `ensure_indexed_ready` and
+    /// materialize a shallow-only importer) and does NOT call
+    /// `cache_positive_import_route_result` (which would rewrite the
+    /// `DerivedRawState.import_routes` known-miss entry to a positive and
+    /// register a new dependency). Resolution flows straight through the
+    /// workspace VFS (`WorkspaceAccess::resolve_import`) and the
+    /// read-only target normalizers, so the only state it touches is the
+    /// workspace engine's own resolution memo.
+    ///
+    /// The returned canonical id matches what
+    /// `resolve_type_dependency_canonical` would return for a
+    /// now-resolvable specifier: the workspace `TypeImport` resolution is
+    /// normalized through declaration-companion preference, then the
+    /// relative runtime companion and the `EsmImport` fallback are tried
+    /// in the same order. This keeps the absence-sensitive
+    /// `ImportRoute` hash correct without the side effects.
+    pub(crate) fn generation_current_known_miss_resolution(
+        &self,
+        owner_canonical: &str,
+        import_source: &str,
+    ) -> Option<String> {
+        let workspace_resolve = |kind: verter_workspace::ResolveRequestKind| {
+            self.ws()
+                .resolve_import(
+                    owner_canonical,
+                    import_source,
+                    verter_workspace::ResolutionContext {
+                        phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                        kind,
+                    },
+                )
+                .map(|resolution| resolution.source_id)
+        };
+
+        let type_resolved = workspace_resolve(verter_workspace::ResolveRequestKind::TypeImport)
+            .map(|resolved| {
+                self.normalize_live_type_dependency_target(
+                    owner_canonical,
+                    import_source,
+                    resolved.as_str(),
+                )
+            })
+            .or_else(|| self.fallback_relative_type_companion(owner_canonical, import_source));
+        if type_resolved.is_some() {
+            return type_resolved;
+        }
+        workspace_resolve(verter_workspace::ResolveRequestKind::EsmImport)
+    }
 }
