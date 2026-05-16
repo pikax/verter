@@ -21,6 +21,60 @@ use super::{
     extract_component_meta_from_resolved, ComponentMetaOptions, HostFenceValidator,
 };
 
+/// Strip the OWNER's own `DerivedFactHash { kind: Route }` fact from a
+/// `ComponentMetaResultEntry` signature before cache admission.
+///
+/// **Why exactly this one fact.** The owner's `Route` hash is the only
+/// fact in the tracer-owned signature that does NOT round-trip through
+/// warm validation. `HostStoreView::build` populates
+/// `view.derived_hashes[(owner, Route)]` from TWO sources — the
+/// owner's `IndexedReady.shallow_state` AND the
+/// `route_owned_shallow_cache` — and the route-owned source overwrites
+/// the indexed source when both are present (see
+/// `resolver_store.rs` `HostStoreView::build`). When the owner already
+/// has a `route_owned_shallow` entry from an earlier route-only read,
+/// the cold component-meta compute's route walk observes the owner's
+/// Route fact with the *indexed* hash, but a later warm-hit validation
+/// reads the *route-owned* hash. The two disagree even with no edit,
+/// so the warm hit misses and the query cold-recomputes every time —
+/// a steady-state warm-cache miss / perf regression.
+///
+/// The filter is deliberately narrow:
+///
+/// - Only `kind == Route` is dropped. `ImportRoute` and `DirectSource`
+///   derived facts round-trip and stay.
+/// - Only the OWNER's own Route fact is dropped (`canonical_id ==
+///   owner_canonical`). Cross-file route facts — Route facts for the
+///   route DEPS the cold compute walked — round-trip correctly (a dep
+///   does not race a route-owned-shallow build during the owner's cold
+///   compute) and MUST stay so an edit to a route dep still
+///   invalidates the owner's warm hit.
+/// - The owner's `FileWholeHash` fact is untouched, so owner-content
+///   edits still invalidate the warm hit.
+///
+/// Returns the input unchanged (cloned into a fresh `Arc`) when no
+/// owner-Route fact is present.
+fn strip_owner_route_fact(
+    owner_canonical: &str,
+    facts: &[crate::resolver_core::FactVersionRef],
+) -> Arc<[crate::resolver_core::FactVersionRef]> {
+    let filtered: Vec<crate::resolver_core::FactVersionRef> = facts
+        .iter()
+        .filter(|fact| {
+            !matches!(
+                fact,
+                crate::resolver_core::FactVersionRef::DerivedFactHash {
+                    canonical_id,
+                    kind: crate::resolver_core::DerivedFactKind::Route,
+                    ..
+                } if canonical_id == owner_canonical
+            )
+        })
+        .cloned()
+        .collect();
+    Arc::from(filtered.into_boxed_slice())
+}
+
 impl VerterHost {
     pub fn evaluate_types(
         &self,
@@ -82,9 +136,14 @@ impl VerterHost {
         // resolver-tier `Parse` / `ResolveImports` / `RouteSurface`
         // facts, and every sub-cache's bubbled signature. The curated
         // `resolved.fact_versions` is NOT consulted for the published
-        // signature (it carries the dual-source `DerivedFactHash{Route}`
-        // owner fact that necessitated the now-deleted route-fact
-        // filter; the traced set never observes that fact).
+        // signature. The single fact the tracer-owned signature CAN
+        // carry that does not round-trip on warm validation is the
+        // owner's OWN `DerivedFactHash{Route}` — the cold compute's
+        // macro-root route walk observes it whenever the owner is a
+        // route participant — so `publish_component_meta_cache_entry`
+        // drops exactly that fact before cache admission (see
+        // `strip_owner_route_fact`). Cross-file route facts round-trip
+        // and are retained.
         //
         // R24 contract: the tracer is installed on COLD paths only.
         // The warm-hit fast path above returned before reaching
@@ -439,12 +498,16 @@ impl VerterHost {
             canonical_id: Arc::from(canonical),
             whole_hash,
         };
+        // Drop the owner's own non-round-tripping `DerivedFactHash{Route}`
+        // fact before admission (see `strip_owner_route_fact`). Cross-file
+        // route facts and the owner `FileWholeHash` fact are retained.
+        let admitted_signature = strip_owner_route_fact(canonical, &fact_dep_signature);
         self.project_type_store.component_meta_results().insert(
             key,
             crate::component_meta_result_db::ComponentMetaResultEntry {
                 payload: Arc::new(cached),
                 read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(
-                    fact_dep_signature,
+                    admitted_signature,
                     dep_signature,
                 ),
             },
@@ -507,12 +570,16 @@ impl VerterHost {
             canonical_id: Arc::from(canonical),
             whole_hash,
         };
+        // Drop the owner's own non-round-tripping `DerivedFactHash{Route}`
+        // fact before admission (see `strip_owner_route_fact`). Cross-file
+        // route facts and the owner `FileWholeHash` fact are retained.
+        let admitted_signature = strip_owner_route_fact(canonical, &fact_dep_signature);
         self.project_type_store.component_meta_results().insert(
             key,
             crate::component_meta_result_db::ComponentMetaResultEntry {
                 payload: Arc::new(cached),
                 read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(
-                    fact_dep_signature,
+                    admitted_signature,
                     dep_signature,
                 ),
             },
@@ -1034,3 +1101,7 @@ impl VerterHost {
         crate::component_meta_payload::resolve_type_expansion(self, handle, depth)
     }
 }
+
+#[cfg(test)]
+#[path = "component_meta_entry_tests.rs"]
+mod component_meta_entry_tests;

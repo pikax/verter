@@ -11,24 +11,30 @@
 //! `DerivedFactHash` Route/ImportRoute entries the tracer never
 //! observes, and the route-filter dropped the owner's Route entry.
 //!
-//! Post-1.J.2: the `FactReadSetFinalise::Ok(facts)` payload IS the
-//! published `read_set_signature.facts` rail. The route-fact filter
-//! and `filter_owner_round_trippable_facts` are deleted. The cold
-//! traced set computed by replaying the exact cold-path body equals
-//! the published `facts` rail byte-for-byte.
+//! Post-1.J.2: the `FactReadSetFinalise::Ok(facts)` payload — minus
+//! the owner's own non-round-tripping `DerivedFactHash{Route}` fact —
+//! IS the published `read_set_signature.facts` rail. The signature is
+//! sourced from the finalized tracer read set, then
+//! `publish_component_meta_cache_entry` applies the narrow
+//! `strip_owner_route_fact` filter at cache admission: exactly the
+//! owner's own Route fact is dropped (it is dual-sourced on
+//! `HostStoreView::derived_hashes` and does not round-trip on warm
+//! validation). Every OTHER traced fact — cross-file route facts,
+//! `FileWholeHash` facts, `Parse` / `ResolveImports` / `RouteSurface`
+//! facts — lands in the published `facts` rail unchanged.
 //!
 //! Discrimination: this test asserts EXACT set equality between the
-//! published `facts` rail and the finalized tracer read set. If the
-//! producer reverted to sourcing the signature from
-//! `resolved.fact_versions`, the two sets would diverge (the curated
-//! set carries `DerivedFactHash` variants absent from the traced set)
-//! and `assert_eq!` on the sorted fact vectors would FAIL.
+//! published `facts` rail and the finalized tracer read set with the
+//! owner-Route fact removed. If the producer reverted to sourcing the
+//! signature from `resolved.fact_versions`, the two sets would diverge
+//! (the curated set carries `DerivedFactHash` variants absent from the
+//! traced set) and `assert_eq!` on the sorted fact vectors would FAIL.
 
 #![cfg(test)]
 
 use std::sync::Arc;
 
-use verter_session::resolver_core::{FactReadSetFinalise, FactVersionRef};
+use verter_session::resolver_core::{DerivedFactKind, FactReadSetFinalise, FactVersionRef};
 use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
 
 fn build_host() -> Arc<VerterHost> {
@@ -116,24 +122,48 @@ fn published_component_meta_signature_equals_finalized_tracer_read_set() {
         }
     };
 
-    // EXACT set equality — item 3 discrimination. The published
-    // `facts` rail IS the finalized tracer read set: `get_component_meta`'s
-    // cold path takes the `FactReadSetFinalise::Ok(facts)` payload
-    // verbatim as the published signature. A producer that instead
-    // sourced the signature from the curated `resolved.fact_versions`
-    // would publish a DIFFERENT set — the curated path drains the
-    // dispatch accumulator and adds blanket `DerivedFactHash`
-    // Route/ImportRoute entries per `current_dependency_fact_versions`,
-    // a set that does not match what the tracer accumulated. The
-    // sorted vectors would diverge and this `assert_eq!` would FAIL.
+    // The publish site applies the narrow `strip_owner_route_fact`
+    // filter at cache admission — exactly the owner's own
+    // `DerivedFactHash{Route}` fact is dropped. To compare the
+    // published rail against the tracer read set, remove the same one
+    // fact from the traced set. This is the ONLY fact the publish
+    // site filters; every other traced fact is published verbatim.
+    let traced_minus_owner_route: Vec<FactVersionRef> = traced_facts
+        .iter()
+        .filter(|f| {
+            !matches!(
+                f,
+                FactVersionRef::DerivedFactHash {
+                    canonical_id,
+                    kind: DerivedFactKind::Route,
+                    ..
+                } if canonical_id == "/src/Comp.vue"
+            )
+        })
+        .cloned()
+        .collect();
+
+    // EXACT set equality — tracer-owned-signature discrimination. The
+    // published `facts` rail IS the finalized tracer read set with the
+    // owner-Route fact stripped: `get_component_meta`'s cold path takes
+    // the `FactReadSetFinalise::Ok(facts)` payload, and
+    // `publish_component_meta_cache_entry` removes only the owner's own
+    // Route fact. A producer that instead sourced the signature from
+    // the curated `resolved.fact_versions` would publish a DIFFERENT
+    // set — the curated path drains the dispatch accumulator and adds
+    // blanket `DerivedFactHash` Route/ImportRoute entries per
+    // `current_dependency_fact_versions`, a set that does not match
+    // what the tracer accumulated. The sorted vectors would diverge
+    // and this `assert_eq!` would FAIL.
     assert_eq!(
         sorted(&published.facts),
-        sorted(&traced_facts),
-        "Block 1.J.2 item 3: the published `ComponentMetaResultEntry` \
-         `facts` rail MUST equal the finalized fact-tracer read set. \
-         published={:#?} traced={:#?}",
+        sorted(&traced_minus_owner_route),
+        "Block 1.J.2: the published `ComponentMetaResultEntry` `facts` \
+         rail MUST equal the finalized fact-tracer read set minus the \
+         owner's own `DerivedFactHash{{Route}}` fact. \
+         published={:#?} traced(minus owner-Route)={:#?}",
         sorted(&published.facts),
-        sorted(&traced_facts),
+        sorted(&traced_minus_owner_route),
     );
 
     // Warm sanity: an identical second call must hit the warm cache

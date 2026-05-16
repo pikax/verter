@@ -1,35 +1,31 @@
-//! Block 1.J.2 — item 3 discriminator: route facts FLOW into the
-//! published `ComponentMetaResultEntry` signature now that the
-//! route-fact filtering workaround is removed.
+//! Block 1.J.2 — route facts in the published `ComponentMetaResultEntry`
+//! signature: CROSS-FILE route facts flow in, the OWNER's own Route
+//! fact is filtered.
 //!
-//! Pre-1.J.2: `get_component_meta`'s cold path published
-//! `filter_owner_round_trippable_facts(resolved.fact_versions)`. That
-//! workaround EXPLICITLY stripped the owner's
-//! `FactVersionRef::DerivedFactHash { kind: Route }` entry from the
-//! published signature, because the curated signature could carry a
-//! non-round-tripping copy of it. Route facts therefore did NOT fully
-//! flow into the published `facts` rail.
+//! Block 1.J.2 sourced the signature from the finalised fact tracer
+//! read set. The cold compute's macro-root route walk genuinely
+//! observes the route's participant facts — including the owner's own
+//! `DerivedFactHash{Route}` — into the active tracer.
 //!
-//! Post-1.J.2: the signature is sourced from the finalized fact
-//! tracer read set. The cold compute's macro-root route walk
-//! (`RouteDb::get_or_resolve_route_observing_facts`) genuinely
-//! observes the route's participant facts — including the owner's
-//! `DerivedFactHash{Route}` — into the active tracer, and the
-//! `filter_owner_round_trippable_facts` workaround is deleted. Every
-//! route fact the cold compute actually observed lands in the
-//! published `facts` rail unfiltered.
+//! The owner's own Route fact does not round-trip on warm validation:
+//! `HostStoreView::build` dual-sources `derived_hashes[(owner, Route)]`
+//! (the `IndexedReady` shallow state AND any `route_owned_shallow`
+//! entry), and the two can disagree. `publish_component_meta_cache_entry`
+//! therefore drops exactly the owner's own `DerivedFactHash{Route}`
+//! fact via `strip_owner_route_fact` before cache admission. Cross-file
+//! route facts — Route facts for the route DEPS the cold compute
+//! walked — round-trip correctly and stay in the published signature.
 //!
 //! Discrimination:
-//!  1. `route_facts_flow_unfiltered_into_signature` asserts the
-//!     published `facts` rail carries a `DerivedFactHash{Route}` fact
-//!     for the OWNER canonical — the EXACT fact the deleted
-//!     `filter_owner_round_trippable_facts` stripped. If the filter
-//!     were still applied (or the curated source restored), the
-//!     owner's Route fact would be absent and this assertion FAILS.
+//!  1. `cross_file_route_facts_flow_owner_route_filtered` asserts the
+//!     published `facts` rail carries the route DEP's
+//!     `DerivedFactHash{Route}` fact but NOT the owner's own. PRE-FIX
+//!     (Block 1.J.2 with no publish-site filter) the owner's Route
+//!     fact IS present and the negative assertion FAILS.
 //!  2. `editing_route_dep_invalidates_warm_hit` asserts that editing
 //!     the route's source type invalidates the warm hit and the
-//!     post-edit result reflects the new shape — the route facts in
-//!     the signature drive correct invalidation.
+//!     post-edit result reflects the new shape — the cross-file route
+//!     facts in the signature drive correct invalidation.
 
 #![cfg(test)]
 
@@ -64,7 +60,7 @@ const OWNER_VUE: &str = "<script setup lang=\"ts\">\n\
      <template><div /></template>\n";
 
 #[test]
-fn route_facts_flow_unfiltered_into_signature() {
+fn cross_file_route_facts_flow_owner_route_filtered() {
     // `defineProps<RProps>()` over an imported type. Resolving the
     // macro root walks the named-type export route; the route walk
     // observes `DerivedFactHash{Route}` participant facts (including
@@ -83,11 +79,31 @@ fn route_facts_flow_unfiltered_into_signature() {
     )
     .expect("a ComponentMetaResultEntry must be published for /src/Comp.vue");
 
-    // EXACT discrimination: the OWNER's `DerivedFactHash{Route}` fact
-    // — the precise fact `filter_owner_round_trippable_facts`
-    // stripped — MUST now be present in the published `facts` rail.
-    // The cold compute's macro-root route walk observes it; with the
-    // filter deleted, it flows through unfiltered.
+    // The cross-file route dep's Route fact MUST be present — route
+    // facts for every walked DEP flow into the signature unfiltered
+    // and drive correct cross-file invalidation.
+    assert!(
+        sig.facts.iter().any(|f| matches!(
+            f,
+            FactVersionRef::DerivedFactHash {
+                canonical_id,
+                kind: DerivedFactKind::Route,
+                ..
+            } if canonical_id == "/src/types.ts"
+        )),
+        "the route source dep's `DerivedFactHash{{Route}}` fact MUST \
+         be in the published `facts` rail — cross-file route facts \
+         are NOT filtered. facts = {:#?}",
+        sig.facts,
+    );
+
+    // EXACT discrimination: the OWNER's own `DerivedFactHash{Route}`
+    // fact MUST be filtered from the published `facts` rail.
+    // `publish_component_meta_cache_entry` strips it via
+    // `strip_owner_route_fact` because the owner's own export route is
+    // dual-sourced on `HostStoreView::derived_hashes` and does not
+    // round-trip on warm validation. PRE-FIX (no publish-site filter)
+    // the owner's Route fact is present and this assertion FAILS.
     let owner_route_facts: Vec<&FactVersionRef> = sig
         .facts
         .iter()
@@ -103,30 +119,12 @@ fn route_facts_flow_unfiltered_into_signature() {
         })
         .collect();
     assert!(
-        !owner_route_facts.is_empty(),
-        "Block 1.J.2 item 3: the owner's `DerivedFactHash{{Route}}` \
-         fact MUST be present in the published `facts` rail — the \
-         `filter_owner_round_trippable_facts` route-fact filter is \
-         deleted, so the route facts the cold compute observed flow \
-         in unfiltered. facts = {:#?}",
-        sig.facts,
-    );
-
-    // The route-dep's Route fact must also be present — route facts
-    // for every walked participant flow into the signature.
-    assert!(
-        sig.facts.iter().any(|f| matches!(
-            f,
-            FactVersionRef::DerivedFactHash {
-                canonical_id,
-                kind: DerivedFactKind::Route,
-                ..
-            } if canonical_id == "/src/types.ts"
-        )),
-        "Block 1.J.2 item 3: the route source dep's \
-         `DerivedFactHash{{Route}}` fact MUST also be in the \
-         published `facts` rail. facts = {:#?}",
-        sig.facts,
+        owner_route_facts.is_empty(),
+        "the owner's own `DerivedFactHash{{Route}}` fact MUST be \
+         filtered from the published `facts` rail — it does not \
+         round-trip on warm validation. The narrow `strip_owner_route_fact` \
+         filter drops exactly this fact at cache admission. \
+         offending facts = {owner_route_facts:#?}",
     );
 }
 
@@ -143,13 +141,14 @@ fn editing_route_dep_invalidates_warm_hit() {
     let prov = host.provenance();
     let hits_before = prov.component_meta_result_cache_hits.load(Relaxed);
     // Warm sanity: an unedited second call hits the warm cache — the
-    // route facts in the tracer-owned signature round-trip.
+    // tracer-owned signature (with the owner-Route fact filtered)
+    // round-trips.
     let _ = host.get_component_meta("/src/Comp.vue");
     let hits_after = prov.component_meta_result_cache_hits.load(Relaxed);
     assert!(
         hits_after > hits_before,
         "warm sanity: unedited second call must hit the warm cache — \
-         the tracer-owned route facts must round-trip \
+         the published signature must round-trip \
          (hits {hits_before} -> {hits_after})",
     );
 
@@ -163,9 +162,9 @@ fn editing_route_dep_invalidates_warm_hit() {
     let misses_after = prov.component_meta_result_cache_misses.load(Relaxed);
     assert!(
         misses_after > misses_before,
-        "Block 1.J.2 item 3: editing the route source type MUST \
-         invalidate the owner's warm `ComponentMetaResultDb` hit — \
-         the route facts flow into the published signature and \
+        "editing the route source type MUST invalidate the owner's \
+         warm `ComponentMetaResultDb` hit — the cross-file route \
+         facts flow into the published signature and \
          `validates_fact_signature` catches the change. \
          misses {misses_before} -> {misses_after}",
     );
@@ -176,7 +175,7 @@ fn editing_route_dep_invalidates_warm_hit() {
     let prop_names: Vec<&str> = props.props.iter().map(|p| p.name.as_str()).collect();
     assert!(
         prop_names.contains(&"a") && prop_names.contains(&"b"),
-        "Block 1.J.2 item 3: post-edit component-meta MUST reflect \
-         the new `RProps` shape (a + b) — got props {prop_names:?}",
+        "post-edit component-meta MUST reflect the new `RProps` shape \
+         (a + b) — got props {prop_names:?}",
     );
 }
