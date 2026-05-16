@@ -696,6 +696,32 @@ impl crate::resolver_core::StoreView for HostStoreView {
         self.whole_hashes.contains_key(canonical_id)
     }
 
+    /// Strict self-root `FileWholeHash` validation.
+    ///
+    /// Unlike the [`Self::validates`] `FileWholeHash` arm — whose
+    /// untracked-file branch optimistically returns `true` so a
+    /// dependency loaded after the view snapshot is not forced through
+    /// a permissive recheck — this strict variant returns `false` for
+    /// an untracked keyed canonical. A self-root names a query-identity
+    /// cache entry's OWN keyed canonical; if that file is untracked by
+    /// the live view its content is unknown here, which must invalidate
+    /// the entry (a same-canonical content edit must not survive). A
+    /// tracked canonical is validated by exact hash equality, identical
+    /// to the [`Self::validates`] tracked arm.
+    fn validates_self_root_whole_hash(
+        &self,
+        canonical_id: &str,
+        hash: &crate::resolver_core::ResolverHash16,
+    ) -> bool {
+        match self.whole_hashes.get(canonical_id) {
+            Some(current) => current == hash,
+            // Untracked self-root canonical — the entry's own file is
+            // not in this view. Reject: the warm read misses and
+            // recomputes against current content.
+            None => false,
+        }
+    }
+
     /// Parse-domain validator (R26).
     ///
     /// Look up `fact.key` against the file's `FileFacts` registry and

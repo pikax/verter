@@ -125,6 +125,11 @@ mod cache_identity_invariants_tests;
 // Block 1.J.1 item 1 — content-pinned artifact-read discriminators.
 #[cfg(test)]
 mod artifact_reads_pinned_tests;
+// Shared substrate for query-identity self-version rooting —
+// current-content fact path, self-root signature helpers, strict
+// self-root validation, and the skip-own-drain test hook.
+#[cfg(test)]
+mod query_identity_self_root_substrate_tests;
 // Block 1.J.1 item 2 — negative import-route reopen discriminators.
 /// Selective component-meta surface API types and BFS bridge support
 /// (Tier 1B / D102 / D125).

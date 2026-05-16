@@ -17,32 +17,41 @@
 //! That keeps the outer compute's observation set complete even when
 //! inner reads come from cache.
 //!
-//! ## Path-precise observation (R28)
+//! ## Path-precise parse facts (R28)
 //!
-//! Two helper shapes serve the Family A path-precise observation
-//! contract:
+//! Beneath the self-root (below), two helper shapes carry the Family A
+//! path-precise parse facts:
 //!
 //! - [`fact_signature_for_canonical_member`] — keyed on `(canonical,
 //!   exporter, member, space)`. The cold path reads the `Member`
 //!   body fingerprint and `MemberPresence` header fact for the
-//!   member. Adding a sibling member to `exporter` does NOT shift
-//!   either fact for the named member, so unrelated edits do not
-//!   invalidate the entry.
+//!   member.
 //! - [`fact_signature_for_exported_type`] — keyed on `(canonical,
 //!   type_name, space)`. The cold path observes the top-level type
-//!   identity via `Export`, `LocalDecl`, and `MemberShape` facts.
-//!   Editing a single member body does NOT invalidate (callers that
-//!   walk member bodies must combine with `member` observations);
-//!   adding/removing/renaming a member shifts `MemberShape` and
-//!   invalidates whole-type readers.
+//!   identity via `Export`, `LocalDecl`, and `MemberShape` facts;
+//!   adding/removing/renaming a member shifts `MemberShape`.
 //!
 //! For caches whose key shape does NOT include a member name (e.g.
 //! `AppConfigNoOverrideProofKey`), the cold path observes the
-//! `SyntacticExportSet` of the contributing canonical instead.
-//! Whole-file `FileWholeHash` observations are reserved for callers
-//! that genuinely consume the full file body (e.g. `<src=>` external
-//! blocks); cross-file member-precise consumers route through this
-//! module's `member_*` helpers.
+//! `SyntacticExportSet` of the contributing canonical instead. These
+//! parse facts remain a refinement for cross-file consumers; the
+//! self-root below is the always-on same-file edit detector.
+//!
+//! ## Self-version rooting
+//!
+//! Each of the three central helpers prepends a self-root
+//! `FactVersionRef::FileWholeHash` for the defining/key canonical it
+//! represents, then adds the path-precise parse facts above. The
+//! self-root is the whole-hash fact for the cache entry's OWN keyed
+//! canonical: any byte change to that file shifts its whole hash, so
+//! a warm read that validates the self-root via
+//! [`validate_fact_signature_with_self_roots`] detects a
+//! same-canonical content edit and recomputes. The path-precise parse
+//! facts still gate sibling-edit reuse — the self-root augments them
+//! for correctness-first closure, it does not replace them. The
+//! self-root hash is sourced through the authoritative current-content
+//! oracle ([`ResolverContext::authoritative_current_content_hash`]),
+//! never the permissive `get_any` hash.
 
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
@@ -151,6 +160,57 @@ pub(crate) fn validate_fact_signature(
     signature.iter().all(|fact| view.validates(fact))
 }
 
+/// Walk `signature` against the current resolver-store view, but
+/// validate any `FileWholeHash` fact whose canonical appears in
+/// `self_root_canonicals` **strictly** — an untracked or mismatched
+/// self-root canonical fails validation.
+///
+/// This is the validation entry point for a query-identity cache
+/// whose `read_set_signature` carries a self-root `FileWholeHash` for
+/// its own keyed canonical (the signature shape produced by the three
+/// central fact-signature helpers above). [`validate_fact_signature`]
+/// alone routes a `FileWholeHash` through the lazy
+/// [`crate::resolver_core::StoreView::validates`] rule, whose
+/// untracked-file arm optimistically accepts: that is correct for a
+/// cross-file *dependency* fact (loaded after the view snapshot) but
+/// wrong for a *self-root*, where an untracked keyed canonical means
+/// the entry's own file is gone and the entry must miss.
+///
+/// `self_root_canonicals` is the explicit self-root-vs-dependency
+/// distinction: a `FileWholeHash` whose canonical is listed is a
+/// self-root and routes through the strict
+/// [`crate::resolver_core::StoreView::validates_self_root_whole_hash`];
+/// every other fact (including a `FileWholeHash` for a non-listed
+/// cross-file dependency) routes through the lazy `validates`, so
+/// cross-file lazy permissiveness is preserved. Empty signatures
+/// trivially validate.
+///
+/// `#[allow(dead_code)]`: this is the strict-validation substrate.
+/// The per-query-identity-cache warm-read sites that pass their own
+/// keyed canonical(s) as `self_root_canonicals` land in the follow-up
+/// cache-wiring work; until then the only callers are the substrate
+/// discriminator tests.
+#[inline]
+#[allow(dead_code)]
+pub(crate) fn validate_fact_signature_with_self_roots(
+    ctx: &dyn ResolverContext,
+    signature: &[FactVersionRef],
+    self_root_canonicals: &[&str],
+) -> bool {
+    if signature.is_empty() {
+        return true;
+    }
+    let view = ctx.resolver_store_view();
+    signature.iter().all(|fact| match fact {
+        FactVersionRef::FileWholeHash { canonical_id, hash }
+            if self_root_canonicals.contains(&canonical_id.as_str()) =>
+        {
+            view.validates_self_root_whole_hash(canonical_id, hash)
+        }
+        other => view.validates(other),
+    })
+}
+
 /// Bubble `signature` into **all** active fact tracers on the current
 /// thread's stack (fan-out). Called by both cold-compute and warm-hit
 /// paths so every outer tracer scope sees every transitive fact the
@@ -187,21 +247,26 @@ fn zero_hash() -> Hash16 {
 }
 
 /// Recover the producer's hash for a parse-domain fact key on
-/// `canonical_id`. Returns `None` only when the file has no
-/// `FileArtifacts` entry under any `(content_hash, parse_env_hash)`
-/// in the cache (truly absent file — the validator will treat the
-/// missing fact as a miss).
+/// `canonical_id`. Returns `None` when the file has no `FileFacts`
+/// entry for its **current** content identity (truly absent file, or
+/// a content edit left only a stale artifact behind — the validator
+/// treats the missing fact as a miss).
+///
+/// Reads through [`ResolverContext::current_file_facts`], which pins
+/// the lookup on the canonical's authoritative current content hash.
+/// The permissive `FileArtifactStore::get_artifacts_any` is NOT used:
+/// it returns the latest cached registry regardless of content hash,
+/// so a fact hash sourced from a stale artifact would let the
+/// validator confirm a stale cache entry as valid once the upsert
+/// own-canonical drain is retired.
 fn lookup_parse_fact_hash(
     ctx: &dyn ResolverContext,
     canonical_id: &str,
     key: &FactKey,
     lane: FactLane,
 ) -> Option<Hash16> {
-    let artifacts = ctx
-        .project_type_store()
-        .indexed()
-        .get_artifacts_any(canonical_id)?;
-    let fact = artifacts.facts.lookup(key)?;
+    let facts = ctx.current_file_facts(canonical_id)?;
+    let fact = facts.lookup(key)?;
     Some(match lane {
         FactLane::Semantic => fact.semantic_hash,
         FactLane::Display => fact.display_hash,
@@ -226,19 +291,46 @@ fn parse_fact_ref(
     })
 }
 
-/// Build a path-precise signature for a cache whose validity depends
-/// on a single MEMBER of an exporter type — the R28 path-precise
-/// pattern.
+/// Build a self-root `FileWholeHash` fact for `canonical_id` at its
+/// authoritative current content hash, or `None` when the canonical
+/// has no current content (unloaded / evicted at signature-build
+/// time).
 ///
-/// The cold-compute reads the body of `member` declared inside the
-/// `exporter` type at `canonical_id`, so the signature observes BOTH
+/// A self-root is the whole-hash fact for a cache entry's OWN keyed
+/// canonical. Including it makes a cache entry detect a
+/// same-canonical content edit: any byte change to `canonical_id`
+/// shifts its whole hash, so a warm read that validates this fact
+/// strictly (via [`validate_fact_signature_with_self_roots`]) misses
+/// and recomputes. The fact is sourced through
+/// [`ResolverContext::current_file_facts`]'s hash oracle —
+/// [`ResolverContext::authoritative_current_content_hash`] — never
+/// the permissive `get_any` hash.
+fn self_root_fact(ctx: &dyn ResolverContext, canonical_id: &str) -> Option<FactVersionRef> {
+    let hash = ctx.authoritative_current_content_hash(canonical_id)?;
+    Some(FactVersionRef::FileWholeHash {
+        canonical_id: canonical_id.to_string(),
+        hash,
+    })
+}
+
+/// Build a self-rooted, path-precise signature for a cache whose
+/// validity depends on a single MEMBER of an exporter type.
+///
+/// The signature leads with a self-root `FileWholeHash` for
+/// `canonical_id`: any content edit to the declaring file shifts its
+/// whole hash and invalidates the entry. This is the correctness-first
+/// floor — a same-canonical edit is always detected.
+///
+/// It then adds the path-precise parse facts: the cold-compute reads
+/// the body of `member` declared inside the `exporter` type at
+/// `canonical_id`, so the signature observes BOTH
 /// `MemberPresence(exporter, member, space)` (header fact — bumps on
 /// add/remove/rename/kind-change) AND `Member(exporter, member,
-/// space)` (body fingerprint — bumps on body edit). Adding sibling
-/// members to `exporter` does NOT shift either fact for the named
-/// member (R10 / R28); editing the named member's body shifts only
-/// the `Member` body fact; removing the named member drops both
-/// facts (validator treats absence as a sentinel-hash mismatch).
+/// space)` (body fingerprint — bumps on body edit). Removing the
+/// named member drops both parse facts (the validator treats absence
+/// as a sentinel-hash mismatch). The parse facts remain a refinement
+/// for cross-file consumers and future member-precise invalidation;
+/// the self-root is the always-on same-file edit detector.
 ///
 /// Use this helper for caches keyed on `(canonical, exporter,
 /// member, space)` — e.g. `PreparedMemberDb`, slot-binding member
@@ -262,20 +354,42 @@ pub(crate) fn fact_signature_for_canonical_member(
         name: member_name,
         space,
     };
-    let entries: Vec<FactVersionRef> = vec![
-        parse_fact_ref(ctx, canonical_id, presence_key, FactLane::Semantic),
-        parse_fact_ref(ctx, canonical_id, body_key, FactLane::Semantic),
-    ];
+    // Prepend the self-root `FileWholeHash` for the declaring
+    // canonical so a same-canonical content edit invalidates the
+    // entry, then add the path-precise `MemberPresence` / `Member`
+    // parse facts.
+    let mut entries: Vec<FactVersionRef> = Vec::with_capacity(3);
+    if let Some(root) = self_root_fact(ctx, canonical_id) {
+        entries.push(root);
+    }
+    entries.push(parse_fact_ref(
+        ctx,
+        canonical_id,
+        presence_key,
+        FactLane::Semantic,
+    ));
+    entries.push(parse_fact_ref(
+        ctx,
+        canonical_id,
+        body_key,
+        FactLane::Semantic,
+    ));
     Arc::from(entries)
 }
 
-/// Build a signature for a cache whose validity depends on the
-/// IDENTITY of a top-level type declared at `canonical_id` — the
-/// Family A producer pattern for caches keyed on `(canonical,
+/// Build a self-rooted signature for a cache whose validity depends
+/// on the IDENTITY of a top-level type declared at `canonical_id` —
+/// the Family A producer pattern for caches keyed on `(canonical,
 /// type_name)`.
 ///
-/// The cold-compute consumes the declaration of `type_name` (its
-/// declaration shape and member list), so the signature observes:
+/// The signature leads with a self-root `FileWholeHash` for
+/// `canonical_id`: any content edit to the declaring file shifts its
+/// whole hash and invalidates the entry (the correctness-first floor —
+/// a same-canonical edit is always detected).
+///
+/// It then adds the top-level-identity parse facts. The cold-compute
+/// consumes the declaration of `type_name` (its declaration shape and
+/// member list), so the signature observes:
 /// - `Export(name, space)` — present iff the type is exported under
 ///   that name.
 /// - `LocalDecl(name, space)` — present iff the type is declared
@@ -283,12 +397,12 @@ pub(crate) fn fact_signature_for_canonical_member(
 /// - `MemberShape(exporter=name, space)` — the ordered member list
 ///   fingerprint; bumps when members are added/removed/renamed.
 ///
-/// Editing one member's body changes `Member(name, m, space)` but
-/// NOT this signature — that path-precise invalidation is the
-/// caller's responsibility via [`fact_signature_for_canonical_member`].
-/// This helper covers caches whose validity is "the top-level type
-/// exists and has THIS member-shape", not "the body of a particular
-/// member".
+/// Editing one member's body changes `Member(name, m, space)` (not
+/// observed here) — but the self-root catches it for the same-file
+/// case, and cross-file member-precise invalidation routes through
+/// [`fact_signature_for_canonical_member`]. This helper covers caches
+/// whose validity is "the top-level type exists and has THIS
+/// member-shape".
 pub(crate) fn fact_signature_for_exported_type(
     ctx: &dyn ResolverContext,
     canonical_id: &str,
@@ -308,30 +422,61 @@ pub(crate) fn fact_signature_for_exported_type(
         exporter: name,
         space,
     };
-    let entries: Vec<FactVersionRef> = vec![
-        parse_fact_ref(ctx, canonical_id, export_key, FactLane::Semantic),
-        parse_fact_ref(ctx, canonical_id, local_decl_key, FactLane::Semantic),
-        parse_fact_ref(ctx, canonical_id, member_shape_key, FactLane::Semantic),
-    ];
+    // Prepend the self-root `FileWholeHash` for the defining
+    // canonical so a same-canonical content edit invalidates the
+    // entry, then add the top-level-identity `Export` / `LocalDecl` /
+    // `MemberShape` parse facts.
+    let mut entries: Vec<FactVersionRef> = Vec::with_capacity(4);
+    if let Some(root) = self_root_fact(ctx, canonical_id) {
+        entries.push(root);
+    }
+    entries.push(parse_fact_ref(
+        ctx,
+        canonical_id,
+        export_key,
+        FactLane::Semantic,
+    ));
+    entries.push(parse_fact_ref(
+        ctx,
+        canonical_id,
+        local_decl_key,
+        FactLane::Semantic,
+    ));
+    entries.push(parse_fact_ref(
+        ctx,
+        canonical_id,
+        member_shape_key,
+        FactLane::Semantic,
+    ));
     Arc::from(entries)
 }
 
-/// Build a whole-canonical signature for caches whose cold-compute
-/// reads the file's surface fingerprint (e.g. a binding-walker that
-/// enumerates every export). Observes `SyntacticExportSet` — adding
-/// or removing exports shifts the fact; cosmetic edits inside a
-/// member body do NOT (they are observed by `Member(...)` facts on
-/// each consumer).
+/// Build a self-rooted whole-canonical signature for caches whose
+/// cold-compute reads the file's surface fingerprint (e.g. a
+/// binding-walker that enumerates every export).
+///
+/// The signature leads with a self-root `FileWholeHash` for
+/// `canonical_id` (any content edit to the keyed file invalidates the
+/// entry — the correctness-first floor), then observes
+/// `SyntacticExportSet`: adding or removing exports shifts that parse
+/// fact, which remains a refinement for cross-file consumers.
 pub(crate) fn fact_signature_for_canonical_surface(
     ctx: &dyn ResolverContext,
     canonical_id: &str,
 ) -> Arc<[FactVersionRef]> {
-    let entries = vec![parse_fact_ref(
+    // Prepend the self-root `FileWholeHash` for the keyed canonical so
+    // a same-canonical content edit invalidates the entry, then add
+    // the `SyntacticExportSet` surface parse fact.
+    let mut entries: Vec<FactVersionRef> = Vec::with_capacity(2);
+    if let Some(root) = self_root_fact(ctx, canonical_id) {
+        entries.push(root);
+    }
+    entries.push(parse_fact_ref(
         ctx,
         canonical_id,
         FactKey::SyntacticExportSet,
         FactLane::Semantic,
-    )];
+    ));
     Arc::from(entries)
 }
 

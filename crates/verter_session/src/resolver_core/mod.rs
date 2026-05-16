@@ -165,6 +165,35 @@ pub trait StoreView {
         false
     }
 
+    /// Validate a **self-root** `FileWholeHash` fact strictly.
+    ///
+    /// A self-root is the whole-hash fact for a query-identity cache
+    /// entry's OWN keyed canonical (as opposed to a cross-file
+    /// dependency fact). [`Self::validates`] applies a lazy
+    /// "untracked file → optimistically accept" rule to a plain
+    /// `FileWholeHash`: a file loaded as a dependency after the view
+    /// snapshot has no tracked hash, and forcing every such dependency
+    /// through a permissive recheck would be expensive. That
+    /// permissiveness is unsafe for a self-root: an untracked self-root
+    /// canonical means the cache entry's own file is gone (or its
+    /// content is unknown to this view), which must FAIL validation —
+    /// otherwise the entry survives a same-canonical content edit.
+    ///
+    /// This method is the strict counterpart: an untracked or
+    /// hash-mismatched self-root canonical returns `false`. The default
+    /// impl delegates to [`Self::validates`] so non-production
+    /// `StoreView` stubs keep their existing behavior; the production
+    /// [`crate::resolver_store::HostStoreView`] overrides it to reject
+    /// the untracked case. Callers that hold the explicit self-root
+    /// canonical set route through
+    /// [`crate::fact_signature_helpers::validate_fact_signature_with_self_roots`].
+    fn validates_self_root_whole_hash(&self, canonical_id: &str, hash: &ResolverHash16) -> bool {
+        self.validates(&FactVersionRef::FileWholeHash {
+            canonical_id: canonical_id.to_string(),
+            hash: *hash,
+        })
+    }
+
     /// Whether the view tracks a specific file (has its hash in the snapshot).
     ///
     /// Used by route-derived cache materialization paths to decide whether to
