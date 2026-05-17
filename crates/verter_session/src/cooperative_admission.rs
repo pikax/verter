@@ -56,6 +56,32 @@
 //!     locks, and re-enters admission so it cold-computes for its OWN
 //!     view.
 //!
+//! ## Removal-side cache cleanup
+//!
+//! The substrate removes a *published* `Arc<Entry>` in exactly two
+//! places: the warm-hit path when `validate` rejects a stale entry, and
+//! the joiner-fork path when a cross-view follower rejects the winner's
+//! entry. Both removals must trigger the cache's own removal-side
+//! bookkeeping — caches with publish-side state (a shared live counter,
+//! a per-canonical reverse index) keep that state consistent only if a
+//! substrate removal decrements / drains symmetrically with the
+//! publish-side increment / registration.
+//!
+//! The caller therefore supplies a `removal_cleanup` closure — the
+//! removal-side counterpart of `post_publish`. The substrate invokes it
+//! with the `(key, removed entry)` pair every time it removes a
+//! published entry on either path. Caches whose admission path bumps a
+//! live counter (in `compute` or in `post_publish`) pass a closure that
+//! decrements it and drains any reverse-index registration; caches with
+//! no publish-side bookkeeping pass a no-op. `removal_cleanup` is
+//! `FnMut` because one cooperative call can remove more than once (a
+//! warm-hit reject, then a joiner-fork reject after a re-loop).
+//!
+//! `removal_cleanup` fires ONLY for removals of an already-published
+//! entry. It does NOT fire when a cold compute is skipped without ever
+//! publishing (post-compute revalidation rejection, `Failed`,
+//! `ReturnOnly`): nothing was inserted, so there is nothing to clean up.
+//!
 //! `revalidate_after_compute` is NOT used for the joiner path: it is a
 //! winner-side publish-race closer that returns only `bool`; `validate`
 //! is the read-side contract and produces / bubbles the caller-visible
@@ -204,6 +230,19 @@ where
     pub fn live_count(&self) -> usize {
         self.table.lock().len()
     }
+
+    /// Strong-count of the in-flight slot `Arc` currently registered
+    /// under `key`, or `None` if no slot is registered. Test-only —
+    /// drives the deterministic joiner rendezvous: a thread is a
+    /// confirmed cooperative joiner once it has cloned its own `Arc`
+    /// to the winner's in-flight slot, observable as a step up in this
+    /// count. Reading the count through the table's shard guard does
+    /// NOT itself bump the count.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub fn slot_strong_count(&self, key: &K) -> Option<usize> {
+        self.table.lock().get(key).map(Arc::strong_count)
+    }
 }
 
 /// RAII guard that fails the in-flight slot if the cold build panics or
@@ -296,6 +335,34 @@ fn retire_slot_if_current<K>(
     }
 }
 
+/// Remove the exact published `Arc<Entry>` the caller validated — a
+/// `ptr_eq` guard so a concurrent fresh winner's entry is not evicted —
+/// and, on a real removal, run the caller's `removal_cleanup` so the
+/// cache's removal-side bookkeeping (live counter, reverse index) stays
+/// symmetric with its publish-side bookkeeping.
+///
+/// Used by both substrate removal sites: the warm-hit path when
+/// `validate` rejects a stale entry, and the joiner-fork path when a
+/// cross-view follower rejects the winner's entry. A raw `map.remove_if`
+/// in either site would skip the cleanup and leave caches with
+/// publish-side counters / reverse indexes out of sync after a removal.
+fn remove_published_entry_with_cleanup<K, Entry, RemovalCleanup>(
+    map: &DashMap<K, Arc<Entry>>,
+    key: &K,
+    entry_arc: &Arc<Entry>,
+    removal_cleanup: &mut RemovalCleanup,
+) where
+    K: Eq + Hash + Clone,
+    Entry: Send + Sync + 'static,
+    RemovalCleanup: FnMut(&K, &Arc<Entry>),
+{
+    if let Some((removed_key, removed_entry)) =
+        map.remove_if(key, |_, existing| Arc::ptr_eq(existing, entry_arc))
+    {
+        removal_cleanup(&removed_key, &removed_entry);
+    }
+}
+
 /// Cooperative get-or-compute over a [`DashMap`]-backed cache. See module
 /// docs for the full contract.
 ///
@@ -331,6 +398,13 @@ fn retire_slot_if_current<K>(
 ///   this re-validates the entry against current host state. Returns
 ///   `false` if the entry is now stale (e.g. file mutated mid-compute);
 ///   the publish is skipped and waiters fall through.
+/// - `removal_cleanup`: the removal-side counterpart of `post_publish`.
+///   Runs whenever the substrate removes an already-published entry —
+///   on the warm-hit reject path AND on the joiner-fork reject path —
+///   so a cache that bumps a live counter / reverse index on publish
+///   can decrement / drain symmetrically. `FnMut`: one cooperative call
+///   can remove more than once. A cache with no publish-side
+///   bookkeeping passes a no-op.
 ///
 /// ## Returns
 ///
@@ -339,7 +413,17 @@ fn retire_slot_if_current<K>(
 ///   entry).
 /// - `None` if `compute()` returns `None`, panics, post-compute
 ///   revalidation fails, or the joiner observes a failed winner.
-pub fn cooperative_get_or_insert<K, Entry, V, Validate, Compute, Project, Revalidate>(
+#[allow(clippy::too_many_arguments)]
+pub fn cooperative_get_or_insert<
+    K,
+    Entry,
+    V,
+    Validate,
+    Compute,
+    Project,
+    Revalidate,
+    RemovalCleanup,
+>(
     map: &DashMap<K, Arc<Entry>>,
     inflight: &InflightTable<K>,
     key: K,
@@ -347,6 +431,7 @@ pub fn cooperative_get_or_insert<K, Entry, V, Validate, Compute, Project, Revali
     compute: Compute,
     project: Project,
     revalidate_after_compute: Revalidate,
+    removal_cleanup: RemovalCleanup,
 ) -> Option<V>
 where
     K: Eq + Hash + Clone,
@@ -356,6 +441,7 @@ where
     Compute: FnOnce() -> Option<Entry>,
     Project: FnOnce(&Entry) -> V,
     Revalidate: FnMut(&Entry) -> bool,
+    RemovalCleanup: FnMut(&K, &Arc<Entry>),
 {
     cooperative_get_or_insert_with_post_publish(
         map,
@@ -365,6 +451,7 @@ where
         compute,
         project,
         revalidate_after_compute,
+        removal_cleanup,
         |_, _| {},
     )
 }
@@ -424,6 +511,7 @@ pub fn cooperative_get_or_insert_with_post_publish<
     Compute,
     Project,
     Revalidate,
+    RemovalCleanup,
     PostPublish,
 >(
     map: &DashMap<K, Arc<Entry>>,
@@ -433,6 +521,7 @@ pub fn cooperative_get_or_insert_with_post_publish<
     compute: Compute,
     project: Project,
     mut revalidate_after_compute: Revalidate,
+    mut removal_cleanup: RemovalCleanup,
     post_publish: PostPublish,
 ) -> Option<V>
 where
@@ -443,6 +532,7 @@ where
     Compute: FnOnce() -> Option<Entry>,
     Project: FnOnce(&Entry) -> V,
     Revalidate: FnMut(&Entry) -> bool,
+    RemovalCleanup: FnMut(&K, &Arc<Entry>),
     PostPublish: FnOnce(&Arc<Entry>, &K),
 {
     // `compute` and `project` are logically one-shot but the joiner
@@ -459,8 +549,11 @@ where
                 return Some(value);
             }
             // Stale entry; remove the exact `Arc` we validated so a
-            // concurrent fresh winner's entry is not evicted.
-            map.remove_if(&key, |_, existing| Arc::ptr_eq(existing, &entry_arc));
+            // concurrent fresh winner's entry is not evicted, and run
+            // the cache's removal-side cleanup so its live counter /
+            // reverse index stay symmetric with the publish-side
+            // bookkeeping.
+            remove_published_entry_with_cleanup(map, &key, &entry_arc, &mut removal_cleanup);
         }
 
         // Claim the inflight slot or join an in-progress build.
@@ -494,11 +587,13 @@ where
                     return Some(value);
                 }
                 // The winner's entry is stale for the follower's view.
-                // Remove the exact stale entry (`ptr_eq`-guarded), retire
-                // the same in-flight slot (`ptr_eq`-guarded), and
-                // re-enter admission so the follower cold-computes for
-                // its own view.
-                map.remove_if(&key, |_, existing| Arc::ptr_eq(existing, &entry_arc));
+                // Remove the exact stale entry (`ptr_eq`-guarded) AND run
+                // the cache's removal-side cleanup so its live counter /
+                // reverse index stay consistent, retire the same
+                // in-flight slot (`ptr_eq`-guarded), and re-enter
+                // admission so the follower cold-computes for its own
+                // view.
+                remove_published_entry_with_cleanup(map, &key, &entry_arc, &mut removal_cleanup);
             }
             retire_slot_if_current(&inflight.table, &key, &slot);
             drop(slot);
@@ -620,6 +715,7 @@ pub fn cooperative_admit_with_post_publish<
     Compute,
     Project,
     Revalidate,
+    RemovalCleanup,
     PostPublish,
 >(
     map: &DashMap<K, Arc<Entry>>,
@@ -629,6 +725,7 @@ pub fn cooperative_admit_with_post_publish<
     compute: Compute,
     project: Project,
     mut revalidate_after_compute: Revalidate,
+    mut removal_cleanup: RemovalCleanup,
     post_publish: PostPublish,
 ) -> Option<V>
 where
@@ -639,6 +736,7 @@ where
     Compute: FnOnce() -> ComputeAdmission<V, Entry>,
     Project: FnOnce(&Entry) -> V,
     Revalidate: FnMut(&Entry) -> bool,
+    RemovalCleanup: FnMut(&K, &Arc<Entry>),
     PostPublish: FnOnce(&Arc<Entry>, &K),
 {
     // `compute` and `project` are logically one-shot; the joiner
@@ -648,12 +746,14 @@ where
     let mut project = Some(project);
     loop {
         // Warm-hit + read-side validation. Same shape as the
-        // `cooperative_get_or_insert_with_post_publish` warm path.
+        // `cooperative_get_or_insert_with_post_publish` warm path —
+        // including the removal-side cleanup so the cache's live
+        // counter / reverse index stay symmetric with publish.
         if let Some(entry_arc) = map.get(&key).map(|e| e.clone()) {
             if let Some(value) = validate(&entry_arc) {
                 return Some(value);
             }
-            map.remove_if(&key, |_, existing| Arc::ptr_eq(existing, &entry_arc));
+            remove_published_entry_with_cleanup(map, &key, &entry_arc, &mut removal_cleanup);
         }
 
         // Claim the inflight slot or join an in-progress build.
@@ -695,9 +795,11 @@ where
                     return Some(value);
                 }
                 // The winner's entry is stale for the follower's view.
-                // Fork: remove the stale entry, retire the slot, re-enter
+                // Fork: remove the stale entry AND run the cache's
+                // removal-side cleanup so its live counter / reverse
+                // index stay consistent, retire the slot, re-enter
                 // admission so the follower cold-computes for its view.
-                map.remove_if(&key, |_, existing| Arc::ptr_eq(existing, &entry_arc));
+                remove_published_entry_with_cleanup(map, &key, &entry_arc, &mut removal_cleanup);
             }
             retire_slot_if_current(&inflight.table, &key, &slot);
             drop(slot);

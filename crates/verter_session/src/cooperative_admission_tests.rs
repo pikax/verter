@@ -42,6 +42,7 @@ fn cooperative_admission_one_winner_others_wait() {
                     },
                     |entry: &String| entry.clone(),
                     |_entry: &String| true,
+                    |_k: &u32, _e: &Arc<String>| {},
                 )
             })
         })
@@ -62,27 +63,31 @@ fn cooperative_admission_one_winner_others_wait() {
 /// D3.2 test 2: winner panics in compute → waiters wake with
 /// None; subsequent calls retry.
 ///
-/// Stabilisation note: the original 5 ms `thread::sleep` between
-/// winner-spawn and joiner-spawn under-budgeted scheduler latency
-/// under workspace-parallel test load on Windows. When the OS
-/// scheduled the winner to panic + the panic guard's `Drop` to
-/// remove the inflight slot BEFORE the joiner reached
-/// `cooperative_get_or_insert`, the joiner found no inflight slot,
-/// claimed a fresh one itself, and ran its own `compute` (returning
-/// `Some("never reached")`) instead of waking on the panicked-winner
-/// condvar with `None`. The fix replaces the timed sleep with a
-/// `mpsc::sync_channel(0)` rendezvous: the winner's compute sends
-/// `()` AFTER `state.claimed = true` (claim happens unconditionally
-/// before `compute()` runs in `cooperative_get_or_insert`) and
-/// BEFORE its own pre-panic sleep. Main blocks on `recv()` before
-/// spawning the joiner, so the joiner is guaranteed to enter
-/// `cooperative_get_or_insert` while the winner is still inside
-/// compute. The assertion is unchanged (joiner returns `None`), so
-/// this is not a Stub Prevention violation — only the timing
-/// primitive changed.
+/// Deterministic rendezvous: a fixed sleep between the winner's
+/// claim and its panic does NOT prove the joiner has acquired its
+/// own `Arc` on the in-flight slot — on a slow worker the panic
+/// guard's `Drop` can retire the slot before the joiner reaches it,
+/// the joiner then claims a fresh slot and runs its own `compute`,
+/// and the test no longer exercises the wake-on-panic path it
+/// claims to cover. The rendezvous instead has two stages:
+///   * `claimed_tx`/`claimed_rx` `sync_channel(0)` — the winner's
+///     `compute` signals AFTER `state.claimed = true`; main blocks
+///     on `recv()` before spawning the joiner so the joiner cannot
+///     race ahead of the winner's claim.
+///   * `release_barrier` — the winner's `compute` blocks on a
+///     `Barrier::new(2)` AFTER signalling claim; the test driver
+///     polls the slot strong count and crosses the barrier ONLY
+///     once the joiner has its own `Arc` on the slot (count `>= 4`:
+///     table + winner.slot + winner.panic_guard.slot + joiner.slot).
+///
+/// The winner therefore panics only after the joiner is a proven
+/// slot waiter, so the panic guard's `Drop` `notify_all` wakes the
+/// joiner with `failed` on every run regardless of worker speed.
 #[test]
 fn cooperative_admission_panic_wakes_waiters() {
     use std::sync::mpsc;
+    use std::sync::Barrier;
+    use std::time::Instant;
 
     // Use a dedicated map per scenario to avoid cross-test races.
     let map: DashMap<u32, Arc<String>> = DashMap::new();
@@ -95,15 +100,19 @@ fn cooperative_admission_panic_wakes_waiters() {
     let joiner_done = Arc::new(AtomicUsize::new(0));
 
     // Rendezvous channel — the winner's compute() signals AFTER
-    // claim (i.e. once `state.claimed = true` in the inflight slot)
-    // and BEFORE its pre-panic sleep. Main blocks on `recv()`
-    // before spawning the joiner so the joiner cannot race ahead
-    // of the winner's claim.
+    // claim (i.e. once `state.claimed = true` in the inflight slot).
+    // Main blocks on `recv()` before spawning the joiner so the
+    // joiner cannot race ahead of the winner's claim.
     let (claimed_tx, claimed_rx) = mpsc::sync_channel::<()>(0);
+    // Release barrier — the winner's compute blocks here after
+    // signalling claim; the driver crosses it only after the joiner
+    // has acquired its own slot Arc.
+    let release_barrier = Arc::new(Barrier::new(2));
 
     // Winner thread that panics inside compute.
     let map_w = Arc::clone(&map);
     let inflight_w = Arc::clone(&inflight);
+    let release_barrier_w = Arc::clone(&release_barrier);
     let winner = thread::spawn(move || {
         // We use catch_unwind manually so the test process doesn't
         // abort on the panic; the production cooperative caller
@@ -123,17 +132,16 @@ fn cooperative_admission_panic_wakes_waiters() {
                     claimed_tx
                         .send(())
                         .expect("rendezvous receiver must outlive winner's compute");
-                    // Slack window so the joiner has time to enter
-                    // `cooperative_get_or_insert` and acquire the
-                    // existing inflight slot reference before the
-                    // panic guard's `Drop` removes the slot from
-                    // the inflight table. Sized for headroom under
-                    // workspace-parallel test load on Windows.
-                    thread::sleep(Duration::from_millis(50));
+                    // Block until the driver has confirmed the
+                    // joiner holds its own `Arc` on the in-flight
+                    // slot — only then is the joiner a proven slot
+                    // waiter and the panic guaranteed to wake it.
+                    release_barrier_w.wait();
                     panic!("simulated compute panic");
                 },
                 |entry: &String| entry.clone(),
                 |_entry: &String| true,
+                |_k: &u32, _e: &Arc<String>| {},
             )
         }));
     });
@@ -159,10 +167,36 @@ fn cooperative_admission_panic_wakes_waiters() {
             || Some("never reached".to_string()),
             |entry: &String| entry.clone(),
             |_entry: &String| true,
+            |_k: &u32, _e: &Arc<String>| {},
         );
         joiner_done_j.fetch_add(1, Ordering::SeqCst);
         result
     });
+
+    // Deterministic wait: poll the inflight table until the joiner
+    // has acquired its own `Arc` on the slot. While the winner is
+    // parked at the release barrier the strong count is 3 (table +
+    // winner.slot + winner.panic_guard.slot); the joiner bumps it to
+    // 4 once it clones its slot Arc, past which it deterministically
+    // reaches the cooperative joiner wait branch.
+    let poll_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if inflight
+            .slot_strong_count(&7u32)
+            .is_some_and(|count| count >= 4)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < poll_deadline,
+            "joiner failed to acquire inflight slot Arc within 10s — \
+             the deterministic panic-wake rendezvous is broken"
+        );
+        std::hint::spin_loop();
+    }
+    // Joiner is a proven slot waiter — release the winner so it
+    // panics; the panic guard's `Drop` wakes the joiner with `failed`.
+    release_barrier.wait();
 
     winner.join().unwrap();
     let joiner_result = joiner.join().unwrap();
@@ -185,6 +219,7 @@ fn cooperative_admission_panic_wakes_waiters() {
         || Some("retry succeeded".to_string()),
         |entry: &String| entry.clone(),
         |_entry: &String| true,
+        |_k: &u32, _e: &Arc<String>| {},
     );
     assert_eq!(retry_result.as_deref(), Some("retry succeeded"));
 }
@@ -204,6 +239,7 @@ fn cooperative_admission_post_compute_revalidation_drops_stale() {
         || Some("computed but stale".to_string()),
         |entry: &String| entry.clone(),
         |_entry: &String| false, // post-compute revalidation FAILS
+        |_k: &u32, _e: &Arc<String>| {},
     );
 
     assert_eq!(
@@ -237,6 +273,7 @@ fn cooperative_admission_invalidation_during_compute_retries() {
         },
         |entry: &String| entry.clone(),
         |_entry: &String| false,
+        |_k: &u32, _e: &Arc<String>| {},
     );
     assert_eq!(first, None, "first attempt must drop on revalidation");
 
@@ -252,6 +289,7 @@ fn cooperative_admission_invalidation_during_compute_retries() {
         },
         |entry: &String| entry.clone(),
         |_entry: &String| true,
+        |_k: &u32, _e: &Arc<String>| {},
     );
     assert_eq!(second.as_deref(), Some("second"));
     assert_eq!(
@@ -288,6 +326,7 @@ fn cooperative_admission_value_projection_isolated() {
         },
         |entry: &Entry| entry.length,
         |_entry: &Entry| true,
+        |_k: &u32, _e: &Arc<Entry>| {},
     );
     assert_eq!(length, Some(7));
 
@@ -301,6 +340,7 @@ fn cooperative_admission_value_projection_isolated() {
         || -> Option<Entry> { panic!("must not run compute on warm hit") },
         |entry: &Entry| entry.label.clone(),
         |_entry: &Entry| true,
+        |_k: &u32, _e: &Arc<Entry>| {},
     );
     assert_eq!(label.as_deref(), Some("hello"));
 }
@@ -389,6 +429,7 @@ fn cacheable_joiner_runs_validate_on_its_own_thread() {
             },
             |entry: &String| -> String { entry.clone() },
             |_entry: &String| -> bool { true },
+            |_k: &u32, _e: &Arc<String>| {},
             |_entry_arc: &Arc<String>, _k: &u32| {},
         )
     });
@@ -424,6 +465,7 @@ fn cacheable_joiner_runs_validate_on_its_own_thread() {
             },
             |entry: &String| -> String { entry.clone() },
             |_entry: &String| -> bool { true },
+            |_k: &u32, _e: &Arc<String>| {},
             |_entry_arc: &Arc<String>, _k: &u32| {},
         )
     });
@@ -559,6 +601,7 @@ fn cooperative_get_or_insert_joiner_validate_reject_forks() {
             },
             |entry: &String| entry.clone(),
             |_entry: &String| true,
+            |_k: &u32, _e: &Arc<String>| {},
         )
     });
 
@@ -591,6 +634,7 @@ fn cooperative_get_or_insert_joiner_validate_reject_forks() {
             },
             |entry: &String| entry.clone(),
             |_entry: &String| true,
+            |_k: &u32, _e: &Arc<String>| {},
         )
     });
 
@@ -688,6 +732,7 @@ fn cooperative_admit_joiner_validate_reject_forks() {
             },
             |entry: &String| entry.clone(),
             |_entry: &String| true,
+            |_k: &u32, _e: &Arc<String>| {},
             |_entry_arc: &Arc<String>, _k: &u32| {},
         )
     });
@@ -717,6 +762,7 @@ fn cooperative_admit_joiner_validate_reject_forks() {
             },
             |entry: &String| entry.clone(),
             |_entry: &String| true,
+            |_k: &u32, _e: &Arc<String>| {},
             |_entry_arc: &Arc<String>, _k: &u32| {},
         )
     });
@@ -802,6 +848,7 @@ fn return_only_winner_not_broadcast_cross_view_joiner_forks() {
             },
             |entry: &String| entry.clone(),
             |_entry: &String| true,
+            |_k: &u32, _e: &Arc<String>| {},
             |_entry_arc: &Arc<String>, _k: &u32| {},
         )
     });
@@ -831,6 +878,7 @@ fn return_only_winner_not_broadcast_cross_view_joiner_forks() {
             },
             |entry: &String| entry.clone(),
             |_entry: &String| true,
+            |_k: &u32, _e: &Arc<String>| {},
             |_entry_arc: &Arc<String>, _k: &u32| {},
         )
     });

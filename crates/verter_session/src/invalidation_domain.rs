@@ -233,11 +233,47 @@ where
         keys
     }
 
+    /// Drop a single `(canonical, key)` registration. Used by the
+    /// cooperative-admission removal-side cleanup: when the substrate
+    /// removes one already-published entry (a warm-hit reject or a
+    /// joiner-fork reject), the entry's reverse-index registration must
+    /// be dropped symmetrically with the publish-side `register` so the
+    /// index does not dangle. Empties and removes the canonical's
+    /// bucket once its last key is gone. Idempotent — unregistering an
+    /// absent `(canonical, key)` pair is a no-op.
+    pub fn unregister(&self, canonical: &str, key: &K) {
+        let now_empty = {
+            let Some(entry) = self.inner.get(canonical) else {
+                return;
+            };
+            let mut set = entry.lock();
+            set.remove(key);
+            set.is_empty()
+        };
+        if now_empty {
+            // `remove_if` re-checks emptiness under the shard lock so a
+            // concurrent `register` that re-populated the bucket
+            // between the `set.is_empty()` read and here is not lost.
+            self.inner
+                .remove_if(canonical, |_, mutex| mutex.lock().is_empty());
+        }
+    }
+
     /// Clear every bucket. Used by `invalidate_all` to keep the index
     /// coherent with the underlying entry table after a wholesale
     /// drop.
     pub fn clear(&self) {
         self.inner.clear();
+    }
+
+    /// Test-only: is `(canonical, key)` currently registered? Drives
+    /// the cooperative-admission removal-cleanup discriminator — after
+    /// a substrate removal the entry's registration must NOT dangle.
+    #[cfg(test)]
+    pub fn contains(&self, canonical: &str, key: &K) -> bool {
+        self.inner
+            .get(canonical)
+            .is_some_and(|entry| entry.lock().contains(key))
     }
 }
 

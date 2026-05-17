@@ -195,8 +195,10 @@ impl ImportedRegistryDb {
         >,
     {
         let live_counter = Arc::clone(&self.live_counter);
+        let live_counter_for_removal = Arc::clone(&self.live_counter);
         let key_for_post_publish = key.clone();
         let canonical_index = &self.canonical_index;
+        let canonical_index_for_removal = &self.canonical_index;
         // The keyed canonical is the entry's self-root — validated
         // strictly on warm read (same-canonical edit / untracked keyed
         // canonical → miss).
@@ -224,6 +226,18 @@ impl ImportedRegistryDb {
             },
             |entry: &ImportedRegistryEntry| {
                 validate_fact_signature_with_self_roots(ctx, &entry.fact_dep_signature, &self_roots)
+            },
+            // Removal-side counterpart of `post_publish`: when the
+            // substrate removes an already-published entry (warm-hit
+            // reject or joiner-fork reject) the live counter must
+            // decrement and the per-canonical reverse-index
+            // registration must drop, symmetric with the
+            // `post_publish` bump + register. Without this a
+            // joiner-fork over-counts the live counter and leaves a
+            // dangling reverse-index entry.
+            move |removed_key: &ImportedRegistryKey, _entry: &Arc<ImportedRegistryEntry>| {
+                live_counter_for_removal.fetch_sub(1, Ordering::Relaxed);
+                canonical_index_for_removal.unregister(removed_key.0.as_ref(), removed_key);
             },
             move |_entry_arc: &Arc<ImportedRegistryEntry>, _key: &ImportedRegistryKey| {
                 // Fires AFTER entries.insert AND AFTER successful
@@ -264,6 +278,25 @@ impl ImportedRegistryDb {
 
     pub fn live_count(&self) -> usize {
         self.entries.len()
+    }
+
+    /// Test-only accessor for the per-cache in-flight table. Drives
+    /// the deterministic cooperative-joiner rendezvous in
+    /// `query_db_self_root_tests.rs` — a follower is a confirmed
+    /// joiner once it has cloned its own `Arc` to the winner's
+    /// in-flight slot, observable via `InflightTable::slot_strong_count`.
+    #[cfg(test)]
+    pub(crate) fn inflight_table_for_test(&self) -> &InflightTable<ImportedRegistryKey> {
+        &self.inflight
+    }
+
+    /// Test-only: is `key` currently registered in the per-canonical
+    /// reverse index? Drives the P2 removal-cleanup discriminator —
+    /// after a joiner-fork removes the winner's entry, the winner's
+    /// key must NOT dangle in the reverse index.
+    #[cfg(test)]
+    pub(crate) fn reverse_index_contains_for_test(&self, key: &ImportedRegistryKey) -> bool {
+        self.canonical_index.contains(key.0.as_ref(), key)
     }
 
     /// Test-only direct insertion entry point used by the
@@ -402,6 +435,11 @@ impl DeclarationLookupDb {
         F: FnOnce() -> Option<(ResolvedTypeDeclaration, Arc<[FactVersionRef]>)>,
     {
         let live_counter = Arc::clone(&self.live_counter);
+        // Removal-side counterpart of the `compute`-closure increment:
+        // when the substrate removes an already-published entry (warm-hit
+        // reject or joiner-fork reject), the live counter must decrement
+        // symmetrically so it tracks live entries, not lifetime inserts.
+        let live_counter_for_removal = Arc::clone(&self.live_counter);
         // The entry's keyed canonical is its self-root: the warm-read
         // validator validates the self-root `FileWholeHash` strictly so
         // a same-canonical content edit (or a keyed canonical that
@@ -439,6 +477,9 @@ impl DeclarationLookupDb {
             },
             |entry: &DeclarationLookupEntry| {
                 validate_fact_signature_with_self_roots(ctx, &entry.fact_dep_signature, &self_roots)
+            },
+            move |_key: &DeclarationLookupKey, _entry: &Arc<DeclarationLookupEntry>| {
+                live_counter_for_removal.fetch_sub(1, Ordering::Relaxed);
             },
         )
     }
@@ -526,6 +567,11 @@ impl ResolvabilityDb {
         F: FnOnce() -> Option<(bool, Arc<[FactVersionRef]>)>,
     {
         let live_counter = Arc::clone(&self.live_counter);
+        // Removal-side counterpart of the `compute`-closure increment —
+        // decrements when the substrate removes an already-published
+        // entry so the live counter tracks live entries, not lifetime
+        // inserts.
+        let live_counter_for_removal = Arc::clone(&self.live_counter);
         // The keyed source canonical is the entry's self-root — strict
         // warm-read validation rejects a same-canonical edit or an
         // untracked keyed canonical.
@@ -561,6 +607,9 @@ impl ResolvabilityDb {
             },
             |entry: &ResolvabilityEntry| {
                 validate_fact_signature_with_self_roots(ctx, &entry.fact_dep_signature, &self_roots)
+            },
+            move |_key: &ResolvabilityKey, _entry: &Arc<ResolvabilityEntry>| {
+                live_counter_for_removal.fetch_sub(1, Ordering::Relaxed);
             },
         )
     }
@@ -655,6 +704,10 @@ impl OwnerCollectionDb {
     {
         let owner_canonical = key.0.clone();
         let live_counter = Arc::clone(&self.live_counter);
+        // Removal-side counterpart of the `compute`-closure increment —
+        // decrements when the substrate removes an already-published
+        // entry so the live counter tracks live entries.
+        let live_counter_for_removal = Arc::clone(&self.live_counter);
         // The owner canonical is the entry's self-root. This cache is
         // body-bearing (stores a `TypeExpr`), so strict self-root
         // validation is the correctness floor — a content edit to the
@@ -692,6 +745,9 @@ impl OwnerCollectionDb {
             },
             |entry: &OwnerCollectionEntry| {
                 validate_fact_signature_with_self_roots(ctx, &entry.fact_dep_signature, &self_roots)
+            },
+            move |_key: &OwnerCollectionKey, _entry: &Arc<OwnerCollectionEntry>| {
+                live_counter_for_removal.fetch_sub(1, Ordering::Relaxed);
             },
         )
     }
@@ -822,6 +878,10 @@ impl PreparedTargetDb {
         F: FnOnce() -> Option<(Option<(Arc<str>, Arc<str>)>, Arc<[FactVersionRef]>)>,
     {
         let live_counter = Arc::clone(&self.live_counter);
+        // Removal-side counterpart of the `compute`-closure increment —
+        // decrements when the substrate removes an already-published
+        // entry so the live counter tracks live entries.
+        let live_counter_for_removal = Arc::clone(&self.live_counter);
         // Both keyed canonicals (active scope + declaring file) are
         // self-roots — strict warm-read validation.
         let self_roots: [&str; 2] = [
@@ -859,6 +919,9 @@ impl PreparedTargetDb {
             },
             |entry: &PreparedTargetEntry| {
                 validate_fact_signature_with_self_roots(ctx, &entry.fact_dep_signature, &self_roots)
+            },
+            move |_key: &PreparedTargetCacheKey, _entry: &Arc<PreparedTargetEntry>| {
+                live_counter_for_removal.fetch_sub(1, Ordering::Relaxed);
             },
         )
     }
@@ -1045,6 +1108,10 @@ impl MaterializeMemoDb {
         F: FnOnce() -> Option<(MaterializedTypeExpr, Arc<[FactVersionRef]>)>,
     {
         let live_counter = Arc::clone(&self.live_counter);
+        // Removal-side counterpart of the `compute`-closure increment —
+        // decrements when the substrate removes an already-published
+        // entry so the live counter tracks live entries.
+        let live_counter_for_removal = Arc::clone(&self.live_counter);
         // The keyed scope canonical is the entry's self-root — strict
         // warm-read validation.
         let self_roots: [&str; 1] = [key.0.as_ref()];
@@ -1079,6 +1146,9 @@ impl MaterializeMemoDb {
             },
             |entry: &MaterializeMemoEntry| {
                 validate_fact_signature_with_self_roots(ctx, &entry.fact_dep_signature, &self_roots)
+            },
+            move |_key: &MaterializeMemoKey, _entry: &Arc<MaterializeMemoEntry>| {
+                live_counter_for_removal.fetch_sub(1, Ordering::Relaxed);
             },
         )
     }
@@ -1281,6 +1351,10 @@ impl PreparedSurfaceDb {
         F: FnOnce() -> Option<(PreparedSurfacePayload, Arc<[FactVersionRef]>)>,
     {
         let live_counter = Arc::clone(&self.live_counter);
+        // Removal-side counterpart of the `compute`-closure increment —
+        // decrements when the substrate removes an already-published
+        // entry so the live counter tracks live entries.
+        let live_counter_for_removal = Arc::clone(&self.live_counter);
         // The keyed canonical is the entry's self-root — strict
         // warm-read validation (body-sensitive surface).
         let self_roots: [&str; 1] = [key.canonical_id.as_ref()];
@@ -1315,6 +1389,9 @@ impl PreparedSurfaceDb {
             },
             |entry: &PreparedSurfaceEntry| {
                 validate_fact_signature_with_self_roots(ctx, &entry.fact_dep_signature, &self_roots)
+            },
+            move |_key: &PreparedSurfaceCacheKey, _entry: &Arc<PreparedSurfaceEntry>| {
+                live_counter_for_removal.fetch_sub(1, Ordering::Relaxed);
             },
         )
     }
@@ -1497,6 +1574,10 @@ impl PreparedMemberDb {
         F: FnOnce() -> Option<(Option<ProjectedMember>, Arc<[FactVersionRef]>)>,
     {
         let live_counter = Arc::clone(&self.live_counter);
+        // Removal-side counterpart of the `compute`-closure increment —
+        // decrements when the substrate removes an already-published
+        // entry so the live counter tracks live entries.
+        let live_counter_for_removal = Arc::clone(&self.live_counter);
         // The keyed canonical is the entry's self-root — strict
         // warm-read validation.
         let self_roots: [&str; 1] = [key.canonical_id.as_ref()];
@@ -1531,6 +1612,9 @@ impl PreparedMemberDb {
             },
             |entry: &PreparedMemberEntry| {
                 validate_fact_signature_with_self_roots(ctx, &entry.fact_dep_signature, &self_roots)
+            },
+            move |_key: &PreparedMemberCacheKey, _entry: &Arc<PreparedMemberEntry>| {
+                live_counter_for_removal.fetch_sub(1, Ordering::Relaxed);
             },
         )
     }
@@ -1696,6 +1780,10 @@ impl RoutedExprSurfaceDb {
         F: FnOnce() -> Option<(TypeExpr, Arc<[FactVersionRef]>)>,
     {
         let live_counter = Arc::clone(&self.live_counter);
+        // Removal-side counterpart of the `compute`-closure increment —
+        // decrements when the substrate removes an already-published
+        // entry so the live counter tracks live entries.
+        let live_counter_for_removal = Arc::clone(&self.live_counter);
         // The keyed scope canonical is the entry's self-root — strict
         // warm-read validation.
         let self_roots: [&str; 1] = [key.scope_canonical_id.as_ref()];
@@ -1730,6 +1818,9 @@ impl RoutedExprSurfaceDb {
             },
             |entry: &RoutedExprSurfaceEntry| {
                 validate_fact_signature_with_self_roots(ctx, &entry.fact_dep_signature, &self_roots)
+            },
+            move |_key: &RoutedExprSurfaceCacheKey, _entry: &Arc<RoutedExprSurfaceEntry>| {
+                live_counter_for_removal.fetch_sub(1, Ordering::Relaxed);
             },
         )
     }
@@ -2125,6 +2216,41 @@ impl MaterializeStructureDb {
     pub(crate) fn bump_live_counter(&self) {
         self.live_counter.fetch_add(1, Ordering::Relaxed);
     }
+
+    /// Internal — decrement the live counter. The removal-side
+    /// counterpart of [`Self::bump_live_counter`], called from the
+    /// materialiser's cooperative-admission `removal_cleanup` closure
+    /// when the substrate removes an already-published entry so the
+    /// shared `component_meta_cache_live` counter tracks live entries,
+    /// not lifetime inserts.
+    pub(crate) fn decrement_live_counter(&self) {
+        self.live_counter.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    /// Removal-side counterpart of [`Self::register_post_publish`].
+    /// When the cooperative-admission substrate removes one
+    /// already-published entry (a warm-hit reject or a joiner-fork
+    /// reject) the entry's reverse-index registration must be dropped
+    /// under EVERY canonical it referenced, symmetric with the
+    /// per-canonical `register_post_publish` insert. `Arc::ptr_eq`
+    /// against the entry's `legacy` rail discriminates "our
+    /// registration" from a concurrent fresh winner's.
+    pub(crate) fn unregister_post_publish(
+        &self,
+        key: &MaterializeStructureCacheKey,
+        read_set_signature: &crate::fact_signature_helpers::ReadSetSignature,
+    ) {
+        for canonical in read_set_signature.canonical_ids() {
+            if let Some(shard) = self.canonical_to_keys.get(&canonical) {
+                let mut map = shard.lock();
+                if let Some(existing_sig) = map.get(key) {
+                    if Arc::ptr_eq(existing_sig, &read_set_signature.legacy) {
+                        map.remove(key);
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl Default for MaterializeStructureDb {
@@ -2254,6 +2380,15 @@ impl RefCycleResultDb {
         self.live_counter.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Removal-side counterpart of [`Self::bump_live_counter`]. Called
+    /// from the cooperative-admission `removal_cleanup` closure when
+    /// the substrate removes an already-published entry so the shared
+    /// `component_meta_cache_live` counter tracks live entries, not
+    /// lifetime inserts.
+    pub(crate) fn decrement_live_counter(&self) {
+        self.live_counter.fetch_sub(1, Ordering::Relaxed);
+    }
+
     /// Read-only test accessor for the shared
     /// `live_counter`. Used by R's invalidation tests to verify that
     /// `invalidate_for_canonical` and `invalidate_all` correctly
@@ -2293,6 +2428,32 @@ impl RefCycleResultDb {
                 .unwrap_or(std::time::Duration::ZERO);
             crate::host_manage::record_family_map_lock_acquisition(lock_wait);
             map.insert(key.clone(), Arc::clone(&registered_legacy));
+        }
+    }
+
+    /// Removal-side counterpart of [`Self::register_post_publish`].
+    /// When the cooperative-admission substrate removes one
+    /// already-published entry (a warm-hit reject or a joiner-fork
+    /// reject) the entry's reverse-index registration must be dropped
+    /// under EVERY canonical it referenced, symmetric with the
+    /// per-canonical `register_post_publish` insert. `Arc::ptr_eq`
+    /// against the entry's `legacy` rail discriminates "our
+    /// registration" from a concurrent fresh winner's so a
+    /// re-published entry's registration is not stolen.
+    pub(crate) fn unregister_post_publish(
+        &self,
+        key: &DeclIdentity,
+        read_set_signature: &crate::fact_signature_helpers::ReadSetSignature,
+    ) {
+        for canonical in read_set_signature.canonical_ids() {
+            if let Some(shard) = self.canonical_to_keys.get(&canonical) {
+                let mut map = shard.lock();
+                if let Some(existing_sig) = map.get(key) {
+                    if Arc::ptr_eq(existing_sig, &read_set_signature.legacy) {
+                        map.remove(key);
+                    }
+                }
+            }
         }
     }
 
@@ -2708,6 +2869,10 @@ where
     C: FnOnce(&mut Vec<(Arc<str>, crate::semantic_query::DepVersion)>) -> bool,
 {
     let key_for_register = id.clone();
+    // `&RefCycleResultDb` is `Copy`; a dedicated binding lets the
+    // removal-side closure capture the db alongside the `post_publish`
+    // closure that captures the original `db`.
+    let db_for_removal = db;
     let current_gen = ctx.workspace_content_generation();
     // Block 1.H: wrap the BFS cold-compute with `install_fact_tracer`.
     // On `Ok`, override the entry's `fact_dep_signature` with the
@@ -2789,6 +2954,16 @@ where
         },
         // revalidate_after_compute(&Entry) -> bool — carrier AND-gate.
         |entry: &RefCycleEntry| entry.read_set_signature.validate(ctx),
+        // removal_cleanup(&K, &Arc<Entry>) — removal-side counterpart
+        // of `post_publish`. When the substrate removes an
+        // already-published entry (warm-hit reject or joiner-fork
+        // reject) the live counter must decrement and the
+        // per-canonical reverse-index registration must drop,
+        // symmetric with the `post_publish` bump + register.
+        move |removed_key: &DeclIdentity, removed_entry: &Arc<RefCycleEntry>| {
+            db_for_removal.decrement_live_counter();
+            db_for_removal.unregister_post_publish(removed_key, &removed_entry.read_set_signature);
+        },
         // post_publish(&Arc<Entry>, &K)
         move |entry_arc: &Arc<RefCycleEntry>, _k: &DeclIdentity| {
             db.bump_live_counter();

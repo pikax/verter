@@ -4271,6 +4271,14 @@ fn materialize_memo_publish_site_degrades_on_none_scope_observation() {
 /// `ImportedRegistryDb`'s `validate` closure against its OWN overlay
 /// view.
 ///
+/// Deterministic rendezvous: the winner is held inside its `compute()`
+/// closure; the test driver releases it ONLY after polling the
+/// winner's `InflightSlot` strong count to PROVE the follower has
+/// coalesced onto that slot (count `>= 4` — see the loop below). A
+/// fixed sleep would not discriminate the joiner path: on a slow
+/// worker the winner could publish first and the follower would then
+/// pass via the warm-map-reject path instead of the joiner-fork path.
+///
 /// Discrimination:
 /// - Pre-fix: the cooperative joiner ran `project` (NOT `validate`) on
 ///   the winner's published entry — no view check — so the follower
@@ -4289,7 +4297,7 @@ fn imported_registry_cooperative_joiner_validates_against_follower_view() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     let canonical = "/coop_xview/imported.ts";
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -4384,10 +4392,41 @@ fn imported_registry_cooperative_joiner_validates_against_follower_view() {
         })
     });
 
-    // Give the follower time to reach the cooperative wait branch
-    // BEFORE the winner publishes — this forces a real coalesce onto
-    // the winner's in-flight slot.
-    thread::sleep(Duration::from_millis(80));
+    // Deterministic rendezvous — prove the follower has coalesced onto
+    // the winner's in-flight slot BEFORE releasing the winner. A fixed
+    // sleep proves nothing: on a slow worker the winner would publish
+    // first, the follower would then reject the warm map entry and
+    // recompute, and the test would pass via the warm-map-reject path
+    // instead of the joiner-fork path it advertises.
+    //
+    // Poll the winner's `InflightSlot` strong count. While the winner
+    // is parked inside its `compute()` closure (blocked on
+    // `rx_release_winner`), the substrate holds exactly three `Arc`s on
+    // the slot: the in-flight table entry, the winner's `slot` local,
+    // and the winner's `panic_guard.slot`. The follower bumps the count
+    // to 4 the instant it clones its own `Arc` via the slot-acquisition
+    // `table.entry(key).or_insert_with(...).clone()` — past which it
+    // deterministically reaches the cooperative joiner wait branch. We
+    // release the winner only once the count is `>= 4`, so the follower
+    // is a PROVEN joiner on every run regardless of worker speed.
+    let db = host.project_type_store().imported_registry_db();
+    let rendezvous_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if db
+            .inflight_table_for_test()
+            .slot_strong_count(&key)
+            .is_some_and(|count| count >= 4)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < rendezvous_deadline,
+            "follower failed to coalesce onto the winner's in-flight \
+             slot within 10s — the deterministic joiner rendezvous is \
+             broken",
+        );
+        std::hint::spin_loop();
+    }
     tx_release_winner.send(()).expect("release winner");
 
     let winner_result = winner.join().expect("winner joined");
@@ -4422,5 +4461,225 @@ fn imported_registry_cooperative_joiner_validates_against_follower_view() {
         "the follower's resolved symbol MUST be its OWN overlay-view \
          recompute — the winner's base-view symbol is not interchangeable \
          across views",
+    );
+}
+
+/// P2 removal-cleanup discriminator through `ImportedRegistryDb`.
+///
+/// `ImportedRegistryDb` does publish-side bookkeeping: its
+/// cooperative-admission `post_publish` bumps the shared
+/// `component_meta_cache_live` counter and registers the key in the
+/// per-canonical reverse index. A cross-view joiner-fork removes the
+/// winner's published entry — and that removal MUST run the cache's
+/// removal-side cleanup (decrement the counter, drop the reverse-index
+/// registration) symmetrically with `post_publish`. A raw `DashMap`
+/// removal skips the cleanup.
+///
+/// This test drives a full joiner-fork (winner publishes a base-rooted
+/// entry; follower under an overlay rejects it, forks, and publishes
+/// its own overlay-rooted entry) and then checks that
+/// `ImportedRegistryDb`'s contribution to the shared live counter
+/// equals its actual live entry count.
+///
+/// Discrimination — counter consistency:
+/// - Pre-fix: when the joiner-fork's entry removal is a raw
+///   `map.remove_if` that skips the removal cleanup, the winner's
+///   `post_publish` increments the counter (+1); the joiner-fork
+///   removes the winner entry with NO decrement; the follower's
+///   re-publish increments again (+1). The counter delta is +2 while
+///   the map holds exactly ONE entry — over-counted by one.
+/// - Post-fix: the joiner-fork removal routes through
+///   `removal_cleanup`, decrementing the counter (−1). The counter
+///   delta is +1, matching the one live entry.
+///
+/// The counter is the discriminating signal: pre-fix `counter_delta`
+/// (+2) ≠ `entries_delta` (+1); post-fix they are equal. The
+/// reverse-index assertion below is an additional consistency check —
+/// for this same-key fork the follower re-publishes the same key so
+/// the reverse index ends consistent on both trees; it guards against
+/// a regression that would leave the key unregistered.
+#[test]
+fn imported_registry_joiner_fork_removal_keeps_live_counter_consistent() {
+    use crate::resolver_core::SessionResolverContext;
+    use crate::session_view::{OverlaidView, SessionView};
+    use rustc_hash::FxHashMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    let canonical = "/coop_xview_p2/imported.ts";
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert(
+        &host,
+        canonical,
+        "export interface Probe { base: number; }\n",
+    );
+    let base_hash = host
+        .ensure_indexed_ready(canonical)
+        .expect("base IndexedReady materialises")
+        .whole_hash;
+    let host = Arc::new(host);
+
+    let base_self_root: Arc<[FactVersionRef]> = Arc::from(vec![FactVersionRef::FileWholeHash {
+        canonical_id: canonical.to_string(),
+        hash: base_hash,
+    }]);
+
+    let key: (Arc<str>, Arc<str>) = (Arc::<str>::from(canonical), Arc::<str>::from("Probe"));
+
+    // Snapshot the shared live counter AND `ImportedRegistryDb`'s entry
+    // count BEFORE the cooperative race. The shared counter is bumped
+    // by every component-meta cache, so the discriminator is the
+    // DELTA, not the absolute value.
+    let live_counter = Arc::clone(&host.project_type_store().counters.component_meta_cache_live);
+    let counter_before = live_counter.load(Ordering::Relaxed);
+    let entries_before = host
+        .project_type_store()
+        .imported_registry_db()
+        .live_count();
+
+    let (tx_winner_in_compute, rx_winner_in_compute) = mpsc::channel::<()>();
+    let (tx_release_winner, rx_release_winner) = mpsc::channel::<()>();
+
+    // Winner — publishes a base-rooted `Cacheable` entry.
+    let winner_host = Arc::clone(&host);
+    let winner_key = key.clone();
+    let winner_self_root = Arc::clone(&base_self_root);
+    let winner = thread::spawn(move || {
+        let ctx: &dyn ResolverContext = winner_host.as_ref();
+        let db = winner_host.project_type_store().imported_registry_db();
+        db.get_or_compute_admit(&winner_key, ctx, || {
+            tx_winner_in_compute.send(()).expect("winner: signal claim");
+            rx_release_winner
+                .recv()
+                .expect("winner: released by driver");
+            crate::cooperative_admission::ComputeAdmission::Cacheable(
+                crate::component_meta_caches::ImportedRegistryEntry {
+                    value: Some(Arc::new(imported_symbol(canonical, "winner-base"))),
+                    fact_dep_signature: Arc::clone(&winner_self_root),
+                },
+            )
+        })
+    });
+
+    rx_winner_in_compute
+        .recv()
+        .expect("winner entered compute (claimed the inflight slot)");
+
+    // Follower — under an overlay that re-roots the keyed canonical, so
+    // the winner's base-rooted entry fails the follower's view check;
+    // the follower forks and cold-recomputes its own entry.
+    let follower_cold_ran = Arc::new(AtomicBool::new(false));
+    let follower_host = Arc::clone(&host);
+    let follower_key = key.clone();
+    let follower_cold_flag = Arc::clone(&follower_cold_ran);
+    let follower = thread::spawn(move || {
+        let overlay_source: Arc<str> = Arc::from("export interface Probe { overlaid: string; }\n");
+        let mut overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();
+        overlays.insert(canonical.to_string(), Arc::clone(&overlay_source));
+        let view = OverlaidView::new(Arc::clone(&follower_host), overlays);
+        let overlay_hash = view
+            .overlay_content_hash_for(canonical)
+            .expect("overlay content hash present");
+        assert_ne!(
+            overlay_hash, base_hash,
+            "fixture invariant: the overlay hash must differ from the base hash",
+        );
+        follower_host
+            .materialize_overlay_indexed_ready(canonical, &overlay_source, overlay_hash)
+            .expect("overlay IndexedReady materialises");
+        let session_ctx = SessionResolverContext::new(&follower_host, &view);
+        let db = follower_host.project_type_store().imported_registry_db();
+        db.get_or_compute_admit(&follower_key, &session_ctx, || {
+            follower_cold_flag.store(true, Ordering::SeqCst);
+            crate::cooperative_admission::ComputeAdmission::Cacheable(
+                crate::component_meta_caches::ImportedRegistryEntry {
+                    value: Some(Arc::new(imported_symbol(canonical, "follower-overlay"))),
+                    fact_dep_signature: Arc::from(vec![FactVersionRef::FileWholeHash {
+                        canonical_id: canonical.to_string(),
+                        hash: overlay_hash,
+                    }]),
+                },
+            )
+        })
+    });
+
+    // Deterministic rendezvous — release the winner only once the
+    // follower has PROVABLY coalesced onto the winner's in-flight slot
+    // (strong count `>= 4`: table + winner.slot + winner.panic_guard +
+    // follower.slot). See
+    // `imported_registry_cooperative_joiner_validates_against_follower_view`.
+    let rendezvous_db = host.project_type_store().imported_registry_db();
+    let rendezvous_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if rendezvous_db
+            .inflight_table_for_test()
+            .slot_strong_count(&key)
+            .is_some_and(|count| count >= 4)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < rendezvous_deadline,
+            "follower failed to coalesce onto the winner's in-flight \
+             slot within 10s — the deterministic joiner rendezvous is \
+             broken",
+        );
+        std::hint::spin_loop();
+    }
+    tx_release_winner.send(()).expect("release winner");
+
+    let _winner_result = winner.join().expect("winner joined");
+    let _follower_result = follower.join().expect("follower joined");
+
+    // The follower MUST have forked — this test only discriminates the
+    // removal cleanup if the joiner-fork path actually ran.
+    assert!(
+        follower_cold_ran.load(Ordering::SeqCst),
+        "fixture invariant: the follower MUST fork and cold-recompute \
+         (the winner's base-rooted entry must fail the follower's \
+         overlay-view check) — otherwise the joiner-fork removal under \
+         test never executed",
+    );
+
+    let counter_after = live_counter.load(Ordering::Relaxed);
+    let db = host.project_type_store().imported_registry_db();
+    let entries_after = db.live_count();
+    let counter_delta: u64 = counter_after - counter_before;
+    let entries_delta: u64 = (entries_after - entries_before) as u64;
+
+    // After a joiner-fork the map holds exactly ONE entry for the key
+    // (the follower's overlay-rooted re-publish; the winner's
+    // base-rooted entry was removed by the fork).
+    assert_eq!(
+        entries_delta, 1,
+        "after the joiner-fork the cache must hold exactly one live \
+         entry for the key — the winner's entry removed, the follower's \
+         re-published",
+    );
+
+    // Discriminator: pre-fix the joiner-fork's raw removal skipped the
+    // counter decrement, so the shared counter over-counts (delta +2)
+    // while the map holds one entry. Post-fix the removal routes
+    // through `removal_cleanup` and the counter delta matches the live
+    // entry count.
+    assert_eq!(
+        counter_delta, entries_delta,
+        "the shared `component_meta_cache_live` counter delta ({counter_delta}) \
+         MUST equal `ImportedRegistryDb`'s live-entry delta ({entries_delta}) \
+         after a joiner-fork. A larger counter delta means the \
+         joiner-fork's entry removal skipped the cache-owned removal \
+         cleanup — the winner's entry was removed without decrementing \
+         the counter that its `post_publish` incremented.",
+    );
+
+    // Reverse-index consistency: the one live key must be registered
+    // exactly once; no removal must have left it unregistered.
+    assert!(
+        db.reverse_index_contains_for_test(&key),
+        "the live key must be registered in the per-canonical reverse \
+         index — the joiner-fork's removal cleanup must not unregister \
+         a key that a subsequent re-publish re-registered",
     );
 }

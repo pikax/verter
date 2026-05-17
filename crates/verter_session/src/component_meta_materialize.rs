@@ -1007,6 +1007,10 @@ pub(crate) fn materialize_component_meta_structure(
     };
 
     let key_for_register = key.clone();
+    // `&MaterializeStructureDb` is `Copy`; a dedicated binding lets the
+    // removal-side closure capture the db alongside the `post_publish`
+    // closure that captures the original `db`.
+    let db_for_removal = db;
     // Wrap the cooperative-admission compute closure with
     // `install_fact_tracer`. On `FactReadSetFinalise::Ok`, override
     // the entry's `read_set_signature.facts` rail with the traced
@@ -1104,6 +1108,16 @@ pub(crate) fn materialize_component_meta_structure(
         },
         // Race-closer — post-compute revalidation via carrier AND-gate.
         |entry: &MaterializeStructureEntry| entry.read_set_signature.validate(ctx),
+        // removal_cleanup — removal-side counterpart of `post_publish`.
+        // When the substrate removes an already-published entry
+        // (warm-hit reject or joiner-fork reject) the live counter must
+        // decrement and the per-canonical reverse-index registration
+        // must drop, symmetric with the `post_publish` bump + register.
+        move |removed_key: &MaterializeStructureCacheKey,
+              removed_entry: &Arc<MaterializeStructureEntry>| {
+            db_for_removal.decrement_live_counter();
+            db_for_removal.unregister_post_publish(removed_key, &removed_entry.read_set_signature);
+        },
         // post_publish — register reverse-index AFTER
         // entries.insert AND AFTER successful revalidation.
         move |entry_arc: &Arc<MaterializeStructureEntry>, k: &MaterializeStructureCacheKey| {
