@@ -423,13 +423,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
             adapter.utility_source(base, decl_name.as_ref()),
             UtilitySource::Builtin
         ) {
-            // Built-in utility shells are structural — they compose
-            // `MappedType` / `ProjectPath` / `Normalize` dispatches over
-            // the supplied args. The result carries no per-file self-root
-            // of its own; the args' own memo entries carry theirs.
-            return self
+            // A built-in utility instantiation (`Pick<X, K>`, `Omit<X, K>`,
+            // `ReturnType<F>`, …) inspects its argument nodes to form the
+            // result — `build_builtin_utility` reads `X`'s Object surface,
+            // enumerates `K`'s key space, walks `F`'s call signature, etc.
+            // The result therefore transitively depends on the file
+            // content each file-derived argument was lowered from. Derive
+            // the self-roots from the `args` node set (the same
+            // file-derived-input rooting `KeyOf` / `MappedType` /
+            // `IndexedAccess` use): each `NodeScopeId::File`-scoped arg
+            // contributes one `(canonical, observed_hash)` self-root so an
+            // edit to that file rejects this utility memo entry on the
+            // strict warm-read validator. Structural args (`Global`-scoped
+            // primitives, literal-union key sets) contribute nothing.
+            let observed_self_roots = self.observed_self_roots_from_nodes(args.iter().copied());
+            let output: crate::project_semantic_dispatch::walk::QueryBuildOutput = self
                 .build_builtin_utility(base, decl_name.as_ref(), args)
                 .into();
+            return output.with_observed_self_roots(observed_self_roots);
         }
 
         // 3. Resolve prepared type decl via `DispatchHost` — the adapter

@@ -1980,6 +1980,24 @@ impl SemanticGraphStore {
                 &self_root_canonicals,
                 &inflight,
             );
+            // Bubble the completed carrier's path-precise fact rail into
+            // this thread's still-active outer tracer (if any). When this
+            // cold owner build was nested under another semantic query,
+            // `build()` installed a fresh tracer for the child build and
+            // popped it before the carrier was available — so the child's
+            // synthesised self-root `FileWholeHash` facts (added by
+            // `semantic_graph_read_set_signature`, never observed onto the
+            // tracer) live ONLY on this carrier. Without this bubble the
+            // outer cold-compute scope's accumulated observation set would
+            // miss the child's self-roots, and a parent that cold-builds a
+            // child would publish with strictly fewer deps than a parent
+            // that warm-hit the same child (the warm-hit fast path and the
+            // joiner path both bubble the carrier). Bubbling here makes the
+            // parent's dep coverage path-independent: a cold-built child
+            // and a warm-hit child deliver the identical fact set to the
+            // parent, so an edit to the child's self-root file invalidates
+            // the parent entry regardless of the child's cache state.
+            carrier.bubble(ctx);
             // Prefix backfill: publish each accumulated backfill
             // record AFTER the parent entry is warm so the
             // sibling-share short-circuit at `find_longest_warm_prefix`

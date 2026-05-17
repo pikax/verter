@@ -46,7 +46,7 @@ use std::sync::Arc;
 use verter_semantic::facts::{FactKey, FactLane};
 
 use crate::fact_signature_helpers::ReadSetSignature;
-use crate::resolver_core::{FactVersionRef, ResolverContext};
+use crate::resolver_core::{FactReadSetFinalise, FactVersionRef, ResolverContext};
 use crate::semantic_query::{
     DepSignature, DepVersion, ResolveDeclKey, ScopeId, SemanticNodeData, SemanticNodeId,
     SemanticQueryApi, SemanticQueryKey,
@@ -904,5 +904,204 @@ fn project_path_same_canonical_edit_rejects_warm_entry() {
         graph.get_validated(&key, ctx).is_none(),
         "ProjectPath: a content edit to the projection base's originating file MUST reject \
          the warm memo entry via the base node's file-derived self-root",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Cold-owner carrier bubble — a parent that COLD-builds a nested child
+// must end with the SAME dep coverage as a parent that WARM-HIT the
+// child.
+// ---------------------------------------------------------------------------
+
+/// The cold-owner publish path bubbles the completed carrier into the
+/// still-active outer tracer — exactly as the warm-hit fast path and the
+/// in-flight joiner path already do.
+///
+/// Discriminating property: a `ResolveDecl` cold build observes NO facts
+/// organically onto the tracer (`build_resolve_decl` reads the scope
+/// `IndexedReady` through `ensure_indexed_ready` — a storage accessor
+/// that fans nothing — then builds the dep-signature and interns a
+/// placeholder). The build's self-root `FileWholeHash` is **synthesised**
+/// by `semantic_graph_read_set_signature` onto the published carrier; it
+/// is never an `observe_fan_out` observation. So an outer tracer wrapping
+/// a *cold* dispatch sees the child's self-root `FileWholeHash` ONLY if
+/// the cold-owner publish path bubbles the carrier.
+///
+/// Pre-fix the cold owner path published the carrier to the memo entry
+/// and to the in-flight joiner state, but never bubbled it into this
+/// thread's still-active parent tracer — so a parent that cold-built a
+/// child accumulated strictly fewer deps than a parent that warm-hit the
+/// same child (the warm-hit and joiner paths both bubble). Reverting the
+/// `carrier.bubble(ctx)` in `execute_cooperative_slow`'s cold-owner path
+/// leaves the outer tracer's finalised signature WITHOUT the cold child's
+/// self-root `FileWholeHash` and this test FAILS.
+///
+/// The test also asserts the cold-built-child coverage EQUALS the
+/// warm-hit-child coverage: a second dispatch of the same key under a
+/// fresh outer tracer warm-hits and bubbles the identical self-root fact.
+#[test]
+fn cold_owner_bubbles_carrier_into_outer_tracer() {
+    let host = host();
+    let c = "/sg_self_root/cold_owner_bubble.ts";
+    upsert(&host, c, "export type Foo = { a: number };\n");
+    let observed_hash = host
+        .ensure_indexed_ready(c)
+        .map(|indexed| indexed.whole_hash)
+        .expect("declaring file IndexedReady materialises");
+    let key = SemanticQueryKey::ResolveDecl(resolve_decl_key(c, "Foo"));
+
+    // Outer tracer #1 wraps the FIRST dispatch of `key` — a cold build.
+    // The cold-owner publish path must bubble the freshly-built carrier
+    // (whose facts rail leads with the self-root `FileWholeHash` for `c`)
+    // into this outer tracer.
+    let ((), cold_finalise) = crate::fact_signature_helpers::install_fact_tracer(&host, || {
+        let dispatch = host.semantic_dispatch();
+        let r = dispatch.execute(key.clone());
+        assert!(
+            matches!(r, crate::semantic_query::QueryResult::Value(_)),
+            "the cold ResolveDecl dispatch must resolve to a Value"
+        );
+    });
+
+    let cold_facts = match cold_finalise {
+        FactReadSetFinalise::Ok(sig) => sig,
+        FactReadSetFinalise::Overflow => {
+            panic!("outer tracer overflowed — a single ResolveDecl cold build cannot overflow")
+        }
+    };
+    assert!(
+        cold_facts.iter().any(|f| matches!(
+            f,
+            FactVersionRef::FileWholeHash { canonical_id, hash }
+                if canonical_id == c && *hash == observed_hash
+        )),
+        "the cold-owner publish path MUST bubble the completed carrier into the still-active \
+         outer tracer — the outer tracer's finalised signature must contain the cold child's \
+         synthesised self-root FileWholeHash for {c}. Pre-fix the cold owner published the \
+         carrier to the memo + joiner state but never bubbled it into the parent tracer, so a \
+         cold-built child under-rooted the parent. Got: {cold_facts:?}",
+    );
+
+    // Outer tracer #2 wraps the SECOND dispatch of the SAME key — now a
+    // warm hit. The warm-hit fast path bubbles the entry's carrier. The
+    // warm-hit-child coverage MUST equal the cold-built-child coverage:
+    // a parent's dep set is path-independent regardless of whether the
+    // child was cold or warm.
+    let ((), warm_finalise) = crate::fact_signature_helpers::install_fact_tracer(&host, || {
+        let dispatch = host.semantic_dispatch();
+        let _ = dispatch.execute(key.clone());
+    });
+    let warm_facts = match warm_finalise {
+        FactReadSetFinalise::Ok(sig) => sig,
+        FactReadSetFinalise::Overflow => panic!("warm outer tracer overflowed — setup error"),
+    };
+    assert!(
+        warm_facts.iter().any(|f| matches!(
+            f,
+            FactVersionRef::FileWholeHash { canonical_id, hash }
+                if canonical_id == c && *hash == observed_hash
+        )),
+        "the warm-hit fast path bubbles the entry's carrier — the outer tracer must contain \
+         the same self-root FileWholeHash for {c}. Got: {warm_facts:?}",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Built-in utility instantiations rooted on their argument files.
+// ---------------------------------------------------------------------------
+
+/// A built-in utility instantiation (`Pick<Foo, 'a'>`) self-roots on the
+/// file its source argument `Foo` was lowered from — a content edit to
+/// that file rejects the warm utility memo entry.
+///
+/// Discriminating property: the built-in utility branch in
+/// `build_instantiate` previously returned the `QueryBuildOutput` with
+/// **empty** `observed_self_roots`, even though `build_builtin_utility`
+/// inspects the argument nodes to form the result (`Pick` reads the
+/// source's Object surface and enumerates the key set). With empty
+/// `observed_self_roots` the published carrier carried no self-root
+/// `FileWholeHash` for the source argument's file, so a same-canonical
+/// content edit to that file left the warm utility entry valid and a
+/// reissue served the stale result.
+///
+/// The fix derives the self-roots from the `args` node set via
+/// `observed_self_roots_from_nodes`. Reverting that derivation leaves the
+/// `Pick` instantiation entry without the source-file self-root and this
+/// test FAILS — the stale entry validates after the edit.
+#[test]
+fn builtin_utility_instantiation_roots_on_argument_file() {
+    let host = host();
+    let c = "/sg_self_root/builtin_utility_arg.ts";
+    upsert(&host, c, "export type Foo = { a: number; b: string };\n");
+    // `file_derived_object_node` primes an `Instantiate` of the
+    // non-generic `Foo` so the result node is an Object surface scoped to
+    // `c`'s file — a genuine file-derived argument for the utility.
+    let source = file_derived_object_node(&host, c);
+    let dispatch = host.semantic_dispatch();
+    let graph = host.project_type_store().semantic_graph();
+
+    // `Pick<Foo, 'a'>` — args are [source_object_node, key_set]. The
+    // key set is a structural literal union (Global-scoped → contributes
+    // no self-root); the source object node is file-derived.
+    let members = vec![Arc::<str>::from("a")];
+    let key_set = dispatch.intern_string_literal_union(&members);
+    let key = SemanticQueryKey::Instantiate {
+        base: crate::project_semantic_dispatch::pick_builtin_decl_identity(),
+        args: Arc::from(vec![source, key_set].into_boxed_slice()),
+        body_mode: crate::semantic_query::ProjectionMode::Expanded,
+    };
+
+    let primed = dispatch.execute(key.clone());
+    assert!(
+        matches!(primed, crate::semantic_query::QueryResult::Value(_)),
+        "the Pick<Foo, 'a'> built-in utility instantiation must resolve before the edit"
+    );
+    // Hard fixture invariant: the `Pick` utility instantiation MUST warm
+    // a memo entry. An early `return` here would make the test pass
+    // vacuously if the kind ever stopped publishing — the discrimination
+    // is the validator rejecting the entry, not its absence.
+    assert!(
+        graph.get_unvalidated(&key).is_some(),
+        "fixture invariant: the warm Pick utility memo entry must exist after priming"
+    );
+    // Direct carrier inspection: the published entry's facts rail MUST
+    // lead with the source argument's file self-root `FileWholeHash`.
+    // This is the precise discrimination — pre-fix the carrier had no
+    // FileWholeHash at all.
+    let carrier = graph
+        .entry_read_set_signature_for_tests(&key)
+        .expect("the Pick utility memo entry must carry a ReadSetSignature");
+    assert!(
+        carrier.facts.iter().any(|f| matches!(
+            f,
+            FactVersionRef::FileWholeHash { canonical_id, .. } if canonical_id == c
+        )),
+        "the built-in utility instantiation carrier MUST carry a self-root FileWholeHash for \
+         the source argument's file {c} — `build_builtin_utility` inspects the argument nodes \
+         to form the result, so the result depends on each file-derived argument's file. \
+         Pre-fix the utility branch returned empty `observed_self_roots` and the carrier had \
+         no FileWholeHash. Got facts: {:?}",
+        carrier.facts,
+    );
+
+    // Edit the source argument's file through the skip-own-drain hook so
+    // the own-canonical drain does not remove the utility entry — the
+    // warm read exercises the entry's self-root validation directly.
+    upsert_skip_drain(
+        &host,
+        c,
+        "export type Foo = { a: number; b: string; d: boolean };\n",
+    );
+
+    let ctx: &dyn ResolverContext = &host;
+    assert!(
+        graph.get_unvalidated(&key).is_some(),
+        "the physical Pick utility memo entry must still be present after the skip-drain edit"
+    );
+    assert!(
+        graph.get_validated(&key, ctx).is_none(),
+        "built-in utility instantiation: a content edit to the source argument's originating \
+         file MUST reject the warm utility memo entry — the entry self-roots on the \
+         argument's file via `observed_self_roots_from_nodes` over the `args` node set",
     );
 }
