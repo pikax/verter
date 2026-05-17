@@ -704,11 +704,15 @@ impl ReadSetSignature {
     /// all three return `false`.
     ///
     /// The in-flight joiner gate uses this to refuse cross-view reuse
-    /// of a non-cacheable (`cache_suppress`) winner whose carrier could
-    /// only ever validate vacuously: such a winner's
-    /// `validate_with_self_roots` is not a real view check, so a
-    /// follower under a different overlay must fork rather than coalesce
-    /// onto the winner's view-specific result.
+    /// of ANY winner whose carrier could only ever validate vacuously —
+    /// a tracer-overflow carrier, an unrootable build carrying only
+    /// cross-file dependency facts, or a non-suppressed
+    /// `QueryResult::Error(Miss)` from a declaration missing under the
+    /// winner's overlay. For all of these `validate_with_self_roots` is
+    /// not a real view check, so a follower under a possibly-different
+    /// overlay must fork and recompute rather than coalesce onto the
+    /// winner's view-specific result. The fork is not gated on
+    /// `cache_suppress`.
     #[inline]
     pub(crate) fn has_view_discriminating_self_root(
         &self,

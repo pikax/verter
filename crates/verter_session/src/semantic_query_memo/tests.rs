@@ -4795,3 +4795,292 @@ fn cross_view_joiner_of_suppressed_unrootable_winner_forks() {
         }
     }
 }
+
+/// Discriminating test: a cross-thread joiner that coalesced onto an
+/// in-flight winner that completed with a **`QueryResult::Error(Miss)`**
+/// — a view-specific missing declaration — and whose carrier has **no
+/// view-discriminating self-root** does NOT receive the winner's miss
+/// even though the winner is **NOT `cache_suppress`**. It forks and
+/// cold-recomputes for its own view.
+///
+/// Codex P2 (fix round 9): fix round 8 made the no-self-root joiner
+/// fork fire only for `cache_suppress` winners
+/// (`suppressed_without_self_root = cache_suppress && !carrier
+/// .has_view_discriminating_self_root(..)`). But a NON-suppressed
+/// winner can ALSO have no view-discriminating self-root: a
+/// `QueryResult::Error(Miss)` produced because the requested
+/// declaration is absent UNDER THE WINNER'S overlay. That build
+/// completes with `cache_suppress == false` and a carrier holding only
+/// cross-file *dependency* facts (no self-root for the keyed
+/// canonical, because the declaration the self-root would have rooted
+/// does not exist under the winner's view). The fix-8 predicate is
+/// gated on `cache_suppress`, which is `false` here, so it does not
+/// fork — `validate_with_self_roots` then routes the carrier's
+/// dependency `FileWholeHash` through the lazy untracked-file-accepting
+/// `validates` and the carrier validates VACUOUSLY against any
+/// follower's `ctx`. A cross-view follower whose own overlay DOES
+/// contain the declaration coalesces onto the winner's view-specific
+/// `Error(Miss)` and returns a stale miss instead of recomputing.
+///
+/// Setup: a real `/p2_9_nonsuppressed_miss/keyed.ts` is upserted under
+/// the base host with content declaring only `Other`. The winner runs
+/// the `ResolveDecl` key for `Keyed` (absent under the base view) under
+/// the base host and returns a `QueryBuildOutput` with `result ==
+/// QueryResult::Error(QueryError::Miss)`, `cache_suppress == false`, a
+/// `graph_carrier` carrying ONE `FileWholeHash` for an unrelated
+/// cross-file *dependency* (`/p2_9_nonsuppressed_miss/dep.ts`, never
+/// tracked by either host), and an EMPTY `self_root_canonicals` — the
+/// build could not self-root the keyed file because the requested
+/// declaration is missing under the winner's view. The follower runs
+/// the SAME key under a `SessionResolverContext` whose `OverlaidViewRef`
+/// overlays the keyed file with content that DOES declare `Keyed`; its
+/// recompute closure returns a non-Miss `QueryResult::Value`.
+///
+/// Discrimination property:
+/// - Pre-fix-9: the fix-8 predicate `suppressed_without_self_root`
+///   short-circuits on `cache_suppress == false` and is therefore
+///   `false`; `carrier_view_validates` is `true` (the lone dependency
+///   `FileWholeHash` is not a listed self-root, routes through lazy
+///   `validates`, the untracked-file arm accepts) — the joiner gate
+///   does NOT fork. The follower coalesces, its build closure NEVER
+///   runs (`follower_cold_ran == false`), and `follower_value` is the
+///   winner's `QueryResult::Error(Miss)`.
+/// - Post-fix-9: the joiner fork predicate drops the `cache_suppress`
+///   gate — it fires on `!carrier.has_view_discriminating_self_root(
+///   &winner_self_roots)` regardless of `cache_suppress`. The carrier
+///   holds a `FileWholeHash` whose canonical is NOT in the empty
+///   `self_root_canonicals`, so `has_view_discriminating_self_root` is
+///   `false` and the joiner force-forks; the follower's build closure
+///   runs (`follower_cold_ran == true`) and `follower_value` is its
+///   OWN recomputed non-Miss `Value`.
+#[test]
+fn cross_view_joiner_of_nonsuppressed_miss_winner_without_self_root_forks() {
+    use crate::fact_signature_helpers::ReadSetSignature;
+    use crate::resolver_core::{FactVersionRef, SessionResolverContext};
+    use crate::session_view::OverlaidViewRef;
+    use crate::{FileKind, UpsertRequest};
+    use rustc_hash::FxHashMap;
+    use std::collections::HashSet;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    let keyed_canonical = "/p2_9_nonsuppressed_miss/keyed.ts";
+    let host = ctx_host();
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some(keyed_canonical.to_string()),
+            input_id: keyed_canonical.to_string(),
+            source: Arc::from("export interface Other { base: number; }\n"),
+            file_kind: FileKind::from_path(keyed_canonical),
+            aliases: Vec::new(),
+        })
+        .expect("upsert of the keyed file succeeds");
+    let base_hash = host
+        .ensure_indexed_ready(keyed_canonical)
+        .expect("keyed-file base IndexedReady must materialise")
+        .whole_hash;
+    let host = Arc::new(host);
+
+    let store = Arc::new(SemanticGraphStore::new());
+    // The winner resolves `Keyed` — a declaration ABSENT under the
+    // winner's base view (the base source only declares `Other`), so
+    // the winner's build legitimately completes with `Error(Miss)` and
+    // cannot self-root the keyed file for this query.
+    let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        scope: scope(keyed_canonical),
+        name: Arc::from("Keyed"),
+    });
+
+    // The NON-suppressed winner's carrier holds ONE cross-file
+    // *dependency* fact — NOT a self-root. `/p2_9_nonsuppressed_miss/
+    // dep.ts` is never upserted, so the lazy `validates` untracked-file
+    // arm accepts it under any view: the carrier cannot discriminate by
+    // view, and `self_root_canonicals` is EMPTY.
+    let dep_canonical = "/p2_9_nonsuppressed_miss/dep.ts";
+    let winner_dep_fact = FactVersionRef::FileWholeHash {
+        canonical_id: dep_canonical.to_string(),
+        hash: [0x7eu8; 16],
+    };
+
+    let (tx_winner_in_build, rx_winner_in_build) = mpsc::channel::<()>();
+    let (tx_release_winner, rx_release_winner) = mpsc::channel::<()>();
+
+    let winner_store = Arc::clone(&store);
+    let winner_host = Arc::clone(&host);
+    let winner_key = key.clone();
+    let winner_dep_fact_for_build = winner_dep_fact.clone();
+    let winner = thread::spawn(move || {
+        let host: &dyn crate::resolver_core::ResolverContext = winner_host.as_ref();
+        winner_store.execute_cooperative(
+            host,
+            winner_key,
+            || winner_store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || {
+                tx_winner_in_build
+                    .send(())
+                    .expect("winner: signal in-build");
+                rx_release_winner
+                    .recv()
+                    .expect("winner: released by driver");
+                // A NON-suppressed build that completes with a
+                // view-specific `Error(Miss)`: the requested `Keyed`
+                // declaration is missing under the winner's overlay, so
+                // the build could not self-root the keyed file. The
+                // carrier carries only an unrelated cross-file
+                // *dependency* fact and an EMPTY `self_root_canonicals`
+                // — `cache_suppress` is `false` (a plain miss is a
+                // cacheable result, not a non-cacheable build).
+                let carrier = ReadSetSignature::new(
+                    Arc::from(vec![winner_dep_fact_for_build.clone()]),
+                    Arc::from(Vec::new().into_boxed_slice()),
+                );
+                crate::project_semantic_dispatch::walk::QueryBuildOutput {
+                    result: QueryResult::Error(QueryError::Miss),
+                    dep_signature: Arc::from(Vec::new().into_boxed_slice()),
+                    walker_diagnostics: Vec::new(),
+                    cache_suppress: false,
+                    observed_self_roots: Vec::new(),
+                    graph_carrier: Some(Box::new(carrier)),
+                    self_root_canonicals: Arc::from([]),
+                    pending_prefix_backfills: Vec::new(),
+                }
+            },
+        )
+    });
+
+    rx_winner_in_build.recv().expect("winner entered build");
+
+    let follower_cold_ran = Arc::new(AtomicBool::new(false));
+    let follower_store = Arc::clone(&store);
+    let follower_host = Arc::clone(&host);
+    let follower_key = key.clone();
+    let follower_cold_flag = Arc::clone(&follower_cold_ran);
+    let follower = thread::spawn(move || {
+        // The follower's overlay DOES declare `Keyed` — under its view
+        // the declaration the winner found missing exists, so its
+        // recompute resolves a real non-Miss result.
+        let overlay_hash: crate::types::Hash16 = [0xC9u8; 16];
+        assert_ne!(
+            overlay_hash, base_hash,
+            "fixture invariant: the overlay hash must differ from the base hash",
+        );
+        let mut overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();
+        overlays.insert(
+            keyed_canonical.to_string(),
+            Arc::from("export interface Keyed { overlaid: string; }\n"),
+        );
+        let mut overlay_hashes: FxHashMap<String, crate::types::Hash16> = FxHashMap::default();
+        overlay_hashes.insert(keyed_canonical.to_string(), overlay_hash);
+        let tombstones: HashSet<String> = HashSet::new();
+        let view = OverlaidViewRef::new(
+            follower_host.as_ref(),
+            &overlays,
+            &overlay_hashes,
+            &tombstones,
+        );
+        let session_ctx = SessionResolverContext::new(follower_host.as_ref(), &view);
+        let recompute_id =
+            follower_store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let cache_read = follower_store.execute_cooperative(
+            &session_ctx,
+            follower_key,
+            || follower_store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || {
+                follower_cold_flag.store(true, Ordering::SeqCst);
+                (
+                    QueryResult::Value(recompute_id),
+                    Arc::from(Vec::new().into_boxed_slice()),
+                )
+            },
+        );
+        (cache_read.value, recompute_id)
+    });
+
+    thread::sleep(Duration::from_millis(80));
+    tx_release_winner.send(()).expect("release winner");
+
+    let winner_read = winner.join().expect("winner joined");
+    let (follower_value, follower_recompute) = follower.join().expect("follower joined");
+
+    // Fixture invariant: the winner genuinely produced an `Error(Miss)`
+    // — without this the test does not exercise the non-suppressed
+    // missing-declaration shape at all.
+    assert!(
+        matches!(winner_read.value, QueryResult::Error(QueryError::Miss)),
+        "fixture invariant: the winner must complete with \
+         QueryResult::Error(Miss); got {:?}",
+        winner_read.value,
+    );
+    assert!(
+        !winner_read.cache_suppress,
+        "fixture invariant: the winner must NOT be `cache_suppress` — \
+         this test discriminates a NON-suppressed no-self-root winner \
+         from the fix-8 `cache_suppress`-gated fork.",
+    );
+
+    let snap = store.stats_snapshot();
+    assert!(
+        snap.joined_waits >= 1,
+        "the follower MUST have hit the cooperative wait branch \
+         (joined_waits={}); if this fails the follower never coalesced \
+         onto the winner's flight and the test does not exercise the \
+         cross-view join path at all.",
+        snap.joined_waits,
+    );
+
+    assert!(
+        follower_cold_ran.load(Ordering::SeqCst),
+        "the follower coalesced onto an in-flight winner that \
+         completed with a view-specific QueryResult::Error(Miss) and a \
+         carrier holding only a cross-file dependency fact with an \
+         EMPTY self-root set — and `cache_suppress` is FALSE. That \
+         carrier validates VACUOUSLY against any view (the dependency \
+         `FileWholeHash` routes through the lazy \
+         untracked-file-accepting `validates`), so the follower MUST be \
+         force-forked and cold-recompute for its own overlay view, \
+         under which the declaration the winner found missing DOES \
+         exist. Pre-fix-9 the joiner fork predicate was gated on \
+         `cache_suppress`, which is false here, so it never fired and \
+         the follower coalesced onto the winner's stale view-specific \
+         miss; the follower's build closure never ran (codex P2 fix \
+         round 9).",
+    );
+
+    match follower_value {
+        QueryResult::Value(node) => {
+            assert_eq!(
+                node, follower_recompute,
+                "the follower's result MUST be its OWN recompute node — \
+                 the winner's `Error(Miss)` was computed against a \
+                 different overlay (under which `Keyed` is absent) and \
+                 is not interchangeable with the follower's view.",
+            );
+        }
+        QueryResult::Error(QueryError::Miss) => panic!(
+            "the follower returned the winner's stale view-specific \
+             QueryResult::Error(Miss) — pre-fix-9 regression: the \
+             joiner fork did not fire for a NON-suppressed \
+             no-self-root winner, so the follower coalesced onto the \
+             winner's miss instead of recomputing under its own \
+             overlay (where the declaration exists).",
+        ),
+        other => panic!("follower: expected the recomputed non-Miss Value, got {other:?}"),
+    }
+
+    // The winner's view-specific miss must never reach a warm cache
+    // entry under the follower's key: after the fork the follower's OWN
+    // recompute publishes a `MemoEntry` carrying the resolved Value —
+    // the discriminating negative is that the cached result is the
+    // follower's Value, NOT the winner's `Error(Miss)`.
+    if let Some(cached) = store.get_unvalidated(&key) {
+        assert!(
+            !matches!(cached.value, QueryResult::Error(QueryError::Miss)),
+            "the winner's view-specific QueryResult::Error(Miss) must \
+             never be promoted to a warm cache entry the follower's \
+             view would read back — the follower's fork publishes its \
+             own resolved Value.",
+        );
+    }
+}

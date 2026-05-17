@@ -1853,42 +1853,58 @@ impl SemanticGraphStore {
                 // self-root-validate against its own content identity,
                 // exactly as a warm hit (`MemoEntry::validate`) does.
                 //
-                // Validate the winner's carrier against THIS follower's
-                // `ctx`. If the winner's carrier validates under the
-                // follower's view the coalesce is legitimate — proceed
-                // to bubble + return. If it does NOT validate (the
-                // winner ran under a different overlay; an overflow
-                // carrier; a self-root the follower's view no longer
-                // tracks) the follower MUST NOT return the winner's
-                // node: it forks and cold-recomputes for its own view.
-                //
-                // Suppressed-winner exception. The validation above
-                // only DISCRIMINATES by view when the carrier carries a
-                // `FileWholeHash` self-root listed in
-                // `winner_self_roots` — that fact routes through the
-                // strict `validates_self_root_whole_hash`. A
-                // `cache_suppress` winner has no such fact: a tracer
-                // overflow yields a synthetic empty-fact carrier, and an
-                // unrootable build (`semantic_graph_read_set_signature`
-                // returned `None`) carries only cross-file *dependency*
-                // facts with an EMPTY `winner_self_roots`. Both validate
-                // VACUOUSLY against any follower's `ctx` — the strict
-                // arm never fires — so the gate above would coalesce a
-                // follower in a different overlay onto the suppressed
-                // winner's view-specific result. `cache_suppress` blocks
-                // memo insertion but NOT in-flight reuse; a non-cacheable
-                // winner whose carrier cannot view-validate must force
-                // every joiner to recompute for its own view. The
-                // winner itself, and a same-thread direct caller, still
-                // receive the suppressed result — only a cross-thread
-                // joiner under a possibly-different overlay is forked.
-                //
-                // A `cache_suppress` winner that DOES carry a real,
+                // A cross-view joiner may reuse the winner's result
+                // ONLY IF the winner's carrier carries a
                 // view-discriminating self-root (a `FileWholeHash`
-                // listed in `winner_self_roots`) is left to the ordinary
+                // listed in `winner_self_roots`, routed through the
+                // strict `validates_self_root_whole_hash`) AND that
+                // self-root validates against THIS follower's `ctx`.
+                // Both conditions are checked below; if either fails
+                // the follower MUST NOT return the winner's node — it
+                // forks and cold-recomputes for its own view.
+                //
+                // No-self-root fork. `validate_with_self_roots` only
+                // DISCRIMINATES by view when the carrier carries a
+                // self-root listed in `winner_self_roots`. A carrier
+                // with no such fact validates VACUOUSLY against any
+                // follower's `ctx` — the strict arm never fires — so a
+                // bare `validate_with_self_roots` gate would coalesce a
+                // follower in a different overlay onto the winner's
+                // view-specific result. Three winner shapes have no
+                // view-discriminating self-root:
+                //
+                //  - a tracer-overflow `cache_suppress` winner, whose
+                //    carrier is a synthetic empty-fact carrier;
+                //  - an unrootable `cache_suppress` winner
+                //    (`semantic_graph_read_set_signature` returned
+                //    `None`), whose carrier holds only cross-file
+                //    *dependency* facts with an EMPTY `winner_self_roots`;
+                //  - a NON-suppressed winner that completed with a
+                //    view-specific `QueryResult::Error(Miss)` because a
+                //    declaration is missing UNDER THE WINNER'S overlay:
+                //    `cache_suppress` is `false`, yet the build could
+                //    not self-root the keyed file and its carrier
+                //    carries no listed self-root.
+                //
+                // The no-self-root fork therefore fires for ANY winner
+                // lacking a view-discriminating self-root — it is NOT
+                // gated on `cache_suppress`. The winner itself, and a
+                // same-thread direct caller, still receive the winner's
+                // result; only a cross-thread joiner under a
+                // possibly-different overlay is forked. A genuinely
+                // structural / view-invariant result also has no
+                // self-root and is re-forked here — an accepted
+                // redundant recompute: correctness over coalescing the
+                // no-self-root class.
+                //
+                // A winner that DOES carry a real, view-discriminating
+                // self-root (a `FileWholeHash` listed in
+                // `winner_self_roots`) is left to the ordinary
                 // `validate_with_self_roots` gate: a genuine same-view
-                // joiner of such a winner still coalesces and inherits
-                // `cache_suppress`.
+                // joiner still coalesces — and a `cache_suppress`
+                // winner with a real self-root still propagates
+                // `cache_suppress` to that legitimately-coalescing
+                // joiner.
                 //
                 // The fork removes the stale completed in-flight entry
                 // (iff it is still the SAME `Arc` the follower joined —
@@ -1904,9 +1920,9 @@ impl SemanticGraphStore {
                 if let Some(ref carrier) = graph_carrier {
                     let carrier_view_validates =
                         carrier.validate_with_self_roots(ctx, &winner_self_roots);
-                    let suppressed_without_self_root = cache_suppress
-                        && !carrier.has_view_discriminating_self_root(&winner_self_roots);
-                    if !carrier_view_validates || suppressed_without_self_root {
+                    let lacks_view_discriminating_self_root =
+                        !carrier.has_view_discriminating_self_root(&winner_self_roots);
+                    if !carrier_view_validates || lacks_view_discriminating_self_root {
                         self.stats
                             .joiner_view_mismatch_forks
                             .fetch_add(1, Ordering::Relaxed);
