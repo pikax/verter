@@ -5,12 +5,22 @@
 //!
 //! Each cache is a typed `*Db` wrapper around `DashMap<Key, Arc<Entry>>`
 //! plus a per-cache `InflightTable<Key>` (admission control isolation per
-//! D3.2). All 10 wrappers share the same shape:
+//! D3.2). The wrappers share the same shape:
 //!
 //! - `Entry` carries `(value, dep_signature)`.
-//! - `get_or_compute<F>(key, host, compute) -> Option<value>` delegates to
-//!   [`cooperative_get_or_insert`] for one-winner-cold-build,
-//!   panic-safety, and post-compute revalidation.
+//! - The cold-compute entry point delegates to a cooperative-admission
+//!   primitive for one-winner-cold-build, panic-safety, and
+//!   post-compute revalidation. Most wrappers expose
+//!   `get_or_compute<F>(key, host, compute) -> Option<value>` over
+//!   [`cooperative_get_or_insert`]. Two consume the
+//!   [`ComputeAdmission`](crate::cooperative_admission::ComputeAdmission)
+//!   API of `cooperative_admit_with_post_publish` so a
+//!   valid-but-non-cacheable cold outcome is broadcast to joiners
+//!   without admitting the cache: `ImportedRegistryDb` via its
+//!   `get_or_compute_admit` method (the producer runs its
+//!   fuse-consuming resolution inside the singleflight `compute`
+//!   closure), and `MaterializeStructureDb` via the materialiser's
+//!   direct use of its `entries()` / `inflight()` accessors.
 //! - `validate(&Entry)` and `revalidate_after_compute(&Entry)` consult
 //!   [`HostFenceValidator`](crate::host_manage::HostFenceValidator) to
 //!   reject entries whose `dep_signature` no longer matches host state.
@@ -143,17 +153,46 @@ impl ImportedRegistryDb {
         }
     }
 
-    pub(crate) fn get_or_compute<F>(
+    /// Cooperative-admission cold compute over the imported-registry
+    /// cache, routed through
+    /// [`crate::cooperative_admission::cooperative_admit_with_post_publish`]
+    /// (the [`ComputeAdmission`](crate::cooperative_admission::ComputeAdmission)
+    /// API).
+    ///
+    /// The producer's `compute` closure runs the expensive,
+    /// fuse-consuming `resolve_imported_registry_symbol_with_budget`
+    /// resolution INSIDE the per-key `InflightTable` singleflight slot:
+    /// when several requests miss the same key concurrently, exactly
+    /// ONE winner runs `compute` and every joiner blocks on the slot
+    /// condvar and reuses the winner's value. Running the resolution
+    /// here — rather than before the admission call — is what makes the
+    /// wildcard-route fuse a one-winner cost instead of an N-waiter
+    /// cost.
+    ///
+    /// `compute` returns a [`ComputeAdmission`](crate::cooperative_admission::ComputeAdmission):
+    ///
+    /// - `Cacheable(entry)` — the provenance-pure fact signature built;
+    ///   the entry is admitted, `post_publish` registers the reverse
+    ///   index, joiners re-read the published entry.
+    /// - `ReturnOnly(value)` — the resolution produced a valid value
+    ///   but shared-cache admission is refused (the signature builder
+    ///   could not build, or the test refusal hook fired). The cache
+    ///   stays empty, joiners receive `value` through the slot's
+    ///   return-only channel, and the next cold miss recomputes. The
+    ///   resolution is NOT re-run and the fuse is NOT consumed twice.
+    /// - `Failed` — the resolution itself failed; joiners surface
+    ///   `None` and the next caller retries.
+    pub(crate) fn get_or_compute_admit<F>(
         &self,
         key: &ImportedRegistryKey,
         ctx: &dyn ResolverContext,
         compute: F,
     ) -> Option<Option<Arc<ResolvedImportedRegistrySymbol>>>
     where
-        F: FnOnce() -> Option<(
-            Option<ResolvedImportedRegistrySymbol>,
-            Arc<[FactVersionRef]>,
-        )>,
+        F: FnOnce() -> crate::cooperative_admission::ComputeAdmission<
+            Option<Arc<ResolvedImportedRegistrySymbol>>,
+            ImportedRegistryEntry,
+        >,
     {
         let live_counter = Arc::clone(&self.live_counter);
         let key_for_post_publish = key.clone();
@@ -162,7 +201,7 @@ impl ImportedRegistryDb {
         // strictly on warm read (same-canonical edit / untracked keyed
         // canonical → miss).
         let self_roots: [&str; 1] = [key.0.as_ref()];
-        crate::cooperative_admission::cooperative_get_or_insert_with_post_publish(
+        crate::cooperative_admission::cooperative_admit_with_post_publish(
             &self.entries,
             &self.inflight,
             key.clone(),
@@ -178,16 +217,7 @@ impl ImportedRegistryDb {
                     None
                 }
             },
-            move || {
-                compute().map(|(value, fact_dep_signature)| {
-                    let inserted_value = value.map(Arc::new);
-                    live_counter.fetch_add(1, Ordering::Relaxed);
-                    ImportedRegistryEntry {
-                        value: inserted_value,
-                        fact_dep_signature,
-                    }
-                })
-            },
+            compute,
             |entry: &ImportedRegistryEntry| {
                 bubble_fact_signature(ctx, &entry.fact_dep_signature);
                 entry.value.clone()
@@ -195,10 +225,13 @@ impl ImportedRegistryDb {
             |entry: &ImportedRegistryEntry| {
                 validate_fact_signature_with_self_roots(ctx, &entry.fact_dep_signature, &self_roots)
             },
-            |_, _| {
-                // Register the published key in the
-                // canonical reverse index so future
-                // invalidate_canonical_for drains in O(K).
+            move |_entry_arc: &Arc<ImportedRegistryEntry>, _key: &ImportedRegistryKey| {
+                // Fires AFTER entries.insert AND AFTER successful
+                // post-compute revalidation — only for the `Cacheable`
+                // arm. A `ReturnOnly` outcome is NOT admitted, so the
+                // live counter is bumped and the reverse index is
+                // registered exactly when the entry actually lands.
+                live_counter.fetch_add(1, Ordering::Relaxed);
                 let canonical = Arc::clone(&key_for_post_publish.0);
                 canonical_index.register(&canonical, key_for_post_publish.clone());
             },

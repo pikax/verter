@@ -72,27 +72,29 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // RefCell view above is non-authoritative scratch; the
         // DashMap-backed DB is the authoritative cross-request cache.
         //
-        // Compute-once shape (mirrors the materialize-memo / prepared
-        // surface+member+target peek-then-compute producers): peek the
-        // shared DB first, and on a miss resolve the imported symbol
-        // EXACTLY ONCE. `resolve_imported_registry_symbol_with_budget`
+        // Singleflight shape: peek the shared DB first, and on a miss
+        // run the resolution INSIDE the cooperative-admission
+        // `compute` closure. `resolve_imported_registry_symbol_with_budget`
         // consumes the wildcard-route fuse (`allow_wildcard_route()` /
-        // `wildcard_route_fanout`) on the slow lane — a side-effecting
-        // budget that MUST NOT be consumed twice for one request.
-        // `get_or_compute` is used purely as a signature-building
-        // write-through, never to re-run resolution: on a `Some(cached)`
-        // return its authoritative value is surfaced (this covers a
-        // concurrent publish that landed inside the cold window — the
-        // closure is then not run); on a `None` return (admission
-        // refused) the freshly-computed value is reused.
+        // `wildcard_route_fanout`) on the slow lane — a side-effecting,
+        // per-request budget. Running it inside the
+        // `cooperative_admit_with_post_publish` slot is what bounds
+        // that cost to ONE winner: when several requests miss the same
+        // key concurrently, exactly one runs the closure and joiners
+        // block on the slot condvar and reuse its value. The closure
+        // returns `ComputeAdmission::Cacheable` when the
+        // provenance-pure signature builds and `ComputeAdmission::ReturnOnly`
+        // when it cannot — `ReturnOnly` still returns (and broadcasts)
+        // the freshly-resolved value without admitting the cache and
+        // without re-running the resolution.
         let arc_key = (
             std::sync::Arc::<str>::from(canonical_id),
             std::sync::Arc::<str>::from(exported_name),
         );
-        // Bind the resolver context to a local so the write-through
-        // closure below `move`-captures this `Copy` reference rather
-        // than the `ctx` field of `&mut self` — `self` stays usable
-        // after the closure for the request-local view insert.
+        // Bind the resolver context to a local `Copy` reference so the
+        // request-local view inserts before and after the cooperative
+        // admission call below borrow `self` only through its `RefCell`
+        // fields, never through the `ctx` field.
         let ctx = self.ctx;
         let host_db = ctx.project_type_store().imported_registry_db();
         if let Some(opt_arc) = host_db.peek(&arc_key, ctx) {
@@ -102,6 +104,13 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 .insert(key, cached.clone());
             return cached;
         }
+        // Cross-thread singleflight rendezvous seam: when the
+        // imported-registry post-peek barrier is armed for this keyed
+        // canonical, block here so every contending thread is past its
+        // `peek` miss before any enters cooperative admission. A no-op
+        // in production and whenever the gate is unarmed.
+        #[cfg(test)]
+        super::await_imported_registry_post_peek_barrier_for_tests(canonical_id);
         // Cold path — observe the keyed canonical's content version
         // ONCE here, before the value is computed, through the
         // view-aware `authoritative_current_content_hash` oracle —
@@ -111,25 +120,21 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // later base request mismatches it instead of reusing it). The
         // signature builder is provenance-pure: it roots the entry's
         // self-root on this observed hash, never a current-content
-        // re-read inside the closure. `None` (canonical has no
-        // authoritative current content) refuses shared-cache admission
-        // — but the freshly-computed value is still returned.
+        // re-read inside the cooperative-admission closure. `None`
+        // (canonical has no authoritative current content) refuses
+        // shared-cache admission — but the freshly-computed value is
+        // still returned via `ComputeAdmission::ReturnOnly`. The
+        // observed hash is captured HERE, before the closure, and
+        // `move`-captured in, so provenance purity holds regardless of
+        // which thread wins the singleflight.
         let observed_keyed_hash = ctx.authoritative_current_content_hash(canonical_id);
-        // The single, side-effecting resolution: the wildcard-route
-        // fuse is consumed here at most once for this request.
-        #[cfg(test)]
-        super::IMPORTED_REGISTRY_RESOLVE_INVOCATIONS.with(|n| n.set(n.get().saturating_add(1)));
-        let resolved: Option<ResolvedImportedRegistrySymbol> =
-            resolve_imported_registry_symbol_with_budget(ctx, canonical_id, exported_name, || {
-                self.allow_wildcard_route()
-            });
         // Test-only injection: simulate a concurrent request that
         // validated-and-published this key into the shared DB inside
         // this request's cold window — after the `peek` miss above,
-        // before the `get_or_compute` write-through below.
-        // `get_or_compute` then takes its warm-hit `validate` arm and
-        // returns the injected value without running the closure,
-        // exactly as it would under a real concurrent publish.
+        // before the `get_or_compute_admit` call below.
+        // `get_or_compute_admit` then takes its warm-hit `validate` arm
+        // and returns the injected value without running the compute
+        // closure, exactly as it would under a real concurrent publish.
         #[cfg(test)]
         super::INJECT_IMPORTED_REGISTRY_CONCURRENT_PUBLISH.with(|slot| {
             if let Some(symbol) = slot.borrow().clone() {
@@ -151,49 +156,90 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 }
             }
         });
-        // Write-through: `get_or_compute`'s closure only builds the
-        // provenance-pure signature and hands back the ALREADY-COMPUTED
-        // `resolved` value — it never re-runs resolution. The returned
-        // `Option<Option<Arc<_>>>` distinguishes two outcomes:
+        // Cooperative-admission cold compute. The expensive,
+        // fuse-consuming `resolve_imported_registry_symbol_with_budget`
+        // resolution runs INSIDE the `compute` closure, so it runs
+        // exactly ONCE per key across all concurrent waiters: the
+        // `InflightTable` singleflight elects one winner to run the
+        // closure while joiners block on the slot condvar and reuse the
+        // winner's value. `allow_wildcard_route()` — and therefore the
+        // `wildcard_route_fanout` fuse — is consumed only by the
+        // winner.
         //
-        // - `Some(cached)` — a validated value is authoritative: either
-        //   this request's own freshly-admitted compute, OR an entry a
-        //   CONCURRENT request published into the DB between the `peek`
-        //   miss above and this call (the warm-hit `validate` arm of
-        //   `cooperative_get_or_insert_with_post_publish` returns it
-        //   without running the closure). Surface that authoritative
-        //   value — the concurrent entry may carry a real symbol even
-        //   when this request's local `resolved` is a fuse-exhausted
-        //   `None`.
-        // - `None` — shared-cache admission was refused (the closure
-        //   `?`-returned `None`: no observed shallow state for the keyed
-        //   canonical, or the test refusal hook; or post-compute
-        //   revalidation failed). Fall back to the `resolved` value
-        //   computed exactly once above. No recompute, no second
-        //   wildcard-route fuse consumption.
-        let captured = resolved.clone();
-        let host_value = host_db.get_or_compute(&arc_key, ctx, move || {
+        // The closure returns a `ComputeAdmission`:
+        //
+        // - `Cacheable` — the provenance-pure fact signature built; the
+        //   entry is admitted and joiners re-read it.
+        // - `ReturnOnly` — the resolution produced a valid value but
+        //   the signature could not be built (no observed shallow
+        //   state for the keyed canonical) or the test refusal hook
+        //   fired; the value is still returned to this caller and
+        //   broadcast to joiners, the cache stays empty, and the
+        //   resolution is NOT re-run (no second fuse consumption).
+        //
+        // `get_or_compute_admit` returns `Option<Option<Arc<_>>>`:
+        //
+        // - `Some(cached)` — a validated value is authoritative: this
+        //   request's own freshly-computed `Cacheable`/`ReturnOnly`
+        //   outcome, OR an entry a CONCURRENT request published into
+        //   the DB between the `peek` miss above and this call (the
+        //   warm-hit `validate` arm returns it without running the
+        //   closure).
+        // - `None` — `compute` returned `Failed`, or post-compute
+        //   revalidation rejected the freshly-built entry (a file
+        //   mutated mid-compute). The request resolves to a transient
+        //   miss; the next request cold-recomputes. The resolution is
+        //   never re-run on this path.
+        let host_value = host_db.get_or_compute_admit(&arc_key, ctx, || {
+            #[cfg(test)]
+            super::IMPORTED_REGISTRY_RESOLVE_INVOCATIONS.with(|n| n.set(n.get().saturating_add(1)));
+            // The single, side-effecting resolution: the wildcard-route
+            // fuse is consumed here at most once per key.
+            let resolved: Option<ResolvedImportedRegistrySymbol> =
+                resolve_imported_registry_symbol_with_budget(
+                    ctx,
+                    canonical_id,
+                    exported_name,
+                    || self.allow_wildcard_route(),
+                );
+            let resolved_value = resolved.map(std::sync::Arc::new);
             #[cfg(test)]
             if super::FORCE_IMPORTED_REGISTRY_ADMISSION_REFUSAL.with(|f| f.get()) {
                 // Deterministically reproduce the production
                 // admission-refusal contract (`engine_fact_signature_*`
-                // returns `None`, or `revalidate_after_compute` fails)
-                // so the discriminating test can drive the
-                // refused-admission path without manufacturing a stale
-                // observed hash.
-                return None;
+                // returns `None`) so the discriminating test can drive
+                // the refused-admission path without manufacturing a
+                // stale observed hash. The freshly-resolved value is
+                // still returned — and broadcast to joiners — via
+                // `ReturnOnly`.
+                return crate::cooperative_admission::ComputeAdmission::ReturnOnly(resolved_value);
             }
-            let fact_sig = engine_fact_signature_for_exported_type(
+            let Some(observed) = observed_keyed_hash else {
+                // No authoritative current content for the keyed
+                // canonical — shared-cache admission is refused, but
+                // the value is still returned via `ReturnOnly`.
+                return crate::cooperative_admission::ComputeAdmission::ReturnOnly(resolved_value);
+            };
+            match engine_fact_signature_for_exported_type(
                 ctx,
                 canonical_id,
                 exported_name,
-                observed_keyed_hash?,
-            )?;
-            Some((captured, fact_sig))
+                observed,
+            ) {
+                Some(fact_dep_signature) => {
+                    crate::cooperative_admission::ComputeAdmission::Cacheable(
+                        crate::component_meta_caches::ImportedRegistryEntry {
+                            value: resolved_value,
+                            fact_dep_signature,
+                        },
+                    )
+                }
+                None => crate::cooperative_admission::ComputeAdmission::ReturnOnly(resolved_value),
+            }
         });
         let result = match host_value {
             Some(cached) => cached.as_deref().cloned(),
-            None => resolved,
+            None => None,
         };
         self.imported_registry_symbols
             .borrow_mut()

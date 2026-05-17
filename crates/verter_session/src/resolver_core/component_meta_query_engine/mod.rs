@@ -832,21 +832,24 @@ thread_local! {
     /// wildcard-route fuse a second time and spuriously resolve to
     /// `None` near `wildcard_route_fanout`.
     static IMPORTED_REGISTRY_RESOLVE_INVOCATIONS: Cell<usize> = const { Cell::new(0) };
-    /// When set, `resolve_imported_registry_symbol`'s `get_or_compute`
-    /// closure short-circuits to `None`, deterministically reproducing
-    /// the production cache-admission-refusal contract (signature
-    /// builder returns `None`, or post-compute revalidation fails)
-    /// without manufacturing a stale observed hash.
+    /// When set, `resolve_imported_registry_symbol`'s
+    /// `get_or_compute_admit` `compute` closure returns
+    /// `ComputeAdmission::ReturnOnly` instead of `Cacheable`,
+    /// deterministically reproducing the production
+    /// cache-admission-refusal contract (the provenance-pure signature
+    /// builder returns `None`) without manufacturing a stale observed
+    /// hash. The freshly-resolved value is still returned to the
+    /// caller — `ReturnOnly` does not poison joiners.
     static FORCE_IMPORTED_REGISTRY_ADMISSION_REFUSAL: Cell<bool> = const { Cell::new(false) };
     /// When `Some`, `resolve_imported_registry_symbol` publishes this
     /// value into the shared `ImportedRegistryDb` AFTER its own `peek`
-    /// miss but BEFORE its `get_or_compute` write-through —
+    /// miss but BEFORE its `get_or_compute_admit` call —
     /// deterministically reproducing a concurrent request that
     /// validated-and-published the same key inside the producer's cold
-    /// window. The producer's `get_or_compute` then takes the warm-hit
-    /// arm and returns this published value without running the
-    /// closure; the producer MUST surface that returned value rather
-    /// than its own locally-computed `resolved`.
+    /// window. `get_or_compute_admit` then takes its warm-hit
+    /// `validate` arm and returns this published value WITHOUT running
+    /// the `compute` closure; the producer MUST surface that returned
+    /// value.
     static INJECT_IMPORTED_REGISTRY_CONCURRENT_PUBLISH:
         RefCell<Option<ResolvedImportedRegistrySymbol>> = const { RefCell::new(None) };
     /// When `Some`, `project_routed_expr_surface_expr` invokes this
@@ -961,6 +964,86 @@ pub(crate) fn fire_routed_expr_projection_seam_edit_for_tests() {
     let hook = INJECT_ROUTED_EXPR_PROJECTION_SEAM_EDIT.with(|slot| slot.borrow_mut().take());
     if let Some(hook) = hook {
         hook();
+    }
+}
+
+/// Process-global rendezvous barrier for the imported-registry
+/// singleflight discriminator. Unlike the thread-local hooks above,
+/// this hook crosses threads — the singleflight contract is a
+/// cross-thread property, so the test that exercises it spawns real
+/// contending threads.
+///
+/// `resolve_imported_registry_symbol` consults this gate exactly once,
+/// at the seam AFTER its `peek` miss and BEFORE `get_or_compute_admit`.
+/// When the gate is armed for the request's keyed canonical, the
+/// producer blocks on the barrier; every contending thread therefore
+/// passes its `peek` miss before any of them enters the cooperative
+/// admission slot. That is the precondition the discriminator needs:
+/// pre-fix every thread then runs `resolve_imported_registry_symbol_with_budget`
+/// independently (the wildcard-route fuse is consumed N times), post-fix
+/// exactly one winner runs it inside the singleflight slot (fuse
+/// consumed once).
+///
+/// The gate is keyed to a marker canonical so an unrelated test running
+/// concurrently — whose `resolve_imported_registry_symbol` targets a
+/// different canonical — sails past untouched.
+#[cfg(test)]
+static IMPORTED_REGISTRY_POST_PEEK_BARRIER: std::sync::Mutex<
+    Option<(String, std::sync::Arc<std::sync::Barrier>)>,
+> = std::sync::Mutex::new(None);
+
+/// RAII guard that disarms the imported-registry post-peek barrier on
+/// drop so a panicking test cannot leave the gate armed for the next
+/// test.
+#[cfg(test)]
+pub(crate) struct ImportedRegistryPostPeekBarrierGuard;
+
+#[cfg(test)]
+impl Drop for ImportedRegistryPostPeekBarrierGuard {
+    fn drop(&mut self) {
+        *IMPORTED_REGISTRY_POST_PEEK_BARRIER.lock().unwrap() = None;
+    }
+}
+
+/// Arm the imported-registry post-peek barrier for `marker_canonical`
+/// with a `parties`-party rendezvous. Every `resolve_imported_registry_symbol`
+/// call whose keyed canonical equals `marker_canonical` blocks on the
+/// returned barrier at the post-`peek` seam until `parties` callers
+/// have arrived. The returned guard disarms the gate on drop.
+#[cfg(test)]
+pub(crate) fn arm_imported_registry_post_peek_barrier_for_tests(
+    marker_canonical: &str,
+    parties: usize,
+) -> (
+    std::sync::Arc<std::sync::Barrier>,
+    ImportedRegistryPostPeekBarrierGuard,
+) {
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(parties));
+    *IMPORTED_REGISTRY_POST_PEEK_BARRIER.lock().unwrap() = Some((
+        marker_canonical.to_string(),
+        std::sync::Arc::clone(&barrier),
+    ));
+    (barrier, ImportedRegistryPostPeekBarrierGuard)
+}
+
+/// Block on the imported-registry post-peek barrier when it is armed
+/// for `canonical_id`. Invoked by `resolve_imported_registry_symbol`
+/// exactly once per call, at the seam between the `peek` miss and
+/// `get_or_compute_admit`. A no-op when the gate is unarmed or armed
+/// for a different canonical.
+#[cfg(test)]
+pub(crate) fn await_imported_registry_post_peek_barrier_for_tests(canonical_id: &str) {
+    let barrier = {
+        let slot = IMPORTED_REGISTRY_POST_PEEK_BARRIER.lock().unwrap();
+        match slot.as_ref() {
+            Some((marker, barrier)) if marker == canonical_id => {
+                Some(std::sync::Arc::clone(barrier))
+            }
+            _ => None,
+        }
+    };
+    if let Some(barrier) = barrier {
+        barrier.wait();
     }
 }
 

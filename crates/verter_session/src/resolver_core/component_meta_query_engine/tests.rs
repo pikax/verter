@@ -4152,6 +4152,21 @@ fn resolve_imported_registry_symbol_surfaces_concurrently_published_value() {
     );
     assert!(host.ensure_loaded("/concurrent_pub/index.ts"));
     assert!(host.ensure_loaded("/concurrent_pub/types.ts"));
+    // Materialise the `IndexedReady` artifact for the keyed canonical
+    // so the concurrent-publish injection below can build a
+    // provenance-pure `fact_dep_signature` for the entry it plants.
+    // `engine_fact_signature_for_exported_type` resolves the parse
+    // facts content-addressed against the keyed canonical's observed
+    // hash, which requires the `FileArtifactStore` artifact to exist.
+    // In a real concurrent scenario the racing request that published
+    // the entry would itself have materialised this artifact while
+    // resolving the same key; the fixture reproduces that precondition
+    // explicitly because the injection lands the entry BEFORE this
+    // request's own resolution runs (inside the cooperative-admission
+    // singleflight closure).
+    assert!(host
+        .ensure_indexed_ready("/concurrent_pub/index.ts")
+        .is_some());
 
     let mut engine = ComponentMetaQueryEngine::new(&host);
 
@@ -4186,4 +4201,158 @@ fn resolve_imported_registry_symbol_surfaces_concurrently_published_value() {
         "the surfaced value must be the concurrently-published symbol, not the local \
          unresolved `None`",
     );
+}
+
+/// Discriminating regression for the imported-registry singleflight
+/// bug (codex fix-round-9 P2).
+///
+/// `resolve_imported_registry_symbol`'s expensive resolution —
+/// `resolve_imported_registry_symbol_with_budget` — consumes the
+/// per-request wildcard-route fuse (`allow_wildcard_route()` /
+/// `wildcard_route_fanout`) on the slow lane. Fix-round-7 moved that
+/// resolution OUTSIDE the `ImportedRegistryDb` cooperative-admission
+/// closure. With the resolution outside the singleflight slot, several
+/// requests that miss the cache for the SAME key each run the
+/// resolution independently and each tick the wildcard-route fuse —
+/// the one-winner contract documented for these DBs is regressed.
+///
+/// The fix runs the resolution INSIDE the
+/// `cooperative_admit_with_post_publish` `compute` closure, so exactly
+/// one winner resolves under the `InflightTable` singleflight while
+/// joiners block on the slot condvar and reuse the winner's value.
+///
+/// Driver shape — `WORKERS` real threads contend on one uncached
+/// `ImportedRegistryDb` key:
+///
+///  - `Wide` is a re-export (`export { Inner as Wide } from './inner'`)
+///    with NO local prepared declaration in `index.ts`, so
+///    `resolve_imported_registry_symbol_with_budget` takes the slow
+///    lane and consumes one `allow_wildcard_route()` tick per
+///    invocation.
+///  - The process-global post-peek barrier is armed for the keyed
+///    canonical with `WORKERS` parties. Every worker blocks at the
+///    seam AFTER its `peek` miss and BEFORE cooperative admission, so
+///    all `WORKERS` workers are guaranteed past `peek` (all missing —
+///    nothing is published yet) before any of them enters the
+///    admission slot. This makes the discrimination deterministic in
+///    BOTH configurations: it removes the timing window in which an
+///    early publisher could let a late worker warm-hit `peek` and skip
+///    its resolution.
+///  - Each worker owns an independent `ComponentMetaQueryEngine` (hence
+///    an independent wildcard-route fuse). After the join the test sums
+///    each engine's observed fuse consumption.
+///
+/// Discrimination property — FAILS pre-fix, PASSES post-fix:
+///
+///  - Pre-fix (resolution outside the closure): every worker passes the
+///    barrier, then every worker runs
+///    `resolve_imported_registry_symbol_with_budget` before reaching
+///    the inflight slot. The summed wildcard-route fuse consumption is
+///    `WORKERS`, not 1.
+///  - Post-fix (resolution inside the `cooperative_admit_with_post_publish`
+///    closure): every worker passes the barrier, then exactly one
+///    winner claims the inflight slot and runs the resolution; the
+///    other `WORKERS - 1` block on the slot condvar and reuse the
+///    winner's value. The summed wildcard-route fuse consumption is
+///    exactly 1.
+///
+/// In both configurations every worker must receive the resolved
+/// symbol — the singleflight fix must not regress correctness.
+#[test]
+fn resolve_imported_registry_symbol_resolves_once_under_concurrent_misses() {
+    const WORKERS: usize = 8;
+
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/singleflight/inner.ts".to_string(),
+        Arc::from("export interface Inner { primary: string }"),
+    );
+    ws.inject_file(
+        "/singleflight/index.ts".to_string(),
+        Arc::from("export { Inner as Wide } from './inner'"),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    assert!(host.ensure_loaded("/singleflight/index.ts"));
+    assert!(host.ensure_loaded("/singleflight/inner.ts"));
+    // Wire the barrel's `./inner` re-export so the slow-lane
+    // `resolve_named_type_export_target_shallow` route reaches the
+    // defining file.
+    host.set_import_dependencies(
+        "/singleflight/index.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "./inner".to_string(),
+            resolved_canonical_id: Some("/singleflight/inner.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    // Arm the post-peek rendezvous so all WORKERS workers pass `peek`
+    // (all missing) before any enters cooperative admission.
+    let (_barrier, _guard) =
+        super::arm_imported_registry_post_peek_barrier_for_tests("/singleflight/index.ts", WORKERS);
+
+    let results: Vec<(usize, Option<super::ResolvedImportedRegistrySymbol>)> =
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..WORKERS)
+                .map(|_| {
+                    let host_ref = &host;
+                    scope.spawn(move || {
+                        let mut engine = ComponentMetaQueryEngine::new(host_ref);
+                        // Give each worker's wildcard-route fuse ample
+                        // budget: the discriminator is the SUMMED
+                        // consumption count, not a near-fanout trip.
+                        engine.prime_wildcard_route_fuse_for_tests(WORKERS + 4);
+                        let fuse_before = engine.wildcard_route_fuse_consumed_for_tests();
+                        let resolved = engine
+                            .resolve_imported_registry_symbol("/singleflight/index.ts", "Wide");
+                        let fuse_consumed = engine
+                            .wildcard_route_fuse_consumed_for_tests()
+                            .saturating_sub(fuse_before);
+                        (fuse_consumed, resolved)
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("worker thread joined"))
+                .collect()
+        });
+
+    let total_fuse_consumed: usize = results.iter().map(|(consumed, _)| consumed).sum();
+    assert_eq!(
+        total_fuse_consumed, 1,
+        "the wildcard-route fuse MUST be consumed exactly ONCE across all {WORKERS} \
+         concurrent cache misses for the same key — the singleflight contract requires \
+         one winner to resolve while joiners reuse its value. The pre-fix producer ran \
+         resolve_imported_registry_symbol_with_budget outside the cooperative-admission \
+         closure, so every worker resolved independently and the summed fuse consumption \
+         was {WORKERS}, not 1 (observed {total_fuse_consumed}).",
+    );
+
+    for (worker, (_, resolved)) in results.iter().enumerate() {
+        let resolved = resolved.as_ref().unwrap_or_else(|| {
+            panic!(
+                "worker {worker} MUST receive the resolved imported symbol — the \
+                 singleflight winner's value is broadcast to every joiner",
+            )
+        });
+        assert_eq!(
+            (
+                resolved.canonical_id.as_str(),
+                resolved.exported_name.as_str(),
+            ),
+            ("/singleflight/inner.ts", "Inner"),
+            "worker {worker} must observe the slow-lane-resolved defining export, \
+             identical to the singleflight winner's value",
+        );
+    }
 }

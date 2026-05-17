@@ -241,18 +241,25 @@ fn imported_registry_db_untracked_self_root_rejects_warm_entry() {
     let db = host.project_type_store().imported_registry_db();
     let key = (Arc::<str>::from(c), Arc::<str>::from("Probe"));
 
-    let _ = db.get_or_compute(&key, ctx, || {
-        Some((Some(imported_symbol(c, "stale")), planted_self_root(c)))
+    let _ = db.get_or_compute_admit(&key, ctx, || {
+        crate::cooperative_admission::ComputeAdmission::Cacheable(
+            crate::component_meta_caches::ImportedRegistryEntry {
+                value: Some(Arc::new(imported_symbol(c, "stale"))),
+                fact_dep_signature: planted_self_root(c),
+            },
+        )
     });
 
     let mut cold_ran = false;
     let warm = db
-        .get_or_compute(&key, ctx, || {
+        .get_or_compute_admit(&key, ctx, || {
             cold_ran = true;
-            Some((
-                Some(imported_symbol(c, "recomputed")),
-                empty_fact_signature(),
-            ))
+            crate::cooperative_admission::ComputeAdmission::Cacheable(
+                crate::component_meta_caches::ImportedRegistryEntry {
+                    value: Some(Arc::new(imported_symbol(c, "recomputed"))),
+                    fact_dep_signature: empty_fact_signature(),
+                },
+            )
         })
         .expect("warm path produces a value");
 
@@ -1183,7 +1190,7 @@ fn imported_registry_db_self_root_sibling_edit_rejects_warm_entry() {
     let observed_keyed_hash = observed_whole_hash(ctx, c);
     let owned = c.to_string();
     let _ = db
-        .get_or_compute(&key, ctx, || {
+        .get_or_compute_admit(&key, ctx, || {
             let sig = engine_fact_signature_for_exported_type(
                 ctx,
                 owned.as_str(),
@@ -1191,7 +1198,12 @@ fn imported_registry_db_self_root_sibling_edit_rejects_warm_entry() {
                 observed_keyed_hash,
             )
             .expect("provenance-pure signature builds — observed artifact present");
-            Some((Some(imported_symbol(c, "stale")), sig))
+            crate::cooperative_admission::ComputeAdmission::Cacheable(
+                crate::component_meta_caches::ImportedRegistryEntry {
+                    value: Some(Arc::new(imported_symbol(c, "stale"))),
+                    fact_dep_signature: sig,
+                },
+            )
         })
         .expect("cold publish succeeds");
 
@@ -1200,12 +1212,14 @@ fn imported_registry_db_self_root_sibling_edit_rejects_warm_entry() {
     let ctx2: &dyn ResolverContext = &host;
     let mut cold_ran = false;
     let warm = db
-        .get_or_compute(&key, ctx2, || {
+        .get_or_compute_admit(&key, ctx2, || {
             cold_ran = true;
-            Some((
-                Some(imported_symbol(c, "recomputed")),
-                empty_fact_signature(),
-            ))
+            crate::cooperative_admission::ComputeAdmission::Cacheable(
+                crate::component_meta_caches::ImportedRegistryEntry {
+                    value: Some(Arc::new(imported_symbol(c, "recomputed"))),
+                    fact_dep_signature: empty_fact_signature(),
+                },
+            )
         })
         .expect("warm path produces a value");
 
