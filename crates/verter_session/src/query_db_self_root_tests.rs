@@ -4683,3 +4683,223 @@ fn imported_registry_joiner_fork_removal_keeps_live_counter_consistent() {
          a key that a subsequent re-publish re-registered",
     );
 }
+
+/// P2 — the removal-cleanup reverse-index `unregister` must be
+/// identity-checked: a stale cleanup must NOT delete a FRESH
+/// registration a concurrent cold-publish put under the same key.
+///
+/// `ImportedRegistryDb`'s cooperative-admission `removal_cleanup`
+/// closure drops the removed entry's per-canonical reverse-index
+/// registration. The substrate's `map.remove_if` (which removes the
+/// caller's stale entry) and that `removal_cleanup` are NOT atomic:
+/// a caller preempted between them gives a concurrent caller a window
+/// to cold-publish a FRESH entry under the same key and `register` it
+/// in the reverse index. If the `removal_cleanup`'s `unregister` were
+/// key-only, the resumed stale cleanup would delete that fresh
+/// registration — leaving a live entry in `entries` that
+/// `invalidate_canonical` (which drains via the reverse index) can no
+/// longer find. A later content edit then leaves that entry stale and
+/// served.
+///
+/// This test drives that exact interleaving deterministically and
+/// single-threaded. The winning caller publishes entry A under `key`,
+/// self-rooting the canonical at its BASE content hash. A second read
+/// then runs under a `SessionResolverContext` whose overlay re-roots
+/// the canonical to a DIFFERENT content hash — so the warm hit on A
+/// fails the overlay-view `validate` and the substrate removes A.
+/// (An overlay is session-local: it does NOT run the host's
+/// `invalidate_canonical` cascade, so entry A genuinely survives in
+/// the base `entries` map between the two reads.)
+///
+/// The substrate's test-only `REMOVAL_CLEANUP_PRE_HOOK` — fired AFTER
+/// `map.remove_if` removed A but BEFORE `removal_cleanup` runs — is
+/// installed to cold-publish a FRESH, DISTINCT entry B under the SAME
+/// `key` (the work a concurrent cold-publisher does while the removing
+/// caller is preempted). The second read's `compute` returns `Failed`
+/// so nothing publishes AFTER the removal — B is left as the sole live
+/// entry under `key`.
+///
+/// Discrimination — the hook IS the synchronisation point, no timing
+/// sleep:
+/// - Pre-fix (`12e29bcbf`): `CanonicalReverseIndex::unregister` is
+///   key-only. A's stale cleanup deletes the `key` registration even
+///   though it now belongs to B. B's entry stays in `entries` but is
+///   orphaned from the reverse index → `reverse_index_contains` is
+///   `false` and a subsequent `invalidate_canonical` MISSES B,
+///   leaving it stale-cached.
+/// - Post-fix: `unregister` is `EntryIdentity`-checked. The stored
+///   registration now names B (`EntryIdentity::of(entry_B)`), which
+///   does not match A's identity, so A's cleanup is a no-op. B's
+///   registration survives → `reverse_index_contains` is `true` and
+///   `invalidate_canonical` evicts B.
+#[test]
+fn imported_registry_removal_cleanup_preserves_fresh_reverse_index_registration() {
+    use crate::resolver_core::SessionResolverContext;
+    use crate::session_view::{OverlaidView, SessionView};
+    use rustc_hash::FxHashMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let canonical = "/coop_xview_p2_identity/imported.ts";
+    let host = VerterHost::new_standalone(HostConfig::default());
+    // Base content — entry A is published self-rooting this hash.
+    upsert(
+        &host,
+        canonical,
+        "export interface Probe { base: number; }\n",
+    );
+    let base_hash = host
+        .ensure_indexed_ready(canonical)
+        .expect("base IndexedReady materialises")
+        .whole_hash;
+    let host = Arc::new(host);
+
+    let key: (Arc<str>, Arc<str>) = (Arc::<str>::from(canonical), Arc::<str>::from("Probe"));
+
+    // Publish entry A under `key`, self-rooting the canonical at its
+    // BASE hash so A's own post-compute revalidation (base view)
+    // accepts it and it lands in the map + reverse index.
+    {
+        let ctx: &dyn ResolverContext = host.as_ref();
+        let db = host.project_type_store().imported_registry_db();
+        let base_self_root: Arc<[FactVersionRef]> =
+            Arc::from(vec![FactVersionRef::FileWholeHash {
+                canonical_id: canonical.to_string(),
+                hash: base_hash,
+            }]);
+        let published = db
+            .get_or_compute_admit(&key, ctx, || {
+                crate::cooperative_admission::ComputeAdmission::Cacheable(
+                    crate::component_meta_caches::ImportedRegistryEntry {
+                        value: Some(Arc::new(imported_symbol(canonical, "entry-A"))),
+                        fact_dep_signature: Arc::clone(&base_self_root),
+                    },
+                )
+            })
+            .expect("entry A publishes under the base view");
+        assert_eq!(
+            published.map(|s| s.exported_name.clone()),
+            Some("entry-A".to_string()),
+            "fixture invariant: entry A is the freshly published value",
+        );
+    }
+    assert!(
+        host.project_type_store()
+            .imported_registry_db()
+            .reverse_index_contains_for_test(&key),
+        "fixture invariant: entry A's publish registered `key` in the \
+         per-canonical reverse index",
+    );
+
+    // An overlay that re-roots the keyed canonical to a DIFFERENT
+    // content hash: a different source body yields a different overlay
+    // content hash, so entry A's base-rooted self-root fails the
+    // overlay-view `validate` and the warm read removes A.
+    let overlay_source: Arc<str> = Arc::from("export interface Probe { overlaid: string; }\n");
+    let mut overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();
+    overlays.insert(canonical.to_string(), Arc::clone(&overlay_source));
+    let view = OverlaidView::new(Arc::clone(&host), overlays);
+    let overlay_hash = view
+        .overlay_content_hash_for(canonical)
+        .expect("overlay content hash present");
+    assert_ne!(
+        overlay_hash, base_hash,
+        "fixture invariant: the overlay hash must differ from the base hash",
+    );
+    host.materialize_overlay_indexed_ready(canonical, &overlay_source, overlay_hash)
+        .expect("overlay IndexedReady materialises");
+
+    // The hook fires INSIDE `remove_published_entry_with_cleanup`,
+    // AFTER `map.remove_if` removed entry A but BEFORE `removal_cleanup`
+    // runs — the exact window a concurrent cold-publisher would use. It
+    // cold-publishes a FRESH, DISTINCT entry B under the SAME `key`,
+    // self-rooting the canonical at the OVERLAY hash (so B is valid for
+    // the overlay view). A latch makes the publish fire exactly once
+    // even though the substrate's hook is `Fn`.
+    let hook_host = Arc::clone(&host);
+    let hook_key = key.clone();
+    let fired = Arc::new(AtomicBool::new(false));
+    let hook_fired = Arc::clone(&fired);
+    let _hook_guard =
+        crate::cooperative_admission::install_removal_cleanup_pre_hook(Box::new(move || {
+            if hook_fired.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            let db = hook_host.project_type_store().imported_registry_db();
+            let fresh_entry = Arc::new(crate::component_meta_caches::ImportedRegistryEntry {
+                value: Some(Arc::new(imported_symbol(canonical, "entry-B-fresh"))),
+                fact_dep_signature: Arc::from(vec![FactVersionRef::FileWholeHash {
+                    canonical_id: canonical.to_string(),
+                    hash: overlay_hash,
+                }]),
+            });
+            // Cold-publish B: inserts into `entries` AND registers in
+            // the reverse index with B's own `EntryIdentity` — exactly
+            // what a concurrent cold winner's `post_publish` does.
+            db.insert_for_test(hook_key.clone(), fresh_entry);
+        }));
+
+    // Warm-hit `get_or_compute_admit` under the overlay session view:
+    //   warm hit on A → `validate` rejects A (base self-root fails the
+    //     overlay view) → `remove_published_entry_with_cleanup` removes A
+    //   → REMOVAL_CLEANUP_PRE_HOOK fires → B is cold-published
+    //   → the production `removal_cleanup` runs `unregister(identity_A)`.
+    // `compute` returns `Failed` so nothing publishes after the
+    // removal — B is the sole live entry under `key`.
+    {
+        let session_ctx = SessionResolverContext::new(&host, &view);
+        let db = host.project_type_store().imported_registry_db();
+        let outcome = db.get_or_compute_admit(&key, &session_ctx, || {
+            crate::cooperative_admission::ComputeAdmission::Failed
+        });
+        assert!(
+            outcome.is_none(),
+            "fixture invariant: the warm read rejected stale entry A and \
+             `compute` returned `Failed`, so the call yields `None`",
+        );
+    }
+
+    assert!(
+        fired.load(Ordering::SeqCst),
+        "fixture invariant: the removal-cleanup pre-hook MUST have fired — \
+         otherwise the racey cold-publish under test never executed",
+    );
+
+    let db = host.project_type_store().imported_registry_db();
+
+    // entry B must still be the live entry under `key`.
+    assert_eq!(
+        db.live_count(),
+        1,
+        "fixture invariant: entry B is the sole live entry under the key \
+         (A removed by the warm-hit reject, B cold-published by the hook)",
+    );
+
+    // DISCRIMINATOR: B's reverse-index registration must survive A's
+    // stale removal cleanup. Pre-fix the key-only `unregister` deletes
+    // it; post-fix the identity-checked `unregister` is a no-op for a
+    // registration that now names B.
+    assert!(
+        db.reverse_index_contains_for_test(&key),
+        "the removal-cleanup `unregister` MUST be identity-checked: a \
+         stale cleanup for the REMOVED entry A must not delete the FRESH \
+         reverse-index registration a concurrent cold-publish created \
+         for entry B. Pre-fix the key-only `unregister` deleted B's \
+         registration, orphaning a live entry from `invalidate_canonical`.",
+    );
+
+    // CONSEQUENCE DISCRIMINATOR: the orphaned-registration bug's real
+    // damage — `invalidate_canonical` drains via the reverse index, so
+    // a lost registration means a later content edit leaves entry B
+    // stale-cached. With the registration preserved, `invalidate_canonical`
+    // finds and evicts B.
+    db.invalidate_canonical(canonical);
+    assert_eq!(
+        db.live_count(),
+        0,
+        "after the identity-checked removal cleanup preserved entry B's \
+         reverse-index registration, `invalidate_canonical` MUST find and \
+         evict B. Pre-fix B's registration was deleted, so \
+         `invalidate_canonical` drained an empty bucket and left B \
+         stale-cached.",
+    );
+}

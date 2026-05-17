@@ -235,11 +235,26 @@ impl ImportedRegistryDb {
             // `post_publish` bump + register. Without this a
             // joiner-fork over-counts the live counter and leaves a
             // dangling reverse-index entry.
-            move |removed_key: &ImportedRegistryKey, _entry: &Arc<ImportedRegistryEntry>| {
+            //
+            // The `unregister` is identity-checked against the removed
+            // entry's `EntryIdentity`: the substrate's `map.remove_if`
+            // and this cleanup are not atomic, so a cold re-publish
+            // could land a FRESH entry under the same key (and
+            // `register` it) in between. A key-only unregister would
+            // then delete that fresh registration and orphan a live
+            // entry from `invalidate_canonical`'s reverse-index drain.
+            // The identity carried here names the entry this cleanup
+            // actually removed, so a re-published entry's registration
+            // is preserved.
+            move |removed_key: &ImportedRegistryKey, removed_entry: &Arc<ImportedRegistryEntry>| {
                 live_counter_for_removal.fetch_sub(1, Ordering::Relaxed);
-                canonical_index_for_removal.unregister(removed_key.0.as_ref(), removed_key);
+                canonical_index_for_removal.unregister(
+                    removed_key.0.as_ref(),
+                    removed_key,
+                    crate::invalidation_domain::EntryIdentity::of(removed_entry),
+                );
             },
-            move |_entry_arc: &Arc<ImportedRegistryEntry>, _key: &ImportedRegistryKey| {
+            move |entry_arc: &Arc<ImportedRegistryEntry>, _key: &ImportedRegistryKey| {
                 // Fires AFTER entries.insert AND AFTER successful
                 // post-compute revalidation — only for the `Cacheable`
                 // arm. A `ReturnOnly` outcome is NOT admitted, so the
@@ -247,7 +262,11 @@ impl ImportedRegistryDb {
                 // registered exactly when the entry actually lands.
                 live_counter.fetch_add(1, Ordering::Relaxed);
                 let canonical = Arc::clone(&key_for_post_publish.0);
-                canonical_index.register(&canonical, key_for_post_publish.clone());
+                canonical_index.register(
+                    &canonical,
+                    key_for_post_publish.clone(),
+                    crate::invalidation_domain::EntryIdentity::of(entry_arc),
+                );
             },
         )
     }
@@ -308,7 +327,9 @@ impl ImportedRegistryDb {
     #[cfg(any(test, debug_assertions))]
     pub fn insert_for_test(&self, key: ImportedRegistryKey, entry: Arc<ImportedRegistryEntry>) {
         let canonical = Arc::clone(&key.0);
-        self.canonical_index.register(&canonical, key.clone());
+        let identity = crate::invalidation_domain::EntryIdentity::of(&entry);
+        self.canonical_index
+            .register(&canonical, key.clone(), identity);
         self.entries.insert(key, entry);
         self.live_counter.fetch_add(1, Ordering::Relaxed);
     }

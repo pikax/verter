@@ -155,7 +155,36 @@ use std::hash::Hash;
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use rustc_hash::{FxHashSet, FxHasher};
+use rustc_hash::{FxHashMap, FxHasher};
+
+/// Opaque identity token for the entry a `(canonical, key)` registration
+/// belongs to.
+///
+/// Derived from the published `Arc<Entry>`'s pointer
+/// ([`EntryIdentity::of`]). It is a pure identity discriminator — never
+/// dereferenced, so it carries no lifetime — used to make
+/// [`CanonicalReverseIndex::unregister`] identity-checked: a removal-side
+/// cleanup must drop ONLY the registration belonging to the entry it
+/// actually removed, never a fresh entry a concurrent publish put under
+/// the same key.
+///
+/// ABA-safety: the only caller comparing two identities is a removal
+/// cleanup, which runs while the substrate still holds an `Arc` clone of
+/// the removed entry (`remove_published_entry_with_cleanup` borrows
+/// `&Arc<Entry>` for the whole cleanup). The removed entry's allocation
+/// therefore cannot be freed and handed to a concurrently-published
+/// fresh entry before the identity comparison, so two distinct live
+/// entries always have distinct identities.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EntryIdentity(usize);
+
+impl EntryIdentity {
+    /// Identity token for `entry` — the `Arc`'s allocation pointer.
+    #[must_use]
+    pub fn of<E>(entry: &Arc<E>) -> Self {
+        Self(Arc::as_ptr(entry) as *const () as usize)
+    }
+}
 
 /// Per-DB secondary index that maps a canonical id to the set of
 /// DB-internal keys belonging to that canonical.
@@ -166,8 +195,16 @@ use rustc_hash::{FxHashSet, FxHasher};
 /// the number of entries owned by the canonical, instead of O(N) over
 /// the whole DB.
 ///
+/// Each `(canonical → key)` registration carries the [`EntryIdentity`]
+/// of the published entry it belongs to, so [`Self::unregister`] is
+/// identity-checked: a removal-side cleanup drops ONLY the registration
+/// for the entry it actually removed. Without this, a removal cleanup
+/// preempted between `map.remove_if` and the cleanup could delete a
+/// FRESH registration a concurrent cold-publish put under the same key,
+/// leaving a live entry that `invalidate_canonical` can no longer find.
+///
 /// `Send + Sync` and lock-free under read/write (DashMap shards). The
-/// inner per-canonical set is wrapped in `parking_lot::Mutex` because
+/// inner per-canonical map is wrapped in `parking_lot::Mutex` because
 /// concurrent post-publish + drain on the same canonical needs a
 /// linearisation point.
 pub struct CanonicalReverseIndex<K>
@@ -176,7 +213,7 @@ where
 {
     inner: DashMap<
         Arc<str>,
-        parking_lot::Mutex<FxHashSet<K>>,
+        parking_lot::Mutex<FxHashMap<K, EntryIdentity>>,
         std::hash::BuildHasherDefault<FxHasher>,
     >,
 }
@@ -192,15 +229,19 @@ where
         }
     }
 
-    /// Register `key` under `canonical`. Idempotent — re-registering
-    /// the same `(canonical, key)` pair is a no-op.
-    pub fn register(&self, canonical: &Arc<str>, key: K) {
+    /// Register `key` under `canonical`, bound to `identity` — the
+    /// [`EntryIdentity`] of the published entry the registration belongs
+    /// to. Re-registering the same `(canonical, key)` pair overwrites the
+    /// stored identity: a cold re-publish under a key whose stale entry
+    /// was already removed legitimately rebinds the registration to the
+    /// fresh entry.
+    pub fn register(&self, canonical: &Arc<str>, key: K, identity: EntryIdentity) {
         let entry = self
             .inner
             .entry(Arc::clone(canonical))
-            .or_insert_with(|| parking_lot::Mutex::new(FxHashSet::default()));
-        let mut set = entry.lock();
-        set.insert(key);
+            .or_insert_with(|| parking_lot::Mutex::new(FxHashMap::default()));
+        let mut map = entry.lock();
+        map.insert(key, identity);
     }
 
     /// Remove the canonical's bucket and return every key that was
@@ -217,8 +258,8 @@ where
         let removed = self.inner.remove(canonical_id);
         let keys: Vec<K> = match removed {
             Some((_, mutex)) => {
-                let set = mutex.into_inner();
-                set.into_iter().collect()
+                let map = mutex.into_inner();
+                map.into_keys().collect()
             }
             None => Vec::new(),
         };
@@ -233,27 +274,47 @@ where
         keys
     }
 
-    /// Drop a single `(canonical, key)` registration. Used by the
-    /// cooperative-admission removal-side cleanup: when the substrate
-    /// removes one already-published entry (a warm-hit reject or a
-    /// joiner-fork reject), the entry's reverse-index registration must
-    /// be dropped symmetrically with the publish-side `register` so the
-    /// index does not dangle. Empties and removes the canonical's
-    /// bucket once its last key is gone. Idempotent — unregistering an
-    /// absent `(canonical, key)` pair is a no-op.
-    pub fn unregister(&self, canonical: &str, key: &K) {
+    /// Drop a single `(canonical, key)` registration, but ONLY when the
+    /// registration still belongs to `identity` — the [`EntryIdentity`]
+    /// of the entry the caller actually removed.
+    ///
+    /// Used by the cooperative-admission removal-side cleanup: when the
+    /// substrate removes one already-published entry (a warm-hit reject
+    /// or a joiner-fork reject), the entry's reverse-index registration
+    /// must be dropped symmetrically with the publish-side `register` so
+    /// the index does not dangle.
+    ///
+    /// The identity check closes a race: the substrate's
+    /// `map.remove_if` and this cleanup are not atomic, so a cold
+    /// re-publish can land a FRESH entry under the same key (and
+    /// `register` it) in between. A key-only unregister would then
+    /// delete the fresh registration, orphaning a live entry from the
+    /// per-canonical drain. With the identity check, a stale cleanup
+    /// whose `identity` no longer matches the stored registration is a
+    /// no-op — the fresh registration is preserved.
+    ///
+    /// Empties and removes the canonical's bucket once its last key is
+    /// gone. Idempotent — unregistering an absent `(canonical, key)`
+    /// pair, or one whose identity has moved on, is a no-op.
+    pub fn unregister(&self, canonical: &str, key: &K, identity: EntryIdentity) {
         let now_empty = {
             let Some(entry) = self.inner.get(canonical) else {
                 return;
             };
-            let mut set = entry.lock();
-            set.remove(key);
-            set.is_empty()
+            let mut map = entry.lock();
+            // Identity-checked removal: drop the registration ONLY when
+            // it still names the entry this cleanup removed. A fresh
+            // re-publish under the same key rebound the identity, so a
+            // stale cleanup must not steal that registration.
+            if map.get(key) == Some(&identity) {
+                map.remove(key);
+            }
+            map.is_empty()
         };
         if now_empty {
             // `remove_if` re-checks emptiness under the shard lock so a
             // concurrent `register` that re-populated the bucket
-            // between the `set.is_empty()` read and here is not lost.
+            // between the `map.is_empty()` read and here is not lost.
             self.inner
                 .remove_if(canonical, |_, mutex| mutex.lock().is_empty());
         }
@@ -273,7 +334,7 @@ where
     pub fn contains(&self, canonical: &str, key: &K) -> bool {
         self.inner
             .get(canonical)
-            .is_some_and(|entry| entry.lock().contains(key))
+            .is_some_and(|entry| entry.lock().contains_key(key))
     }
 }
 

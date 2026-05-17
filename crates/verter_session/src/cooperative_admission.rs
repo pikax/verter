@@ -335,6 +335,46 @@ fn retire_slot_if_current<K>(
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only rendezvous: a hook fired by
+    /// [`remove_published_entry_with_cleanup`] AFTER `map.remove_if`
+    /// succeeds but BEFORE the caller's `removal_cleanup` runs.
+    ///
+    /// This is the precise interleaving point a removal-cleanup race
+    /// needs: a test installs a hook that cold-publishes a fresh entry
+    /// under the same key (the work a concurrent caller would do while
+    /// the removing caller is preempted), then lets the real
+    /// `removal_cleanup` run. It is a deterministic rendezvous — the
+    /// hook IS the synchronisation point — not a timing sleep. The
+    /// hook is thread-local so it only affects the installing test's
+    /// thread, and it fires the production removal path otherwise
+    /// unchanged.
+    static REMOVAL_CLEANUP_PRE_HOOK: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test-only: install a hook fired between `map.remove_if` and
+/// `removal_cleanup` inside [`remove_published_entry_with_cleanup`].
+/// Returns a guard that clears the hook on drop so it cannot leak into
+/// a later test on the same worker thread.
+#[cfg(test)]
+pub(crate) fn install_removal_cleanup_pre_hook(hook: Box<dyn Fn()>) -> RemovalCleanupPreHookGuard {
+    REMOVAL_CLEANUP_PRE_HOOK.with(|h| *h.borrow_mut() = Some(hook));
+    RemovalCleanupPreHookGuard
+}
+
+/// RAII guard that clears the thread-local removal-cleanup pre-hook.
+#[cfg(test)]
+pub(crate) struct RemovalCleanupPreHookGuard;
+
+#[cfg(test)]
+impl Drop for RemovalCleanupPreHookGuard {
+    fn drop(&mut self) {
+        REMOVAL_CLEANUP_PRE_HOOK.with(|h| *h.borrow_mut() = None);
+    }
+}
+
 /// Remove the exact published `Arc<Entry>` the caller validated — a
 /// `ptr_eq` guard so a concurrent fresh winner's entry is not evicted —
 /// and, on a real removal, run the caller's `removal_cleanup` so the
@@ -359,6 +399,15 @@ fn remove_published_entry_with_cleanup<K, Entry, RemovalCleanup>(
     if let Some((removed_key, removed_entry)) =
         map.remove_if(key, |_, existing| Arc::ptr_eq(existing, entry_arc))
     {
+        // Test-only rendezvous: a fresh re-publish under the same key
+        // can land here, between the `remove_if` and the cleanup. This
+        // is the exact window the removal-cleanup identity-check guards.
+        #[cfg(test)]
+        REMOVAL_CLEANUP_PRE_HOOK.with(|h| {
+            if let Some(hook) = h.borrow().as_ref() {
+                hook();
+            }
+        });
         removal_cleanup(&removed_key, &removed_entry);
     }
 }
