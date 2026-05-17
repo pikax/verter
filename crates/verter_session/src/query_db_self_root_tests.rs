@@ -72,8 +72,8 @@ use crate::resolver_core::cache_keys::{
 };
 use crate::resolver_core::component_meta_query_engine::ResolvedImportedRegistrySymbol;
 use crate::resolver_core::{
-    FactVersionRef, ResolvedDeclarationKind, ResolvedTypeDeclaration, ResolverContext, RouteDemand,
-    StoreView,
+    FactVersionRef, MaterializeScopeObservation, ResolvedDeclarationKind, ResolvedTypeDeclaration,
+    ResolverContext, RouteDemand, StoreView,
 };
 use crate::{HostConfig, UpsertRequest, VerterHost};
 
@@ -809,6 +809,22 @@ fn observed_scope_export_set(
     })
 }
 
+/// Establish the single tear-free
+/// [`MaterializeScopeObservation`] for `scope` through the production
+/// [`ResolverContext::observe_materialize_scope`] path — the one
+/// observation the materialize-memo publish site threads into
+/// [`engine_fact_signature_for_materialize_memo`]. Tests call this so
+/// the keyed-scope `whole_hash` AND the keyed-scope parse fact descend
+/// from the SAME `IndexedReady`, matching the production write-through.
+fn observe_scope(ctx: &dyn ResolverContext, scope: &str) -> MaterializeScopeObservation {
+    ctx.observe_materialize_scope(scope).unwrap_or_else(|| {
+        panic!(
+            "fixture invariant: scope {scope} must have a tear-free materialize-scope \
+             observation (a live scheduler DerivedRawState or a current artifact)",
+        )
+    })
+}
+
 /// `MaterializeMemoDb` validates the keyed scope canonical's self-root
 /// strictly.
 ///
@@ -929,22 +945,26 @@ fn materialize_memo_db_observed_dependency_edit_rejects_warm_entry() {
         Arc::<str>::from(dep),
         DepVersion::WholeHash(dep_indexed.whole_hash),
     )]);
-    // The materialize write-through observes the scope content version
-    // once and threads both the observed whole hash and the
-    // observed-version `SyntacticExportSet` parse fact into the
-    // provenance-pure signature builder.
-    let observed_scope_hash = scope_indexed.whole_hash;
-    let scope_owned = scope.to_string();
+    // The materialize write-through establishes ONE tear-free scope
+    // observation and threads it into the provenance-pure signature
+    // builder; the keyed-scope whole hash and the keyed-scope parse
+    // fact both descend from that single observation.
+    let observed_scope = observe_scope(ctx, scope);
+    assert_eq!(
+        observed_scope.whole_hash(),
+        scope_indexed.whole_hash,
+        "fixture invariant: the scope observation pins the scope's current IndexedReady",
+    );
     let primed_dep_sig = Arc::clone(&dep_sig);
     let primed = db
         .get_or_compute(&key, ctx, move || {
             // `dep` is recorded as `DepVersion::WholeHash`, so the
             // signature builder returns `Some` and the entry is
             // admitted.
+            let export_set = observed_scope.syntactic_export_set.clone()?;
             let sig = engine_fact_signature_for_materialize_memo(
-                scope_owned.as_str(),
-                observed_scope_hash,
-                observed_scope_export_set(ctx, scope_owned.as_str(), observed_scope_hash),
+                &observed_scope,
+                export_set,
                 &primed_dep_sig,
             )?;
             Some((materialized("stale", Arc::clone(&primed_dep_sig)), sig))
@@ -1734,13 +1754,9 @@ fn materialize_memo_db_self_root_sibling_edit_rejects_warm_entry() {
     let c = "/self_root_e2e/memo.ts";
     load_tracked_keyed(&host, c);
     let ctx: &dyn ResolverContext = &host;
-    // The scope content version observed at materialisation/cold-publish
-    // time — `ensure_indexed_ready` is idempotent so this is the same
-    // `IndexedReady` `load_tracked_keyed` produced.
-    let observed_scope_hash = host
-        .ensure_indexed_ready(c)
-        .expect("scope IndexedReady is available")
-        .whole_hash;
+    // The single tear-free scope observation taken at
+    // materialisation/cold-publish time — `observe_materialize_scope`
+    // pins the scope's current `IndexedReady`.
     let db = host.project_type_store().materialize_memo_db();
     let probe_expr = Arc::new(TypeExpr::Ref {
         name: Arc::from("Probe"),
@@ -1752,17 +1768,17 @@ fn materialize_memo_db_self_root_sibling_edit_rejects_warm_entry() {
         ProjectionMode::Expanded,
     );
 
-    let owned = c.to_string();
+    let observed_scope = observe_scope(ctx, c);
     let _ = db
         .get_or_compute(&key, ctx, || {
             // No observed dependencies — the signature builder returns
             // `Some` (no `RouteGeneration` entry) and the discriminator
             // is the scope canonical's own self-root `FileWholeHash`,
-            // rooted on the observed cold-publish-time content version.
+            // rooted on the observation's content version.
+            let export_set = observed_scope.syntactic_export_set.clone()?;
             let sig = engine_fact_signature_for_materialize_memo(
-                owned.as_str(),
-                observed_scope_hash,
-                observed_scope_export_set(ctx, owned.as_str(), observed_scope_hash),
+                &observed_scope,
+                export_set,
                 &empty_dep_signature(),
             )?;
             Some((materialized("stale", empty_dep_signature()), sig))
@@ -1946,10 +1962,10 @@ fn materialize_memo_db_route_generation_observed_dependency_refuses_admission() 
     let dep = "/self_root_e2e/memo_rg_dep.ts";
     upsert(&host, scope, "export type Probe = number;\n");
     upsert(&host, dep, "export interface Helper { a: number; }\n");
-    let observed_scope_hash = host
-        .ensure_indexed_ready(scope)
-        .expect("scope IndexedReady materialises")
-        .whole_hash;
+    assert!(
+        host.ensure_indexed_ready(scope).is_some(),
+        "scope IndexedReady materialises",
+    );
     assert!(
         host.ensure_indexed_ready(dep).is_some(),
         "dep IndexedReady materialises",
@@ -1980,10 +1996,13 @@ fn materialize_memo_db_route_generation_observed_dependency_refuses_admission() 
     // dependency, not by a missing scope observation. A producer that
     // rooted the `RouteGeneration` dependency by any fact returns
     // `Some(...)` and this assertion trips.
+    let observed_scope = observe_scope(ctx, scope);
     let sig = engine_fact_signature_for_materialize_memo(
-        scope,
-        observed_scope_hash,
-        observed_scope_export_set(ctx, scope, observed_scope_hash),
+        &observed_scope,
+        observed_scope
+            .syntactic_export_set
+            .clone()
+            .expect("scope SyntacticExportSet parse fact recoverable"),
         &dep_sig,
     );
     assert!(
@@ -2000,13 +2019,12 @@ fn materialize_memo_db_route_generation_observed_dependency_refuses_admission() 
     // does: the closure threads the `None` signature through `?`, so
     // `get_or_compute`'s compute returns `None` and nothing is
     // admitted.
-    let scope_owned = scope.to_string();
     let primed_dep_sig = Arc::clone(&dep_sig);
     let cold_value = db.get_or_compute(&key, ctx, move || {
+        let export_set = observed_scope.syntactic_export_set.clone()?;
         let fact_sig = engine_fact_signature_for_materialize_memo(
-            scope_owned.as_str(),
-            observed_scope_hash,
-            observed_scope_export_set(ctx, scope_owned.as_str(), observed_scope_hash),
+            &observed_scope,
+            export_set,
             &primed_dep_sig,
         )?;
         Some((materialized("fresh", Arc::clone(&primed_dep_sig)), fact_sig))
@@ -2094,10 +2112,10 @@ fn materialize_memo_db_project_generation_observed_dependency_roots_on_observed_
     let dep = "/self_root_e2e/memo_pg_dep.ts";
     upsert(&host, scope, "export type Probe = number;\n");
     upsert(&host, dep, "export interface Helper { a: number; }\n");
-    let observed_scope_hash = host
-        .ensure_indexed_ready(scope)
-        .expect("scope IndexedReady materialises")
-        .whole_hash;
+    assert!(
+        host.ensure_indexed_ready(scope).is_some(),
+        "scope IndexedReady materialises",
+    );
     assert!(
         host.ensure_indexed_ready(dep).is_some(),
         "dep IndexedReady materialises",
@@ -2124,10 +2142,13 @@ fn materialize_memo_db_project_generation_observed_dependency_roots_on_observed_
     )]);
 
     // Half 1 — signature shape.
+    let observed_scope = observe_scope(ctx, scope);
     let sig = engine_fact_signature_for_materialize_memo(
-        scope,
-        observed_scope_hash,
-        observed_scope_export_set(ctx, scope, observed_scope_hash),
+        &observed_scope,
+        observed_scope
+            .syntactic_export_set
+            .clone()
+            .expect("scope SyntacticExportSet parse fact recoverable"),
         &dep_sig,
     )
     .expect("a ProjectGeneration dep signature is admissible (Some)");
@@ -2152,14 +2173,13 @@ fn materialize_memo_db_project_generation_observed_dependency_roots_on_observed_
     );
 
     // Prime the memo with the production signature.
-    let scope_owned = scope.to_string();
     let primed_dep_sig = Arc::clone(&dep_sig);
     let primed = db
         .get_or_compute(&key, ctx, move || {
+            let export_set = observed_scope.syntactic_export_set.clone()?;
             let fact_sig = engine_fact_signature_for_materialize_memo(
-                scope_owned.as_str(),
-                observed_scope_hash,
-                observed_scope_export_set(ctx, scope_owned.as_str(), observed_scope_hash),
+                &observed_scope,
+                export_set,
                 &primed_dep_sig,
             )?;
             Some((materialized("stale", Arc::clone(&primed_dep_sig)), fact_sig))
@@ -2301,15 +2321,22 @@ fn materialize_memo_db_observed_whole_hash_dependency_preserves_observed_hash() 
     // emits H1.
     let ctx: &dyn ResolverContext = &host;
     // The scope canonical is untouched by the dependency edit, so its
-    // observed whole hash (and the content-addressed artifact backing
+    // tear-free observation (and the content-addressed artifact backing
     // its `SyntacticExportSet` parse fact) is still recoverable.
-    let observed_scope_hash = scope_indexed.whole_hash;
+    let observed_scope = observe_scope(ctx, scope);
+    assert_eq!(
+        observed_scope.whole_hash(),
+        scope_indexed.whole_hash,
+        "fixture invariant: the scope observation is unchanged by the dependency edit",
+    );
     // `dep` is recorded as `DepVersion::WholeHash`, so the signature
     // builder admits the entry (`Some`).
     let sig = engine_fact_signature_for_materialize_memo(
-        scope,
-        observed_scope_hash,
-        observed_scope_export_set(ctx, scope, observed_scope_hash),
+        &observed_scope,
+        observed_scope
+            .syntactic_export_set
+            .clone()
+            .expect("scope SyntacticExportSet parse fact recoverable"),
         &dep_sig,
     )
     .expect("a WholeHash-only dep signature must produce an admissible fact signature");
@@ -2384,10 +2411,18 @@ fn materialize_memo_db_scope_self_root_carries_observed_hash_not_current() {
         .whole_hash;
 
     let ctx: &dyn ResolverContext = &host;
-    // Capture the observed-version parse fact NOW — before any edit —
-    // mirroring the production publish site, which observes the scope
-    // content version once at materialisation time.
-    let observed_export_set = observed_scope_export_set(ctx, scope, observed_hash);
+    // Capture the ONE tear-free scope observation NOW — before any
+    // edit — mirroring the production publish site, which calls
+    // `observe_materialize_scope` once at materialisation time. The
+    // observation carries BOTH the observed `whole_hash` AND the
+    // observed-version `SyntacticExportSet` parse fact, from one
+    // `IndexedReady` — they cannot disagree.
+    let observed_scope = observe_scope(ctx, scope);
+    assert_eq!(
+        observed_scope.whole_hash(),
+        observed_hash,
+        "fixture invariant: the observation pins the scope's pre-edit content version",
+    );
 
     // The scope is edited AFTER materialisation but BEFORE the memo
     // signature is built — the race window. Its CURRENT content hash
@@ -2404,13 +2439,18 @@ fn materialize_memo_db_scope_self_root_carries_observed_hash_not_current() {
         "fixture invariant: the scope edit shifts its whole hash (observed != current)",
     );
 
-    // Build the signature NOW — after the edit — passing the OBSERVED
-    // (pre-edit) hash and the pre-edit parse fact, exactly as the
-    // publish site does after observing the scope content version once
-    // at materialisation time.
+    // Build the signature NOW — after the edit — from the SINGLE
+    // pre-edit observation captured above, exactly as the publish site
+    // does after observing the scope content version once at
+    // materialisation time. The observation's `whole_hash` and parse
+    // fact are both pre-edit; a builder that re-read current content
+    // would emit `current_hash`.
+    let observed_export_set = observed_scope
+        .syntactic_export_set
+        .clone()
+        .expect("the pre-edit observation carries the scope's SyntacticExportSet parse fact");
     let sig = engine_fact_signature_for_materialize_memo(
-        scope,
-        observed_hash,
+        &observed_scope,
         observed_export_set,
         &empty_dep_signature(),
     )
@@ -2492,12 +2532,17 @@ fn materialize_memo_db_scope_edit_in_race_window_rejects_stale_entry_end_to_end(
         ProjectionMode::Expanded,
     );
 
-    // The publish site observes the scope content version once,
+    // The publish site calls `observe_materialize_scope` once,
     // synchronously, at materialisation time — BEFORE any racing edit.
-    // Capture the observed-version parse fact now to mirror that
-    // ordering (a re-upsert removes the prior content-hash artifact
-    // from the content-addressed store).
-    let observed_export_set_h1 = observed_scope_export_set(ctx, scope, observed_hash_h1);
+    // Capture that single observation now to mirror the ordering (a
+    // re-upsert removes the prior content-hash artifact from the
+    // content-addressed store).
+    let observed_scope_h1 = observe_scope(ctx, scope);
+    assert_eq!(
+        observed_scope_h1.whole_hash(),
+        observed_hash_h1,
+        "fixture invariant: the observation pins the scope's pre-edit H1 content version",
+    );
 
     // The scope is edited AFTER the value's hash observation but BEFORE
     // the write-through builds the fact signature — the exact race
@@ -2514,15 +2559,14 @@ fn materialize_memo_db_scope_edit_in_race_window_rejects_stale_entry_end_to_end(
 
     // Drive the publish closure exactly as the production write-through
     // does: the value was materialised against the OBSERVED H1, so the
-    // signature is built passing H1 plus the H1 parse fact (the publish
-    // site threads the single observation in). The provenance-pure
-    // builder roots the scope self-root on H1.
-    let scope_owned = scope.to_string();
+    // signature is built from the single pre-edit observation (the
+    // publish site threads it in). The provenance-pure builder roots
+    // the scope self-root on H1 — the observation's `whole_hash`.
     let cold_value = db.get_or_compute(&key, ctx, move || {
+        let export_set = observed_scope_h1.syntactic_export_set.clone()?;
         let fact_sig = engine_fact_signature_for_materialize_memo(
-            scope_owned.as_str(),
-            observed_hash_h1,
-            observed_export_set_h1,
+            &observed_scope_h1,
+            export_set,
             &empty_dep_signature(),
         )?;
         Some((materialized("stale", empty_dep_signature()), fact_sig))
@@ -2590,10 +2634,13 @@ fn materialize_memo_db_mixed_scope_observation_refuses_admission() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let scope = "/self_root_race/memo_mixed_scope.ts";
     upsert(&host, scope, "export type Probe = number;\n");
-    let observed_scope_hash = host
-        .ensure_indexed_ready(scope)
-        .expect("scope indexed")
-        .whole_hash;
+    assert!(host.ensure_indexed_ready(scope).is_some(), "scope indexed",);
+
+    let ctx: &dyn ResolverContext = &host;
+    // The single tear-free scope observation the publish site threads
+    // into the builder.
+    let observed_scope = observe_scope(ctx, scope);
+    let observed_scope_hash = observed_scope.whole_hash();
 
     // A disagreeing hash for the SAME scope canonical — distinct from
     // the observed scope hash, simulating a sub-dispatch that recorded
@@ -2613,18 +2660,19 @@ fn materialize_memo_db_mixed_scope_observation_refuses_admission() {
         DepVersion::WholeHash(h_disagree),
     )]);
 
-    let ctx: &dyn ResolverContext = &host;
     let sig = engine_fact_signature_for_materialize_memo(
-        scope,
-        observed_scope_hash,
-        observed_scope_export_set(ctx, scope, observed_scope_hash),
+        &observed_scope,
+        observed_scope
+            .syntactic_export_set
+            .clone()
+            .expect("scope SyntacticExportSet parse fact recoverable"),
         &dep_sig,
     );
     assert!(
         sig.is_none(),
         "engine_fact_signature_for_materialize_memo MUST return None when an observed \
          dependency names the keyed scope with a WholeHash disagreeing with the \
-         caller-supplied observed scope hash — a torn read of the scope's content \
+         observation's whole hash — a torn read of the scope's content \
          version. A builder that unconditionally skips a scope-named dependency admits \
          an entry whose self-root and dep observation disagree.",
     );
@@ -2652,18 +2700,17 @@ fn materialize_memo_db_scope_export_set_canonical_mismatch_refuses_admission() {
     let other = "/self_root_race/memo_canon_other.ts";
     upsert(&host, scope, "export type Probe = number;\n");
     upsert(&host, other, "export type Other = number;\n");
-    let observed_scope_hash = host
-        .ensure_indexed_ready(scope)
-        .expect("scope indexed")
-        .whole_hash;
+    assert!(host.ensure_indexed_ready(scope).is_some(), "scope indexed",);
     let observed_other_hash = host
         .ensure_indexed_ready(other)
         .expect("other indexed")
         .whole_hash;
 
     let ctx: &dyn ResolverContext = &host;
-    // The parse fact describes `other`, NOT the keyed `scope` — a
-    // mismatched observation that must refuse admission.
+    // The observation describes the keyed `scope`, but the parse fact
+    // passed alongside it describes `other` — a mismatched observation
+    // that must refuse admission.
+    let observed_scope = observe_scope(ctx, scope);
     let mismatched_export_set = observed_scope_export_set(ctx, other, observed_other_hash);
     assert_eq!(
         mismatched_export_set.canonical_id, other,
@@ -2671,8 +2718,7 @@ fn materialize_memo_db_scope_export_set_canonical_mismatch_refuses_admission() {
     );
 
     let sig = engine_fact_signature_for_materialize_memo(
-        scope,
-        observed_scope_hash,
+        &observed_scope,
         mismatched_export_set,
         &empty_dep_signature(),
     );
@@ -2688,110 +2734,119 @@ fn materialize_memo_db_scope_export_set_canonical_mismatch_refuses_admission() {
 
 /// The materialize-memo publish site lowers the scope's `TypeExpr`
 /// under the scope's REAL content version even for a scope reachable
-/// only through the artifact / shallow-state path (a foreign source or
-/// a test-seeded file with no live scheduler `DerivedRawState`).
+/// only through the artifact path — a genuinely artifact-only file
+/// (foreign source or test-seeded `IndexedReady`) that was NEVER
+/// registered with the scheduler as a live `DerivedRawState`.
 ///
 /// Root cause this test guards: the publish site
-/// (`meta_resolve/materialize/field_types.rs`) sources the scope's
-/// content hash for two distinct consumers. The
+/// (`meta_resolve/materialize/field_types.rs`) needs ONE tear-free
+/// observation of the scope's content identity. The
 /// `NodeScopeId::File { whole_hash }` the materialiser LOWERS against
-/// identifies the lowered value's semantic identity — it must be the
-/// scope's real content version. The `MaterializeMemoDb` signature
-/// self-root gates view-correct shared-cache admission — it must be
-/// the view-aware `authoritative_current_content_hash`. A fix round
-/// that switched BOTH to `authoritative_current_content_hash` was
-/// correct for the signature but wrong for the `NodeScopeId`:
-/// `authoritative_current_content_hash` returns `None` for a scope
-/// with no live scheduler `DerivedRawState`, and the `.unwrap_or_default()`
-/// then lowers the expression under an all-zero scope hash.
+/// AND the `MaterializeMemoDb` signature self-root MUST agree —
+/// `observe_materialize_scope` collapses both onto one
+/// `Arc<IndexedReady>`. The scheduler-pinned authority
+/// (`current_content_pinned_indexed`) answers only for files with a
+/// live scheduler `DerivedRawState`. A genuinely artifact-only file
+/// has a perfectly valid `IndexedReady` in `FileArtifactStore` but no
+/// scheduler source, so `observe_materialize_scope` MUST also consult
+/// the **artifact-current authority** (`artifact_current_indexed`).
 ///
-/// ## Fixture — the two oracles deliberately diverge
+/// ## Fixture — a genuinely artifact-only scope
 ///
-/// The scope is upserted, its `IndexedReady` materialised (so
-/// `FileArtifactStore` holds the artifact and `shallow_file_state`
-/// carries the real `whole_hash`), its prepared-decl bundle warmed,
-/// then EVICTED. `evict` marks the `DerivedRawState` evicted without
-/// removing the `FileArtifactStore` artifact, so post-evict:
+/// A real `IndexedReady` (with a resolvable `Probe` interface) is
+/// materialised for a helper file, then published into
+/// `FileArtifactStore` under a SEPARATE canonical that the scheduler
+/// never tracked. That canonical therefore has:
 ///
-/// - `authoritative_current_content_hash(scope)` → `None` (the
-///   `DerivedRawState` eviction gate trips).
-/// - `shallow_file_state(scope).whole_hash` → the real, non-zero hash
-///   (the surviving content-addressed artifact).
+/// - no `DerivedRawState` entry → `authoritative_current_content_hash`
+///   returns `None`, so `current_content_pinned_indexed` returns
+///   `None`;
+/// - a current `FileArtifactStore` artifact (not evicted — there is no
+///   `DerivedRawState` entry to carry an `evicted` flag) →
+///   `artifact_current_indexed` returns `Some`.
 ///
-/// The fixture asserts exactly this divergence before materialising.
+/// The fixture asserts exactly this before materialising.
 ///
 /// ## Discrimination property
 ///
 /// A 0-arg `Ref` to a same-file type lowers (in `Navigate` mode) to a
 /// `SemanticNodeData::DeclRef` carrier whose `NodeScopeId` scope is the
 /// lowering scope verbatim — the `NodeScopeId::File` the publish site
-/// builds. The test materialises `Probe` (a same-file interface) and
-/// scans the semantic graph for that `DeclRef` node:
+/// builds from `observe_materialize_scope(scope).whole_hash()`. The
+/// test materialises `Probe` and scans the semantic graph for that
+/// `DeclRef` node:
 ///
-/// - PRE-FIX (`NodeScopeId` hash ← `authoritative_current_content_hash`):
-///   the oracle returns `None`, `.unwrap_or_default()` yields `[0; 16]`,
-///   and the `DeclRef` node's scope `whole_hash` is all-zero — the
-///   `assert_ne!(.., [0; 16])` AND the `assert_eq!(.., real_hash)` both
-///   trip.
-/// - POST-FIX (`NodeScopeId` hash ← `shallow_file_state().whole_hash`):
-///   the `DeclRef` node's scope `whole_hash` is the real shallow-state
-///   hash and both assertions hold.
+/// - WITHOUT the artifact-current authority (`observe_materialize_scope`
+///   scheduler-only): the genuinely artifact-only scope yields a
+///   `None` observation, the publish site's
+///   `.expect("materialize scope must have a real indexed scope
+///   identity")` PANICS — the test fails.
+/// - WITH the artifact-current authority: `observe_materialize_scope`
+///   returns `Some` rooted on the artifact's real `whole_hash`, the
+///   `DeclRef` node's `NodeScopeId` scope `whole_hash` is that real
+///   non-zero hash, and both assertions hold.
 ///
-/// The `DeclRef`'s `DeclIdentity.whole_hash` is independently sourced
-/// from `shallow_file_state` inside the lowerer, so it stays correct
-/// in both trees — only the node's `NodeScopeId` *scope* discriminates
-/// the publish-site bug. Verified RED against the pre-fix tree (the
-/// `NodeScopeId` hash reverted to `authoritative_current_content_hash`)
-/// and GREEN against the post-fix tree.
+/// Reverting `observe_materialize_scope` to drop the
+/// `artifact_current_indexed` fallback flips this test RED (publish-site
+/// panic). The `assert_eq!(.., real_hash)` independently pins that the
+/// lowering scope hash is the observation's hash — not a fabricated
+/// `[0; 16]` (the publish site contains no `unwrap_or_default`).
 #[test]
 fn materialize_memo_db_artifact_only_scope_lowers_under_shallow_whole_hash() {
     use crate::resolver_core::ComponentMetaQueryEngine;
     use crate::semantic_query::{NodeScopeId, ProjectionMode, SemanticNodeId};
 
     let host = VerterHost::new_standalone(HostConfig::default());
-    let scope = "/self_root_race/memo_artifact_only_scope.ts";
-    upsert(&host, scope, "export interface Probe { a: number; }\n");
-    let real_hash = host
-        .ensure_indexed_ready(scope)
-        .expect("scope IndexedReady materialises")
-        .whole_hash;
+
+    // Build a real `IndexedReady` (with a resolvable `Probe`
+    // interface) by loading a helper file through the production path.
+    let helper = "/self_root_race/memo_artifact_only_helper.ts";
+    upsert(&host, helper, "export interface Probe { a: number; }\n");
+    let helper_indexed = host
+        .ensure_indexed_ready(helper)
+        .expect("helper IndexedReady materialises");
+    let real_hash = helper_indexed.whole_hash;
     assert_ne!(
         real_hash, [0u8; 16],
-        "fixture invariant: the scope's real content hash is non-zero",
+        "fixture invariant: the artifact's real content hash is non-zero",
     );
 
+    // Publish that `IndexedReady` into `FileArtifactStore` under a
+    // SEPARATE canonical the scheduler never tracked — a genuinely
+    // artifact-only scope (codex P2's "foreign source or test-seeded
+    // file with no scheduler DerivedRawState").
+    let scope = "/self_root_race/memo_artifact_only_scope.ts";
+    host.project_type_store()
+        .indexed()
+        .insert(Arc::from(scope), Arc::clone(&helper_indexed));
+
     let ctx: &dyn ResolverContext = &host;
-    // Warm the scope's prepared-decl bundle BEFORE eviction so the
-    // materialise path's `scope_payload_for_scope` returns it from the
-    // warm cache and does NOT trigger an un-evicting `ensure_loaded`.
-    let _ = ctx.prepared_decl_bundle(scope);
-
-    // Evict the scope: the `DerivedRawState` is marked evicted; the
-    // `FileArtifactStore` artifact survives. This reproduces a scope
-    // reachable ONLY through the artifact / shallow-state path — codex
-    // P2's "foreign source or test-seeded file with no scheduler
-    // DerivedRawState".
-    host.evict(scope);
-
-    // The fixture's load-bearing divergence: the two content-hash
-    // oracles disagree for this artifact-only scope.
+    // Fixture invariant: the scheduler-pinned authority cannot answer
+    // for this scope (no `DerivedRawState`), but the artifact-current
+    // authority can (a current, non-evicted `FileArtifactStore`
+    // artifact).
     assert_eq!(
         ctx.authoritative_current_content_hash(scope),
         None,
-        "fixture invariant: an evicted scope has no authoritative current \
-         content hash — `authoritative_current_content_hash` returns None",
+        "fixture invariant: a genuinely artifact-only scope has no scheduler \
+         DerivedRawState, so `authoritative_current_content_hash` returns None",
+    );
+    let observation = ctx.observe_materialize_scope(scope).expect(
+        "fixture invariant: `observe_materialize_scope` MUST return Some for a \
+         genuinely artifact-only scope via the artifact-current authority — a \
+         current FileArtifactStore artifact with no DerivedRawState eviction",
     );
     assert_eq!(
-        ctx.shallow_file_state(scope).map(|s| s.whole_hash),
-        Some(real_hash),
-        "fixture invariant: the evicted scope's `FileArtifactStore` artifact \
-         survives, so `shallow_file_state` still carries the real whole hash",
+        observation.whole_hash(),
+        real_hash,
+        "fixture invariant: the observation pins the artifact's real whole hash",
     );
 
     // Materialise a 0-arg `Ref` to the same-file `Probe` interface in
     // `Navigate` mode. In `Navigate` mode a 0-arg local `Ref` lowers to
     // a `DeclRef` carrier interned with the lowering `NodeScopeId`
-    // verbatim — the `NodeScopeId::File` the publish site builds.
+    // verbatim — the `NodeScopeId::File` the publish site builds from
+    // the single `observe_materialize_scope` observation.
     let probe_expr = TypeExpr::Ref {
         name: Arc::from("Probe"),
         type_arguments: Arc::from(Vec::<TypeExpr>::new()),
@@ -2834,21 +2889,19 @@ fn materialize_memo_db_artifact_only_scope_lowers_under_shallow_whole_hash() {
     assert_ne!(
         decl_ref_scope_hash, [0u8; 16],
         "the materialise-memo publish site MUST NOT lower the scope's TypeExpr under an \
-         all-zero `NodeScopeId::File` whole hash. For an artifact-only scope (no live \
-         scheduler `DerivedRawState`), `authoritative_current_content_hash` returns None \
-         and `.unwrap_or_default()` yields `[0; 16]` — lowering under that all-zero scope \
-         corrupts the lowered value's semantic identity. The lowering scope hash must be \
-         sourced from `shallow_file_state`, which carries the real content version for \
-         every scope including artifact-only ones.",
+         all-zero `NodeScopeId::File` whole hash. The lowering scope hash is sourced from \
+         the single `observe_materialize_scope` observation — which answers for a \
+         genuinely artifact-only scope via the artifact-current authority. The publish \
+         site contains no `unwrap_or_default`: a missing observation would panic the \
+         `expect`, never fabricate `[0; 16]`.",
     );
     assert_eq!(
         decl_ref_scope_hash, real_hash,
         "the lowered `DeclRef` node's `NodeScopeId::File` whole hash MUST equal the \
-         scope's real `shallow_file_state` whole hash — the version of the file actually \
-         being materialised. A publish site that sourced the `NodeScopeId` hash from the \
-         view-aware `authoritative_current_content_hash` oracle (correct for the signature \
-         self-root, wrong for the lowering scope) roots the lowered value on a scope \
-         identity that does not match the file version.",
+         scope's real content version — `observe_materialize_scope(scope).whole_hash()`, \
+         the version of the file actually being materialised. The lowering scope and the \
+         signature self-root both descend from this one observation, so they cannot \
+         disagree.",
     );
 }
 
@@ -3594,5 +3647,333 @@ fn observed_prepared_type_decl_is_single_artifact_and_view_aware() {
         "the observed hash must NOT be the base content hash — that is the torn-read \
          (overlay decl + base hash) defect this accessor's single-artifact provenance \
          closes",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Single-observation materialize scope identity.
+//
+// The materialize-memo publish site needs the scope's content version
+// for two consumers that MUST agree: the `NodeScopeId::File` the
+// materialiser lowers against, and the `MaterializeMemoDb` signature
+// self-root. Pre-fix the publish site read TWO separate oracles
+// (`shallow_file_state` for the scope id, `authoritative_current_content_hash`
+// for the signature) — an edit between the two reads roots a value
+// lowered under `H1` on a signature self-rooted at `H2`.
+// `observe_materialize_scope` collapses both onto ONE `Arc<IndexedReady>`.
+// ---------------------------------------------------------------------------
+
+/// Atomicity — the materialiser's lowering `NodeScopeId.whole_hash` AND
+/// the materialize-memo signature self-root hash come from ONE
+/// `observe_materialize_scope` observation.
+///
+/// Discrimination property: the test takes the single observation, then
+/// (a) runs the production publish path and reads the lowered `DeclRef`
+/// node's `NodeScopeId::File` scope `whole_hash` out of the semantic
+/// graph, and (b) builds the materialize-memo fact signature through
+/// `engine_fact_signature_for_materialize_memo` and extracts the
+/// keyed-scope self-root `FileWholeHash`. Both MUST equal
+/// `observe_materialize_scope(scope).whole_hash()` — a single source.
+///
+/// Pre-fix the publish site sourced the lowering hash from
+/// `shallow_file_state` and the signature hash from
+/// `authoritative_current_content_hash` — two oracles, separately read,
+/// tearable. They happen to agree on a steady-state scheduler-backed
+/// file, so this test does not discriminate by hash *inequality*;
+/// instead it pins the architectural invariant directly — both hashes
+/// are identical AND both equal the one observation's `whole_hash()`.
+/// The race-window discriminators
+/// (`materialize_memo_db_scope_self_root_carries_observed_hash_not_current`,
+/// `materialize_memo_db_scope_edit_in_race_window_rejects_stale_entry_end_to_end`)
+/// drive the tearing edit; this test is the steady-state contract pin.
+#[test]
+fn materialize_memo_scope_lowering_and_signature_root_share_one_observation() {
+    use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo;
+    use crate::resolver_core::ComponentMetaQueryEngine;
+    use crate::semantic_query::{NodeScopeId, ProjectionMode, SemanticNodeId};
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let scope = "/self_root_obs/atomic_scope.ts";
+    upsert(&host, scope, "export interface Probe { a: number; }\n");
+    assert!(
+        host.ensure_indexed_ready(scope).is_some(),
+        "scope IndexedReady materialises",
+    );
+
+    let ctx: &dyn ResolverContext = &host;
+    // The ONE observation the publish site takes.
+    let observed_scope = observe_scope(ctx, scope);
+    let observation_hash = observed_scope.whole_hash();
+    assert_ne!(
+        observation_hash, [0u8; 16],
+        "fixture invariant: the observation carries a real, non-zero whole hash",
+    );
+
+    // (a) Run the production publish path and read the lowered
+    // `DeclRef` node's `NodeScopeId::File` scope hash.
+    let probe_expr = TypeExpr::Ref {
+        name: Arc::from("Probe"),
+        type_arguments: Arc::from(Vec::<TypeExpr>::new()),
+    };
+    let mut engine = ComponentMetaQueryEngine::new(&host);
+    let _ =
+        crate::meta_resolve::materialize::materialize_component_meta_type_expr_until_stable_full(
+            &probe_expr,
+            scope,
+            ProjectionMode::Navigate,
+            &mut engine,
+        );
+    let graph = host.project_type_store().semantic_graph();
+    let lowering_scope_hash = (0..graph.node_count() as u64)
+        .find_map(|i| {
+            let id = SemanticNodeId(i);
+            let data = graph.node_data(id)?;
+            let names_probe = matches!(
+                &*data,
+                crate::semantic_query::SemanticNodeData::DeclRef { identity }
+                    if identity.canonical_id.as_ref() == scope
+                        && identity.decl_name.as_ref() == "Probe"
+            );
+            if !names_probe {
+                return None;
+            }
+            match graph.node_scope(id)? {
+                NodeScopeId::File { whole_hash, .. } => Some(whole_hash),
+                NodeScopeId::Global => None,
+            }
+        })
+        .expect(
+            "the Navigate-mode materialisation lowers `Probe` to a `NodeScopeId::File` DeclRef",
+        );
+
+    // (b) Build the materialize-memo fact signature and extract the
+    // keyed-scope self-root `FileWholeHash`.
+    let signature = engine_fact_signature_for_materialize_memo(
+        &observed_scope,
+        observed_scope
+            .syntactic_export_set
+            .clone()
+            .expect("scope SyntacticExportSet parse fact recoverable"),
+        &empty_dep_signature(),
+    )
+    .expect("a dep-free materialize-memo signature is admissible");
+    let signature_self_root_hash = signature
+        .iter()
+        .find_map(|f| match f {
+            FactVersionRef::FileWholeHash { canonical_id, hash } if canonical_id == scope => {
+                Some(*hash)
+            }
+            _ => None,
+        })
+        .expect("the materialize-memo signature MUST carry a keyed-scope self-root FileWholeHash");
+
+    assert_eq!(
+        lowering_scope_hash, observation_hash,
+        "the materialiser's lowering `NodeScopeId::File` whole hash MUST equal the single \
+         `observe_materialize_scope` observation's `whole_hash()` — the publish site \
+         builds the `NodeScopeId` from exactly that observation",
+    );
+    assert_eq!(
+        signature_self_root_hash, observation_hash,
+        "the materialize-memo signature's keyed-scope self-root `FileWholeHash` MUST equal \
+         the single observation's `whole_hash()` — the publish site threads the same \
+         observation into `engine_fact_signature_for_materialize_memo`",
+    );
+    assert_eq!(
+        lowering_scope_hash, signature_self_root_hash,
+        "the lowering scope hash and the signature self-root hash MUST be identical — they \
+         descend from ONE `Arc<IndexedReady>`, not from two separately-read oracles. A \
+         publish site that sourced the lowering hash from `shallow_file_state` and the \
+         signature hash from `authoritative_current_content_hash` reads two oracles that \
+         can tear under a mid-flight edit.",
+    );
+}
+
+/// Overlay view-correctness — under a `SessionResolverContext` carrying
+/// an overlay, `observe_materialize_scope` returns the OVERLAY
+/// `IndexedReady` (the overlay content hash), not the base one.
+///
+/// Discrimination property: an `OverlaidView` masks `canonical` with an
+/// overlay source whose content hash (`overlay_hash`) differs from the
+/// base (`base_hash`). Driven through a `SessionResolverContext`,
+/// `observe_materialize_scope(canonical).whole_hash()` MUST equal
+/// `overlay_hash`. The base-host `observe_materialize_scope` (no
+/// overlay) MUST equal `base_hash`. A `SessionResolverContext` impl
+/// that delegated straight to the base host — or sourced the artifact
+/// from the base-only `shallow_file_state` — returns `base_hash` here
+/// and the `assert_eq!(.., overlay_hash)` trips.
+///
+/// This is the LSP edit-in-overlay path: an overlay materialize-memo
+/// entry roots on the overlay version, so it hits for the same overlay
+/// content and never cross-validates a base request.
+#[test]
+fn observe_materialize_scope_is_overlay_view_correct() {
+    use crate::resolver_core::SessionResolverContext;
+
+    let canonical = "/overlay_disc/observe_materialize_scope.ts";
+    let (host, view, base_hash, overlay_hash) = overlay_disc_fixture(canonical);
+
+    // Base-host observation — no overlay → the base content hash.
+    let base_ctx: &dyn ResolverContext = host.as_ref();
+    let base_observation = base_ctx
+        .observe_materialize_scope(canonical)
+        .expect("base-host observe_materialize_scope resolves the base artifact");
+    assert_eq!(
+        base_observation.whole_hash(),
+        base_hash,
+        "the base-host `observe_materialize_scope` MUST observe the base content version",
+    );
+
+    // Overlay-session observation — the overlay content hash.
+    let overlay_ctx = SessionResolverContext::new(&host, &view);
+    let overlay_observation = ResolverContext::observe_materialize_scope(&overlay_ctx, canonical)
+        .expect("overlay-session observe_materialize_scope resolves the overlay-pinned artifact");
+    assert_eq!(
+        overlay_observation.whole_hash(),
+        overlay_hash,
+        "the overlay-session `observe_materialize_scope` MUST observe the OVERLAY content \
+         version — the overlay `IndexedReady` candidate was prewarmed under the overlay \
+         hash. A `SessionResolverContext` impl that delegated to the base host (or read \
+         the base-only `shallow_file_state`) observes the base hash, mis-rooting an \
+         overlay-derived memo entry on the base version.",
+    );
+    assert_ne!(
+        overlay_observation.whole_hash(),
+        base_hash,
+        "the overlay observation must NOT carry the base content hash — that torn read \
+         would let an overlay-derived memo entry cross-validate for a base request",
+    );
+
+    // The pinned `SyntacticExportSet` parse fact descends from the SAME
+    // overlay artifact — its canonical names the scope (not a torn
+    // base/overlay mix).
+    let overlay_export_set = overlay_observation
+        .syntactic_export_set
+        .clone()
+        .expect("the overlay observation carries the scope's SyntacticExportSet parse fact");
+    assert_eq!(
+        overlay_export_set.canonical_id, canonical,
+        "the observation's pinned parse fact MUST describe the keyed scope canonical",
+    );
+}
+
+/// Evicted / stale refusal — for an evicted scope whose only
+/// `FileArtifactStore` artifact is a stale leftover,
+/// `observe_materialize_scope` returns `None`, so no `MaterializeMemoDb`
+/// entry is admitted; a follow-up request still computes a value.
+///
+/// Discrimination property: the scope is upserted (creating a live
+/// `DerivedRawState` + a `FileArtifactStore` artifact), then evicted —
+/// `evict` marks the `DerivedRawState` `evicted` while leaving the
+/// `FileArtifactStore` artifact in place. `observe_materialize_scope`
+/// MUST return `None`: the scheduler authority refuses (the
+/// `DerivedRawState` is evicted) AND the artifact-current authority
+/// refuses (the surviving artifact is a stale leftover, detected via
+/// the `evicted` flag). The publish closure then `?`-returns `None`, so
+/// `get_or_compute` admits nothing and a follow-up request cold-
+/// recomputes.
+///
+/// An artifact-current authority that used a content-agnostic `get_any`
+/// (no eviction check) would return `Some` for the stale artifact and
+/// admit a stale memo entry — this test FAILS against that
+/// (`observe_materialize_scope` would be `Some`, the entry would be
+/// admitted, and the follow-up cold closure would not run). The
+/// eviction-aware authority returns `None` and this test PASSES.
+#[test]
+fn observe_materialize_scope_refuses_evicted_stale_artifact() {
+    use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo;
+    use crate::semantic_query::ProjectionMode;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let scope = "/self_root_obs/evicted_scope.ts";
+    upsert(&host, scope, "export type Probe = number;\n");
+    assert!(
+        host.ensure_indexed_ready(scope).is_some(),
+        "scope IndexedReady materialises",
+    );
+
+    let ctx: &dyn ResolverContext = &host;
+    // Pre-eviction: `observe_materialize_scope` returns Some.
+    assert!(
+        ctx.observe_materialize_scope(scope).is_some(),
+        "fixture invariant: a live scope has a tear-free observation",
+    );
+
+    // Evict the scope: `DerivedRawState` is marked evicted; the
+    // `FileArtifactStore` artifact survives as a stale leftover.
+    host.evict(scope);
+    assert!(
+        host.project_type_store().indexed().get_any(scope).is_some(),
+        "fixture invariant: the evicted scope's stale FileArtifactStore artifact survives",
+    );
+
+    // The discriminating assertion: `observe_materialize_scope` MUST
+    // return `None` — the surviving artifact is a stale evicted
+    // leftover, not a current artifact-backed file. A content-agnostic
+    // `get_any` would surface it.
+    assert!(
+        ctx.observe_materialize_scope(scope).is_none(),
+        "observe_materialize_scope MUST return None for an evicted scope whose only \
+         FileArtifactStore artifact is a stale leftover — the artifact-current authority \
+         distinguishes a current artifact-backed file from a stale evicted leftover via \
+         the DerivedRawState `evicted` flag. A content-agnostic `get_any` currentness \
+         oracle would surface the stale artifact and admit a stale memo entry.",
+    );
+
+    // The publish closure threads the `None` observation through `?`,
+    // so `get_or_compute` admits nothing and a follow-up cold-recomputes.
+    let db = host.project_type_store().materialize_memo_db();
+    let probe_expr = Arc::new(TypeExpr::Ref {
+        name: Arc::from("Probe"),
+        type_arguments: Arc::from(Vec::<TypeExpr>::new()),
+    });
+    let key = (
+        Arc::<str>::from(scope),
+        Arc::clone(&probe_expr),
+        ProjectionMode::Expanded,
+    );
+    let scope_owned = scope.to_string();
+    let cold_value = db.get_or_compute(&key, ctx, move || {
+        // The production publish closure: a `None` observation refuses
+        // shared-cache admission.
+        let observed_scope = ctx.observe_materialize_scope(scope_owned.as_str())?;
+        let export_set = observed_scope.syntactic_export_set.clone()?;
+        let fact_sig = engine_fact_signature_for_materialize_memo(
+            &observed_scope,
+            export_set,
+            &empty_dep_signature(),
+        )?;
+        Some((materialized("stale", empty_dep_signature()), fact_sig))
+    });
+    assert!(
+        cold_value.is_none(),
+        "the publish path threads the None observation through `?`, so get_or_compute \
+         declines to insert and returns None",
+    );
+    assert_eq!(
+        db.live_count(),
+        0,
+        "no MaterializeMemoDb entry may be admitted when the scope observation is refused",
+    );
+
+    let ctx2: &dyn ResolverContext = &host;
+    let mut cold_ran = false;
+    let value = db
+        .get_or_compute(&key, ctx2, || {
+            cold_ran = true;
+            Some((
+                materialized("recomputed", empty_dep_signature()),
+                empty_fact_signature(),
+            ))
+        })
+        .expect("the follow-up request still computes and returns a value");
+    assert!(
+        cold_ran,
+        "the follow-up request's cold closure MUST run — no entry was admitted, so there \
+         is no warm hit to short-circuit it",
+    );
+    assert!(
+        matches!(&value.type_expr, TypeExpr::Unknown { raw } if raw == "recomputed"),
+        "the refused-admission path still returns the freshly-computed value to the caller",
     );
 }

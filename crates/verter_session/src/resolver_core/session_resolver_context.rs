@@ -197,6 +197,65 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
         self.inner.authoritative_current_content_hash(canonical)
     }
 
+    /// Overlay-aware materialize-scope observation.
+    ///
+    /// The base-host [`crate::VerterHost::observe_materialize_scope`]
+    /// resolves the scope's `IndexedReady` from the scheduler /
+    /// artifact-current authorities — the *base* content. When this
+    /// context wraps an overlay over `canonical`, the materialiser must
+    /// observe the OVERLAY `IndexedReady`: the overlay candidate was
+    /// prewarmed under the overlay content hash, so lowering /
+    /// signature-rooting under the base hash would mis-identify the
+    /// version actually being materialised.
+    ///
+    /// Resolution order:
+    /// 1. An overlay-Upsert covering `canonical` →
+    ///    [`SessionView::overlay_content_hash_for`] gives the overlay
+    ///    content hash; the overlay `IndexedReady` is materialised /
+    ///    fetched via the overlay-priority `ensure_indexed_ready` path
+    ///    and pinned to that exact hash — **no base fallback**. If the
+    ///    overlay candidate cannot be recovered at the overlay hash,
+    ///    `None` (refuse admission rather than observe the base).
+    /// 2. A session tombstone for `canonical` → `None` (the session
+    ///    deleted the file; there is no current content).
+    /// 3. Otherwise → the base-host
+    ///    [`crate::VerterHost::observe_materialize_scope`].
+    #[inline]
+    fn observe_materialize_scope(
+        &self,
+        canonical: &str,
+    ) -> Option<crate::resolver_core::MaterializeScopeObservation> {
+        if let Some(overlay_hash) = self.view.overlay_content_hash_for(canonical) {
+            // Materialise / fetch the overlay candidate, then pin to the
+            // exact overlay content hash — no base fallback. The
+            // content-addressed `FileArtifactStore` slot keeps the
+            // overlay candidate isolated from the base artifact.
+            let _ = ResolverContext::ensure_indexed_ready(self, canonical);
+            let indexed = self
+                .inner
+                .project_type_store()
+                .indexed()
+                .get_for_current_content(canonical, overlay_hash)?;
+            let syntactic_export_set =
+                crate::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
+                    self,
+                    canonical,
+                    overlay_hash,
+                    verter_semantic::facts::FactKey::SyntacticExportSet,
+                    verter_semantic::facts::FactLane::Semantic,
+                );
+            return Some(crate::resolver_core::MaterializeScopeObservation {
+                canonical_id: Arc::from(canonical),
+                indexed,
+                syntactic_export_set,
+            });
+        }
+        if self.view.is_tombstoned(canonical) {
+            return None;
+        }
+        self.inner.observe_materialize_scope(canonical)
+    }
+
     #[inline]
     fn resolver_store_view(&self) -> HostStoreView {
         ResolverContext::resolver_store_view(self.inner)

@@ -45,7 +45,7 @@ pub(crate) mod scope_shadowing;
 pub(crate) mod session_resolver_context;
 
 pub use fact_read_set::{FactReadSet, FactReadSetCell, FactReadSetFinalise};
-pub(crate) use resolver_context::ResolverContext;
+pub(crate) use resolver_context::{MaterializeScopeObservation, ResolverContext};
 pub(crate) use session_resolver_context::SessionResolverContext;
 
 pub use fuses::{FuseBudgets, FuseState, FuseTrip};

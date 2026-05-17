@@ -88,6 +88,55 @@ mod sealed {
     pub trait Sealed {}
 }
 
+/// A single, tear-free observation of a materialize-memo scope's
+/// content identity.
+///
+/// The materialize-memo publish site
+/// (`meta_resolve/materialize/field_types.rs`) needs the scope's
+/// content version for two distinct consumers that MUST agree:
+///
+/// 1. the `NodeScopeId::File { whole_hash }` the materialiser lowers
+///    the `TypeExpr` against — the lowered value's semantic identity;
+/// 2. the `MaterializeMemoDb` entry's fact-signature self-root — the
+///    view-correct shared-cache admission gate.
+///
+/// Sourcing those from two separate oracles (`shallow_file_state` for
+/// the scope id, `authoritative_current_content_hash` for the
+/// signature) can tear: an edit landing between the two reads roots a
+/// value lowered under `H1` on a signature self-rooted at `H2`. This
+/// type closes the tear: the publish site takes ONE
+/// `MaterializeScopeObservation` and feeds [`Self::whole_hash`] to
+/// BOTH consumers, plus the pinned [`Self::syntactic_export_set`] to
+/// the signature builder. Both come from the same
+/// `Arc<IndexedReady>` — internally consistent by construction
+/// (`FileArtifactStore` is content-addressed; `indexed.whole_hash ==
+/// indexed.shallow_state.whole_hash`).
+#[derive(Clone)]
+pub(crate) struct MaterializeScopeObservation {
+    /// The scope canonical this observation describes.
+    pub canonical_id: Arc<str>,
+    /// The single `IndexedReady` artifact whose `whole_hash` roots both
+    /// the lowering `NodeScopeId` and the signature self-root.
+    pub indexed: Arc<IndexedReady>,
+    /// The scope's `SyntacticExportSet` parse fact, pinned to
+    /// `indexed.whole_hash` via
+    /// [`crate::fact_signature_helpers::parse_fact_ref_for_observed_current_content`].
+    /// `None` when the observed version's parse-fact registry is not
+    /// recoverable — the publish site then refuses shared-cache
+    /// admission while still returning the freshly-computed value.
+    pub syntactic_export_set: Option<crate::resolver_core::ParseFactRef>,
+}
+
+impl MaterializeScopeObservation {
+    /// The observed scope content version. Feeds both the lowering
+    /// `NodeScopeId::File { whole_hash }` and the signature self-root —
+    /// a single source, so the two cannot disagree.
+    #[inline]
+    pub(crate) fn whole_hash(&self) -> crate::resolver_core::ResolverHash16 {
+        self.indexed.whole_hash
+    }
+}
+
 /// Restricted host facade for resolver-tier code (`resolver_core/*`,
 /// `meta_resolve/*` post-moves, `component_meta_caches.rs`,
 /// `component_meta_materialize.rs`, `project_semantic_dispatch/*`).
@@ -194,6 +243,33 @@ pub(crate) trait ResolverContext: sealed::Sealed {
         self.project_type_store()
             .indexed()
             .get_for_current_content(canonical, current_hash)
+    }
+
+    /// Establish ONE tear-free [`MaterializeScopeObservation`] for a
+    /// materialize-memo scope canonical.
+    ///
+    /// The materialize-memo publish site needs the scope's content
+    /// version for two consumers that must agree (the lowering
+    /// `NodeScopeId` and the signature self-root). This accessor
+    /// produces a single `Arc<IndexedReady>` whose `whole_hash` roots
+    /// BOTH — eliminating the two-oracle tear.
+    ///
+    /// Returns `None` when the scope has no recoverable *current*
+    /// indexed artifact: an evicted / deleted canonical whose stale
+    /// `IndexedReady` lingers, or a tombstoned overlay canonical. A
+    /// `None` observation makes the publish site skip shared-cache
+    /// admission while still returning the freshly-computed value.
+    ///
+    /// The default impl delegates to
+    /// [`crate::VerterHost::observe_materialize_scope`]. The
+    /// overlay-aware `SessionResolverContext` overrides it: an
+    /// overlay-covered canonical is pinned to the overlay
+    /// `IndexedReady` (the overlay content hash), with no base
+    /// fallback; a session tombstone yields `None`; otherwise it
+    /// delegates to the base host.
+    fn observe_materialize_scope(&self, canonical: &str) -> Option<MaterializeScopeObservation> {
+        self.host_for_fact_tracer_install()
+            .observe_materialize_scope(canonical)
     }
 
     fn resolver_store_view(&self) -> HostStoreView;

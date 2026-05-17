@@ -707,6 +707,101 @@ impl VerterHost {
             .get_for_current_content(canonical, current_hash)
     }
 
+    /// Artifact-current [`crate::project_type_store::IndexedReady`]
+    /// authority for a canonical that is **genuinely artifact-backed** —
+    /// reachable through [`crate::file_artifact_store::FileArtifactStore`]
+    /// with no live scheduler `DerivedRawState`.
+    ///
+    /// A foreign-source-loaded file or a test-seeded `IndexedReady`
+    /// that was never registered with the scheduler as a live
+    /// `DerivedRawState` has a perfectly valid artifact in
+    /// `FileArtifactStore` but no scheduler source — so
+    /// [`Self::current_content_pinned_indexed`] (scheduler-pinned)
+    /// returns `None` for it. This accessor answers for exactly those
+    /// scopes WITHOUT widening the strict scheduler oracle.
+    ///
+    /// It is NOT a content-agnostic `get_any`: it distinguishes a
+    /// **current** artifact-backed file from a **stale evicted
+    /// leftover**. The `FileArtifactStore` retains at most one artifact
+    /// per canonical (`insert` drains prior versions), so a stale
+    /// artifact only lingers after [`Self::evict`] — which marks the
+    /// canonical's `DerivedRawState` entry `evicted` while leaving the
+    /// `FileArtifactStore` artifact in place. The eviction flag is
+    /// therefore the current-vs-stale oracle:
+    ///
+    /// - `DerivedRawState` entry exists AND `evicted` → the artifact is
+    ///   a stale leftover → `None`.
+    /// - no `DerivedRawState` entry, OR an entry that is `!evicted` →
+    ///   the `FileArtifactStore` artifact is current → `Some`.
+    ///
+    /// Returns `None` when no artifact is cached at all.
+    #[must_use]
+    pub(crate) fn artifact_current_indexed(
+        &self,
+        canonical: &str,
+    ) -> Option<Arc<crate::project_type_store::IndexedReady>> {
+        // A stale `IndexedReady` only lingers in `FileArtifactStore`
+        // after `evict` — and `evict` always records the eviction on
+        // `DerivedRawState`. So an `evicted` entry means the surviving
+        // artifact is stale and must NOT answer as current.
+        let evicted = self
+            .derived_raw_cache()
+            .get(canonical)
+            .is_some_and(|d| d.evicted);
+        if evicted {
+            return None;
+        }
+        self.project_type_store.indexed().get_any(canonical)
+    }
+
+    /// Establish ONE tear-free
+    /// [`crate::resolver_core::MaterializeScopeObservation`] for a
+    /// materialize-memo scope canonical (base-host path).
+    ///
+    /// Pins the scope to a single `Arc<IndexedReady>` whose `whole_hash`
+    /// roots BOTH the materialiser's lowering `NodeScopeId` and the
+    /// `MaterializeMemoDb` signature self-root, plus the scope's
+    /// `SyntacticExportSet` parse fact pinned to that same version.
+    ///
+    /// The artifact is resolved by, in order:
+    ///
+    /// 1. [`Self::current_content_pinned_indexed`] — the scheduler
+    ///    authority, when the scope has a live non-evicted
+    ///    `DerivedRawState`. This is the steady-state path.
+    /// 2. [`Self::artifact_current_indexed`] — the artifact-current
+    ///    authority, for a genuinely artifact-only scope (foreign
+    ///    source / test seed) with no scheduler `DerivedRawState`.
+    ///
+    /// Returns `None` when neither authority answers — an evicted /
+    /// deleted scope whose only `FileArtifactStore` artifact is a stale
+    /// leftover. A `None` observation makes the publish site skip
+    /// shared-cache admission while still returning the freshly-computed
+    /// value; it never lowers under a fabricated all-zero scope hash.
+    #[must_use]
+    pub(crate) fn observe_materialize_scope(
+        &self,
+        canonical: &str,
+    ) -> Option<crate::resolver_core::MaterializeScopeObservation> {
+        let indexed = self
+            .current_content_pinned_indexed(canonical)
+            .or_else(|| self.artifact_current_indexed(canonical))?;
+        let observed_whole_hash = indexed.whole_hash;
+        let ctx: &dyn crate::resolver_core::ResolverContext = self;
+        let syntactic_export_set =
+            crate::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
+                ctx,
+                canonical,
+                observed_whole_hash,
+                verter_semantic::facts::FactKey::SyntacticExportSet,
+                verter_semantic::facts::FactLane::Semantic,
+            );
+        Some(crate::resolver_core::MaterializeScopeObservation {
+            canonical_id: Arc::from(canonical),
+            indexed,
+            syntactic_export_set,
+        })
+    }
+
     /// Return the scheduler's authoritative [`oxc_span::SourceType`] for a loaded
     /// canonical file, or `None` if the canonical has not been processed by the
     /// scheduler (WASM / unloaded / pre-parse routing).

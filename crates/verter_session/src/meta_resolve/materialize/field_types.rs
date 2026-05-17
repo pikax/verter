@@ -126,57 +126,36 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
     let ctx = query_engine.ctx();
     let dispatch = ProjectSemanticDispatch::new(ctx);
     let env: FxHashMap<String, crate::semantic_query::SemanticNodeId> = FxHashMap::default();
-    // The scope's content version feeds two DISTINCT consumers, and the
-    // two are sourced from different oracles on purpose:
+    // Establish ONE tear-free observation of the scope's content
+    // identity. The scope's `whole_hash` feeds two distinct consumers
+    // that MUST agree:
     //
     //  1. The `NodeScopeId::File` the materialiser lowers the
-    //     `TypeExpr` against (built just below). This hash identifies
-    //     the lowered value — it must be the real content version of
-    //     the file being materialised for EVERY scope, including a
-    //     foreign source or test-seeded scope reachable only through
-    //     the artifact/shallow-state path. `shallow_file_state` carries
-    //     that real `whole_hash` for all such scopes;
-    //     `authoritative_current_content_hash` returns `None` for a
-    //     scope with no live scheduler `DerivedRawState`, and lowering
-    //     under an all-zero scope hash would corrupt semantic identity.
-    //
+    //     `TypeExpr` against (built just below) — the lowered value's
+    //     semantic identity.
     //  2. The `MaterializeMemoDb` entry's fact-signature self-root
-    //     (threaded into the write-through, further down). This gates
-    //     view-correct SHARED-cache admission, so it must observe
-    //     through the view-aware `authoritative_current_content_hash`
-    //     oracle: an overlay-bearing `SessionResolverContext` observes
-    //     the overlay content hash, so an overlay-derived memo entry
-    //     roots on the overlay version (a base request mismatches it
-    //     rather than reusing it). When the oracle returns `None` the
-    //     write-through's provenance-pure path refuses shared admission
-    //     — the freshly-computed value is still returned to the caller.
+    //     (threaded into the write-through, further down) — the
+    //     view-correct SHARED-cache admission gate.
     //
-    // Each oracle is read EXACTLY ONCE here. A second, later read of
-    // the authoritative hash would open a publish race: an edit landing
-    // between materialisation and signature-build would root a stale
-    // value by a fresh-looking current hash.
-    let lowering_scope_whole_hash = ctx
-        .shallow_file_state(scope_canonical_id)
-        .map(|state| state.whole_hash)
-        .unwrap_or_default();
-    let observed_scope_whole_hash = ctx.authoritative_current_content_hash(scope_canonical_id);
-    // Pin the scope's `SyntacticExportSet` parse fact to the SAME
-    // observed content version the signature self-root uses
-    // (content-addressed, never re-read from current content). `None`
-    // when the observed version's artifact is not recoverable — the
-    // write-through then refuses shared admission.
-    let observed_scope_syntactic_export_set = observed_scope_whole_hash.and_then(|hash| {
-        crate::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
-            ctx,
-            scope_canonical_id,
-            hash,
-            verter_semantic::facts::FactKey::SyntacticExportSet,
-            verter_semantic::facts::FactLane::Semantic,
-        )
-    });
+    // Sourcing those from two separate oracles (`shallow_file_state`
+    // for the scope id, `authoritative_current_content_hash` for the
+    // signature) tears: an edit landing between the two reads roots a
+    // value lowered under `H1` on a signature self-rooted at `H2`.
+    // `observe_materialize_scope` collapses both onto ONE
+    // `Arc<IndexedReady>`: `whole_hash()` is the single source for both
+    // the lowering scope and the signature self-root, and the pinned
+    // `SyntacticExportSet` parse fact descends from the same artifact.
+    // The observation is view-correct — an overlay-bearing
+    // `SessionResolverContext` pins the overlay `IndexedReady`, so an
+    // overlay-derived memo entry roots on the overlay version (a base
+    // request mismatches it rather than reusing it).
+    let observed_scope = ctx
+        .observe_materialize_scope(scope_canonical_id)
+        .expect("materialize scope must have a real indexed scope identity");
+    let observed_scope_whole_hash = observed_scope.whole_hash();
     let scope = NodeScopeId::File {
         canonical_id: Arc::from(scope_canonical_id),
-        whole_hash: lowering_scope_whole_hash,
+        whole_hash: observed_scope_whole_hash,
         local_scope: None,
     };
     let name_resolution = rustc_hash::FxHashMap::default();
@@ -254,19 +233,15 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
         );
         let host_db = ctx.project_type_store().materialize_memo_db();
         let captured_value = materialized.clone();
-        let captured_canonical = scope_canonical_id.to_string();
-        // Thread the SINGLE view-aware scope-content observation taken
-        // above into the write-through. The signature builder is
-        // provenance-pure: it roots the keyed scope on these observed
-        // values, never on a re-read of current content. The signature
-        // self-root deliberately uses the view-aware
-        // `authoritative_current_content_hash` observation (gating
-        // view-correct shared-cache admission), NOT the
-        // `shallow_file_state` hash the lowering `NodeScopeId` uses —
-        // the two identify different things and are sourced separately.
-        let captured_observed_scope_whole_hash = observed_scope_whole_hash;
-        let captured_observed_scope_syntactic_export_set =
-            observed_scope_syntactic_export_set.clone();
+        // Thread the SINGLE tear-free scope observation taken above into
+        // the write-through. The signature builder is provenance-pure:
+        // it roots the keyed scope on the observation's `whole_hash` and
+        // pinned `SyntacticExportSet` parse fact, never on a re-read of
+        // current content. The lowering `NodeScopeId` was built from the
+        // SAME observation's `whole_hash`, so the memo value and its
+        // fact signature root on one identical scope hash — no torn
+        // read.
+        let captured_scope_observation = observed_scope;
         let _ = host_db.get_or_compute(&arc_key, ctx, move || {
             // The keyed scope canonical is the entry's self-root, rooted
             // on the observed materialisation-time content version;
@@ -275,21 +250,20 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
             // the fact matching its recorded `DepVersion` so an edit to
             // any contributing file invalidates the memo.
             //
-            // `engine_fact_signature_for_materialize_memo` returns
-            // `None` when the observed scope identity cannot be
-            // recovered or when an observed dependency carries a
+            // The scope's `SyntacticExportSet` parse fact rides on the
+            // observation. It is `None` when the observed version's
+            // parse-fact registry is not recoverable; the closure then
+            // `?`-returns `None` so the entry is not admitted to the
+            // shared memo. `engine_fact_signature_for_materialize_memo`
+            // also returns `None` when an observed dependency carries a
             // `RouteGeneration` version (route generation has no real
-            // validating source). On a `None` observation here the
-            // closure `?`-returns `None`, so the entry is not admitted
-            // to the shared memo. The freshly-computed `materialized`
-            // value is still returned to the caller below; only the
-            // shared-cache admission is refused.
-            let observed_scope_whole_hash = captured_observed_scope_whole_hash?;
+            // validating source). On any `None` here the freshly-
+            // computed `materialized` value is still returned to the
+            // caller below; only the shared-cache admission is refused.
             let observed_scope_syntactic_export_set =
-                captured_observed_scope_syntactic_export_set?;
+                captured_scope_observation.syntactic_export_set.clone()?;
             let fact_sig = crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo(
-                captured_canonical.as_str(),
-                observed_scope_whole_hash,
+                &captured_scope_observation,
                 observed_scope_syntactic_export_set,
                 &captured_value.dep_signature,
             )?;

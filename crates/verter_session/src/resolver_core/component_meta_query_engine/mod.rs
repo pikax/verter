@@ -310,21 +310,30 @@ pub(crate) struct ObservedPreparedTypeDecl {
 /// never calls a helper that can re-read current content. Every file
 /// identity it emits is supplied by the caller as an *observed*
 /// value — the content version the materialiser actually worked
-/// against. The publish site observes the scope's content version
-/// exactly once and threads that single observation in here, so the
-/// memo value and its fact signature root on the identical scope
-/// hash.
+/// against.
+///
+/// The scope's content identity arrives as ONE
+/// [`crate::resolver_core::MaterializeScopeObservation`] — a single
+/// `Arc<IndexedReady>`. The keyed-scope `whole_hash` and the keyed-scope
+/// `SyntacticExportSet` parse fact therefore both descend from the same
+/// observation: the builder physically cannot be handed a raw hash
+/// from one source and a parse fact from another. The publish site
+/// builds the value's `NodeScopeId::File` from the same observation's
+/// `whole_hash`, so the memo value and its fact signature root on the
+/// identical scope hash — no torn read.
 ///
 /// Parameters:
 ///
-/// - `scope_canonical_id` — the keyed scope canonical.
-/// - `observed_scope_whole_hash` — the scope's whole hash as observed
-///   at materialisation time (the same hash baked into the value's
-///   `NodeScopeId::File`).
+/// - `observed_scope` — the single tear-free scope observation. Its
+///   [`crate::resolver_core::MaterializeScopeObservation::whole_hash`]
+///   is the keyed-scope self-root hash AND the hash baked into the
+///   value's `NodeScopeId::File`.
 /// - `observed_scope_syntactic_export_set` — the scope's
-///   `SyntacticExportSet` parse fact, pinned to
-///   `observed_scope_whole_hash` (content-addressed at the observed
-///   version, NOT re-read from current content).
+///   `SyntacticExportSet` parse fact, pinned to the observation's
+///   `whole_hash` (the publish closure unwraps it from
+///   `observed_scope.syntactic_export_set` — passing it explicitly
+///   keeps the `None`-refuses-admission control flow at the call
+///   site). A `debug_assert` confirms it agrees with the observation.
 /// - `materialized_dep_signature` — every canonical the materialisation
 ///   walk observed, each tagged with the
 ///   [`crate::semantic_query::DepVersion`] the materialiser recorded.
@@ -343,10 +352,10 @@ pub(crate) struct ObservedPreparedTypeDecl {
 /// freshly-computed `MaterializedTypeExpr`. `None` is returned when:
 ///
 /// - `observed_scope_syntactic_export_set` is a `Parse` fact for a
-///   canonical other than `scope_canonical_id` (caller-supplied
+///   canonical other than the observed scope (caller-supplied
 ///   observation does not describe the keyed scope), or
 /// - an observed dependency names the scope canonical with a
-///   `WholeHash` that disagrees with `observed_scope_whole_hash` (a
+///   `WholeHash` that disagrees with the observation's `whole_hash` (a
 ///   torn / mixed observation of the scope), or
 /// - an observed dependency carries a `RouteGeneration` version (see
 ///   below).
@@ -357,7 +366,7 @@ pub(crate) struct ObservedPreparedTypeDecl {
 ///   that file's content version. The OBSERVED hash is preserved
 ///   verbatim in the emitted `FileWholeHash`. A dependency entry that
 ///   names the scope itself is collapsed onto the scope self-root: it
-///   must agree with `observed_scope_whole_hash` or admission is
+///   must agree with the observation's `whole_hash` or admission is
 ///   refused.
 /// - `DepVersion::ProjectGeneration(observed)` — the materialiser
 ///   observed the project-wide resolver/config/lib generation, not
@@ -375,13 +384,22 @@ pub(crate) struct ObservedPreparedTypeDecl {
 ///   admitted to the shared `MaterializeMemoDb` until route generation
 ///   has a real validating source.
 pub(crate) fn engine_fact_signature_for_materialize_memo(
-    scope_canonical_id: &str,
-    observed_scope_whole_hash: crate::resolver_core::ResolverHash16,
+    observed_scope: &crate::resolver_core::MaterializeScopeObservation,
     observed_scope_syntactic_export_set: crate::resolver_core::ParseFactRef,
     materialized_dep_signature: &crate::semantic_query::DepSignature,
 ) -> Option<std::sync::Arc<[crate::resolver_core::FactVersionRef]>> {
     use crate::resolver_core::FactVersionRef;
     use crate::semantic_query::DepVersion;
+
+    let scope_canonical_id = observed_scope.canonical_id.as_ref();
+    let observed_scope_whole_hash = observed_scope.whole_hash();
+    // The observation carries one `Arc<IndexedReady>`; its top-level
+    // `whole_hash` and its `shallow_state.whole_hash` are the same
+    // parse by construction (`FileArtifactStore` is content-addressed).
+    debug_assert_eq!(
+        observed_scope.indexed.shallow_state.whole_hash, observed_scope_whole_hash,
+        "MaterializeScopeObservation must carry one internally-consistent IndexedReady",
+    );
 
     if observed_scope_syntactic_export_set.canonical_id.as_str() != scope_canonical_id {
         return None;
