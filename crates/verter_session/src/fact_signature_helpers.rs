@@ -679,6 +679,52 @@ impl ReadSetSignature {
             && ctx.validate_dep_signature(&self.legacy)
     }
 
+    /// Whether [`Self::validate_with_self_roots`] would actually
+    /// **discriminate by view** for `self_root_canonicals` — i.e.
+    /// whether the carrier carries at least one self-root fact that the
+    /// strict validator routes through
+    /// [`crate::resolver_core::StoreView::validates_self_root_whole_hash`].
+    ///
+    /// `validate_with_self_roots` only rejects a cross-view reuse when a
+    /// `FileWholeHash` whose canonical is listed in
+    /// `self_root_canonicals` mismatches the live store view. Every
+    /// other fact — an empty fact rail, a `FileWholeHash` for a
+    /// non-listed cross-file *dependency*, a `ProjectGeneration` rail —
+    /// routes through the lazy / permissive path, which an unrelated
+    /// overlay validates **vacuously**. So a carrier whose `facts` hold
+    /// no `FileWholeHash` for any listed self-root canonical cannot
+    /// discriminate a follower running under a different overlay: the
+    /// validation passes regardless of the follower's view.
+    ///
+    /// Returns `true` iff at least one `FileWholeHash` fact in `facts`
+    /// has a canonical that appears in `self_root_canonicals`. An
+    /// overflow carrier never carries a self-root (`facts` is empty),
+    /// an empty `self_root_canonicals` slice can never match, and a
+    /// synthetic empty-fact carrier holds no `FileWholeHash` at all —
+    /// all three return `false`.
+    ///
+    /// The in-flight joiner gate uses this to refuse cross-view reuse
+    /// of a non-cacheable (`cache_suppress`) winner whose carrier could
+    /// only ever validate vacuously: such a winner's
+    /// `validate_with_self_roots` is not a real view check, so a
+    /// follower under a different overlay must fork rather than coalesce
+    /// onto the winner's view-specific result.
+    #[inline]
+    pub(crate) fn has_view_discriminating_self_root(
+        &self,
+        self_root_canonicals: &[Arc<str>],
+    ) -> bool {
+        if self_root_canonicals.is_empty() {
+            return false;
+        }
+        self.facts.iter().any(|fact| match fact {
+            FactVersionRef::FileWholeHash { canonical_id, .. } => self_root_canonicals
+                .iter()
+                .any(|root| root.as_ref() == canonical_id.as_str()),
+            _ => false,
+        })
+    }
+
     /// Bubble the path-precise fact set into every active outer
     /// tracer on the current TLS stack. No-op when the tracer stack
     /// is empty or `facts` is empty. The legacy rail is the

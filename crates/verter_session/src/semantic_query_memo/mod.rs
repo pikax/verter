@@ -1862,6 +1862,34 @@ impl SemanticGraphStore {
                 // tracks) the follower MUST NOT return the winner's
                 // node: it forks and cold-recomputes for its own view.
                 //
+                // Suppressed-winner exception. The validation above
+                // only DISCRIMINATES by view when the carrier carries a
+                // `FileWholeHash` self-root listed in
+                // `winner_self_roots` — that fact routes through the
+                // strict `validates_self_root_whole_hash`. A
+                // `cache_suppress` winner has no such fact: a tracer
+                // overflow yields a synthetic empty-fact carrier, and an
+                // unrootable build (`semantic_graph_read_set_signature`
+                // returned `None`) carries only cross-file *dependency*
+                // facts with an EMPTY `winner_self_roots`. Both validate
+                // VACUOUSLY against any follower's `ctx` — the strict
+                // arm never fires — so the gate above would coalesce a
+                // follower in a different overlay onto the suppressed
+                // winner's view-specific result. `cache_suppress` blocks
+                // memo insertion but NOT in-flight reuse; a non-cacheable
+                // winner whose carrier cannot view-validate must force
+                // every joiner to recompute for its own view. The
+                // winner itself, and a same-thread direct caller, still
+                // receive the suppressed result — only a cross-thread
+                // joiner under a possibly-different overlay is forked.
+                //
+                // A `cache_suppress` winner that DOES carry a real,
+                // view-discriminating self-root (a `FileWholeHash`
+                // listed in `winner_self_roots`) is left to the ordinary
+                // `validate_with_self_roots` gate: a genuine same-view
+                // joiner of such a winner still coalesces and inherits
+                // `cache_suppress`.
+                //
                 // The fork removes the stale completed in-flight entry
                 // (iff it is still the SAME `Arc` the follower joined —
                 // a `ptr_eq` check; a third thread may already have
@@ -1874,7 +1902,11 @@ impl SemanticGraphStore {
                 // `ctx`) also misses the winner's published entry, so
                 // the follower runs its own cold build.
                 if let Some(ref carrier) = graph_carrier {
-                    if !carrier.validate_with_self_roots(ctx, &winner_self_roots) {
+                    let carrier_view_validates =
+                        carrier.validate_with_self_roots(ctx, &winner_self_roots);
+                    let suppressed_without_self_root = cache_suppress
+                        && !carrier.has_view_discriminating_self_root(&winner_self_roots);
+                    if !carrier_view_validates || suppressed_without_self_root {
                         self.stats
                             .joiner_view_mismatch_forks
                             .fetch_add(1, Ordering::Relaxed);

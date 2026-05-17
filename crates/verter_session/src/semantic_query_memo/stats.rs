@@ -72,12 +72,17 @@ pub(super) struct AtomicSemanticGraphStats {
     pub(super) waits_ms: AtomicU64,
     pub(super) joined_waits: AtomicU64,
     pub(super) inflight_aborted_retries: AtomicU64,
-    /// Number of cooperative joiners that woke from the condvar,
-    /// found the winner's carrier did NOT validate against their own
-    /// `ctx` (the winner ran under a different overlay / view), and
+    /// Number of cooperative joiners that woke from the condvar and
     /// forked to a cold recompute rather than reusing the winner's
-    /// view-mismatched result. A view-validated coalesce does not
-    /// bump this counter; only a fork does.
+    /// result. A fork happens in two cases: the winner's carrier did
+    /// NOT validate against the joiner's own `ctx` (the winner ran
+    /// under a different overlay / view); or the winner was
+    /// `cache_suppress` and its carrier carries no view-discriminating
+    /// self-root (a tracer-overflow synthetic empty-fact carrier or an
+    /// unrootable build with an empty self-root set), so its carrier
+    /// could only ever validate vacuously and is unsafe to reuse
+    /// cross-view. A view-validated coalesce does not bump this
+    /// counter; only a fork does.
     pub(super) joiner_view_mismatch_forks: AtomicU64,
     pub(super) cold_aborts_swept: AtomicU64,
     pub(super) origin_edges_emitted: AtomicU64,

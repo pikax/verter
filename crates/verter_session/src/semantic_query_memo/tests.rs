@@ -3693,16 +3693,17 @@ fn joiner_outer_tracer_contains_winner_carrier_fact() {
 }
 
 /// Discriminating test: a cross-thread joiner of a **`cache_suppress`**
-/// (non-cacheable) winner still inherits the winner's carrier facts AND
-/// the winner's `cache_suppress` flag.
+/// (non-cacheable) winner that legitimately coalesces — the winner and
+/// follower run under the SAME view and the winner's carrier carries a
+/// real, view-discriminating self-root — still inherits the winner's
+/// carrier facts AND the winner's `cache_suppress` flag.
 ///
 /// The winner's cold build returns a [`QueryBuildOutput`] with
 /// `cache_suppress == true` and a `graph_carrier` carrying one
-/// `FileWholeHash` fact — exactly the shape
-/// `finalise_traced_build_output` produces on its `Ok(traced)→None`
-/// suppress path (a torn / unrootable build whose traced cross-file deps
-/// are still valid). The memo refuses to admit the entry (suppression),
-/// but the broadcast to joiners MUST still carry the build's
+/// `FileWholeHash` self-root for the keyed canonical at its real base
+/// hash — plus the matching `self_root_canonicals` entry. The memo
+/// refuses to admit the entry (suppression), but the broadcast to a
+/// joiner that legitimately coalesces MUST still carry the build's
 /// dependency + suppression state:
 ///
 /// - The joiner thread's outer tracer MUST finalise containing the
@@ -3721,35 +3722,72 @@ fn joiner_outer_tracer_contains_winner_carrier_fact() {
 /// `state.cache_suppress`, so the joiner bubbles the fact and returns
 /// `cache_suppress: true`. The winner's memo entry is still NOT
 /// admitted (`cache_suppress` gates `warm_publish_one`).
+///
+/// This case keeps the fix-4 invariant — `cache_suppress` propagates to
+/// a joiner that *legitimately* coalesces — under the fix-8 joiner
+/// gate. Because the winner carries a real, view-discriminating
+/// self-root (`/suppress_joiner/keyed.ts` at its base hash), the
+/// follower's `validate_with_self_roots` genuinely passes under its
+/// identical view and the suppressed-no-self-root fork (see
+/// [`cross_view_joiner_of_suppressed_no_self_root_winner_forks`]) does
+/// NOT fire. A `cache_suppress` winner with a real self-root is left to
+/// the ordinary view-validation gate; only a suppressed winner whose
+/// carrier could ONLY validate vacuously is force-forked.
 #[test]
 fn joiner_of_cache_suppress_winner_inherits_carrier_and_suppression() {
     use crate::resolver_core::{FactReadSetFinalise, FactVersionRef};
+    use crate::{FileKind, UpsertRequest};
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
 
+    // A real keyed file gives the carrier a tracked self-root the
+    // follower's view can strictly validate — the winner therefore
+    // remains a *legitimate* same-view coalesce post-fix-8.
+    let keyed_canonical = "/suppress_joiner/keyed.ts";
+    let host = ctx_host();
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some(keyed_canonical.to_string()),
+            input_id: keyed_canonical.to_string(),
+            source: Arc::from("export interface Target { base: number; }\n"),
+            file_kind: FileKind::from_path(keyed_canonical),
+            aliases: Vec::new(),
+        })
+        .expect("upsert of the keyed file succeeds");
+    let base_hash = host
+        .ensure_indexed_ready(keyed_canonical)
+        .expect("keyed-file base IndexedReady must materialise")
+        .whole_hash;
+    let host = Arc::new(host);
+
     let store = Arc::new(SemanticGraphStore::new());
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
-        scope: scope("/suppress_joiner/site.ts"),
+        scope: scope(keyed_canonical),
         name: Arc::from("Target"),
     });
 
-    // The suppressed winner's transitive cross-file dep fact.
+    // The suppressed winner's carrier self-root: a `FileWholeHash` for
+    // the keyed canonical at its real base hash. Listed in
+    // `self_root_canonicals` so it routes through the strict
+    // `validates_self_root_whole_hash` and is genuinely
+    // view-discriminating.
     let winner_fact = FactVersionRef::FileWholeHash {
-        canonical_id: "suppressed_dep.ts".to_string(),
-        hash: [0x5cu8; 16],
+        canonical_id: keyed_canonical.to_string(),
+        hash: base_hash,
     };
 
     let (tx_winner_in_build, rx_winner_in_build) = mpsc::channel::<()>();
     let (tx_release_winner, rx_release_winner) = mpsc::channel::<()>();
 
     let winner_store = Arc::clone(&store);
+    let winner_host = Arc::clone(&host);
     let winner_key = key.clone();
     let winner_fact_for_build = winner_fact.clone();
     let winner = thread::spawn(move || {
-        let host = ctx_host();
+        let host: &dyn crate::resolver_core::ResolverContext = winner_host.as_ref();
         winner_store.execute_cooperative(
-            &host,
+            host,
             winner_key,
             || winner_store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
             || {
@@ -3762,12 +3800,13 @@ fn joiner_of_cache_suppress_winner_inherits_carrier_and_suppression() {
                 let id =
                     winner_store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
                 // A non-cacheable build that still carries valid traced
-                // cross-file deps: `cache_suppress == true` AND a
-                // populated `graph_carrier`. This is the shape
-                // `finalise_traced_build_output` emits when
-                // `semantic_graph_read_set_signature` returns `None`
-                // (e.g. a torn self-root observation) yet the traced
-                // fact set is intact.
+                // deps AND a real view-discriminating self-root:
+                // `cache_suppress == true`, a populated `graph_carrier`,
+                // and a non-empty `self_root_canonicals`. This is the
+                // shape `finalise_traced_build_output` emits when the
+                // build is suppressed for a non-self-root reason (an
+                // unvalidatable legacy dep) yet the self-root
+                // observation is intact.
                 let carrier = crate::fact_signature_helpers::ReadSetSignature::new(
                     Arc::from(vec![winner_fact_for_build.clone()]),
                     Arc::from(Vec::new().into_boxed_slice()),
@@ -3779,7 +3818,7 @@ fn joiner_of_cache_suppress_winner_inherits_carrier_and_suppression() {
                     cache_suppress: true,
                     observed_self_roots: Vec::new(),
                     graph_carrier: Some(Box::new(carrier)),
-                    self_root_canonicals: Arc::from([]),
+                    self_root_canonicals: Arc::from([Arc::<str>::from(keyed_canonical)]),
                     pending_prefix_backfills: Vec::new(),
                 }
             },
@@ -3789,15 +3828,17 @@ fn joiner_of_cache_suppress_winner_inherits_carrier_and_suppression() {
     rx_winner_in_build.recv().expect("winner entered build");
 
     let joiner_store = Arc::clone(&store);
+    let joiner_host = Arc::clone(&host);
     let joiner_key = key.clone();
     let joiner = thread::spawn(move || {
-        let host = ctx_host();
+        // SAME view as the winner — the plain base host context.
+        let host: &crate::VerterHost = joiner_host.as_ref();
         // Outer tracer scope spans the whole dispatch so the
         // joiner-bubble target is the cell the joiner returns into.
         let (joiner_suppress, finalise) =
-            crate::fact_signature_helpers::install_fact_tracer(&host, || {
+            crate::fact_signature_helpers::install_fact_tracer(host, || {
                 let cache_read = joiner_store.execute_cooperative(
-                    &host,
+                    host,
                     joiner_key,
                     || joiner_store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
                     || {
@@ -4274,5 +4315,483 @@ fn same_view_joiner_still_coalesces_onto_winner() {
              — a legitimate coalesce returns the winner's result.",
         ),
         other => panic!("follower: expected the winner's Value, got {other:?}"),
+    }
+}
+
+/// Discriminating test: a cross-thread joiner that coalesced onto an
+/// in-flight **`cache_suppress`** winner produced by a **tracer
+/// overflow** does NOT receive the winner's node — it forks and
+/// cold-recomputes for its own view.
+///
+/// Codex P2 (fix round 8): the fix-round-7 joiner gate validates
+/// "whatever carrier was stored" against the follower's `ctx`. But a
+/// `cache_suppress` winner from a tracer overflow has no bounded fact
+/// list — `finalise_traced_build_output`'s `Overflow` arm leaves
+/// `graph_carrier` unset, and `execute_cooperative` broadcasts a
+/// SYNTHETIC empty-fact carrier (`ReadSetSignature::new(empty_fact_…,
+/// dep_signature)`). An empty-fact carrier with no self-roots validates
+/// VACUOUSLY against ANY follower's `ctx` — the strict
+/// `validates_self_root_whole_hash` arm never fires. So pre-fix-8 a
+/// follower running under a DIFFERENT session overlay coalesces onto
+/// the suppressed winner's view-specific result instead of forking.
+/// `cache_suppress` blocks memo insertion but NOT in-flight reuse.
+///
+/// Setup mirrors
+/// [`cross_view_joiner_forks_when_winner_carrier_fails_follower_validation`]:
+/// a real `/p2_8_overflow/keyed.ts` is upserted; the winner runs under
+/// the base host and returns a `QueryBuildOutput` with
+/// `cache_suppress == true` and `graph_carrier == None` — the exact
+/// shape the overflow arm yields (the cold-winner path then broadcasts
+/// the synthetic empty-fact carrier). The follower runs the SAME key
+/// under a `SessionResolverContext` whose `OverlaidViewRef` overlays the
+/// keyed file with a DIFFERENT content hash.
+///
+/// Discrimination property:
+/// - Pre-fix-8: the empty-fact carrier validates vacuously under the
+///   follower's overlay view; the follower coalesces and its build
+///   closure NEVER runs (`follower_cold_ran == false`).
+/// - Post-fix-8: the joiner gate sees `cache_suppress == true` and
+///   `has_view_discriminating_self_root == false` (no self-root fact at
+///   all) and force-forks; the follower's build closure runs
+///   (`follower_cold_ran == true`) and the follower returns its OWN
+///   recompute node.
+#[test]
+fn cross_view_joiner_of_suppressed_overflow_winner_forks() {
+    use crate::resolver_core::SessionResolverContext;
+    use crate::session_view::OverlaidViewRef;
+    use crate::{FileKind, UpsertRequest};
+    use rustc_hash::FxHashMap;
+    use std::collections::HashSet;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    let keyed_canonical = "/p2_8_overflow/keyed.ts";
+    let host = ctx_host();
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some(keyed_canonical.to_string()),
+            input_id: keyed_canonical.to_string(),
+            source: Arc::from("export interface Keyed { base: number; }\n"),
+            file_kind: FileKind::from_path(keyed_canonical),
+            aliases: Vec::new(),
+        })
+        .expect("upsert of the keyed file succeeds");
+    let base_hash = host
+        .ensure_indexed_ready(keyed_canonical)
+        .expect("keyed-file base IndexedReady must materialise")
+        .whole_hash;
+    let host = Arc::new(host);
+
+    let store = Arc::new(SemanticGraphStore::new());
+    let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        scope: scope(keyed_canonical),
+        name: Arc::from("Keyed"),
+    });
+
+    let (tx_winner_in_build, rx_winner_in_build) = mpsc::channel::<()>();
+    let (tx_release_winner, rx_release_winner) = mpsc::channel::<()>();
+
+    // Intern the winner's result node up front so the follower's
+    // negative assertions can name the exact (view-specific) node the
+    // follower must NOT return or cache.
+    let winner_node = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let winner_store = Arc::clone(&store);
+    let winner_host = Arc::clone(&host);
+    let winner_key = key.clone();
+    let winner = thread::spawn(move || {
+        let host: &dyn crate::resolver_core::ResolverContext = winner_host.as_ref();
+        winner_store.execute_cooperative(
+            host,
+            winner_key,
+            || winner_store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || {
+                tx_winner_in_build
+                    .send(())
+                    .expect("winner: signal in-build");
+                rx_release_winner
+                    .recv()
+                    .expect("winner: released by driver");
+                // The tracer-overflow shape: `cache_suppress == true`,
+                // `graph_carrier == None`. `finalise_traced_build_output`
+                // emits exactly this on `FactReadSetFinalise::Overflow`;
+                // the cold-winner path then broadcasts the SYNTHETIC
+                // empty-fact carrier with no self-root.
+                crate::project_semantic_dispatch::walk::QueryBuildOutput {
+                    result: QueryResult::Value(winner_node),
+                    dep_signature: Arc::from(Vec::new().into_boxed_slice()),
+                    walker_diagnostics: Vec::new(),
+                    cache_suppress: true,
+                    observed_self_roots: Vec::new(),
+                    graph_carrier: None,
+                    self_root_canonicals: Arc::from([]),
+                    pending_prefix_backfills: Vec::new(),
+                }
+            },
+        )
+    });
+
+    rx_winner_in_build.recv().expect("winner entered build");
+
+    let follower_cold_ran = Arc::new(AtomicBool::new(false));
+    let follower_store = Arc::clone(&store);
+    let follower_host = Arc::clone(&host);
+    let follower_key = key.clone();
+    let follower_cold_flag = Arc::clone(&follower_cold_ran);
+    let follower = thread::spawn(move || {
+        // Overlay the keyed canonical with a different content hash so
+        // the follower runs under a genuinely DIFFERENT view than the
+        // winner. The winner's value was computed under the base view;
+        // its non-cacheable result is NOT interchangeable.
+        let overlay_hash: crate::types::Hash16 = [0xA5u8; 16];
+        assert_ne!(
+            overlay_hash, base_hash,
+            "fixture invariant: the overlay hash must differ from the base hash",
+        );
+        let mut overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();
+        overlays.insert(
+            keyed_canonical.to_string(),
+            Arc::from("export interface Keyed { overlaid: string; }\n"),
+        );
+        let mut overlay_hashes: FxHashMap<String, crate::types::Hash16> = FxHashMap::default();
+        overlay_hashes.insert(keyed_canonical.to_string(), overlay_hash);
+        let tombstones: HashSet<String> = HashSet::new();
+        let view = OverlaidViewRef::new(
+            follower_host.as_ref(),
+            &overlays,
+            &overlay_hashes,
+            &tombstones,
+        );
+        let session_ctx = SessionResolverContext::new(follower_host.as_ref(), &view);
+        let recompute_id =
+            follower_store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let cache_read = follower_store.execute_cooperative(
+            &session_ctx,
+            follower_key,
+            || follower_store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || {
+                follower_cold_flag.store(true, Ordering::SeqCst);
+                (
+                    QueryResult::Value(recompute_id),
+                    Arc::from(Vec::new().into_boxed_slice()),
+                )
+            },
+        );
+        (cache_read.value, recompute_id)
+    });
+
+    thread::sleep(Duration::from_millis(80));
+    tx_release_winner.send(()).expect("release winner");
+
+    let _winner_read = winner.join().expect("winner joined");
+    let (follower_value, follower_recompute) = follower.join().expect("follower joined");
+
+    let snap = store.stats_snapshot();
+    assert!(
+        snap.joined_waits >= 1,
+        "the follower MUST have hit the cooperative wait branch \
+         (joined_waits={}); if this fails the follower never coalesced \
+         onto the winner's flight and the test does not exercise the \
+         cross-view join path at all.",
+        snap.joined_waits,
+    );
+
+    assert!(
+        follower_cold_ran.load(Ordering::SeqCst),
+        "the follower coalesced onto an in-flight `cache_suppress` \
+         winner produced by a tracer overflow. The overflow winner \
+         broadcasts a SYNTHETIC empty-fact carrier with no self-root, \
+         which validates VACUOUSLY against any view — so the follower \
+         MUST be force-forked and cold-recompute for its own overlay \
+         view. Pre-fix-8 the joiner gate validated the empty carrier \
+         vacuously and coalesced the follower onto the winner's \
+         view-specific suppressed result; the follower's build closure \
+         never ran (codex P2 fix round 8).",
+    );
+
+    assert_ne!(
+        winner_node, follower_recompute,
+        "fixture invariant: the winner's node and the follower's \
+         recompute node must be distinct ids so the assertions below \
+         genuinely discriminate.",
+    );
+    match follower_value {
+        QueryResult::Value(node) => {
+            assert_eq!(
+                node, follower_recompute,
+                "the follower's result MUST be its OWN recompute node — \
+                 the suppressed winner's node was computed against a \
+                 different overlay and is not interchangeable.",
+            );
+            assert_ne!(
+                node, winner_node,
+                "the follower MUST NOT receive the suppressed winner's \
+                 view-specific node.",
+            );
+        }
+        other => panic!("follower: expected the recomputed Value, got {other:?}"),
+    }
+
+    // The suppressed winner's view-specific node must never reach a
+    // warm cache entry. After the fork the follower's OWN (non-
+    // suppressed) recompute publishes a `MemoEntry` — that is correct;
+    // the discriminating negative is that the cached node is the
+    // follower's recompute, NOT the winner's suppressed node.
+    if let Some(cached) = store.get_unvalidated(&key) {
+        match cached.value {
+            QueryResult::Value(node) => assert_ne!(
+                node, winner_node,
+                "the suppressed winner's view-specific node must never \
+                 be promoted to a warm cache entry — `cache_suppress` \
+                 gates memo admission.",
+            ),
+            other => panic!("unexpected cached value shape: {other:?}"),
+        }
+    }
+}
+
+/// Discriminating test: a cross-thread joiner that coalesced onto an
+/// in-flight **`cache_suppress`** winner produced by an **unrootable
+/// build** (`semantic_graph_read_set_signature` returned `None`) does
+/// NOT receive the winner's node — it forks and cold-recomputes for its
+/// own view.
+///
+/// Codex P2 (fix round 8): the `Ok(traced)→None` suppress arm of
+/// `finalise_traced_build_output` carries the build's traced cross-file
+/// *dependency* facts on a non-admitted carrier but leaves
+/// `self_root_canonicals` EMPTY (the build could not be soundly
+/// self-rooted). The fix-round-7 joiner gate's
+/// `validate_with_self_roots` then routes every `FileWholeHash` in the
+/// carrier through the LAZY `validates` (none is a listed self-root),
+/// whose untracked-file arm optimistically accepts — so the carrier
+/// validates against ANY follower's `ctx`. Pre-fix-8 a follower under a
+/// different overlay coalesces onto the suppressed winner's
+/// view-specific result.
+///
+/// Setup: a real `/p2_8_unrootable/keyed.ts` is upserted; the winner
+/// runs under the base host and returns a `QueryBuildOutput` with
+/// `cache_suppress == true`, a `graph_carrier` carrying ONE
+/// `FileWholeHash` for an unrelated cross-file *dependency*
+/// (`/p2_8_unrootable/dep.ts`, never tracked by either host), and an
+/// EMPTY `self_root_canonicals`. The follower runs the SAME key under a
+/// session that overlays the keyed file with a different content hash.
+///
+/// Discrimination property:
+/// - Pre-fix-8: the dependency `FileWholeHash` routes through lazy
+///   `validates` (not a listed self-root), the untracked-file arm
+///   accepts, the legacy rail is empty — the carrier validates
+///   vacuously and the follower coalesces; its build closure NEVER runs
+///   (`follower_cold_ran == false`).
+/// - Post-fix-8: the joiner gate sees `cache_suppress == true` and
+///   `has_view_discriminating_self_root == false` (the carrier holds a
+///   `FileWholeHash`, but its canonical is NOT in the empty
+///   `self_root_canonicals`) and force-forks; the follower's build
+///   closure runs (`follower_cold_ran == true`).
+#[test]
+fn cross_view_joiner_of_suppressed_unrootable_winner_forks() {
+    use crate::fact_signature_helpers::ReadSetSignature;
+    use crate::resolver_core::{FactVersionRef, SessionResolverContext};
+    use crate::session_view::OverlaidViewRef;
+    use crate::{FileKind, UpsertRequest};
+    use rustc_hash::FxHashMap;
+    use std::collections::HashSet;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    let keyed_canonical = "/p2_8_unrootable/keyed.ts";
+    let host = ctx_host();
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some(keyed_canonical.to_string()),
+            input_id: keyed_canonical.to_string(),
+            source: Arc::from("export interface Keyed { base: number; }\n"),
+            file_kind: FileKind::from_path(keyed_canonical),
+            aliases: Vec::new(),
+        })
+        .expect("upsert of the keyed file succeeds");
+    let base_hash = host
+        .ensure_indexed_ready(keyed_canonical)
+        .expect("keyed-file base IndexedReady must materialise")
+        .whole_hash;
+    let host = Arc::new(host);
+
+    let store = Arc::new(SemanticGraphStore::new());
+    let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        scope: scope(keyed_canonical),
+        name: Arc::from("Keyed"),
+    });
+
+    // The suppressed winner's carrier holds ONE cross-file *dependency*
+    // fact — NOT a self-root. `/p2_8_unrootable/dep.ts` is never
+    // upserted, so the lazy `validates` untracked-file arm accepts it
+    // under any view: the carrier cannot discriminate by view.
+    let dep_canonical = "/p2_8_unrootable/dep.ts";
+    let winner_dep_fact = FactVersionRef::FileWholeHash {
+        canonical_id: dep_canonical.to_string(),
+        hash: [0x3cu8; 16],
+    };
+
+    let (tx_winner_in_build, rx_winner_in_build) = mpsc::channel::<()>();
+    let (tx_release_winner, rx_release_winner) = mpsc::channel::<()>();
+
+    // Intern the winner's result node up front so the follower's
+    // negative assertions can name the exact (view-specific) node the
+    // follower must NOT return or cache.
+    let winner_node = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let winner_store = Arc::clone(&store);
+    let winner_host = Arc::clone(&host);
+    let winner_key = key.clone();
+    let winner_dep_fact_for_build = winner_dep_fact.clone();
+    let winner = thread::spawn(move || {
+        let host: &dyn crate::resolver_core::ResolverContext = winner_host.as_ref();
+        winner_store.execute_cooperative(
+            host,
+            winner_key,
+            || winner_store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || {
+                tx_winner_in_build
+                    .send(())
+                    .expect("winner: signal in-build");
+                rx_release_winner
+                    .recv()
+                    .expect("winner: released by driver");
+                // The `Ok(traced)→None` unrootable shape: a non-admitted
+                // carrier carrying only cross-file *dependency* facts,
+                // with an EMPTY `self_root_canonicals` — the build could
+                // not be soundly self-rooted.
+                let carrier = ReadSetSignature::new(
+                    Arc::from(vec![winner_dep_fact_for_build.clone()]),
+                    Arc::from(Vec::new().into_boxed_slice()),
+                );
+                crate::project_semantic_dispatch::walk::QueryBuildOutput {
+                    result: QueryResult::Value(winner_node),
+                    dep_signature: Arc::from(Vec::new().into_boxed_slice()),
+                    walker_diagnostics: Vec::new(),
+                    cache_suppress: true,
+                    observed_self_roots: Vec::new(),
+                    graph_carrier: Some(Box::new(carrier)),
+                    self_root_canonicals: Arc::from([]),
+                    pending_prefix_backfills: Vec::new(),
+                }
+            },
+        )
+    });
+
+    rx_winner_in_build.recv().expect("winner entered build");
+
+    let follower_cold_ran = Arc::new(AtomicBool::new(false));
+    let follower_store = Arc::clone(&store);
+    let follower_host = Arc::clone(&host);
+    let follower_key = key.clone();
+    let follower_cold_flag = Arc::clone(&follower_cold_ran);
+    let follower = thread::spawn(move || {
+        let overlay_hash: crate::types::Hash16 = [0xA5u8; 16];
+        assert_ne!(
+            overlay_hash, base_hash,
+            "fixture invariant: the overlay hash must differ from the base hash",
+        );
+        let mut overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();
+        overlays.insert(
+            keyed_canonical.to_string(),
+            Arc::from("export interface Keyed { overlaid: string; }\n"),
+        );
+        let mut overlay_hashes: FxHashMap<String, crate::types::Hash16> = FxHashMap::default();
+        overlay_hashes.insert(keyed_canonical.to_string(), overlay_hash);
+        let tombstones: HashSet<String> = HashSet::new();
+        let view = OverlaidViewRef::new(
+            follower_host.as_ref(),
+            &overlays,
+            &overlay_hashes,
+            &tombstones,
+        );
+        let session_ctx = SessionResolverContext::new(follower_host.as_ref(), &view);
+        let recompute_id =
+            follower_store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let cache_read = follower_store.execute_cooperative(
+            &session_ctx,
+            follower_key,
+            || follower_store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || {
+                follower_cold_flag.store(true, Ordering::SeqCst);
+                (
+                    QueryResult::Value(recompute_id),
+                    Arc::from(Vec::new().into_boxed_slice()),
+                )
+            },
+        );
+        (cache_read.value, recompute_id)
+    });
+
+    thread::sleep(Duration::from_millis(80));
+    tx_release_winner.send(()).expect("release winner");
+
+    let _winner_read = winner.join().expect("winner joined");
+    let (follower_value, follower_recompute) = follower.join().expect("follower joined");
+
+    let snap = store.stats_snapshot();
+    assert!(
+        snap.joined_waits >= 1,
+        "the follower MUST have hit the cooperative wait branch \
+         (joined_waits={}); if this fails the follower never coalesced \
+         onto the winner's flight and the test does not exercise the \
+         cross-view join path at all.",
+        snap.joined_waits,
+    );
+
+    assert!(
+        follower_cold_ran.load(Ordering::SeqCst),
+        "the follower coalesced onto an in-flight `cache_suppress` \
+         winner whose carrier holds only a cross-file dependency fact \
+         and an EMPTY self-root set. That carrier validates VACUOUSLY \
+         against any view (the dependency `FileWholeHash` routes \
+         through the lazy untracked-file-accepting `validates`), so the \
+         follower MUST be force-forked and cold-recompute for its own \
+         overlay view. Pre-fix-8 the joiner gate validated the \
+         self-root-less carrier vacuously and coalesced the follower \
+         onto the winner's view-specific suppressed result; the \
+         follower's build closure never ran (codex P2 fix round 8).",
+    );
+
+    assert_ne!(
+        winner_node, follower_recompute,
+        "fixture invariant: the winner's node and the follower's \
+         recompute node must be distinct ids so the assertions below \
+         genuinely discriminate.",
+    );
+    match follower_value {
+        QueryResult::Value(node) => {
+            assert_eq!(
+                node, follower_recompute,
+                "the follower's result MUST be its OWN recompute node — \
+                 the suppressed winner's node was computed against a \
+                 different overlay and is not interchangeable.",
+            );
+            assert_ne!(
+                node, winner_node,
+                "the follower MUST NOT receive the suppressed winner's \
+                 view-specific node.",
+            );
+        }
+        other => panic!("follower: expected the recomputed Value, got {other:?}"),
+    }
+
+    // The suppressed winner's view-specific node must never reach a
+    // warm cache entry. After the fork the follower's OWN (non-
+    // suppressed) recompute publishes a `MemoEntry` — that is correct;
+    // the discriminating negative is that the cached node is the
+    // follower's recompute, NOT the winner's suppressed node.
+    if let Some(cached) = store.get_unvalidated(&key) {
+        match cached.value {
+            QueryResult::Value(node) => assert_ne!(
+                node, winner_node,
+                "the suppressed winner's view-specific node must never \
+                 be promoted to a warm cache entry — `cache_suppress` \
+                 gates memo admission.",
+            ),
+            other => panic!("unexpected cached value shape: {other:?}"),
+        }
     }
 }
