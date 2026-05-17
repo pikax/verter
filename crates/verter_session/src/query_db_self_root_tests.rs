@@ -4243,3 +4243,184 @@ fn materialize_memo_publish_site_degrades_on_none_scope_observation() {
          shared-cache admission is skipped to avoid a mis-rooted entry",
     );
 }
+
+// ---------------------------------------------------------------------------
+// Cooperative-admission joiner view-validation — cache-level discriminator.
+// ---------------------------------------------------------------------------
+
+/// Cache-level cross-view discriminator through `ImportedRegistryDb`.
+///
+/// `ImportedRegistryDb::get_or_compute_admit` routes through the
+/// `cooperative_admit_with_post_publish` substrate. The substrate's
+/// single-flight coalesces concurrent cold misses for the same key —
+/// but two requests carrying the same key can run under different
+/// views (a base context and a session/overlay context). Their
+/// resolved-import results are NOT interchangeable: each must validate
+/// the entry's `fact_dep_signature` against its OWN content identity,
+/// exactly as a warm hit does.
+///
+/// Setup: a real file is upserted, giving it a base content hash. The
+/// winner runs `get_or_compute_admit` under the base host context and
+/// publishes a `Cacheable` entry whose `fact_dep_signature` self-roots
+/// the keyed canonical at its BASE hash — so the winner's own
+/// `revalidate_after_compute` (base view) accepts it and the entry
+/// lands in the map. The follower runs the SAME key under a
+/// `SessionResolverContext` whose overlay re-roots the keyed canonical
+/// to a DIFFERENT content hash. The follower coalesces onto the
+/// winner's flight, wakes onto the published entry, and runs
+/// `ImportedRegistryDb`'s `validate` closure against its OWN overlay
+/// view.
+///
+/// Discrimination:
+/// - Pre-fix: the cooperative joiner ran `project` (NOT `validate`) on
+///   the winner's published entry — no view check — so the follower
+///   inherited the winner's base-rooted symbol and its own cold
+///   closure never ran (`follower_cold_ran == false`).
+/// - Post-fix: the joiner runs `ImportedRegistryDb`'s `validate`
+///   closure; the base-rooted self-root mismatches the follower's
+///   overlay hash, `validate` returns `None`, the follower forks and
+///   cold-recomputes for its own view (`follower_cold_ran == true`),
+///   returning its OWN symbol.
+#[test]
+fn imported_registry_cooperative_joiner_validates_against_follower_view() {
+    use crate::resolver_core::SessionResolverContext;
+    use crate::session_view::{OverlaidView, SessionView};
+    use rustc_hash::FxHashMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    let canonical = "/coop_xview/imported.ts";
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert(
+        &host,
+        canonical,
+        "export interface Probe { base: number; }\n",
+    );
+    let base_hash = host
+        .ensure_indexed_ready(canonical)
+        .expect("base IndexedReady materialises")
+        .whole_hash;
+    let host = Arc::new(host);
+
+    // The winner's published entry self-roots the keyed canonical at
+    // its BASE content hash — so the winner's own
+    // `revalidate_after_compute` (run under the base view) accepts the
+    // entry and it is admitted into the map.
+    let base_self_root: Arc<[FactVersionRef]> = Arc::from(vec![FactVersionRef::FileWholeHash {
+        canonical_id: canonical.to_string(),
+        hash: base_hash,
+    }]);
+
+    let db_handle = Arc::clone(&host);
+    let key: (Arc<str>, Arc<str>) = (Arc::<str>::from(canonical), Arc::<str>::from("Probe"));
+
+    let (tx_winner_in_compute, rx_winner_in_compute) = mpsc::channel::<()>();
+    let (tx_release_winner, rx_release_winner) = mpsc::channel::<()>();
+
+    // Winner thread — runs under the base host context.
+    let winner_host = Arc::clone(&db_handle);
+    let winner_key = key.clone();
+    let winner_self_root = Arc::clone(&base_self_root);
+    let winner = thread::spawn(move || {
+        let ctx: &dyn ResolverContext = winner_host.as_ref();
+        let db = winner_host.project_type_store().imported_registry_db();
+        db.get_or_compute_admit(&winner_key, ctx, || {
+            tx_winner_in_compute.send(()).expect("winner: signal claim");
+            rx_release_winner
+                .recv()
+                .expect("winner: released by driver");
+            crate::cooperative_admission::ComputeAdmission::Cacheable(
+                crate::component_meta_caches::ImportedRegistryEntry {
+                    value: Some(Arc::new(imported_symbol(canonical, "winner-base"))),
+                    fact_dep_signature: Arc::clone(&winner_self_root),
+                },
+            )
+        })
+    });
+
+    rx_winner_in_compute
+        .recv()
+        .expect("winner entered compute (claimed the inflight slot)");
+
+    // Follower thread — runs under a session whose overlay re-roots the
+    // keyed canonical to a DIFFERENT content hash, so the winner's
+    // base-rooted entry must not validate under the follower's view.
+    let follower_cold_ran = Arc::new(AtomicBool::new(false));
+    let follower_host = Arc::clone(&db_handle);
+    let follower_key = key.clone();
+    let follower_cold_flag = Arc::clone(&follower_cold_ran);
+    let follower = thread::spawn(move || {
+        // Overlay re-roots the keyed canonical: a different source body
+        // yields a different overlay content hash.
+        let overlay_source: Arc<str> = Arc::from("export interface Probe { overlaid: string; }\n");
+        let mut overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();
+        overlays.insert(canonical.to_string(), Arc::clone(&overlay_source));
+        let view = OverlaidView::new(Arc::clone(&follower_host), overlays);
+        let overlay_hash = view
+            .overlay_content_hash_for(canonical)
+            .expect("overlay content hash present");
+        assert_ne!(
+            overlay_hash, base_hash,
+            "fixture invariant: the overlay hash must differ from the base hash",
+        );
+        follower_host
+            .materialize_overlay_indexed_ready(canonical, &overlay_source, overlay_hash)
+            .expect("overlay IndexedReady materialises");
+        let session_ctx = SessionResolverContext::new(&follower_host, &view);
+        let db = follower_host.project_type_store().imported_registry_db();
+        db.get_or_compute_admit(&follower_key, &session_ctx, || {
+            follower_cold_flag.store(true, Ordering::SeqCst);
+            crate::cooperative_admission::ComputeAdmission::Cacheable(
+                crate::component_meta_caches::ImportedRegistryEntry {
+                    value: Some(Arc::new(imported_symbol(canonical, "follower-overlay"))),
+                    fact_dep_signature: Arc::from(vec![FactVersionRef::FileWholeHash {
+                        canonical_id: canonical.to_string(),
+                        hash: overlay_hash,
+                    }]),
+                },
+            )
+        })
+    });
+
+    // Give the follower time to reach the cooperative wait branch
+    // BEFORE the winner publishes — this forces a real coalesce onto
+    // the winner's in-flight slot.
+    thread::sleep(Duration::from_millis(80));
+    tx_release_winner.send(()).expect("release winner");
+
+    let winner_result = winner.join().expect("winner joined");
+    let follower_result = follower.join().expect("follower joined");
+
+    // The winner ran under the base view and resolves its own symbol.
+    assert_eq!(
+        winner_result.flatten().map(|s| s.exported_name.clone()),
+        Some("winner-base".to_string()),
+        "the winner resolves its own base-view symbol",
+    );
+
+    // Discriminator: pre-fix the cooperative joiner ran `project` on the
+    // winner's published entry with no view check, so the follower
+    // never ran its own cold closure. Post-fix the joiner runs
+    // `ImportedRegistryDb`'s `validate` closure; the winner's
+    // base-rooted self-root mismatches the follower's overlay hash, so
+    // `validate` returns `None` and the follower forks.
+    assert!(
+        follower_cold_ran.load(Ordering::SeqCst),
+        "ImportedRegistryDb's cooperative joiner MUST run the cache's \
+         `validate` closure against the follower's OWN overlay view — \
+         the winner's entry self-roots the keyed canonical at the BASE \
+         hash and must not validate under the follower's overlay view, \
+         so the follower MUST fork and cold-recompute. Pre-fix the \
+         joiner ran `project` (no view check) and inherited the winner's \
+         base-rooted symbol without recomputing.",
+    );
+    assert_eq!(
+        follower_result.flatten().map(|s| s.exported_name.clone()),
+        Some("follower-overlay".to_string()),
+        "the follower's resolved symbol MUST be its OWN overlay-view \
+         recompute — the winner's base-view symbol is not interchangeable \
+         across views",
+    );
+}

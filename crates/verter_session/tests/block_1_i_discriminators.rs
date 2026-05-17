@@ -616,28 +616,32 @@ fn materialize_structure_peek_and_register_use_carrier() {
     );
 }
 
-/// Discriminator 5 (codex 5) —
-/// `cooperative_return_only_broadcasts_to_joiners`.
+/// Discriminator 5 — `cooperative_return_only_not_shared_to_joiners`.
 ///
-/// The previous tree's `cooperative_get_or_insert_with_post_publish`
-/// API had no first-class non-cacheable result. The materialiser's
-/// stack-local `non_cacheable_outcome: RefCell<...>` side channel
-/// held the valid-but-non-cacheable outcome from the winner thread
-/// only — cooperative joiners on the same key observed an empty
-/// stash and returned `Tainted`.
+/// The materialiser's stack-local `non_cacheable_outcome:
+/// RefCell<...>` side channel held the valid-but-non-cacheable
+/// outcome from the winner thread only — cooperative joiners on the
+/// same key observed an empty stash and returned `Tainted`.
 ///
-/// The new `ComputeAdmission::{Cacheable, ReturnOnly, Failed}`
-/// admission outcome lifts the case into the cooperative API.
-/// `cooperative_admit_with_post_publish` broadcasts `ReturnOnly(V)`
-/// to joiners through the inflight slot's typed `return_only`
-/// channel, so winner and joiner observe the same valid outcome.
-/// The cache stays empty (next request cold-recomputes).
+/// The `ComputeAdmission::{Cacheable, ReturnOnly, Failed}` admission
+/// outcome lifts the non-cacheable case into the cooperative API.
+/// A `ReturnOnly(V)` value carries NO `Entry` and NO dep-signature
+/// carrier, so it cannot be view-validated against a cooperative
+/// joiner's own view: two requests carrying the same cache key can
+/// run under different overlays, and a carrier-less value is not
+/// interchangeable across views. `ReturnOnly` is therefore
+/// non-shareable — the winner alone receives the `V`, and every
+/// joiner observes the slot's `non_cacheable_winner` flag, forks,
+/// and cold-recomputes for its own view. The cache stays empty.
 ///
 /// Discriminating assertions: the enum exists with all three
-/// variants; the new admission function exists; the materialiser
-/// uses it (the legacy side channel is retired).
+/// variants; the admission function exists; the `ReturnOnly` arm
+/// sets `non_cacheable_winner` (NOT a broadcast channel); the
+/// joiner branch forks on `non_cacheable_winner`; the `Cacheable`
+/// arm does not broadcast a value; the materialiser uses the API
+/// (the legacy side channel is retired).
 #[test]
-fn cooperative_return_only_broadcasts_to_joiners() {
+fn cooperative_return_only_not_shared_to_joiners() {
     let _serial = DISCRIMINATOR_MUTEX
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -667,16 +671,13 @@ fn cooperative_return_only_broadcasts_to_joiners() {
         "cooperative_admission must expose `cooperative_admit_with_post_publish` — \
          the ComputeAdmission-aware admission entry point"
     );
-    // The non-cacheable broadcast path must remain wired so joiners
-    // observe valid-but-non-cacheable outcomes without re-reading the
-    // (intentionally empty) cache map. Scope the check to the
-    // ReturnOnly match arm so the assertion does not false-trigger on
-    // residual text inside the Cacheable arm (whose
-    // `state.return_only = Some(...)` line was deliberately retired
-    // by the joiner-bubble fix — Cacheable joiners now fall through
-    // to `map.get + project(&entry_arc)` so each joiner thread runs
-    // `project` on its own thread to deliver the cached entry's
-    // facts into the joiner's outer fact tracer).
+    // A `ReturnOnly` winner must NOT broadcast `V` to joiners. A
+    // carrier-less value cannot be view-validated against a joiner's
+    // own view, so `ReturnOnly` is non-shareable across joiners. The
+    // `ReturnOnly` arm marks the slot `non_cacheable_winner` so every
+    // joiner forks and cold-recomputes for its own view; the winner
+    // alone receives the value. Scope the check to the `ReturnOnly`
+    // match arm.
     let return_only_arm_idx = ca_src
         .find("ComputeAdmission::ReturnOnly(value) => {")
         .expect("ReturnOnly admission arm must exist");
@@ -685,46 +686,61 @@ fn cooperative_return_only_broadcasts_to_joiners() {
         .expect("Cacheable admission arm must exist");
     let return_only_arm_window = &ca_src[return_only_arm_idx..];
     assert!(
-        return_only_arm_window.contains("state.return_only = Some(Box::new(value.clone()));"),
-        "the ReturnOnly admission arm must broadcast `V` through the \
-         inflight slot's typed return_only channel so joiners observe \
-         the value without re-reading the (empty) cache map"
+        return_only_arm_window.contains("state.non_cacheable_winner = true;"),
+        "the ReturnOnly admission arm must mark the slot \
+         `non_cacheable_winner` so cooperative joiners fork and \
+         cold-recompute for their own view — a carrier-less ReturnOnly \
+         value cannot be view-validated and must not be shared to joiners"
     );
-    // Critical: the Cacheable arm must NOT set `state.return_only`.
-    // Doing so makes joiners take the ReturnOnly broadcast branch and
-    // skip the `project(&entry_arc)` call site that delivers the
-    // cached entry's facts into the joiner's outer fact tracer —
-    // admitting the outer cache with an incomplete dependency
-    // signature. See `cacheable_joiner_runs_project_on_its_own_thread`
-    // below for the behavioural discriminator.
+    assert!(
+        !return_only_arm_window.contains("return_only ="),
+        "the ReturnOnly admission arm must NOT broadcast `V` through a \
+         slot channel — `ReturnOnly` is non-shareable across joiners; \
+         each joiner forks and cold-recomputes for its own view"
+    );
+    // The joiner branch must fork when it observes a
+    // `non_cacheable_winner` winner rather than reading a broadcast
+    // value.
+    assert!(
+        ca_src.contains("if non_cacheable_winner {"),
+        "the cooperative joiner branch must fork (re-enter admission) \
+         when the winner emitted a non-cacheable `ReturnOnly` outcome"
+    );
+    // Critical: the Cacheable arm must NOT broadcast `V` through a
+    // slot channel. Joiners fall through to `map.get(&key) +
+    // validate(&entry_arc)` so each joiner thread runs `validate` on
+    // its own thread — view-checking the entry against its own view
+    // and running the caller's fact-bubble side effect. See
+    // `cacheable_joiner_runs_validate_on_its_own_thread` in
+    // `cooperative_admission.rs` for the behavioural discriminator.
     let cacheable_arm_end = cacheable_arm_idx
         + ca_src[cacheable_arm_idx..]
             .find("ComputeAdmission::ReturnOnly(value) => {")
             .expect("ReturnOnly arm follows Cacheable arm");
     let cacheable_arm_window = &ca_src[cacheable_arm_idx..cacheable_arm_end];
     assert!(
-        !cacheable_arm_window.contains("state.return_only ="),
-        "the Cacheable admission arm must NOT broadcast `V` through \
-         `state.return_only`. Joiners must fall through to \
-         `map.get(&key) + project(&entry_arc)` so each joiner thread \
-         runs `project` on its own thread and bubbles the cached \
-         entry's facts into the joiner's outer fact tracer."
+        !cacheable_arm_window.contains("return_only ="),
+        "the Cacheable admission arm must NOT broadcast `V` through a \
+         slot channel. Joiners must fall through to \
+         `map.get(&key) + validate(&entry_arc)` so each joiner thread \
+         runs `validate` on its own thread — view-checking the entry \
+         and bubbling the cached entry's facts into the joiner's outer \
+         fact tracer."
     );
 
-    // The materialiser routes through the new admission API.
+    // The materialiser routes through the admission API.
     assert!(
         mat_src.contains("cooperative_admit_with_post_publish"),
-        "materialize_component_meta_structure must use the new \
+        "materialize_component_meta_structure must use the \
          `cooperative_admit_with_post_publish` API so overflow outcomes \
-         broadcast to cooperative joiners (closes codex round-2 P2.B)"
+         are modelled as `ComputeAdmission::ReturnOnly`"
     );
     // The stack-local `non_cacheable_outcome: RefCell<...>` side
     // channel is retired.
     assert!(
         !mat_src.contains("let non_cacheable_outcome: NonCacheableSlot = RefCell::new(None);"),
         "the stack-local `non_cacheable_outcome` side channel must be retired — \
-         cooperative joiners observe non-cacheable outcomes via \
-         `ComputeAdmission::ReturnOnly`'s typed broadcast channel."
+         non-cacheable outcomes are modelled by `ComputeAdmission::ReturnOnly`."
     );
     assert!(
         !mat_src.contains("non_cacheable_for_compute"),

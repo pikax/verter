@@ -20,14 +20,46 @@
 //!     dep-signature is no longer valid against host state, so the publish
 //!     is skipped and waiters fall through to retry.
 //!   - **Value projection.** Three callbacks separate concerns:
-//!     - `validate(&Entry) -> Option<V>`: warm-hit validation.
+//!     - `validate(&Entry) -> Option<V>`: read-side validation. Runs on the
+//!       warm-hit fast path AND on every cooperative joiner that wakes onto
+//!       a winner's published entry.
 //!     - `compute() -> Option<Entry>`: cold build.
 //!     - `project(&Entry) -> V`: value projection from the published
-//!       entry.
+//!       entry. Runs ONLY on the cold winner's own thread after it
+//!       publishes.
 //!
 //!     The `Entry` shape may be richer than the projected `V` — e.g. an
 //!     entry can carry dep-signature plus value, while a Value is just
 //!     the value.
+//!
+//! ## Joiner read-side validation
+//!
+//! A follower that coalesces onto an in-flight cold build is NOT
+//! guaranteed to be running under the same view/overlay as the winner:
+//! two requests can carry the same cache key while executing under
+//! different overlays (a base context and a session/overlay context, or
+//! two different overlays). Their results are NOT interchangeable — each
+//! must validate against its own content identity.
+//!
+//! Therefore, when a joiner wakes onto a successfully-published entry it
+//! re-reads the published `Arc<Entry>` and runs the caller's `validate`
+//! closure — the SAME read-side contract a warm hit runs — NOT `project`.
+//!   - `validate` returns `Some(value)` → the winner's entry is valid for
+//!     the follower's view; the follower returns that value. `validate`
+//!     also performs the caller's fact-bubble side effect, so an outer
+//!     cold-compute scope spawning this joiner still observes the entry's
+//!     transitive dependency facts.
+//!   - `validate` returns `None` → the winner's entry is stale for the
+//!     follower's view. The follower removes the exact stale published
+//!     entry (a `ptr_eq` guard so a concurrent fresh winner is not
+//!     evicted), retires the same in-flight slot (`ptr_eq`-guarded), drops
+//!     locks, and re-enters admission so it cold-computes for its OWN
+//!     view.
+//!
+//! `revalidate_after_compute` is NOT used for the joiner path: it is a
+//! winner-side publish-race closer that returns only `bool`; `validate`
+//! is the read-side contract and produces / bubbles the caller-visible
+//! value.
 //!
 //! ## What this primitive deliberately does NOT do
 //!
@@ -50,7 +82,7 @@
 //! Each typed cache owns an [`InflightTable<K>`] (this module's wrapper
 //! around `Mutex<HashMap<K, Arc<InflightSlot>>>`) so that contention on
 //! one cache does not stall threads operating on a different cache. The
-//! plan's D3.2 admission-control architecture expects this isolation.
+//! D3.2 admission-control architecture expects this isolation.
 
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -64,15 +96,16 @@ use parking_lot::{Condvar, Mutex};
 /// `compute` closures return one of three variants:
 ///
 /// - `Cacheable(Entry)` — the result is valid AND cacheable. The
-///   admission flow inserts the entry into the map and broadcasts
-///   the projected `V` to joiners by re-reading the freshly-published
-///   entry.
+///   admission flow inserts the entry into the map; joiners re-read the
+///   freshly-published entry and run `validate` against their own view.
 /// - `ReturnOnly(V)` — the result is valid but NOT cacheable (e.g.
 ///   the producer's fact-signature tracer overflowed). The admission
-///   flow does NOT insert into the map. Joiners receive the
-///   already-projected `V` directly through the slot's broadcast
-///   channel so they observe the same valid outcome as the winner.
-///   The next cold-miss recomputes from scratch.
+///   flow does NOT insert into the map. A `ReturnOnly` outcome carries
+///   no `Entry` and no dep-signature carrier, so it CANNOT be
+///   view-validated against a cooperative joiner's own view. It is
+///   therefore non-shareable: the winner alone receives the `V`, and
+///   every joiner is forced to fork and cold-recompute for its own
+///   view. The next cold-miss recomputes from scratch.
 /// - `Failed` — compute observed a fatal condition (panic substitute,
 ///   missing dep, parse error). Joiners wake to a failed slot and
 ///   surface `None`; the next cold-miss retries.
@@ -83,14 +116,17 @@ use parking_lot::{Condvar, Mutex};
 /// closure, so cooperative joiners on the same key saw an empty
 /// side channel and returned a Tainted outcome even when the winner
 /// computed a valid result. `ReturnOnly` lifts that case into the
-/// admission contract so all participants observe the same outcome.
+/// admission contract: the winner observes its valid outcome, and
+/// joiners — which cannot validate a carrier-less value against their
+/// own view — fork and recompute rather than inherit a possibly
+/// wrong-view result.
 pub enum ComputeAdmission<V, Entry> {
     /// Result is valid AND cacheable. Cache admits the entry; joiners
-    /// re-read the map and project.
+    /// re-read the map and run `validate`.
     Cacheable(Entry),
-    /// Result is valid but NOT cacheable. Cache does NOT admit;
-    /// in-flight slot broadcasts the projected `V` directly to
-    /// joiners while leaving the map empty.
+    /// Result is valid but NOT cacheable. Cache does NOT admit. The
+    /// winner receives the `V` directly; joiners cannot view-validate a
+    /// carrier-less value and therefore fork + cold-recompute.
     ReturnOnly(V),
     /// Cold-compute failed (panic substitute, missing dep, etc.).
     /// Joiners surface `None`; subsequent callers retry the cold path.
@@ -116,20 +152,13 @@ struct InflightSlotState {
     /// Joiners observing `failed = true` return `None`; subsequent calls
     /// retry the cold path.
     failed: bool,
-    /// Broadcast slot for non-cacheable outcomes (`ComputeAdmission::ReturnOnly`).
-    /// When the winner's compute returns a valid-but-non-cacheable
-    /// value, it lands here as a type-erased `Box<dyn Any>` so joiners
-    /// can downcast to the per-call `V` and observe the same outcome
-    /// without re-reading the (empty) map. `None` for cacheable
-    /// outcomes (joiners project from the map entry) and for failures.
-    ///
-    /// **Type-erasure rationale.** `InflightTable<K>` is generic over
-    /// the cache key only, not the per-call projected value `V`. The
-    /// `cooperative_admit_with_post_publish` function downcasts via
-    /// `Any::downcast_ref` on joiner wake; the contract is enforced
-    /// by the function's `V: Clone + Send + Sync + 'static` bound so
-    /// the per-call `V` matches winner and joiners on the same key.
-    return_only: Option<Box<dyn std::any::Any + Send + Sync>>,
+    /// `true` when the winner's compute returned a valid-but-non-cacheable
+    /// outcome (`ComputeAdmission::ReturnOnly`). The map stays empty for
+    /// such a winner. A joiner that wakes observing `non_cacheable_winner
+    /// == true` (with `failed == false`) has no published entry to
+    /// validate against its own view, so it forks and cold-recomputes.
+    /// `false` for cacheable outcomes and for failures.
+    non_cacheable_winner: bool,
 }
 
 impl InflightSlot {
@@ -233,9 +262,37 @@ where
         }
         self.slot.ready.notify_all();
         // Retire the in-flight slot from the per-cache table so the next
-        // caller starts a fresh build.
+        // caller starts a fresh build. `ptr_eq`-guarded: a cross-view
+        // joiner that forked may already have installed a fresh
+        // `InflightSlot` for the same key; an unconditional remove would
+        // evict that fresh slot.
         let mut table = self.table.lock();
-        table.remove(&self.key);
+        if table
+            .get(&self.key)
+            .is_some_and(|existing| Arc::ptr_eq(existing, &self.slot))
+        {
+            table.remove(&self.key);
+        }
+    }
+}
+
+/// Remove the in-flight slot from the per-cache table iff the table
+/// still holds the SAME `Arc` this caller owned. A cross-view joiner
+/// that forked may already have installed a fresh slot for the same
+/// key; an unconditional remove would evict that fresh slot.
+fn retire_slot_if_current<K>(
+    table: &Mutex<HashMap<K, Arc<InflightSlot>>>,
+    key: &K,
+    slot: &Arc<InflightSlot>,
+) where
+    K: Eq + Hash + Clone,
+{
+    let mut table = table.lock();
+    if table
+        .get(key)
+        .is_some_and(|existing| Arc::ptr_eq(existing, slot))
+    {
+        table.remove(key);
     }
 }
 
@@ -253,17 +310,23 @@ where
 ///
 /// ## Closures
 ///
-/// - `validate`: runs on warm-hit; returns `Some(V)` if the entry is
-///   still valid for the caller's view of host state (typically a
-///   dep-signature check), `None` to fall through and remove the stale
-///   entry.
+/// - `validate`: read-side validation. Runs on the warm-hit fast path
+///   AND on every cooperative joiner that wakes onto a winner's
+///   published entry. Returns `Some(V)` if the entry is still valid for
+///   the caller's view of host state (typically a dep-signature check),
+///   `None` to fall through, remove the stale entry, and cold-compute.
+///   Because a joiner runs `validate`, the bound is `FnMut`: one call
+///   can reject a stale warm hit and a later call (after the joiner
+///   wakes) can validate the joined winner's entry.
 /// - `compute`: runs on cold-miss for exactly one thread. Returns
 ///   `Some(Entry)` on success, `None` on observable failure (e.g. dep
 ///   missing, parse error). A panic also classifies as failure via the
-///   RAII guard.
+///   RAII guard. Logically one-shot — the loop carries it in an
+///   `Option` and `take()`s it only when this caller becomes the cold
+///   winner.
 /// - `project`: extracts the projected value from a published entry.
-///   Called by both the winner (after publish) and joiners (after
-///   waking from the condvar).
+///   Called ONLY by the cold winner on its own thread after it
+///   publishes. Joiners do NOT call `project` — they call `validate`.
 /// - `revalidate_after_compute`: after `compute()` returns successfully,
 ///   this re-validates the entry against current host state. Returns
 ///   `false` if the entry is now stale (e.g. file mutated mid-compute);
@@ -272,7 +335,8 @@ where
 /// ## Returns
 ///
 /// - `Some(V)` on warm-hit, on cold success + valid post-compute, or on
-///   joiner success.
+///   joiner success (joiner's own `validate` accepted the winner's
+///   entry).
 /// - `None` if `compute()` returns `None`, panics, post-compute
 ///   revalidation fails, or the joiner observes a failed winner.
 pub fn cooperative_get_or_insert<K, Entry, V, Validate, Compute, Project, Revalidate>(
@@ -288,10 +352,10 @@ where
     K: Eq + Hash + Clone,
     Entry: Send + Sync + 'static,
     V: Clone,
-    Validate: FnOnce(&Entry) -> Option<V>,
+    Validate: FnMut(&Entry) -> Option<V>,
     Compute: FnOnce() -> Option<Entry>,
     Project: FnOnce(&Entry) -> V,
-    Revalidate: FnOnce(&Entry) -> bool,
+    Revalidate: FnMut(&Entry) -> bool,
 {
     cooperative_get_or_insert_with_post_publish(
         map,
@@ -309,6 +373,12 @@ where
 /// with a `post_publish` callback that fires AFTER `entries.insert`
 /// AND AFTER successful `revalidate_after_compute`. The callback
 /// receives the published `Arc<Entry>` and the key.
+///
+/// `post_publish` is winner-only — it fires exactly once, on the cold
+/// winner's thread after a successful publish. Cooperative joiners run
+/// `validate` against the published entry; they never re-run
+/// `post_publish`, so reverse-index registration and live counters are
+/// not duplicated.
 ///
 /// **Race-closure contract.** post_publish is NOT inside the
 /// inflight slot's state lock. Synchronisation against concurrent
@@ -335,8 +405,8 @@ where
 ///
 /// **Halt grep before each commit modifying this function**
 /// (production-only per R8-4 — strips `#[cfg(test)]` regions before
-/// grep so the existing test-only `thread::spawn` calls at lines
-/// 434/511/557 do not false-trigger):
+/// grep so the existing test-only `thread::spawn` calls do not
+/// false-trigger):
 /// ```text
 /// awk '/^#\[cfg\(test\)\]\s*$/{intest=1} !intest{print} /^}\s*$/&&intest{intest=0}' \
 ///     crates/verter_session/src/cooperative_admission.rs \
@@ -359,120 +429,157 @@ pub fn cooperative_get_or_insert_with_post_publish<
     map: &DashMap<K, Arc<Entry>>,
     inflight: &InflightTable<K>,
     key: K,
-    validate: Validate,
+    mut validate: Validate,
     compute: Compute,
     project: Project,
-    revalidate_after_compute: Revalidate,
+    mut revalidate_after_compute: Revalidate,
     post_publish: PostPublish,
 ) -> Option<V>
 where
     K: Eq + Hash + Clone,
     Entry: Send + Sync + 'static,
     V: Clone,
-    Validate: FnOnce(&Entry) -> Option<V>,
+    Validate: FnMut(&Entry) -> Option<V>,
     Compute: FnOnce() -> Option<Entry>,
     Project: FnOnce(&Entry) -> V,
-    Revalidate: FnOnce(&Entry) -> bool,
+    Revalidate: FnMut(&Entry) -> bool,
     PostPublish: FnOnce(&Arc<Entry>, &K),
 {
-    // Warm-hit + validation.
-    if let Some(entry_arc) = map.get(&key).map(|e| e.clone()) {
-        if let Some(value) = validate(&entry_arc) {
-            return Some(value);
+    // `compute` and `project` are logically one-shot but the joiner
+    // re-validation loop may iterate (a follower whose `validate`
+    // rejects the winner's entry forks and re-enters admission). Carry
+    // them in `Option`s and `take()` them only on the iteration where
+    // THIS caller becomes the cold winner.
+    let mut compute = Some(compute);
+    let mut project = Some(project);
+    loop {
+        // Warm-hit + read-side validation.
+        if let Some(entry_arc) = map.get(&key).map(|e| e.clone()) {
+            if let Some(value) = validate(&entry_arc) {
+                return Some(value);
+            }
+            // Stale entry; remove the exact `Arc` we validated so a
+            // concurrent fresh winner's entry is not evicted.
+            map.remove_if(&key, |_, existing| Arc::ptr_eq(existing, &entry_arc));
         }
-        // Stale entry; remove. DashMap::remove is idempotent under races.
-        map.remove(&key);
-    }
 
-    // Claim the inflight slot or join an in-progress build.
-    let slot = {
-        let mut table = inflight.table.lock();
-        table
-            .entry(key.clone())
-            .or_insert_with(|| Arc::new(InflightSlot::new()))
-            .clone()
-    };
+        // Claim the inflight slot or join an in-progress build.
+        let slot = {
+            let mut table = inflight.table.lock();
+            table
+                .entry(key.clone())
+                .or_insert_with(|| Arc::new(InflightSlot::new()))
+                .clone()
+        };
 
-    let mut state = slot.state.lock();
-    if state.claimed {
-        // Joiner — wait for the winner to publish or fail.
-        slot.ready.wait_while(&mut state, |s| !s.completed);
-        if state.failed {
-            return None;
+        let mut state = slot.state.lock();
+        if state.claimed {
+            // Joiner — wait for the winner to publish or fail.
+            slot.ready.wait_while(&mut state, |s| !s.completed);
+            if state.failed {
+                return None;
+            }
+            // Winner succeeded. Drop the slot lock, then re-read the
+            // published entry and run the caller's `validate` closure
+            // against THIS follower's view — NOT `project`. A follower
+            // joining this in-flight build is not guaranteed to be
+            // running under the same view/overlay as the winner, so the
+            // winner's entry must validate against the follower's own
+            // content identity (the same read-side contract a warm hit
+            // runs). `validate` returning `Some` also performs the
+            // caller's fact-bubble side effect.
+            drop(state);
+            if let Some(entry_arc) = map.get(&key).map(|e| e.clone()) {
+                if let Some(value) = validate(&entry_arc) {
+                    return Some(value);
+                }
+                // The winner's entry is stale for the follower's view.
+                // Remove the exact stale entry (`ptr_eq`-guarded), retire
+                // the same in-flight slot (`ptr_eq`-guarded), and
+                // re-enter admission so the follower cold-computes for
+                // its own view.
+                map.remove_if(&key, |_, existing| Arc::ptr_eq(existing, &entry_arc));
+            }
+            retire_slot_if_current(&inflight.table, &key, &slot);
+            drop(slot);
+            continue;
         }
-        // Winner succeeded; entry is in the map. Re-read and project.
+        state.claimed = true;
         drop(state);
-        let entry_arc = map.get(&key).map(|e| e.clone())?;
-        return Some(project(&entry_arc));
-    }
-    state.claimed = true;
-    drop(state);
 
-    // Cold winner runs compute under a panic guard.
-    let mut panic_guard = InflightPanicGuard::new(Arc::clone(&slot), &inflight.table, key.clone());
+        // Cold winner runs compute under a panic guard.
+        let mut panic_guard =
+            InflightPanicGuard::new(Arc::clone(&slot), &inflight.table, key.clone());
 
-    let computed = compute();
+        let computed = compute
+            .take()
+            .expect("compute is taken exactly once by the cold winner")();
 
-    let value = match computed {
-        Some(entry) => {
-            // Post-compute revalidation. If a mutation invalidated the
-            // entry's dep-signature during the cold window, skip publish
-            // and signal failure to waiters.
-            if !revalidate_after_compute(&entry) {
+        let value = match computed {
+            Some(entry) => {
+                // Post-compute revalidation. If a mutation invalidated the
+                // entry's dep-signature during the cold window, skip publish
+                // and signal failure to waiters.
+                if !revalidate_after_compute(&entry) {
+                    {
+                        let mut state = slot.state.lock();
+                        state.completed = true;
+                        state.failed = true;
+                    }
+                    slot.ready.notify_all();
+                    panic_guard.mark_finished();
+                    drop(panic_guard);
+                    retire_slot_if_current(&inflight.table, &key, &slot);
+                    return None;
+                }
+
+                let entry_arc = Arc::new(entry);
+                let value = project
+                    .take()
+                    .expect("project is taken exactly once by the cold winner")(
+                    &entry_arc
+                );
+                map.insert(key.clone(), Arc::clone(&entry_arc));
+
+                // post_publish: fires AFTER
+                // entries.insert AND AFTER successful revalidate.
+                // Reverse-index registration lives here. NOT inside
+                // the inflight slot's state lock — the race-closure
+                // is via the revalidate_after_compute check above
+                // (eventually-consistent for the reverse index per
+                // the function-level docs).
+                post_publish(&entry_arc, &key);
+
+                // Mark slot completed; wake joiners.
+                {
+                    let mut state = slot.state.lock();
+                    state.completed = true;
+                }
+                slot.ready.notify_all();
+
+                Some(value)
+            }
+            None => {
+                // Compute returned None — failure.
                 {
                     let mut state = slot.state.lock();
                     state.completed = true;
                     state.failed = true;
                 }
                 slot.ready.notify_all();
-                panic_guard.mark_finished();
-                drop(panic_guard);
-                inflight.table.lock().remove(&key);
-                return None;
+                None
             }
+        };
 
-            let entry_arc = Arc::new(entry);
-            let value = project(&entry_arc);
-            map.insert(key.clone(), Arc::clone(&entry_arc));
+        panic_guard.mark_finished();
+        drop(panic_guard);
 
-            // post_publish: fires AFTER
-            // entries.insert AND AFTER successful revalidate.
-            // Reverse-index registration lives here. NOT inside
-            // the inflight slot's state lock — the race-closure
-            // is via the revalidate_after_compute check above
-            // (eventually-consistent for the reverse index per
-            // the function-level docs).
-            post_publish(&entry_arc, &key);
+        // Retire the inflight slot. Future callers either hit the warm map
+        // or start a fresh inflight if the publish was skipped.
+        retire_slot_if_current(&inflight.table, &key, &slot);
 
-            // Mark slot completed; wake joiners.
-            {
-                let mut state = slot.state.lock();
-                state.completed = true;
-            }
-            slot.ready.notify_all();
-
-            Some(value)
-        }
-        None => {
-            // Compute returned None — failure.
-            {
-                let mut state = slot.state.lock();
-                state.completed = true;
-                state.failed = true;
-            }
-            slot.ready.notify_all();
-            None
-        }
-    };
-
-    panic_guard.mark_finished();
-    drop(panic_guard);
-
-    // Retire the inflight slot. Future callers either hit the warm map
-    // or start a fresh inflight if the publish was skipped.
-    inflight.table.lock().remove(&key);
-
-    value
+        return value;
+    }
 }
 
 /// Cooperative cold-compute admission with a first-class
@@ -483,26 +590,27 @@ where
 ///
 /// **Three-way outcome contract.**
 ///
-/// - `Cacheable(Entry)` — insert into the map, call `post_publish`,
-///   broadcast the projected `V` to joiners by storing it in the
-///   slot's `return_only` channel. Joiners observe the same outcome
-///   without re-reading the map.
-/// - `ReturnOnly(V)` — do NOT insert; do NOT call `post_publish`;
-///   broadcast `V` directly via the slot's `return_only` channel.
-///   Joiners receive the same `V` and the cache remains empty so
-///   the next cold-miss recomputes.
+/// - `Cacheable(Entry)` — insert into the map, call `post_publish`.
+///   Joiners re-read the published entry and run `validate` against
+///   their own view.
+/// - `ReturnOnly(V)` — do NOT insert; do NOT call `post_publish`. A
+///   `ReturnOnly` value carries no `Entry` and no dep-signature
+///   carrier, so it cannot be view-validated against a joiner's own
+///   view. The winner alone receives the `V`; joiners observe the
+///   non-cacheable-winner flag and fork + cold-recompute for their own
+///   view. The cache stays empty so the next cold-miss recomputes.
 /// - `Failed` — mark the slot failed; joiners surface `None`.
 ///
 /// **Joiner contract.** Joiners wake on the slot's condvar. If
-/// `state.failed`, they return `None`. Otherwise they consult
-/// `state.return_only` first (downcasting the type-erased `Box<dyn
-/// Any>` to the per-call `V`); a hit means the winner returned a
-/// non-cacheable outcome and joiners use that value directly. A miss
-/// means the entry was inserted into the map; joiners re-read the
-/// map and project.
+/// `state.failed`, they return `None`. If `state.non_cacheable_winner`,
+/// the winner emitted a carrier-less `ReturnOnly` outcome that cannot
+/// be view-validated — the joiner forks and cold-recomputes. Otherwise
+/// the winner inserted an entry into the map; the joiner re-reads the
+/// map and runs `validate` against its own view (forking if the entry
+/// is stale for that view).
 ///
-/// The `V: Send + Sync + 'static` bound is the substrate for the
-/// type-erased broadcast through `state.return_only`.
+/// `post_publish` is winner-only and fires exactly once. Joiners run
+/// `validate`, never `post_publish`.
 #[allow(clippy::too_many_arguments)]
 pub fn cooperative_admit_with_post_publish<
     K,
@@ -517,673 +625,184 @@ pub fn cooperative_admit_with_post_publish<
     map: &DashMap<K, Arc<Entry>>,
     inflight: &InflightTable<K>,
     key: K,
-    validate: Validate,
+    mut validate: Validate,
     compute: Compute,
     project: Project,
-    revalidate_after_compute: Revalidate,
+    mut revalidate_after_compute: Revalidate,
     post_publish: PostPublish,
 ) -> Option<V>
 where
     K: Eq + Hash + Clone,
     Entry: Send + Sync + 'static,
-    V: Clone + Send + Sync + 'static,
-    Validate: FnOnce(&Entry) -> Option<V>,
+    V: Clone,
+    Validate: FnMut(&Entry) -> Option<V>,
     Compute: FnOnce() -> ComputeAdmission<V, Entry>,
     Project: FnOnce(&Entry) -> V,
-    Revalidate: FnOnce(&Entry) -> bool,
+    Revalidate: FnMut(&Entry) -> bool,
     PostPublish: FnOnce(&Arc<Entry>, &K),
 {
-    // Warm-hit + validation. Same shape as the
-    // `cooperative_get_or_insert_with_post_publish` warm path.
-    if let Some(entry_arc) = map.get(&key).map(|e| e.clone()) {
-        if let Some(value) = validate(&entry_arc) {
-            return Some(value);
-        }
-        map.remove(&key);
-    }
-
-    // Claim the inflight slot or join an in-progress build.
-    let slot = {
-        let mut table = inflight.table.lock();
-        table
-            .entry(key.clone())
-            .or_insert_with(|| Arc::new(InflightSlot::new()))
-            .clone()
-    };
-
-    let mut state = slot.state.lock();
-    if state.claimed {
-        // Joiner — wait for the winner to publish or fail.
-        slot.ready.wait_while(&mut state, |s| !s.completed);
-        if state.failed {
-            return None;
-        }
-        // Winner completed without failure. Check the broadcast slot
-        // for a non-cacheable outcome BEFORE consulting the map; the
-        // winner emits `ReturnOnly(V)` directly into `return_only` and
-        // leaves the map untouched.
-        if let Some(boxed) = state.return_only.as_ref() {
-            if let Some(value) = boxed.downcast_ref::<V>() {
-                return Some(value.clone());
+    // `compute` and `project` are logically one-shot; the joiner
+    // re-validation loop carries them in `Option`s (see
+    // `cooperative_get_or_insert_with_post_publish` for the rationale).
+    let mut compute = Some(compute);
+    let mut project = Some(project);
+    loop {
+        // Warm-hit + read-side validation. Same shape as the
+        // `cooperative_get_or_insert_with_post_publish` warm path.
+        if let Some(entry_arc) = map.get(&key).map(|e| e.clone()) {
+            if let Some(value) = validate(&entry_arc) {
+                return Some(value);
             }
-            // Per-call V mismatch — should never happen given the
-            // contract. Fall through to the map path; on miss the
-            // joiner surfaces None.
+            map.remove_if(&key, |_, existing| Arc::ptr_eq(existing, &entry_arc));
         }
+
+        // Claim the inflight slot or join an in-progress build.
+        let slot = {
+            let mut table = inflight.table.lock();
+            table
+                .entry(key.clone())
+                .or_insert_with(|| Arc::new(InflightSlot::new()))
+                .clone()
+        };
+
+        let mut state = slot.state.lock();
+        if state.claimed {
+            // Joiner — wait for the winner to publish or fail.
+            slot.ready.wait_while(&mut state, |s| !s.completed);
+            if state.failed {
+                return None;
+            }
+            // A `ReturnOnly` winner left the map empty and published no
+            // dep-signature carrier. The joiner cannot view-validate a
+            // carrier-less value against its own view — `ReturnOnly` is
+            // non-shareable across joiners — so it forks and
+            // cold-recomputes for its own view.
+            let non_cacheable_winner = state.non_cacheable_winner;
+            drop(state);
+            if non_cacheable_winner {
+                retire_slot_if_current(&inflight.table, &key, &slot);
+                drop(slot);
+                continue;
+            }
+            // Cacheable winner — re-read the published entry and run the
+            // caller's `validate` closure against THIS follower's view
+            // (NOT `project`). A follower joining this in-flight build is
+            // not guaranteed to be running under the same view/overlay
+            // as the winner. `validate` returning `Some` also performs
+            // the caller's fact-bubble side effect.
+            if let Some(entry_arc) = map.get(&key).map(|e| e.clone()) {
+                if let Some(value) = validate(&entry_arc) {
+                    return Some(value);
+                }
+                // The winner's entry is stale for the follower's view.
+                // Fork: remove the stale entry, retire the slot, re-enter
+                // admission so the follower cold-computes for its view.
+                map.remove_if(&key, |_, existing| Arc::ptr_eq(existing, &entry_arc));
+            }
+            retire_slot_if_current(&inflight.table, &key, &slot);
+            drop(slot);
+            continue;
+        }
+        state.claimed = true;
         drop(state);
-        let entry_arc = map.get(&key).map(|e| e.clone())?;
-        return Some(project(&entry_arc));
-    }
-    state.claimed = true;
-    drop(state);
 
-    // Cold winner runs compute under a panic guard.
-    let mut panic_guard = InflightPanicGuard::new(Arc::clone(&slot), &inflight.table, key.clone());
+        // Cold winner runs compute under a panic guard.
+        let mut panic_guard =
+            InflightPanicGuard::new(Arc::clone(&slot), &inflight.table, key.clone());
 
-    let admission = compute();
+        let admission = compute
+            .take()
+            .expect("compute is taken exactly once by the cold winner")();
 
-    let value = match admission {
-        ComputeAdmission::Cacheable(entry) => {
-            if !revalidate_after_compute(&entry) {
+        let value = match admission {
+            ComputeAdmission::Cacheable(entry) => {
+                if !revalidate_after_compute(&entry) {
+                    {
+                        let mut state = slot.state.lock();
+                        state.completed = true;
+                        state.failed = true;
+                    }
+                    slot.ready.notify_all();
+                    panic_guard.mark_finished();
+                    drop(panic_guard);
+                    retire_slot_if_current(&inflight.table, &key, &slot);
+                    return None;
+                }
+                let entry_arc = Arc::new(entry);
+                let value = project
+                    .take()
+                    .expect("project is taken exactly once by the cold winner")(
+                    &entry_arc
+                );
+                map.insert(key.clone(), Arc::clone(&entry_arc));
+                post_publish(&entry_arc, &key);
+                {
+                    let mut state = slot.state.lock();
+                    state.completed = true;
+                    // Cacheable winner: joiners fall through to the
+                    // `map.get(&key) + validate(&entry_arc)` path so each
+                    // joiner thread runs `validate` against its own view.
+                    // `validate` both view-checks the entry and runs the
+                    // caller's fact-bubble side effect (e.g.
+                    // `entry.read_set_signature.bubble(ctx)` for the
+                    // materialiser) on the joiner's own thread, delivering
+                    // the cached entry's facts into the joiner's outer
+                    // fact tracer.
+                    //
+                    // The map entry persists past slot retirement
+                    // (`map.insert` above happens before the slot is
+                    // removed from the inflight table), so a slow-waking
+                    // joiner still observes the entry through `map.get`.
+                }
+                slot.ready.notify_all();
+                Some(value)
+            }
+            ComputeAdmission::ReturnOnly(value) => {
+                // Valid result but not cacheable. The map stays empty and
+                // no dep-signature carrier is published, so a joiner has
+                // nothing to view-validate against its own view. Mark the
+                // slot `non_cacheable_winner` so every joiner forks and
+                // cold-recomputes for its own view; the winner alone
+                // receives `value`.
+                {
+                    let mut state = slot.state.lock();
+                    state.completed = true;
+                    state.non_cacheable_winner = true;
+                }
+                slot.ready.notify_all();
+                Some(value)
+            }
+            ComputeAdmission::Failed => {
                 {
                     let mut state = slot.state.lock();
                     state.completed = true;
                     state.failed = true;
                 }
                 slot.ready.notify_all();
-                panic_guard.mark_finished();
-                drop(panic_guard);
-                inflight.table.lock().remove(&key);
-                return None;
+                None
             }
-            let entry_arc = Arc::new(entry);
-            let value = project(&entry_arc);
-            map.insert(key.clone(), Arc::clone(&entry_arc));
-            post_publish(&entry_arc, &key);
-            {
-                let mut state = slot.state.lock();
-                state.completed = true;
-                // Cacheable winner: DO NOT broadcast the projected `V`
-                // through `return_only`. Joiners fall through to the
-                // `map.get(&key) + project(&entry_arc)` path so each
-                // joiner thread runs `project` on its own thread, which
-                // is where carrier-bubbling side effects (e.g.
-                // `entry.read_set_signature.bubble(ctx)` for the
-                // materialiser) deliver the cached entry's facts into
-                // the joiner's outer fact tracer. Routing the value
-                // through `return_only` skipped that side effect and
-                // admitted the outer cache with an incomplete
-                // dependency signature when a joiner ran inside an
-                // outer tracer scope.
-                //
-                // The map entry persists past slot retirement
-                // (`map.insert` above happens before the slot is
-                // removed from the inflight table), so a slow-waking
-                // joiner still observes the entry through `map.get`.
-            }
-            slot.ready.notify_all();
-            Some(value)
-        }
-        ComputeAdmission::ReturnOnly(value) => {
-            // Valid result but not cacheable — broadcast the value to
-            // joiners through the slot's type-erased channel. The map
-            // stays empty so the next cold-miss recomputes.
-            {
-                let mut state = slot.state.lock();
-                state.completed = true;
-                state.return_only = Some(Box::new(value.clone()));
-            }
-            slot.ready.notify_all();
-            Some(value)
-        }
-        ComputeAdmission::Failed => {
-            {
-                let mut state = slot.state.lock();
-                state.completed = true;
-                state.failed = true;
-            }
-            slot.ready.notify_all();
-            None
-        }
-    };
+        };
 
-    panic_guard.mark_finished();
-    drop(panic_guard);
+        panic_guard.mark_finished();
+        drop(panic_guard);
 
-    // Retire the inflight slot. Future callers either hit the warm map
-    // (Cacheable path) or start a fresh inflight (ReturnOnly /
-    // Failed paths leave the map empty).
-    inflight.table.lock().remove(&key);
+        // Retire the inflight slot. Future callers either hit the warm map
+        // (Cacheable path) or start a fresh inflight (ReturnOnly /
+        // Failed paths leave the map empty).
+        retire_slot_if_current(&inflight.table, &key, &slot);
 
-    value
+        return value;
+    }
 }
-
 // ============================================================================
-// Sub-task 3.2.0 gating tests (5 required by D3.2)
+// D3.2 admission-control gating tests + joiner view-validation discriminators.
+//
+// Extracted to the sibling `cooperative_admission_tests.rs` (kept as a
+// child `mod` via `#[path]` so the thread-coordinated discriminators
+// reach the substrate's private `InflightSlot` / `InflightTable`
+// internals). Splitting keeps this file under the file-size guard cap.
 // ============================================================================
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::thread;
-    use std::time::Duration;
-
-    /// Plan D3.2 test 1: 100 threads racing on the same key — exactly
-    /// ONE compute call observed; all return same value.
-    #[test]
-    fn cooperative_admission_one_winner_others_wait() {
-        let map: DashMap<u32, Arc<String>> = DashMap::new();
-        let inflight: InflightTable<u32> = InflightTable::default();
-        let compute_count = Arc::new(AtomicUsize::new(0));
-
-        let map = Arc::new(map);
-        let inflight = Arc::new(inflight);
-
-        let handles: Vec<_> = (0..100)
-            .map(|_| {
-                let map = Arc::clone(&map);
-                let inflight = Arc::clone(&inflight);
-                let compute_count = Arc::clone(&compute_count);
-                thread::spawn(move || {
-                    cooperative_get_or_insert(
-                        &map,
-                        &inflight,
-                        42u32,
-                        |entry: &String| Some(entry.clone()),
-                        || {
-                            compute_count.fetch_add(1, Ordering::SeqCst);
-                            // Hold long enough for other threads to enter
-                            // the joiner branch.
-                            thread::sleep(Duration::from_millis(20));
-                            Some("winner".to_string())
-                        },
-                        |entry: &String| entry.clone(),
-                        |_entry: &String| true,
-                    )
-                })
-            })
-            .collect();
-
-        let results: Vec<Option<String>> = handles.into_iter().map(|h| h.join().unwrap()).collect();
-
-        assert_eq!(
-            compute_count.load(Ordering::SeqCst),
-            1,
-            "exactly one thread must run compute under admission control"
-        );
-        for r in &results {
-            assert_eq!(r.as_deref(), Some("winner"));
-        }
-    }
-
-    /// Plan D3.2 test 2: winner panics in compute → waiters wake with
-    /// None; subsequent calls retry.
-    ///
-    /// Stabilisation note: the original 5 ms `thread::sleep` between
-    /// winner-spawn and joiner-spawn under-budgeted scheduler latency
-    /// under workspace-parallel test load on Windows. When the OS
-    /// scheduled the winner to panic + the panic guard's `Drop` to
-    /// remove the inflight slot BEFORE the joiner reached
-    /// `cooperative_get_or_insert`, the joiner found no inflight slot,
-    /// claimed a fresh one itself, and ran its own `compute` (returning
-    /// `Some("never reached")`) instead of waking on the panicked-winner
-    /// condvar with `None`. The fix replaces the timed sleep with a
-    /// `mpsc::sync_channel(0)` rendezvous: the winner's compute sends
-    /// `()` AFTER `state.claimed = true` (claim happens unconditionally
-    /// before `compute()` runs in `cooperative_get_or_insert`) and
-    /// BEFORE its own pre-panic sleep. Main blocks on `recv()` before
-    /// spawning the joiner, so the joiner is guaranteed to enter
-    /// `cooperative_get_or_insert` while the winner is still inside
-    /// compute. The assertion is unchanged (joiner returns `None`), so
-    /// this is not a Stub Prevention violation — only the timing
-    /// primitive changed.
-    #[test]
-    fn cooperative_admission_panic_wakes_waiters() {
-        use std::sync::mpsc;
-
-        // Use a dedicated map per scenario to avoid cross-test races.
-        let map: DashMap<u32, Arc<String>> = DashMap::new();
-        let inflight: InflightTable<u32> = InflightTable::default();
-        let map = Arc::new(map);
-        let inflight = Arc::new(inflight);
-
-        // Joiner that arrives second; will block on the panicking
-        // winner's slot.
-        let joiner_done = Arc::new(AtomicUsize::new(0));
-
-        // Rendezvous channel — the winner's compute() signals AFTER
-        // claim (i.e. once `state.claimed = true` in the inflight slot)
-        // and BEFORE its pre-panic sleep. Main blocks on `recv()`
-        // before spawning the joiner so the joiner cannot race ahead
-        // of the winner's claim.
-        let (claimed_tx, claimed_rx) = mpsc::sync_channel::<()>(0);
-
-        // Winner thread that panics inside compute.
-        let map_w = Arc::clone(&map);
-        let inflight_w = Arc::clone(&inflight);
-        let winner = thread::spawn(move || {
-            // We use catch_unwind manually so the test process doesn't
-            // abort on the panic; the production cooperative caller
-            // doesn't care, but the test harness does.
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                cooperative_get_or_insert(
-                    &map_w,
-                    &inflight_w,
-                    7u32,
-                    |entry: &String| Some(entry.clone()),
-                    || -> Option<String> {
-                        // `compute` runs only AFTER the winner has set
-                        // `state.claimed = true` inside
-                        // `cooperative_get_or_insert`, so signalling
-                        // here is the contract-correct hook for "winner
-                        // has claimed the inflight slot".
-                        claimed_tx
-                            .send(())
-                            .expect("rendezvous receiver must outlive winner's compute");
-                        // Slack window so the joiner has time to enter
-                        // `cooperative_get_or_insert` and acquire the
-                        // existing inflight slot reference before the
-                        // panic guard's `Drop` removes the slot from
-                        // the inflight table. Sized for headroom under
-                        // workspace-parallel test load on Windows.
-                        thread::sleep(Duration::from_millis(50));
-                        panic!("simulated compute panic");
-                    },
-                    |entry: &String| entry.clone(),
-                    |_entry: &String| true,
-                )
-            }));
-        });
-
-        // Block until the winner has claimed the inflight slot. Once
-        // this returns, the joiner spawn is guaranteed to race against
-        // a winner that is already in compute, not a winner that has
-        // not yet claimed.
-        claimed_rx
-            .recv()
-            .expect("winner's compute must signal claim before panicking");
-
-        // Joiner — should wake with None when winner's RAII guard fires.
-        let map_j = Arc::clone(&map);
-        let inflight_j = Arc::clone(&inflight);
-        let joiner_done_j = Arc::clone(&joiner_done);
-        let joiner = thread::spawn(move || {
-            let result = cooperative_get_or_insert(
-                &map_j,
-                &inflight_j,
-                7u32,
-                |entry: &String| Some(entry.clone()),
-                || Some("never reached".to_string()),
-                |entry: &String| entry.clone(),
-                |_entry: &String| true,
-            );
-            joiner_done_j.fetch_add(1, Ordering::SeqCst);
-            result
-        });
-
-        winner.join().unwrap();
-        let joiner_result = joiner.join().unwrap();
-        assert_eq!(
-            joiner_done.load(Ordering::SeqCst),
-            1,
-            "joiner must finish after winner panics"
-        );
-        assert_eq!(
-            joiner_result, None,
-            "joiner observing a panicked winner must return None"
-        );
-
-        // Subsequent call retries cold path successfully.
-        let retry_result = cooperative_get_or_insert(
-            &map,
-            &inflight,
-            7u32,
-            |entry: &String| Some(entry.clone()),
-            || Some("retry succeeded".to_string()),
-            |entry: &String| entry.clone(),
-            |_entry: &String| true,
-        );
-        assert_eq!(retry_result.as_deref(), Some("retry succeeded"));
-    }
-
-    /// Plan D3.2 test 3: post-compute revalidation returns false →
-    /// publish skipped; waiters fall through; no entry in map.
-    #[test]
-    fn cooperative_admission_post_compute_revalidation_drops_stale() {
-        let map: DashMap<u32, Arc<String>> = DashMap::new();
-        let inflight: InflightTable<u32> = InflightTable::default();
-
-        let result = cooperative_get_or_insert(
-            &map,
-            &inflight,
-            13u32,
-            |entry: &String| Some(entry.clone()),
-            || Some("computed but stale".to_string()),
-            |entry: &String| entry.clone(),
-            |_entry: &String| false, // post-compute revalidation FAILS
-        );
-
-        assert_eq!(
-            result, None,
-            "post-compute revalidation rejection must yield None"
-        );
-        assert!(
-            map.get(&13u32).is_none(),
-            "rejected entries must NOT be inserted into the map"
-        );
-    }
-
-    /// Plan D3.2 test 4: simulated invalidation during compute — first
-    /// call returns None due to revalidation rejection; second call
-    /// runs fresh compute and succeeds when revalidation passes.
-    #[test]
-    fn cooperative_admission_invalidation_during_compute_retries() {
-        let map: DashMap<u32, Arc<String>> = DashMap::new();
-        let inflight: InflightTable<u32> = InflightTable::default();
-        let attempt = AtomicUsize::new(0);
-
-        // First attempt: compute succeeds but revalidation rejects.
-        let first = cooperative_get_or_insert(
-            &map,
-            &inflight,
-            21u32,
-            |entry: &String| Some(entry.clone()),
-            || {
-                attempt.fetch_add(1, Ordering::SeqCst);
-                Some("first".to_string())
-            },
-            |entry: &String| entry.clone(),
-            |_entry: &String| false,
-        );
-        assert_eq!(first, None, "first attempt must drop on revalidation");
-
-        // Second attempt: post-mutation, revalidation passes.
-        let second = cooperative_get_or_insert(
-            &map,
-            &inflight,
-            21u32,
-            |entry: &String| Some(entry.clone()),
-            || {
-                attempt.fetch_add(1, Ordering::SeqCst);
-                Some("second".to_string())
-            },
-            |entry: &String| entry.clone(),
-            |_entry: &String| true,
-        );
-        assert_eq!(second.as_deref(), Some("second"));
-        assert_eq!(
-            attempt.load(Ordering::SeqCst),
-            2,
-            "both attempts must run compute (no spurious cache reuse)"
-        );
-    }
-
-    /// Plan D3.2 test 5: same Entry projects to different Value types
-    /// per call site. Demonstrates the projection-isolation contract.
-    #[test]
-    fn cooperative_admission_value_projection_isolated() {
-        // Entry carries TWO fields; different call sites project
-        // different scalars from the same entry.
-        struct Entry {
-            length: usize,
-            label: String,
-        }
-        let map: DashMap<u32, Arc<Entry>> = DashMap::new();
-        let inflight: InflightTable<u32> = InflightTable::default();
-
-        // First call site: project the length.
-        let length: Option<usize> = cooperative_get_or_insert(
-            &map,
-            &inflight,
-            55u32,
-            |entry: &Entry| Some(entry.length),
-            || {
-                Some(Entry {
-                    length: 7,
-                    label: "hello".to_string(),
-                })
-            },
-            |entry: &Entry| entry.length,
-            |_entry: &Entry| true,
-        );
-        assert_eq!(length, Some(7));
-
-        // Second call site (warm hit): project the label from the same
-        // cached Entry.
-        let label: Option<String> = cooperative_get_or_insert(
-            &map,
-            &inflight,
-            55u32,
-            |entry: &Entry| Some(entry.label.clone()),
-            || -> Option<Entry> { panic!("must not run compute on warm hit") },
-            |entry: &Entry| entry.label.clone(),
-            |_entry: &Entry| true,
-        );
-        assert_eq!(label.as_deref(), Some("hello"));
-    }
-
-    /// Discriminator for codex P2.A on Block 1.I —
-    /// `cacheable_joiner_runs_project_on_its_own_thread`.
-    ///
-    /// A cacheable winner must NOT broadcast the projected value through
-    /// the inflight slot's `return_only` channel; joiners must fall
-    /// through to `map.get(&key) + project(&entry_arc)` so each joiner
-    /// thread runs `project` on its OWN thread. The materialiser's
-    /// `project` closure is where `entry.read_set_signature.bubble(ctx)`
-    /// is invoked — bubbling the cached entry's facts into the joiner
-    /// thread's active outer fact tracer.
-    ///
-    /// Pre-fix shape: the Cacheable winner branch wrote
-    /// `state.return_only = Some(Box::new(value.clone()))`. The joiner
-    /// then read `return_only` and skipped the `project(&entry_arc)`
-    /// call site. The fact-bubble side effect was lost; outer cache
-    /// admitted with an incomplete dependency signature.
-    ///
-    /// Post-fix shape: Cacheable does NOT set `state.return_only`.
-    /// Joiners run `project` themselves on their own thread.
-    ///
-    /// Discriminating signal: a per-thread `project_count` atomic. The
-    /// JOINER thread's count must increment exactly once. Pre-fix it
-    /// would be zero because the joiner takes the `return_only` branch.
-    #[test]
-    fn cacheable_joiner_runs_project_on_its_own_thread() {
-        use std::sync::mpsc;
-        use std::sync::Barrier;
-        use std::time::{Duration, Instant};
-        let map: Arc<DashMap<u32, Arc<String>>> = Arc::new(DashMap::new());
-        let inflight: Arc<InflightTable<u32>> = Arc::new(InflightTable::default());
-
-        // Per-thread project counters. Pre-fix the joiner's project
-        // count is zero (joiner takes return_only branch). Post-fix
-        // the joiner's project count is exactly one.
-        let winner_project_count = Arc::new(AtomicUsize::new(0));
-        let joiner_project_count = Arc::new(AtomicUsize::new(0));
-
-        // Deterministic synchronisation (codex round-3 P3):
-        //
-        //   * `tx_winner_in_compute` — winner signals it has claimed
-        //     the inflight slot and is inside `compute()`. Joiner is
-        //     spawned only after this fires, so the joiner cannot
-        //     race ahead of the winner's claim.
-        //   * `release_barrier` — a `Barrier::new(2)` between winner's
-        //     `compute()` body and the test driver. The winner blocks
-        //     at the barrier AFTER signalling claim, so it CANNOT
-        //     publish (return Cacheable) until the test driver also
-        //     crosses the barrier. This replaces the previous
-        //     `rx_release_winner` channel with an explicit
-        //     `Barrier::wait()` ordering primitive.
-        //
-        // The 50 ms `thread::sleep` heuristic the test previously
-        // used to wait for the joiner to register on the inflight
-        // slot was racy on a loaded test runner: if the joiner had
-        // not yet acquired the slot when the winner published and
-        // retired, the joiner would either claim a fresh inflight
-        // slot itself (becoming a new winner and panicking in its
-        // compute closure) or hit a stale map miss. The Barrier
-        // alone does not solve this — there is no closure hook on
-        // the joiner side between "took the joiner branch" and
-        // "blocked on the condvar". Instead, between
-        // `rx_winner_in_compute.recv()` and the barrier release we
-        // poll the inflight table for the moment the joiner has
-        // acquired its own `Arc<InflightSlot>` (table refcount +
-        // winner refcount + joiner refcount = 3). Once the joiner
-        // holds an Arc to the existing slot, the winner may retire
-        // the table entry without changing the joiner's view of
-        // `state.claimed`/`completed`, and the joiner deterministically
-        // reaches the `map.get(&key) + project(&entry_arc)` branch
-        // that the discriminator measures.
-        let (tx_winner_in_compute, rx_winner_in_compute) = mpsc::channel::<()>();
-        let release_barrier = Arc::new(Barrier::new(2));
-
-        let winner_map = Arc::clone(&map);
-        let winner_inflight = Arc::clone(&inflight);
-        let winner_pc = Arc::clone(&winner_project_count);
-        let release_barrier_w = Arc::clone(&release_barrier);
-        let winner = thread::spawn(move || {
-            cooperative_admit_with_post_publish(
-                &*winner_map,
-                &*winner_inflight,
-                42u32,
-                |_entry: &String| -> Option<String> { None }, // no warm hit
-                || -> ComputeAdmission<String, String> {
-                    // Signal we are inside compute (claimed). The
-                    // joiner can now enter and acquire the inflight
-                    // slot Arc.
-                    tx_winner_in_compute.send(()).expect("signal in-compute");
-                    // Block until the test driver crosses the
-                    // release barrier — i.e. until the test driver
-                    // has confirmed the joiner has acquired its own
-                    // Arc on the inflight slot.
-                    release_barrier_w.wait();
-                    ComputeAdmission::Cacheable("payload".to_string())
-                },
-                |entry: &String| -> String {
-                    winner_pc.fetch_add(1, Ordering::SeqCst);
-                    entry.clone()
-                },
-                |_entry: &String| -> bool { true },
-                |_entry_arc: &Arc<String>, _k: &u32| {},
-            )
-        });
-
-        // Wait for the winner to enter compute (claimed but not yet
-        // published).
-        rx_winner_in_compute
-            .recv()
-            .expect("winner must signal claim before joiner spawn");
-
-        let joiner_map = Arc::clone(&map);
-        let joiner_inflight = Arc::clone(&inflight);
-        let joiner_pc = Arc::clone(&joiner_project_count);
-        let joiner = thread::spawn(move || {
-            cooperative_admit_with_post_publish(
-                &*joiner_map,
-                &*joiner_inflight,
-                42u32,
-                |_entry: &String| -> Option<String> { None },
-                || -> ComputeAdmission<String, String> {
-                    // The joiner MUST NOT execute compute; if this
-                    // panics the test isn't exercising the joiner
-                    // branch (which means the deterministic sync
-                    // below is broken, not the production code).
-                    panic!("joiner must not run compute");
-                },
-                |entry: &String| -> String {
-                    joiner_pc.fetch_add(1, Ordering::SeqCst);
-                    entry.clone()
-                },
-                |_entry: &String| -> bool { true },
-                |_entry_arc: &Arc<String>, _k: &u32| {},
-            )
-        });
-
-        // Deterministic wait: poll the inflight table until the
-        // joiner has acquired its own `Arc<InflightSlot>` for the
-        // key. Strong-count layout for the still-claimed slot:
-        //
-        //   * 1 — table entry holds the slot Arc
-        //   * 1 — winner's `slot` local inside
-        //         `cooperative_admit_with_post_publish`
-        //   * 1 — winner's `panic_guard.slot`, created by
-        //         `InflightPanicGuard::new(Arc::clone(&slot), ...)`
-        //         AFTER `state.claimed = true` (i.e. before the
-        //         winner enters its `compute()` body)
-        //   * 1 — joiner's `slot` local AFTER it executes the
-        //         `table.entry(key).or_insert_with(...).clone()`
-        //         block
-        //
-        // The winner is parked inside its `compute()` body at the
-        // release barrier, so winner.slot and winner.panic_guard.slot
-        // both stay alive — the baseline strong count is 3 before
-        // the joiner arrives and exactly 4 once the joiner has
-        // acquired its Arc on the existing slot. We poll for `>= 4`
-        // so the release barrier crosses only after the joiner has
-        // bumped the refcount. Once the joiner holds its own Arc,
-        // winner can retire the table entry without changing the
-        // joiner's view of `state.claimed = true`; the joiner falls
-        // through to `map.get(&key) + project(&entry_arc)` once
-        // `state.completed = true` is set by the winner's publish.
-        let poll_deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            let table_guard = inflight.table.lock();
-            if let Some(slot) = table_guard.get(&42u32) {
-                // strong_count counts table + winner.slot +
-                // winner.panic_guard.slot + joiner.slot. The
-                // `slot` binding above is a `&Arc<...>` from
-                // `HashMap::get`, NOT a fresh clone, so it does
-                // not bump the count.
-                if Arc::strong_count(slot) >= 4 {
-                    break;
-                }
-            }
-            drop(table_guard);
-            if Instant::now() >= poll_deadline {
-                panic!(
-                    "joiner failed to acquire inflight slot Arc within 10s — \
-                     the deterministic-sync poll below the release barrier is broken"
-                );
-            }
-            std::hint::spin_loop();
-        }
-
-        // Release the winner via the barrier. The winner returns
-        // Cacheable, publishes (winner project count = 1), inserts
-        // into the map, sets `state.completed = true`, notifies the
-        // joiner, and retires the inflight table entry. The joiner
-        // is past the slot-acquisition point so it observes the
-        // existing slot via its own Arc and falls through to
-        // `map.get(&key) + project(&entry_arc)` — bumping the joiner
-        // project count by exactly one.
-        release_barrier.wait();
-
-        let winner_result = winner.join().expect("winner joined");
-        let joiner_result = joiner.join().expect("joiner joined");
-
-        assert_eq!(winner_result.as_deref(), Some("payload"));
-        assert_eq!(joiner_result.as_deref(), Some("payload"));
-        assert_eq!(
-            winner_project_count.load(Ordering::SeqCst),
-            1,
-            "winner thread's project count must be exactly 1 (the \
-             winner-side projection)"
-        );
-        // Pre-fix this is 0 (joiner took return_only branch and
-        // skipped `project`). Post-fix this is 1 (joiner ran
-        // `project(&entry_arc)` on its own thread, which is where
-        // production materialisers run their fact-bubble side
-        // effect — `entry.read_set_signature.bubble(ctx)`).
-        assert_eq!(
-            joiner_project_count.load(Ordering::SeqCst),
-            1,
-            "joiner thread's project count must be exactly 1. If 0, \
-             the Cacheable winner is broadcasting `V` through \
-             `state.return_only` and the joiner is skipping the \
-             `project(&entry_arc)` call site — losing the fact-bubble \
-             side effect that delivers the cached entry's facts into \
-             the joiner's outer tracer. See \
-             `crates/verter_session/src/cooperative_admission.rs` \
-             Cacheable arm and codex P2.A."
-        );
-    }
-}
+#[path = "cooperative_admission_tests.rs"]
+mod tests;
