@@ -68,60 +68,87 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         if let Some(cached) = self.imported_registry_symbols.borrow().get(&key).cloned() {
             return cached;
         }
-        // Step 3 closure: route through ctx-owned ImportedRegistryDb.
-        // The local RefCell view above is non-authoritative scratch; the
+        // Route through the ctx-owned `ImportedRegistryDb`. The local
+        // RefCell view above is non-authoritative scratch; the
         // DashMap-backed DB is the authoritative cross-request cache.
         //
-        // Observe the keyed canonical's content version ONCE here,
-        // before the value is computed, through the view-aware
-        // `authoritative_current_content_hash` oracle — under a
-        // `SessionResolverContext` this resolves the overlay content
-        // hash for an overlay-bearing session, so an overlay-derived
-        // entry roots on the overlay version (and a later base request
-        // mismatches it instead of reusing it). The signature builder
-        // is provenance-pure: it roots the entry's self-root on this
-        // observed hash, never a current-content re-read inside the
-        // closure. `None` (canonical has no authoritative current
-        // content) refuses shared-cache admission below.
-        let observed_keyed_hash = self.ctx.authoritative_current_content_hash(canonical_id);
+        // Compute-once shape (mirrors the materialize-memo / prepared
+        // surface+member+target peek-then-compute producers): peek the
+        // shared DB first, and on a miss resolve the imported symbol
+        // EXACTLY ONCE. `resolve_imported_registry_symbol_with_budget`
+        // consumes the wildcard-route fuse (`allow_wildcard_route()` /
+        // `wildcard_route_fanout`) on the slow lane — a side-effecting
+        // budget that MUST NOT be consumed twice for one request. The
+        // freshly-computed value is then reused on cache-admission
+        // failure: `get_or_compute` is used purely as a
+        // signature-building write-through, never to re-run resolution.
         let arc_key = (
             std::sync::Arc::<str>::from(canonical_id),
             std::sync::Arc::<str>::from(exported_name),
         );
-        let host_db = self.ctx.project_type_store().imported_registry_db();
-        let host_value = host_db.get_or_compute(&arc_key, self.ctx, || {
-            let computed = resolve_imported_registry_symbol_with_budget(
-                self.ctx,
-                canonical_id,
-                exported_name,
-                || self.allow_wildcard_route(),
-            );
-            // `?` on a `None` observation refuses shared-cache
-            // admission — the computed value is still returned to the
-            // caller below from the cold-resolver fall-through.
+        // Bind the resolver context to a local so the write-through
+        // closure below `move`-captures this `Copy` reference rather
+        // than the `ctx` field of `&mut self` — `self` stays usable
+        // after the closure for the request-local view insert.
+        let ctx = self.ctx;
+        let host_db = ctx.project_type_store().imported_registry_db();
+        if let Some(opt_arc) = host_db.peek(&arc_key, ctx) {
+            let cached = opt_arc.as_deref().cloned();
+            self.imported_registry_symbols
+                .borrow_mut()
+                .insert(key, cached.clone());
+            return cached;
+        }
+        // Cold path — observe the keyed canonical's content version
+        // ONCE here, before the value is computed, through the
+        // view-aware `authoritative_current_content_hash` oracle —
+        // under a `SessionResolverContext` this resolves the overlay
+        // content hash for an overlay-bearing session, so an
+        // overlay-derived entry roots on the overlay version (and a
+        // later base request mismatches it instead of reusing it). The
+        // signature builder is provenance-pure: it roots the entry's
+        // self-root on this observed hash, never a current-content
+        // re-read inside the closure. `None` (canonical has no
+        // authoritative current content) refuses shared-cache admission
+        // — but the freshly-computed value is still returned.
+        let observed_keyed_hash = ctx.authoritative_current_content_hash(canonical_id);
+        // The single, side-effecting resolution: the wildcard-route
+        // fuse is consumed here at most once for this request.
+        #[cfg(test)]
+        super::IMPORTED_REGISTRY_RESOLVE_INVOCATIONS.with(|n| n.set(n.get().saturating_add(1)));
+        let resolved: Option<ResolvedImportedRegistrySymbol> =
+            resolve_imported_registry_symbol_with_budget(ctx, canonical_id, exported_name, || {
+                self.allow_wildcard_route()
+            });
+        // Write-through: `get_or_compute`'s closure only builds the
+        // provenance-pure signature and hands back the ALREADY-COMPUTED
+        // `resolved` value — it never re-runs resolution. When the
+        // closure `?`-returns `None` (no observed shallow state for the
+        // keyed canonical, or the test refusal hook below) OR
+        // post-compute revalidation fails, `get_or_compute` returns
+        // `None`; shared-cache admission is forgone, but the request
+        // still returns the same `resolved` value computed above. No
+        // recompute, no second wildcard-route fuse consumption.
+        let captured = resolved.clone();
+        let _ = host_db.get_or_compute(&arc_key, ctx, move || {
+            #[cfg(test)]
+            if super::FORCE_IMPORTED_REGISTRY_ADMISSION_REFUSAL.with(|f| f.get()) {
+                // Deterministically reproduce the production
+                // admission-refusal contract (`engine_fact_signature_*`
+                // returns `None`, or `revalidate_after_compute` fails)
+                // so the discriminating test can drive the
+                // refused-admission path without manufacturing a stale
+                // observed hash.
+                return None;
+            }
             let fact_sig = engine_fact_signature_for_exported_type(
-                self.ctx,
+                ctx,
                 canonical_id,
                 exported_name,
                 observed_keyed_hash?,
             )?;
-            Some((computed, fact_sig))
+            Some((captured, fact_sig))
         });
-        let resolved: Option<ResolvedImportedRegistrySymbol> = match host_value {
-            Some(opt_arc) => opt_arc.as_deref().cloned(),
-            // `get_or_compute` returned `None` — the signature builder
-            // refused admission (no observed shallow state for the
-            // keyed canonical) or post-compute revalidation failed.
-            // Shared-cache admission is forgone; the value is still
-            // produced by re-running the cold resolver so the caller
-            // gets the correct result.
-            None => resolve_imported_registry_symbol_with_budget(
-                self.ctx,
-                canonical_id,
-                exported_name,
-                || self.allow_wildcard_route(),
-            ),
-        };
         self.imported_registry_symbols
             .borrow_mut()
             .insert(key, resolved.clone());
@@ -522,6 +549,26 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     #[cfg(test)]
     pub(crate) fn imported_registry_symbol_cache_len(&self) -> usize {
         self.imported_registry_symbols.borrow().len()
+    }
+
+    /// Pre-consume the wildcard-route fuse so exactly `remaining`
+    /// further `allow_wildcard_route()` calls stay within budget. With
+    /// `remaining == 1`, the next slow-lane resolution is permitted and
+    /// a second would trip `wildcard_route_fanout` — the near-fanout
+    /// boundary that discriminates the imported-registry recompute bug.
+    #[cfg(test)]
+    pub(crate) fn prime_wildcard_route_fuse_for_tests(&mut self, remaining: usize) {
+        self.fuse_state.wildcard_sources_processed = self
+            .fuse_budgets
+            .wildcard_route_fanout
+            .saturating_sub(remaining);
+    }
+
+    /// Number of `allow_wildcard_route()` calls observed so far — the
+    /// live wildcard-route fuse consumption count.
+    #[cfg(test)]
+    pub(crate) fn wildcard_route_fuse_consumed_for_tests(&self) -> usize {
+        self.fuse_state.wildcard_sources_processed
     }
 
     /// Cache size for the structural materialiser's final-result

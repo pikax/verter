@@ -3964,3 +3964,124 @@ fn workspace_classification_helpers_use_typed_accessor_not_substring() {
          substring body returns `true` for workspace-linked packages and fails this assertion",
     );
 }
+
+/// Discriminating regression for the imported-registry recompute bug.
+///
+/// `resolve_imported_registry_symbol`'s producer used to handle a
+/// `None`-refuse-admission outcome by RE-RUNNING
+/// `resolve_imported_registry_symbol_with_budget` in a fallback arm.
+/// That second run consumed the wildcard-route fuse
+/// (`allow_wildcard_route()` / `wildcard_route_fanout`) a SECOND time —
+/// so a request near the fanout limit would trip the fuse on the
+/// recompute and spuriously resolve a slow-lane imported symbol to
+/// `None`, even though the first (uncached) compute had found a value.
+///
+/// The fixture pins all three discriminators of the bug:
+///
+///  - `ButtonProps` is a re-export (`export { Props as ButtonProps }
+///    from './types'`) — it has NO local prepared declaration in
+///    `index.ts`, so `resolve_imported_registry_symbol_with_budget`
+///    takes the slow lane and consumes one `allow_wildcard_route()`
+///    tick per invocation.
+///  - The wildcard-route fuse is primed so EXACTLY ONE further
+///    slow-lane resolution stays within budget; a second trips it.
+///  - Shared-cache admission is forced to be refused, so the producer
+///    must reuse the freshly-computed value on the refused path.
+///
+/// Discrimination property — FAILS pre-fix, PASSES post-fix:
+///
+///  - Pre-fix: the producer resolves once inside the `get_or_compute`
+///    closure (fuse → 1), `get_or_compute` returns `None` (admission
+///    refused), and the fallback arm resolves AGAIN (fuse → 2 > budget
+///    → `wildcard_route_fanout` trips → `None`). The resolver runs
+///    twice and the request returns `None`.
+///  - Post-fix: the producer resolves EXACTLY ONCE outside the closure
+///    (fuse → 1), the closure only builds the signature, and the
+///    refused-admission path returns the already-computed value. The
+///    resolver runs once and the request returns the resolved symbol.
+#[test]
+fn resolve_imported_registry_symbol_reuses_value_on_admission_failure_without_refusing_fuse() {
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/src/types.ts".to_string(),
+        Arc::from("export interface Props { primary: string }"),
+    );
+    ws.inject_file(
+        "/src/index.ts".to_string(),
+        Arc::from("export { Props as ButtonProps } from './types'"),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    assert!(host.ensure_loaded("/src/index.ts"));
+    assert!(host.ensure_loaded("/src/types.ts"));
+    // Wire the barrel's `./types` re-export so the slow-lane
+    // `resolve_named_type_export_target_shallow` route reaches the
+    // defining file.
+    host.set_import_dependencies(
+        "/src/index.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let mut engine = ComponentMetaQueryEngine::new(&host);
+    // Prime the wildcard-route fuse so exactly ONE further slow-lane
+    // `allow_wildcard_route()` stays within budget — a second
+    // resolution tips it past `wildcard_route_fanout` and trips. This
+    // is the near-fanout boundary the recompute bug spuriously fails
+    // at.
+    engine.prime_wildcard_route_fuse_for_tests(1);
+    let fuse_before = engine.wildcard_route_fuse_consumed_for_tests();
+
+    // Force shared-cache admission to be refused for this request, so
+    // the producer's refused-admission path is exercised.
+    let _refusal = super::force_imported_registry_admission_refusal_for_tests();
+    super::reset_imported_registry_resolve_invocations_for_tests();
+
+    let resolved = engine.resolve_imported_registry_symbol("/src/index.ts", "ButtonProps");
+
+    let resolve_invocations = super::imported_registry_resolve_invocations_for_tests();
+    let fuse_consumed = engine
+        .wildcard_route_fuse_consumed_for_tests()
+        .saturating_sub(fuse_before);
+
+    assert_eq!(
+        resolve_invocations, 1,
+        "resolve_imported_registry_symbol MUST resolve the imported symbol exactly ONCE \
+         even when shared-cache admission is refused — the pre-fix producer re-ran \
+         resolve_imported_registry_symbol_with_budget in the None-admission fallback, \
+         resolving twice",
+    );
+    assert_eq!(
+        fuse_consumed, 1,
+        "the wildcard-route fuse MUST be consumed exactly ONCE — the pre-fix recompute \
+         consumed it a second time, which near wildcard_route_fanout trips the fuse and \
+         spuriously resolves the imported symbol to None",
+    );
+    assert!(
+        !engine.has_fuse_tripped(),
+        "no fuse may trip — the single permitted slow-lane resolution stays within \
+         budget; the pre-fix second resolution trips wildcard_route_fanout",
+    );
+    let resolved = resolved
+        .expect("the slow-lane imported symbol must still resolve on the refused-admission path");
+    assert_eq!(
+        (
+            resolved.canonical_id.as_str(),
+            resolved.exported_name.as_str()
+        ),
+        ("/src/types.ts", "Props"),
+        "the refused-admission path must return the freshly-computed resolved symbol \
+         (the defining export), not a recompute and not None",
+    );
+}

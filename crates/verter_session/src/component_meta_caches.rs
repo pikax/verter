@@ -114,6 +114,35 @@ impl ImportedRegistryDb {
         }
     }
 
+    /// Peek-only lookup: returns the cached value only if its
+    /// `fact_dep_signature` is still valid against `ctx`.
+    ///
+    /// This is the warm-hit half of [`Self::get_or_compute`] exposed
+    /// for the producer's compute-once shape: the producer peeks here
+    /// first, and on a miss computes the imported-registry value
+    /// **once** (the wildcard-route fuse is a side-effecting budget —
+    /// it must be consumed at most once per request) before using
+    /// `get_or_compute` purely as a signature-building write-through.
+    /// The keyed canonical is the entry's self-root, validated
+    /// strictly — a same-canonical content edit, or a keyed canonical
+    /// untracked by the live store view, rejects the entry, exactly
+    /// matching the `get_or_compute` warm-hit `validate` arm.
+    pub(crate) fn peek(
+        &self,
+        key: &ImportedRegistryKey,
+        ctx: &dyn ResolverContext,
+    ) -> Option<Option<Arc<ResolvedImportedRegistrySymbol>>> {
+        let self_roots: [&str; 1] = [key.0.as_ref()];
+        let entry_arc = self.entries.get(key).map(|e| e.clone())?;
+        if validate_fact_signature_with_self_roots(ctx, &entry_arc.fact_dep_signature, &self_roots)
+        {
+            bubble_fact_signature(ctx, &entry_arc.fact_dep_signature);
+            Some(entry_arc.value.clone())
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn get_or_compute<F>(
         &self,
         key: &ImportedRegistryKey,

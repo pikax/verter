@@ -822,6 +822,59 @@ pub(crate) fn prepared_structural_substitution_slow_lane_forbidden_for_current_t
 #[cfg(not(test))]
 fn assert_prepared_structural_substitution_slow_lane_allowed(_expr: &TypeExpr) {}
 
+#[cfg(test)]
+thread_local! {
+    /// Counts how many times `resolve_imported_registry_symbol`'s
+    /// producer invokes `resolve_imported_registry_symbol_with_budget`.
+    /// The compute-once contract requires the producer to resolve the
+    /// imported symbol exactly once per request even when shared-cache
+    /// admission is refused — re-running the resolver would consume the
+    /// wildcard-route fuse a second time and spuriously resolve to
+    /// `None` near `wildcard_route_fanout`.
+    static IMPORTED_REGISTRY_RESOLVE_INVOCATIONS: Cell<usize> = const { Cell::new(0) };
+    /// When set, `resolve_imported_registry_symbol`'s `get_or_compute`
+    /// closure short-circuits to `None`, deterministically reproducing
+    /// the production cache-admission-refusal contract (signature
+    /// builder returns `None`, or post-compute revalidation fails)
+    /// without manufacturing a stale observed hash.
+    static FORCE_IMPORTED_REGISTRY_ADMISSION_REFUSAL: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Reset the imported-registry resolver invocation counter and read its
+/// prior value. Tests call this before a producer invocation and read
+/// the counter after.
+#[cfg(test)]
+pub(crate) fn reset_imported_registry_resolve_invocations_for_tests() {
+    IMPORTED_REGISTRY_RESOLVE_INVOCATIONS.with(|n| n.set(0));
+}
+
+/// Read the imported-registry resolver invocation counter.
+#[cfg(test)]
+pub(crate) fn imported_registry_resolve_invocations_for_tests() -> usize {
+    IMPORTED_REGISTRY_RESOLVE_INVOCATIONS.with(|n| n.get())
+}
+
+/// RAII guard that forces `resolve_imported_registry_symbol`'s shared
+/// cache admission to be refused for the current thread until dropped.
+#[cfg(test)]
+pub(crate) struct ForceImportedRegistryAdmissionRefusalGuard;
+
+#[cfg(test)]
+impl Drop for ForceImportedRegistryAdmissionRefusalGuard {
+    fn drop(&mut self) {
+        FORCE_IMPORTED_REGISTRY_ADMISSION_REFUSAL.with(|f| f.set(false));
+    }
+}
+
+/// Force `resolve_imported_registry_symbol`'s shared cache admission to
+/// be refused for the current thread until the returned guard drops.
+#[cfg(test)]
+pub(crate) fn force_imported_registry_admission_refusal_for_tests(
+) -> ForceImportedRegistryAdmissionRefusalGuard {
+    FORCE_IMPORTED_REGISTRY_ADMISSION_REFUSAL.with(|f| f.set(true));
+    ForceImportedRegistryAdmissionRefusalGuard
+}
+
 impl<'a> ComponentMetaQueryEngine<'a> {
     pub(crate) fn new(ctx: &'a dyn ResolverContext) -> Self {
         Self {
