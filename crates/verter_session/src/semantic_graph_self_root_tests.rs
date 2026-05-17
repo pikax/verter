@@ -1106,6 +1106,237 @@ fn builtin_utility_instantiation_roots_on_argument_file() {
     );
 }
 
+/// A NON-builtin generic instantiation `Gen<Arg>` self-roots on the file
+/// its file-derived type argument `Arg` was lowered from — a content edit
+/// to that file (which is NOT the declaring file of `Gen`) rejects the
+/// warm `Instantiate` memo entry.
+///
+/// Discriminating property: the non-builtin `Instantiate` path in
+/// `build_instantiate` rooted its `observed_self_roots` ONLY on the
+/// declaring file (`DeclIdentity.canonical_id` + `whole_hash`). The
+/// instantiated shell substitutes the generic `args` into the
+/// declaration body, so the result transitively depends on the file
+/// each file-derived argument was lowered from — but a content edit to
+/// an argument's file does NOT shift the *declaring* file's whole hash,
+/// so the declaring-file-only carrier validated the stale entry. The
+/// built-in utility path was fixed (see
+/// `builtin_utility_instantiation_roots_on_argument_file`); the
+/// non-builtin path was missed.
+///
+/// The fix merges `observed_self_roots_from_nodes(args)` alongside the
+/// declaration-file root. Reverting that merge leaves the non-builtin
+/// `Instantiate` carrier without the argument-file self-root and this
+/// test FAILS — the stale entry validates after the edit. The two files
+/// are distinct (`gen` declares `Box<T>`; `arg` declares `Foo`, used as
+/// the type argument) so the discrimination is precisely the
+/// argument-file self-root, not the declaring-file one.
+#[test]
+fn non_builtin_instantiation_roots_on_type_argument_file() {
+    let host = host();
+    let gen = "/sg_self_root/non_builtin_inst_gen.ts";
+    let arg = "/sg_self_root/non_builtin_inst_arg.ts";
+    // Declaring file: a userland generic `Box<T>` (NOT a built-in
+    // utility — `utility_source` classifies `Box` as userland, so
+    // `build_instantiate` takes the `resolve_prepared_type_decl` path).
+    upsert(&host, gen, "export type Box<T> = { value: T };\n");
+    // Argument file: a separate canonical whose `Foo` is lowered into a
+    // genuine file-derived Object node scoped to `arg`'s file.
+    upsert(&host, arg, "export type Foo = { a: number; b: string };\n");
+    let arg_node = file_derived_object_node(&host, arg);
+    let dispatch = host.semantic_dispatch();
+    let graph = host.project_type_store().semantic_graph();
+
+    let gen_whole_hash = host
+        .ensure_indexed_ready(gen)
+        .map(|indexed| indexed.whole_hash)
+        .expect("declaring file IndexedReady materialises");
+    // `Box<Foo>` — the single arg is the file-derived `Foo` Object node
+    // scoped to `arg`'s file. The declaring file is `gen`.
+    let key = SemanticQueryKey::Instantiate {
+        base: crate::semantic_query::DeclIdentity {
+            canonical_id: Arc::from(gen),
+            whole_hash: gen_whole_hash,
+            decl_name: Arc::from("Box"),
+        },
+        args: Arc::from(vec![arg_node].into_boxed_slice()),
+        body_mode: crate::semantic_query::ProjectionMode::Expanded,
+    };
+
+    let primed = dispatch.execute(key.clone());
+    assert!(
+        matches!(primed, crate::semantic_query::QueryResult::Value(_)),
+        "the Box<Foo> non-builtin instantiation must resolve before the edit"
+    );
+    // Hard fixture invariant: the non-builtin `Instantiate` MUST warm a
+    // memo entry. An early `return` would make the test pass vacuously
+    // if the kind ever stopped publishing — the discrimination is the
+    // validator rejecting the entry, not its absence.
+    assert!(
+        graph.get_unvalidated(&key).is_some(),
+        "fixture invariant: the warm non-builtin Instantiate memo entry must exist after priming"
+    );
+    // Direct carrier inspection: the published entry's facts rail MUST
+    // lead with the type argument's file self-root `FileWholeHash` for
+    // `arg` — this is the precise discrimination. Pre-fix the carrier
+    // carried a `FileWholeHash` only for the declaring file `gen`.
+    let carrier = graph
+        .entry_read_set_signature_for_tests(&key)
+        .expect("the non-builtin Instantiate memo entry must carry a ReadSetSignature");
+    assert!(
+        carrier.facts.iter().any(|f| matches!(
+            f,
+            FactVersionRef::FileWholeHash { canonical_id, .. } if canonical_id == arg
+        )),
+        "the non-builtin instantiation carrier MUST carry a self-root FileWholeHash for the \
+         type argument's file {arg} — `build_instantiate` substitutes the generic `args` into \
+         the declaration body, so the result depends on each file-derived argument's file. \
+         Pre-fix the non-builtin path rooted only on the declaring file. Got facts: {:?}",
+        carrier.facts,
+    );
+
+    // Edit the type argument's file through the skip-own-drain hook so
+    // the own-canonical drain does not remove the `Instantiate` entry —
+    // the warm read exercises the entry's self-root validation directly.
+    // The declaring file `gen` is UNTOUCHED, so a declaring-file-only
+    // carrier would still validate; only the argument-file self-root
+    // catches this edit.
+    upsert_skip_drain(
+        &host,
+        arg,
+        "export type Foo = { a: number; b: string; c: boolean };\n",
+    );
+
+    let ctx: &dyn ResolverContext = &host;
+    assert!(
+        graph.get_unvalidated(&key).is_some(),
+        "the physical non-builtin Instantiate memo entry must still be present after the edit"
+    );
+    assert!(
+        graph.get_validated(&key, ctx).is_none(),
+        "non-builtin instantiation: a content edit to the type argument's originating file \
+         (NOT the declaring file) MUST reject the warm Instantiate memo entry — the entry \
+         self-roots on each file-derived argument's file via `observed_self_roots_from_nodes` \
+         over the `args` node set, merged alongside the declaring-file root",
+    );
+}
+
+/// A `ResolveMacroPayload` whose macro type argument is file-derived
+/// from another canonical self-roots on that argument's file — a content
+/// edit to the argument's file (which is NOT the owning SFC) rejects the
+/// warm `ResolveMacroPayload` memo entry.
+///
+/// Discriminating property: `build_resolve_macro_payload` rooted its
+/// `observed_self_roots` ONLY on the macro owner (`owner.canonical_id` +
+/// `owner.whole_hash`). The `DefineProps` 1-arg arm returns the
+/// `type_args[0]` node directly, so the macro payload's identity IS the
+/// type argument — when that argument is file-derived from another
+/// canonical the result transitively depends on that file's content.
+/// But a content edit to the argument's file does NOT shift the owning
+/// SFC's whole hash, so the owner-only carrier validated the stale
+/// entry.
+///
+/// The fix merges `observed_self_roots_from_nodes(type_args)` alongside
+/// the owner root. Reverting that merge leaves the `ResolveMacroPayload`
+/// carrier without the argument-file self-root and this test FAILS — the
+/// stale entry validates after the edit. The owning SFC and the
+/// argument file are distinct canonicals so the discrimination is
+/// precisely the type-argument self-root, not the owner one.
+#[test]
+fn resolve_macro_payload_roots_on_type_argument_file() {
+    let host = host();
+    let sfc = "/sg_self_root/macro_payload_owner.vue";
+    let arg = "/sg_self_root/macro_payload_arg.ts";
+    // Owning SFC — a `defineProps` macro. The `ResolveMacroPayload` key
+    // is owned by this canonical.
+    upsert(
+        &host,
+        sfc,
+        "<script setup lang=\"ts\">defineProps<{ x: string }>()</script>\n",
+    );
+    // Type-argument file — a separate canonical whose `Foo` lowers into
+    // a genuine file-derived Object node scoped to `arg`'s file.
+    upsert(&host, arg, "export type Foo = { a: number; b: string };\n");
+    let arg_node = file_derived_object_node(&host, arg);
+    let dispatch = host.semantic_dispatch();
+    let graph = host.project_type_store().semantic_graph();
+
+    let sfc_whole_hash = host
+        .ensure_indexed_ready(sfc)
+        .map(|indexed| indexed.whole_hash)
+        .expect("owner SFC IndexedReady materialises");
+    // A `DefineProps` macro with a SINGLE type argument: the 1-arg arm
+    // returns `type_args[0]` directly, so the resolved payload IS the
+    // file-derived `Foo` Object node scoped to `arg`'s file. The owning
+    // canonical is `sfc`.
+    let key = SemanticQueryKey::ResolveMacroPayload {
+        owner: crate::semantic_query::DeclIdentity {
+            canonical_id: Arc::from(sfc),
+            whole_hash: sfc_whole_hash,
+            decl_name: Arc::from("<sfc-script-setup>"),
+        },
+        macro_index: 0,
+        macro_kind: verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
+        type_args: Arc::from(vec![arg_node].into_boxed_slice()),
+        mode: crate::semantic_query::ProjectionMode::Expanded,
+    };
+
+    let primed = dispatch.execute(key.clone());
+    assert!(
+        matches!(primed, crate::semantic_query::QueryResult::Value(_)),
+        "the ResolveMacroPayload over a file-derived type argument must resolve before the edit"
+    );
+    // Hard fixture invariant: the `ResolveMacroPayload` MUST warm a memo
+    // entry. An early `return` would make the test pass vacuously if the
+    // kind ever stopped publishing — the discrimination is the validator
+    // rejecting the entry, not its absence.
+    assert!(
+        graph.get_unvalidated(&key).is_some(),
+        "fixture invariant: the warm ResolveMacroPayload memo entry must exist after priming"
+    );
+    // Direct carrier inspection: the published entry's facts rail MUST
+    // lead with the type argument's file self-root `FileWholeHash` for
+    // `arg` — the precise discrimination. Pre-fix the carrier carried a
+    // `FileWholeHash` only for the owning SFC `sfc`.
+    let carrier = graph
+        .entry_read_set_signature_for_tests(&key)
+        .expect("the ResolveMacroPayload memo entry must carry a ReadSetSignature");
+    assert!(
+        carrier.facts.iter().any(|f| matches!(
+            f,
+            FactVersionRef::FileWholeHash { canonical_id, .. } if canonical_id == arg
+        )),
+        "the ResolveMacroPayload carrier MUST carry a self-root FileWholeHash for the type \
+         argument's file {arg} — the `DefineProps` 1-arg arm returns the `type_args[0]` node \
+         directly, so the payload's identity depends on that file's content. Pre-fix the \
+         carrier rooted only on the owning SFC. Got facts: {:?}",
+        carrier.facts,
+    );
+
+    // Edit the type argument's file through the skip-own-drain hook so
+    // the own-canonical drain does not remove the `ResolveMacroPayload`
+    // entry — the warm read exercises the entry's self-root validation
+    // directly. The owning SFC is UNTOUCHED, so an owner-only carrier
+    // would still validate; only the argument-file self-root catches it.
+    upsert_skip_drain(
+        &host,
+        arg,
+        "export type Foo = { a: number; b: string; c: boolean };\n",
+    );
+
+    let ctx: &dyn ResolverContext = &host;
+    assert!(
+        graph.get_unvalidated(&key).is_some(),
+        "the physical ResolveMacroPayload memo entry must still be present after the edit"
+    );
+    assert!(
+        graph.get_validated(&key, ctx).is_none(),
+        "ResolveMacroPayload: a content edit to the macro type argument's originating file \
+         (NOT the owning SFC) MUST reject the warm memo entry — the entry self-roots on each \
+         file-derived `type_args` node's file via `observed_self_roots_from_nodes`, merged \
+         alongside the owner root",
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Session-overlay warm-hit validation matrix.
 // ---------------------------------------------------------------------------

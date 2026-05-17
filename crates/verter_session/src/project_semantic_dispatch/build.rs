@@ -620,14 +620,30 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // Self-version rooting: the instantiated shell's body and member
         // structure were lowered from the prepared decl declared in
         // `decl_canonical` at the observed `decl_whole_hash` (carried by
-        // the `Instantiate` key's `DeclIdentity`). Root the memo entry on
-        // that observed content version so a content edit to the
-        // declaring file misses the warm read.
+        // the `Instantiate` key's `DeclIdentity`) AND from the generic
+        // `args` substituted into the decl body. The result therefore
+        // transitively depends on the file content each file-derived
+        // argument was lowered from — the same file-derived-input rooting
+        // the built-in utility path applies. Root the memo entry on the
+        // declaring file's observed content version AND on each
+        // `NodeScopeId::File`-scoped arg's `(canonical, observed_hash)`
+        // self-root so a content edit to the declaring file OR to any
+        // argument's originating file misses the warm read. Structural
+        // args (`Global`-scoped primitives) contribute nothing.
+        let mut observed_self_roots = vec![(Arc::clone(decl_canonical), decl_whole_hash)];
+        for arg_root in self.observed_self_roots_from_nodes(args.iter().copied()) {
+            if !observed_self_roots
+                .iter()
+                .any(|(c, h)| *c == arg_root.0 && *h == arg_root.1)
+            {
+                observed_self_roots.push(arg_root);
+            }
+        }
         crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
             QueryResult::Value(result),
             fence,
         ))
-        .with_observed_self_roots([(Arc::clone(decl_canonical), decl_whole_hash)])
+        .with_observed_self_roots(observed_self_roots)
     }
 
     pub(super) fn backfill_member_index_surface(
@@ -2463,14 +2479,35 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
 
         // Self-version rooting: the macro payload was resolved from the
-        // owning SFC's macro analysis at the observed `owner.whole_hash`.
-        // Root the memo entry on that canonical so a content edit to the
-        // SFC misses the warm read.
+        // owning SFC's macro analysis at the observed `owner.whole_hash`
+        // AND from the `type_args` nodes — every arm derives its value
+        // from `type_args` (returned directly for `DefineProps` /
+        // `WithDefaults` 1-arg and `DefineExpose` / `DefineOptions`;
+        // `NormalizeIntersection`-normalised for the ≥2-arg props arms;
+        // `ProjectPath`-projected for `DefineEmits` / `DefineSlots` /
+        // `DefineModel`). When a type argument is file-derived from
+        // another canonical the result transitively depends on that
+        // file's content, so the carrier must self-root on it too.
+        // Root the memo entry on the owning canonical AND on each
+        // `NodeScopeId::File`-scoped `type_args` node's
+        // `(canonical, observed_hash)` self-root so a content edit to the
+        // SFC OR to any type argument's originating file misses the warm
+        // read. Structural type args (`Global`-scoped primitives) and an
+        // empty `type_args` set contribute nothing.
+        let mut observed_self_roots = vec![(Arc::clone(&owner.canonical_id), owner.whole_hash)];
+        for arg_root in self.observed_self_roots_from_nodes(type_args.iter().copied()) {
+            if !observed_self_roots
+                .iter()
+                .any(|(c, h)| *c == arg_root.0 && *h == arg_root.1)
+            {
+                observed_self_roots.push(arg_root);
+            }
+        }
         crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
             result,
             fence_to_dep_signature(local_fence),
         ))
-        .with_observed_self_roots([(Arc::clone(&owner.canonical_id), owner.whole_hash)])
+        .with_observed_self_roots(observed_self_roots)
     }
 
     pub(super) fn intern_normalized_union_or_intersection(
