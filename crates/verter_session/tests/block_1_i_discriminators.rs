@@ -250,8 +250,12 @@ fn semantic_memo_invalidate_drains_fact_only_canonical_entry() {
     let carrier = ReadSetSignature::new(facts, legacy);
 
     // Direct publish via the test-only helper.
-    let populated =
-        store.publish_with_carrier_for_tests(key.clone(), QueryResult::Value(node), carrier);
+    let populated = store.publish_with_carrier_for_tests(
+        key.clone(),
+        QueryResult::Value(node),
+        carrier,
+        std::sync::Arc::from([]),
+    );
     assert!(
         populated >= 1,
         "publish must populate at least one slot (got {populated})"
@@ -405,14 +409,22 @@ fn semantic_memo_invalidate_preserves_unaffected_shared_legacy_entry() {
          (Arc::ptr_eq) so the shared-Arc hazard is exercised"
     );
 
-    let populated_a =
-        store.publish_with_carrier_for_tests(key_a.clone(), QueryResult::Value(node_a), carrier_a);
+    let populated_a = store.publish_with_carrier_for_tests(
+        key_a.clone(),
+        QueryResult::Value(node_a),
+        carrier_a,
+        std::sync::Arc::from([]),
+    );
     assert!(
         populated_a >= 1,
         "entry A must publish at least one slot (got {populated_a})"
     );
-    let populated_b =
-        store.publish_with_carrier_for_tests(key_b.clone(), QueryResult::Value(node_b), carrier_b);
+    let populated_b = store.publish_with_carrier_for_tests(
+        key_b.clone(),
+        QueryResult::Value(node_b),
+        carrier_b,
+        std::sync::Arc::from([]),
+    );
     assert!(
         populated_b >= 1,
         "entry B must publish at least one slot (got {populated_b})"
@@ -524,9 +536,13 @@ fn semantic_memo_warm_hit_validates_before_bubble() {
          the outer tracer."
     );
     assert!(
-        memo_mod_src.contains("if !entry.read_set_signature.validate(ctx) {"),
-        "get_validated must call `read_set_signature.validate(ctx)` BEFORE \
-         bubbling — that is the validate-before-bubble gate codex flagged."
+        memo_mod_src.contains("if !entry.validate(ctx) {"),
+        "get_validated must call `entry.validate(ctx)` BEFORE bubbling — that is \
+         the validate-before-bubble gate. `MemoEntry::validate` routes through the \
+         strict self-root validator `ReadSetSignature::validate_with_self_roots`, \
+         passing the entry's recorded `self_root_canonicals`, so a same-canonical \
+         content edit (or a self-root the live store view no longer tracks) rejects \
+         the entry strictly before any bubble."
     );
     assert!(
         build_src.contains("graph.get_validated(&prefix_key, ctx)"),

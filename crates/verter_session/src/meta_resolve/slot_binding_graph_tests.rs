@@ -808,10 +808,16 @@ defineSlots<Slots>()
 "#,
     );
 
-    // Drive in a small thread to bound stack growth.
+    // Drive in a small thread to bound stack growth. The cap is small
+    // enough that an UNBOUNDED recursion overflows immediately — that
+    // is the invariant under test. It accounts for the per-frame cost
+    // of the cold-build cooperative-admission path: each hop of a deep
+    // type resolution nests one cold build, and the strict warm-read
+    // validator threads a resolver-context handle through every cold
+    // build.
     let host_for_thread = Arc::clone(&host);
     let join = std::thread::Builder::new()
-        .stack_size(2 * 1024 * 1024)
+        .stack_size(384 * 1024)
         .spawn(move || {
             host_for_thread
                 .get_component_meta("/src/Comp.vue")
@@ -1264,9 +1270,14 @@ defineSlots<Slots>()
 "#,
     );
 
+    // Small cap so an UNBOUNDED recursion overflows immediately. The
+    // value accounts for the per-frame cost of the cold-build
+    // cooperative-admission path — the strict warm-read validator
+    // threads a resolver-context handle through every nested cold
+    // build of a deep type resolution.
     let host_for_thread = Arc::clone(&host);
     let join = std::thread::Builder::new()
-        .stack_size(256 * 1024)
+        .stack_size(384 * 1024)
         .spawn(move || {
             host_for_thread
                 .get_component_meta("/src/Comp.vue")
@@ -1277,7 +1288,7 @@ defineSlots<Slots>()
     assert!(
         outcome.is_ok(),
         "100-arm intersection through public component-meta entry must not exceed bounded \
-         recursion stack (256 KiB); outcome={:?}",
+         recursion stack (384 KiB cap); outcome={:?}",
         outcome.map(|_| "<ok>").unwrap_or("<panic>"),
     );
 }

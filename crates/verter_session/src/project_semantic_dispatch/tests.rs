@@ -189,7 +189,7 @@ fn instantiate_dedups_by_args() {
     let graph = Arc::clone(store.semantic_graph());
 
     let _ = resolve_decl_anchor(&dispatch, "/w/generic.ts", "Wrap"); // ensure indexed
-    let base = decl_identity("/w/generic.ts", "Wrap");
+    let base = decl_identity(&host, "/w/generic.ts", "Wrap");
     let arg_number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let arg_string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let args_number: Arc<[SemanticNodeId]> = Arc::from(vec![arg_number].into_boxed_slice());
@@ -1077,10 +1077,22 @@ fn resolve_decl_anchor(
 
 /// Build a `DeclIdentity` for a test type declared in the given file.
 /// Uses `whole_hash = [0u8; 16]` (tests don't have real content hashes).
-fn decl_identity(canonical_id: &str, name: &str) -> crate::semantic_query::DeclIdentity {
+fn decl_identity(
+    host: &VerterHost,
+    canonical_id: &str,
+    name: &str,
+) -> crate::semantic_query::DeclIdentity {
+    // The identity carries the file.s REAL whole hash — the content
+    // version recorded on `NodeScopeId::File` at intern time in
+    // production. A bogus hash would make the published memo entry.s
+    // self-root `FileWholeHash` fail strict warm-read validation.
+    let whole_hash = host
+        .ensure_indexed_ready(canonical_id)
+        .map(|indexed| indexed.whole_hash)
+        .unwrap_or([0u8; 16]);
     crate::semantic_query::DeclIdentity {
         canonical_id: Arc::from(canonical_id),
-        whole_hash: [0u8; 16],
+        whole_hash,
         decl_name: Arc::from(name),
     }
 }
@@ -1117,7 +1129,7 @@ fn instantiate_is_mode_free_one_entry_across_depth_requests() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
-    let base = decl_identity("/w/types.ts", "Foo");
+    let base = decl_identity(&host, "/w/types.ts", "Foo");
     let _ = resolve_decl_anchor(&dispatch, "/w/types.ts", "Foo"); // ensure indexed
     let string_arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let args: Arc<[SemanticNodeId]> = Arc::from(vec![string_arg].into_boxed_slice());
@@ -1176,7 +1188,7 @@ fn instantiate_with_concrete_args_emits_substitute_edges() {
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let _ = resolve_decl_anchor(&dispatch, "/w/types.ts", "Foo"); // ensure indexed
-    let base = decl_identity("/w/types.ts", "Foo");
+    let base = decl_identity(&host, "/w/types.ts", "Foo");
     let string_arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let args: Arc<[SemanticNodeId]> = Arc::from(vec![string_arg].into_boxed_slice());
 
@@ -1251,7 +1263,7 @@ fn shallow_instantiate_does_not_materialise_member_bodies() {
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let _ = resolve_decl_anchor(&dispatch, "/w/types.ts", "Foo"); // ensure indexed
-    let base = decl_identity("/w/types.ts", "Foo");
+    let base = decl_identity(&host, "/w/types.ts", "Foo");
     let string_arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let args: Arc<[SemanticNodeId]> = Arc::from(vec![string_arg].into_boxed_slice());
 
@@ -1314,7 +1326,7 @@ fn same_args_different_callers_dedup_to_one_entry() {
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let _ = resolve_decl_anchor(&dispatch, "/w/types.ts", "Foo"); // ensure indexed
-    let base = decl_identity("/w/types.ts", "Foo");
+    let base = decl_identity(&host, "/w/types.ts", "Foo");
     let string_arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let args: Arc<[SemanticNodeId]> = Arc::from(vec![string_arg].into_boxed_slice());
 
@@ -1367,7 +1379,7 @@ fn expanded_instantiate_materialises_through_dispatcher_not_private_walker() {
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let _ = resolve_decl_anchor(&dispatch, "/w/types.ts", "Foo"); // ensure indexed
-    let base = decl_identity("/w/types.ts", "Foo");
+    let base = decl_identity(&host, "/w/types.ts", "Foo");
     let string_arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let args: Arc<[SemanticNodeId]> = Arc::from(vec![string_arg].into_boxed_slice());
     let result = match dispatch.execute(SemanticQueryKey::Instantiate {
@@ -1423,7 +1435,7 @@ fn distinct_instantiations_share_visited_subpath_lowering_not_full_body() {
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let _ = resolve_decl_anchor(&dispatch, "/w/types.ts", "Foo"); // ensure indexed
-    let base = decl_identity("/w/types.ts", "Foo");
+    let base = decl_identity(&host, "/w/types.ts", "Foo");
     let string_arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number_arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let args_s: Arc<[SemanticNodeId]> = Arc::from(vec![string_arg].into_boxed_slice());
@@ -3136,7 +3148,7 @@ fn instantiate_ref_with_args_produces_sub_instantiate_shell_with_edge() {
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let _ = resolve_decl_anchor(&dispatch, "/w/t.ts", "Foo"); // ensure indexed
-    let foo = decl_identity("/w/t.ts", "Foo");
+    let foo = decl_identity(&host, "/w/t.ts", "Foo");
     let string_arg = primitive(&graph, PrimitiveKind::String);
     let args: Arc<[SemanticNodeId]> = Arc::from(vec![string_arg].into_boxed_slice());
     let result = match dispatch.execute(SemanticQueryKey::Instantiate {
@@ -3896,7 +3908,7 @@ fn semantic_graph_array_variant_preserves_element_and_readonly() {
     let args: Arc<[SemanticNodeId]> = Arc::from(vec![string_arg].into_boxed_slice());
 
     let _ = resolve_decl_anchor(&dispatch, "/w/arr.ts", "Mut"); // ensure indexed
-    let mut_base = decl_identity("/w/arr.ts", "Mut");
+    let mut_base = decl_identity(&host, "/w/arr.ts", "Mut");
     let mut_result = match dispatch.execute(SemanticQueryKey::Instantiate {
         base: mut_base,
         args: Arc::clone(&args),
@@ -3930,7 +3942,7 @@ fn semantic_graph_array_variant_preserves_element_and_readonly() {
     );
 
     let _ = resolve_decl_anchor(&dispatch, "/w/arr.ts", "Ro"); // ensure indexed
-    let ro_base = decl_identity("/w/arr.ts", "Ro");
+    let ro_base = decl_identity(&host, "/w/arr.ts", "Ro");
     let ro_result = match dispatch.execute(SemanticQueryKey::Instantiate {
         base: ro_base,
         args,
@@ -3968,7 +3980,7 @@ fn semantic_graph_tuple_variant_preserves_label_optional_rest_and_readonly() {
     let args: Arc<[SemanticNodeId]> = Arc::from(vec![string_arg].into_boxed_slice());
 
     let _ = resolve_decl_anchor(&dispatch, "/w/tup.ts", "Tup"); // ensure indexed
-    let base = decl_identity("/w/tup.ts", "Tup");
+    let base = decl_identity(&host, "/w/tup.ts", "Tup");
     let result = match dispatch.execute(SemanticQueryKey::Instantiate {
         base,
         args: Arc::clone(&args),
@@ -4016,7 +4028,7 @@ fn semantic_graph_tuple_variant_preserves_label_optional_rest_and_readonly() {
     }
 
     let _ = resolve_decl_anchor(&dispatch, "/w/tup.ts", "Ro"); // ensure indexed
-    let ro_base = decl_identity("/w/tup.ts", "Ro");
+    let ro_base = decl_identity(&host, "/w/tup.ts", "Ro");
     let ro_result = match dispatch.execute(SemanticQueryKey::Instantiate {
         base: ro_base,
         args,
@@ -4053,7 +4065,7 @@ fn semantic_graph_template_literal_variant_preserves_quasis_and_expression_refs(
     let args: Arc<[SemanticNodeId]> = Arc::from(vec![string_arg].into_boxed_slice());
 
     let _ = resolve_decl_anchor(&dispatch, "/w/tl.ts", "Greet"); // ensure indexed
-    let base = decl_identity("/w/tl.ts", "Greet");
+    let base = decl_identity(&host, "/w/tl.ts", "Greet");
     let result = match dispatch.execute(SemanticQueryKey::Instantiate {
         base,
         args,
@@ -4312,12 +4324,12 @@ fn typeparam_identity_discriminates_distinct_mapped_binders_in_same_file() {
         "B",
     )));
     let _ = dispatch.execute(SemanticQueryKey::Instantiate {
-        base: decl_identity("/w/two_mapped.ts", "A"),
+        base: decl_identity(&host, "/w/two_mapped.ts", "A"),
         args: Arc::from(vec![num].into_boxed_slice()),
         body_mode: ProjectionMode::Expanded,
     });
     let _ = dispatch.execute(SemanticQueryKey::Instantiate {
-        base: decl_identity("/w/two_mapped.ts", "B"),
+        base: decl_identity(&host, "/w/two_mapped.ts", "B"),
         args: Arc::from(vec![str_].into_boxed_slice()),
         body_mode: ProjectionMode::Expanded,
     });
@@ -4383,7 +4395,7 @@ fn substitute_preserves_scope_on_shell_rebuilds() {
     )));
     let num = primitive(&graph, PrimitiveKind::Number);
     let instantiated = match dispatch.execute(SemanticQueryKey::Instantiate {
-        base: decl_identity("/w/scope_pres.ts", "Wrap"),
+        base: decl_identity(&host, "/w/scope_pres.ts", "Wrap"),
         args: Arc::from(vec![num].into_boxed_slice()),
         body_mode: ProjectionMode::Expanded,
     }) {
@@ -4435,7 +4447,7 @@ fn unresolved_typeparameter_references_alias_by_name_within_same_file() {
     )));
     let num = primitive(&graph, PrimitiveKind::Number);
     let inst = match dispatch.execute(SemanticQueryKey::Instantiate {
-        base: decl_identity("/w/unresolved.ts", "Has"),
+        base: decl_identity(&host, "/w/unresolved.ts", "Has"),
         args: Arc::from(vec![num].into_boxed_slice()),
         body_mode: ProjectionMode::Expanded,
     }) {
@@ -5078,10 +5090,20 @@ fn project_path_prefix_peek_short_circuits_sibling_walk() {
 
 use verter_semantic::analysis::AnalyzedMacroKind;
 
-fn synthetic_macro_owner(canonical: &str) -> crate::semantic_query::DeclIdentity {
+fn synthetic_macro_owner(
+    host: &VerterHost,
+    canonical: &str,
+) -> crate::semantic_query::DeclIdentity {
+    // The owner identity carries the SFC.s REAL whole hash so the
+    // published `ResolveMacroPayload` memo entry.s self-root
+    // `FileWholeHash` passes strict warm-read validation.
+    let whole_hash = host
+        .ensure_indexed_ready(canonical)
+        .map(|indexed| indexed.whole_hash)
+        .unwrap_or([0u8; 16]);
     crate::semantic_query::DeclIdentity {
         canonical_id: Arc::from(canonical),
-        whole_hash: [0u8; 16],
+        whole_hash,
         decl_name: Arc::from("<sfc-script-setup>"),
     }
 }
@@ -5092,7 +5114,7 @@ fn synthetic_macro_owner(canonical: &str) -> crate::semantic_query::DeclIdentity
 fn resolve_macro_payload_define_props_no_args_opaque_miss() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
-    let owner = synthetic_macro_owner("/c.vue");
+    let owner = synthetic_macro_owner(&host, "/c.vue");
     let key = SemanticQueryKey::ResolveMacroPayload {
         owner,
         macro_index: 0,
@@ -5125,7 +5147,7 @@ fn resolve_macro_payload_define_props_single_arg_returns_arg_unchanged() {
     let arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
 
     let dispatch = ProjectSemanticDispatch::new(&host);
-    let owner = synthetic_macro_owner("/c.vue");
+    let owner = synthetic_macro_owner(&host, "/c.vue");
     let key = SemanticQueryKey::ResolveMacroPayload {
         owner,
         macro_index: 0,
@@ -5162,7 +5184,7 @@ fn resolve_macro_payload_define_props_multi_arg_normalize_intersection() {
         other => panic!("direct NormalizeIntersection failed: {other:?}"),
     };
 
-    let owner = synthetic_macro_owner("/c.vue");
+    let owner = synthetic_macro_owner(&host, "/c.vue");
     let via_macro = dispatch.execute(SemanticQueryKey::ResolveMacroPayload {
         owner,
         macro_index: 0,
@@ -5192,7 +5214,7 @@ fn resolve_macro_payload_define_expose_passthrough() {
     let dispatch = ProjectSemanticDispatch::new(&host);
 
     // 0 args → Miss.
-    let owner = synthetic_macro_owner("/c.vue");
+    let owner = synthetic_macro_owner(&host, "/c.vue");
     let zero = dispatch.execute(SemanticQueryKey::ResolveMacroPayload {
         owner: owner.clone(),
         macro_index: 0,
@@ -5265,7 +5287,7 @@ fn resolve_macro_payload_define_slots_dispatches_through_project_path() {
     let arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
 
     let dispatch = ProjectSemanticDispatch::new(&host);
-    let owner = synthetic_macro_owner("/c.vue");
+    let owner = synthetic_macro_owner(&host, "/c.vue");
 
     // The §3.2 body for DefineSlots requires the sidecar lookup to
     // succeed. Without an actual SFC + ensure_indexed_ready setup
@@ -5319,7 +5341,7 @@ fn resolve_macro_payload_define_model_branches_distinctly() {
     let arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
 
     let dispatch = ProjectSemanticDispatch::new(&host);
-    let owner = synthetic_macro_owner("/c.vue");
+    let owner = synthetic_macro_owner(&host, "/c.vue");
     let result = dispatch.execute(SemanticQueryKey::ResolveMacroPayload {
         owner,
         macro_index: 0,
@@ -5375,7 +5397,7 @@ fn resolve_macro_payload_self_reference_does_not_loop() {
     }));
 
     let dispatch = ProjectSemanticDispatch::new(&host);
-    let owner = synthetic_macro_owner("/c.vue");
+    let owner = synthetic_macro_owner(&host, "/c.vue");
     // Run the variant on DefineEmits with a recursive-ref node as the
     // type argument. The body must complete (no stack overflow), even
     // though the input itself is a cycle marker.
@@ -5412,11 +5434,24 @@ fn resolve_macro_payload_self_reference_does_not_loop() {
 #[test]
 fn resolve_macro_payload_dedups_via_interning() {
     let host = host();
+    // The `ResolveMacroPayload` memo entry self-roots on the owner
+    // SFC's `FileWholeHash`. The owner canonical must be a tracked
+    // file so the strict warm-read validator can confirm the self-root
+    // — `synthetic_macro_owner` then reads the file's real whole hash.
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/c.vue".to_string(),
+            source: Arc::from("<script setup lang=\"ts\">defineProps<{ x: string }>()</script>\n"),
+            file_kind: FileKind::from_path("/c.vue"),
+            aliases: Vec::new(),
+        })
+        .unwrap();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
 
     let dispatch = ProjectSemanticDispatch::new(&host);
-    let owner = synthetic_macro_owner("/c.vue");
+    let owner = synthetic_macro_owner(&host, "/c.vue");
     let key = SemanticQueryKey::ResolveMacroPayload {
         owner,
         macro_index: 0,
@@ -5473,7 +5508,7 @@ fn resolve_macro_payload_distinct_family_does_not_collapse() {
     let arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
 
     let dispatch = ProjectSemanticDispatch::new(&host);
-    let owner = synthetic_macro_owner("/c.vue");
+    let owner = synthetic_macro_owner(&host, "/c.vue");
     let key_props = SemanticQueryKey::ResolveMacroPayload {
         owner: owner.clone(),
         macro_index: 0,
@@ -5631,7 +5666,7 @@ fn navigate_integrity_project_path_does_not_route_through_macro_payload() {
 
     // Run an additional ResolveMacroPayload query — its hits/misses
     // are accounted to its own slot, separately from ProjectPath.
-    let owner = synthetic_macro_owner("/c.vue");
+    let owner = synthetic_macro_owner(&host, "/c.vue");
     let _macro_result = dispatch.execute(SemanticQueryKey::ResolveMacroPayload {
         owner,
         macro_index: 0,
@@ -6043,7 +6078,7 @@ fn no_new_semantic_query_key_variants_beyond_resolve_macro_payload() {
     let n = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
 
     let resolve_macro_payload_key = SemanticQueryKey::ResolveMacroPayload {
-        owner: synthetic_macro_owner("/c.vue"),
+        owner: synthetic_macro_owner(&host, "/c.vue"),
         macro_index: 0,
         macro_kind: AnalyzedMacroKind::DefineProps,
         type_args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
@@ -6221,7 +6256,7 @@ fn shallow_intersection_object_and_instantiation_ref_merges_members() {
     // Ensure Foo is indexed before constructing the InstantiationRef.
     let _ = resolve_decl_anchor(&dispatch, "/w/inst.ts", "Foo");
     let inst_ref = graph.intern_node(SemanticNodeData::InstantiationRef {
-        base: decl_identity("/w/inst.ts", "Foo"),
+        base: decl_identity(&host, "/w/inst.ts", "Foo"),
         args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
     });
     let base = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
@@ -6326,7 +6361,7 @@ fn shallow_instantiation_ref_substitutes_via_navigate() {
     let _ = resolve_decl_anchor(&dispatch, "/w/wrap.ts", "Foo");
     let str_arg = primitive(&graph, PrimitiveKind::String);
     let inst_ref = graph.intern_node(SemanticNodeData::InstantiationRef {
-        base: decl_identity("/w/wrap.ts", "Foo"),
+        base: decl_identity(&host, "/w/wrap.ts", "Foo"),
         args: Arc::from(vec![str_arg].into_boxed_slice()),
     });
 
@@ -6364,7 +6399,7 @@ fn shallow_instantiation_ref_warm_pass_o1() {
     let _ = resolve_decl_anchor(&dispatch, "/w/wrap_warm.ts", "Foo");
     let str_arg = primitive(&graph, PrimitiveKind::String);
     let inst_ref = graph.intern_node(SemanticNodeData::InstantiationRef {
-        base: decl_identity("/w/wrap_warm.ts", "Foo"),
+        base: decl_identity(&host, "/w/wrap_warm.ts", "Foo"),
         args: Arc::from(vec![str_arg].into_boxed_slice()),
     });
     // Cold pass populates the warm cache.
@@ -6545,7 +6580,7 @@ fn shallow_cycle_propagates_via_diagnostic_not_panic() {
     let _ = resolve_decl_anchor(&dispatch, "/w/cycle.ts", "Foo");
     let str_arg = primitive(&graph, PrimitiveKind::String);
     let inst_ref = graph.intern_node(SemanticNodeData::InstantiationRef {
-        base: decl_identity("/w/cycle.ts", "Foo"),
+        base: decl_identity(&host, "/w/cycle.ts", "Foo"),
         args: Arc::from(vec![str_arg].into_boxed_slice()),
     });
 
@@ -6718,7 +6753,7 @@ fn shallow_conditional_closed_recurses_on_branch() {
     // via `require_object_surface`.
     let _ = resolve_decl_anchor(&dispatch, "/w/cond_branch.ts", "Wrap");
     let true_branch = graph.intern_node(SemanticNodeData::InstantiationRef {
-        base: decl_identity("/w/cond_branch.ts", "Wrap"),
+        base: decl_identity(&host, "/w/cond_branch.ts", "Wrap"),
         args: Arc::from(vec![str_id].into_boxed_slice()),
     });
 

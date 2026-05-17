@@ -134,6 +134,12 @@ mod query_identity_self_root_substrate_tests;
 // component-meta query-identity caches.
 #[cfg(test)]
 mod query_db_self_root_tests;
+// Self-version-root discriminators for the `SemanticGraphStore`
+// query-node memo: strict warm-read validation, the
+// `semantic_graph_read_set_signature` producer, and per-node-kind
+// same-canonical-edit rejection.
+#[cfg(test)]
+mod semantic_graph_self_root_tests;
 // Block 1.J.1 item 2 — negative import-route reopen discriminators.
 /// Selective component-meta surface API types and BFS bridge support
 /// (Tier 1B / D102 / D125).

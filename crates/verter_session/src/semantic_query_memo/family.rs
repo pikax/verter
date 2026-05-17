@@ -19,16 +19,59 @@ pub(super) struct MemoEntry {
     pub(super) result: QueryResult<SemanticNodeId>,
     /// Carrier holding both the legacy whole-hash `DepSignature` and
     /// the path-precise R28 fact signature for this entry. Warm-hit
-    /// reads call `read_set_signature.validate(ctx)` BEFORE bubbling
-    /// `read_set_signature.bubble(ctx)` (or `bubble_via_tls()` on the
-    /// fast path). The unified reverse index registers under every
-    /// canonical yielded by `read_set_signature.canonical_ids()` so
-    /// `invalidate_canonical` drains both legacy- and fact-only deps.
+    /// reads validate the carrier against the live store view —
+    /// validating every [`Self::self_root_canonicals`] entry's
+    /// `FileWholeHash` *strictly* — BEFORE bubbling the carrier's
+    /// observations (see [`MemoEntry::validate`]). The unified reverse
+    /// index registers under every canonical yielded by
+    /// `read_set_signature.canonical_ids()` so `invalidate_canonical`
+    /// drains both legacy- and fact-only deps.
     pub(super) read_set_signature: ReadSetSignature,
+    /// The entry's **self-root canonicals** — the keyed canonical(s) the
+    /// cold build's value depends on for its own identity (its keyed
+    /// canonical for `ResolveDecl` / `TypeOf` / `Instantiate` /
+    /// `ResolveMacroPayload`, or the file-derived origin of every input
+    /// node for the node kinds keyed by interned `SemanticNodeId`s).
+    ///
+    /// A warm read validates each listed canonical's self-root
+    /// `FileWholeHash` *strictly* via
+    /// [`crate::fact_signature_helpers::validate_fact_signature_with_self_roots`]:
+    /// a same-canonical content edit — or a self-root canonical the live
+    /// store view no longer tracks — rejects the entry. The
+    /// `FileWholeHash` fact for any *non-listed* canonical (a cross-file
+    /// dependency loaded after the view snapshot) keeps the lazy
+    /// `validates` "untracked → optimistically accept" rule.
+    ///
+    /// Empty for entries published outside an observable cold-compute
+    /// pass (synthetic / test fixtures); validation then degrades to the
+    /// plain `read_set_signature.validate(ctx)` rails with no strict
+    /// self-root check.
+    pub(super) self_root_canonicals: Arc<[Arc<str>]>,
     /// Walker diagnostics observed during the cold build that produced
     /// this entry. Replayed on warm hits via `CacheRead.walker_diagnostics`.
     /// Empty for non-walker queries.
     pub(super) walker_diagnostics: Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
+}
+
+impl MemoEntry {
+    /// Validate the entry's carrier against the live store view,
+    /// validating every [`Self::self_root_canonicals`] entry's
+    /// self-root `FileWholeHash` *strictly*.
+    ///
+    /// Returns `true` only when the path-precise fact rail validates
+    /// (self-roots strict, cross-file dependency facts lazy) AND the
+    /// legacy `DepSignature` rail validates. An overflow carrier always
+    /// fails (it must never warm-hit). An empty carrier with no
+    /// self-roots validates vacuously.
+    ///
+    /// This is the strict warm-read validation entry point: a
+    /// same-canonical content edit on any self-root canonical, or a
+    /// self-root canonical the live store view no longer tracks, fails
+    /// validation and the warm read recomputes.
+    pub(super) fn validate(&self, ctx: &dyn crate::resolver_core::ResolverContext) -> bool {
+        self.read_set_signature
+            .validate_with_self_roots(ctx, &self.self_root_canonicals)
+    }
 }
 
 /// Mode-erased identity for one [`SemanticQueryKey`] family.

@@ -35,7 +35,6 @@ use std::sync::Arc;
 use verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource;
 use verter_semantic::analysis::type_eval::DeclarationId;
 use verter_semantic::analysis::type_solver::{PreparedTypeDecl, PreparedValueDecl};
-use verter_semantic::analysis::ScriptAnalysisSnapshot;
 use verter_workspace::{AmbientSymbolHit, ProjectStableKey};
 
 use crate::host_manage::ValueDeclIdentity;
@@ -269,11 +268,6 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
     #[inline]
     fn config(&self) -> &HostConfig {
         ResolverContext::config(self.inner)
-    }
-
-    #[inline]
-    fn analyzed_macro_snapshot(&self, canonical_id: &str) -> Option<Arc<ScriptAnalysisSnapshot>> {
-        ResolverContext::analyzed_macro_snapshot(self.inner, canonical_id)
     }
 
     // -------- Symbol / route resolution ----------------------------

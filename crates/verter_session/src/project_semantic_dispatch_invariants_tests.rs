@@ -1216,7 +1216,7 @@ fn relation_unknown_is_cached_with_fence_not_recomputed_on_repeated_cycle() {
     );
     // Belt-and-braces: the memo exposes the cached outcome via
     // `get_relation`.
-    let cached = graph.get_relation(source, target);
+    let cached = graph.get_relation(&host, source, target);
     assert!(
         matches!(cached, Some((_, RelationResult::Unknown))),
         "memo must expose the cached Unknown; got {cached:?}"
@@ -2535,16 +2535,24 @@ fn type_surface_db_identity_moved_to_semantic_graph_store_memo() {
     let b = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     // Cold: no entry.
     assert!(
-        graph.get_relation(a, b).is_none(),
+        graph.get_relation(&host, a, b).is_none(),
         "cold relation memo must return None before publish"
     );
-    // Publish a NotAssignable judgement.
-    let fence: crate::semantic_query::DepSignature =
-        std::sync::Arc::from(Vec::new().into_boxed_slice());
-    graph.insert_relation(a, b, fence.clone(), RelationResult::NotAssignable);
+    // Publish a NotAssignable judgement. The relation memo entry is
+    // self-version-rooted; a synthetic publish with no self-roots uses
+    // an empty carrier + empty self-root set so the warm read validates
+    // vacuously.
+    let carrier = crate::fact_signature_helpers::ReadSetSignature::empty();
+    graph.insert_relation(
+        a,
+        b,
+        carrier,
+        std::sync::Arc::from([]),
+        RelationResult::NotAssignable,
+    );
     // Warm: must return the same judgement.
     let (_, cached) = graph
-        .get_relation(a, b)
+        .get_relation(&host, a, b)
         .expect("published relation memo must be readable");
     assert_eq!(cached, RelationResult::NotAssignable);
     assert_eq!(graph.relation_memo_count(), 1);

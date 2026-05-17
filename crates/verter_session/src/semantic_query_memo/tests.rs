@@ -4,6 +4,23 @@
 
 use super::*;
 use crate::semantic_query::{DepVersion, PrimitiveKind, ResolveDeclKey, ScopeId};
+use crate::{HostConfig, VerterHost};
+
+/// A standalone host used purely as a
+/// [`crate::resolver_core::ResolverContext`] for the strict warm-read
+/// validator that `execute_cooperative` / `get_validated` / the
+/// relation memo now consult.
+///
+/// These substrate tests drive cooperative admission on a directly
+/// constructed [`SemanticGraphStore`]; the memo entries they publish
+/// carry empty self-version-rooted carriers (the `empty_signature()`
+/// build outputs), so warm-read validation is vacuous regardless of the
+/// host the context belongs to. The host therefore only has to be a
+/// well-formed `ResolverContext` — it does not need to own the store
+/// under test.
+fn ctx_host() -> VerterHost {
+    VerterHost::new_standalone(HostConfig::default())
+}
 
 fn scope(canonical: &str) -> ScopeId {
     ScopeId {
@@ -156,6 +173,7 @@ fn shard_routing_is_deterministic_per_payload_and_scope() {
 
 #[test]
 fn execute_cooperative_memoizes_winner_result() {
+    let host = ctx_host();
     let store = SemanticGraphStore::new();
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/a.ts"),
@@ -164,6 +182,7 @@ fn execute_cooperative_memoizes_winner_result() {
 
     let mut call_count = 0u32;
     let _first = store.execute_cooperative(
+        &host,
         key.clone(),
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || {
@@ -175,6 +194,7 @@ fn execute_cooperative_memoizes_winner_result() {
 
     // Second call must be a warm hit. The build closure is not invoked.
     let second = store.execute_cooperative(
+        &host,
         key.clone(),
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || {
@@ -199,6 +219,7 @@ fn execute_cooperative_memoizes_winner_result() {
 
 #[test]
 fn same_path_recursion_returns_sentinel_not_deadlock() {
+    let host = ctx_host();
     let store = Arc::new(SemanticGraphStore::new());
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/a.ts"),
@@ -209,12 +230,14 @@ fn same_path_recursion_returns_sentinel_not_deadlock() {
     let key_ref = key.clone();
 
     let result = store.execute_cooperative(
+        &host,
         key.clone(),
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || {
             // Re-enter the same key from the same stack — this must
             // return a Recursive sentinel, not self-await.
             let inner = store_ref.execute_cooperative(
+                &host,
                 key_ref.clone(),
                 || store_ref.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
                 || -> (QueryResult<SemanticNodeId>, DepSignature) {
@@ -236,6 +259,7 @@ fn same_path_recursion_returns_sentinel_not_deadlock() {
 
 #[test]
 fn errors_do_not_warm_shared_memo() {
+    let host = ctx_host();
     let store = SemanticGraphStore::new();
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/a.ts"),
@@ -243,6 +267,7 @@ fn errors_do_not_warm_shared_memo() {
     });
 
     let first = store.execute_cooperative(
+        &host,
         key.clone(),
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || (QueryResult::Error(QueryError::Miss), empty_signature()),
@@ -256,6 +281,7 @@ fn errors_do_not_warm_shared_memo() {
 
     let mut re_ran = false;
     let second = store.execute_cooperative(
+        &host,
         key.clone(),
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || {
@@ -270,6 +296,7 @@ fn errors_do_not_warm_shared_memo() {
 
 #[test]
 fn dep_signature_is_returned_with_warm_hits() {
+    let host = ctx_host();
     let store = SemanticGraphStore::new();
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/a.ts"),
@@ -283,6 +310,7 @@ fn dep_signature_is_returned_with_warm_hits() {
         .into_boxed_slice(),
     );
     let _ = store.execute_cooperative(
+        &host,
         key.clone(),
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || {
@@ -304,6 +332,7 @@ fn dep_signature_is_returned_with_warm_hits() {
 /// callers start a fresh build.
 #[test]
 fn panic_in_cold_build_does_not_deadlock_future_callers() {
+    let host = ctx_host();
     use std::panic::{catch_unwind, AssertUnwindSafe};
 
     let store = SemanticGraphStore::new();
@@ -315,6 +344,7 @@ fn panic_in_cold_build_does_not_deadlock_future_callers() {
     // Cold build panics; `catch_unwind` turns it into an `Err`.
     let panicked = catch_unwind(AssertUnwindSafe(|| {
         store.execute_cooperative(
+            &host,
             key.clone(),
             || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
             || -> (QueryResult<SemanticNodeId>, DepSignature) {
@@ -335,6 +365,7 @@ fn panic_in_cold_build_does_not_deadlock_future_callers() {
     // retired by the panic guard).
     let mut re_ran = false;
     let second = store.execute_cooperative(
+        &host,
         key.clone(),
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || {
@@ -356,6 +387,7 @@ fn panic_in_cold_build_does_not_deadlock_future_callers() {
 /// under invalidation.
 #[test]
 fn invalidate_canonical_removes_only_matching_scope_keys() {
+    let host = ctx_host();
     let store = SemanticGraphStore::new();
 
     // Warm `ResolveDecl(a.ts::Foo)` with a dep-sig referencing /w/a.ts.
@@ -364,6 +396,7 @@ fn invalidate_canonical_removes_only_matching_scope_keys() {
         name: Arc::from("Foo"),
     });
     let _ = store.execute_cooperative(
+        &host,
         a_key.clone(),
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || {
@@ -378,6 +411,7 @@ fn invalidate_canonical_removes_only_matching_scope_keys() {
         name: Arc::from("Foo"),
     });
     let _ = store.execute_cooperative(
+        &host,
         b_key.clone(),
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || {
@@ -533,12 +567,14 @@ fn dep_signature_intern_auto_sweep_keeps_bucket_count_bounded() {
 /// each backfilled narrower slot).
 #[test]
 fn family_map_publish_registers_canonical_to_entries_reverse_index() {
+    let host = ctx_host();
     let store = SemanticGraphStore::new();
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/a.ts"),
         name: Arc::from("Foo"),
     });
     let _ = store.execute_cooperative(
+        &host,
         key,
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || {
@@ -601,12 +637,16 @@ fn warm_publish_one_inserts_warm_map_and_registers_reverse_index() {
     let walker_diagnostics: std::sync::Arc<
         [crate::project_semantic_dispatch::walk::ShallowDiagnostic],
     > = std::sync::Arc::from([]);
+    let carrier = crate::fact_signature_helpers::ReadSetSignature::new(
+        crate::fact_signature_helpers::empty_fact_signature(),
+        Arc::clone(&dep_sig),
+    );
     store.warm_publish_one(
         &key,
         &QueryResult::Value(value),
-        &dep_sig,
         &walker_diagnostics,
-        None,
+        &carrier,
+        &Arc::from([]),
         &inflight,
     );
 
@@ -653,6 +693,7 @@ fn warm_publish_one_inserts_warm_map_and_registers_reverse_index() {
 /// cleanup did not exist; the "/w/b.ts" entry would dangle.
 #[test]
 fn family_map_invalidate_canonical_propagates_cross_canonical_cleanup() {
+    let host = ctx_host();
     let store = SemanticGraphStore::new();
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/a.ts"),
@@ -673,6 +714,7 @@ fn family_map_invalidate_canonical_propagates_cross_canonical_cleanup() {
         .into_boxed_slice(),
     );
     let _ = store.execute_cooperative(
+        &host,
         key,
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || {
@@ -720,6 +762,7 @@ fn family_map_invalidate_canonical_propagates_cross_canonical_cleanup() {
 /// warm entry is gone; b.ts-referencing warm entry survives.
 #[test]
 fn family_map_invalidate_canonical_uses_reverse_index_to_find_affected_pairs() {
+    let host = ctx_host();
     let store = SemanticGraphStore::new();
     let a_key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/a.ts"),
@@ -730,6 +773,7 @@ fn family_map_invalidate_canonical_uses_reverse_index_to_find_affected_pairs() {
         name: Arc::from("FooB"),
     });
     let _ = store.execute_cooperative(
+        &host,
         a_key.clone(),
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || {
@@ -738,6 +782,7 @@ fn family_map_invalidate_canonical_uses_reverse_index_to_find_affected_pairs() {
         },
     );
     let _ = store.execute_cooperative(
+        &host,
         b_key.clone(),
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || {
@@ -905,6 +950,7 @@ fn node_arena_invalidation_preserves_global_scope() {
 /// every one that references the touched canonical.
 #[test]
 fn invalidate_canonical_evicts_instantiate_entries_that_read_that_canonical_body() {
+    let host = ctx_host();
     let store = SemanticGraphStore::new();
     let base = crate::semantic_query::DeclIdentity::synthetic("Foo");
     let arg = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -918,6 +964,7 @@ fn invalidate_canonical_evicts_instantiate_entries_that_read_that_canonical_body
     // instantiation lowers from.
     let value_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
     let _ = store.execute_cooperative(
+        &host,
         key.clone(),
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || (QueryResult::Value(value_id), dep_sig_for("/w/body.ts", 1)),
@@ -948,6 +995,7 @@ fn invalidate_canonical_evicts_instantiate_entries_that_read_that_canonical_body
 /// confirming the sweep is driven strictly by dep-sig membership.
 #[test]
 fn invalidate_canonical_keeps_instantiate_entries_whose_bases_are_unrelated() {
+    let host = ctx_host();
     let store = SemanticGraphStore::new();
     let base = crate::semantic_query::DeclIdentity::synthetic("Foo");
     let arg = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -959,6 +1007,7 @@ fn invalidate_canonical_keeps_instantiate_entries_whose_bases_are_unrelated() {
 
     let value_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
     let _ = store.execute_cooperative(
+        &host,
         key.clone(),
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || {
@@ -986,6 +1035,7 @@ fn invalidate_canonical_keeps_instantiate_entries_whose_bases_are_unrelated() {
 /// broader compute's dep-sig via backfill (§7.11).
 #[test]
 fn invalidate_canonical_evicts_project_path_entries_through_touched_subtree() {
+    let host = ctx_host();
     let store = SemanticGraphStore::new();
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let path: Arc<[PathSegment]> = Arc::from(
@@ -1003,6 +1053,7 @@ fn invalidate_canonical_evicts_project_path_entries_through_touched_subtree() {
 
     let value_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
     let _ = store.execute_cooperative(
+        &host,
         key.clone(),
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || {
@@ -1047,6 +1098,7 @@ fn invalidate_canonical_evicts_project_path_entries_through_touched_subtree() {
 /// the warm slot.
 #[test]
 fn invalidate_canonical_evicts_in_flight_entries_per_mode_slot_and_joiners_retry() {
+    let host = ctx_host();
     let store = SemanticGraphStore::new();
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let path: Arc<[PathSegment]> =
@@ -1068,12 +1120,14 @@ fn invalidate_canonical_evicts_in_flight_entries_per_mode_slot_and_joiners_retry
     // from clobbering Identity with Expanded's (matching) dep-sig.
     let ident_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let _ = store.execute_cooperative(
+        &host,
         key_identity.clone(),
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || (QueryResult::Value(ident_id), dep_sig_for("/w/a.ts", 1)),
     );
     let exp_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
     let _ = store.execute_cooperative(
+        &host,
         key_expanded.clone(),
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || (QueryResult::Value(exp_id), dep_sig_for("/w/b.ts", 2)),
@@ -1108,6 +1162,7 @@ fn invalidate_canonical_evicts_in_flight_entries_per_mode_slot_and_joiners_retry
     let mut rebuilt = false;
     let new_ident = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let _ = store.execute_cooperative(
+        &host,
         key_identity.clone(),
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || {
@@ -1129,6 +1184,7 @@ fn invalidate_canonical_evicts_in_flight_entries_per_mode_slot_and_joiners_retry
 /// dep-sigs stay warm.
 #[test]
 fn backfilled_slot_with_wider_dep_sig_over_invalidates_conservatively_not_incorrectly() {
+    let host = ctx_host();
     let store = SemanticGraphStore::new();
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let path: Arc<[PathSegment]> =
@@ -1156,6 +1212,7 @@ fn backfilled_slot_with_wider_dep_sig_over_invalidates_conservatively_not_incorr
     };
     let exp_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let _ = store.execute_cooperative(
+        &host,
         key_expanded.clone(),
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || (QueryResult::Value(exp_id), wide_dep_sig.clone()),
@@ -1203,6 +1260,7 @@ fn backfilled_slot_with_wider_dep_sig_over_invalidates_conservatively_not_incorr
     };
     let narrow_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
     let _ = store.execute_cooperative(
+        &host,
         key_navigate.clone(),
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || {
@@ -1259,6 +1317,7 @@ fn backfilled_slot_with_wider_dep_sig_over_invalidates_conservatively_not_incorr
 /// Without the guard, Identity would re-warm with A's stale result.
 #[test]
 fn winner_skips_warm_publish_when_aborted_by_invalidation_during_build() {
+    let host = ctx_host();
     use std::sync::Barrier;
     use std::thread;
     let store = Arc::new(SemanticGraphStore::new());
@@ -1290,7 +1349,9 @@ fn winner_skips_warm_publish_when_aborted_by_invalidation_during_build() {
     let a_key_owner = key_identity.clone();
 
     let a_thread = thread::spawn(move || {
+        let host = ctx_host();
         store_a.execute_cooperative(
+            &host,
             a_key_owner,
             || store_a.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
             || {
@@ -1317,6 +1378,7 @@ fn winner_skips_warm_publish_when_aborted_by_invalidation_during_build() {
     // `FamilySlots::publish` writes the slot field directly.
     let exp_result = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
     let _ = store.execute_cooperative(
+        &host,
         key_expanded,
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || {
@@ -1361,6 +1423,7 @@ fn winner_skips_warm_publish_when_aborted_by_invalidation_during_build() {
 /// changes).
 #[test]
 fn invalidate_all_clears_every_memo_entry() {
+    let host = ctx_host();
     let store = SemanticGraphStore::new();
     for name in ["X", "Y", "Z"] {
         let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
@@ -1368,6 +1431,7 @@ fn invalidate_all_clears_every_memo_entry() {
             name: Arc::from(name),
         });
         let _ = store.execute_cooperative(
+            &host,
             key,
             || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
             || {
@@ -1384,6 +1448,7 @@ fn invalidate_all_clears_every_memo_entry() {
 
 #[test]
 fn recursive_sentinel_does_not_promote_to_warm_memo() {
+    let host = ctx_host();
     let store = Arc::new(SemanticGraphStore::new());
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/a.ts"),
@@ -1392,6 +1457,7 @@ fn recursive_sentinel_does_not_promote_to_warm_memo() {
 
     let id = store.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
     let res = store.execute_cooperative(
+        &host,
         key.clone(),
         || id,
         || (QueryResult::Recursive(id), empty_signature()),
@@ -1423,7 +1489,9 @@ fn cross_thread_joiner_waits_on_winner_publish() {
     let barrier_owner = Arc::clone(&start_barrier);
 
     let winner = thread::spawn(move || {
+        let host = ctx_host();
         store_owner.execute_cooperative(
+            &host,
             key_owner,
             || store_owner.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
             || {
@@ -1445,7 +1513,9 @@ fn cross_thread_joiner_waits_on_winner_publish() {
         let store = Arc::clone(&store);
         let key = key.clone();
         move || {
+            let host = ctx_host();
             store.execute_cooperative(
+                &host,
                 key,
                 || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
                 || -> (QueryResult<SemanticNodeId>, DepSignature) {
@@ -1605,6 +1675,7 @@ fn family_test_dep_signature() -> DepSignature {
 /// Run a cold build for `mode` with a stable result + dep-signature.
 /// Returns the published `SemanticNodeId`.
 fn warm_family_slot(
+    host: &VerterHost,
     store: &SemanticGraphStore,
     base: SemanticNodeId,
     mode: ProjectionMode,
@@ -1612,6 +1683,7 @@ fn warm_family_slot(
     let value_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let key = family_test_key(base, mode);
     let read = store.execute_cooperative(
+        host,
         key,
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || (QueryResult::Value(value_id), family_test_dep_signature()),
@@ -1655,9 +1727,10 @@ fn assert_cold_at(store: &SemanticGraphStore, base: SemanticNodeId, mode: Projec
 
 #[test]
 fn family_expanded_backfills_shallow_navigate_identity_share_dep_signature() {
+    let host = ctx_host();
     let store = SemanticGraphStore::new();
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let id = warm_family_slot(&store, base, ProjectionMode::Expanded);
+    let id = warm_family_slot(&host, &store, base, ProjectionMode::Expanded);
 
     // The Expanded slot itself.
     assert_warm_at(&store, base, ProjectionMode::Expanded, id);
@@ -1672,9 +1745,10 @@ fn family_expanded_backfills_shallow_navigate_identity_share_dep_signature() {
 
 #[test]
 fn family_shallow_backfills_navigate_and_identity() {
+    let host = ctx_host();
     let store = SemanticGraphStore::new();
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let id = warm_family_slot(&store, base, ProjectionMode::Shallow);
+    let id = warm_family_slot(&host, &store, base, ProjectionMode::Shallow);
 
     assert_warm_at(&store, base, ProjectionMode::Shallow, id);
     assert_warm_at(&store, base, ProjectionMode::Navigate, id);
@@ -1688,9 +1762,10 @@ fn family_shallow_backfills_navigate_and_identity() {
 
 #[test]
 fn family_navigate_backfills_identity_only() {
+    let host = ctx_host();
     let store = SemanticGraphStore::new();
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let id = warm_family_slot(&store, base, ProjectionMode::Navigate);
+    let id = warm_family_slot(&host, &store, base, ProjectionMode::Navigate);
 
     assert_warm_at(&store, base, ProjectionMode::Navigate, id);
     assert_warm_at(&store, base, ProjectionMode::Identity, id);
@@ -1703,9 +1778,10 @@ fn family_navigate_backfills_identity_only() {
 
 #[test]
 fn family_identity_does_not_backfill_anything() {
+    let host = ctx_host();
     let store = SemanticGraphStore::new();
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let id = warm_family_slot(&store, base, ProjectionMode::Identity);
+    let id = warm_family_slot(&host, &store, base, ProjectionMode::Identity);
 
     assert_warm_at(&store, base, ProjectionMode::Identity, id);
     assert_cold_at(&store, base, ProjectionMode::Navigate);
@@ -1718,26 +1794,29 @@ fn family_identity_does_not_backfill_anything() {
 
 #[test]
 fn family_navigate_does_not_satisfy_shallow_or_expanded() {
+    let host = ctx_host();
     let store = SemanticGraphStore::new();
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let _ = warm_family_slot(&store, base, ProjectionMode::Navigate);
+    let _ = warm_family_slot(&host, &store, base, ProjectionMode::Navigate);
     assert_cold_at(&store, base, ProjectionMode::Shallow);
     assert_cold_at(&store, base, ProjectionMode::Expanded);
 }
 
 #[test]
 fn family_shallow_does_not_satisfy_expanded() {
+    let host = ctx_host();
     let store = SemanticGraphStore::new();
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let _ = warm_family_slot(&store, base, ProjectionMode::Shallow);
+    let _ = warm_family_slot(&host, &store, base, ProjectionMode::Shallow);
     assert_cold_at(&store, base, ProjectionMode::Expanded);
 }
 
 #[test]
 fn family_identity_does_not_satisfy_navigate_shallow_expanded() {
+    let host = ctx_host();
     let store = SemanticGraphStore::new();
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let _ = warm_family_slot(&store, base, ProjectionMode::Identity);
+    let _ = warm_family_slot(&host, &store, base, ProjectionMode::Identity);
     assert_cold_at(&store, base, ProjectionMode::Navigate);
     assert_cold_at(&store, base, ProjectionMode::Shallow);
     assert_cold_at(&store, base, ProjectionMode::Expanded);
@@ -1768,7 +1847,9 @@ fn family_concurrent_navigate_and_expanded_both_complete_independently() {
     let store_exp = Arc::clone(&store);
     let bar_exp = Arc::clone(&barrier);
     let t_nav = thread::spawn(move || {
+        let host = ctx_host();
         store_nav.execute_cooperative(
+            &host,
             family_test_key(base, ProjectionMode::Navigate),
             || store_nav.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
             || {
@@ -1778,7 +1859,9 @@ fn family_concurrent_navigate_and_expanded_both_complete_independently() {
         )
     });
     let t_exp = thread::spawn(move || {
+        let host = ctx_host();
         store_exp.execute_cooperative(
+            &host,
             family_test_key(base, ProjectionMode::Expanded),
             || store_exp.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
             || {
@@ -1810,6 +1893,7 @@ fn family_concurrent_navigate_and_expanded_both_complete_independently() {
 
 #[test]
 fn family_wider_backfill_noop_when_narrower_slot_already_filled() {
+    let host = ctx_host();
     let store = SemanticGraphStore::new();
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
 
@@ -1817,6 +1901,7 @@ fn family_wider_backfill_noop_when_narrower_slot_already_filled() {
     // Identity slots.
     let nav_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let _ = store.execute_cooperative(
+        &host,
         family_test_key(base, ProjectionMode::Navigate),
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || (QueryResult::Value(nav_id), family_test_dep_signature()),
@@ -1829,6 +1914,7 @@ fn family_wider_backfill_noop_when_narrower_slot_already_filled() {
     // narrower-build result; only Shallow + Expanded get the new id.
     let exp_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
     let _ = store.execute_cooperative(
+        &host,
         family_test_key(base, ProjectionMode::Expanded),
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || (QueryResult::Value(exp_id), family_test_dep_signature()),
@@ -1845,10 +1931,12 @@ fn family_wider_backfill_noop_when_narrower_slot_already_filled() {
 
 #[test]
 fn family_cancelled_does_not_backfill_any_slot() {
+    let host = ctx_host();
     let store = SemanticGraphStore::new();
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
 
     let read = store.execute_cooperative(
+        &host,
         family_test_key(base, ProjectionMode::Expanded),
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || (QueryResult::Error(QueryError::Miss), empty_signature()),
@@ -2006,6 +2094,7 @@ fn alias_chain_multiple_hops_walk() {
 /// `stats_snapshot` increments hits + misses on warm + cold paths.
 #[test]
 fn stats_counters_increment_on_hit_and_miss() {
+    let host = ctx_host();
     let store = SemanticGraphStore::new();
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/stats.ts"),
@@ -2018,6 +2107,7 @@ fn stats_counters_increment_on_hit_and_miss() {
 
     // Cold call → misses increments by 1; hits stays 0.
     let _ = store.execute_cooperative(
+        &host,
         key.clone(),
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || {
@@ -2031,6 +2121,7 @@ fn stats_counters_increment_on_hit_and_miss() {
 
     // Warm call → hits increments; misses stays at 1.
     let _ = store.execute_cooperative(
+        &host,
         key.clone(),
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || -> (QueryResult<SemanticNodeId>, DepSignature) {
@@ -2205,8 +2296,10 @@ fn edge_dep_signatures_intern_identical_fences() {
 /// snapshot is internally consistent.
 #[test]
 fn stats_snapshot_is_consistent_mid_request() {
+    let host = ctx_host();
     let store = SemanticGraphStore::new();
     let _ = store.execute_cooperative(
+        &host,
         SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: scope("/w/snap.ts"),
             name: Arc::from("Foo"),
@@ -2364,6 +2457,7 @@ fn walk_origin_chain_releases_derivation_lock_before_visitor() {
 /// fresh `in_flight_peak` baseline.
 #[test]
 fn panic_in_cold_build_does_not_leak_in_flight_stats_counter() {
+    let host = ctx_host();
     use std::panic::{catch_unwind, AssertUnwindSafe};
 
     let store = SemanticGraphStore::new();
@@ -2376,6 +2470,7 @@ fn panic_in_cold_build_does_not_leak_in_flight_stats_counter() {
     // decrement in_flight_current back to 0.
     let _ = catch_unwind(AssertUnwindSafe(|| {
         store.execute_cooperative(
+            &host,
             key.clone(),
             || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
             || -> (QueryResult<SemanticNodeId>, DepSignature) {
@@ -2395,6 +2490,7 @@ fn panic_in_cold_build_does_not_leak_in_flight_stats_counter() {
         name: Arc::from("Foo"),
     });
     let _ = store.execute_cooperative(
+        &host,
         key2,
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || {
@@ -2411,6 +2507,7 @@ fn panic_in_cold_build_does_not_leak_in_flight_stats_counter() {
 
 #[test]
 fn resolved_named_type_refcount_path_unchanged_after_family_rewrite() {
+    let host = ctx_host();
     use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
 
     let store = SemanticGraphStore::new();
@@ -2436,6 +2533,7 @@ fn resolved_named_type_refcount_path_unchanged_after_family_rewrite() {
         key: Arc::new(key.clone()),
     };
     let read = store.execute_cooperative(
+        &host,
         formal_key.clone(),
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || {
@@ -2636,7 +2734,9 @@ fn semantic_graph_stats_joined_waits_increments_on_cooperative_join() {
     let winner_store = Arc::clone(&store);
     let winner_key = key.clone();
     let winner = thread::spawn(move || {
+        let host = ctx_host();
         winner_store.execute_cooperative(
+            &host,
             winner_key,
             || winner_store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
             || {
@@ -2657,7 +2757,9 @@ fn semantic_graph_stats_joined_waits_increments_on_cooperative_join() {
     let joiner_store = Arc::clone(&store);
     let joiner_key = key.clone();
     let joiner = thread::spawn(move || {
+        let host = ctx_host();
         joiner_store.execute_cooperative(
+            &host,
             joiner_key,
             || joiner_store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
             || -> (QueryResult<SemanticNodeId>, DepSignature) {
@@ -2711,7 +2813,9 @@ fn semantic_graph_stats_inflight_aborted_retries_increments_on_retry_loop() {
     let winner_store = Arc::clone(&store);
     let winner_key = key.clone();
     let winner = thread::spawn(move || {
+        let host = ctx_host();
         winner_store.execute_cooperative(
+            &host,
             winner_key,
             || winner_store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
             || {
@@ -2729,7 +2833,9 @@ fn semantic_graph_stats_inflight_aborted_retries_increments_on_retry_loop() {
     let joiner_store = Arc::clone(&store);
     let joiner_key = key.clone();
     let joiner = thread::spawn(move || {
+        let host = ctx_host();
         joiner_store.execute_cooperative(
+            &host,
             joiner_key,
             || joiner_store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
             || {
@@ -2783,6 +2889,7 @@ fn semantic_graph_stats_inflight_aborted_retries_increments_on_retry_loop() {
 /// flag should bump the counter exactly once.
 #[test]
 fn semantic_graph_stats_cold_aborts_swept_increments_when_forced() {
+    let host = ctx_host();
     let store = SemanticGraphStore::new();
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/dep.ts"),
@@ -2793,6 +2900,7 @@ fn semantic_graph_stats_cold_aborts_swept_increments_when_forced() {
 
     let mut call_count = 0u32;
     let result = store.execute_cooperative(
+        &host,
         key.clone(),
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || {
@@ -2884,6 +2992,7 @@ fn concurrent_stress_16_threads_retry_counters_consistent() {
             let store = Arc::clone(&store);
             let barrier = Arc::clone(&barrier);
             thread::spawn(move || {
+                let host = ctx_host();
                 barrier.wait();
                 for call in 0..CALLS_PER_THREAD {
                     // Rotate across a small key set so aborts and
@@ -2894,6 +3003,7 @@ fn concurrent_stress_16_threads_retry_counters_consistent() {
                         name: Arc::from(name.as_str()),
                     });
                     let _ = store.execute_cooperative(
+                        &host,
                         key,
                         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
                         || {
@@ -3010,6 +3120,7 @@ fn concurrent_stress_16_threads_retry_counters_consistent() {
 /// and post-fix it is bumped on every fast-path return.
 #[test]
 fn execute_cooperative_warm_hit_skips_admission_overhead() {
+    let host = ctx_host();
     use crate::loop5_instrumentation::WARM_HIT_FAST_PATH_HITS;
     use crate::request_context::{RequestContext, RequestContextGuard};
 
@@ -3024,6 +3135,7 @@ fn execute_cooperative_warm_hit_skips_admission_overhead() {
 
     // Cold build to populate the warm slot. Records one Miss.
     let _ = store.execute_cooperative(
+        &host,
         key.clone(),
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || {
@@ -3061,6 +3173,7 @@ fn execute_cooperative_warm_hit_skips_admission_overhead() {
     // Warm call — must skip the build closure (panic indicates a
     // miscount) and route through the fast path.
     let _ = store.execute_cooperative(
+        &host,
         key.clone(),
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || -> (QueryResult<SemanticNodeId>, DepSignature) {
@@ -3107,31 +3220,25 @@ fn execute_cooperative_warm_hit_skips_admission_overhead() {
     );
 }
 
-/// Discriminator for codex P2.C —
-/// `prefix_backfill_carries_traced_facts`.
+/// Discriminator — `prefix_backfill_carries_traced_facts`.
 ///
 /// The cooperative cold-build path accumulates
 /// `pending_prefix_backfills` on `QueryBuildOutput` and publishes them
-/// AFTER the parent's `install_fact_tracer` finalises. Pre-fix the
-/// publish call site (`semantic_query_memo/mod.rs:1813-1817`) passed
-/// ONLY `dep_signature` (legacy fence) to `warm_publish_one_if_absent`;
-/// the helper then reconstructed `facts` via `fact_signature_from_fence`
-/// — that bridge can only emit `FileWholeHash` from `DepVersion::WholeHash`
-/// entries and drops every `Parse(...)` / `ResolveImports(...)` /
-/// `RouteSurface(...)` fact the parent observed.
-///
-/// Post-fix the call site constructs a full `ReadSetSignature` from
-/// both rails (legacy + traced facts) and passes it to
-/// `warm_publish_one_if_absent`. The backfilled prefix entry's carrier
-/// therefore matches the parent's traced facts verbatim.
+/// AFTER the parent's carrier is built. Each backfilled prefix entry
+/// stores the parent's COMPLETED `graph_carrier` verbatim — the prefix
+/// hops are sub-paths of the same `base`, so they share the parent's
+/// self-version-rooted carrier (self-roots + traced cross-file facts).
 ///
 /// Discriminating signal: post-publish, look up the BACKFILLED PREFIX
 /// entry and inspect its `read_set_signature.facts`. It must contain
-/// the parent's traced `Parse(...)` fact. Pre-fix the prefix entry's
-/// `facts` contains only `FileWholeHash` reconstructions; the
-/// `Parse(...)` fact is absent.
+/// the parent's traced `Parse(...)` fact. A backfill path that dropped
+/// the parent's carrier — or reconstructed facts from the legacy fence
+/// alone — would leave the prefix entry's `facts` rail missing the
+/// `Parse(...)` fact (the legacy fence references a DIFFERENT
+/// canonical, so a fence-only reconstruction cannot recover it).
 #[test]
 fn prefix_backfill_carries_traced_facts() {
+    let host = ctx_host();
     use crate::project_semantic_dispatch::walk::{PrefixBackfill, QueryBuildOutput};
     use crate::resolver_core::{FactVersionRef, ParseFactRef};
     use crate::semantic_query::PathSegment;
@@ -3184,7 +3291,17 @@ fn prefix_backfill_carries_traced_facts() {
         "prefix key must start cold"
     );
 
+    // The parent's COMPLETED self-version-rooted carrier — the facts
+    // rail carries the traced `Parse(...)` fact, the legacy rail the
+    // `dep_signature`. A test calling `execute_cooperative` directly
+    // does not go through the dispatch's `traced_build` wrapper, so it
+    // builds `graph_carrier` itself here.
+    let parent_carrier = crate::fact_signature_helpers::ReadSetSignature::new(
+        Arc::clone(&parent_traced_facts),
+        Arc::clone(&parent_dep_signature),
+    );
     let _ = store.execute_cooperative(
+        &host,
         parent_key.clone(),
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || QueryBuildOutput {
@@ -3192,7 +3309,9 @@ fn prefix_backfill_carries_traced_facts() {
             dep_signature: Arc::clone(&parent_dep_signature),
             walker_diagnostics: Vec::new(),
             cache_suppress: false,
-            fact_dep_signature: Some(Arc::clone(&parent_traced_facts)),
+            observed_self_roots: Vec::new(),
+            graph_carrier: Some(Box::new(parent_carrier.clone())),
+            self_root_canonicals: Arc::from([]),
             pending_prefix_backfills: vec![PrefixBackfill {
                 key: prefix_key.clone(),
                 node: prefix_node,
@@ -3237,5 +3356,368 @@ fn prefix_backfill_carries_traced_facts() {
         has_legacy_canonical,
         "backfilled prefix entry's legacy rail must include the \
          parent's legacy canonical (`/test/legacy-dep.ts`)"
+    );
+}
+
+/// Without any `RequestContext` installed, the global
+/// `cold_aborts_swept` counter must still tick — the dual-target
+/// counter helper is dual-target, not exclusive-target. Existing
+/// global-stats observers (telemetry, Prometheus exporters, debug
+/// dumps) rely on this invariant: a refactor that moved the global
+/// write behind a per-request guard would fail this test.
+#[test]
+fn cold_abort_sweep_global_counter_increments_without_request_context() {
+    use crate::request_context::current_request_context;
+
+    // Sanity: this test runs without an audited request scope.
+    assert!(
+        current_request_context().is_none(),
+        "test prelude expects an empty TLS — found an installed context. \
+         Another test leaked its RequestContextGuard."
+    );
+
+    let host = ctx_host();
+    let store = SemanticGraphStore::new();
+    let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        scope: scope("/w/dep.ts"),
+        name: Arc::from("Foo"),
+    });
+
+    let _force_guard = SemanticGraphStore::test_force_cold_abort_sweep();
+
+    let result = store.execute_cooperative(
+        &host,
+        key.clone(),
+        || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+        || {
+            let id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+            (QueryResult::Value(id), empty_signature())
+        },
+    );
+    assert!(matches!(result.value, QueryResult::Value(_)));
+
+    let snap = store.stats_snapshot();
+    assert_eq!(
+        snap.cold_aborts_swept, 1,
+        "global stats.cold_aborts_swept must increment for non-audited callers \
+         (got {}). If this regresses, the dual-target helper has accidentally \
+         moved the global write behind a per-request guard — that would \
+         break every existing telemetry consumer that reads stats_snapshot.",
+        snap.cold_aborts_swept,
+    );
+}
+
+/// Drive the production cold-abort path with an installed
+/// `RequestContext` and confirm the per-request `cold_aborts_swept`
+/// counter is bumped — this is what the audit miner reads at
+/// `component_meta_audit/footprint_miner.rs::CacheOutcomeTally`.
+///
+/// The counter helper consults `current_request_context()` directly
+/// and bumps both global stats AND per-request when a context is
+/// installed. The architecture-guard `audit_counter_single_helper`
+/// proves the helper is the only writer; this test proves the
+/// per-request mirror lands on the right atomic counter.
+#[test]
+fn cold_abort_sweep_attributes_to_per_request_context() {
+    use crate::request_context::{RequestContext, RequestContextGuard};
+    use std::sync::atomic::Ordering;
+
+    let host = ctx_host();
+    let store = SemanticGraphStore::new();
+    let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        scope: scope("/w/dep.ts"),
+        name: Arc::from("Foo"),
+    });
+
+    // Install a request context on the calling thread. The cold-abort
+    // path runs synchronously on this thread under
+    // `execute_cooperative`, so `current_request_context()` is `Some`
+    // exactly when the helper fires.
+    let ctx = RequestContext::new(7, Arc::from("/c.vue"), false, None);
+    let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
+
+    // Force the cold-abort sweep deterministically.
+    let _force_guard = SemanticGraphStore::test_force_cold_abort_sweep();
+
+    let result = store.execute_cooperative(
+        &host,
+        key.clone(),
+        || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+        || {
+            let id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+            (QueryResult::Value(id), empty_signature())
+        },
+    );
+    assert!(matches!(result.value, QueryResult::Value(_)));
+
+    let snap = store.stats_snapshot();
+    assert_eq!(
+        snap.cold_aborts_swept, 1,
+        "global stats.cold_aborts_swept must still increment for non-audited and audited callers \
+         (got {})",
+        snap.cold_aborts_swept,
+    );
+
+    let per_request = ctx.cold_aborts_swept.load(Ordering::Relaxed);
+    assert_eq!(
+        per_request, 1,
+        "ctx.cold_aborts_swept must increment when a RequestContext is \
+         installed during a cold-abort sweep — this is what the audit \
+         miner reads (got {per_request})."
+    );
+}
+
+/// Drive the inflight-aborted-retry path with an installed
+/// `RequestContext` on the joiner thread and confirm the per-request
+/// `inflight_aborted_retries` counter is bumped — the audit miner
+/// reads it at `CacheOutcomeTally`.
+#[test]
+fn inflight_aborted_retry_attributes_to_per_request_context() {
+    use crate::request_context::{RequestContext, RequestContextGuard};
+    use std::sync::atomic::Ordering;
+    use std::sync::mpsc;
+    use std::thread;
+
+    let store = Arc::new(SemanticGraphStore::new());
+    let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        scope: scope("/w/dep.ts"),
+        name: Arc::from("Foo"),
+    });
+
+    let ctx = RequestContext::new(11, Arc::from("/r.vue"), false, None);
+
+    let (tx_in_build, rx_in_build) = mpsc::channel::<()>();
+    let (tx_finish_build, rx_finish_build) = mpsc::channel::<()>();
+
+    let winner_store = Arc::clone(&store);
+    let winner_key = key.clone();
+    let winner = thread::spawn(move || {
+        let host = ctx_host();
+        winner_store.execute_cooperative(
+            &host,
+            winner_key,
+            || winner_store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || {
+                tx_in_build.send(()).expect("winner signal in_build");
+                rx_finish_build.recv().expect("winner signal finish");
+                let id =
+                    winner_store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+                (QueryResult::Value(id), empty_signature())
+            },
+        )
+    });
+
+    rx_in_build.recv().expect("winner entered build");
+
+    let joiner_store = Arc::clone(&store);
+    let joiner_key = key.clone();
+    let joiner_ctx = Arc::clone(&ctx);
+    let joiner = thread::spawn(move || {
+        let host = ctx_host();
+        // Install the context on the JOINER thread — that's where
+        // the retry-bump helper runs.
+        let _ctx_guard = RequestContextGuard::install(Arc::clone(&joiner_ctx));
+        joiner_store.execute_cooperative(
+            &host,
+            joiner_key,
+            || joiner_store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || {
+                let id =
+                    joiner_store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+                (QueryResult::Value(id), empty_signature())
+            },
+        )
+    });
+
+    thread::sleep(std::time::Duration::from_millis(50));
+    let aborted = test_trigger_inflight_abort(&store, &key);
+    assert!(aborted, "inflight entry must have been present to abort");
+
+    tx_finish_build.send(()).expect("release winner");
+    let _ = winner.join().expect("winner joined");
+    let _ = joiner.join().expect("joiner joined");
+
+    let snap = store.stats_snapshot();
+    assert!(
+        snap.inflight_aborted_retries >= 1,
+        "global stats.inflight_aborted_retries must increment on retry loop (got {})",
+        snap.inflight_aborted_retries,
+    );
+
+    let per_request = ctx.inflight_aborted_retries.load(Ordering::Relaxed);
+    assert!(
+        per_request >= 1,
+        "ctx.inflight_aborted_retries must increment when a RequestContext \
+         is installed on the joiner thread — this is what the audit miner \
+         reads at `CacheOutcomeTally` (got {per_request})."
+    );
+}
+
+/// Discriminating test: a cross-thread joiner bubbles the winner's
+/// self-version-rooted carrier into the joiner thread's active fact
+/// tracer.
+///
+/// The winner's cold build produces a [`QueryBuildOutput`] whose
+/// `graph_carrier` carries one `FileWholeHash` fact. The cooperative
+/// winner records that carrier on `InflightState::graph_carrier`
+/// BEFORE notifying joiners; the joiner reads it after waking and fans
+/// its fact rail into the joiner thread's outer tracer via
+/// `bubble_via_tls`. The joiner's finalised tracer set must then
+/// contain the winner's fact.
+///
+/// This FAILS if the winner-write of `state.graph_carrier`, the
+/// joiner-side read, or the joiner-side `carrier.bubble_via_tls()`
+/// call regresses — the joiner's outer tracer would finalise without
+/// the winner's fact.
+#[test]
+fn joiner_outer_tracer_contains_winner_carrier_fact() {
+    use crate::resolver_core::{FactReadSetFinalise, FactVersionRef};
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    let store = Arc::new(SemanticGraphStore::new());
+    let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        scope: scope("/cross_thread_joiner/site.ts"),
+        name: Arc::from("Target"),
+    });
+
+    // The winner's fact: a `FileWholeHash` over a synthetic canonical
+    // with a recognisable 16-byte pattern.
+    let winner_fact = FactVersionRef::FileWholeHash {
+        canonical_id: "winner_dep.ts".to_string(),
+        hash: [0x77u8; 16],
+    };
+
+    let (tx_winner_in_build, rx_winner_in_build) = mpsc::channel::<()>();
+    let (tx_release_winner, rx_release_winner) = mpsc::channel::<()>();
+
+    let winner_store = Arc::clone(&store);
+    let winner_key = key.clone();
+    let winner_fact_for_build = winner_fact.clone();
+    let winner = thread::spawn(move || {
+        let host = ctx_host();
+        winner_store.execute_cooperative(
+            &host,
+            winner_key,
+            || winner_store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || {
+                tx_winner_in_build
+                    .send(())
+                    .expect("winner: signal in-build");
+                rx_release_winner
+                    .recv()
+                    .expect("winner: released by driver");
+                let id =
+                    winner_store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+                // The winner's COMPLETED carrier carries the winner's
+                // fact on the path-precise rail. A direct
+                // `execute_cooperative` caller builds `graph_carrier`
+                // itself (the dispatch's `traced_build` wrapper is not
+                // in scope here).
+                let carrier = crate::fact_signature_helpers::ReadSetSignature::new(
+                    Arc::from(vec![winner_fact_for_build.clone()]),
+                    Arc::from(Vec::new().into_boxed_slice()),
+                );
+                crate::project_semantic_dispatch::walk::QueryBuildOutput {
+                    result: QueryResult::Value(id),
+                    dep_signature: Arc::from(Vec::new().into_boxed_slice()),
+                    walker_diagnostics: Vec::new(),
+                    cache_suppress: false,
+                    observed_self_roots: Vec::new(),
+                    graph_carrier: Some(Box::new(carrier)),
+                    self_root_canonicals: Arc::from([]),
+                    pending_prefix_backfills: Vec::new(),
+                }
+            },
+        )
+    });
+
+    rx_winner_in_build.recv().expect("winner entered build");
+
+    let joiner_store = Arc::clone(&store);
+    let joiner_key = key.clone();
+    let joiner = thread::spawn(move || {
+        let host = ctx_host();
+        // Outer tracer scope spans the whole dispatch so the
+        // joiner-bubble target is the cell the joiner returns into.
+        let ((), finalise) = crate::fact_signature_helpers::install_fact_tracer(&host, || {
+            let cache_read = joiner_store.execute_cooperative(
+                &host,
+                joiner_key,
+                || joiner_store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+                || {
+                    // This build MUST NOT run on the joiner.
+                    let id = joiner_store
+                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+                    (
+                        QueryResult::Value(id),
+                        Arc::from(Vec::new().into_boxed_slice()),
+                    )
+                },
+            );
+            let _value = cache_read.value;
+        });
+        finalise
+    });
+
+    thread::sleep(Duration::from_millis(50));
+    tx_release_winner.send(()).expect("release winner");
+
+    let _winner_read = winner.join().expect("winner joined");
+    let joiner_finalise = joiner.join().expect("joiner joined");
+
+    let snap = store.stats_snapshot();
+    assert!(
+        snap.joined_waits >= 1,
+        "joiner must have hit the cooperative wait branch \
+         (joined_waits={}); if this fails the joiner ran its own \
+         cold build instead of entering the wait branch.",
+        snap.joined_waits
+    );
+
+    match joiner_finalise {
+        FactReadSetFinalise::Ok(sig) => {
+            assert!(
+                sig.iter().any(|f| f == &winner_fact),
+                "joiner thread's outer tracer must contain the winner's \
+                 carrier fact (got {sig:?}; expected to contain \
+                 {winner_fact:?}). If this fails, the winner did not \
+                 record state.graph_carrier, the joiner did not read it, \
+                 or the joiner-side `carrier.bubble_via_tls()` did not \
+                 deliver the fact to this thread's outer tracer."
+            );
+        }
+        FactReadSetFinalise::Overflow => panic!("joiner outer tracer overflowed"),
+    }
+}
+
+/// `execute_cooperative_batch` over an empty key list returns an empty
+/// result vector — a non-admission probe, no cold builds, no panic.
+#[test]
+fn execute_cooperative_batch_returns_per_key_errors_not_panic() {
+    let host = ctx_host();
+    let store = SemanticGraphStore::default();
+    // No cold builds — every key would return
+    // BatchExpandError::EvictedNode (per-key, NOT panic).
+    let keys: Vec<SemanticQueryKey> = vec![]; // empty: trivially returns []
+    let result = store.execute_cooperative_batch(&host, &keys);
+    assert_eq!(result.len(), 0);
+}
+
+/// `execute_cooperative_batch` is non-admission: one batch call over an
+/// empty key list performs zero cold admissions and leaves the store's
+/// miss counter untouched.
+#[test]
+fn execute_cooperative_batch_one_batch_entry_n_keys_k_admissions() {
+    let host = ctx_host();
+    let store = SemanticGraphStore::default();
+    let keys: Vec<SemanticQueryKey> = vec![]; // batched: 0 cold admissions
+    let result = store.execute_cooperative_batch(&host, &keys);
+    assert_eq!(result.len(), keys.len());
+    let stats = store.stats_snapshot();
+    assert_eq!(
+        stats.misses, 0,
+        "execute_cooperative_batch is non-admission"
     );
 }

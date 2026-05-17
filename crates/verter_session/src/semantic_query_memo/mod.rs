@@ -138,15 +138,19 @@ pub struct SemanticGraphStore {
     /// and `execute_cooperative` short-circuits straight to the build
     /// closure for that variant.
     named_type_index: DashMap<HostResolvedNamedTypeKey, SemanticNodeId>,
-    /// Relation-engine memo. Added in Phase D §5.4
-    /// WIP-S. Maps `(source, target)` semantic-node pairs to the tri-state
+    /// Relation-engine memo. Maps `(source, target)` semantic-node pairs
+    /// to the tri-state
     /// [`RelationResult`](crate::semantic_query::RelationResult) plus the
-    /// dep-signature used for warm-hit revalidation. Separate from the
-    /// family memo because relation identity is pairwise, not single-node.
-    relation_memo: DashMap<
-        (SemanticNodeId, SemanticNodeId),
-        (DepSignature, crate::semantic_query::RelationResult),
-    >,
+    /// self-version-rooted carrier + the self-root canonical set used
+    /// for strict warm-hit validation. Separate from the family memo
+    /// because relation identity is pairwise, not single-node.
+    ///
+    /// The stored [`RelationMemoEntry`] is validated on every warm read
+    /// (`get_relation`) — every self-root canonical's `FileWholeHash` is
+    /// validated strictly, so a same-canonical content edit to either
+    /// the source's or the target's originating file misses the warm
+    /// relation judgement and forces a recompute.
+    relation_memo: DashMap<(SemanticNodeId, SemanticNodeId), RelationMemoEntry>,
     /// Sibling derivation/origin layer (plan B2 + Derivation/Origin Layer
     /// Contract). Edges are keyed by `(result_node, kind)`; multiple
     /// derivations of the same structural result store multiple edges per
@@ -189,6 +193,31 @@ pub struct SemanticGraphStore {
 /// Γ.B reverse-index type alias. See
 /// [`SemanticGraphStore::canonical_to_entries`] for the contract.
 type CanonicalToEntries = DashMap<Arc<str>, Mutex<FxHashMap<(FamilyKey, ModeSlot), DepSignature>>>;
+
+/// One entry in the relation memo
+/// ([`SemanticGraphStore::relation_memo`]).
+///
+/// A relation judgement for a `(source, target)` semantic-node pair is
+/// self-version-rooted: `carrier` leads with a self-root `FileWholeHash`
+/// for each file-derived input node's originating file, so a content
+/// edit to either the source's or the target's file misses the warm
+/// relation read. `self_root_canonicals` is the strict self-root
+/// canonical set the warm validator
+/// ([`SemanticGraphStore::get_relation`]) checks via
+/// [`crate::fact_signature_helpers::ReadSetSignature::validate_with_self_roots`].
+#[derive(Clone)]
+struct RelationMemoEntry {
+    /// The self-version-rooted carrier — built by
+    /// [`semantic_graph_read_set_signature`] from the relation build's
+    /// observed self-roots, the traced fact set, and the legacy
+    /// `DepSignature` rail.
+    carrier: crate::fact_signature_helpers::ReadSetSignature,
+    /// The strict self-root canonical set — the file-derived origins of
+    /// `source` and `target`.
+    self_root_canonicals: Arc<[Arc<str>]>,
+    /// The cached tri-state relation result.
+    result: crate::semantic_query::RelationResult,
+}
 
 impl std::fmt::Debug for SemanticGraphStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -777,33 +806,72 @@ impl SemanticGraphStore {
     // Relation memo
     // ──────────────────────────────────────────────────────────────────
 
-    /// Warm-hit read of a cached relation judgement for `(source, target)`.
-    /// Returns the tri-state [`RelationResult`](crate::semantic_query::RelationResult)
-    /// plus the `DepSignature` recorded at publish so warm hits can
-    /// revalidate under content changes via
-    /// [`HostFenceValidator`](crate::resolver_core::host_fence_validator::HostFenceValidator).
+    /// Strict warm-hit read of a cached relation judgement for
+    /// `(source, target)`.
+    ///
+    /// Returns the tri-state
+    /// [`RelationResult`](crate::semantic_query::RelationResult) plus the
+    /// recorded legacy `DepSignature` **only when** the stored entry's
+    /// self-version-rooted carrier validates against the live store view
+    /// — every self-root canonical's `FileWholeHash` is validated
+    /// strictly. A stale entry (a same-canonical content edit to the
+    /// source's or the target's originating file, or a self-root the
+    /// live store view no longer tracks) returns `None`, so the caller
+    /// recomputes the relation judgement instead of serving it stale.
+    /// Validation failure does NOT bubble the carrier — a stale entry
+    /// must not pollute an outer tracer.
     #[must_use]
-    pub fn get_relation(
+    pub(crate) fn get_relation(
         &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
         source: SemanticNodeId,
         target: SemanticNodeId,
     ) -> Option<(DepSignature, crate::semantic_query::RelationResult)> {
-        self.relation_memo
+        // Clone the entry OUT of the `DashMap` shard guard before
+        // validating: `validate_with_self_roots` / `bubble` consult the
+        // resolver store view and fan into TLS tracers, which may
+        // re-enter the relation memo — holding the shard guard across
+        // that re-entry would deadlock.
+        let entry = self
+            .relation_memo
             .get(&(source, target))
-            .map(|entry| entry.value().clone())
+            .map(|e| e.value().clone())?;
+        if !entry
+            .carrier
+            .validate_with_self_roots(ctx, &entry.self_root_canonicals)
+        {
+            return None;
+        }
+        entry.carrier.bubble(ctx);
+        Some((Arc::clone(&entry.carrier.legacy), entry.result))
     }
 
     /// Publish a relation judgement for `(source, target)`. Writes to the
     /// dedicated relation memo DashMap, separate from the family memo so
     /// pairwise identity does not inflate the single-node keyspace.
+    ///
+    /// The entry is self-version-rooted: `carrier` is built by
+    /// [`semantic_graph_read_set_signature`] from the relation build's
+    /// observed self-roots (the file-derived origins of `source` and
+    /// `target`), so a content edit to either originating file misses
+    /// the warm relation read. `self_root_canonicals` is the strict
+    /// self-root canonical set the warm validator checks.
     pub fn insert_relation(
         &self,
         source: SemanticNodeId,
         target: SemanticNodeId,
-        fence: DepSignature,
+        carrier: crate::fact_signature_helpers::ReadSetSignature,
+        self_root_canonicals: Arc<[Arc<str>]>,
         result: crate::semantic_query::RelationResult,
     ) {
-        self.relation_memo.insert((source, target), (fence, result));
+        self.relation_memo.insert(
+            (source, target),
+            RelationMemoEntry {
+                carrier,
+                self_root_canonicals,
+                result,
+            },
+        );
     }
 
     /// Count of relation memo entries. Useful for tests and counters.
@@ -1177,38 +1245,33 @@ impl SemanticGraphStore {
     /// Returns the memoized result + its recorded dependency signature
     /// when the requested `(family, mode_slot)` is populated.
     ///
-    /// **Unchecked-read contract — do not use as a production warm
-    /// read.** This entry point bubbles the entry's path-precise fact
-    /// signature unconditionally; the AND-gate validation against the
-    /// live store view does NOT run here. A stale entry returns its
-    /// cached value AND pollutes the outer fact tracer with
-    /// observations that no longer reflect the current state.
+    /// **Unchecked-read contract — TEST / DEBUG ONLY.** This entry
+    /// point bubbles the entry's path-precise fact signature
+    /// unconditionally; neither the AND-gate validation nor the strict
+    /// self-root validation against the live store view runs here. A
+    /// stale entry returns its cached value AND pollutes the outer fact
+    /// tracer with observations that no longer reflect current state.
     ///
-    /// Two — and only two — caller classes may use the unvalidated
-    /// read:
+    /// **No production warm-read caller may use this.** Every
+    /// production warm read of the semantic graph — the
+    /// cooperative-admission fast path / slow-path step-1 re-check, the
+    /// non-admission batch probe, the build-side prefix-probe at
+    /// `build_project_path` — routes through the strict
+    /// [`Self::get_validated`] (or the carrier-validating
+    /// [`Self::execute_cooperative`] fast path). `get_validated`
+    /// validates the entry's carrier — every self-root canonical's
+    /// `FileWholeHash` strictly — BEFORE bubbling, so a stale entry
+    /// neither returns nor pollutes the outer tracer.
     ///
-    /// 1. The cooperative-admission machinery inside this `impl`
-    ///    ([`Self::execute_cooperative`]'s slow-path warm re-check and
-    ///    [`Self::execute_cooperative_batch`]'s non-admission probe).
-    ///    Those flows own the validate / remove / cold-recompute dance
-    ///    one level up, and the slow-path re-check only ever observes a
-    ///    freshly-published (hence fresh) entry or an empty slot.
-    /// 2. Test and debug probes that explicitly want the unchecked
-    ///    read for cache-state inspection.
-    ///
-    /// Every OTHER production warm read — anything that consults the
-    /// warm map outside the cooperative-admission flow, e.g. the
-    /// build-side prefix-probe at `build_project_path` — MUST call
-    /// [`Self::get_validated`] instead: `get_validated` validates
-    /// BEFORE bubbling so a stale entry neither returns nor pollutes
-    /// the outer tracer. The architecture guard
-    /// `semantic_graph_production_reads_validated`
+    /// The only sanctioned callers are test and debug probes that
+    /// explicitly want the unchecked read for cache-state inspection.
+    /// The architecture guard `semantic_graph_production_reads_validated`
     /// (`tests/semantic_graph_production_reads_validated.rs`) enforces
-    /// this — a new seal-scope caller of `get_unvalidated` fails it.
+    /// that no seal-scope production file calls `get_unvalidated`.
     ///
     /// The name carries the contract: `get_unvalidated` returns an entry
-    /// WITHOUT validating its `ReadSetSignature`, so the unvalidated
-    /// nature is explicit at every call site.
+    /// WITHOUT validating its carrier, so the unvalidated nature is
+    /// explicit at every call site.
     #[must_use]
     pub fn get_unvalidated(
         &self,
@@ -1278,8 +1341,14 @@ impl SemanticGraphStore {
         let entries = self.entries_lock_diagnosed();
         let result = entries.get(&family).and_then(|slots| {
             slots.slot(slot).cloned().and_then(|entry| {
-                if !entry.read_set_signature.validate(ctx) {
-                    // Stale entry — do NOT bubble; return None.
+                // Strict warm-read validation: validate the carrier
+                // against the live store view, validating every
+                // self-root canonical's `FileWholeHash` strictly. A
+                // stale entry — a same-canonical content edit, or a
+                // self-root the live store view no longer tracks —
+                // fails and is NOT bubbled (a stale entry must not
+                // pollute an outer tracer).
+                if !entry.validate(ctx) {
                     return None;
                 }
                 entry.read_set_signature.bubble(ctx);
@@ -1328,26 +1397,37 @@ impl SemanticGraphStore {
     /// errors are returned, NOT panic'd (D41 invariant: one batch entry → N
     /// keys → K admissions).
     ///
-    /// Lookups happen via warm `get_unvalidated(key)` only —
-    /// `execute_cooperative_batch` is a non-admission probe; cold
-    /// builds stay the responsibility of the per-query cooperative
-    /// path.
-    pub fn execute_cooperative_batch(
+    /// Lookups happen via the validated warm read `get_validated(key,
+    /// ctx)` only — `execute_cooperative_batch` is a non-admission
+    /// probe; a stale (or absent) entry surfaces as
+    /// [`BatchExpandError::EvictedNode`] so the BFS bridge re-issues a
+    /// per-key cooperative cold build. Cold builds stay the
+    /// responsibility of the per-query cooperative path.
+    ///
+    /// `#[cfg(test)]`: the non-admission batch probe has no production
+    /// warm-read caller — the per-query cooperative path is the sole
+    /// production warm-read entry point. The probe is retained for the
+    /// substrate test suite that characterises its non-admission
+    /// contract.
+    #[cfg(test)]
+    pub(crate) fn execute_cooperative_batch(
         &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
         keys: &[crate::semantic_query::SemanticQueryKey],
     ) -> Vec<Result<SemanticNodeId, BatchExpandError>> {
         keys.iter()
             .map(|key| {
-                if let Some(hit) = self.get_unvalidated(key) {
+                if let Some(hit) = self.get_validated(key, ctx) {
                     match hit.value {
                         QueryResult::Value(node) => Ok(node),
                         QueryResult::Recursive(node) => Ok(node),
                         QueryResult::Error(_) => Err(BatchExpandError::EvictedNode),
                     }
                 } else {
-                    // Cold: from the BFS bridge's perspective, an unmaterialized
-                    // key is treated as evicted; the bridge will surface a
-                    // typed StaleAtFrontier envelope and the caller can decide
+                    // Cold or stale: from the BFS bridge's perspective,
+                    // an unmaterialized OR stale key is treated as
+                    // evicted; the bridge will surface a typed
+                    // StaleAtFrontier envelope and the caller can decide
                     // whether to issue a per-key cooperative cold build.
                     Err(BatchExpandError::EvictedNode)
                 }
@@ -1406,8 +1486,9 @@ impl SemanticGraphStore {
     /// waits and abort-driven retries are unaffected: a populated
     /// warm slot means no joiner participation is needed.
     #[must_use = "the CacheRead carries both the resolved node id and the dep signature callers must merge into their active CompletionFence"]
-    pub fn execute_cooperative<F, R, O>(
+    pub(crate) fn execute_cooperative<F, R, O>(
         &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
         key: SemanticQueryKey,
         recursion_sentinel: R,
         build: F,
@@ -1424,22 +1505,27 @@ impl SemanticGraphStore {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // Warm-hit fast path. A single non-diagnosed `entries.lock()`
-        // acquisition checks the slot; on hit it returns immediately
-        // bypassing the slow path's `entries_lock_diagnosed`
-        // `Instant::now`/capture-token wait+hold timing, the
-        // in-flight table mutex, the second `self.get_unvalidated(&key)`
-        // invocation inside the loop's step 1, the same-path
-        // recursion test, and the joiner-condvar admission entry
-        // path. On miss the lock is released and execution falls
-        // through to the cooperative slow path that owns same-path
-        // recursion, in-flight admission, and cold-build publish.
-        if let Some(hit) = self.try_warm_hit_fast_path(&key) {
+        // acquisition checks the slot; on a hit the entry's carrier is
+        // validated strictly (self-roots through
+        // `validates_self_root_whole_hash`) BEFORE the carrier is
+        // bubbled or the value returned — a stale entry (a
+        // same-canonical content edit, an untracked self-root) misses
+        // and the slow path cold-recomputes. On hit it returns
+        // immediately bypassing the slow path's `entries_lock_diagnosed`
+        // `Instant::now`/capture-token wait+hold timing, the in-flight
+        // table mutex, the second warm probe inside the loop's step 1,
+        // the same-path recursion test, and the joiner-condvar
+        // admission entry path. On miss the lock is released and
+        // execution falls through to the cooperative slow path that
+        // owns same-path recursion, in-flight admission, and cold-build
+        // publish.
+        if let Some(hit) = self.try_warm_hit_fast_path(ctx, &key) {
             return hit;
         }
 
         // Slow path — cooperative-admission flow. Handles same-path
         // recursion, joiner-condvar waits, cold-build publish.
-        self.execute_cooperative_slow(key, recursion_sentinel, build)
+        self.execute_cooperative_slow(ctx, key, recursion_sentinel, build)
     }
 
     /// Warm-hit fast path for [`Self::execute_cooperative`]. Returns
@@ -1474,6 +1560,7 @@ impl SemanticGraphStore {
     #[inline]
     fn try_warm_hit_fast_path(
         &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
         key: &SemanticQueryKey,
     ) -> Option<CacheRead<QueryResult<SemanticNodeId>>> {
         let (family, slot) = family_and_slot(key);
@@ -1487,21 +1574,31 @@ impl SemanticGraphStore {
             // wall-clock.
             let entries = self.entries.lock();
             entries.get(&family).and_then(|slots| {
-                slots.slot(slot).cloned().map(|entry| {
-                    // R3/R26/R28 - bubble the entry path-precise
-                    // fact observation set into any outer
-                    // cold-compute scope so transitive memo hits do
-                    // not lose the contributing fact identities. The
-                    // AND-gate validation against the current view
-                    // happens at the outer fence revalidation point.
+                slots.slot(slot).cloned().and_then(|entry| {
+                    // Strict warm-read validation BEFORE bubbling: the
+                    // entry's carrier is validated against the live
+                    // store view, validating every self-root canonical's
+                    // `FileWholeHash` strictly. A stale entry — a
+                    // same-canonical content edit, or a self-root the
+                    // live store view no longer tracks — fails and the
+                    // fast path reports a miss WITHOUT bubbling: a stale
+                    // entry must not pollute an outer tracer with
+                    // observations that no longer reflect current state.
+                    if !entry.validate(ctx) {
+                        return None;
+                    }
+                    // R3/R26/R28 - bubble the entry path-precise fact
+                    // observation set into any outer cold-compute scope
+                    // so transitive memo hits do not lose the
+                    // contributing fact identities.
                     entry.read_set_signature.bubble_via_tls();
                     let dep_signature = Arc::clone(&entry.read_set_signature.legacy);
-                    CacheRead {
+                    Some(CacheRead {
                         value: entry.result,
                         dep_signature,
                         walker_diagnostics: entry.walker_diagnostics,
                         cache_suppress: false,
-                    }
+                    })
                 })
             })
         };
@@ -1569,6 +1666,7 @@ impl SemanticGraphStore {
     /// handles every warm hit before this function is called.
     fn execute_cooperative_slow<F, R, O>(
         &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
         key: SemanticQueryKey,
         recursion_sentinel: R,
         build: F,
@@ -1612,13 +1710,15 @@ impl SemanticGraphStore {
             // 1. Warm memo hit. Reaches here only on the rare race
             //    where another thread published between our fast-path
             //    check and now (or on retry after an abort sweep). The
-            //    unvalidated read is sound here: the cooperative-
-            //    admission flow only ever observes a freshly-published
-            //    (hence fresh) entry or an empty slot at this point.
-            if let Some(hit) = self.get_unvalidated(&key) {
+            //    warm read is validated strictly via `get_validated` —
+            //    a freshly-published entry validates; a slot a
+            //    concurrent invalidation made stale misses and the
+            //    cold-build path below recomputes.
+            if let Some(hit) = self.get_validated(&key, ctx) {
                 self.stats.hits.fetch_add(1, Ordering::Relaxed);
-                if let Some(ctx) = verter_scheduler::request_context::current_context() {
-                    ctx.0
+                if let Some(sched_ctx) = verter_scheduler::request_context::current_context() {
+                    sched_ctx
+                        .0
                         .record_cache_event(verter_scheduler::request_context::CacheEventKind::Hit);
                 }
                 return hit;
@@ -1707,7 +1807,7 @@ impl SemanticGraphStore {
                     )))
                 });
                 let dep_signature = state.dep_signature.clone().unwrap_or_else(empty_signature);
-                let fact_dep_signature = state.fact_dep_signature.clone();
+                let graph_carrier = state.graph_carrier.clone();
                 let walker_diagnostics = state
                     .walker_diagnostics
                     .clone()
@@ -1716,18 +1816,17 @@ impl SemanticGraphStore {
                 // so the lock is released before any re-entrant observation
                 // from a nested tracer scope.
                 drop(state);
-                // Bubble the winner's fact signature into the joiner thread's
-                // active tracer stack (if any). This ensures that an outer
-                // cold-compute scope that spawned this joiner sees all the
-                // facts the winner observed, preserving completeness of the
-                // outer scope's accumulated observation set.
+                // Bubble the winner's path-precise fact rail into the
+                // joiner thread's active tracer stack (if any). This
+                // ensures that an outer cold-compute scope that spawned
+                // this joiner sees all the facts the winner observed,
+                // preserving completeness of the outer scope's
+                // accumulated observation set.
                 // Abort-path guard: `state.aborted` was checked above; the
                 // `continue` path retries without reaching here, so we only
                 // bubble on the non-aborted joiner path.
-                if let Some(ref facts) = fact_dep_signature {
-                    if !facts.is_empty() {
-                        crate::resolver_core::resolver_context::observe_fan_out_borrowed(facts);
-                    }
+                if let Some(ref carrier) = graph_carrier {
+                    carrier.bubble_via_tls();
                 }
                 if let Some(prov) = self.provenance.as_ref() {
                     prov.execute_cooperative_joiner_path
@@ -1769,7 +1868,9 @@ impl SemanticGraphStore {
             dep_signature,
             walker_diagnostics,
             cache_suppress,
-            fact_dep_signature: traced_fact_dep_signature,
+            observed_self_roots: _,
+            graph_carrier,
+            self_root_canonicals,
             pending_prefix_backfills,
         } = build_output;
         let walker_diagnostics: std::sync::Arc<
@@ -1836,53 +1937,67 @@ impl SemanticGraphStore {
         // result still flows back to the caller, but the next request
         // re-runs cold so the suppression decision applies under the
         // current state of the world rather than being fossilised.
-        if !cache_suppress {
+        // The cold-build helper produced the COMPLETED self-version-rooted
+        // carrier on `graph_carrier` — `Some` iff the build is cacheable.
+        // A non-cacheable build (a `None` producer result or a tracer
+        // overflow) sets `cache_suppress = true` and leaves
+        // `graph_carrier == None`; the publish path is skipped without
+        // reconstructing facts from the legacy fence.
+        // Resolve the carrier the cacheable build publishes. The
+        // production cold-build path
+        // (`ProjectSemanticDispatch::execute_via_cold_build_helper`)
+        // always sets `graph_carrier` via `finalise_traced_build_output`
+        // → `semantic_graph_read_set_signature`, so the published entry
+        // is self-version-rooted. A direct `execute_cooperative` caller
+        // that bypasses the dispatch's `traced_build` wrapper (test /
+        // debug drivers) leaves `graph_carrier` unset and
+        // `cache_suppress` false; such a build is published with a
+        // synthetic carrier — the legacy `dep_signature` rail and an
+        // empty fact rail with no self-roots, so the entry validates
+        // vacuously on warm reads. This is NOT a fence-fact
+        // reconstruction: the fact rail is left empty rather than
+        // reverse-engineered from the legacy `WholeHash` entries. When
+        // `cache_suppress` is set the build is non-cacheable and no
+        // carrier is resolved.
+        let publish_carrier: Option<crate::fact_signature_helpers::ReadSetSignature> =
+            if cache_suppress {
+                None
+            } else {
+                Some(match graph_carrier {
+                    Some(boxed) => *boxed,
+                    None => crate::fact_signature_helpers::ReadSetSignature::new(
+                        crate::fact_signature_helpers::empty_fact_signature(),
+                        dep_signature.clone(),
+                    ),
+                })
+            };
+        if let Some(ref carrier) = publish_carrier {
             self.warm_publish_one(
                 &key,
                 &result,
-                &dep_signature,
                 &walker_diagnostics,
-                traced_fact_dep_signature.as_ref(),
+                carrier,
+                &self_root_canonicals,
                 &inflight,
             );
-            // Carrier-aware prefix backfill: publish each accumulated
-            // backfill record AFTER the parent entry is warm so the
+            // Prefix backfill: publish each accumulated backfill
+            // record AFTER the parent entry is warm so the
             // sibling-share short-circuit at `find_longest_warm_prefix`
             // sees the prefixes with the parent's authoritative
-            // path-precise fact signature. Publication uses the same
+            // self-version-rooted carrier. Each backfilled prefix
+            // entry stores the parent's completed carrier and its
+            // self-root canonicals verbatim — the prefix hops are
+            // sub-paths of the same `base`, so they share the same
+            // file self-roots and the same traced cross-file fact
+            // set as the parent. The publish uses the same
             // `warm_publish_one_if_absent` substrate so the prefix
             // entries land in the unified reverse index.
-            //
-            // Codex P2.C: construct the full `ReadSetSignature` from
-            // BOTH the legacy `dep_signature` AND the traced facts
-            // captured under the dispatch's `install_fact_tracer`
-            // wrapper. Pre-fix the call site passed only the legacy
-            // `dep_signature` and `warm_publish_one_if_absent`
-            // reconstructed facts via `fact_signature_from_fence` —
-            // that bridge drops `Parse(...)` / `ResolveImports(...)` /
-            // `RouteSurface(...)` facts, leaving a sibling-share
-            // short-circuit through the prefix unable to validate or
-            // bubble those dependencies. Now the backfilled prefix
-            // entry's carrier matches the parent's traced facts
-            // verbatim (with the same fence-only fallback when the
-            // tracer wrapper was absent for the cold build, matching
-            // the parent's own carrier construction in
-            // `warm_publish_one`).
-            let prefix_fact_dep_signature = match traced_fact_dep_signature.as_ref() {
-                Some(sig) => Arc::clone(sig),
-                None => crate::component_meta_materialize::fact_signature_from_fence(
-                    dep_signature.as_ref(),
-                ),
-            };
-            let prefix_carrier = crate::fact_signature_helpers::ReadSetSignature::new(
-                prefix_fact_dep_signature,
-                dep_signature.clone(),
-            );
             for backfill in pending_prefix_backfills {
                 self.warm_publish_one_if_absent(
                     backfill.key,
                     QueryResult::Value(backfill.node),
-                    prefix_carrier.clone(),
+                    carrier.clone(),
+                    Arc::clone(&self_root_canonicals),
                 );
             }
         } else {
@@ -1915,31 +2030,18 @@ impl SemanticGraphStore {
             if !state.aborted {
                 state.completed = Some(result.clone());
                 state.dep_signature = Some(dep_signature.clone());
-                // Publish the same fact signature `warm_publish_one`
-                // records onto the memo entry so cross-thread joiners
-                // can bubble the winner's observations into their own
-                // active tracer stack. Derived via
-                // `fact_signature_from_fence` — the same helper
-                // `warm_publish_one` uses — so winner and joiner agree
-                // on the identical fact set. Only published on the
-                // non-aborted path; the abort/retry branch above (which
-                // executes `continue`) deliberately bypasses this so
-                // joiners awakened by an abort sweep re-enter dispatch
-                // rather than bubbling a stale signature.
-                // Prefer the traced path-precise signature when the
-                // dispatch's `install_fact_tracer` wrapper observed
-                // one — it carries the full `Parse(...)` /
-                // `ResolveImports(...)` / `RouteSurface(...)` set
-                // that the legacy `fact_signature_from_fence` bridge
-                // cannot reconstruct from `DepSignature`. Fall back
-                // to the legacy fence conversion for build paths
-                // that have not yet been wired through the tracer.
-                state.fact_dep_signature = Some(match traced_fact_dep_signature {
-                    Some(ref sig) => Arc::clone(sig),
-                    None => crate::component_meta_materialize::fact_signature_from_fence(
-                        dep_signature.as_ref(),
-                    ),
-                });
+                // Publish the SAME resolved carrier `warm_publish_one`
+                // recorded onto the memo entry so cross-thread joiners
+                // bubble the winner's path-precise fact rail into their
+                // own active tracer stack. Winner and joiner therefore
+                // agree on the identical fact set. Only published on
+                // the non-aborted path; the abort/retry branch above
+                // (which executes `continue`) deliberately bypasses
+                // this so joiners awakened by an abort sweep re-enter
+                // dispatch rather than bubbling a stale carrier. `None`
+                // for a non-cacheable build — joiners then have no
+                // carrier to bubble.
+                state.graph_carrier = publish_carrier.clone().map(Box::new);
                 state.walker_diagnostics = Some(std::sync::Arc::clone(&walker_diagnostics));
             }
         }
@@ -1990,9 +2092,9 @@ impl SemanticGraphStore {
         &self,
         key: &SemanticQueryKey,
         result: &QueryResult<SemanticNodeId>,
-        dep_signature: &DepSignature,
         walker_diagnostics: &Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
-        traced_fact_dep_signature: Option<&Arc<[crate::resolver_core::FactVersionRef]>>,
+        read_set_signature: &crate::fact_signature_helpers::ReadSetSignature,
+        self_root_canonicals: &Arc<[Arc<str>]>,
         inflight: &Arc<InflightEntry>,
     ) {
         let publishable = matches!(result, QueryResult::Value(_));
@@ -2005,28 +2107,17 @@ impl SemanticGraphStore {
         if matches!(family, FamilyKey::ResolvedNamedType { .. }) {
             return;
         }
-        // Prefer the traced path-precise signature captured by the
-        // dispatch's `install_fact_tracer` wrapper when present; fall
-        // back to deriving from the legacy `DepSignature` for build
-        // paths that have not yet been wired through the tracer. The
-        // traced signature carries `Parse(...)` / `ResolveImports(...)`
-        // / `RouteSurface(...)` facts that the legacy fence cannot
-        // reconstruct, so warm-hit bubble-up via
-        // `bubble_fact_signature_via_tls` delivers the complete
-        // observation set into any outer tracer on the warm-hit thread.
-        let fact_dep_signature = match traced_fact_dep_signature {
-            Some(sig) => Arc::clone(sig),
-            None => {
-                crate::component_meta_materialize::fact_signature_from_fence(dep_signature.as_ref())
-            }
-        };
-        let read_set_signature = crate::fact_signature_helpers::ReadSetSignature::new(
-            fact_dep_signature,
-            dep_signature.clone(),
-        );
+        // The carrier is the COMPLETED self-version-rooted carrier the
+        // shared cold-build helper produced via
+        // `semantic_graph_read_set_signature` — it already leads with a
+        // self-root `FileWholeHash` per observed self-root and merges
+        // the traced cross-file fact set. `warm_publish_one` records it
+        // verbatim; it never reconstructs facts from the legacy fence.
+        let read_set_signature = read_set_signature.clone();
         let entry = MemoEntry {
             result: result.clone(),
             read_set_signature: read_set_signature.clone(),
+            self_root_canonicals: Arc::clone(self_root_canonicals),
             walker_diagnostics: Arc::clone(walker_diagnostics),
         };
         let mut entries = self.entries_lock_diagnosed();
@@ -2123,6 +2214,7 @@ impl SemanticGraphStore {
         key: SemanticQueryKey,
         result: QueryResult<SemanticNodeId>,
         read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
+        self_root_canonicals: Arc<[Arc<str>]>,
     ) {
         if !matches!(result, QueryResult::Value(_)) {
             return;
@@ -2149,6 +2241,7 @@ impl SemanticGraphStore {
         let entry = MemoEntry {
             result,
             read_set_signature: read_set_signature.clone(),
+            self_root_canonicals,
             walker_diagnostics: Arc::from([]),
         };
         let mut entries = self.entries_lock_diagnosed();
@@ -2266,12 +2359,13 @@ impl SemanticGraphStore {
     }
 
     /// Test-only direct publish path. Constructs a `MemoEntry` from the
-    /// caller-supplied `(result, read_set_signature)` pair and routes it
-    /// through the unified reverse-index registration. Mirrors the
-    /// production publish path but accepts an explicit carrier so
-    /// integration tests can seed entries whose `legacy` rail excludes
-    /// canonicals that the `facts` rail names (the fact-only
-    /// invalidation discriminator for codex P2.B).
+    /// caller-supplied `(result, read_set_signature, self_root_canonicals)`
+    /// tuple and routes it through the unified reverse-index
+    /// registration. Mirrors the production publish path but accepts an
+    /// explicit carrier + self-root canonical set so integration tests
+    /// can seed entries whose `legacy` rail excludes canonicals that the
+    /// `facts` rail names (the fact-only invalidation discriminator) and
+    /// drive the strict self-root warm-read validator.
     ///
     /// Returns the number of populated slots after publish (always
     /// ≥1 for a `Value` result on a previously-empty slot).
@@ -2281,6 +2375,7 @@ impl SemanticGraphStore {
         key: SemanticQueryKey,
         result: QueryResult<SemanticNodeId>,
         read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
+        self_root_canonicals: Arc<[Arc<str>]>,
     ) -> usize {
         if !matches!(result, QueryResult::Value(_)) {
             return 0;
@@ -2292,6 +2387,7 @@ impl SemanticGraphStore {
         let entry = MemoEntry {
             result,
             read_set_signature: read_set_signature.clone(),
+            self_root_canonicals,
             walker_diagnostics: Arc::from([]),
         };
         let mut entries = self.entries_lock_diagnosed();
@@ -2339,6 +2435,148 @@ pub enum BatchExpandError {
     /// generation bump under memory pressure) and would require a cold
     /// rebuild that the batch path is not authorised to perform.
     EvictedNode,
+}
+
+/// One observed self-root: a query-identity memo entry's keyed (or
+/// file-derived input) canonical paired with the content version the
+/// builder actually computed the value against.
+///
+/// The hash is the file's whole-hash **as observed at value-compute
+/// time** — never re-read at signature-build time. Builders capture it
+/// once at the value source (a [`crate::resolver_core::MaterializeScopeObservation`],
+/// a [`crate::semantic_query::DeclIdentity`]'s `whole_hash`, or a
+/// file-derived input node's [`crate::semantic_query::NodeScopeId::File`])
+/// and thread it here. Rooting the entry on the observed version is what
+/// makes a same-canonical content edit miss the warm read: a re-read of
+/// current content inside the signature builder would reopen the publish
+/// race a concurrent `upsert` between value-compute and signature-build
+/// otherwise creates.
+pub(crate) type ObservedGraphSelfRoot = (Arc<str>, crate::types::Hash16);
+
+/// Build the [`ReadSetSignature`](crate::fact_signature_helpers::ReadSetSignature)
+/// carrier for a [`SemanticGraphStore`] query-identity memo entry —
+/// **provenance-pure**.
+///
+/// A semantic-graph memo entry caches a resolved [`SemanticNodeId`] for
+/// one [`SemanticQueryKey`]. The entry is self-version-rooted: its
+/// signature leads with a `FileWholeHash` fact for every canonical the
+/// builder's value depends on for its own identity (its keyed canonical,
+/// or — for node kinds keyed by already-interned input nodes — the
+/// file-derived origin of each input node). A warm read validates those
+/// self-roots strictly through
+/// [`crate::fact_signature_helpers::validate_fact_signature_with_self_roots`],
+/// so a same-canonical content edit — or a keyed canonical the live
+/// store view no longer tracks — rejects the entry and forces a
+/// recompute.
+///
+/// The builder NEVER re-reads current content. `observed_self_roots`
+/// carries each `(canonical, observed_hash)` pair the cold build
+/// captured at the value source; `traced_facts` is the path-precise
+/// fact set the `install_fact_tracer` scope collected; `legacy` is the
+/// whole-hash / project-generation `DepSignature` rail retained so
+/// `ProjectGeneration` stays validated by `validate_dep_signature`
+/// until the generation rail is unified. Re-reading a canonical's
+/// current hash here would reopen the publish race the central
+/// fact-signature helpers close.
+///
+/// Returns `None` — refusing shared-cache admission — when the entry
+/// cannot be soundly rooted. The cooperative-admission caller still
+/// returns the freshly-computed value; it only forgoes the shared memo.
+/// `None` is returned when:
+///
+/// - two `observed_self_roots` name the same canonical with conflicting
+///   observed hashes (a torn observation), or
+/// - a `traced` `FileWholeHash` fact names a self-root canonical with a
+///   hash that disagrees with the observed self-root (the traced
+///   dependency rail and the observed self-root disagree on the keyed
+///   file's version), or
+/// - the legacy rail carries a `RouteGeneration` dependency: route
+///   generation has no authoritative validating source
+///   (`HostFenceValidator` treats it as always-valid and there is no
+///   production emitter), so an entry rooted on it could not detect a
+///   content edit to the route-observed file.
+///
+/// The traced fact set is merged after the self-roots: a self-root
+/// `FileWholeHash` already emitted is not duplicated, but every other
+/// traced fact (cross-file `Parse` / `ResolveImports` / `RouteSurface`
+/// dependency facts, `DerivedFactHash`, `ProjectGeneration`) is kept so
+/// transitive invalidation still works.
+//
+// arch-guard:graph-signature-builder-provenance-pure — this function
+// (and any helper it calls to build facts) must stay provenance-pure.
+// The guard `semantic_graph_signature_builder_is_provenance_pure`
+// (`tests/semantic_graph_signature_builder_provenance.rs`) bans
+// `authoritative_current_content_hash`, `current_file_facts`,
+// `parse_fact_ref(`, `self_root_fact`, and `shallow_file_state` inside
+// this body.
+pub(crate) fn semantic_graph_read_set_signature(
+    observed_self_roots: &[ObservedGraphSelfRoot],
+    traced_facts: &[crate::resolver_core::FactVersionRef],
+    legacy: &DepSignature,
+) -> Option<crate::fact_signature_helpers::ReadSetSignature> {
+    use crate::resolver_core::FactVersionRef;
+    use crate::semantic_query::DepVersion;
+
+    // A `RouteGeneration` legacy dependency cannot be soundly rooted —
+    // it has no authoritative validator and no production emitter.
+    // Refuse shared admission rather than caching an entry that cannot
+    // detect a content edit to the route-observed file.
+    if legacy
+        .iter()
+        .any(|(_, v)| matches!(v, DepVersion::RouteGeneration(_)))
+    {
+        return None;
+    }
+
+    // Collapse the observed self-roots into a per-canonical hash map;
+    // a conflicting hash for the same canonical is a torn observation.
+    let mut self_root_hashes: rustc_hash::FxHashMap<Arc<str>, crate::types::Hash16> =
+        rustc_hash::FxHashMap::default();
+    for (canonical, observed_hash) in observed_self_roots {
+        match self_root_hashes.get(canonical) {
+            Some(existing) if existing != observed_hash => return None,
+            _ => {
+                self_root_hashes.insert(Arc::clone(canonical), *observed_hash);
+            }
+        }
+    }
+
+    let mut facts: Vec<FactVersionRef> =
+        Vec::with_capacity(self_root_hashes.len() + traced_facts.len());
+
+    // Lead with one self-root `FileWholeHash` per observed self-root,
+    // pinned to the OBSERVED content version.
+    for (canonical, observed_hash) in &self_root_hashes {
+        facts.push(FactVersionRef::FileWholeHash {
+            canonical_id: canonical.as_ref().to_string(),
+            hash: *observed_hash,
+        });
+    }
+
+    // Merge the traced fact set. A traced `FileWholeHash` for a
+    // self-root canonical is folded onto the observed self-root: it
+    // MUST agree with the observed hash (else the dependency rail and
+    // the observed self-root disagree on the keyed file's version — a
+    // torn read). Every other traced fact is kept verbatim so
+    // transitive cross-file invalidation is preserved.
+    for fact in traced_facts {
+        if let FactVersionRef::FileWholeHash { canonical_id, hash } = fact {
+            if let Some(observed_hash) = self_root_hashes.get(canonical_id.as_str()) {
+                if hash != observed_hash {
+                    return None;
+                }
+                // Already emitted as a self-root above — do not
+                // duplicate.
+                continue;
+            }
+        }
+        facts.push(fact.clone());
+    }
+
+    Some(crate::fact_signature_helpers::ReadSetSignature::new(
+        Arc::from(facts),
+        Arc::clone(legacy),
+    ))
 }
 
 impl SemanticGraphStore {

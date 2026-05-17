@@ -86,18 +86,32 @@ fn upsert_ts(host: &VerterHost, id: &str, source: &str) {
         .unwrap();
 }
 
-/// Construct a `Parse(...)` fact whose `expected_hash` is a recognisable
-/// 16-byte pattern. The fact survives the cold-publish → warm-hit
-/// transition iff the post-fix wiring is in place.
+/// Construct a `Parse(...)` fact the warm-hit path will both bubble
+/// AND validate.
+///
+/// The semantic-graph warm-read path validates a `MemoEntry`'s carrier
+/// strictly BEFORE bubbling its fact rail — a stale entry must not
+/// pollute the outer tracer. So a fact that survives the cold-publish →
+/// warm-hit transition must also *validate* against the live store
+/// view, otherwise the entry is (correctly) rejected and never bubbles.
+///
+/// This fact is keyed on the real tracked file `/w/types.ts` with a
+/// member name that file does NOT export (`InjectedExport`) and the
+/// zero-hash sentinel: `StoreView::validates_parse_domain` accepts an
+/// absent parse fact whose observed hash is the zero sentinel
+/// ("consistent absence"). The fact is therefore a genuine traced
+/// observation that the warm-hit validator accepts — exercising the
+/// cold-publish → warm-hit → outer-tracer thread without tripping the
+/// validate-before-bubble gate.
 fn injected_parse_fact() -> FactVersionRef {
     FactVersionRef::Parse(ParseFactRef {
-        canonical_id: "/w/memo_traced_parse_fact.injected.ts".to_string(),
+        canonical_id: "/w/types.ts".to_string(),
         key: FactKey::Export {
             name: InternedName::from("InjectedExport"),
             space: SymbolSpace::Type,
         },
         lane: FactLane::Semantic,
-        expected_hash: [0xABu8; 16],
+        expected_hash: [0u8; 16],
     })
 }
 

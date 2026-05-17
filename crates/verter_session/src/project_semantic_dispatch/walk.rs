@@ -90,15 +90,23 @@ pub enum ShallowDiagnostic {
 /// shape coerces via `From` — those builds preserve their tuple
 /// signature unchanged.
 ///
-/// `fact_dep_signature` carries the path-precise R28 fact observation
-/// set captured by the dispatch's outer `install_fact_tracer` wrapper.
-/// When `Some`, the memo stores the traced signature on the published
-/// [`crate::semantic_query_memo::MemoEntry`] verbatim so warm-hit
-/// bubble-up delivers the full set of path-precise facts the cold
-/// build observed (NOT just the `FileWholeHash` subset reachable via
-/// the legacy fence). When `None`, the memo falls back to
-/// `fact_signature_from_fence(dep_signature)` for backward
-/// compatibility with build paths that do not yet wire the tracer.
+/// `observed_self_roots` carries every `(canonical, observed_hash)`
+/// self-root the cold build captured at the value source — the keyed
+/// canonical for `ResolveDecl` / `TypeOf` / `Instantiate` /
+/// `ResolveMacroPayload`, or the file-derived origin of every input
+/// node for the node kinds keyed by interned `SemanticNodeId`s. The
+/// shared cold-build helper feeds these to
+/// [`crate::semantic_query_memo::semantic_graph_read_set_signature`] so
+/// the published memo entry is self-version-rooted: a warm read
+/// validates each self-root `FileWholeHash` strictly. The hash is the
+/// content version the builder *observed* — never re-read at
+/// signature-build time.
+///
+/// `cache_suppress` (already on this struct) carries the
+/// non-cacheable signal: a build that needs a self-root but cannot
+/// observe it (an evicted / deleted scope artifact) sets `cache_suppress`
+/// so the memo refuses admission while the value still flows to the
+/// caller.
 /// One deferred prefix-backfill record. Accumulated during a
 /// `build_project_path` walk; published into the warm map AFTER the
 /// shared cold-build helper finalises the fact tracer so each
@@ -119,27 +127,53 @@ pub struct QueryBuildOutput {
     pub dep_signature: DepSignature,
     pub walker_diagnostics: Vec<ShallowDiagnostic>,
     pub cache_suppress: bool,
-    pub fact_dep_signature: Option<Arc<[crate::resolver_core::FactVersionRef]>>,
+    /// Every `(canonical, observed_hash)` self-root the cold build
+    /// captured at the value source — the keyed canonical for
+    /// `ResolveDecl` / `TypeOf` / `Instantiate` / `ResolveMacroPayload`,
+    /// or the file-derived origin of every input node for the node
+    /// kinds keyed by interned `SemanticNodeId`s. The shared cold-build
+    /// helper feeds these to
+    /// [`crate::semantic_query_memo::semantic_graph_read_set_signature`]
+    /// so the published memo entry is self-version-rooted. Empty for
+    /// builds whose result is fully structural (no file-derived
+    /// dependency).
+    ///
+    /// A `Vec` (not an inline `SmallVec`) keeps `QueryBuildOutput`
+    /// compact on the stack: this struct is moved through every
+    /// `build_*` → `execute_cooperative` hop, and a deeply-nested type
+    /// resolution carries one per recursion frame.
+    pub observed_self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+    /// The completed self-version-rooted carrier for the published
+    /// memo entry — built by the shared cold-build helper from
+    /// [`Self::observed_self_roots`], the traced fact set, and
+    /// [`Self::dep_signature`] via
+    /// [`crate::semantic_query_memo::semantic_graph_read_set_signature`].
+    ///
+    /// `None` BEFORE the shared cold-build helper post-processes the
+    /// raw build output (the build closures never set it). After
+    /// post-processing `None` means the entry is **non-cacheable** —
+    /// the helper sets `cache_suppress = true` so the memo refuses
+    /// admission while the value still flows to the caller. `Some`
+    /// carries the carrier `warm_publish_one` / the in-flight joiner
+    /// state / prefix-backfill all publish verbatim — they NEVER
+    /// reconstruct facts from the legacy fence.
+    ///
+    /// `Box`ed so the in-line `None` case (the raw build-closure
+    /// output, on every recursion frame of a deep type resolution)
+    /// costs one pointer rather than an inline `ReadSetSignature`.
+    pub graph_carrier: Option<Box<crate::fact_signature_helpers::ReadSetSignature>>,
+    /// The self-root canonicals recorded on the published
+    /// [`crate::semantic_query_memo::MemoEntry`] so a warm read
+    /// validates each one's self-root `FileWholeHash` strictly. Derived
+    /// by the shared cold-build helper from [`Self::observed_self_roots`].
+    /// Empty before post-processing and for structural builds.
+    pub self_root_canonicals: Arc<[Arc<str>]>,
     /// Pending prefix-backfill records. The walker pushes one entry
     /// per linear intermediate; the shared cold-build helper publishes
     /// them AFTER the fact tracer finalises so backfilled memo entries
-    /// carry the parent's authoritative path-precise fact signature
-    /// (not a fence-derived legacy-only signature that loses
-    /// `Parse(...)` / `ResolveImports(...)` / `RouteSurface(...)`
-    /// facts).
+    /// carry the parent's authoritative carrier (the same
+    /// self-version-rooted [`Self::graph_carrier`]).
     pub pending_prefix_backfills: Vec<PrefixBackfill>,
-}
-
-impl QueryBuildOutput {
-    /// Append walker diagnostics emitted by a nested terminal-surface
-    /// synthesiser run.
-    #[inline]
-    pub fn merge_walker_diagnostics<I>(&mut self, diags: I)
-    where
-        I: IntoIterator<Item = ShallowDiagnostic>,
-    {
-        self.walker_diagnostics.extend(diags);
-    }
 }
 
 impl From<(QueryResult<SemanticNodeId>, DepSignature)> for QueryBuildOutput {
@@ -150,9 +184,31 @@ impl From<(QueryResult<SemanticNodeId>, DepSignature)> for QueryBuildOutput {
             dep_signature,
             walker_diagnostics: Vec::new(),
             cache_suppress: false,
-            fact_dep_signature: None,
+            observed_self_roots: Vec::new(),
+            graph_carrier: None,
+            self_root_canonicals: Arc::from([]),
             pending_prefix_backfills: Vec::new(),
         }
+    }
+}
+
+impl QueryBuildOutput {
+    /// Attach the cold build's observed self-roots and return `self`.
+    ///
+    /// Builders that produce a `(QueryResult, DepSignature)` tuple coerce
+    /// via the [`From`] impl above (self-roots empty), then call this to
+    /// record the `(canonical, observed_hash)` self-root pairs the build
+    /// captured at the value source. The shared cold-build helper feeds
+    /// these to
+    /// [`crate::semantic_query_memo::semantic_graph_read_set_signature`].
+    #[inline]
+    #[must_use]
+    pub fn with_observed_self_roots(
+        mut self,
+        roots: impl IntoIterator<Item = crate::semantic_query_memo::ObservedGraphSelfRoot>,
+    ) -> Self {
+        self.observed_self_roots.extend(roots);
+        self
     }
 }
 

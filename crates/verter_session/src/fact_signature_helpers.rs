@@ -645,6 +645,40 @@ impl ReadSetSignature {
         validate_fact_signature(ctx, &self.facts) && ctx.validate_dep_signature(&self.legacy)
     }
 
+    /// Validate both rails against the host's live state, validating
+    /// every `FileWholeHash` fact whose canonical is listed in
+    /// `self_root_canonicals` **strictly**.
+    ///
+    /// Returns `true` only when BOTH rails validate (R3 AND-gate). The
+    /// fact rail routes any `FileWholeHash` for a listed self-root
+    /// canonical through the strict
+    /// [`crate::resolver_core::StoreView::validates_self_root_whole_hash`]
+    /// (an untracked or hash-mismatched self-root fails); every other
+    /// fact — including a `FileWholeHash` for a non-listed cross-file
+    /// dependency — keeps the lazy
+    /// [`crate::resolver_core::StoreView::validates`] permissiveness.
+    /// An overflow carrier always fails; an empty carrier with no
+    /// self-roots validates vacuously.
+    ///
+    /// This is the strict warm-read validation entry point for a
+    /// query-identity cache whose entry records its keyed (or
+    /// file-derived input) canonicals as `self_root_canonicals`: a
+    /// same-canonical content edit, or a self-root canonical the live
+    /// store view no longer tracks, fails validation.
+    #[inline]
+    pub(crate) fn validate_with_self_roots(
+        &self,
+        ctx: &dyn ResolverContext,
+        self_root_canonicals: &[Arc<str>],
+    ) -> bool {
+        if self.overflowed {
+            return false;
+        }
+        let self_root_refs: Vec<&str> = self_root_canonicals.iter().map(Arc::as_ref).collect();
+        validate_fact_signature_with_self_roots(ctx, &self.facts, &self_root_refs)
+            && ctx.validate_dep_signature(&self.legacy)
+    }
+
     /// Bubble the path-precise fact set into every active outer
     /// tracer on the current TLS stack. No-op when the tracer stack
     /// is empty or `facts` is empty. The legacy rail is the

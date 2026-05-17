@@ -40,6 +40,52 @@ thread_local! {
 }
 
 impl<'a> ProjectSemanticDispatch<'a> {
+    /// Collect the observed self-roots of a set of input `SemanticNodeId`s.
+    ///
+    /// A node kind keyed by already-interned input nodes (`ProjectPath` /
+    /// `ProjectMember` / `IndexedAccess` rooted at `base`; `KeyOf` /
+    /// `MappedType` / `Conditional` / `NormalizeUnion` /
+    /// `NormalizeIntersection` over their input nodes) produces a result
+    /// whose identity transitively depends on the file content each
+    /// file-derived input was lowered from. The input node's origin scope
+    /// — recorded in the arena sidecar at intern time — names that file
+    /// and the content version (`whole_hash`) it was observed at.
+    ///
+    /// This helper reads [`crate::semantic_query_memo::SemanticGraphStore::node_scope`]
+    /// for each input id and yields one `(canonical, observed_whole_hash)`
+    /// self-root per [`crate::semantic_query::NodeScopeId::File`]-scoped
+    /// input. `Global`-scoped inputs (primitives, structural helper
+    /// intermediates) and sidecar-exempt inputs contribute nothing — a
+    /// fully structural result has no file self-root.
+    ///
+    /// The `whole_hash` is the version the input node already carries in
+    /// its scope sidecar — captured when the node was interned. This
+    /// helper never re-reads current content; it only projects the
+    /// already-observed identity each input node carries.
+    pub(super) fn observed_self_roots_from_nodes(
+        &self,
+        nodes: impl IntoIterator<Item = SemanticNodeId>,
+    ) -> Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> {
+        let graph = self.graph();
+        let mut roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> = Vec::new();
+        for node in nodes {
+            if let Some(NodeScopeId::File {
+                canonical_id,
+                whole_hash,
+                ..
+            }) = graph.node_scope(node)
+            {
+                if !roots
+                    .iter()
+                    .any(|(c, h)| *c == canonical_id && *h == whole_hash)
+                {
+                    roots.push((canonical_id, whole_hash));
+                }
+            }
+        }
+        roots
+    }
+
     /// Resolve a top-level declaration lookup via the host's shallow state.
     ///
     /// Path C C16: the retired `DeclAnchor` variant is no longer interned.
@@ -51,11 +97,28 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(super) fn build_resolve_decl(
         &self,
         key: &ResolveDeclKey,
-    ) -> (QueryResult<SemanticNodeId>, DepSignature) {
-        let shallow = match self.ctx.shallow_file_state(key.scope.canonical_id.as_ref()) {
-            Some(state) => state,
-            None => return (QueryResult::Error(QueryError::Miss), empty_signature()),
+    ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        // Self-version rooting: observe the scope canonical.s
+        // `IndexedReady` ONCE through `ensure_indexed_ready` — the
+        // overlay-aware host accessor (a `SessionResolverContext`
+        // observes the overlay artifact, not the base file). The
+        // single observed artifact roots both the node.s
+        // `NodeScopeId::File` and the memo entry.s self-root
+        // `FileWholeHash` on `indexed.whole_hash`, and its
+        // `shallow_state` is the shallow inventory this builder reads
+        // — value basis and self-root descend from one observation, so
+        // a concurrent edit cannot tear them. `shallow_file_state` is
+        // deliberately not used: it reads the base file hash under an
+        // overlay and re-reads content outside the single observation.
+        let indexed = match self
+            .ctx
+            .ensure_indexed_ready(key.scope.canonical_id.as_ref())
+        {
+            Some(indexed) => indexed,
+            None => return (QueryResult::Error(QueryError::Miss), empty_signature()).into(),
         };
+        let shallow = &indexed.shallow_state;
+        let observed_hash = indexed.whole_hash;
 
         let has_type_symbol = shallow.symbol(key.name.as_ref()).is_some();
         let has_value_symbol = shallow.value_symbol(key.name.as_ref()).is_some();
@@ -63,7 +126,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let has_import_local = shallow.import_targets.contains_key(key.name.as_ref());
 
         if !(has_type_symbol || has_value_symbol || has_export || has_import_local) {
-            return (QueryResult::Error(QueryError::Miss), empty_signature());
+            return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
         }
 
         // Record the declaration's origin scope in the sidecar (
@@ -72,21 +135,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // payload.
         let scope = NodeScopeId::File {
             canonical_id: Arc::clone(&key.scope.canonical_id),
-            whole_hash: shallow.whole_hash,
+            whole_hash: observed_hash,
             local_scope: key.scope.local_scope,
         };
-        let signature = self.dep_signature_for(&key.scope.canonical_id, shallow.whole_hash);
+        let signature = self.dep_signature_for(&key.scope.canonical_id, observed_hash);
         // C16: DeclAnchor retired. Return a DeclPlaceholder that carries
         // enough identity for callers to construct Instantiate keys.
         let node_id = self.graph().intern_node_with_scope(
             SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
                 canonical_id: Arc::clone(&key.scope.canonical_id),
                 name: Arc::clone(&key.name),
-                whole_hash: shallow.whole_hash,
+                whole_hash: observed_hash,
             }),
             scope,
         );
-        (QueryResult::Value(node_id), signature)
+        crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+            QueryResult::Value(node_id),
+            signature,
+        ))
+        .with_observed_self_roots([(Arc::clone(&key.scope.canonical_id), observed_hash)])
     }
 
     /// `typeof`-rooted declaration lookup. Shape mirrors [`Self::build_resolve_decl`]
@@ -95,14 +162,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(super) fn build_typeof(
         &self,
         value_root: &ValueRootKey,
-    ) -> (QueryResult<SemanticNodeId>, DepSignature) {
-        let shallow = match self
+    ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        // Self-version rooting: observe the value-root scope
+        // canonical.s `IndexedReady` ONCE through the overlay-aware
+        // `ensure_indexed_ready` accessor. The single observed
+        // artifact roots both the node.s `NodeScopeId::File` and the
+        // memo entry.s self-root `FileWholeHash` on
+        // `indexed.whole_hash`; its `shallow_state` is the shallow
+        // inventory this builder reads — value basis and self-root
+        // descend from one observation.
+        let indexed = match self
             .ctx
-            .shallow_file_state(value_root.scope.canonical_id.as_ref())
+            .ensure_indexed_ready(value_root.scope.canonical_id.as_ref())
         {
-            Some(state) => state,
-            None => return (QueryResult::Error(QueryError::Miss), empty_signature()),
+            Some(indexed) => indexed,
+            None => return (QueryResult::Error(QueryError::Miss), empty_signature()).into(),
         };
+        let shallow = &indexed.shallow_state;
+        let observed_hash = indexed.whole_hash;
 
         let has_value = shallow.value_symbol(value_root.name.as_ref()).is_some();
         let has_import_local = shallow
@@ -121,7 +198,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .is_some_and(|(prefix, _)| shallow.import_targets.contains_key(prefix));
 
         if !(has_value || has_import_local || has_type_symbol || has_namespace_prefix) {
-            return (QueryResult::Error(QueryError::Miss), empty_signature());
+            return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
         }
 
         // Same scope-recording rule as `build_resolve_decl` — the value
@@ -129,7 +206,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // builders downstream can reach the correct declaration file.
         let scope = NodeScopeId::File {
             canonical_id: Arc::clone(&value_root.scope.canonical_id),
-            whole_hash: shallow.whole_hash,
+            whole_hash: observed_hash,
             local_scope: value_root.scope.local_scope,
         };
         let scope_payload = self
@@ -154,7 +231,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 value_root.name.as_ref(),
             ) {
                 Some(identity) => identity,
-                None => return (QueryResult::Error(QueryError::Miss), empty_signature()),
+                None => return (QueryResult::Error(QueryError::Miss), empty_signature()).into(),
             };
         let prepared = match self
             .ctx
@@ -179,7 +256,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .prepared_value_decl(&target.canonical_id, &target.name)
             }) {
             Some(prepared) => prepared,
-            None => return (QueryResult::Error(QueryError::Miss), empty_signature()),
+            None => return (QueryResult::Error(QueryError::Miss), empty_signature()).into(),
         };
         let empty_env = FxHashMap::default();
         let mut substitutions = Vec::new();
@@ -255,10 +332,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 crate::semantic_query::ProjectionMode::Expanded,
             )
         } else {
-            return (QueryResult::Error(QueryError::Miss), empty_signature());
+            return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
         };
-        let signature = self.dep_signature_for(&value_root.scope.canonical_id, shallow.whole_hash);
-        (QueryResult::Value(node_id), signature)
+        let signature = self.dep_signature_for(&value_root.scope.canonical_id, observed_hash);
+        crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+            QueryResult::Value(node_id),
+            signature,
+        ))
+        .with_observed_self_roots([(Arc::clone(&value_root.scope.canonical_id), observed_hash)])
     }
 
     /// Generic instantiation.
@@ -289,7 +370,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         identity: &DeclIdentity,
         args: &Arc<[SemanticNodeId]>,
         body_mode: crate::semantic_query::ProjectionMode,
-    ) -> (QueryResult<SemanticNodeId>, DepSignature) {
+    ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         // Count Instantiate dispatches that ask for the Expanded body
         // mode. Used by the slot-binding regression `enrich_does_not_eagerly_instantiate_carrier`
         // to enforce that synthesis stays in Navigate mode and never
@@ -342,19 +423,36 @@ impl<'a> ProjectSemanticDispatch<'a> {
             adapter.utility_source(base, decl_name.as_ref()),
             UtilitySource::Builtin
         ) {
-            return self.build_builtin_utility(base, decl_name.as_ref(), args);
+            // Built-in utility shells are structural — they compose
+            // `MappedType` / `ProjectPath` / `Normalize` dispatches over
+            // the supplied args. The result carries no per-file self-root
+            // of its own; the args' own memo entries carry theirs.
+            return self
+                .build_builtin_utility(base, decl_name.as_ref(), args)
+                .into();
         }
 
         // 3. Resolve prepared type decl via `DispatchHost` — the adapter
         // routes through the sidecar-recorded scope for `base`.
+        //
+        // The prepared decl is recovered from the declaration artifact
+        // pinned to `(decl_canonical, decl_whole_hash)` — `decl_whole_hash`
+        // is the content version `DeclIdentity` carries (observed when
+        // the base placeholder was interned). When the prepared decl
+        // cannot be recovered the result is left non-cacheable
+        // (`cache_suppress`): the value still flows to the caller but the
+        // memo refuses admission rather than rooting an entry on a decl
+        // identity whose artifact is gone.
         let ri = ResolvedRootIdentity::new(decl_canonical.as_ref(), decl_name.as_ref());
         let prepared = match adapter.resolve_prepared_type_decl(base, &ri) {
             Some(p) => p,
             None => {
-                return (
+                let mut out = crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
                     QueryResult::Value(self.opaque(QueryError::Miss)),
                     empty_signature(),
-                )
+                ));
+                out.cache_suppress = true;
+                return out;
             }
         };
 
@@ -454,7 +552,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     name: Arc::clone(decl_name),
                 })),
                 empty_signature(),
-            );
+            )
+                .into();
         }
         let mut result = self.shallow_lower_type_expr(
             &prepared.body,
@@ -507,7 +606,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
             );
         }
 
-        (QueryResult::Value(result), fence)
+        // Self-version rooting: the instantiated shell's body and member
+        // structure were lowered from the prepared decl declared in
+        // `decl_canonical` at the observed `decl_whole_hash` (carried by
+        // the `Instantiate` key's `DeclIdentity`). Root the memo entry on
+        // that observed content version so a content edit to the
+        // declaring file misses the warm read.
+        crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+            QueryResult::Value(result),
+            fence,
+        ))
+        .with_observed_self_roots([(Arc::clone(decl_canonical), decl_whole_hash)])
     }
 
     pub(super) fn backfill_member_index_surface(
@@ -1266,7 +1375,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 dep_signature: fence,
                 walker_diagnostics,
                 cache_suppress,
-                fact_dep_signature: None,
+                observed_self_roots: Vec::new(),
+                graph_carrier: None,
+                self_root_canonicals: Arc::from([]),
                 pending_prefix_backfills: Vec::new(),
             };
         }
@@ -1300,12 +1411,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // codex flagged in `publish_warm_if_absent`).
         let pending_prefix_backfills =
             collect_prefix_backfills(start_base, &walker_path, &walker.intermediate_nodes);
+        // Self-version rooting: the projection result depends on the
+        // file content the projection `base` was lowered from. The
+        // base node's origin scope (recorded in the arena sidecar)
+        // names that file and the version observed at intern time —
+        // root the memo entry on it so a content edit to the base's
+        // file misses the warm read.
+        let observed_self_roots = self.observed_self_roots_from_nodes([base]);
         crate::project_semantic_dispatch::walk::QueryBuildOutput {
             result: QueryResult::Value(result),
             dep_signature: fence,
             walker_diagnostics,
             cache_suppress,
-            fact_dep_signature: None,
+            observed_self_roots,
+            graph_carrier: None,
+            self_root_canonicals: Arc::from([]),
             pending_prefix_backfills,
         }
     }
@@ -1322,7 +1442,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(super) fn build_key_of(
         &self,
         base: SemanticNodeId,
-    ) -> (QueryResult<SemanticNodeId>, DepSignature) {
+    ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         let data = self.graph().node_data(base);
         let fence = self.project_generation_signature();
         let node = match data.as_deref() {
@@ -1349,7 +1469,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ) => self.graph().intern_node(SemanticNodeData::KeyOf { base }),
             _ => self.opaque(QueryError::Miss),
         };
-        (QueryResult::Value(node), fence)
+        // Self-version rooting: `keyof base` depends on `base`'s member
+        // surface, which was lowered from the file `base` originates in.
+        // Root the memo entry on that file's observed content version.
+        let observed_self_roots = self.observed_self_roots_from_nodes([base]);
+        crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+            QueryResult::Value(node),
+            fence,
+        ))
+        .with_observed_self_roots(observed_self_roots)
     }
 
     pub(super) fn intern_keyspace_names<I>(
@@ -1444,9 +1572,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         source: SemanticNodeId,
         mapper: &crate::semantic_query::MapperKey,
-    ) -> (QueryResult<SemanticNodeId>, DepSignature) {
+    ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         let graph = self.graph();
         let fence = self.project_generation_signature();
+        // Self-version rooting: the mapped result depends on the
+        // `source` surface, the `key_space`, and the `value_expr` — all
+        // already-interned nodes. Root the memo entry on the file
+        // content version each file-derived input was lowered from.
+        let observed_self_roots =
+            self.observed_self_roots_from_nodes([source, mapper.key_space, mapper.value_expr]);
 
         // 1. Resolve the key space.
         //
@@ -1500,7 +1634,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 OriginMeta::None,
                 Arc::clone(&fence),
             );
-            return (QueryResult::Value(node), fence);
+            return crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+                QueryResult::Value(node),
+                fence,
+            ))
+            .with_observed_self_roots(observed_self_roots.clone());
         };
 
         // 2. Build member slots.
@@ -1651,7 +1789,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             );
         }
 
-        (QueryResult::Value(node), fence)
+        crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+            QueryResult::Value(node),
+            fence,
+        ))
+        .with_observed_self_roots(observed_self_roots)
     }
 
     /// Conditional type ( C2 + §2 lazy block + §3
@@ -1703,9 +1845,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
         true_branch: SemanticNodeId,
         false_branch: SemanticNodeId,
         distributive: bool,
-    ) -> (QueryResult<SemanticNodeId>, DepSignature) {
+    ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         let graph = self.graph();
         let fence = self.project_generation_signature();
+        // Self-version rooting: the conditional's resolution depends on
+        // the `check`, `extends`, and both branch shells — all
+        // already-interned nodes. Root the memo entry on the file
+        // content version each file-derived input was lowered from.
+        let observed_self_roots =
+            self.observed_self_roots_from_nodes([check, extends, true_branch, false_branch]);
 
         // C2 + §3: distributive distribution is the
         // dispatch layer's responsibility. When `distributive == true`
@@ -1749,7 +1897,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             members: Arc::from(per_member.into_boxed_slice()),
                         })
                     {
-                        return (QueryResult::Value(normalised), fence);
+                        return crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+                            QueryResult::Value(normalised),
+                            fence,
+                        ))
+                        .with_observed_self_roots(observed_self_roots.clone());
                     }
                 }
                 // Fall through to the deferred-shell path below.
@@ -1788,7 +1940,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             );
             graph.record_conditional_decided();
             graph.record_branch_selection_true();
-            return (QueryResult::Value(result), fence);
+            return crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+                QueryResult::Value(result),
+                fence,
+            ))
+            .with_observed_self_roots(observed_self_roots.clone());
         }
 
         // Path C C11a — nested-infer in Function types.
@@ -1878,7 +2034,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     if any_bound {
                         graph.record_conditional_decided();
                         graph.record_branch_selection_true();
-                        return (QueryResult::Value(result), fence);
+                        return crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+                            QueryResult::Value(result),
+                            fence,
+                        ))
+                        .with_observed_self_roots(observed_self_roots.clone());
                     }
                 }
             }
@@ -1944,7 +2104,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 BranchSelection::Deferred => {}
             }
         }
-        (QueryResult::Value(result), fence)
+        crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+            QueryResult::Value(result),
+            fence,
+        ))
+        .with_observed_self_roots(observed_self_roots)
     }
 
     /// Shallow hot-path relation check used by [`Self::build_conditional`].
@@ -2000,7 +2164,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(super) fn build_normalize_union(
         &self,
         members: &Arc<[SemanticNodeId]>,
-    ) -> (QueryResult<SemanticNodeId>, DepSignature) {
+    ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         let node = self.intern_normalized_union_or_intersection(members, /* is_union */ true);
         let fence = self.project_generation_signature();
         if members.len() > 1 {
@@ -2012,7 +2176,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 Arc::clone(&fence),
             );
         }
-        (QueryResult::Value(node), fence)
+        // Self-version rooting: the normalised union depends on every
+        // contributing member node. Root the memo entry on the file
+        // content version each file-derived member was lowered from.
+        let observed_self_roots = self.observed_self_roots_from_nodes(members.iter().copied());
+        crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+            QueryResult::Value(node),
+            fence,
+        ))
+        .with_observed_self_roots(observed_self_roots)
     }
 
     /// Intersection normalization. Structurally sorts + dedups; singleton
@@ -2023,7 +2195,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(super) fn build_normalize_intersection(
         &self,
         members: &Arc<[SemanticNodeId]>,
-    ) -> (QueryResult<SemanticNodeId>, DepSignature) {
+    ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         let node = self.intern_normalized_union_or_intersection(members, /* is_union */ false);
         let fence = self.project_generation_signature();
         if members.len() > 1 {
@@ -2035,7 +2207,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 Arc::clone(&fence),
             );
         }
-        (QueryResult::Value(node), fence)
+        // Self-version rooting: the normalised intersection depends on
+        // every contributing member node. Root the memo entry on the
+        // file content version each file-derived member was lowered
+        // from.
+        let observed_self_roots = self.observed_self_roots_from_nodes(members.iter().copied());
+        crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+            QueryResult::Value(node),
+            fence,
+        ))
+        .with_observed_self_roots(observed_self_roots)
     }
 
     /// Vue macro resolution lookup.
@@ -2118,12 +2299,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
         macro_kind: verter_semantic::analysis::AnalyzedMacroKind,
         type_args: &Arc<[SemanticNodeId]>,
         mode: ProjectionMode,
-    ) -> (QueryResult<SemanticNodeId>, DepSignature) {
+    ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         use verter_semantic::analysis::AnalyzedMacroKind;
 
-        // §3.2 — seed local fence with the macro's owning canonical
-        // and whole_hash so HostFenceValidator catches stale warm hits
-        // when the SFC's content changes.
+        // Seed local fence with the macro's owning canonical and the
+        // content version the `ResolveMacroPayload` key carries
+        // (`owner.whole_hash`, observed when the synthetic SFC owner
+        // identity was constructed). This is also the memo entry's
+        // self-root: a content edit to the owning SFC shifts the
+        // whole-hash and misses the warm read.
         let mut local_fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
         local_fence.push((
             Arc::clone(&owner.canonical_id),
@@ -2160,23 +2344,38 @@ impl<'a> ProjectSemanticDispatch<'a> {
             AnalyzedMacroKind::DefineEmits
             | AnalyzedMacroKind::DefineSlots
             | AnalyzedMacroKind::DefineModel => {
-                // A14: anchor the result in the sidecar (no AST re-walk).
-                // The accessor returns `None` if the file is not indexed,
-                // which collapses to a Miss per the sketch.
-                let snapshot = match self.ctx.analyzed_macro_snapshot(&owner.canonical_id) {
+                // Read the macro snapshot from the owner artifact pinned
+                // to `owner.whole_hash` — the content version the
+                // `ResolveMacroPayload` key names. A content-addressed
+                // `IndexedReady` lookup (NOT the current-content
+                // `analyzed_macro_snapshot` accessor) keeps the macro
+                // body the build reads consistent with the key identity:
+                // a key for an older owner version must read that older
+                // version's macros, not whatever is current. A miss on
+                // the pinned artifact (the keyed version is not cached)
+                // collapses to a Miss per the sketch.
+                let snapshot = match self
+                    .ctx
+                    .project_type_store()
+                    .indexed()
+                    .get_for_current_content(&owner.canonical_id, owner.whole_hash)
+                    .and_then(|indexed| indexed.script_analysis.clone())
+                {
                     Some(s) => s,
                     None => {
                         return (
                             QueryResult::Error(QueryError::Miss),
                             fence_to_dep_signature(local_fence),
-                        );
+                        )
+                            .into();
                     }
                 };
                 if snapshot.macros.get(macro_index).is_none() {
                     return (
                         QueryResult::Error(QueryError::Miss),
                         fence_to_dep_signature(local_fence),
-                    );
+                    )
+                        .into();
                 }
                 if type_args.is_empty() {
                     QueryResult::Value(self.opaque(QueryError::Miss))
@@ -2207,7 +2406,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         };
 
-        (result, fence_to_dep_signature(local_fence))
+        // Self-version rooting: the macro payload was resolved from the
+        // owning SFC's macro analysis at the observed `owner.whole_hash`.
+        // Root the memo entry on that canonical so a content edit to the
+        // SFC misses the warm read.
+        crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+            result,
+            fence_to_dep_signature(local_fence),
+        ))
+        .with_observed_self_roots([(Arc::clone(&owner.canonical_id), owner.whole_hash)])
     }
 
     pub(super) fn intern_normalized_union_or_intersection(

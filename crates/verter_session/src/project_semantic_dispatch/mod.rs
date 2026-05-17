@@ -583,13 +583,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let key_for_build = key.clone();
         let raw_build = move || -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
             match &key_for_build {
-                SemanticQueryKey::ResolveDecl(decl_key) => self.build_resolve_decl(decl_key).into(),
-                SemanticQueryKey::TypeOf { value_root } => self.build_typeof(value_root).into(),
+                SemanticQueryKey::ResolveDecl(decl_key) => self.build_resolve_decl(decl_key),
+                SemanticQueryKey::TypeOf { value_root } => self.build_typeof(value_root),
                 SemanticQueryKey::Instantiate {
                     base,
                     args,
                     body_mode,
-                } => self.build_instantiate(base, args, *body_mode).into(),
+                } => self.build_instantiate(base, args, *body_mode),
                 // `ProjectMember` / `IndexedAccess` are API sugar that
                 // admission-time canonicalisation rewrites to
                 // `ProjectPath` above. The build closure never observes
@@ -608,9 +608,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 SemanticQueryKey::ProjectPath { base, path, mode } => {
                     self.build_project_path(*base, path, *mode)
                 }
-                SemanticQueryKey::KeyOf { base } => self.build_key_of(*base).into(),
+                SemanticQueryKey::KeyOf { base } => self.build_key_of(*base),
                 SemanticQueryKey::MappedType { source, mapper } => {
-                    self.build_mapped_type(*source, mapper).into()
+                    self.build_mapped_type(*source, mapper)
                 }
                 SemanticQueryKey::Conditional {
                     check,
@@ -618,14 +618,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     true_branch,
                     false_branch,
                     distributive,
-                } => self
-                    .build_conditional(*check, *extends, *true_branch, *false_branch, *distributive)
-                    .into(),
-                SemanticQueryKey::NormalizeUnion { members } => {
-                    self.build_normalize_union(members).into()
-                }
+                } => self.build_conditional(
+                    *check,
+                    *extends,
+                    *true_branch,
+                    *false_branch,
+                    *distributive,
+                ),
+                SemanticQueryKey::NormalizeUnion { members } => self.build_normalize_union(members),
                 SemanticQueryKey::NormalizeIntersection { members } => {
-                    self.build_normalize_intersection(members).into()
+                    self.build_normalize_intersection(members)
                 }
                 SemanticQueryKey::ResolvedNamedType { key } => {
                     self.build_resolved_named_type(key).into()
@@ -645,18 +647,36 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     macro_kind,
                     type_args,
                     mode,
-                } => self
-                    .build_resolve_macro_payload(owner, *macro_index, *macro_kind, type_args, *mode)
-                    .into(),
+                } => self.build_resolve_macro_payload(
+                    owner,
+                    *macro_index,
+                    *macro_kind,
+                    type_args,
+                    *mode,
+                ),
             }
         };
-        // Wrap the raw cold-build closure with the fact tracer. On
-        // `Ok(facts)` the build output's `fact_dep_signature` is set
-        // so `warm_publish_one` records the path-precise signature
-        // verbatim on the `MemoEntry`. On `Overflow` the build output
-        // is marked `cache_suppress = true` so the memo refuses to
-        // admit the entry — caller cold-recomputes on the next
-        // request.
+        // Wrap the raw cold-build closure with the fact tracer, then
+        // build the published memo entry's self-version-rooted carrier.
+        //
+        // On `Ok(traced_facts)` the carrier is assembled by
+        // `semantic_graph_read_set_signature` from the build's
+        // `observed_self_roots`, the traced fact set, and the legacy
+        // `dep_signature`: it prepends a self-root `FileWholeHash` per
+        // observed self-root and merges the traced cross-file facts.
+        // The producer is provenance-pure — it roots the entry on the
+        // content version the build OBSERVED, never a current-content
+        // re-read, so a same-canonical content edit misses the warm
+        // read. A `None` producer result (a torn / conflicting
+        // self-root observation, a `FileWholeHash` traced fact that
+        // disagrees with the observed self-root, or a `RouteGeneration`
+        // dependency that has no authoritative validator) marks the
+        // build `cache_suppress = true`: the value still flows to the
+        // caller, the memo refuses admission.
+        //
+        // On `Overflow` the build is marked `cache_suppress = true` so
+        // the memo refuses to admit the entry — caller cold-recomputes
+        // on the next request.
         let host = self.ctx.host_for_fact_tracer_install();
         let provenance = Arc::clone(&host.provenance);
         let traced_build = move || -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
@@ -672,22 +692,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             provenance
                 .memo_entry_fact_tracer_installs
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput = output;
-            match finalise {
-                crate::resolver_core::FactReadSetFinalise::Ok(fact_dep_signature) => {
-                    output.fact_dep_signature = Some(fact_dep_signature);
-                    output
-                }
-                crate::resolver_core::FactReadSetFinalise::Overflow => {
-                    provenance
-                        .memo_entry_overflow_refusals
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    output.cache_suppress = true;
-                    output
-                }
-            }
+            finalise_traced_build_output(output, finalise, &provenance)
         };
-        let cache_read = graph.execute_cooperative(key.clone(), sentinel, traced_build);
+        let cache_read = graph.execute_cooperative(self.ctx, key.clone(), sentinel, traced_build);
         tracing::debug!(
             target: "verter::dispatch::execute_via_helper",
             ?key,
@@ -696,6 +703,70 @@ impl<'a> ProjectSemanticDispatch<'a> {
         );
         cache_read
     }
+}
+
+/// Post-process a raw cold-build `QueryBuildOutput` into a
+/// self-version-rooted one.
+///
+/// On `FactReadSetFinalise::Ok` it builds the published memo entry's
+/// completed [`crate::fact_signature_helpers::ReadSetSignature`] carrier
+/// from the build's `observed_self_roots`, the traced fact set, and the
+/// legacy `dep_signature` via
+/// [`crate::semantic_query_memo::semantic_graph_read_set_signature`],
+/// and records the deduplicated self-root canonical set. A `None`
+/// producer result (a torn / conflicting self-root observation, or an
+/// unvalidated `RouteGeneration` dependency) marks the build
+/// `cache_suppress = true`. On `Overflow` it marks `cache_suppress`.
+///
+/// `#[inline(never)]`: this is invoked once per cold build from the
+/// dispatch's `traced_build` closure. Keeping it out-of-line gives its
+/// `Vec`/`FxHashMap` locals their own poppable stack frame instead of
+/// inflating the `traced_build` closure frame — `traced_build` sits on
+/// the recursive cold-build call chain (a deeply-nested type resolution
+/// nests one cold build per hop), so a fat closure frame multiplies
+/// across the recursion depth.
+#[inline(never)]
+fn finalise_traced_build_output(
+    output: crate::project_semantic_dispatch::walk::QueryBuildOutput,
+    finalise: crate::resolver_core::FactReadSetFinalise,
+    provenance: &crate::types::MetaProvenance,
+) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+    let mut output = output;
+    match finalise {
+        crate::resolver_core::FactReadSetFinalise::Ok(traced_facts) => {
+            // Record the self-root canonicals (deduplicated) for the
+            // strict warm-read validator on the published `MemoEntry`.
+            let mut self_root_canonicals: Vec<Arc<str>> =
+                Vec::with_capacity(output.observed_self_roots.len());
+            for (canonical, _) in output.observed_self_roots.iter() {
+                if !self_root_canonicals.iter().any(|c| c == canonical) {
+                    self_root_canonicals.push(Arc::clone(canonical));
+                }
+            }
+            match crate::semantic_query_memo::semantic_graph_read_set_signature(
+                &output.observed_self_roots,
+                &traced_facts,
+                &output.dep_signature,
+            ) {
+                Some(carrier) => {
+                    output.graph_carrier = Some(Box::new(carrier));
+                    output.self_root_canonicals = Arc::from(self_root_canonicals);
+                }
+                None => {
+                    // Non-cacheable: refuse memo admission, the value
+                    // still flows back to the caller.
+                    output.cache_suppress = true;
+                }
+            }
+        }
+        crate::resolver_core::FactReadSetFinalise::Overflow => {
+            provenance
+                .memo_entry_overflow_refusals
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            output.cache_suppress = true;
+        }
+    }
+    output
 }
 
 impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {

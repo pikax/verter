@@ -55,20 +55,56 @@ fn intern_empty_object(host: &VerterHost) -> SemanticNodeId {
         }))
 }
 
+/// Upsert a minimal `defineProps` SFC at `canonical` and build a
+/// `ResolveMacroPayload` owner [`DeclIdentity`] carrying that file's
+/// REAL whole hash.
+///
+/// A `ResolveMacroPayload` memo entry self-roots on the owner SFC's
+/// `FileWholeHash`; the strict warm-read validator rejects an entry
+/// whose self-root canonical is untracked or hash-mismatched. The
+/// owner must therefore be a tracked file with the real content
+/// version threaded into the key identity.
+fn tracked_macro_owner(host: &VerterHost, canonical: &str) -> DeclIdentity {
+    use crate::{FileKind, UpsertRequest};
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: canonical.to_string(),
+            source: Arc::from("<script setup lang=\"ts\">defineProps<{ x: string }>()</script>\n"),
+            file_kind: FileKind::from_path(canonical),
+            aliases: Vec::new(),
+        })
+        .expect("owner SFC upsert succeeds");
+    let whole_hash = host
+        .ensure_indexed_ready(canonical)
+        .map(|indexed| indexed.whole_hash)
+        .expect("owner SFC IndexedReady materialises");
+    DeclIdentity {
+        canonical_id: Arc::from(canonical),
+        whole_hash,
+        decl_name: Arc::from("<sfc-script-setup>"),
+    }
+}
+
 /// 5b §5.D.1 — `ResolveMacroPayload` repeated identical keys: cold
 /// once, warm N-1 times. Negative assertion against an unrelated
 /// `ResolveMacroPayload` proves the warm hits are key-specific.
 ///
 /// Uses `DefineProps` with a single type_arg so the build returns
-/// `QueryResult::Value(type_args[0])` (publishable) rather than the
-/// `Error(Miss)` shape the snapshot-driven arms produce when the
-/// owner is synthetic.
+/// `QueryResult::Value(type_args[0])` (publishable). The owner is a
+/// real tracked SFC so the entry's self-root `FileWholeHash` passes
+/// strict warm-read validation.
 #[test]
 fn cache_discipline_resolve_macro_payload_repeated_keys_warm() {
     let host = build_test_host();
     let arg = intern_empty_object(&host);
+    // The `ResolveMacroPayload` memo entry self-roots on the owner
+    // SFC's `FileWholeHash`; the owner canonical must be a tracked
+    // file so the strict warm-read validator can confirm the self-root
+    // and the repeated-key warm hit lands.
+    let owner = tracked_macro_owner(&host, "/cache_discipline_owner.vue");
     let key = SemanticQueryKey::ResolveMacroPayload {
-        owner: DeclIdentity::synthetic("TestOwner"),
+        owner,
         macro_index: 0,
         macro_kind: AnalyzedMacroKind::DefineProps,
         type_args: Arc::from(vec![arg].into_boxed_slice()),

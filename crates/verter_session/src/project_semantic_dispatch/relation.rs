@@ -106,10 +106,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> (RelationResult, DepSignature) {
         let graph = self.graph();
         graph.record_relation_check();
-        // Warm-hit fast path: memoised result returns without recomputing
-        // the judgement. Dep signatures revalidate under content changes
-        // via the surrounding completion-fence.
-        if let Some((fence, cached)) = graph.get_relation(source, target) {
+        // Strict warm-hit fast path: a memoised judgement returns only
+        // when its self-version-rooted carrier validates against the
+        // live store view — a content edit to the source's or the
+        // target's originating file misses the warm read and the
+        // judgement recomputes below.
+        if let Some((fence, cached)) = graph.get_relation(self.ctx, source, target) {
             return (cached, fence);
         }
         let fence = self.project_generation_signature();
@@ -121,7 +123,34 @@ impl<'a> ProjectSemanticDispatch<'a> {
         } else {
             RelationResult::Unknown
         };
-        graph.insert_relation(source, target, fence.clone(), result.clone());
+        // Self-version rooting: the relation judgement depends on the
+        // `source` and `target` node surfaces — root the memo entry on
+        // the file content version each file-derived input was lowered
+        // from. A `None` carrier (a torn / conflicting self-root
+        // observation, or an unvalidated `RouteGeneration` dependency)
+        // makes the judgement non-cacheable: it is returned to the
+        // caller but not admitted to the relation memo.
+        let observed_self_roots = self.observed_self_roots_from_nodes([source, target]);
+        let mut self_root_canonicals: Vec<std::sync::Arc<str>> =
+            Vec::with_capacity(observed_self_roots.len());
+        for (canonical, _) in observed_self_roots.iter() {
+            if !self_root_canonicals.iter().any(|c| c == canonical) {
+                self_root_canonicals.push(std::sync::Arc::clone(canonical));
+            }
+        }
+        if let Some(carrier) = crate::semantic_query_memo::semantic_graph_read_set_signature(
+            &observed_self_roots,
+            &[],
+            &fence,
+        ) {
+            graph.insert_relation(
+                source,
+                target,
+                carrier,
+                std::sync::Arc::from(self_root_canonicals),
+                result.clone(),
+            );
+        }
         (result, fence)
     }
 

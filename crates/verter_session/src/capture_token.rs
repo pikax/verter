@@ -869,9 +869,14 @@ where
     F: FnOnce() -> R + Send + 'static,
     R: Send + 'static,
 {
+    // A small stack so an UNBOUNDED recursion in `f` overflows fast.
+    // The cap accounts for the per-frame cost of the cold-build
+    // cooperative-admission path — the strict warm-read validator
+    // threads a resolver-context handle through every nested cold
+    // build of a deep type resolution.
     let builder = thread::Builder::new()
         .name("assert_no_stack_overflow".into())
-        .stack_size(256 * 1024);
+        .stack_size(384 * 1024);
     let handle = builder
         .spawn(move || {
             // Wrap in `catch_unwind` so an explicit panic inside `f`

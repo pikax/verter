@@ -88,9 +88,26 @@ that self-root is checked:
   canonical observed during materialization as a cross-file dependency
   fact. Cross-file *dependency* facts keep the lazy
   "untracked → accept" permissiveness — only the self-roots are strict.
-- The remaining query-identity caches (`semantic_graph`,
-  `materialize_structure_db`, `ref_cycle_db`, `route_owned_shallow`)
-  do not yet validate their self-root strictly.
+- The **`SemanticGraphStore` query nodes** validate their self-root
+  **strictly**. Each query-node `MemoEntry` records its
+  `self_root_canonicals` — the keyed canonical for `ResolveDecl` /
+  `TypeOf` / `Instantiate` / `ResolveMacroPayload`, or the file-derived
+  origin of every input node for the node kinds keyed by interned
+  `SemanticNodeId`s (`ProjectPath` / `ProjectMember` / `IndexedAccess` /
+  `KeyOf` / `MappedType` / `Conditional` / `NormalizeUnion` /
+  `NormalizeIntersection`). The carrier is built by the provenance-pure
+  producer `semantic_graph_read_set_signature` (prepends a self-root
+  `FileWholeHash` per observed self-root, merges the traced fact set,
+  returns `None` — non-cacheable — on a conflicting self-root hash or an
+  unvalidated `RouteGeneration` dependency). The warm-read validator —
+  `execute_cooperative`'s fast path, `get_validated`, the slow-path
+  step-1 recheck, and the relation memo's `get_relation` — validates
+  every self-root strictly via `validate_fact_signature_with_self_roots`
+  / `ReadSetSignature::validate_with_self_roots`. `get_unvalidated` has
+  no production warm-read caller (test/debug only).
+- The remaining query-identity caches (`materialize_structure_db`,
+  `ref_cycle_db`, `route_owned_shallow`) do not yet validate their
+  self-root strictly.
 
 The own-canonical drain is retained until every query-identity cache
 validates its self-root strictly; dropping it before then would serve

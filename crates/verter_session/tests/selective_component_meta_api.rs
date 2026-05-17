@@ -330,39 +330,6 @@ fn stale_handle_after_declaration_removed_returns_declaration_removed_error() {
     );
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// SemanticGraphStore::execute_cooperative_batch (D22 + D41 + D103)
-// ─────────────────────────────────────────────────────────────────────
-
-#[test]
-fn execute_cooperative_batch_returns_per_key_errors_not_panic() {
-    use verter_session::semantic_query::SemanticQueryKey;
-
-    let store = SemanticGraphStore::default();
-    // Populate with no cold builds — every key returns
-    // BatchExpandError::EvictedNode (per-key, NOT panic).
-    let keys: Vec<SemanticQueryKey> = vec![]; // empty: trivially returns []
-    let result = store.execute_cooperative_batch(&keys);
-    assert_eq!(result.len(), 0);
-}
-
-#[test]
-fn execute_cooperative_batch_one_batch_entry_n_keys_k_admissions() {
-    use verter_session::semantic_query::SemanticQueryKey;
-
-    let store = SemanticGraphStore::default();
-    let keys: Vec<SemanticQueryKey> = vec![]; // batched: 0 cold admissions for empty keys
-    let result = store.execute_cooperative_batch(&keys);
-    // One batch call, K=0 admissions, N=0 keys.
-    assert_eq!(result.len(), keys.len());
-    // The store stats counters are unchanged (no cold work happened).
-    let stats = store.stats_snapshot();
-    assert_eq!(
-        stats.misses, 0,
-        "execute_cooperative_batch is non-admission"
-    );
-}
-
 #[test]
 fn batch_expand_error_variants_match_proto_taxonomy() {
     // D103: verify the Rust taxonomy mirrors the proto enum bit-for-bit.

@@ -65,7 +65,6 @@ use std::sync::Arc;
 use verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource;
 use verter_semantic::analysis::type_eval::DeclarationId;
 use verter_semantic::analysis::type_solver::{PreparedTypeDecl, PreparedValueDecl};
-use verter_semantic::analysis::ScriptAnalysisSnapshot;
 use verter_workspace::{AmbientSymbolHit, ProjectStableKey};
 
 use crate::host_manage::ValueDeclIdentity;
@@ -277,8 +276,6 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     fn project_type_store(&self) -> &Arc<ProjectTypeStore>;
 
     fn config(&self) -> &HostConfig;
-
-    fn analyzed_macro_snapshot(&self, canonical_id: &str) -> Option<Arc<ScriptAnalysisSnapshot>>;
 
     // -------- Symbol / route resolution ----------------------------
 
@@ -638,11 +635,6 @@ impl ResolverContext for crate::VerterHost {
     #[inline]
     fn config(&self) -> &HostConfig {
         crate::VerterHost::config(self)
-    }
-
-    #[inline]
-    fn analyzed_macro_snapshot(&self, canonical_id: &str) -> Option<Arc<ScriptAnalysisSnapshot>> {
-        crate::VerterHost::analyzed_macro_snapshot(self, canonical_id)
     }
 
     // Symbol / route resolution --------------------------------------
