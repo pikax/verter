@@ -4085,3 +4085,105 @@ fn resolve_imported_registry_symbol_reuses_value_on_admission_failure_without_re
          (the defining export), not a recompute and not None",
     );
 }
+
+/// Discriminating regression for the discarded-concurrent-result bug.
+///
+/// `resolve_imported_registry_symbol`'s producer routes a cold miss
+/// through `ImportedRegistryDb::get_or_compute`, used purely as a
+/// signature-building write-through. `get_or_compute` returns
+/// `Option<Option<Arc<_>>>`:
+///
+///  - `Some(cached)` — a validated value is authoritative: either this
+///    request's freshly-admitted compute, OR an entry a CONCURRENT
+///    request validated-and-published into the DB between this
+///    request's `peek` miss and its `get_or_compute` call (the warm-hit
+///    `validate` arm returns it WITHOUT running the closure).
+///  - `None` — shared-cache admission was refused.
+///
+/// Fix-round-7 wrote `let _ = get_or_compute(...)` and unconditionally
+/// returned the locally-computed `resolved`. That discards the
+/// `Some(cached)` value the concurrent-publish warm-hit arm returns —
+/// so when the local slow-lane resolution produced `None` (e.g. the
+/// exported name does not resolve) the producer reported a spurious
+/// miss even though the authoritative cache held a real symbol.
+///
+/// The fixture pins the discriminator:
+///
+///  - The requested name (`Missing`) has NO resolution from
+///    `/concurrent_pub/index.ts` — no local prepared decl, no resolvable
+///    export target — so `resolve_imported_registry_symbol_with_budget`
+///    deterministically produces a local `resolved` of `None`.
+///  - A concurrent publish is injected: a real `ResolvedImportedRegistrySymbol`
+///    is validated-and-published into `ImportedRegistryDb` after the
+///    producer's `peek` miss and before its `get_or_compute`, so
+///    `get_or_compute` takes the warm-hit arm and returns `Some(<that
+///    symbol>)`.
+///
+/// Discrimination property — FAILS pre-fix, PASSES post-fix:
+///
+///  - Pre-fix (`let _ = get_or_compute(...)`): the `Some(cached)`
+///    concurrent value is discarded; the producer returns the local
+///    `resolved` (`None`). The request reports a spurious miss.
+///  - Post-fix (`match host_value { Some(cached) => cached, None =>
+///    resolved }`): the producer surfaces the authoritative
+///    concurrently-published symbol.
+#[test]
+fn resolve_imported_registry_symbol_surfaces_concurrently_published_value() {
+    use super::ResolvedImportedRegistrySymbol;
+
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/concurrent_pub/index.ts".to_string(),
+        Arc::from("export const anchor = 1;\n"),
+    );
+    ws.inject_file(
+        "/concurrent_pub/types.ts".to_string(),
+        Arc::from("export interface Props { primary: string }\n"),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    assert!(host.ensure_loaded("/concurrent_pub/index.ts"));
+    assert!(host.ensure_loaded("/concurrent_pub/types.ts"));
+
+    let mut engine = ComponentMetaQueryEngine::new(&host);
+
+    // The value a concurrent request validated-and-published into the
+    // shared DB for the SAME key while this request was cold.
+    let concurrent_symbol = ResolvedImportedRegistrySymbol {
+        canonical_id: "/concurrent_pub/types.ts".to_string(),
+        exported_name: "Props".to_string(),
+        body: TypeExpr::Primitive(PrimitiveName::String),
+        canonical_dependencies: std::collections::BTreeSet::new(),
+    };
+    let _publish =
+        super::inject_imported_registry_concurrent_publish_for_tests(concurrent_symbol.clone());
+
+    // `Missing` has no resolution from `/concurrent_pub/index.ts`, so
+    // the producer's local slow-lane `resolved` is `None`. The injected
+    // concurrent publish makes `get_or_compute` return `Some(<the
+    // published symbol>)` via its warm-hit arm.
+    let resolved = engine.resolve_imported_registry_symbol("/concurrent_pub/index.ts", "Missing");
+
+    let resolved = resolved.expect(
+        "the producer MUST surface the concurrently-published value `get_or_compute` returns \
+         from its warm-hit arm — the pre-fix `let _ =` discarded it and returned the local \
+         `None`, reporting a spurious miss",
+    );
+    assert_eq!(
+        (
+            resolved.canonical_id.as_str(),
+            resolved.exported_name.as_str(),
+        ),
+        ("/concurrent_pub/types.ts", "Props"),
+        "the surfaced value must be the concurrently-published symbol, not the local \
+         unresolved `None`",
+    );
+}

@@ -96,14 +96,38 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             return Some(cached_expr);
         }
 
+        // Observe the keyed scope canonical's content version ONCE
+        // here, BEFORE any routed-expression projection runs, through
+        // the view-aware `authoritative_current_content_hash` oracle
+        // (overlay-correct under a `SessionResolverContext`). Every
+        // `cache_routed_expr_surface_expr` write-through below is
+        // handed this single observation, so the cached projection and
+        // the entry's self-root are a single consistent content view.
+        // Reading the hash after a projection (as the helper used to)
+        // is a torn read: an `upsert` between the projection and the
+        // write-through would publish the pre-edit value under a fresh
+        // post-edit self-root, and a later warm hit would serve the
+        // stale route surface.
+        let observed_keyed_hash = self
+            .ctx
+            .authoritative_current_content_hash(scope_canonical_id);
+
         if let Some(projected_expr) =
             self.project_routed_expr_surface_expr_direct(scope_canonical_id, root_symbol, route)
         {
+            // Test-only seam: the projection above has produced
+            // `projected_expr`; the cache write-through runs next. A
+            // racing `upsert` of the scope file landing in this window
+            // is the torn-read class the observed-hash capture above
+            // guards against — the hook reproduces it deterministically.
+            #[cfg(test)]
+            super::fire_routed_expr_projection_seam_edit_for_tests();
             self.cache_routed_expr_surface_expr(
                 scope_canonical_id,
                 root_symbol,
                 route,
                 &projected_expr,
+                observed_keyed_hash,
             );
             if let RouteDemand::MemberPath(path) = route {
                 if let [member_name] = path.as_slice() {
@@ -144,6 +168,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     root_symbol,
                     route,
                     &projected_expr,
+                    observed_keyed_hash,
                 );
                 if let [member_name] = path.as_slice() {
                     if let Some(projected_member) = single_member_route_cache_entry(
@@ -176,6 +201,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     root_symbol,
                     route,
                     &projected_expr,
+                    observed_keyed_hash,
                 );
                 self.cache_projected_member(scope_canonical_id, root_symbol, &projected_member);
                 return Some(projected_expr);
@@ -193,6 +219,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     root_symbol,
                     route,
                     &projected_expr,
+                    observed_keyed_hash,
                 );
                 return Some(projected_expr);
             }
@@ -206,6 +233,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     root_symbol,
                     route,
                     &projected_expr,
+                    observed_keyed_hash,
                 );
                 return Some(projected_expr);
             }
@@ -220,6 +248,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     root_symbol,
                     route,
                     &projected_expr,
+                    observed_keyed_hash,
                 );
                 self.cache_pick_members_from_projected_expr(
                     scope_canonical_id,
@@ -268,6 +297,22 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         Some(value)
     }
 
+    /// Write-through to ctx-owned `RoutedExprSurfaceDb`.
+    ///
+    /// `observed_keyed_hash` is the `scope_canonical_id` content
+    /// version, captured by the caller through the view-aware
+    /// `authoritative_current_content_hash` oracle **before** it
+    /// projected `projected_expr`. Threading the observation in (rather
+    /// than re-reading current content here, after the caller's
+    /// projection has already run) keeps the cached value and the
+    /// entry's self-root a single consistent observation: an `upsert`
+    /// that lands between the projection and this write-through then
+    /// shifts the keyed canonical's hash and the post-compute
+    /// revalidation refuses admission, instead of validating a stale
+    /// route surface under a fresh self-root. The signature builder is
+    /// provenance-pure — it never re-reads current content. `None`
+    /// (the keyed canonical has no authoritative current content)
+    /// refuses shared-cache admission.
     #[allow(dead_code)]
     fn cache_routed_expr_surface_expr(
         &mut self,
@@ -275,6 +320,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         root_symbol: &str,
         route: &RouteDemand,
         projected_expr: &TypeExpr,
+        observed_keyed_hash: Option<crate::resolver_core::ResolverHash16>,
     ) {
         let local_key = RoutedExprSurfaceCacheKey {
             scope_canonical_id: scope_canonical_id.to_owned(),
@@ -282,17 +328,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             route: route.clone(),
         };
         // Step 3 closure: write-through to ctx-owned RoutedExprSurfaceDb.
-        //
-        // Observe the keyed canonical's content version ONCE here,
-        // before the closure runs, through the view-aware
-        // `authoritative_current_content_hash` oracle (overlay-correct
-        // under a `SessionResolverContext`) — threaded into the
-        // provenance-pure signature builder so the entry's self-root
-        // roots on the observed version, never a current-content
-        // re-read.
-        let observed_keyed_hash = self
-            .ctx
-            .authoritative_current_content_hash(scope_canonical_id);
         let arc_key =
             arc_routed_expr_surface_cache_key(scope_canonical_id, root_symbol, route.clone());
         let ctx = self.ctx;

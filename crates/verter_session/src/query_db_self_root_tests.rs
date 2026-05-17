@@ -1473,6 +1473,148 @@ fn routed_expr_surface_db_self_root_sibling_edit_rejects_warm_entry() {
     );
 }
 
+/// Count the named object-property members of a routed-expression
+/// surface `TypeExpr`. Used to fingerprint which content version a
+/// cached routed surface was projected from.
+fn routed_surface_member_names(expr: &TypeExpr) -> Vec<String> {
+    use verter_type_expr::ObjectMember;
+    let mut names = Vec::new();
+    if let TypeExpr::Object(object) = expr {
+        for member in object.properties.iter() {
+            match member {
+                ObjectMember::Property(property) => names.push(property.name.clone()),
+                ObjectMember::Method(method) => names.push(method.name.clone()),
+                _ => {}
+            }
+        }
+    }
+    names.sort();
+    names
+}
+
+/// `RoutedExprSurfaceDb` — producer-ordering canary for the
+/// routed-expression observed-hash capture.
+///
+/// `project_routed_expr_surface_expr` projects the routed surface and
+/// THEN calls `cache_routed_expr_surface_expr` to write it through. The
+/// observed self-root content hash must be captured BEFORE the
+/// projection, not inside the cache helper after it: capturing it after
+/// the projection is a torn read — the projected value comes from one
+/// content version, the self-root hash from a later one.
+///
+/// The fixture drives the race deterministically. A projection-seam
+/// hook fires a skip-own-drain `upsert` of the keyed scope file
+/// EXACTLY between the projection and the `cache_routed_expr_surface_expr`
+/// write-through — the precise window the torn read opens. `Probe`'s
+/// own member is renamed across the edit (`staleField` → `freshField`)
+/// so the v1 routed surface and the v2 routed surface are
+/// distinguishable, and the v1 value is provably stale once v2 lands.
+///
+/// Discrimination property — FAILS pre-fix, PASSES post-fix:
+///
+///  - Pre-fix (`cache_routed_expr_surface_expr` reads
+///    `authoritative_current_content_hash` itself, after the projection
+///    AND after the seam edit): the helper observes the POST-edit (v2)
+///    hash, so the entry's self-root `FileWholeHash` is v2. Post-compute
+///    revalidation against the (post-edit) v2 host validates that v2
+///    self-root, so the entry is ADMITTED — carrying the stale v1
+///    `projected_expr`. A warm `peek` against the v2 host then serves it.
+///  - Post-fix (the caller captures the observed hash before the
+///    projection and threads it in): the entry's self-root is the
+///    PRE-edit (v1) hash; revalidation against the v2 host rejects it,
+///    so the torn entry is NOT admitted. The warm `peek` misses and a
+///    fresh request recomputes the v2 surface.
+#[test]
+fn routed_expr_surface_db_observed_hash_captured_before_projection_rejects_torn_entry() {
+    use crate::resolver_core::component_meta_query_engine::{
+        inject_routed_expr_projection_seam_edit_for_tests, ComponentMetaQueryEngine,
+    };
+
+    let probe_v1 = "export interface Probe { staleField: string; }\n";
+    let probe_v2 = "export interface Probe { freshField: string; }\n";
+    let c = "/routed_seam/probe.ts";
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert(&host, c, probe_v1);
+    assert!(
+        host.ensure_indexed_ready(c).is_some(),
+        "fixture invariant: IndexedReady must materialise for {c}",
+    );
+
+    // The projection-seam hook: upsert v2 of the keyed scope file
+    // through the skip-own-drain hook so the own-canonical drain does
+    // NOT remove the entry the producer is about to publish — the
+    // staleness must be caught by the producer's self-root hash alone.
+    // The hook fires exactly between the routed-expression projection
+    // and the `cache_routed_expr_surface_expr` write-through.
+    let seam_host = Arc::clone(&host);
+    let seam_path = c.to_string();
+    let _seam = inject_routed_expr_projection_seam_edit_for_tests(move || {
+        upsert_skip_drain(&seam_host, &seam_path, probe_v2);
+        // Materialise v2's IndexedReady so the post-edit content-version
+        // is a recoverable content-addressed artifact. The torn-read
+        // producer roots the entry on this v2 hash and its signature
+        // builds (and revalidates) against v2 — exactly the
+        // "post-compute revalidation then passes" defect. Without a
+        // recoverable v2 artifact the v2-rooted signature could not
+        // build at all and the bug would be masked.
+        assert!(
+            seam_host.ensure_indexed_ready(&seam_path).is_some(),
+            "seam-edit invariant: v2 IndexedReady must materialise",
+        );
+    });
+
+    let route = RouteDemand::Whole;
+    let projected = {
+        let mut engine = ComponentMetaQueryEngine::new(&*host);
+        engine
+            .project_routed_expr_surface_expr(c, "Probe", &route)
+            .expect("the routed-expression `Whole` surface of `Probe` projects")
+    };
+    // The producer projected v1 (the seam edit lands AFTER the
+    // projection), so the returned value is the v1 surface regardless
+    // of the fix — the discriminating fact is what the SHARED DB holds.
+    assert_eq!(
+        routed_surface_member_names(&projected),
+        vec!["staleField".to_string()],
+        "fixture invariant: the projection ran against v1 of `Probe`",
+    );
+
+    // The discriminating assertion: a warm `peek` of the shared
+    // `RoutedExprSurfaceDb` against the POST-edit (v2) host. The key is
+    // the same `(scope, root_symbol, route)` the producer wrote under.
+    let ctx: &dyn ResolverContext = &*host;
+    let db = host.project_type_store().routed_expr_surface_db();
+    let arc_key = RoutedExprSurfaceCacheKey {
+        scope_canonical_id: Arc::from(c),
+        root_symbol: Arc::from("Probe"),
+        route: route.clone(),
+    };
+    let warm = db.peek(&arc_key, ctx);
+    assert!(
+        warm.is_none(),
+        "RoutedExprSurfaceDb MUST NOT hold a warm entry after the projection-seam edit: \
+         the torn-read producer roots the entry's self-root on the POST-edit hash, so it \
+         validates against the post-edit host and serves the stale v1 routed surface. \
+         Capturing the observed hash before the projection roots it on the pre-edit hash, \
+         so the torn entry is refused admission. warm = {:?}",
+        warm.as_deref(),
+    );
+
+    // A fresh request (new engine — request-local scratch is per-engine)
+    // recomputes the v2 surface.
+    let mut fresh_engine = ComponentMetaQueryEngine::new(&*host);
+    let fresh = fresh_engine
+        .project_routed_expr_surface_expr(c, "Probe", &route)
+        .expect("the routed-expression `Whole` surface of `Probe` re-projects against v2");
+    assert_eq!(
+        routed_surface_member_names(&fresh),
+        vec!["freshField".to_string()],
+        "the recomputed routed surface must reflect the v2 content (`freshField`), \
+         not the stale v1 `staleField`",
+    );
+}
+
 /// `PreparedTargetDb` — producer-level self-root canary. The production
 /// producer is [`engine_fact_signature_for_prepared_target`] (called by
 /// `resolve_prepared_surface_target`), which roots BOTH the active

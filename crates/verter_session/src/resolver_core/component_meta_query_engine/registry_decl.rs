@@ -78,10 +78,13 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // EXACTLY ONCE. `resolve_imported_registry_symbol_with_budget`
         // consumes the wildcard-route fuse (`allow_wildcard_route()` /
         // `wildcard_route_fanout`) on the slow lane — a side-effecting
-        // budget that MUST NOT be consumed twice for one request. The
-        // freshly-computed value is then reused on cache-admission
-        // failure: `get_or_compute` is used purely as a
-        // signature-building write-through, never to re-run resolution.
+        // budget that MUST NOT be consumed twice for one request.
+        // `get_or_compute` is used purely as a signature-building
+        // write-through, never to re-run resolution: on a `Some(cached)`
+        // return its authoritative value is surfaced (this covers a
+        // concurrent publish that landed inside the cold window — the
+        // closure is then not run); on a `None` return (admission
+        // refused) the freshly-computed value is reused.
         let arc_key = (
             std::sync::Arc::<str>::from(canonical_id),
             std::sync::Arc::<str>::from(exported_name),
@@ -120,17 +123,56 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             resolve_imported_registry_symbol_with_budget(ctx, canonical_id, exported_name, || {
                 self.allow_wildcard_route()
             });
+        // Test-only injection: simulate a concurrent request that
+        // validated-and-published this key into the shared DB inside
+        // this request's cold window — after the `peek` miss above,
+        // before the `get_or_compute` write-through below.
+        // `get_or_compute` then takes its warm-hit `validate` arm and
+        // returns the injected value without running the closure,
+        // exactly as it would under a real concurrent publish.
+        #[cfg(test)]
+        super::INJECT_IMPORTED_REGISTRY_CONCURRENT_PUBLISH.with(|slot| {
+            if let Some(symbol) = slot.borrow().clone() {
+                if let Some(fact_sig) = engine_fact_signature_for_exported_type(
+                    ctx,
+                    canonical_id,
+                    exported_name,
+                    observed_keyed_hash.expect(
+                        "concurrent-publish injection fixture requires an observed keyed hash",
+                    ),
+                ) {
+                    host_db.insert_for_test(
+                        arc_key.clone(),
+                        std::sync::Arc::new(crate::component_meta_caches::ImportedRegistryEntry {
+                            value: Some(std::sync::Arc::new(symbol)),
+                            fact_dep_signature: fact_sig,
+                        }),
+                    );
+                }
+            }
+        });
         // Write-through: `get_or_compute`'s closure only builds the
         // provenance-pure signature and hands back the ALREADY-COMPUTED
-        // `resolved` value — it never re-runs resolution. When the
-        // closure `?`-returns `None` (no observed shallow state for the
-        // keyed canonical, or the test refusal hook below) OR
-        // post-compute revalidation fails, `get_or_compute` returns
-        // `None`; shared-cache admission is forgone, but the request
-        // still returns the same `resolved` value computed above. No
-        // recompute, no second wildcard-route fuse consumption.
+        // `resolved` value — it never re-runs resolution. The returned
+        // `Option<Option<Arc<_>>>` distinguishes two outcomes:
+        //
+        // - `Some(cached)` — a validated value is authoritative: either
+        //   this request's own freshly-admitted compute, OR an entry a
+        //   CONCURRENT request published into the DB between the `peek`
+        //   miss above and this call (the warm-hit `validate` arm of
+        //   `cooperative_get_or_insert_with_post_publish` returns it
+        //   without running the closure). Surface that authoritative
+        //   value — the concurrent entry may carry a real symbol even
+        //   when this request's local `resolved` is a fuse-exhausted
+        //   `None`.
+        // - `None` — shared-cache admission was refused (the closure
+        //   `?`-returned `None`: no observed shallow state for the keyed
+        //   canonical, or the test refusal hook; or post-compute
+        //   revalidation failed). Fall back to the `resolved` value
+        //   computed exactly once above. No recompute, no second
+        //   wildcard-route fuse consumption.
         let captured = resolved.clone();
-        let _ = host_db.get_or_compute(&arc_key, ctx, move || {
+        let host_value = host_db.get_or_compute(&arc_key, ctx, move || {
             #[cfg(test)]
             if super::FORCE_IMPORTED_REGISTRY_ADMISSION_REFUSAL.with(|f| f.get()) {
                 // Deterministically reproduce the production
@@ -149,10 +191,14 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             )?;
             Some((captured, fact_sig))
         });
+        let result = match host_value {
+            Some(cached) => cached.as_deref().cloned(),
+            None => resolved,
+        };
         self.imported_registry_symbols
             .borrow_mut()
-            .insert(key, resolved.clone());
-        resolved
+            .insert(key, result.clone());
+        result
     }
 
     pub fn resolve_direct_prepared_type_declaration(
