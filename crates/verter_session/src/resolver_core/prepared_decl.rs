@@ -278,6 +278,23 @@ impl PreparedTypeDeclCache {
         self.slots.contains_key(symbol_name)
     }
 
+    /// The defining file's content identity — the `whole_hash` of the
+    /// [`ShallowFileState`] every `PreparedTypeDecl` in this cache is
+    /// built from.
+    ///
+    /// Provenance source for a query-identity cache producer whose
+    /// value is derived from a `PreparedTypeDecl`: the producer reads
+    /// the decl AND this hash from the SAME bundle, so the value and
+    /// its self-root fact signature are provably one content version
+    /// (untorn against a racing `upsert`). The hash is also view-correct
+    /// — an overlay-bearing bundle (materialised through
+    /// `prepared_decl_bundle_with_context`) carries the overlay's
+    /// `ShallowFileState`, so the hash reflects whatever view the
+    /// bundle was built from.
+    pub fn defining_content_hash(&self) -> verter_semantic::analysis::Hash16 {
+        self.state.whole_hash
+    }
+
     pub fn get(&self, symbol_name: &str) -> Option<Arc<PreparedTypeDecl>> {
         let slot = self.slots.get(symbol_name)?;
         slot.get_or_init(|| {

@@ -234,7 +234,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         None
     }
 
-    #[allow(dead_code)] // deletion in 5g per call-graph closure
+    #[allow(dead_code)]
     fn cached_routed_expr_surface_expr(
         &self,
         scope_canonical_id: &str,
@@ -268,7 +268,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         Some(value)
     }
 
-    #[allow(dead_code)] // deletion in 5g per call-graph closure
+    #[allow(dead_code)]
     fn cache_routed_expr_surface_expr(
         &mut self,
         scope_canonical_id: &str,
@@ -284,13 +284,15 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // Step 3 closure: write-through to ctx-owned RoutedExprSurfaceDb.
         //
         // Observe the keyed canonical's content version ONCE here,
-        // before the closure runs — threaded into the provenance-pure
-        // signature builder so the entry's self-root roots on the
-        // observed version, never a current-content re-read.
+        // before the closure runs, through the view-aware
+        // `authoritative_current_content_hash` oracle (overlay-correct
+        // under a `SessionResolverContext`) — threaded into the
+        // provenance-pure signature builder so the entry's self-root
+        // roots on the observed version, never a current-content
+        // re-read.
         let observed_keyed_hash = self
             .ctx
-            .shallow_file_state(scope_canonical_id)
-            .map(|state| state.whole_hash);
+            .authoritative_current_content_hash(scope_canonical_id);
         let arc_key =
             arc_routed_expr_surface_cache_key(scope_canonical_id, root_symbol, route.clone());
         let ctx = self.ctx;
@@ -318,7 +320,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .insert(local_key, projected_expr.clone());
     }
 
-    #[allow(dead_code)] // deletion in 5g per call-graph closure
+    #[allow(dead_code)]
     fn cache_pick_members_from_projected_expr(
         &mut self,
         scope_canonical_id: &str,
@@ -361,7 +363,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
 
-    #[allow(dead_code)] // deletion in 5g per call-graph closure
+    #[allow(dead_code)]
     fn cache_projected_member(
         &mut self,
         scope_canonical_id: &str,
@@ -382,7 +384,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         None
     }
 
-    #[allow(dead_code)] // deletion in 5g per call-graph closure
+    #[allow(dead_code)]
     pub(super) fn cached_prepared_surface(
         &mut self,
         scope_canonical_id: &str,
@@ -393,7 +395,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         None
     }
 
-    #[allow(dead_code)] // deletion in 5g per call-graph closure
+    #[allow(dead_code)]
     pub(super) fn cache_prepared_surface_projection(
         &mut self,
         scope_canonical_id: &str,
@@ -444,7 +446,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             && (!substitutions.is_empty() || is_package_source(self.ctx, Some(scope_canonical_id)))
     }
 
-    #[allow(dead_code)] // deletion in 5g per call-graph closure
+    #[allow(dead_code)]
     fn project_prepared_member_route_projection(
         &mut self,
         scope_canonical_id: &str,
@@ -456,7 +458,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         self.project_prepared_member_from_decl(scope_canonical_id, &prepared, member_name, member)
     }
 
-    #[allow(dead_code)] // deletion in 5g per call-graph closure
+    #[allow(dead_code)]
     fn project_prepared_member_from_decl(
         &mut self,
         scope_canonical_id: &str,
@@ -499,7 +501,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         })
     }
 
-    #[allow(dead_code)] // deletion in 5g per call-graph closure
+    #[allow(dead_code)]
     fn project_prepared_member_path_route_surface_expr(
         &mut self,
         scope_canonical_id: &str,
@@ -517,7 +519,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         )
     }
 
-    #[allow(dead_code)] // deletion in 5g per call-graph closure
+    #[allow(dead_code)]
     fn expr_references_prepared_scope_symbol(
         &mut self,
         scope_canonical_id: &str,
@@ -658,7 +660,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
 
-    #[allow(dead_code)] // deletion in 5g per call-graph closure
+    #[allow(dead_code)]
     pub(super) fn solve_or_project_prepared_member_leaf_expr(
         &mut self,
         resolution_scope_canonical_id: &str,
@@ -702,7 +704,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     ///   per-sub-expression scope splitting because their sub-
     ///   expressions are already `TypeExpr` leaves that round-trip
     ///   through this function.
-    #[allow(dead_code)] // deletion in 5g per call-graph closure
+    #[allow(dead_code)]
     fn solve_or_project_leaf_expr_with_context(
         &mut self,
         context: &PreparedProjectionContext,
@@ -866,7 +868,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
 
-    #[allow(dead_code)] // deletion in 5g per call-graph closure
+    #[allow(dead_code)]
     fn solve_or_project_leaf_expr_until_stable(
         &mut self,
         scope_canonical_id: &str,
@@ -904,7 +906,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         last
     }
 
-    #[allow(dead_code)] // deletion in 5g per call-graph closure
+    #[allow(dead_code)]
     pub(super) fn project_prepared_member_path_route_projection_from_symbol(
         &mut self,
         resolution_scope_canonical_id: &str,
@@ -987,7 +989,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         result
     }
 
-    #[allow(dead_code)] // deletion in 5g per call-graph closure
+    #[allow(dead_code)]
     fn project_prepared_member_path_route_projection_from_expr(
         &mut self,
         resolution_scope_canonical_id: &str,
@@ -1283,7 +1285,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
 
-    #[allow(dead_code)] // deletion in 5g per call-graph closure
+    #[allow(dead_code)]
     fn project_inherited_member_route_projection(
         &mut self,
         scope_canonical_id: &str,
@@ -1299,7 +1301,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         )
     }
 
-    #[allow(dead_code)] // deletion in 5g per call-graph closure
+    #[allow(dead_code)]
     fn project_inherited_member_route_projection_from_symbol(
         &mut self,
         scope_canonical_id: &str,
@@ -1339,14 +1341,15 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
 
         // Observe the keyed canonical's content version ONCE here,
-        // before the member value is computed — threaded into the
+        // before the member value is computed, through the view-aware
+        // `authoritative_current_content_hash` oracle (overlay-correct
+        // under a `SessionResolverContext`) — threaded into the
         // provenance-pure signature builder by the publish helper so
         // the published member and its signature root on one content
         // version.
         let observed_keyed_hash = self
             .ctx
-            .shallow_file_state(scope_canonical_id)
-            .map(|state| state.whole_hash);
+            .authoritative_current_content_hash(scope_canonical_id);
 
         let visit_key = (scope_canonical_id.to_string(), symbol_name.to_string());
         if !visited.insert(visit_key.clone()) {
@@ -1390,7 +1393,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         result
     }
 
-    #[allow(dead_code)] // deletion in 5g per call-graph closure
+    #[allow(dead_code)]
     fn project_inherited_member_route_projection_from_expr(
         &mut self,
         _scope_canonical_id: &str,
@@ -1441,7 +1444,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .map(|projected_member| projected_member.ty)
     }
 
-    #[allow(dead_code)] // deletion in 5g per call-graph closure
+    #[allow(dead_code)]
     fn project_pick_route_surface_expr_via_members(
         &mut self,
         scope_canonical_id: &str,
@@ -1498,7 +1501,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         })))
     }
 
-    #[allow(dead_code)] // deletion in 5g per call-graph closure
+    #[allow(dead_code)]
     fn project_pick_route_surface_expr_via_routed_expr(
         &mut self,
         scope_canonical_id: &str,
@@ -1510,7 +1513,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         self.project_routed_expr_surface_expr_direct(scope_canonical_id, symbol_name, route)
     }
 
-    #[allow(dead_code)] // deletion in 5g per call-graph closure
+    #[allow(dead_code)]
     fn project_routed_expr_surface_expr_direct(
         &mut self,
         scope_canonical_id: &str,
@@ -1520,7 +1523,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         self.dispatch_routed_expr_surface_expr(scope_canonical_id, root_symbol, route)
     }
 
-    #[allow(dead_code)] // deletion in 5g per call-graph closure
+    #[allow(dead_code)]
     pub(super) fn project_prepared_pick_route_surface_expr(
         &mut self,
         scope_canonical_id: &str,

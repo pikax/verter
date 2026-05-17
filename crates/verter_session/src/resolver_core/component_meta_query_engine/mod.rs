@@ -278,10 +278,13 @@ pub(crate) fn engine_fact_signature_for_prepared_target(
 /// `ComponentMetaQueryEngine::observed_prepared_type_decl` returns
 /// this wrapper so the producer threads ONE observation — the
 /// `whole_hash` baked here — into both the value and the
-/// provenance-pure signature builder. `decl` is `Option` because a
-/// prepared decl may legitimately be absent for a tracked canonical
-/// (the requested symbol does not exist); the absence is still rooted
-/// on `whole_hash` so a later declaration is detected.
+/// provenance-pure signature builder. The `decl` and the `whole_hash`
+/// are sourced from a single prepared-decl bundle, so they are
+/// provably the same content version (untorn against a racing
+/// `upsert`). `decl` is `Option` because a prepared decl may
+/// legitimately be absent for a bundled canonical (the requested
+/// symbol does not exist); the absence is still rooted on `whole_hash`
+/// so a later declaration is detected.
 pub(crate) struct ObservedPreparedTypeDecl {
     /// The prepared type declaration, or `None` when the requested
     /// symbol is absent from the keyed canonical.
@@ -289,9 +292,13 @@ pub(crate) struct ObservedPreparedTypeDecl {
         Option<std::sync::Arc<verter_semantic::analysis::type_solver::PreparedTypeDecl>>,
     /// The keyed canonical the prepared decl was resolved for.
     pub(crate) canonical_id: String,
-    /// The keyed canonical's `ShallowFileState::whole_hash` observed
-    /// at the value source — the content version both the value and
-    /// the fact signature root on.
+    /// The defining-file content version the prepared-decl bundle was
+    /// materialised from — the `whole_hash` of the bundle's
+    /// `ShallowFileState`, recovered via
+    /// `PreparedTypeDeclCache::defining_content_hash`. Both the cache
+    /// value and the fact signature root on this one version, and it
+    /// is view-correct because the bundle is fetched through the
+    /// view-aware `prepared_decl_bundle` accessor.
     pub(crate) whole_hash: crate::resolver_core::ResolverHash16,
 }
 

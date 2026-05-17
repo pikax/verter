@@ -104,8 +104,7 @@ pub(crate) fn project_expr_class_a_via_dispatch_threaded<'ctx>(
     // route helpers (`project_route_surface_expr`,
     // `lower_and_project_to_expanded`) exercise engine-local
     // re-export and prepared-decl resolution paths that dispatch's
-    // generic `lower_type_expr_in_scope` does not inherit verbatim;
-    // they retire alongside the engine deletion in 5g.
+    // generic `lower_type_expr_in_scope` does not inherit verbatim.
     //
     // r15/F11 — scope-shadowing gate. The TypeExpr
     // route extractors recognise `Pick<…>` / `Omit<…>` syntactically;

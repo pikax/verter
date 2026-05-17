@@ -72,7 +72,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
 
-    #[allow(dead_code)] // deletion in 5g per call-graph closure
+    #[allow(dead_code)]
     pub(super) fn enumerate_route_literal_keys(
         &mut self,
         resolution_scope_canonical_id: &str,
@@ -87,7 +87,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         )
     }
 
-    #[allow(dead_code)] // deletion in 5g per call-graph closure
+    #[allow(dead_code)]
     fn enumerate_route_literal_keys_inner(
         &mut self,
         resolution_scope_canonical_id: &str,

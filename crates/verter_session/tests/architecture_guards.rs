@@ -4213,13 +4213,18 @@ mod foundations_guards {
                 search_from = abs + prefix.len();
             }
         }
-        // `deleted in 5[a-z]` (lowercase `5` + single ASCII letter).
+        // `deleted in 5[a-z]` / `deletion in 5[a-z]` (deletion-history
+        // vocabulary from the 5-series plan: a lowercase `5` followed
+        // by a single ASCII letter, after either the past-tense
+        // `deleted in ` or the noun `deletion in `).
         let lower = line.to_ascii_lowercase();
-        if let Some(idx) = lower.find("deleted in 5") {
-            let bytes = lower.as_bytes();
-            let after = idx + "deleted in 5".len();
-            if after < bytes.len() && bytes[after].is_ascii_lowercase() {
-                return true;
+        for prefix in ["deleted in 5", "deletion in 5"] {
+            if let Some(idx) = lower.find(prefix) {
+                let bytes = lower.as_bytes();
+                let after = idx + prefix.len();
+                if after < bytes.len() && bytes[after].is_ascii_lowercase() {
+                    return true;
+                }
             }
         }
         // `phase \d+` / `phase-\d+` (case-insensitive on the verb,
@@ -4307,7 +4312,7 @@ mod foundations_guards {
              insights belong in `.claude/skills/*` or `docs/arch/`, not in source comments.\n\n\
              Forbidden patterns: `d-cutover`, `post-cutover`, `pre-Phase`, `pre-Stage`,\n\
              `post-Stage`, `phase \\d+`, `phase-\\d+`, `Stage \\d+`, `Stage-\\d+`,\n\
-             `deleted in 5[a-z]`, `retired in`.\n\n\
+             `deleted in 5[a-z]`, `deletion in 5[a-z]`, `retired in`.\n\n\
              Violations:\n  {}",
             violations
                 .iter()
@@ -4329,6 +4334,8 @@ mod foundations_guards {
             "// D-Cutover §5.8 WIP-W retired the previously embedded engine.",
             "// post-cutover clippy cleanup — direct_macro_type_reference_expr removed.",
             "// `find_matching_angle` was deleted in 5g once the dispatch resolver took over.",
+            "#[allow(dead_code)] // deletion in 5g per call-graph closure",
+            "// they retire alongside the engine deletion in 5g.",
             "// `legacy_first_pass` was retired in 11d.",
             "/// phase-1b cutover deleted the declared component-meta query.",
             // Audit-infrastructure plan archaeology — fixed-needle and

@@ -54,9 +54,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// returns `None` for re-exported / barrel-routed declarations.
     /// The prepared-decl helper itself is a dispatch consumer (it
     /// reads via the ctx store and reduces the prepared decl body
-    /// without embedding a separate resolver). Callers migrate off
-    /// this method in 5d-5f; the method retires in 5g along with the
-    /// prepared-projection helpers per §F call-graph closure.
+    /// without embedding a separate resolver).
     pub(crate) fn cached_prepared_root_surface(
         &mut self,
         scope_canonical_id: &str,
@@ -76,7 +74,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .map(projected_surface_unwrap_or_clone)
     }
 
-    #[allow(dead_code)] // deletion in 5g per call-graph closure
+    #[allow(dead_code)]
     pub(super) fn project_prepared_root_surface(
         &mut self,
         scope_canonical_id: &str,
@@ -90,7 +88,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         result
     }
 
-    #[allow(dead_code)] // deletion in 5g per call-graph closure
+    #[allow(dead_code)]
     fn project_prepared_root_surface_inner(
         &mut self,
         scope_canonical_id: &str,
@@ -116,7 +114,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
 
-    #[allow(dead_code)] // deletion in 5g per call-graph closure
+    #[allow(dead_code)]
     fn project_prepared_surface_from_symbol(
         &mut self,
         scope_canonical_id: &str,
@@ -167,14 +165,17 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             }
         }
         // Observe the keyed canonical's content version ONCE here,
-        // before any surface value is computed — threaded into the
-        // provenance-pure signature builder by the publish helper so
-        // the published surface and its signature root on one content
-        // version.
+        // before any surface value is computed, through the view-aware
+        // `authoritative_current_content_hash` oracle — under a
+        // `SessionResolverContext` it resolves the overlay content hash
+        // for an overlay-bearing session, so an overlay-derived entry
+        // roots on the overlay version rather than the base hash. The
+        // observed hash is threaded into the provenance-pure signature
+        // builder by the publish helper so the published surface and
+        // its signature root on one content version.
         let observed_keyed_hash = self
             .ctx
-            .shallow_file_state(scope_canonical_id)
-            .map(|state| state.whole_hash);
+            .authoritative_current_content_hash(scope_canonical_id);
         if substitutions.is_empty() {
             if let Some(prepared) = self.prepared_type_decl(scope_canonical_id, symbol_name) {
                 if let Some(default_substitutions) =
@@ -268,7 +269,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// the entry's self-root and parse facts root on that one observed
     /// version rather than a current-content re-read. `?` on a `None`
     /// observation or builder result refuses shared-cache admission.
-    #[allow(dead_code)] // deletion in 5g per call-graph closure
+    #[allow(dead_code)]
     fn publish_prepared_surface_to_host_db(
         &self,
         scope_canonical_id: &str,
@@ -305,7 +306,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         });
     }
 
-    #[allow(dead_code)] // deletion in 5g per call-graph closure
+    #[allow(dead_code)]
     fn project_prepared_surface_from_expr(
         &mut self,
         scope_canonical_id: &str,
@@ -415,7 +416,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
 
-    #[allow(dead_code)] // deletion in 5g per call-graph closure
+    #[allow(dead_code)]
     fn project_prepared_surface_from_ref(
         &mut self,
         scope_canonical_id: &str,
@@ -525,7 +526,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
 
-    #[allow(dead_code)] // deletion in 5g per call-graph closure
+    #[allow(dead_code)]
     fn project_prepared_requested_member_surface_from_expr(
         &mut self,
         scope_canonical_id: &str,
@@ -597,17 +598,19 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             }
         }
         // Observe the keyed canonical's content version ONCE here,
-        // before any member value is computed. Every
+        // before any member value is computed, through the view-aware
+        // `authoritative_current_content_hash` oracle (overlay-correct
+        // under a `SessionResolverContext`). Every
         // `publish_prepared_member_to_host_db` call below threads this
         // single observation into the provenance-pure signature
         // builder so the published `ProjectedMember` and its fact
         // signature root on exactly one `scope_canonical_id` content
-        // version. `None` (the canonical has no current shallow state)
-        // refuses shared-cache admission inside the publish helper.
+        // version. `None` (the canonical has no authoritative current
+        // content) refuses shared-cache admission inside the publish
+        // helper.
         let observed_keyed_hash = self
             .ctx
-            .shallow_file_state(scope_canonical_id)
-            .map(|state| state.whole_hash);
+            .authoritative_current_content_hash(scope_canonical_id);
         if substitutions.is_empty() {
             if let Some(prepared) = self.prepared_type_decl(scope_canonical_id, symbol_name) {
                 if let Some(default_substitutions) =
@@ -998,22 +1001,23 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
 
         // Observe BOTH keyed canonicals' content versions ONCE here,
-        // before the value is resolved. `PreparedTargetCacheKey` is
-        // keyed on the active scope AND the declaring canonical, so
+        // before the value is resolved, through the view-aware
+        // `authoritative_current_content_hash` oracle (overlay-correct
+        // under a `SessionResolverContext`). `PreparedTargetCacheKey`
+        // is keyed on the active scope AND the declaring canonical, so
         // both are self-roots. The provenance-pure signature builder
         // roots each self-root on its own observed hash threaded in
         // below — never a current-content re-read inside the closure.
-        // A `None` for either (the canonical has no current shallow
-        // state) refuses shared-cache admission; the resolved value is
-        // still returned to the caller from `resolved` below.
+        // A `None` for either (the canonical has no authoritative
+        // current content) refuses shared-cache admission; the
+        // resolved value is still returned to the caller from
+        // `resolved` below.
         let observed_scope_hash = self
             .ctx
-            .shallow_file_state(scope_canonical_id)
-            .map(|state| state.whole_hash);
+            .authoritative_current_content_hash(scope_canonical_id);
         let observed_decl_hash = self
             .ctx
-            .shallow_file_state(prepared.root_identity.canonical_id.as_str())
-            .map(|state| state.whole_hash);
+            .authoritative_current_content_hash(prepared.root_identity.canonical_id.as_str());
 
         let resolve_prepared_target =
             |this: &mut Self, canonical_source: String, resolved_name: String| {

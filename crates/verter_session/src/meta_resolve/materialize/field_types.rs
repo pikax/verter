@@ -126,16 +126,20 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
     let ctx = query_engine.ctx();
     let dispatch = ProjectSemanticDispatch::new(ctx);
     let env: FxHashMap<String, crate::semantic_query::SemanticNodeId> = FxHashMap::default();
-    // Observe the scope canonical's content version EXACTLY ONCE. The
-    // same observation roots BOTH the value (the `NodeScopeId::File`
-    // the materialiser lowers against, below) AND the entry's fact
-    // signature (the `MaterializeMemoDb` write-through, further down).
-    // A second, later read of the scope hash would open a publish race:
-    // an edit landing between materialisation and signature-build would
-    // root a stale value by a fresh-looking current hash.
-    let observed_scope_whole_hash = ctx
-        .shallow_file_state(scope_canonical_id)
-        .map(|state| state.whole_hash);
+    // Observe the scope canonical's content version EXACTLY ONCE,
+    // through the view-aware `authoritative_current_content_hash`
+    // oracle. The same observation roots BOTH the value (the
+    // `NodeScopeId::File` the materialiser lowers against, below) AND
+    // the entry's fact signature (the `MaterializeMemoDb`
+    // write-through, further down). A second, later read of the scope
+    // hash would open a publish race: an edit landing between
+    // materialisation and signature-build would root a stale value by
+    // a fresh-looking current hash. The oracle is overlay-correct
+    // under a `SessionResolverContext` — an overlay-bearing session
+    // observes the overlay content hash, so an overlay-derived memo
+    // entry roots on the overlay version (and a base request mismatches
+    // it rather than reusing it).
+    let observed_scope_whole_hash = ctx.authoritative_current_content_hash(scope_canonical_id);
     // Pin the scope's `SyntacticExportSet` parse fact to the SAME
     // observed content version (content-addressed, never re-read from
     // current content). `None` when the observed version's artifact is

@@ -2889,3 +2889,388 @@ fn prepared_target_db_signature_builder_is_provenance_pure() {
         "the current-observed signature must root on H2",
     );
 }
+
+// ---------------------------------------------------------------------------
+// Producer-level overlay-discrimination tests — P1-A / P1-B.
+//
+// The six `*_signature_builder_is_provenance_pure` tests above call the
+// signature *helpers* in isolation with a hand-passed hash, so they cannot
+// catch a producer that sources the observed hash from a base-host-only oracle
+// (`shallow_file_state`, not view-aware) instead of the view-aware
+// `authoritative_current_content_hash` / the prepared-decl bundle provenance.
+//
+// Each test below drives an actual producer METHOD through a
+// `SessionResolverContext` carrying an overlay (content `O`) over a base file
+// (content `B`), `O != B`. The producer publishes into the canonical-keyed
+// (NOT view-qualified) shared query-cache DB. A fresh base-context producer
+// then issues a follow-up request against the SAME slot.
+//
+// Discrimination property (FAILS pre-fix, PASSES post-fix):
+//
+//  - Post-fix the producer observes the OVERLAY hash `O` (the view-aware
+//    oracle, or the overlay-aware prepared-decl bundle), so the overlay-derived
+//    entry's self-root `FileWholeHash` carries `O`. The base follow-up's
+//    `validate_fact_signature_with_self_roots` checks that self-root against
+//    the base view's whole-hash `B`; `O != B` mismatches, the warm read MISSES,
+//    and the base producer cold-recomputes the base-content value.
+//  - Pre-fix the producer observes `shallow_file_state(canonical).whole_hash`,
+//    which a `SessionResolverContext` delegates to the BASE host — so the
+//    overlay-derived entry's self-root carries the base hash `B`. The base
+//    follow-up validates `B`-vs-`B`, WARM-HITS, and is served the overlay
+//    value. The base producer returns overlay-content data and the assertion
+//    on base-content data trips.
+//
+// The discriminator is the base producer's RETURN VALUE: the base and overlay
+// sources are deliberately written so the producer outputs differ (the type
+// `Probe` carries a `baseMember` field in the base source and an
+// `overlayMember` field in the overlay source).
+//
+// Cache coverage. The three producer tests below cover the query caches whose
+// producer is externally callable, whose cold value-compute is sourced from
+// the prepared-decl bundle (view-isolated), AND whose producer admits a
+// torn/base-rooted entry pre-fix so the leak is observable: `ResolvabilityDb`,
+// `PreparedSurfaceDb`, `PreparedMemberDb`. The fourth test pins
+// `observed_prepared_type_decl` itself — the single-artifact observation point
+// shared by the `OwnerCollectionDb` producer. The remaining caches' producers
+// are not amenable to a producer-level overlay test: `DeclarationLookupDb` /
+// `RoutedExprSurfaceDb` (and the imported-registry resolver) recover their
+// value through shallow-metadata / dispatch reads that consult the
+// non-content-pinned `FileArtifactStore::get_any`, which itself returns the
+// overlay candidate to a base recompute (a separate pre-existing
+// content-pinning gap — see this file's earlier `[debt]` note), so a
+// producer-level test cannot isolate the self-root fix; `OwnerCollectionDb`'s
+// producer refuses admission of the torn entry pre-fix (see the note above the
+// `ResolvabilityDb` test); `PreparedTargetDb`'s producer is `pub(super)` and
+// not reachable from this module. Their round-6 producer hash-source change
+// (the identical base-only `shallow_file_state` → view-aware
+// `authoritative_current_content_hash` substitution) is covered by the
+// `*_signature_builder_is_provenance_pure` builder tests above and the
+// `central_fact_signature_helpers_are_provenance_pure` architecture guard.
+
+/// Base source for an overlay-discrimination fixture: type `Probe`
+/// carries a `baseMember` field.
+fn overlay_disc_base_source() -> &'static str {
+    "export interface Probe { baseMember: number; }\n"
+}
+
+/// Overlay source for an overlay-discrimination fixture: type `Probe`
+/// carries an `overlayMember` field — deliberately different bytes (and
+/// a different member) from the base so the producer output and the
+/// content hash both differ.
+fn overlay_disc_overlay_source() -> &'static str {
+    "export interface Probe { overlayMember: string; }\n"
+}
+
+/// Build the overlay-discrimination fixture: a host with `canonical`
+/// materialised at the base source, plus an [`OverlaidView`] masking
+/// `canonical` with the overlay source. The overlay `IndexedReady`
+/// candidate is materialised under the overlay hash. Returns the
+/// `Arc<VerterHost>`, the view, and the two distinct content hashes.
+fn overlay_disc_fixture(
+    canonical: &str,
+) -> (
+    Arc<VerterHost>,
+    crate::session_view::OverlaidView,
+    [u8; 16],
+    [u8; 16],
+) {
+    use crate::session_view::SessionView;
+    use rustc_hash::FxHashMap;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert(&host, canonical, overlay_disc_base_source());
+    let base_hash = host
+        .ensure_indexed_ready(canonical)
+        .expect("base IndexedReady materialises")
+        .whole_hash;
+    let host = Arc::new(host);
+
+    let overlay_source: Arc<str> = Arc::from(overlay_disc_overlay_source());
+    let mut overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();
+    overlays.insert(canonical.to_string(), Arc::clone(&overlay_source));
+    let view = crate::session_view::OverlaidView::new(Arc::clone(&host), overlays);
+
+    let overlay_hash = view
+        .overlay_content_hash_for(canonical)
+        .expect("OverlaidView reports an overlay content hash for the masked canonical");
+    assert_ne!(
+        overlay_hash, base_hash,
+        "fixture invariant: the overlay source differs from the base, so the overlay \
+         content hash differs — otherwise the base/overlay entries are indistinguishable",
+    );
+
+    host.materialize_overlay_indexed_ready(canonical, &overlay_source, overlay_hash)
+        .expect("overlay IndexedReady materialises");
+
+    (host, view, base_hash, overlay_hash)
+}
+
+// `OwnerCollectionDb`'s producer (`owner_collection_expr`) is not
+// covered by a producer-level overlay test here: pre-fix its closure
+// builds the signature through `parse_fact_ref_for_observed_current_content`
+// keyed on the (base-only-sourced) observed hash, and after the overlay
+// `IndexedReady` candidate is materialised the base-hash artifact is no
+// longer the slot's current-content candidate, so the parse-fact lookup
+// returns `None` and the pre-fix closure refuses admission anyway — the
+// torn entry is never published, so a producer-level test cannot observe
+// a leak. The P1-B torn-read defect in `OwnerCollectionDb`'s observation
+// point is instead pinned directly by
+// `observed_prepared_type_decl_is_single_artifact_and_view_aware` below,
+// which asserts the `(decl, whole_hash)` pair `observed_prepared_type_decl`
+// returns is single-artifact-consistent and view-correct.
+
+/// `ResolvabilityDb` — producer-level overlay discrimination (P1-A).
+///
+/// Drives `can_resolve_registry_symbol`. The base source declares
+/// `Probe`; the overlay source does NOT (it declares `Other` instead) —
+/// so the resolvability boolean differs between the views. The base
+/// follow-up MUST recompute `true`; a leaked overlay entry would carry
+/// `false`.
+#[test]
+fn resolvability_db_producer_overlay_discrimination() {
+    use crate::resolver_core::component_meta_query_engine::ComponentMetaQueryEngine;
+    use crate::resolver_core::SessionResolverContext;
+    use crate::session_view::SessionView;
+    use rustc_hash::FxHashMap;
+
+    let canonical = "/overlay_disc/resolvable.ts";
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert(&host, canonical, "export interface Probe { a: number; }\n");
+    host.ensure_indexed_ready(canonical)
+        .expect("base IndexedReady materialises");
+    let host = Arc::new(host);
+
+    // The overlay does NOT declare `Probe` — it declares `Other`.
+    let overlay_source: Arc<str> = Arc::from("export interface Other { a: number; }\n");
+    let mut overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();
+    overlays.insert(canonical.to_string(), Arc::clone(&overlay_source));
+    let view = crate::session_view::OverlaidView::new(Arc::clone(&host), overlays);
+    let overlay_hash = view
+        .overlay_content_hash_for(canonical)
+        .expect("overlay content hash present");
+    host.materialize_overlay_indexed_ready(canonical, &overlay_source, overlay_hash)
+        .expect("overlay IndexedReady materialises");
+
+    let overlay_ctx = SessionResolverContext::new(&host, &view);
+    let mut overlay_engine = ComponentMetaQueryEngine::new(&overlay_ctx);
+    let overlay_resolvable = overlay_engine.can_resolve_registry_symbol(canonical, "Probe", None);
+    assert!(
+        !overlay_resolvable,
+        "fixture invariant: the overlay source does not declare `Probe`, so the \
+         overlay producer must resolve `Probe` as NOT resolvable",
+    );
+
+    let base_ctx: &dyn ResolverContext = host.as_ref();
+    let mut base_engine = ComponentMetaQueryEngine::new(base_ctx);
+    let base_resolvable = base_engine.can_resolve_registry_symbol(canonical, "Probe", None);
+    assert!(
+        base_resolvable,
+        "ResolvabilityDb LEAKED an overlay-session entry to a base request. \
+         `can_resolve_registry_symbol` must observe the keyed canonical's content \
+         version through the view-aware `authoritative_current_content_hash`, so the \
+         overlay entry (`Probe` NOT resolvable) roots on the overlay hash and a base \
+         request mismatches it. A producer reading the base-only `shallow_file_state` \
+         roots the entry on the base hash; the base request then warm-hits the \
+         overlay `false` even though the base source declares `Probe`.",
+    );
+}
+
+/// `PreparedSurfaceDb` — producer-level overlay discrimination (P1-A).
+///
+/// Drives `cached_prepared_root_surface`; the value is the projected
+/// `ProjectedSurface` of `Probe`, whose member set is the discriminator.
+#[test]
+fn prepared_surface_db_producer_overlay_discrimination() {
+    use crate::resolver_core::component_meta_query_engine::ComponentMetaQueryEngine;
+    use crate::resolver_core::SessionResolverContext;
+
+    let canonical = "/overlay_disc/prepared_surface.ts";
+    let (host, view, _base_hash, _overlay_hash) = overlay_disc_fixture(canonical);
+
+    let overlay_ctx = SessionResolverContext::new(&host, &view);
+    let mut overlay_engine = ComponentMetaQueryEngine::new(&overlay_ctx);
+    let overlay_surface = overlay_engine
+        .cached_prepared_root_surface(canonical, "Probe")
+        .expect("the overlay producer projects Probe's surface");
+    assert!(
+        overlay_surface
+            .members
+            .iter()
+            .any(|m| m.name == "overlayMember"),
+        "fixture invariant: the overlay producer must project the overlay source's \
+         `overlayMember` field",
+    );
+
+    let base_ctx: &dyn ResolverContext = host.as_ref();
+    let mut base_engine = ComponentMetaQueryEngine::new(base_ctx);
+    let base_surface = base_engine
+        .cached_prepared_root_surface(canonical, "Probe")
+        .expect("the base producer projects Probe's surface");
+    assert!(
+        base_surface.members.iter().any(|m| m.name == "baseMember"),
+        "PreparedSurfaceDb LEAKED an overlay-session entry to a base request. \
+         `project_prepared_surface_from_symbol` must observe the scope canonical's \
+         content version through the view-aware `authoritative_current_content_hash`, \
+         so the overlay surface roots on the overlay hash and a base request \
+         mismatches it. A producer reading the base-only `shallow_file_state` roots \
+         the entry on the base hash; the base request warm-hits the overlay surface.",
+    );
+    assert!(
+        !base_surface
+            .members
+            .iter()
+            .any(|m| m.name == "overlayMember"),
+        "the base producer must not surface the overlay `overlayMember` field",
+    );
+}
+
+/// `PreparedMemberDb` — producer-level overlay discrimination (P1-A).
+///
+/// Drives `project_prepared_requested_member_from_symbol`. The base
+/// source declares `Probe.shared` as `number`; the overlay declares it
+/// as `string` — the projected member type is the discriminator.
+#[test]
+fn prepared_member_db_producer_overlay_discrimination() {
+    use crate::resolver_core::component_meta_query_engine::ComponentMetaQueryEngine;
+    use crate::resolver_core::SessionResolverContext;
+    use crate::session_view::SessionView;
+    use rustc_hash::{FxHashMap, FxHashSet};
+
+    let canonical = "/overlay_disc/prepared_member.ts";
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert(
+        &host,
+        canonical,
+        "export interface Probe { shared: number; }\n",
+    );
+    host.ensure_indexed_ready(canonical)
+        .expect("base IndexedReady materialises");
+    let host = Arc::new(host);
+
+    // The overlay declares `Probe.shared` with a different type.
+    let overlay_source: Arc<str> = Arc::from("export interface Probe { shared: string; }\n");
+    let mut overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();
+    overlays.insert(canonical.to_string(), Arc::clone(&overlay_source));
+    let view = crate::session_view::OverlaidView::new(Arc::clone(&host), overlays);
+    let overlay_hash = view
+        .overlay_content_hash_for(canonical)
+        .expect("overlay content hash present");
+    host.materialize_overlay_indexed_ready(canonical, &overlay_source, overlay_hash)
+        .expect("overlay IndexedReady materialises");
+
+    let overlay_ctx = SessionResolverContext::new(&host, &view);
+    let mut overlay_engine = ComponentMetaQueryEngine::new(&overlay_ctx);
+    let mut active: FxHashSet<(String, String)> = FxHashSet::default();
+    let overlay_member = overlay_engine
+        .project_prepared_requested_member_from_symbol(
+            canonical,
+            "Probe",
+            "shared",
+            &FxHashMap::default(),
+            &mut active,
+        )
+        .expect("the overlay producer projects Probe.shared");
+    assert!(
+        matches!(
+            &overlay_member.ty,
+            TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+        ),
+        "fixture invariant: the overlay producer must see `Probe.shared` as `string`, \
+         got {:?}",
+        overlay_member.ty,
+    );
+
+    let base_ctx: &dyn ResolverContext = host.as_ref();
+    let mut base_engine = ComponentMetaQueryEngine::new(base_ctx);
+    let mut base_active: FxHashSet<(String, String)> = FxHashSet::default();
+    let base_member = base_engine
+        .project_prepared_requested_member_from_symbol(
+            canonical,
+            "Probe",
+            "shared",
+            &FxHashMap::default(),
+            &mut base_active,
+        )
+        .expect("the base producer projects Probe.shared");
+    assert!(
+        matches!(
+            &base_member.ty,
+            TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        ),
+        "PreparedMemberDb LEAKED an overlay-session entry to a base request. \
+         `project_prepared_requested_member_from_symbol` must observe the scope \
+         canonical's content version through the view-aware \
+         `authoritative_current_content_hash`, so the overlay member roots on the \
+         overlay hash and a base request mismatches it. A producer reading the \
+         base-only `shallow_file_state` roots the entry on the base hash; the base \
+         request warm-hits the overlay `string` even though the base source \
+         declares `Probe.shared` as `number`. Base member type was {:?}.",
+        base_member.ty,
+    );
+}
+
+/// `observed_prepared_type_decl` is single-artifact AND view-aware
+/// (P1-B + P1-A).
+///
+/// `observed_prepared_type_decl` is the observation point for the
+/// `OwnerCollectionDb` producer: it must return the prepared decl AND
+/// the content version it was materialised from sourced from ONE
+/// prepared-decl bundle, so the pair cannot tear and the hash is
+/// view-correct.
+///
+/// Discrimination property: driven through a `SessionResolverContext`
+/// with an overlay, the returned `whole_hash` MUST equal the overlay
+/// content hash — the version the overlay-aware prepared-decl bundle
+/// (and therefore the returned `decl`) was built from. Pre-fix the
+/// accessor read the decl via the overlay-aware `prepared_type_decl`
+/// but the hash via the base-only `shallow_file_state`, so it returned
+/// a TORN pair: the overlay decl bundled with the BASE content hash.
+/// This test asserts `whole_hash == overlay_hash` and trips on the
+/// torn base-hash pre-fix result.
+#[test]
+fn observed_prepared_type_decl_is_single_artifact_and_view_aware() {
+    use crate::resolver_core::component_meta_query_engine::ComponentMetaQueryEngine;
+    use crate::resolver_core::SessionResolverContext;
+
+    let canonical = "/overlay_disc/observed_prepared.ts";
+    let (host, view, base_hash, overlay_hash) = overlay_disc_fixture(canonical);
+
+    let overlay_ctx = SessionResolverContext::new(&host, &view);
+    let mut overlay_engine = ComponentMetaQueryEngine::new(&overlay_ctx);
+    let observed = overlay_engine
+        .observed_prepared_type_decl(canonical, "Probe")
+        .expect("observed_prepared_type_decl resolves through the overlay bundle");
+
+    // The decl must be the OVERLAY decl — its member index carries
+    // `overlayMember`, not `baseMember`.
+    let decl = observed
+        .decl
+        .as_ref()
+        .expect("the overlay bundle declares Probe");
+    assert!(
+        decl.member_index.contains_key("overlayMember"),
+        "fixture invariant: the overlay-aware prepared-decl bundle must yield the \
+         overlay `Probe` (member `overlayMember`)",
+    );
+
+    // The discriminating assertion: the observed hash is the OVERLAY
+    // content hash — the version the bundle (and the decl above) were
+    // built from. A torn read that sourced the hash from the base-only
+    // `shallow_file_state` returns the base hash here.
+    assert_eq!(
+        observed.whole_hash, overlay_hash,
+        "observed_prepared_type_decl returned a TORN (decl, whole_hash) pair: the decl \
+         is the overlay `Probe` but `whole_hash` is not the overlay content version. \
+         The accessor MUST source the decl AND the hash from ONE prepared-decl bundle \
+         (`PreparedTypeDeclCache::defining_content_hash`), which is overlay-aware. \
+         Reading the hash from the base-only `shallow_file_state` yields a torn pair \
+         and roots the `OwnerCollectionDb` entry on a content version the value was \
+         not built from.",
+    );
+    assert_ne!(
+        observed.whole_hash, base_hash,
+        "the observed hash must NOT be the base content hash — that is the torn-read \
+         (overlay decl + base hash) defect this accessor's single-artifact provenance \
+         closes",
+    );
+}

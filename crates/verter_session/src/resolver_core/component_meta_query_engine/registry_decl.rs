@@ -73,15 +73,17 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // DashMap-backed DB is the authoritative cross-request cache.
         //
         // Observe the keyed canonical's content version ONCE here,
-        // before the value is computed. The signature builder is
-        // provenance-pure: it roots the entry's self-root on this
+        // before the value is computed, through the view-aware
+        // `authoritative_current_content_hash` oracle — under a
+        // `SessionResolverContext` this resolves the overlay content
+        // hash for an overlay-bearing session, so an overlay-derived
+        // entry roots on the overlay version (and a later base request
+        // mismatches it instead of reusing it). The signature builder
+        // is provenance-pure: it roots the entry's self-root on this
         // observed hash, never a current-content re-read inside the
-        // closure. `None` (canonical has no current shallow state)
-        // refuses shared-cache admission below.
-        let observed_keyed_hash = self
-            .ctx
-            .shallow_file_state(canonical_id)
-            .map(|state| state.whole_hash);
+        // closure. `None` (canonical has no authoritative current
+        // content) refuses shared-cache admission below.
+        let observed_keyed_hash = self.ctx.authoritative_current_content_hash(canonical_id);
         let arc_key = (
             std::sync::Arc::<str>::from(canonical_id),
             std::sync::Arc::<str>::from(exported_name),
@@ -232,16 +234,18 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // Step 3 closure: route through ctx-owned DeclarationLookupDb.
         //
         // Observe the keyed canonical's content version ONCE here,
-        // before the value is computed. The signature builder is
+        // before the value is computed, through the view-aware
+        // `authoritative_current_content_hash` oracle (overlay-correct
+        // under a `SessionResolverContext`). The signature builder is
         // provenance-pure: it roots the entry's self-root on this
         // observed hash, never a current-content re-read inside the
-        // closure. `None` (canonical has no current shallow state)
-        // refuses shared-cache admission; the `None` host-value arm
-        // below still produces the value via the cold resolver.
+        // closure. `None` (canonical has no authoritative current
+        // content) refuses shared-cache admission; the `None`
+        // host-value arm below still produces the value via the cold
+        // resolver.
         let observed_keyed_hash = self
             .ctx
-            .shallow_file_state(canonical_source)
-            .map(|state| state.whole_hash);
+            .authoritative_current_content_hash(canonical_source);
         let arc_key = (
             std::sync::Arc::<str>::from(canonical_source),
             std::sync::Arc::<str>::from(requested_name),
@@ -320,16 +324,15 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // Step 3 closure: route through ctx-owned ResolvabilityDb.
         //
         // Observe the keyed canonical's content version ONCE here,
-        // before the value is computed. The signature builder is
+        // before the value is computed, through the view-aware
+        // `authoritative_current_content_hash` oracle (overlay-correct
+        // under a `SessionResolverContext`). The signature builder is
         // provenance-pure: it roots the entry's self-root on this
         // observed hash, never a current-content re-read inside the
-        // closure. `None` (canonical has no current shallow state)
-        // refuses shared-cache admission; the `None` host-value arm
-        // below still produces the value by recomputing.
-        let observed_keyed_hash = self
-            .ctx
-            .shallow_file_state(source_key)
-            .map(|state| state.whole_hash);
+        // closure. `None` (canonical has no authoritative current
+        // content) refuses shared-cache admission; the `None`
+        // host-value arm below still produces the value by recomputing.
+        let observed_keyed_hash = self.ctx.authoritative_current_content_hash(source_key);
         let arc_key = (
             std::sync::Arc::<str>::from(source_key),
             std::sync::Arc::<str>::from(exported_name),
@@ -383,15 +386,19 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 
         // Step 3 closure: route through ctx-owned OwnerCollectionDb.
         //
-        // Observe the keyed owner canonical's prepared decl AND its
-        // content version in ONE read via `observed_prepared_type_decl`
-        // — the value (`prepared.body`) and the entry's fact-signature
-        // self-root then root on exactly that one observed content
-        // version. The signature builder is provenance-pure: it never
-        // re-reads current content inside the closure. `None` (owner
-        // canonical has no current shallow state) refuses shared-cache
-        // admission; the `None` host-value arm below still produces
-        // the body by recomputing.
+        // Observe the owner canonical's prepared decl AND the content
+        // version it was materialised from from ONE prepared-decl
+        // bundle via `observed_prepared_type_decl`. The cache value
+        // (`prepared.body`) and the entry's fact-signature self-root
+        // therefore root on a single, provably-consistent content
+        // version — they cannot tear against a racing `upsert`, and the
+        // observed hash is view-correct (the bundle is fetched through
+        // the view-aware `prepared_decl_bundle` accessor). The signature
+        // builder is provenance-pure: it never re-reads current content
+        // inside the closure. `None` (owner canonical has no
+        // prepared-decl bundle) refuses shared-cache admission; the
+        // `None` host-value arm below still produces the body by
+        // recomputing.
         let observed = self.observed_prepared_type_decl(owner_canonical, name);
         let arc_key = (
             std::sync::Arc::<str>::from(owner_canonical),
@@ -586,36 +593,55 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         resolved
     }
 
-    /// Resolve a prepared type declaration AND observe `canonical_id`'s
-    /// content version at the same call.
+    /// Resolve a prepared type declaration AND observe the content
+    /// version it was materialised from — both sourced from the SAME
+    /// prepared-decl bundle.
     ///
     /// A query-identity cache producer whose value is built from a
     /// `prepared_type_decl` read must root its fact signature on the
     /// content version the value was actually built from — never a
     /// later current-content re-read, which would let an `upsert`
     /// landing in the publish-race window admit a stale value under a
-    /// fresh signature. This accessor returns the prepared decl
-    /// bundled with the keyed canonical's observed whole hash so the
-    /// producer threads ONE observation into both the value and the
-    /// signature builder.
+    /// fresh signature.
     ///
-    /// The observed hash is the `ShallowFileState::whole_hash` for
-    /// `canonical_id` — the same content-version oracle the prepared
-    /// decl's defining-file provenance and the materialise-memo
-    /// publish site observe. `whole_hash` is `None` when the canonical
-    /// has no current shallow state (unloaded / evicted); the producer
-    /// then refuses shared-cache admission. The `decl` field is
-    /// `Option` because a prepared decl may legitimately be absent for
-    /// a tracked canonical (the requested symbol does not exist), but
-    /// the absence is still rooted on the observed hash so a later
-    /// declaration is detected.
+    /// This accessor fetches `canonical_id`'s prepared-decl bundle once
+    /// through [`crate::resolver_core::ResolverContext::prepared_decl_bundle`]
+    /// — which, under a `SessionResolverContext`, routes to the
+    /// view-aware `prepared_decl_bundle_with_context` so an
+    /// overlay-bearing session observes the overlay's bundle. The
+    /// returned `decl` is the bundle's prepared decl for `symbol_name`;
+    /// the returned `whole_hash` is
+    /// [`crate::resolver_core::prepared_decl::PreparedTypeDeclCache::defining_content_hash`]
+    /// — the `whole_hash` of the very `ShallowFileState` that bundle's
+    /// prepared decls are built from. One bundle ⇒ the decl and the
+    /// hash are provably the same content version (untorn against a
+    /// racing `upsert`) AND the hash is view-correct (it reflects
+    /// whatever view the bundle was materialised from). The producer
+    /// threads this ONE observation into both the value and the
+    /// provenance-pure signature builder.
+    ///
+    /// `None` when `canonical_id` has no prepared-decl bundle (unloaded
+    /// / evicted); the producer then refuses shared-cache admission.
+    /// The `decl` field is `Option` because a prepared decl may
+    /// legitimately be absent for a bundled canonical (the requested
+    /// symbol does not exist), but the absence is still rooted on the
+    /// observed hash so a later declaration is detected.
     pub(crate) fn observed_prepared_type_decl(
         &mut self,
         canonical_id: &str,
         symbol_name: &str,
     ) -> Option<crate::resolver_core::component_meta_query_engine::ObservedPreparedTypeDecl> {
-        let decl = self.prepared_type_decl(canonical_id, symbol_name);
-        let whole_hash = self.ctx.shallow_file_state(canonical_id)?.whole_hash;
+        let bundle = self.ctx.prepared_decl_bundle(canonical_id)?;
+        let whole_hash = bundle.prepared_type_decls.defining_content_hash();
+        let decl = bundle.prepared_type_decls.get(symbol_name);
+        // Mirror the bundle decl into the engine's per-request
+        // read-through cache so a later `prepared_type_decl` call for
+        // the same `(canonical_id, symbol_name)` hits the warm scratch
+        // entry instead of re-resolving the bundle.
+        self.prepared_type_decls.insert(
+            (canonical_id.to_string(), symbol_name.to_string()),
+            decl.clone(),
+        );
         Some(
             crate::resolver_core::component_meta_query_engine::ObservedPreparedTypeDecl {
                 decl,
