@@ -471,6 +471,17 @@ impl HostStoreView {
 
         // WASM-only: scheduler is unavailable on web; see CLAUDE.md "Scheduler as Sole Compile Authority".
 
+        // Canonicals whose current-content `IndexedReady` artifact
+        // contributed a `Route` derived fact below. The
+        // `route_owned_shallow` snapshot MUST NOT overwrite a `Route`
+        // hash sourced from a live current-content `IndexedReady`: the
+        // indexed artifact is the canonical route-surface authority,
+        // and a stale route-owned-shallow entry that lingers for the
+        // same canonical would publish a route hash a cold-compute
+        // observing the indexed surface could not reproduce.
+        let mut indexed_route_canonicals: rustc_hash::FxHashSet<String> =
+            rustc_hash::FxHashSet::default();
+
         // Snapshot FileArtifactStore entries into the store view.
         for (canonical_id, indexed) in host.project_type_store.indexed().snapshot_all() {
             let canonical_str = canonical_id.as_ref().to_owned();
@@ -486,6 +497,7 @@ impl HostStoreView {
                     ),
                     hash_route_surface(&indexed.shallow_state),
                 );
+                indexed_route_canonicals.insert(canonical_str.clone());
             }
             // The `ImportRoute` derived fact must reflect the
             // generation-current import-target surface. A file with
@@ -509,30 +521,26 @@ impl HostStoreView {
             }
         }
 
-        // TODO(follow-up): substrate-level fix in
-        // `HostStoreView::build` — skip the route_owned_shallow
-        // snapshot for canonicals that already have an `IndexedReady`
-        // entry. The materialiser at `route_owned_shallow.rs:188-193`
-        // aborts NEW publishes when `IndexedReady` exists, but
-        // pre-existing route_owned_shallow entries persist and
-        // overwrite the indexed Route hash that the loop above
-        // inserted. A cold-compute that observes the indexed Route
-        // hash via `accumulate_route_fact_for`
-        // (`frontier_engine.rs:489-527` — `route_shallow_cache` /
-        // `route_shallow_state` lookup) records a hash the
-        // validator's later view-build cannot reproduce
-        // (route-owned-derived hash differs).
-        //
-        // The component-meta final-result cache no longer trips this:
-        // its signature is sourced from the finalised fact tracer
-        // read set, which observes route surfaces as `RouteSurface`
-        // facts (validated against `RouteDb`, not the dual-source
-        // `derived_hashes`). Any cache that places a
-        // `DerivedFactHash{Route}` produced by the curated
-        // `current_dependency_fact_versions` path into its signature
-        // still needs care here until the substrate site is fixed.
-        // Defer to Block 6.B (which retires legacy `dep_signature`).
+        // Snapshot the route-only shallow cache's `Route` hashes — but
+        // ONLY for canonicals that have no live current-content
+        // `IndexedReady` route fact. The current-content `IndexedReady`
+        // artifact is the single canonical route-surface authority: its
+        // `Route` hash was inserted by the loop above. A
+        // route-owned-shallow entry is the fallback shape for a
+        // route-only file the indexed store has not (yet) materialised;
+        // the route-owned producer itself declines to publish a new
+        // entry once a content-matching `IndexedReady` exists. A
+        // route-owned entry that LINGERED past an `IndexedReady`
+        // materialisation must not overwrite the indexed `Route` hash —
+        // a cold-compute observing the indexed surface would record a
+        // hash this view could not reproduce, producing a false stale
+        // miss. Centralised source order: indexed `Route` first, the
+        // route-owned `Route` only for canonicals the indexed loop did
+        // not cover.
         for snapshot in host.snapshot_route_owned_shallow_cache_entries() {
+            if indexed_route_canonicals.contains(&snapshot.canonical_id) {
+                continue;
+            }
             let tracked_whole_hash = *view
                 .whole_hashes
                 .entry(snapshot.canonical_id.clone())

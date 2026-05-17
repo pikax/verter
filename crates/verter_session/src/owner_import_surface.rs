@@ -329,8 +329,14 @@ where
     // and append every chain fact observed by the producer.
     // De-duplicate so the same `FactVersionRef` does not appear
     // twice when fast-path + route-walk both emit it.
+    //
+    // `dep_signature` here is built entirely from `DepVersion::WholeHash`
+    // entries (the loop above pushes only `WholeHash`), so
+    // `fact_signature_from_fence` — which refuses only on a
+    // `RouteGeneration` entry — always yields `Some`.
     let base_facts =
-        crate::component_meta_materialize::fact_signature_from_fence(dep_signature.as_ref());
+        crate::component_meta_materialize::fact_signature_from_fence(dep_signature.as_ref())
+            .unwrap_or_default();
     let mut combined: Vec<crate::resolver_core::FactVersionRef> =
         base_facts.iter().cloned().collect();
     let mut seen: rustc_hash::FxHashSet<crate::resolver_core::FactVersionRef> =

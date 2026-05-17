@@ -154,10 +154,12 @@ pub(crate) fn emit_dispatch_dep_signature_facts(
 
     // New: fan into the `ACTIVE_TRACERS` stack so the outer
     // `with_fact_tracer` captures the same facts. The bridge helper
-    // converts `DepSignature` → `Vec<FactVersionRef>`; only
-    // `DepVersion::WholeHash` survives the conversion —
-    // route-generation / project-generation entries are R20-only
-    // signals and have no `FactVersionRef` equivalent.
+    // converts `DepSignature` → `Vec<FactVersionRef>`: `WholeHash`
+    // entries become `FileWholeHash` and `ProjectGeneration` entries
+    // become `FactVersionRef::ProjectGeneration` (so an outer entry
+    // observing this sub-result through the tracer roots the project
+    // generation too). `RouteGeneration` has no `FactVersionRef`
+    // equivalent — entry producers refuse it via the legacy rail.
     let bridged = crate::fact_signature_helpers::dep_signature_to_fact_signature(sig);
     crate::fact_signature_helpers::observe_fact_signature(&bridged);
     if let Some(prov) = ctx.project_type_store().semantic_graph().provenance() {

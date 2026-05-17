@@ -1,5 +1,9 @@
-//! RED test: `dep_signature_to_fact_signature` maps `DepVersion::WholeHash` →
-//! `FactVersionRef::FileWholeHash` and silently drops other variants.
+//! `dep_signature_to_fact_signature` maps `DepVersion::WholeHash` →
+//! `FactVersionRef::FileWholeHash` and `DepVersion::ProjectGeneration`
+//! → `FactVersionRef::ProjectGeneration`. `DepVersion::RouteGeneration`
+//! has no `FactVersionRef` equivalent and is the sole dropped variant
+//! (route generation has no authoritative validating source; entry
+//! producers refuse it via the legacy `DepSignature` rail).
 
 use std::sync::Arc;
 
@@ -64,14 +68,25 @@ fn route_generation_is_dropped() {
 }
 
 #[test]
-fn project_generation_is_dropped() {
+fn project_generation_converts_to_project_generation_fact() {
+    // `ProjectGeneration` carries a real validating fact — the
+    // project-wide generation a sub-result depended on. The bridge
+    // MUST convert it (not drop it) so an outer entry observing this
+    // sub-result through the fact tracer roots the project generation
+    // and rejects the entry on a project-shape change.
     let sig = make_dep_sig(vec![("x.ts", DepVersion::ProjectGeneration(99))]);
 
     let result = dep_signature_to_fact_signature_for_tests(&sig);
 
-    assert!(
-        result.is_empty(),
-        "ProjectGeneration must be dropped; result must be empty"
+    assert_eq!(
+        result.len(),
+        1,
+        "ProjectGeneration must convert to one FactVersionRef, not be dropped"
+    );
+    assert_eq!(
+        result[0],
+        FactVersionRef::ProjectGeneration { generation: 99 },
+        "ProjectGeneration(99) must convert to a FactVersionRef::ProjectGeneration with generation 99"
     );
 }
 

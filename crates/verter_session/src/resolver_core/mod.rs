@@ -758,6 +758,53 @@ where
         None
     }
 
+    /// Like [`Self::get_if_valid`] but validates any `FileWholeHash`
+    /// fact whose canonical appears in `self_root_canonicals`
+    /// **strictly** via [`StoreView::validates_self_root_whole_hash`].
+    ///
+    /// `get_if_valid` routes every `FileWholeHash` through the lazy
+    /// [`StoreView::validates`], whose untracked-file arm optimistically
+    /// accepts — correct for a cross-file *dependency* fact loaded after
+    /// the view snapshot, but WRONG for a *self-root*: an untracked
+    /// self-root canonical means the cache entry's own keyed file is
+    /// gone (deleted), and the lazy arm would serve the stale entry. A
+    /// canonical-keyed cache (e.g. the `prepared_decl_bundles` stable
+    /// cache, keyed by the bundle's defining canonical) passes that
+    /// keyed canonical here so a deleted keyed file rejects the entry.
+    /// Every non-self-root fact keeps the lazy cross-file permissiveness.
+    pub fn get_if_valid_self_rooted<TView>(
+        &self,
+        key: &K,
+        view: &TView,
+        self_root_canonicals: &[&str],
+    ) -> Option<Arc<V>>
+    where
+        TView: StoreView,
+    {
+        self.validations_attempted
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let entry = self.entries.get(key)?;
+        let candidates = entry.candidates.load();
+        for candidate in candidates.iter() {
+            let ok = candidate.fact_dep_signature.iter().all(|fact| match fact {
+                FactVersionRef::FileWholeHash { canonical_id, hash }
+                    if self_root_canonicals.contains(&canonical_id.as_str()) =>
+                {
+                    view.validates_self_root_whole_hash(canonical_id, hash)
+                }
+                other => view.validates(other),
+            });
+            if ok {
+                self.warm_hits
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return Some(candidate.value.clone());
+            }
+        }
+        self.stale_misses
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        None
+    }
+
     /// Like [`Self::get_if_valid`] but also returns the validating
     /// candidate's `fact_dep_signature`. Used by producers that must
     /// thread the recorded facts into a downstream cache entry

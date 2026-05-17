@@ -39,10 +39,14 @@ impl VerterHost {
         // Live-host probe: use resolver_store_view for validation.
         let view_for_get = self.resolver_store_view();
 
-        // Fast path: fact-validated cache hit.
+        // Fast path: fact-validated cache hit. The bundle's keyed
+        // canonical is its self-root — validated **strictly** so a
+        // deleted (now-untracked) keyed file rejects the stale bundle
+        // instead of riding the lazy untracked-accept rule.
         let bundles = &self.resolver.runtime.prepared_decl_bundles;
         let key = canonical_id.to_string();
-        if let Some(bundle) = bundles.get_if_valid(&key, &view_for_get) {
+        if let Some(bundle) = bundles.get_if_valid_self_rooted(&key, &view_for_get, &[canonical_id])
+        {
             self.provenance
                 .bundle_cache_hits
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -57,8 +61,10 @@ impl VerterHost {
         let flight = singleflight.run(key.clone(), token, || {
             // Re-check cache inside the singleflight leader closure (another
             // thread may have populated it between our first check and winning
-            // the flight).
-            if let Some(bundle) = bundles.get_if_valid(&key, &view_for_get) {
+            // the flight). Strict self-root validation on the keyed canonical.
+            if let Some(bundle) =
+                bundles.get_if_valid_self_rooted(&key, &view_for_get, &[canonical_id])
+            {
                 return Ok(crate::resolver_core::StableExecutionValue {
                     value: Some((*bundle).clone()),
                     stable: true,

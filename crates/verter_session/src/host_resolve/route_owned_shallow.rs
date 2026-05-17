@@ -52,6 +52,77 @@ impl VerterHost {
             .map(|entry| entry.whole_hash)
     }
 
+    /// The current route-surface hash for `canonical` — the single
+    /// route-fact production helper. ONE source order, identical to the
+    /// order [`crate::resolver_store::HostStoreView`] snapshots route
+    /// facts in: the current-content `IndexedReady` artifact FIRST, the
+    /// route-only shallow cache ONLY when no current indexed artifact
+    /// exists.
+    ///
+    /// The `IndexedReady` artifact is the canonical route-surface
+    /// authority. The route-owned-shallow entry is the fallback shape
+    /// for a route-only file the indexed store has not materialised.
+    /// A producer that built a `DerivedFactHash { Route }` signature
+    /// fact from the route-owned-shallow surface while an `IndexedReady`
+    /// existed would record a hash the store-view validator (which
+    /// prefers the indexed surface) could not reproduce — a false stale
+    /// miss. Routing every route-fact producer through this helper
+    /// keeps the producer and the validator on one source order.
+    ///
+    /// The indexed lookup is content-pinned (no permissive `get_any`):
+    /// the authoritative current content hash gates the artifact-store
+    /// read, so a stale older-content candidate never answers. When the
+    /// scheduler tracks a current content hash, the route-owned-shallow
+    /// fallback is content-pinned to that same hash; only a genuinely
+    /// scheduler-invisible route-only file (no authoritative current
+    /// hash) reads the route-owned cache's single current entry
+    /// unpinned — that entry is the most-recent publish for the
+    /// canonical (the `RouteOwnedShallowDb` keeps one entry per
+    /// canonical, replaced on every publish).
+    pub(crate) fn current_route_surface_hash(&self, canonical_id: &str) -> Option<Hash16> {
+        let normalized_canonical = self
+            .resolve_eval_dependency_canonical(canonical_id)
+            .unwrap_or_else(|| canonical_id.to_string());
+        let canonical = normalized_canonical.as_str();
+        let current_hash = self
+            .effective_file_state(canonical, None)
+            .map(|state| state.whole_hash);
+        // Source 1 — the current-content `IndexedReady` artifact. The
+        // authoritative current content hash pins the lookup so only a
+        // content-current artifact answers.
+        if let Some(current_hash) = current_hash {
+            if let Some(indexed) = self
+                .project_type_store
+                .indexed()
+                .get(canonical, current_hash)
+            {
+                if indexed.shallow_state.has_resolvable_surface() {
+                    return Some(crate::resolver_store::hash_route_surface(
+                        &indexed.shallow_state,
+                    ));
+                }
+                // A current indexed artifact exists but its surface is
+                // not route-resolvable — there is no route fact, and
+                // the route-owned-shallow fallback must NOT answer (it
+                // would publish a hash the indexed authority overrode).
+                return None;
+            }
+        }
+        // Source 2 — the route-only shallow cache, ONLY when no current
+        // indexed artifact answered. Content-pin to the authoritative
+        // current hash when the scheduler tracks one; fall back to the
+        // route-owned cache's single current entry when the canonical
+        // is scheduler-invisible (a pure route-only file).
+        let route_owned = self.project_type_store.route_owned_shallow();
+        let entry = match current_hash {
+            Some(current_hash) => route_owned.get(canonical, current_hash),
+            None => route_owned.get_any(canonical),
+        };
+        entry
+            .filter(|entry| entry.shallow_state.has_resolvable_surface())
+            .map(|entry| crate::resolver_store::hash_route_surface(entry.shallow_state.as_ref()))
+    }
+
     /// return the cached eval-state tuple for a
     /// canonical via the materialiser. On cache miss, materialises through
     /// [`Self::ensure_route_owned_shallow_entry`].
@@ -182,16 +253,24 @@ impl VerterHost {
                     return Err(());
                 }
 
-                // If a parallel materialisation populated `FileArtifactStore` while
-                // we were reading, prefer that authoritative shape — same
-                // shortcut the pre-migration body had at host_resolve.rs:2257.
-                if let Some(facts) = self.project_type_store.indexed().get_any(canonical_id) {
-                    if facts.whole_hash == whole_hash {
-                        // The IndexedReady authority is preferred; do NOT publish
-                        // a route-only shadow because the IndexedReady fast path
-                        // is the canonical reader.
-                        return Err(());
-                    }
+                // If a parallel materialisation populated
+                // `FileArtifactStore` for THIS content version while we
+                // were reading, prefer that authoritative shape — the
+                // `IndexedReady` fast path is the canonical reader.
+                // Content-pinned lookup: `get_for_current_content`
+                // checks for an artifact at exactly `whole_hash`, so a
+                // stale older-content candidate (which `get_any` could
+                // surface) does NOT spuriously abort the publish, and a
+                // current-content candidate is correctly preferred.
+                if self
+                    .project_type_store
+                    .indexed()
+                    .get_for_current_content(canonical_id, whole_hash)
+                    .is_some()
+                {
+                    // The IndexedReady authority is preferred; do NOT
+                    // publish a route-only shadow.
+                    return Err(());
                 }
 
                 // STEP 6 — cold parse + analysis.

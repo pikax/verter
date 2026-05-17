@@ -1,5 +1,6 @@
-//! Self-version-root discriminator tests for the nine component-meta
-//! query-identity caches.
+//! Self-version-root discriminator tests for the component-meta
+//! query-identity caches AND the structural carriers
+//! (`MaterializeStructureDb`, `RefCycleResultDb`).
 //!
 //! Each query-identity cache is keyed by a canonical (the entry's
 //! *keyed canonical*). The warm-read validator must validate the
@@ -122,6 +123,21 @@ fn host_with_unrelated_file() -> VerterHost {
     host.ensure_indexed_ready("/self_root_qdb/unrelated.ts")
         .expect("unrelated IndexedReady materialises");
     host
+}
+
+/// The self-root canonical set for a [`planted_self_root`] signature —
+/// the single keyed canonical it roots. `PreparedTargetDb` entries
+/// carry an explicit `self_root_canonicals` set (the cache key omits
+/// the routed declaring canonical); a synthetic prime passes this so
+/// the entry's strict-validation set matches the planted fact.
+fn planted_self_root_canonicals(canonical: &str) -> Arc<[Arc<str>]> {
+    Arc::from(vec![Arc::<str>::from(canonical)])
+}
+
+/// An empty self-root canonical set — for a synthetic recompute whose
+/// `empty_fact_signature` carries no self-root fact.
+fn empty_self_root_canonicals() -> Arc<[Arc<str>]> {
+    Arc::from(Vec::<Arc<str>>::new())
 }
 
 /// A one-fact signature whose sole entry is a self-root
@@ -404,6 +420,7 @@ fn prepared_target_db_untracked_self_root_rejects_warm_entry() {
         Some((
             Some((Arc::<str>::from(scope), Arc::<str>::from("stale"))),
             planted_self_root(scope),
+            planted_self_root_canonicals(scope),
         ))
     });
 
@@ -414,6 +431,7 @@ fn prepared_target_db_untracked_self_root_rejects_warm_entry() {
             Some((
                 Some((Arc::<str>::from(scope), Arc::<str>::from("recomputed"))),
                 empty_fact_signature(),
+                empty_self_root_canonicals(),
             ))
         })
         .expect("warm path produces a value");
@@ -497,6 +515,8 @@ fn prepared_target_db_declaring_canonical_edit_rejects_warm_entry() {
     let decl_owned = decl_canonical.to_string();
     let primed = db
         .get_or_compute(&key, ctx, || {
+            // No re-export hop: the declaring canonical IS the final
+            // routed canonical, so `routed_decl` is `None`.
             let sig = engine_fact_signature_for_prepared_target(
                 ctx,
                 scope_owned.as_str(),
@@ -505,11 +525,16 @@ fn prepared_target_db_declaring_canonical_edit_rejects_warm_entry() {
                 decl_owned.as_str(),
                 "Probe",
                 observed_decl_hash,
+                None,
             )
             .expect("provenance-pure signature builds — both observed artifacts present");
             Some((
                 Some((Arc::<str>::from(decl_canonical), Arc::<str>::from("stale"))),
                 sig,
+                Arc::from(vec![
+                    Arc::<str>::from(active_scope),
+                    Arc::<str>::from(decl_canonical),
+                ]),
             ))
         })
         .expect("cold publish succeeds — both keyed canonicals tracked");
@@ -540,6 +565,7 @@ fn prepared_target_db_declaring_canonical_edit_rejects_warm_entry() {
                     Arc::<str>::from("recomputed"),
                 )),
                 empty_fact_signature(),
+                empty_self_root_canonicals(),
             ))
         })
         .expect("warm path produces a value");
@@ -1683,6 +1709,8 @@ fn prepared_target_db_self_root_sibling_edit_rejects_warm_entry() {
     let owned = c.to_string();
     let _ = db
         .get_or_compute(&key, ctx, || {
+            // Active scope and declaring canonical are the same file
+            // and there is no re-export hop — `routed_decl` is `None`.
             let sig = engine_fact_signature_for_prepared_target(
                 ctx,
                 owned.as_str(),
@@ -1691,9 +1719,14 @@ fn prepared_target_db_self_root_sibling_edit_rejects_warm_entry() {
                 owned.as_str(),
                 "Probe",
                 observed_keyed_hash,
+                None,
             )
             .expect("provenance-pure signature builds — observed artifact present");
-            Some((Some((Arc::<str>::from(c), Arc::<str>::from("stale"))), sig))
+            Some((
+                Some((Arc::<str>::from(c), Arc::<str>::from("stale"))),
+                sig,
+                planted_self_root_canonicals(c),
+            ))
         })
         .expect("cold publish succeeds");
 
@@ -1707,6 +1740,7 @@ fn prepared_target_db_self_root_sibling_edit_rejects_warm_entry() {
             Some((
                 Some((Arc::<str>::from(c), Arc::<str>::from("recomputed"))),
                 empty_fact_signature(),
+                empty_self_root_canonicals(),
             ))
         })
         .expect("warm path produces a value");
@@ -3224,6 +3258,7 @@ fn prepared_target_db_signature_builder_is_provenance_pure() {
         c,
         "Probe",
         observed_h1,
+        None,
     )
     .expect("observed-current signature builds");
     assert!(
@@ -3248,6 +3283,7 @@ fn prepared_target_db_signature_builder_is_provenance_pure() {
             c,
             "Probe",
             observed_h1,
+            None,
         )
         .is_none(),
         "PreparedTargetDb's signature builder MUST return None for the STALE observed \
@@ -3256,7 +3292,7 @@ fn prepared_target_db_signature_builder_is_provenance_pure() {
     );
 
     let current_sig = engine_fact_signature_for_prepared_target(
-        ctx2, c, "Probe", current_h2, c, "Probe", current_h2,
+        ctx2, c, "Probe", current_h2, c, "Probe", current_h2, None,
     )
     .expect("current-observed signature still builds");
     assert!(
@@ -4901,5 +4937,375 @@ fn imported_registry_removal_cleanup_preserves_fresh_reverse_index_registration(
          evict B. Pre-fix B's registration was deleted, so \
          `invalidate_canonical` drained an empty bucket and left B \
          stale-cached.",
+    );
+}
+
+// ===========================================================================
+// Structural carriers — `MaterializeStructureDb` and `RefCycleResultDb`.
+//
+// These two query-identity caches carry an explicit `self_root_canonicals`
+// set: `MaterializeStructureDb` roots the materialise scope (and the `base`
+// node's declaration-origin file); `RefCycleResultDb` roots the BFS root
+// file plus every visited declaration's file. Every warm read validates
+// those self-roots strictly via `ReadSetSignature::validate_with_self_roots`,
+// so a same-canonical / visited-canonical content edit — or an untracked
+// self-root canonical — rejects the entry. The tests below discriminate the
+// strict warm-read validator against the pre-self-root tree (which validated
+// structural carriers with the lax `validate(ctx)`), and confirm that a
+// content edit to the scope / root / a visited canonical rejects the warm
+// entry under the skip-own-drain hook — the property that makes deleting the
+// own-canonical drain sound (the carrier rejects the edit on its own).
+// ===========================================================================
+
+/// Intern a stable scope-less `Object` node — a `base` whose identity
+/// does not depend on any file's content (so the cache key is stable
+/// across a scope edit and the only shifting fact is the scope's
+/// `FileWholeHash`).
+fn intern_global_object(host: &VerterHost) -> crate::semantic_query::SemanticNodeId {
+    use crate::semantic_query::{SemanticNodeData, SurfaceView};
+    host.project_type_store()
+        .semantic_graph()
+        .intern_node(SemanticNodeData::Object(SurfaceView {
+            members: Arc::from(Vec::new().into_boxed_slice()),
+            call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+        }))
+}
+
+/// `MaterializeStructureDb` validates the materialise scope's self-root
+/// strictly.
+///
+/// Discriminating property: a synthetic entry is planted with a
+/// `FileWholeHash` self-root for an UNTRACKED scope canonical and
+/// `self_root_canonicals = [scope]`. The lax `validate(ctx)` routes the
+/// untracked `FileWholeHash` through `StoreView::validates`, whose
+/// untracked-accept arm returns `true` — the pre-self-root tree serves
+/// the entry warm. The strict `validate_with_self_roots(ctx, [scope])`
+/// routes it through `validates_self_root_whole_hash`, which rejects an
+/// untracked self-root. The peek misses iff the validator is strict;
+/// reverting `MaterializeStructureDb::peek` to `validate(ctx)` flips
+/// this test.
+#[test]
+fn materialize_structure_db_untracked_self_root_rejects_warm_entry() {
+    use crate::component_meta_caches::MaterializeStructureEntry;
+    use crate::component_meta_materialize::{
+        MaterializationScope, MaterializeOutcome, MaterializeStructureCacheKey,
+    };
+    use crate::semantic_query::ProjectionMode;
+
+    let host = host_with_unrelated_file();
+    let scope = "/struct_carrier_qdb/ms_never_loaded.ts";
+    assert_untracked(&host, scope);
+    let ctx: &dyn ResolverContext = &host;
+    let db = host.project_type_store().materialize_structure_db();
+
+    let base = intern_global_object(&host);
+    let key = MaterializeStructureCacheKey {
+        scope_canonical_id: Arc::from(scope),
+        base,
+        scope_axis: MaterializationScope::TopLevel,
+        mode: ProjectionMode::Expanded,
+    };
+
+    // Plant a synthetic entry: the carrier's facts rail holds a
+    // self-root `FileWholeHash` for the untracked scope, and
+    // `self_root_canonicals` lists it. A lax validator admits this; the
+    // strict one does not.
+    let facts: Arc<[FactVersionRef]> = Arc::from(vec![FactVersionRef::FileWholeHash {
+        canonical_id: scope.to_string(),
+        hash: PLANTED_HASH,
+    }]);
+    let planted = Arc::new(MaterializeStructureEntry {
+        outcome: MaterializeOutcome::Value(base),
+        read_set_signature: crate::fact_signature_helpers::ReadSetSignature::facts_only(facts),
+        self_root_canonicals: planted_self_root_canonicals(scope),
+    });
+    db.entries().insert(key.clone(), planted);
+
+    assert!(
+        db.peek(&key, ctx).is_none(),
+        "MaterializeStructureDb::peek MUST reject a warm entry whose self-root \
+         FileWholeHash names an UNTRACKED scope canonical — the lax `validate` accepts \
+         the untracked self-root and serves the entry stale; only the strict \
+         `validate_with_self_roots` rejects it.",
+    );
+}
+
+/// `MaterializeStructureDb` rejects a warm entry after a content edit
+/// to its materialise scope canonical — end-to-end through the
+/// production materialiser, under the skip-own-drain hook.
+///
+/// Retry-item-2 unblock: the own-canonical drain currently drains
+/// `MaterializeStructureDb` on a same-canonical upsert. After the drain
+/// is removed, a same-canonical edit must still reject the warm entry
+/// via the carrier's strict self-root validation. This test edits the
+/// scope through `upsert_skipping_own_canonical_drain_for_tests` so the
+/// own-canonical drain does NOT mask the staleness, then asserts the
+/// warm `peek` misses. The `base` node is interned directly (Global
+/// scope) and is STABLE across the scope edit, so the cache key is
+/// unchanged — the only shifting fact is the scope's `FileWholeHash`.
+#[test]
+fn materialize_structure_db_scope_edit_rejects_warm_entry_under_skip_drain() {
+    use crate::component_meta_materialize::{MaterializationScope, MaterializeStructureCacheKey};
+    use crate::semantic_query::ProjectionMode;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let scope = "/struct_carrier_qdb/ms_scope.ts";
+    upsert(&host, scope, "export const anchor = 1;\n");
+    assert!(
+        host.ensure_indexed_ready(scope).is_some(),
+        "scope IndexedReady materialises",
+    );
+
+    let dispatch = host.semantic_dispatch();
+    let base = intern_global_object(&host);
+    let key = MaterializeStructureCacheKey {
+        scope_canonical_id: Arc::from(scope),
+        base,
+        scope_axis: MaterializationScope::TopLevel,
+        mode: ProjectionMode::Expanded,
+    };
+
+    // Cold build — publishes a warm entry self-rooted on `scope`.
+    let _ = dispatch.materialize_surface(key.clone());
+    let db = host.project_type_store().materialize_structure_db();
+    assert!(
+        db.peek(&key, &host).is_some(),
+        "fixture invariant: the cold build admitted a warm MaterializeStructureDb entry \
+         self-rooted on the scope",
+    );
+
+    // Edit the scope through the skip-own-drain hook so the
+    // own-canonical drain does NOT remove the entry.
+    upsert_skip_drain(
+        &host,
+        scope,
+        "export const anchor = 2;\nexport const extra = 3;\n",
+    );
+    assert!(
+        host.ensure_indexed_ready(scope).is_some(),
+        "scope IndexedReady re-materialises after the edit",
+    );
+
+    assert!(
+        db.peek(&key, &host).is_none(),
+        "MaterializeStructureDb::peek MUST reject the warm entry after a content edit to \
+         its materialise scope canonical — the entry's strict scope self-root catches \
+         the shifted FileWholeHash even though the own-canonical drain was skipped. This \
+         is the property that makes deleting the own-canonical drain sound: the carrier \
+         rejects a same-canonical edit on its own.",
+    );
+}
+
+/// Build a `DeclIdentity` carrying `canonical`'s CURRENT observed whole
+/// hash — the identity shape the BFS root + visited identities use.
+fn ref_cycle_decl_identity(
+    host: &VerterHost,
+    canonical: &str,
+    name: &str,
+) -> crate::semantic_query::DeclIdentity {
+    let whole_hash = host
+        .shallow_file_state(canonical)
+        .map(|s| s.whole_hash)
+        .unwrap_or([0u8; 16]);
+    crate::semantic_query::DeclIdentity {
+        canonical_id: Arc::from(canonical),
+        whole_hash,
+        decl_name: Arc::from(name),
+    }
+}
+
+/// `RefCycleResultDb` rejects a warm entry after a content edit to its
+/// BFS ROOT canonical, under the skip-own-drain hook.
+///
+/// The own-canonical drain currently drains `RefCycleResultDb` on a
+/// same-canonical upsert. For that drain to be safely removable, a
+/// content edit to the root file must still reject the warm entry on
+/// its own. The BFS records the root identity's `(canonical,
+/// whole_hash)` as a strict self-root; this test edits the root file
+/// through `upsert_skipping_own_canonical_drain_for_tests` and asserts
+/// the warm `peek` misses. The BFS cache key is the `DeclIdentity`,
+/// which embeds `whole_hash` — the test holds the identity at its
+/// ORIGINAL hash (the `DeclIdentity` a stale caller would still hold);
+/// `peek` on that key finds the entry and MUST reject it via the
+/// strict self-root.
+#[test]
+fn ref_cycle_db_root_edit_rejects_warm_entry_under_skip_drain() {
+    use crate::meta_resolve::ref_root_reaches_transitive_cycle_node;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let root = "/struct_carrier_qdb/rc_root.ts";
+    upsert(&host, root, "export type Probe = { a: number };\n");
+    assert!(
+        host.ensure_indexed_ready(root).is_some(),
+        "root IndexedReady materialises",
+    );
+
+    let ctx: &dyn ResolverContext = &host;
+    let id = ref_cycle_decl_identity(&host, root, "Probe");
+
+    // Cold BFS — publishes a warm entry self-rooted on `root`.
+    let mut fence = Vec::new();
+    let _ = ref_root_reaches_transitive_cycle_node(&id, ctx, &mut fence);
+    let db = host.project_type_store().ref_cycle_db();
+    assert!(
+        crate::component_meta_caches::ref_cycle_db_peek(db, &id, ctx).is_some(),
+        "fixture invariant: the cold BFS admitted a warm RefCycleResultDb entry \
+         self-rooted on the root canonical",
+    );
+
+    // Edit the root file through the skip-own-drain hook.
+    upsert_skip_drain(
+        &host,
+        root,
+        "export type Probe = { a: string; b: number };\n",
+    );
+    assert!(
+        host.ensure_indexed_ready(root).is_some(),
+        "root IndexedReady re-materialises after the edit",
+    );
+
+    let ctx2: &dyn ResolverContext = &host;
+    assert!(
+        crate::component_meta_caches::ref_cycle_db_peek(db, &id, ctx2).is_none(),
+        "RefCycleResultDb::peek MUST reject the warm entry after a content edit to its \
+         BFS root canonical — the BFS records the root identity as a strict self-root, \
+         so the shifted FileWholeHash rejects the entry even though the own-canonical \
+         drain was skipped. This is the property that makes deleting the drain sound.",
+    );
+}
+
+/// `RefCycleResultDb` rejects a warm entry after a content edit to a
+/// VISITED (non-root) canonical the BFS walked — under the
+/// skip-own-drain hook. This is a **characterization** test: it
+/// confirms a visited-canonical edit rejects the warm entry so the
+/// own-canonical drain can be safely removed. It is not a
+/// strict-vs-lax discriminator — a visited canonical is also carried in
+/// the legacy `DepSignature` rail (the per-`Instantiate` dispatch
+/// dep-signature), which `validate_dep_signature` already rejects on a
+/// content edit to a tracked file. The strict-self-root discriminator
+/// for `RefCycleResultDb` is the untracked-self-root test below.
+#[test]
+fn ref_cycle_db_visited_canonical_edit_rejects_warm_entry_under_skip_drain() {
+    use crate::meta_resolve::ref_root_reaches_transitive_cycle_node;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let root = "/struct_carrier_qdb/rc_visit_root.ts";
+    let helper = "/struct_carrier_qdb/rc_visit_helper.ts";
+    upsert(
+        &host,
+        helper,
+        "export type Helper<T> = { wrapped: T; next: Helper<T> };\n",
+    );
+    upsert(
+        &host,
+        root,
+        "import type { Helper } from './rc_visit_helper';\nexport type Probe = Helper<number>;\n",
+    );
+    assert!(
+        host.ensure_indexed_ready(helper).is_some(),
+        "helper IndexedReady materialises",
+    );
+    assert!(
+        host.ensure_indexed_ready(root).is_some(),
+        "root IndexedReady materialises",
+    );
+
+    let ctx: &dyn ResolverContext = &host;
+    let id = ref_cycle_decl_identity(&host, root, "Probe");
+
+    // Cold BFS — walks `root` then `helper`; publishes a warm entry
+    // whose self-root set includes BOTH the root and the visited
+    // helper.
+    let mut fence = Vec::new();
+    let _ = ref_root_reaches_transitive_cycle_node(&id, ctx, &mut fence);
+    let db = host.project_type_store().ref_cycle_db();
+    let primed = crate::component_meta_caches::ref_cycle_db_peek(db, &id, ctx);
+    assert!(
+        primed.is_some(),
+        "fixture invariant: the cold BFS admitted a warm RefCycleResultDb entry",
+    );
+
+    // Edit ONLY the visited helper file through the skip-own-drain
+    // hook. The BFS root file is untouched, so a producer that rooted
+    // only the root would keep the entry valid.
+    upsert_skip_drain(
+        &host,
+        helper,
+        "export type Helper<T> = { wrapped: T; sibling: string; next: Helper<T> };\n",
+    );
+    assert!(
+        host.ensure_indexed_ready(helper).is_some(),
+        "helper IndexedReady re-materialises after the edit",
+    );
+
+    let ctx2: &dyn ResolverContext = &host;
+    assert!(
+        crate::component_meta_caches::ref_cycle_db_peek(db, &id, ctx2).is_none(),
+        "RefCycleResultDb::peek MUST reject the warm entry after a content edit to a \
+         VISITED (non-root) canonical the BFS walked — the visited helper is both a \
+         strict self-root (recorded by the BFS) AND a legacy-rail dependency, and a \
+         content edit to it rejects the entry under the skip-own-drain hook.",
+    );
+}
+
+/// `RefCycleResultDb` validates the BFS root's self-root **strictly**.
+///
+/// Discriminating property: a synthetic `RefCycleEntry` is planted
+/// whose `facts` rail holds a `FileWholeHash` self-root for an
+/// UNTRACKED root canonical and `self_root_canonicals = [root]`, with
+/// an EMPTY legacy rail. The lax `validate(ctx)` routes the untracked
+/// `FileWholeHash` through `StoreView::validates`, whose untracked-accept
+/// arm returns `true`, and an empty legacy rail validates vacuously —
+/// so the pre-self-root tree serves the entry warm. The strict
+/// `validate_with_self_roots(ctx, [root])` routes the `FileWholeHash`
+/// through `validates_self_root_whole_hash`, which rejects an untracked
+/// self-root. The peek misses iff the validator is strict; reverting
+/// `RefCycleResultDb::peek` to `validate(ctx)` flips this test.
+///
+/// (The legacy rail is left empty deliberately: `HostFenceValidator`'s
+/// `WholeHash` arm rejects an untracked canonical, so a `legacy`-rail
+/// untracked entry would mask the strict-vs-lax distinction. The
+/// untracked-accept permissiveness lives ONLY on the `facts` rail's
+/// `FileWholeHash` via `StoreView::validates`.)
+#[test]
+fn ref_cycle_db_untracked_self_root_rejects_warm_entry() {
+    use crate::component_meta_caches::RefCycleEntry;
+
+    let host = host_with_unrelated_file();
+    let root = "/struct_carrier_qdb/rc_never_loaded.ts";
+    assert_untracked(&host, root);
+    let ctx: &dyn ResolverContext = &host;
+    let db = host.project_type_store().ref_cycle_db();
+    let id = crate::semantic_query::DeclIdentity {
+        canonical_id: Arc::from(root),
+        whole_hash: PLANTED_HASH,
+        decl_name: Arc::from("Probe"),
+    };
+
+    // Plant a synthetic entry: the carrier's facts rail holds a
+    // self-root `FileWholeHash` for the untracked root, the legacy rail
+    // is empty, and `self_root_canonicals` lists the root. A lax
+    // validator admits this; the strict one does not.
+    let facts: Arc<[FactVersionRef]> = Arc::from(vec![FactVersionRef::FileWholeHash {
+        canonical_id: root.to_string(),
+        hash: PLANTED_HASH,
+    }]);
+    let planted = Arc::new(RefCycleEntry {
+        result: true,
+        read_set_signature: crate::fact_signature_helpers::ReadSetSignature::facts_only(facts),
+        self_root_canonicals: planted_self_root_canonicals(root),
+    });
+    db.entries().insert(id.clone(), planted);
+
+    assert!(
+        crate::component_meta_caches::ref_cycle_db_peek(db, &id, ctx).is_none(),
+        "RefCycleResultDb::peek MUST reject a warm entry whose self-root FileWholeHash \
+         names an UNTRACKED root canonical — the lax `validate` accepts the untracked \
+         self-root and serves the entry stale; only the strict `validate_with_self_roots` \
+         rejects it.",
     );
 }

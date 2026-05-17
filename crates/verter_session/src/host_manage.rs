@@ -627,11 +627,18 @@ impl crate::completion_fence::FenceValidator for HostFenceValidator<'_> {
             crate::semantic_query::DepVersion::ProjectGeneration(expected) => {
                 self.host.project_type_store.project_generation() == *expected
             }
-            // Route-generation facts are not yet emitted by the resolver;
-            // treat them as valid so they do not spuriously invalidate
-            // cache entries once emitters come online. Until the emission
-            // site exists, no cache entry can carry this variant.
-            crate::semantic_query::DepVersion::RouteGeneration(_) => true,
+            // Route generation has no authoritative validating source —
+            // there is no production emitter and no real route-generation
+            // counter, so a `RouteGeneration` dependency cannot detect a
+            // content edit to the route-observed file. It must NOT
+            // validate as always-valid for an admitted cache entry: that
+            // would let a stale entry survive indefinitely. Every
+            // admitted-entry signature producer refuses a
+            // `RouteGeneration` dependency outright (returns
+            // `None`/`ReturnOnly`), so no production cache entry's legacy
+            // rail carries this variant; should one reach here it is
+            // rejected (fail-safe — never falsely confirmed).
+            crate::semantic_query::DepVersion::RouteGeneration(_) => false,
         }
     }
 }

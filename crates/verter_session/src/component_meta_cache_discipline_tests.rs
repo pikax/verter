@@ -169,8 +169,27 @@ fn cache_discipline_resolve_macro_payload_repeated_keys_warm() {
 #[test]
 fn cache_discipline_materialize_surface_repeated_keys_warm() {
     use crate::component_meta_materialize::{MaterializationScope, MaterializeStructureCacheKey};
+    use crate::{FileKind, UpsertRequest};
 
     let host = build_test_host();
+    // The materialise scope canonical must be an observable file: a
+    // `MaterializeStructureDb` entry self-roots on its scope, and the
+    // structural-carrier producer routes the value through `ReturnOnly`
+    // (non-cacheable) when the scope has no recoverable `IndexedReady`.
+    // Load both scope files so the cold build can admit an entry.
+    for scope in ["/test.vue", "/other.vue"] {
+        let _ = host
+            .upsert(UpsertRequest {
+                canonical_id: None,
+                input_id: scope.to_string(),
+                source: Arc::from("<script setup lang=\"ts\">const x = 1;</script>\n"),
+                file_kind: FileKind::from_path(scope),
+                aliases: Vec::new(),
+            })
+            .expect("scope upsert succeeds");
+        host.ensure_indexed_ready(scope)
+            .expect("scope IndexedReady materialises");
+    }
     let base = intern_empty_object(&host);
     let key = MaterializeStructureCacheKey {
         scope_canonical_id: Arc::from("/test.vue"),

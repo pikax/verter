@@ -353,6 +353,13 @@ impl PreparedValueDeclCache {
 /// import graph or file content changes.
 #[derive(Clone)]
 pub struct PreparedDeclBundle {
+    /// The content version (`ShallowFileState::whole_hash`) of the
+    /// canonical file this bundle was built from. A consumer that
+    /// resolves a declaration through this bundle and roots a cache
+    /// entry on the bundle's declaring file reads this — an OBSERVED
+    /// identity captured when the bundle was materialised, never a
+    /// current-content re-read at the consumer's signature-build time.
+    pub owner_whole_hash: crate::resolver_core::ResolverHash16,
     pub prepared_type_decls: PreparedTypeDeclCache,
     pub prepared_value_decls: PreparedValueDeclCache,
     /// The dep_edges snapshot used to build this bundle.
@@ -417,7 +424,9 @@ pub fn build_prepared_decl_bundle(
     let scope_type_names: FxHashSet<String> = state.symbols.keys().cloned().collect();
     let scope_value_names: FxHashSet<String> = state.value_symbols.keys().cloned().collect();
 
+    let owner_whole_hash = state.whole_hash;
     PreparedDeclBundle {
+        owner_whole_hash,
         prepared_type_decls: build_prepared_type_decl_cache(
             canonical_id,
             Arc::clone(&state),

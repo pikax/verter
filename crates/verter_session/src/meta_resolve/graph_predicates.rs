@@ -473,7 +473,9 @@ pub(crate) fn ref_root_reaches_transitive_cycle_node(
         db,
         root_identity,
         ctx,
-        |compute_fence| bfs_compute_inner(root_identity, ctx, compute_fence),
+        |compute_fence, observed_self_roots| {
+            bfs_compute_inner(root_identity, ctx, compute_fence, observed_self_roots)
+        },
     );
 
     match read_opt {
@@ -491,7 +493,9 @@ pub(crate) fn ref_root_reaches_transitive_cycle_node(
             // cache: the same revalidation race that just rejected
             // the entry would reject the next attempt too.
             let mut fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
-            let result = bfs_compute_inner(root_identity, ctx, &mut fence);
+            let mut observed_self_roots: Vec<(Arc<str>, crate::types::Hash16)> = Vec::new();
+            let result =
+                bfs_compute_inner(root_identity, ctx, &mut fence, &mut observed_self_roots);
             local_fence.extend(fence);
             result
         }
@@ -513,6 +517,7 @@ pub(crate) fn bfs_compute_inner(
     root_identity: &crate::semantic_query::DeclIdentity,
     ctx: &dyn ResolverContext,
     local_fence: &mut Vec<(Arc<str>, crate::semantic_query::DepVersion)>,
+    observed_self_roots: &mut Vec<(Arc<str>, crate::types::Hash16)>,
 ) -> bool {
     use crate::semantic_query::{ProjectionMode, QueryResult, SemanticNodeId, SemanticQueryKey};
     use rustc_hash::FxHashSet;
@@ -523,11 +528,30 @@ pub(crate) fn bfs_compute_inner(
     #[cfg(test)]
     dep_signature::BFS_COMPUTE_COUNTER.with(|c| c.set(c.get() + 1));
 
+    // Record one observed self-root per visited declaration identity.
+    // Each `DeclIdentity` carries an embedded observed `whole_hash`
+    // captured when the identity was constructed — an observed
+    // identity, NOT a current-content re-read. A real declaring file
+    // (non-builtin canonical) becomes a strict self-root: a content
+    // edit to it rejects the cached cycle result. The synthetic
+    // `__builtin__` carrier identity (and any other empty/synthetic
+    // canonical) is skipped — it has no file to root against.
+    let record_self_root =
+        |identity: &crate::semantic_query::DeclIdentity,
+         roots: &mut Vec<(Arc<str>, crate::types::Hash16)>| {
+            let canonical = identity.canonical_id.as_ref();
+            if canonical.is_empty() || canonical == "__builtin__" {
+                return;
+            }
+            roots.push((Arc::clone(&identity.canonical_id), identity.whole_hash));
+        };
+
     let dispatch = ctx.dispatch();
     let graph = ctx.project_type_store().semantic_graph();
     let mut visited: FxHashSet<crate::semantic_query::DeclIdentity> = FxHashSet::default();
     let mut queue: VecDeque<(crate::semantic_query::DeclIdentity, bool)> = VecDeque::new();
     visited.insert(root_identity.clone());
+    record_self_root(root_identity, observed_self_roots);
     queue.push_back((root_identity.clone(), false));
 
     let mut remaining_hops: usize = MAX_HOPS;
@@ -619,6 +643,7 @@ pub(crate) fn bfs_compute_inner(
                 return true;
             }
             if visited.insert(child_identity.clone()) {
+                record_self_root(&child_identity, observed_self_roots);
                 queue.push_back((child_identity, cycle_has_complex_signal));
             }
         }

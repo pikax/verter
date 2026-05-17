@@ -1019,8 +1019,20 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .ctx
             .authoritative_current_content_hash(prepared.root_identity.canonical_id.as_str());
 
+        // `resolve_prepared_target` returns the resolved
+        // `(canonical_source, resolved_name)` AND the observed content
+        // version of the FINAL routed declaring file — read from the
+        // `PreparedDeclBundle::owner_whole_hash` of the bundle ACTUALLY
+        // USED to confirm the resolution. That hash is an observed
+        // identity baked into the bundle at materialisation; it is NOT
+        // a current-content re-read, so it cannot race a concurrent
+        // `upsert` to the routed file the way a post-resolution
+        // `authoritative_current_content_hash` call would.
         let resolve_prepared_target =
-            |this: &mut Self, canonical_source: String, resolved_name: String| {
+            |this: &mut Self,
+             canonical_source: String,
+             resolved_name: String|
+             -> Option<(String, String, crate::resolver_core::ResolverHash16)> {
                 let mut canonical_source = if canonical_source.is_empty() {
                     scope_canonical_id.to_string()
                 } else {
@@ -1049,8 +1061,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     }
                 }
 
-                this.prepared_type_decl(&canonical_source, &resolved_name)
-                    .map(|_| (canonical_source, resolved_name))
+                // Fetch the prepared-decl bundle of the FINAL routed
+                // declaring file — the same bundle the value resolves
+                // through — and capture its observed content version.
+                let bundle = this.ctx.prepared_decl_bundle(canonical_source.as_str())?;
+                bundle.prepared_type_decls.get(resolved_name.as_str())?;
+                Some((canonical_source, resolved_name, bundle.owner_whole_hash))
             };
 
         let resolved = prepared
@@ -1071,6 +1087,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     declaration.resolved_name,
                 )
             });
+        // The caller-facing result drops the observed-hash component.
+        let resolved_pair: Option<(String, String)> =
+            resolved.as_ref().map(|(c, n, _)| (c.clone(), n.clone()));
         // Step 3 closure: write-through to ctx-owned PreparedTargetDb.
         {
             let arc_key = arc_prepared_target_cache_key(
@@ -1082,67 +1101,89 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             let ctx = self.ctx;
             let host_db = ctx.project_type_store().prepared_target_db();
             let captured_value: Option<(std::sync::Arc<str>, std::sync::Arc<str>)> =
-                resolved.as_ref().map(|(c, n)| {
+                resolved.as_ref().map(|(c, n, _)| {
                     (
                         std::sync::Arc::<str>::from(c.as_str()),
                         std::sync::Arc::<str>::from(n.as_str()),
                     )
                 });
+            // The FINAL routed declaring canonical + symbol + its
+            // observed content version, captured at the value source.
+            let captured_routed: Option<(String, String, crate::resolver_core::ResolverHash16)> =
+                resolved
+                    .as_ref()
+                    .map(|(c, n, h)| (c.clone(), n.clone(), *h));
             let captured_canonical = scope_canonical_id.to_string();
             let captured_target = name.to_string();
             let captured_decl_canonical = prepared.root_identity.canonical_id.clone();
             let captured_decl_symbol = prepared.root_identity.symbol_name.clone();
             let _ = host_db.get_or_compute(&arc_key, ctx, move || {
                 // PreparedTarget caches a (scope, target-name) →
-                // resolved (canonical, symbol) mapping. The entry is
-                // keyed on the active scope AND the declaring
-                // canonical (`root_identity.canonical_id`), so the
-                // signature roots both — a content edit to either file
-                // rejects the entry. The signature builder is
-                // provenance-pure: each self-root roots on the
-                // content version observed for that keyed canonical at
-                // the value source (`observed_scope_hash` /
-                // `observed_decl_hash`), threaded in here — never a
+                // resolved (canonical, symbol) mapping. The entry has
+                // up to THREE self-roots: the active scope, the
+                // original declaring canonical
+                // (`root_identity.canonical_id`), AND the FINAL routed
+                // declaring canonical. The signature builder is
+                // provenance-pure: each self-root roots on the content
+                // version observed for that file at the value source
+                // (`observed_scope_hash` / `observed_decl_hash` /
+                // `captured_routed`'s observed hash from the
+                // prepared-decl bundle), threaded in here — never a
                 // current-content re-read. `?` on a `None` observation
-                // (canonical has no current shallow state) or builder
+                // (a canonical has no current shallow state) or builder
                 // result refuses shared-cache admission; the resolved
                 // value is still returned to the caller from
-                // `resolved`.
+                // `resolved_pair`.
                 //
                 // Re-route boundary: `resolve_prepared_target` (the
-                // closure above) can re-route `canonical_source` to a
+                // closure above) re-routes `canonical_source` to a
                 // THIRD declaring file via
                 // `resolve_named_type_export_target_shallow` when the
                 // requested name re-exports through an intermediate
-                // module. The cache key (`PreparedTargetCacheKey`) is
-                // keyed on `root_identity.canonical_id`, NOT the
-                // re-routed file, so the re-routed canonical is rooted
-                // by neither self-root here. A content edit to that
-                // third file is therefore not detected by this entry's
-                // signature. This is a pre-existing key-design
-                // boundary — the cache key never encoded the re-routed
-                // canonical — not a publish-race regression, and is a
-                // known separate deferral. A future change that wants
-                // the re-routed declaring file to invalidate this
-                // entry must encode the re-routed canonical in
-                // `PreparedTargetCacheKey` (so it becomes a third
-                // self-root); widening the signature alone cannot
-                // close it without that key change.
+                // module. `PreparedTargetCacheKey` only encodes the
+                // active scope + original declaring canonical, so the
+                // entry carries the routed canonical explicitly in its
+                // `self_root_canonicals` and the signature roots it —
+                // a content edit to that third file rejects the entry.
+                let observed_scope_hash = observed_scope_hash?;
+                let observed_decl_hash = observed_decl_hash?;
+                let routed_decl_ref: Option<(&str, &str, crate::resolver_core::ResolverHash16)> =
+                    captured_routed
+                        .as_ref()
+                        .map(|(c, n, h)| (c.as_str(), n.as_str(), *h));
                 let fact_sig = super::engine_fact_signature_for_prepared_target(
                     ctx,
                     captured_canonical.as_str(),
                     captured_target.as_str(),
-                    observed_scope_hash?,
+                    observed_scope_hash,
                     captured_decl_canonical.as_str(),
                     captured_decl_symbol.as_str(),
-                    observed_decl_hash?,
+                    observed_decl_hash,
+                    routed_decl_ref,
                 )?;
-                Some((captured_value, fact_sig))
+                // Self-root canonical set: active scope + original
+                // declaring canonical + final routed declaring
+                // canonical (deduped).
+                let mut self_root_canonicals: Vec<std::sync::Arc<str>> = vec![
+                    std::sync::Arc::<str>::from(captured_canonical.as_str()),
+                    std::sync::Arc::<str>::from(captured_decl_canonical.as_str()),
+                ];
+                if let Some((routed_canonical, _, _)) = captured_routed.as_ref() {
+                    let routed_arc = std::sync::Arc::<str>::from(routed_canonical.as_str());
+                    if !self_root_canonicals.contains(&routed_arc) {
+                        self_root_canonicals.push(routed_arc);
+                    }
+                }
+                Some((
+                    captured_value,
+                    fact_sig,
+                    std::sync::Arc::from(self_root_canonicals),
+                ))
             });
         }
         self.prepared_target_cache
             .borrow_mut()
-            .insert(cache_key, resolved.clone());
-        resolved
+            .insert(cache_key, resolved_pair.clone());
+        resolved_pair
     }
 }

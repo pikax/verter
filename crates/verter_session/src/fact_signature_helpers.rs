@@ -125,13 +125,28 @@ pub(crate) fn observe_fact_signature(sig: &[FactVersionRef]) {
     crate::resolver_core::resolver_context::observe_fan_out_borrowed(sig);
 }
 
-/// Convert a legacy [`DepSignature`] into a [`Vec<FactVersionRef>`].
+/// Convert a legacy [`DepSignature`] into a [`Vec<FactVersionRef>`] —
+/// the dual-emit bridge that fans a sub-query's recorded dependency
+/// set into the active fact tracer.
 ///
-/// Only `DepVersion::WholeHash` entries are expressible as
-/// `FactVersionRef::FileWholeHash`; all other variants (route-generation
-/// numbers, project-generation numbers) have no direct `FactVersionRef`
-/// equivalent and are silently dropped. Callers that need full fidelity
-/// should migrate to the fact-tracer path.
+/// Per-version mapping (no generation dep is silently dropped):
+///
+/// - `WholeHash` → `FileWholeHash`.
+/// - `ProjectGeneration` → `FactVersionRef::ProjectGeneration` — the
+///   project-wide generation a sub-result depended on. Dropping it
+///   would let an outer entry that observed the sub-result through the
+///   tracer validate against a superseded project shape.
+/// - `RouteGeneration` is **not expressible** as a `FactVersionRef` —
+///   there is no `FactVersionRef::RouteGeneration` variant (route
+///   generation has no authoritative validating source). It is not
+///   emitted into the tracer here; non-cacheability of an entry whose
+///   sub-result carried a `RouteGeneration` is enforced at the entry
+///   producer, which inspects the legacy `DepSignature` rail directly
+///   (`semantic_graph_read_set_signature`,
+///   `engine_fact_signature_for_materialize_memo`,
+///   [`crate::component_meta_materialize::fact_signature_from_fence`])
+///   and refuses shared admission. No production path constructs
+///   `DepVersion::RouteGeneration`; this arm is the defensive floor.
 pub(crate) fn dep_signature_to_fact_signature(sig: &DepSignature) -> Vec<FactVersionRef> {
     sig.iter()
         .filter_map(|(canon, ver)| match ver {
@@ -139,7 +154,10 @@ pub(crate) fn dep_signature_to_fact_signature(sig: &DepSignature) -> Vec<FactVer
                 canonical_id: canon.as_ref().to_string(),
                 hash: *h,
             }),
-            _ => None,
+            DepVersion::ProjectGeneration(generation) => Some(FactVersionRef::ProjectGeneration {
+                generation: *generation,
+            }),
+            DepVersion::RouteGeneration(_) => None,
         })
         .collect()
 }
@@ -534,6 +552,14 @@ pub(crate) fn empty_fact_signature() -> Arc<[FactVersionRef]> {
     Arc::from(Vec::<FactVersionRef>::new())
 }
 
+/// The pair a structural-carrier signature producer returns: the
+/// path-precise `FactVersionRef` signature plus the explicit self-root
+/// canonical set the warm-read validator checks **strictly**. Produced
+/// by `materialize_structure_read_set` (the `MaterializeStructureDb`
+/// carrier) and `ref_cycle_read_set` (the `RefCycleResultDb` carrier);
+/// a `None` result refuses shared-cache admission.
+pub(crate) type StructuralCarrierReadSet = (Arc<[FactVersionRef]>, Arc<[Arc<str>]>);
+
 /// Transition carrier for a cache entry's dependency signature.
 ///
 /// `facts` is the path-precise fact signature captured by an
@@ -548,14 +574,16 @@ pub(crate) fn empty_fact_signature() -> Arc<[FactVersionRef]> {
 /// `read_set_signature: ReadSetSignature` field instead of two
 /// separate `dep_signature`/`fact_dep_signature` rails. The shared
 /// cold-build helper builds the carrier when the tracer finalises;
-/// warm-hit paths call `validate(ctx)` BEFORE `bubble(ctx)`.
+/// warm-hit paths call `validate_with_self_roots(ctx, &self_roots)`
+/// BEFORE `bubble(ctx)`.
 ///
 /// Invariants:
-/// - `validate(ctx)` returns true only when BOTH rails validate. If
-///   `legacy` is empty (the post-cleanup state of cache producers
-///   wired entirely through `install_fact_tracer`), the legacy gate
-///   is a no-op and the carrier behaves as if `facts` is the sole
-///   oracle.
+/// - `validate_with_self_roots(ctx, &self_roots)` returns true only
+///   when BOTH rails validate, with every `FileWholeHash` fact for a
+///   listed self-root canonical validated **strictly**. If `legacy`
+///   is empty (the post-cleanup state of cache producers wired
+///   entirely through `install_fact_tracer`), the legacy gate is a
+///   no-op and the carrier behaves as if `facts` is the sole oracle.
 /// - `bubble(ctx)` fans `facts` into every active outer tracer on the
 ///   current TLS stack. `legacy` does NOT bubble: it is the validator
 ///   rail only; the bubble channel is the fact signature.
@@ -628,21 +656,6 @@ impl ReadSetSignature {
             legacy: Arc::from(Vec::<(Arc<str>, DepVersion)>::new()),
             overflowed: false,
         }
-    }
-
-    /// Validate both rails against the host's live state. Returns
-    /// `true` only when BOTH rails validate (R3 AND-gate). Empty
-    /// rails trivially validate; an entirely-empty carrier validates
-    /// vacuously.
-    #[inline]
-    pub(crate) fn validate(&self, ctx: &dyn ResolverContext) -> bool {
-        if self.overflowed {
-            // Overflow carriers identify values that should never be
-            // cached. A validate on an overflow entry must fail so
-            // the warm-hit path treats the entry as stale.
-            return false;
-        }
-        validate_fact_signature(ctx, &self.facts) && ctx.validate_dep_signature(&self.legacy)
     }
 
     /// Validate both rails against the host's live state, validating

@@ -48,6 +48,25 @@ where
         self.cache.get_if_valid(key, view)
     }
 
+    /// Strict-self-root warm read — forwards to
+    /// [`ValidatedFactCache::get_if_valid_self_rooted`]. A `FileWholeHash`
+    /// fact for a canonical in `self_root_canonicals` validates
+    /// strictly; every other fact keeps the lazy cross-file
+    /// permissiveness. A canonical-keyed stable cache passes its keyed
+    /// canonical so a deleted keyed file rejects the stale entry.
+    pub fn get_if_valid_self_rooted<TView>(
+        &self,
+        key: &K,
+        view: &TView,
+        self_root_canonicals: &[&str],
+    ) -> Option<Arc<V>>
+    where
+        TView: StoreView,
+    {
+        self.cache
+            .get_if_valid_self_rooted(key, view, self_root_canonicals)
+    }
+
     pub fn insert_arc(&self, key: K, value: Arc<V>, facts: Vec<FactVersionRef>) {
         self.cache.insert_arc(key, value, facts);
     }

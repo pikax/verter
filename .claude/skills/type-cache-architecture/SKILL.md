@@ -83,11 +83,17 @@ that self-root is checked:
   (passing the entry's keyed canonical(s)): a same-canonical content
   edit, or a keyed canonical the live store view no longer tracks,
   rejects the entry on both the warm-hit and post-compute-revalidation
-  paths. `prepared_target_db` roots both the active scope and the
-  declaring canonical; `materialize_memo_db` additionally merges every
-  canonical observed during materialization as a cross-file dependency
-  fact. Cross-file *dependency* facts keep the lazy
-  "untracked → accept" permissiveness — only the self-roots are strict.
+  paths. `prepared_target_db` roots the active scope, the original
+  declaring canonical, AND the FINAL routed declaring canonical (when
+  the requested name re-exports through an intermediate module to a
+  third file) — the entry carries an explicit `self_root_canonicals`
+  set because the cache key encodes only the first two; the routed
+  canonical's observed hash is read from the prepared-decl bundle
+  (`PreparedDeclBundle::owner_whole_hash`) actually used for the value.
+  `materialize_memo_db` additionally merges every canonical observed
+  during materialization as a cross-file dependency fact. Cross-file
+  *dependency* facts keep the lazy "untracked → accept" permissiveness
+  — only the self-roots are strict.
 - The **`SemanticGraphStore` query nodes** validate their self-root
   **strictly**. Each query-node `MemoEntry` records its
   `self_root_canonicals` — the keyed canonical for `ResolveDecl` /
@@ -105,13 +111,34 @@ that self-root is checked:
   every self-root strictly via `validate_fact_signature_with_self_roots`
   / `ReadSetSignature::validate_with_self_roots`. `get_unvalidated` has
   no production warm-read caller (test/debug only).
-- The remaining query-identity caches (`materialize_structure_db`,
-  `ref_cycle_db`, `route_owned_shallow`) do not yet validate their
-  self-root strictly.
+- The **structural carriers** — `materialize_structure_db` and
+  `ref_cycle_db` — validate their self-root **strictly**. Each entry
+  carries an explicit `self_root_canonicals` set checked via
+  `ReadSetSignature::validate_with_self_roots` on every warm read AND
+  post-compute revalidation. `MaterializeStructureDb` roots the
+  materialise scope (observed once via
+  `ResolverContext::observe_materialize_scope`) and the `base` node's
+  declaration-origin file (`SemanticGraphStore::node_scope`'s
+  `NodeScopeId::File`); `RefCycleResultDb` roots the BFS root file plus
+  every visited declaration's file (each visited `DeclIdentity`'s
+  embedded `(canonical_id, whole_hash)`). The provenance-pure producers
+  `materialize_structure_read_set` / `ref_cycle_read_set` lead the
+  carrier with one observed-hash `FileWholeHash` per self-root and
+  merge the traced fact set on top; an unrecoverable scope observation,
+  a torn observation, or a `RouteGeneration` dependency routes the
+  value through `ComputeAdmission::ReturnOnly` (valid result, no shared
+  admission). `RefCycleResultDb` has no generation-equal fast return —
+  every `peek` validates strictly. `route_owned_shallow` is a
+  route-only artifact cache, not a self-rooted query-identity cache;
+  its `route_owned_entry_is_fresh` tiered gate stays the route-owned
+  cache's freshness check and `current_route_surface_hash` is the
+  single route-fact production helper (current `IndexedReady` first,
+  route-owned-shallow fallback).
 
-The own-canonical drain is retained until every query-identity cache
-validates its self-root strictly; dropping it before then would serve
-stale output for the edited file itself from a not-yet-strict cache.
+The own-canonical drain serving the edited file's own caches is
+retained only as a redundant fast eviction now that every
+query-identity cache validates its self-root strictly; the warm-read
+validator rejects a same-canonical edit on its own.
 
 **R4.** Source-content changes produce a semantic fact diff (publishable
 via `compute_upsert_changes_from_parse` for LSP / observability

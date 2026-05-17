@@ -231,14 +231,38 @@ fn n_owners_via_materialize_surface_dispatch_collapse_to_one_entry() {
     };
     use verter_session::semantic_query::{ProjectionMode, SemanticNodeId};
 
-    // Use a fresh hermetic project (`/workspace/x.ts` must be parseable
-    // so the materialiser substrate is fully bootstrapped).
-    let project = build_hermetic_project(&[("/workspace/x.ts", "export const x = 1;")]);
+    let owners = [
+        "/workspace/src/Inbox.vue",
+        "/workspace/src/Chat.vue",
+        "/workspace/src/Sidebar.vue",
+        "/workspace/src/Header.vue",
+    ];
+
+    // Use a fresh hermetic project. Every owner scope must be an
+    // observable file: a `MaterializeStructureDb` entry self-roots on
+    // its materialise scope, and the structural-carrier producer routes
+    // the value through `ReturnOnly` (non-cacheable) when the scope has
+    // no recoverable `IndexedReady`. Inject all four owner SFCs (plus
+    // the substrate-bootstrap file) so the cold build can admit an
+    // entry; the cross-owner reuse property is then observable on the
+    // production cache.
+    let mut files: Vec<(&str, &str)> = vec![("/workspace/x.ts", "export const x = 1;")];
+    for scope in &owners {
+        files.push((*scope, "<script setup lang=\"ts\">const x = 1;</script>\n"));
+    }
+    let project = build_hermetic_project(&files);
     let host = project.host();
     let db = host.project_type_store().materialize_structure_db();
 
     let baseline = db.entry_count();
     assert_eq!(baseline, 0, "control: fresh DB has 0 entries");
+
+    // Index every owner scope through the public `get_component_meta`
+    // entry point so each scope has a current `IndexedReady` the
+    // materialiser's `observe_materialize_scope` can pin against.
+    for scope in &owners {
+        let _ = host.get_component_meta(scope);
+    }
 
     // Note: we use `SemanticNodeId(0)` (the NULL node id). The
     // materialiser fast-paths it to a no-op outcome, but the cache
@@ -246,12 +270,12 @@ fn n_owners_via_materialize_surface_dispatch_collapse_to_one_entry() {
     // structural property we want to discriminate: N keys differing
     // ONLY in `scope_canonical_id` collapse to ONE entry.
     let base = SemanticNodeId(0);
-    let owners = [
-        "/workspace/src/Inbox.vue",
-        "/workspace/src/Chat.vue",
-        "/workspace/src/Sidebar.vue",
-        "/workspace/src/Header.vue",
-    ];
+
+    // Capture the entry count AFTER the `get_component_meta` indexing
+    // calls above (which may themselves admit unrelated entries) so the
+    // assertion measures ONLY the delta from the N `materialize_surface`
+    // calls below.
+    let count_before = db.entry_count();
 
     let dispatch = host.semantic_dispatch();
     for scope in &owners {
@@ -264,22 +288,29 @@ fn n_owners_via_materialize_surface_dispatch_collapse_to_one_entry() {
         let _ = dispatch.materialize_surface(key);
     }
 
-    let final_count = db.entry_count();
+    let count_after = db.entry_count();
+    let delta = count_after - count_before;
     eprintln!(
-        "[gap-B dispatch flow] final_count={final_count}, N={}",
+        "[gap-B dispatch flow] count_before={count_before}, count_after={count_after}, \
+         delta={delta}, N={}",
         owners.len()
     );
-    // R7 contract: N keys differing ONLY in scope_canonical_id MUST
-    // collapse to ONE entry. The legacy impl would produce N entries.
+    // R7 contract: N `materialize_surface` calls differing ONLY in
+    // `scope_canonical_id` (shared `(base, scope_axis, mode)`) MUST
+    // collapse to ONE new MaterializeStructureDb entry — the first
+    // cold-builds, the rest warm-hit. The legacy `scope_canonical_id`-
+    // included key would add N entries, one per owner scope.
     assert_eq!(
-        final_count,
+        delta,
         1,
         "R7 cross-owner reuse: {} dispatch calls with shared (base, scope_axis, mode) and \
-         different scope_canonical_id MUST collapse to ONE MaterializeStructureDb entry. \
-         got entry_count={} — a value > 1 indicates scope_canonical_id leaked into the \
-         cache-key Hash/PartialEq impl.",
+         different scope_canonical_id MUST add exactly ONE MaterializeStructureDb entry. \
+         got delta={} (count_before={}, count_after={}) — a value > 1 indicates \
+         scope_canonical_id leaked into the cache-key Hash/PartialEq impl.",
         owners.len(),
-        final_count
+        delta,
+        count_before,
+        count_after
     );
 }
 

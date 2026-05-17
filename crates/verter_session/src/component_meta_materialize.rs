@@ -438,23 +438,48 @@ impl Drop for MaterializeInFlightGuard {
 ///   without re-dispatching.
 /// - For cacheable outcomes (Value / Miss), returns `Some(MaterializeStructureEntry)`
 ///   so cooperative-admission publishes it.
-fn finish_cacheable(
+///
+/// The single admission boundary for a materialiser compute closure.
+/// Converts a `(MaterializeOutcome, local_fence)` pair plus the
+/// observed materialise-scope into a [`ComputeAdmission`]:
+///
+/// - intrinsically non-cacheable outcome (`Recursive` / `Tainted` /
+///   `Error`) → [`ComputeAdmission::ReturnOnly`].
+/// - valid `Value` / `Miss` outcome whose observed-root signature can
+///   be built strictly → [`ComputeAdmission::Cacheable`].
+/// - valid `Value` / `Miss` outcome whose signature CANNOT be built
+///   strictly (the scope observation is missing, or the fence carries
+///   an unsound `RouteGeneration` dependency) → `ReturnOnly`. The
+///   value is still returned to every joiner; the shared cache stays
+///   empty so the next cold-miss recomputes.
+///
+/// `observed_scope` is the single tear-free
+/// [`MaterializeScopeObservation`] the compute closure established
+/// once at its top: its `whole_hash` is the seed pushed onto the fence
+/// AND the scope self-root in the signature, so the value and its
+/// signature root on one content identity (no current-content re-read
+/// at admission time). `base_origin_self_root` is the `base` node's
+/// declaration-origin file (`NodeScopeId::File`) when it is
+/// file-derived — a second self-root pinned to the `whole_hash` baked
+/// into the node's origin sidecar at intern time.
+fn finish_materialize_admission(
     ctx: &dyn ResolverContext,
     key: &MaterializeStructureCacheKey,
     outcome: MaterializeOutcome,
     mut local_fence: Vec<(Arc<str>, DepVersion)>,
+    observed_scope: Option<&crate::resolver_core::MaterializeScopeObservation>,
+    base_origin_self_root: Option<&(Arc<str>, crate::resolver_core::ResolverHash16)>,
 ) -> crate::cooperative_admission::ComputeAdmission<
     crate::semantic_query::CacheRead<MaterializeOutcome>,
     MaterializeStructureEntry,
 > {
-    if !key.scope_canonical_id.as_ref().is_empty() {
-        // Content-pinned read: the fence seed becomes part of the
-        // materialised entry's `read_set_signature`. A permissive
-        // `get_any` could seed the fence with a stale artifact's
-        // `whole_hash`, baking a stale content hash into the cache
-        // entry's validation oracle.
-        if let Some(indexed) = ctx.indexed_for_current_content(key.scope_canonical_id.as_ref()) {
-            let whole_hash = indexed.whole_hash;
+    // Seed the fence with the OBSERVED scope content version — the
+    // single `whole_hash` from `observed_scope`, NOT a current-content
+    // re-read. Seeding from a fresh re-read would root a stale value
+    // on post-edit content when an `upsert` lands in the publish race.
+    if let Some(observation) = observed_scope {
+        if !key.scope_canonical_id.as_ref().is_empty() {
+            let whole_hash = observation.whole_hash();
             local_fence.push((
                 Arc::clone(&key.scope_canonical_id),
                 DepVersion::WholeHash(whole_hash),
@@ -482,15 +507,244 @@ fn finish_cacheable(
             },
         );
     }
-    let fact_dep_signature = fact_signature_from_fence(&local_fence);
-    let legacy = dep_signature_from_fence(local_fence);
-    crate::cooperative_admission::ComputeAdmission::Cacheable(MaterializeStructureEntry {
-        outcome,
-        read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(
-            fact_dep_signature,
-            legacy,
-        ),
-    })
+    let legacy = dep_signature_from_fence(local_fence.clone());
+    match materialize_structure_read_set(&local_fence, observed_scope, base_origin_self_root) {
+        Some((facts, self_root_canonicals)) => {
+            crate::cooperative_admission::ComputeAdmission::Cacheable(MaterializeStructureEntry {
+                outcome,
+                read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(
+                    facts, legacy,
+                ),
+                self_root_canonicals,
+            })
+        }
+        None => {
+            // The observed-root signature cannot be built strictly —
+            // the scope observation is missing or the fence carries an
+            // unsound `RouteGeneration` dependency. The materialised
+            // outcome is valid; route it through `ReturnOnly` so
+            // joiners observe it without admitting an entry that the
+            // warm-read validator could not soundly check.
+            crate::cooperative_admission::ComputeAdmission::ReturnOnly(
+                crate::semantic_query::CacheRead {
+                    value: outcome,
+                    dep_signature: empty_signature(),
+                    walker_diagnostics: Arc::from([]),
+                    cache_suppress: false,
+                },
+            )
+        }
+    }
+}
+
+/// Build the observed-root fact signature + self-root canonical set
+/// for a `MaterializeStructureDb` entry — **provenance-pure**.
+///
+/// The signature leads with one self-root `FileWholeHash` per observed
+/// self-root identity, then merges the fence facts as cross-file
+/// dependency facts. Self-roots:
+///
+/// - the materialise scope (`observed_scope`) — pinned to the single
+///   `IndexedReady.whole_hash` the compute closure observed, plus the
+///   scope's `SyntacticExportSet` parse fact pinned to the same
+///   version (recovered content-addressed; `None` refuses admission).
+/// - the `base` node's declaration-origin file
+///   (`base_origin_self_root`) — pinned to the `whole_hash` baked into
+///   the node's `NodeScopeId::File` origin at intern time.
+///
+/// Returns `None` — refusing shared-cache admission — when:
+///
+/// - `observed_scope` is `None` (no recoverable current scope
+///   artifact), or its `SyntacticExportSet` parse fact is `None`, or
+///   describes a canonical other than the keyed scope;
+/// - a fence entry names a self-root canonical with a `WholeHash` that
+///   disagrees with the observed self-root hash (a torn observation);
+/// - a fence entry carries a `RouteGeneration` dependency (no
+///   authoritative validating source — see [`fact_signature_from_fence`]).
+///
+/// `ProjectGeneration` fence entries convert to
+/// `FactVersionRef::ProjectGeneration` (a project-shape change rejects
+/// the entry; a pure content edit does not over-invalidate).
+fn materialize_structure_read_set(
+    local_fence: &[(Arc<str>, DepVersion)],
+    observed_scope: Option<&crate::resolver_core::MaterializeScopeObservation>,
+    base_origin_self_root: Option<&(Arc<str>, crate::resolver_core::ResolverHash16)>,
+) -> Option<crate::fact_signature_helpers::StructuralCarrierReadSet> {
+    use crate::resolver_core::FactVersionRef;
+
+    // Collapse observed self-roots into a per-canonical hash map; a
+    // conflicting hash for the same canonical is a torn observation.
+    let mut self_root_hashes: rustc_hash::FxHashMap<Arc<str>, crate::types::Hash16> =
+        rustc_hash::FxHashMap::default();
+    let observation = observed_scope?;
+    let scope_canonical: Arc<str> = Arc::clone(&observation.canonical_id);
+    let observed_scope_hash = observation.whole_hash();
+    self_root_hashes.insert(Arc::clone(&scope_canonical), observed_scope_hash);
+    // The scope's `SyntacticExportSet` parse fact must describe the
+    // keyed scope and be pinned to the SAME observed version.
+    let scope_export_set = observation.syntactic_export_set.clone()?;
+    if scope_export_set.canonical_id.as_str() != scope_canonical.as_ref() {
+        return None;
+    }
+    if let Some((origin_canonical, origin_hash)) = base_origin_self_root {
+        match self_root_hashes.get(origin_canonical) {
+            Some(existing) if existing != origin_hash => return None,
+            _ => {
+                self_root_hashes.insert(Arc::clone(origin_canonical), *origin_hash);
+            }
+        }
+    }
+
+    let mut facts: Vec<FactVersionRef> =
+        Vec::with_capacity(self_root_hashes.len() + 1 + local_fence.len());
+    // Lead with one self-root `FileWholeHash` per observed self-root.
+    for (canonical, observed_hash) in &self_root_hashes {
+        facts.push(FactVersionRef::FileWholeHash {
+            canonical_id: canonical.as_ref().to_string(),
+            hash: *observed_hash,
+        });
+    }
+    // The scope self-root's path-precise `SyntacticExportSet` parse
+    // fact, pinned to the same observed version (after the self-root
+    // FileWholeHash, mirroring `engine_fact_signature_for_materialize_memo`).
+    facts.push(FactVersionRef::Parse(scope_export_set));
+
+    // Merge the fence facts as cross-file dependency facts. A fence
+    // `WholeHash` for a self-root canonical is folded onto the
+    // observed self-root: it MUST agree with the observed hash.
+    for (canonical, version) in local_fence.iter() {
+        match version {
+            DepVersion::WholeHash(hash) => {
+                if let Some(observed_hash) = self_root_hashes.get(canonical) {
+                    if hash != observed_hash {
+                        return None;
+                    }
+                    // Already emitted as a self-root — do not duplicate.
+                    continue;
+                }
+                facts.push(FactVersionRef::FileWholeHash {
+                    canonical_id: canonical.as_ref().to_string(),
+                    hash: *hash,
+                });
+            }
+            DepVersion::ProjectGeneration(generation) => {
+                facts.push(FactVersionRef::ProjectGeneration {
+                    generation: *generation,
+                });
+            }
+            DepVersion::RouteGeneration(_) => {
+                // Unsound — see `fact_signature_from_fence`.
+                return None;
+            }
+        }
+    }
+
+    let mut self_root_canonicals: Vec<Arc<str>> = self_root_hashes.into_keys().collect();
+    self_root_canonicals.sort();
+    Some((Arc::from(facts), Arc::from(self_root_canonicals)))
+}
+
+/// The `base` node's declaration-origin self-root for a materialiser
+/// compute closure: `Some((canonical, whole_hash))` when the node's
+/// `SemanticGraphStore::node_scope` is a `NodeScopeId::File`. The
+/// `whole_hash` is the file content version baked into the node's
+/// origin sidecar at intern time — an observed identity, not a
+/// current-content re-read.
+fn base_node_origin_self_root(
+    ctx: &dyn ResolverContext,
+    base: SemanticNodeId,
+) -> Option<(Arc<str>, crate::resolver_core::ResolverHash16)> {
+    let graph = ctx.project_type_store().semantic_graph();
+    match graph.node_scope(base)? {
+        crate::semantic_query::NodeScopeId::File {
+            canonical_id,
+            whole_hash,
+            ..
+        } => Some((canonical_id, whole_hash)),
+        crate::semantic_query::NodeScopeId::Global => None,
+    }
+}
+
+/// Re-base a `MaterializeStructureDb` entry's fact rail on top of its
+/// observed self-roots after the cold-compute `install_fact_tracer`
+/// scope finalises with a traced observation set.
+///
+/// The producer ([`materialize_structure_read_set`]) builds the
+/// entry's `facts` rail leading with one observed-hash self-root
+/// `FileWholeHash` per `self_root_canonicals` entry, followed by the
+/// scope's `SyntacticExportSet` parse fact. The traced set is the
+/// `install_fact_tracer` scope's authoritative observation set — it
+/// catches transitively-bubbled facts the materialiser's `local_fence`
+/// (which merges only legacy dep-signature rails) can miss. This
+/// helper keeps the observed self-roots (and the scope parse fact)
+/// from the producer carrier, then merges the traced facts ON TOP —
+/// exactly the `semantic_graph_read_set_signature` discipline: a
+/// traced `FileWholeHash` for a self-root canonical is folded onto the
+/// observed self-root (it MUST agree — a mismatch is a torn read), a
+/// traced `ProjectGeneration` is kept, every other traced fact is kept
+/// verbatim.
+///
+/// Returns `None` — the caller routes the value through `ReturnOnly`
+/// — when a traced `FileWholeHash` disagrees with an observed
+/// self-root hash (torn read).
+fn merge_traced_facts_into_materialize_carrier(
+    producer_facts: &[crate::resolver_core::FactVersionRef],
+    self_root_canonicals: &[Arc<str>],
+    traced_facts: &[crate::resolver_core::FactVersionRef],
+) -> Option<Arc<[crate::resolver_core::FactVersionRef]>> {
+    use crate::resolver_core::FactVersionRef;
+
+    // The observed self-root hashes are the producer carrier's leading
+    // `FileWholeHash` facts whose canonical is a self-root.
+    let mut self_root_hashes: rustc_hash::FxHashMap<&str, crate::types::Hash16> =
+        rustc_hash::FxHashMap::default();
+    for fact in producer_facts {
+        if let FactVersionRef::FileWholeHash { canonical_id, hash } = fact {
+            if self_root_canonicals
+                .iter()
+                .any(|c| c.as_ref() == canonical_id.as_str())
+            {
+                self_root_hashes.insert(canonical_id.as_str(), *hash);
+            }
+        }
+    }
+
+    // Keep the producer carrier's self-root `FileWholeHash` facts and
+    // its scope `SyntacticExportSet` parse fact — these are the
+    // observed-version self-roots that lead the carrier.
+    let mut facts: Vec<FactVersionRef> =
+        Vec::with_capacity(producer_facts.len() + traced_facts.len());
+    for fact in producer_facts {
+        match fact {
+            FactVersionRef::FileWholeHash { canonical_id, .. }
+                if self_root_hashes.contains_key(canonical_id.as_str()) =>
+            {
+                facts.push(fact.clone());
+            }
+            FactVersionRef::Parse(_) => facts.push(fact.clone()),
+            // Non-self-root producer dependency facts are re-derived
+            // from the (superset) traced set below — drop them here.
+            _ => {}
+        }
+    }
+
+    // Merge the traced facts. A traced `FileWholeHash` for a self-root
+    // canonical folds onto the observed self-root (must agree); every
+    // other traced fact is kept verbatim so transitive invalidation
+    // works.
+    for fact in traced_facts {
+        if let FactVersionRef::FileWholeHash { canonical_id, hash } = fact {
+            if let Some(observed) = self_root_hashes.get(canonical_id.as_str()) {
+                if hash != observed {
+                    return None;
+                }
+                // Already emitted as a self-root — do not duplicate.
+                continue;
+            }
+        }
+        facts.push(fact.clone());
+    }
+    Some(Arc::from(facts))
 }
 
 /// Five-phase materialiser entry. Maintains
@@ -627,6 +881,26 @@ pub(crate) fn materialize_component_meta_structure(
         let graph = ctx.project_type_store().semantic_graph();
         let mut local_fence: Vec<(Arc<str>, DepVersion)> = Vec::new();
 
+        // Establish ONE tear-free materialise-scope observation up
+        // front. Its `whole_hash` is the single content identity
+        // threaded into BOTH the fence scope-seed AND the entry's
+        // signature self-root, so the materialised value and its
+        // validation oracle root on one version — no current-content
+        // re-read races a concurrent `upsert` at admission time. An
+        // empty scope id (synthetic / test-only key) yields `None`,
+        // which makes `finish_materialize_admission` route the value
+        // through `ReturnOnly` rather than admitting an unrooted entry.
+        let observed_scope: Option<crate::resolver_core::MaterializeScopeObservation> =
+            if key_for_compute.scope_canonical_id.as_ref().is_empty() {
+                None
+            } else {
+                ctx.observe_materialize_scope(key_for_compute.scope_canonical_id.as_ref())
+            };
+        // The `base` node's declaration-origin file — a second
+        // self-root pinned to the `whole_hash` baked into the node's
+        // origin sidecar at intern time.
+        let base_origin_self_root = base_node_origin_self_root(ctx, key_for_compute.base);
+
         // Test-only fact-injection hook. When the
         // `MATERIALIZE_TEST_FORCE_OVERFLOW_OBSERVATIONS` knob is non-zero,
         // emit that many synthetic `FileWholeHash` observations onto
@@ -673,7 +947,7 @@ pub(crate) fn materialize_component_meta_structure(
                     key_for_compute.scope_axis,
                     crate::component_meta_audit::MaterializeSkipReason::RegistryRouteCycleGuard,
                 );
-                return finish_cacheable(ctx, &key_for_compute, MaterializeOutcome::Value(key_for_compute.base), local_fence);
+                return finish_materialize_admission(ctx, &key_for_compute, MaterializeOutcome::Value(key_for_compute.base), local_fence, observed_scope.as_ref(), base_origin_self_root.as_ref());
             }
             // Package-ref guard on the actual root.
             if crate::meta_resolve::component_meta_ref_resolves_to_package_node(
@@ -685,7 +959,7 @@ pub(crate) fn materialize_component_meta_structure(
                     key_for_compute.scope_axis,
                     crate::component_meta_audit::MaterializeSkipReason::PackageRefTopLevel,
                 );
-                return finish_cacheable(ctx, &key_for_compute, MaterializeOutcome::Value(key_for_compute.base), local_fence);
+                return finish_materialize_admission(ctx, &key_for_compute, MaterializeOutcome::Value(key_for_compute.base), local_fence, observed_scope.as_ref(), base_origin_self_root.as_ref());
             }
 
             // Guards passed — let dispatch project the original
@@ -729,7 +1003,7 @@ pub(crate) fn materialize_component_meta_structure(
                     let body_id = match body_read.value {
                         QueryResult::Value(id) => id,
                         _ => {
-                            return finish_cacheable(ctx, &key_for_compute, MaterializeOutcome::Value(key_for_compute.base), local_fence);
+                            return finish_materialize_admission(ctx, &key_for_compute, MaterializeOutcome::Value(key_for_compute.base), local_fence, observed_scope.as_ref(), base_origin_self_root.as_ref());
                         }
                     };
                     // Step B: instantiate the builtin carrier on
@@ -768,10 +1042,10 @@ pub(crate) fn materialize_component_meta_structure(
                     let projected_id = match projected.value {
                         QueryResult::Value(id) => id,
                         _ => {
-                            return finish_cacheable(ctx, &key_for_compute, MaterializeOutcome::Value(key_for_compute.base), local_fence);
+                            return finish_materialize_admission(ctx, &key_for_compute, MaterializeOutcome::Value(key_for_compute.base), local_fence, observed_scope.as_ref(), base_origin_self_root.as_ref());
                         }
                     };
-                    return finish_cacheable(ctx, &key_for_compute, MaterializeOutcome::Value(projected_id), local_fence);
+                    return finish_materialize_admission(ctx, &key_for_compute, MaterializeOutcome::Value(projected_id), local_fence, observed_scope.as_ref(), base_origin_self_root.as_ref());
                 }
                 RouteDemand::MemberPath(_) => {
                     // IndexedAccess projection is dispatch's
@@ -818,7 +1092,7 @@ pub(crate) fn materialize_component_meta_structure(
                     key_for_compute.scope_axis,
                     crate::component_meta_audit::MaterializeSkipReason::RecursiveHelperCycleGuard,
                 );
-                return finish_cacheable(ctx, &key_for_compute, MaterializeOutcome::Value(key_for_compute.base), local_fence);
+                return finish_materialize_admission(ctx, &key_for_compute, MaterializeOutcome::Value(key_for_compute.base), local_fence, observed_scope.as_ref(), base_origin_self_root.as_ref());
             }
         }
 
@@ -957,53 +1231,19 @@ pub(crate) fn materialize_component_meta_structure(
             }
         };
 
-        // Seed local_fence with the root scope's whole_hash if
-        // available. Content-pinned: a permissive `get_any` could seed
-        // the fence with a stale artifact's `whole_hash`, baking a
-        // stale content hash into the cache entry's validation oracle.
-        if !key_for_compute.scope_canonical_id.as_ref().is_empty() {
-            if let Some(indexed) =
-                ctx.indexed_for_current_content(key_for_compute.scope_canonical_id.as_ref())
-            {
-                let whole_hash = indexed.whole_hash;
-                local_fence.push((
-                    Arc::clone(&key_for_compute.scope_canonical_id),
-                    DepVersion::WholeHash(whole_hash),
-                ));
-                // Sub-task E: mirror the scope-canonical seed push
-                // onto the active fact-read tracer. R24 — silent when
-                // no tracer is installed.
-                crate::component_meta_audit::observe_fence_entry(
-                    ctx,
-                    &key_for_compute.scope_canonical_id,
-                    &DepVersion::WholeHash(whole_hash),
-                );
-            }
-        }
-        if !outcome.is_cacheable() {
-            // Valid result but intrinsically non-cacheable (Tainted
-            // outcome, e.g.). Route through ComputeAdmission::ReturnOnly
-            // so joiners observe the same valid outcome. The
-            // CacheRead's dep_signature is empty per R20 — non-cacheable
-            // results MUST NOT propagate as cache deps.
-            return crate::cooperative_admission::ComputeAdmission::ReturnOnly(
-                crate::semantic_query::CacheRead {
-                    value: outcome,
-                    dep_signature: empty_signature(),
-                    walker_diagnostics: Arc::from([]),
-                    cache_suppress: false,
-                },
-            );
-        }
-        let fact_dep_signature = fact_signature_from_fence(&local_fence);
-        let legacy = dep_signature_from_fence(local_fence);
-        crate::cooperative_admission::ComputeAdmission::Cacheable(MaterializeStructureEntry {
+        // Single admission boundary: seeds the fence with the
+        // OBSERVED scope `whole_hash`, then builds the observed-root
+        // signature. A non-cacheable outcome — or a signature that
+        // cannot be built strictly (missing scope observation /
+        // unsound `RouteGeneration`) — routes through `ReturnOnly`.
+        finish_materialize_admission(
+            ctx,
+            &key_for_compute,
             outcome,
-            read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(
-                fact_dep_signature,
-                legacy,
-            ),
-        })
+            local_fence,
+            observed_scope.as_ref(),
+            base_origin_self_root.as_ref(),
+        )
     };
 
     let key_for_register = key.clone();
@@ -1037,15 +1277,44 @@ pub(crate) fn materialize_component_meta_structure(
                 crate::resolver_core::FactReadSetFinalise::Ok(fact_dep_signature) => {
                     match admission {
                         crate::cooperative_admission::ComputeAdmission::Cacheable(mut entry) => {
-                            // Override the carrier's fact rail with the
-                            // tracer's authoritative observation set.
-                            let legacy = Arc::clone(&entry.read_set_signature.legacy);
-                            entry.read_set_signature =
-                                crate::fact_signature_helpers::ReadSetSignature::new(
-                                    fact_dep_signature,
-                                    legacy,
-                                );
-                            crate::cooperative_admission::ComputeAdmission::Cacheable(entry)
+                            // Merge the tracer's authoritative
+                            // observation set ON TOP of the producer
+                            // carrier's observed self-roots — the
+                            // self-roots and the scope parse fact lead,
+                            // the traced facts follow (deduped against
+                            // the self-roots). Replacing the rail
+                            // wholesale would drop the observed
+                            // self-roots the warm-read validator checks
+                            // strictly. A torn read (traced self-root
+                            // hash disagrees with the observed one)
+                            // routes the value through `ReturnOnly`.
+                            match merge_traced_facts_into_materialize_carrier(
+                                &entry.read_set_signature.facts,
+                                &entry.self_root_canonicals,
+                                &fact_dep_signature,
+                            ) {
+                                Some(merged) => {
+                                    let legacy =
+                                        Arc::clone(&entry.read_set_signature.legacy);
+                                    entry.read_set_signature =
+                                        crate::fact_signature_helpers::ReadSetSignature::new(
+                                            merged, legacy,
+                                        );
+                                    crate::cooperative_admission::ComputeAdmission::Cacheable(
+                                        entry,
+                                    )
+                                }
+                                None => {
+                                    crate::cooperative_admission::ComputeAdmission::ReturnOnly(
+                                        crate::semantic_query::CacheRead {
+                                            value: entry.outcome,
+                                            dep_signature: empty_signature(),
+                                            walker_diagnostics: Arc::from([]),
+                                            cache_suppress: false,
+                                        },
+                                    )
+                                }
+                            }
                         }
                         other => other,
                     }
@@ -1082,9 +1351,15 @@ pub(crate) fn materialize_component_meta_structure(
         db.inflight(),
         key.clone(),
         |entry: &MaterializeStructureEntry| {
-            // Carrier-aware AND-gate: BOTH rails must validate. Stale
-            // entries never bubble.
-            if entry.read_set_signature.validate(ctx) {
+            // Carrier-aware validate-before-bubble. The entry's
+            // self-root canonicals (the materialise scope and the
+            // `base` node's declaration-origin file) validate
+            // **strictly**; every other fact keeps the lazy cross-file
+            // permissiveness. Stale entries never bubble.
+            if entry
+                .read_set_signature
+                .validate_with_self_roots(ctx, &entry.self_root_canonicals)
+            {
                 entry.read_set_signature.bubble(ctx);
                 Some(crate::semantic_query::CacheRead {
                     value: entry.outcome.clone(),
@@ -1106,8 +1381,13 @@ pub(crate) fn materialize_component_meta_structure(
                 cache_suppress: false,
             }
         },
-        // Race-closer — post-compute revalidation via carrier AND-gate.
-        |entry: &MaterializeStructureEntry| entry.read_set_signature.validate(ctx),
+        // Race-closer — post-compute revalidation with strict
+        // self-root validation.
+        |entry: &MaterializeStructureEntry| {
+            entry
+                .read_set_signature
+                .validate_with_self_roots(ctx, &entry.self_root_canonicals)
+        },
         // removal_cleanup — removal-side counterpart of `post_publish`.
         // When the substrate removes an already-published entry
         // (warm-hit reject or joiner-fork reject) the live counter must
@@ -1303,31 +1583,55 @@ pub fn dep_signature_from_fence(fence: Vec<(Arc<str>, DepVersion)>) -> DepSignat
     Arc::from(fence.into_boxed_slice())
 }
 
-/// R3/R26/R28 path-precise sibling of [`dep_signature_from_fence`].
-/// Maps the materialiser's `local_fence` accumulator into the
-/// `Arc<[FactVersionRef]>` form that the new
-/// `fact_dep_signature` field on [`crate::component_meta_caches::MaterializeStructureEntry`]
-/// carries. `WholeHash` entries map to `FileWholeHash`;
-/// `RouteGeneration` / `ProjectGeneration` entries are dropped
-/// (coarse-grained generation counters do not map to a content
-/// hash and would force the warm-cache validator to invalidate on
-/// unrelated activity). Mirrors the conversion used by
-/// `crate::meta_resolve::dep_signature::accumulate_dispatch_dep_signature`.
+/// Path-precise sibling of [`dep_signature_from_fence`]. Maps the
+/// materialiser's `local_fence` accumulator into the
+/// `Arc<[FactVersionRef]>` form a structural-carrier entry's fact
+/// signature carries.
+///
+/// Per-version mapping (no generation dep is silently dropped — a
+/// dropped generation dep would let the warm-cache validator confirm
+/// a value rooted on a superseded project shape):
+///
+/// - `WholeHash` → `FileWholeHash` — the observed content version.
+/// - `ProjectGeneration` → `FactVersionRef::ProjectGeneration` — a
+///   project-shape change bumps the counter and rejects the entry; a
+///   pure file-content edit never bumps it, so this does not
+///   over-invalidate.
+/// - `RouteGeneration` → the whole function returns `None`. Route
+///   generation has no authoritative validating source (there is no
+///   production emitter and the fence validator treats it as
+///   always-valid), so an entry rooted on it could not detect a
+///   content edit to the route-observed file. A `None` result signals
+///   the value is not safely cacheable; the caller routes it through a
+///   return-only admission.
 #[must_use]
 pub fn fact_signature_from_fence(
     fence: &[(Arc<str>, DepVersion)],
-) -> Arc<[crate::resolver_core::FactVersionRef]> {
+) -> Option<Arc<[crate::resolver_core::FactVersionRef]>> {
     use crate::resolver_core::FactVersionRef;
     let mut out: Vec<FactVersionRef> = Vec::with_capacity(fence.len());
     for (canonical, version) in fence.iter() {
-        if let DepVersion::WholeHash(hash) = version {
-            out.push(FactVersionRef::FileWholeHash {
-                canonical_id: canonical.as_ref().to_string(),
-                hash: *hash,
-            });
+        match version {
+            DepVersion::WholeHash(hash) => {
+                out.push(FactVersionRef::FileWholeHash {
+                    canonical_id: canonical.as_ref().to_string(),
+                    hash: *hash,
+                });
+            }
+            DepVersion::ProjectGeneration(generation) => {
+                out.push(FactVersionRef::ProjectGeneration {
+                    generation: *generation,
+                });
+            }
+            DepVersion::RouteGeneration(_) => {
+                // Route generation cannot be soundly rooted — refuse
+                // the whole signature rather than rooting an entry on a
+                // fact that cannot catch a content edit.
+                return None;
+            }
         }
     }
-    Arc::from(out)
+    Some(Arc::from(out))
 }
 
 #[cfg(test)]
@@ -2323,6 +2627,12 @@ export type C<T> = A<T>
                 crate::fact_signature_helpers::empty_fact_signature(),
                 stale_signature,
             ),
+            // No self-roots on this synthetic stale entry — its
+            // staleness is carried by the legacy `DepSignature` rail
+            // (an all-zero whole hash for `/types.ts` that the live
+            // store view's real hash rejects via
+            // `validate_dep_signature`).
+            self_root_canonicals: StdArc::from(Vec::<StdArc<str>>::new()),
         });
         let db = host.project_type_store().materialize_structure_db();
         db.entries().insert(key.clone(), stale_entry);
@@ -2348,17 +2658,18 @@ export type C<T> = A<T>
     use crate::meta_resolve::{bfs_compute_counter_for_test, reset_bfs_compute_counter_for_test};
     use crate::project_semantic_dispatch::raise::{enable_dispatch_trace_for_test, DISPATCH_TRACE};
 
-    /// Test 1 — generation-local fast-path skips Instantiate
-    /// dispatch on a warm cache hit.
+    /// Test 1 — a warm `RefCycleResultDb` hit skips `Instantiate`
+    /// dispatch and the BFS body.
     ///
-    /// Cold call publishes the cache entry with
-    /// `validated_at_generation == current`. Second call within the
-    /// same `content_generation` returns via `peek`'s fast path WITHOUT
-    /// any `Instantiate` dispatch. Discriminating: pre-R every call
-    /// re-walks the BFS and dispatches; post-R the second call's
-    /// dispatch trace is empty.
+    /// Cold call publishes the cache entry. The second call within the
+    /// same `content_generation` is a warm `peek` hit: the entry's
+    /// carrier strict-validates, so `peek` returns the cached bool
+    /// WITHOUT running `bfs_compute_inner` or dispatching any
+    /// `Instantiate` query. Discriminating: pre-cache every call
+    /// re-walks the BFS and dispatches; with the cache the second
+    /// call's dispatch trace is empty and its BFS compute count is 0.
     #[test]
-    fn cycle_bfs_cache_hit_avoids_dispatch_via_generation_check() {
+    fn cycle_bfs_cache_hit_avoids_dispatch_on_warm_hit() {
         let project = a0_make_project();
         project
             .upsert_base(
@@ -2386,7 +2697,7 @@ export type C<T> = A<T>
             "cold path must run bfs_compute_inner exactly once"
         );
 
-        // Warm call — generation-local fast path skips dispatch entirely.
+        // Warm call — a validating `peek` hit skips dispatch entirely.
         DISPATCH_TRACE.with(|t| t.borrow_mut().clear());
         reset_bfs_compute_counter_for_test();
         let mut fence2 = Vec::new();
@@ -2401,11 +2712,11 @@ export type C<T> = A<T>
         );
         assert_eq!(
             dispatches_second, 0,
-            "warm fast-path must skip Instantiate dispatch via generation-equal check"
+            "a warm `peek` hit must skip Instantiate dispatch"
         );
         assert_eq!(
             computes_second, 0,
-            "warm fast-path must not run bfs_compute_inner"
+            "a warm `peek` hit must not run bfs_compute_inner"
         );
     }
 
@@ -2585,18 +2896,16 @@ export type C<T> = A<T>
         );
     }
 
-    /// Test 6 — when the host's `content_generation` advances
-    /// (e.g., via a file content edit), the cached entry's
-    /// `validated_at_generation` becomes stale and the slow path
-    /// revalidates. If the dep_signature still validates, the entry's
-    /// `validated_at_generation` is updated and the cache hit is
-    /// preserved.
+    /// Test 6 — a second `RefCycleResultDb` read within the same
+    /// `content_generation` is served from the warm cache without
+    /// re-running the BFS body. Every `peek` strict-validates the
+    /// entry's carrier; on a passing validation the cached bool is
+    /// returned and `bfs_compute_inner` does not run.
     ///
-    /// Discriminating: probes the workspace's content_generation moves
-    /// when a file changes, AND that the cache responds correctly to
-    /// the staleness.
+    /// Discriminating relative to a "publish/recompute on every call"
+    /// bug: the second call's BFS compute count is 0.
     #[test]
-    fn cycle_bfs_cache_uses_dep_signature_revalidation_when_generation_advances() {
+    fn cycle_bfs_cache_second_read_skips_recompute_within_generation() {
         let project = a0_make_project();
         project
             .upsert_base("/types.ts", "export type Foo = { x: number };")
@@ -2663,7 +2972,11 @@ export type C<T> = A<T>
                 crate::fact_signature_helpers::empty_fact_signature(),
                 stale_signature,
             ),
-            validated_at_generation: std::sync::atomic::AtomicU64::new(u64::MAX),
+            // No self-roots on this synthetic stale entry — its
+            // staleness is carried by the legacy `DepSignature` rail
+            // (a whole-hash for `/nonexistent.ts`, a canonical the
+            // host's `FileArtifactStore` does not track).
+            self_root_canonicals: std::sync::Arc::from(Vec::<std::sync::Arc<str>>::new()),
         });
         let db = host.project_type_store().ref_cycle_db();
         db.entries().insert(id.clone(), stale_entry);
@@ -2674,10 +2987,10 @@ export type C<T> = A<T>
             "synthetic insert + bump_live_counter should leave live=1"
         );
 
-        // Peek must return None (entry is stale). The cached_gen
-        // (u64::MAX) does NOT match current, so the slow path runs;
-        // dep_signature_valid_for_host returns false (canonical
-        // doesn't exist); peek removes the entry.
+        // Peek must return None (entry is stale). Every peek validates
+        // the carrier strictly — `validate_dep_signature` rejects the
+        // legacy rail's whole-hash on a nonexistent canonical; peek
+        // removes the entry.
         let peek_result = db.peek(&id, host);
         assert!(
             peek_result.is_none(),

@@ -394,11 +394,6 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
     }
 
     #[inline]
-    fn workspace_content_generation(&self) -> u64 {
-        ResolverContext::workspace_content_generation(self.inner)
-    }
-
-    #[inline]
     fn workspace_is_workspace_owned(&self, canonical_id: &str) -> bool {
         ResolverContext::workspace_is_workspace_owned(self.inner, canonical_id)
     }

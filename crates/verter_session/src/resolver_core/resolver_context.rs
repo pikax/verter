@@ -353,14 +353,6 @@ pub(crate) trait ResolverContext: sealed::Sealed {
 
     fn record_ambient_dependency(&self, consumer_canonical: &str, virtual_id: &str);
 
-    /// Workspace content generation — narrow capability used by
-    /// `component_meta_caches.rs::peek` for the validated_at_generation
-    /// fast path. Together with `lookup_ambient_symbol` and
-    /// `record_ambient_dependency`, this replaces the broad `workspace()`
-    /// accessor (which would expose the full `WorkspaceAccess` mutator
-    /// surface to seal-scope code).
-    fn workspace_content_generation(&self) -> u64;
-
     /// Whether `canonical_id` is workspace-owned per the workspace's
     /// resolver-classification (NOT a path-substring check on
     /// `node_modules`). True for workspace package sources, including
@@ -743,11 +735,6 @@ impl ResolverContext for crate::VerterHost {
     fn record_ambient_dependency(&self, consumer_canonical: &str, virtual_id: &str) {
         self.workspace()
             .record_ambient_dependency(consumer_canonical, virtual_id);
-    }
-
-    #[inline]
-    fn workspace_content_generation(&self) -> u64 {
-        self.workspace().content_generation()
     }
 
     #[inline]

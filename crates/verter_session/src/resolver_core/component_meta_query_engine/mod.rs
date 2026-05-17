@@ -204,33 +204,34 @@ pub(crate) fn engine_fact_signature_for_exported_type(
 /// Build the fact signature for a `PreparedTargetDb` entry.
 ///
 /// A `PreparedTargetDb` entry maps `(active_scope, target_name)` to a
-/// resolved `(canonical, symbol)` pair. The entry is keyed on BOTH the
-/// active scope and the declaring canonical, so both are self-roots:
-/// the resolved target depends on the top-level identity of
-/// `target_name` in `active_scope` AND on the declaring file's own
-/// decl identity. The signature observes the top-level-identity facts
-/// for the target name in `active_scope`, and — when the declaring
-/// canonical/symbol differs from the active-scope target — also for
-/// the declaring `(decl_canonical, decl_symbol)`. A content edit to
-/// either file shifts its self-root `FileWholeHash` and rejects the
-/// entry.
+/// resolved `(canonical, symbol)` pair. The entry has up to THREE
+/// self-roots: the active scope, the original declaring canonical, AND
+/// — when the requested name re-exports through an intermediate module
+/// to a third file — the FINAL routed declaring canonical. The
+/// resolved target depends on the top-level identity of `target_name`
+/// in `active_scope`, on the original declaring `(decl_canonical,
+/// decl_symbol)`, and on the routed `(routed_canonical, routed_symbol)`.
+/// A content edit to ANY of the three files shifts its self-root
+/// `FileWholeHash` and rejects the entry.
 ///
-/// The builder is **provenance-pure**: `observed_active_scope_hash`
-/// and `observed_decl_hash` are the two keyed canonicals' content
-/// versions the producer's value was resolved against, captured once
-/// at the value source. Each `engine_fact_signature_for_exported_type`
-/// sub-signature is pinned to its own observed hash — the helper
-/// never re-reads current content. Returns `None` (refuse
-/// shared-cache admission) when either observed version's parse-fact
-/// registry cannot be recovered.
+/// The builder is **provenance-pure**: `observed_active_scope_hash`,
+/// `observed_decl_hash`, and (when present) the routed canonical's
+/// observed hash are the keyed/declaring canonicals' content versions
+/// the producer's value was resolved against, each captured once at
+/// the value source — the routed canonical's hash comes from the
+/// prepared-decl bundle actually used for the value
+/// ([`crate::resolver_core::prepared_decl::PreparedDeclBundle::owner_whole_hash`]),
+/// NOT a current-content re-read. Each
+/// `engine_fact_signature_for_exported_type` sub-signature is pinned
+/// to its own observed hash. Returns `None` (refuse shared-cache
+/// admission) when any observed version's parse-fact registry cannot
+/// be recovered.
 ///
-/// Re-route boundary (unchanged, separate deferral): when the
-/// requested name re-exports through an intermediate module the
-/// resolved value can name a THIRD declaring file that
-/// `PreparedTargetCacheKey` does not encode; that re-routed canonical
-/// is rooted by neither self-root here. Closing that gap requires
-/// encoding the re-routed canonical in the cache key — it is a known
-/// key-design boundary, not part of this provenance-purity fix.
+/// `routed_decl` is `Some((routed_canonical, routed_symbol,
+/// observed_routed_hash))` when the resolved declaring canonical
+/// differs from the original declaring canonical (a re-export hop);
+/// `None` when no re-route occurred (or the routed canonical equals
+/// the active scope / original declaring canonical, already rooted).
 pub(crate) fn engine_fact_signature_for_prepared_target(
     ctx: &dyn ResolverContext,
     active_scope: &str,
@@ -239,6 +240,7 @@ pub(crate) fn engine_fact_signature_for_prepared_target(
     decl_canonical: &str,
     decl_symbol: &str,
     observed_decl_hash: crate::resolver_core::ResolverHash16,
+    routed_decl: Option<(&str, &str, crate::resolver_core::ResolverHash16)>,
 ) -> Option<std::sync::Arc<[crate::resolver_core::FactVersionRef]>> {
     let mut entries: Vec<crate::resolver_core::FactVersionRef> =
         engine_fact_signature_for_exported_type(
@@ -259,6 +261,24 @@ pub(crate) fn engine_fact_signature_for_prepared_target(
             .iter()
             .cloned(),
         );
+    }
+    // The FINAL routed declaring canonical — the third self-root the
+    // cache key never encodes. Root it only when it is a genuinely
+    // distinct file: a routed canonical equal to the active scope or
+    // the original declaring canonical is already rooted above.
+    if let Some((routed_canonical, routed_symbol, observed_routed_hash)) = routed_decl {
+        if routed_canonical != active_scope && routed_canonical != decl_canonical {
+            entries.extend(
+                engine_fact_signature_for_exported_type(
+                    ctx,
+                    routed_canonical,
+                    routed_symbol,
+                    observed_routed_hash,
+                )?
+                .iter()
+                .cloned(),
+            );
+        }
     }
     Some(std::sync::Arc::from(entries))
 }

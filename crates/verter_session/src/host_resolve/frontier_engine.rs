@@ -488,7 +488,6 @@ impl VerterHost {
         canonical: &str,
         facts: &mut Vec<crate::resolver_core::FactVersionRef>,
         seen: &mut rustc_hash::FxHashSet<crate::resolver_core::FactVersionRef>,
-        route_shallow_cache: Option<&RouteShallowStateCache>,
     ) {
         if let Some(hash) = self.current_or_read_whole_hash(canonical) {
             let fact = crate::resolver_core::FactVersionRef::FileWholeHash {
@@ -500,21 +499,13 @@ impl VerterHost {
             }
         }
 
-        let route_hash = {
-            let normalized_canonical = self
-                .resolve_eval_dependency_canonical(canonical)
-                .unwrap_or_else(|| canonical.to_string());
-            route_shallow_cache
-                .and_then(|cache| cache.get(normalized_canonical.as_str()))
-                .filter(|state| state.as_ref().has_resolvable_surface())
-                .map(|state| crate::resolver_store::hash_route_surface(state.as_ref()))
-                .or_else(|| {
-                    self.shallow_file_state(canonical)
-                        .filter(|state| state.has_resolvable_surface())
-                        .map(|state| crate::resolver_store::hash_route_surface(&state))
-                })
-        };
-        if let Some(hash) = route_hash {
+        // Route fact production routes through the single
+        // `current_route_surface_hash` helper — the SAME source order
+        // (current `IndexedReady` first, route-owned-shallow fallback)
+        // the `HostStoreView` validator snapshots route facts in. A
+        // route-owned-shallow-first order here would record a hash the
+        // validator could not reproduce when an `IndexedReady` exists.
+        if let Some(hash) = self.current_route_surface_hash(canonical) {
             let fact = crate::resolver_core::FactVersionRef::DerivedFactHash {
                 canonical_id: canonical.to_string(),
                 kind: crate::resolver_core::DerivedFactKind::Route,
@@ -803,12 +794,7 @@ impl VerterHost {
         participants.sort();
         participants.dedup();
         for canonical in participants {
-            self.append_route_participant_fact_versions(
-                canonical.as_str(),
-                &mut facts,
-                &mut seen,
-                None,
-            );
+            self.append_route_participant_fact_versions(canonical.as_str(), &mut facts, &mut seen);
         }
 
         Some((route_result, facts))

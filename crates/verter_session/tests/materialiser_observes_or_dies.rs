@@ -100,10 +100,10 @@ fn materialise_structure_entry_carries_dep_signature() {
     // `read_set_signature: ReadSetSignature` field. The carrier
     // consolidates the legacy whole-hash rail and the path-precise
     // fact-signature rail; cache lookups validate through
-    // `entry.read_set_signature.validate(ctx)`. A refactor that
-    // dropped the carrier would mean cached entries had no observed
-    // facts to validate against — i.e., the cache could not detect
-    // staleness.
+    // `entry.read_set_signature.validate_with_self_roots(ctx,
+    // &entry.self_root_canonicals)`. A refactor that dropped the
+    // carrier would mean cached entries had no observed facts to
+    // validate against — i.e., the cache could not detect staleness.
     assert!(
         src.contains("read_set_signature: crate::fact_signature_helpers::ReadSetSignature")
             || src.contains("read_set_signature: ReadSetSignature"),
@@ -186,18 +186,24 @@ fn materialiser_pipeline_observes_dep_signatures_on_every_dispatch_family() {
         observe_dep_count
     );
 
-    // Discrimination 2: at least one `observe_fence_entry` per
-    // scope-canonical seed push (`finish_cacheable` + the in-place
-    // closure seed at the end of `materialize_component_meta_structure`).
+    // Discrimination 2: the scope-canonical seed push observes onto
+    // the active fact-read tracer via `observe_fence_entry`. The
+    // materialiser's two former seed-push sites (`finish_cacheable` +
+    // the cold-compute closure tail) are consolidated into the single
+    // admission boundary `finish_materialize_admission`, which seeds
+    // the fence from the ONE tear-free `observe_materialize_scope`
+    // observation and observes that seed exactly once. The invariant —
+    // the scope-canonical whole_hash dependency is recorded on the
+    // tracer — is preserved; the call-site count is now exactly one.
     let observe_fence_count = src.matches("observe_fence_entry(").count();
     assert!(
-        observe_fence_count >= 2,
-        "materialiser must observe scope-canonical seed pushes via \
-         `observe_fence_entry(...)` in both `finish_cacheable` AND \
-         the cold-compute closure tail. Got {} call sites — a value \
-         below 2 means the scope-canonical whole_hash dependency is \
-         not recorded on the active fact-read tracer; downstream \
-         staleness signals would miss owner-file edits.",
+        observe_fence_count >= 1,
+        "the materialiser's single admission boundary \
+         `finish_materialize_admission` must observe the scope-canonical \
+         seed push via `observe_fence_entry(...)`. Got {} call sites — \
+         zero means the scope-canonical whole_hash dependency is not \
+         recorded on the active fact-read tracer; downstream staleness \
+         signals would miss owner-file edits.",
         observe_fence_count
     );
 }

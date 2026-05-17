@@ -564,13 +564,17 @@ fn semantic_memo_warm_hit_validates_before_bubble() {
 /// fact for a member that no longer exists) would survive the peek
 /// even though the path-precise observation was stale.
 ///
-/// The carrier-aware peek calls `entry.read_set_signature.validate(ctx)`
-/// which AND-gates both rails. `register_post_publish` keys the
-/// reverse index under the carrier's `canonical_ids()` (union of
-/// legacy + facts canonicals).
+/// The carrier-aware peek calls
+/// `entry.read_set_signature.validate_with_self_roots(ctx, ...)` which
+/// AND-gates both rails AND validates the entry's self-root canonicals
+/// (the materialise scope + the `base` node's declaration-origin file)
+/// **strictly** — a strictly stronger gate than the plain
+/// `validate(ctx)` the pre-self-root tree used.
+/// `register_post_publish` keys the reverse index under the carrier's
+/// `canonical_ids()` (union of legacy + facts canonicals).
 ///
-/// Discriminating assertions: peek and register_post_publish use
-/// the carrier.
+/// Discriminating assertions: peek strict-validates via the carrier
+/// and register_post_publish uses the carrier.
 #[test]
 fn materialize_structure_peek_and_register_use_carrier() {
     let _serial = DISCRIMINATOR_MUTEX
@@ -595,10 +599,15 @@ fn materialize_structure_peek_and_register_use_carrier() {
     let peek_window =
         &impl_window[peek_offset..peek_offset + 4000.min(impl_window.len() - peek_offset)];
     assert!(
-        peek_window.contains("entry_arc.read_set_signature.validate(ctx)"),
-        "MaterializeStructureDb::peek must AND-gate via `entry_arc.read_set_signature.validate(ctx)` \
-         so the carrier's facts rail invalidates a stale entry even when the legacy \
-         DepSignature still validates. Pre-fix peek validated only the legacy rail."
+        peek_window.contains(".read_set_signature")
+            && peek_window
+                .contains("validate_with_self_roots(ctx, &entry_arc.self_root_canonicals)"),
+        "MaterializeStructureDb::peek must AND-gate via the carrier's strict \
+         `validate_with_self_roots(ctx, &entry_arc.self_root_canonicals)` so the carrier's \
+         facts rail invalidates a stale entry even when the legacy DepSignature still \
+         validates, AND a same-canonical edit to a self-root (the materialise scope / \
+         `base` node's declaration-origin file) rejects the entry strictly. Pre-fix peek \
+         validated only the legacy rail; the pre-self-root tree used the lax `validate`."
     );
 
     // register_post_publish must key the reverse index under the
