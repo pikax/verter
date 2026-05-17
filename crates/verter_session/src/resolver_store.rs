@@ -191,6 +191,26 @@ impl HostStoreView {
         Self::build(host, snapshot_epoch, Some(session_id))
     }
 
+    /// Drop every per-canonical / per-domain snapshot for a
+    /// session-deleted (tombstoned) canonical — there is no current
+    /// content for it. Removing its `whole_hashes`, `file_facts`, and
+    /// `derived_hashes` entries makes strict validation reject any warm
+    /// entry rooted on the now-deleted file (`validates_self_root_whole_hash`
+    /// rejects an untracked self-root; `validates_parse_domain` rejects
+    /// a real fact hash for an untracked file; the `derived_hashes`
+    /// validators reject an absent entry), so the consumer recomputes.
+    fn drop_tombstoned_canonical_snapshots(&mut self, canonical: &str) {
+        self.whole_hashes.remove(canonical);
+        self.file_facts.remove(canonical);
+        for kind in [
+            crate::resolver_core::DerivedFactKind::Route,
+            crate::resolver_core::DerivedFactKind::ImportRoute,
+            crate::resolver_core::DerivedFactKind::DirectSource,
+        ] {
+            self.derived_hashes.remove(&(canonical.to_owned(), kind));
+        }
+    }
+
     /// Re-root this view against a [`SessionView`]'s overlay so
     /// warm-read validation observes the session's CURRENT content
     /// identity rather than the base host's — across **every**
@@ -261,35 +281,37 @@ impl HostStoreView {
     /// still misses — exactly as the un-overlaid view validates against
     /// the base's current content.
     ///
-    /// Non-overlay canonicals are untouched — they keep their base
-    /// snapshots, so a session that overlays one file still validates
-    /// every other canonical against base content.
+    /// A canonical the session TOMBSTONED (overlay-Deleted) has its
+    /// base per-canonical snapshots dropped — see
+    /// [`Self::drop_tombstoned_canonical_snapshots`]. Tombstones are
+    /// reported by [`SessionView::tombstoned_canonicals`], iterated
+    /// independently of [`SessionView::overlay_canonicals`]: a session
+    /// can delete a file without re-upserting it (so it has no overlay
+    /// source), while a canonical re-upserted after a delete appears in
+    /// `overlay_canonicals` and is treated as an overlay-Upsert.
+    ///
+    /// Non-overlay, non-tombstoned canonicals are untouched — they keep
+    /// their base snapshots, so a session that overlays or deletes one
+    /// file still validates every other canonical against base content.
     #[must_use]
     pub(crate) fn with_session_overlay(
         mut self,
         view: &dyn crate::session_view::SessionView,
     ) -> Self {
+        // Tombstone-only canonicals: deleted by the session and never
+        // re-upserted, so absent from `overlay_canonicals()`. This is
+        // the delete-case analogue of the overlay-Upsert re-rooting
+        // below — without it a warm entry rooted on a session-deleted
+        // file's BASE content would still validate.
+        for canonical in view.tombstoned_canonicals() {
+            self.drop_tombstoned_canonical_snapshots(&canonical);
+        }
+
         for canonical in view.overlay_canonicals() {
             if view.is_tombstoned(&canonical) {
-                // The session deleted the file — drop every
-                // per-canonical / per-domain snapshot so a strict
-                // validation rejects any entry rooted on it and
-                // recomputes. There is no current content for a
-                // tombstoned canonical.
-                self.whole_hashes.remove(&canonical);
-                self.file_facts.remove(&canonical);
-                self.derived_hashes.remove(&(
-                    canonical.clone(),
-                    crate::resolver_core::DerivedFactKind::Route,
-                ));
-                self.derived_hashes.remove(&(
-                    canonical.clone(),
-                    crate::resolver_core::DerivedFactKind::ImportRoute,
-                ));
-                self.derived_hashes.remove(&(
-                    canonical.clone(),
-                    crate::resolver_core::DerivedFactKind::DirectSource,
-                ));
+                // Both an overlay-source key AND tombstoned — the
+                // tombstone wins over a stale overlay-source entry.
+                self.drop_tombstoned_canonical_snapshots(&canonical);
                 continue;
             }
             let Some(overlay_hash) = view.overlay_content_hash_for(&canonical) else {

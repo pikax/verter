@@ -202,7 +202,34 @@ pub trait SessionView: Send + Sync {
     /// overlays). Overlay-bearing implementations (`OverlaidView`,
     /// `OverlaidViewRef`) override it to return their overlay map's
     /// keys.
+    ///
+    /// This enumerates only overlay-*source* canonicals (overlay-Upsert
+    /// entries) — a canonical the session DELETED but never re-upserted
+    /// is reported by [`Self::tombstoned_canonicals`] instead.
     fn overlay_canonicals(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Enumerate every canonical id the view explicitly TOMBSTONES
+    /// (overlay-Deletes).
+    ///
+    /// Distinct from [`Self::overlay_canonicals`]: that method yields
+    /// only overlay-*source* keys. A canonical the session deleted but
+    /// never re-upserted has no overlay source, so it is absent from
+    /// `overlay_canonicals()` — only this accessor reports it.
+    ///
+    /// Validation-rebasing consumers
+    /// ([`crate::resolver_store::HostStoreView::with_session_overlay`])
+    /// iterate BOTH sets so a session-deleted canonical's base
+    /// per-canonical snapshots (`whole_hashes` / `file_facts` /
+    /// `derived_hashes`) are dropped from the validation view — a warm
+    /// entry rooted on the now-deleted base file must miss, exactly as
+    /// an edit invalidates it.
+    ///
+    /// Default impl returns an empty vector (base-only views never
+    /// tombstone). Only `OverlaidViewRef` — the sole view that carries
+    /// a tombstone set — overrides it.
+    fn tombstoned_canonicals(&self) -> Vec<String> {
         Vec::new()
     }
 }
@@ -865,6 +892,10 @@ impl SessionView for OverlaidViewRef<'_> {
 
     fn overlay_canonicals(&self) -> Vec<String> {
         self.overlays.keys().cloned().collect()
+    }
+
+    fn tombstoned_canonicals(&self) -> Vec<String> {
+        self.overlay_tombstones.iter().cloned().collect()
     }
 }
 

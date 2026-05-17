@@ -516,13 +516,15 @@ pub(crate) fn dep_signature_valid_for_host(
 ///
 /// Validates `signature` against a caller-supplied [`SessionView`]
 /// rather than the base host. The `WholeHash` arm of
-/// [`HostFenceValidator`] consults `view.content_hash_for(canonical)`,
-/// which carries the **overlay** content hash for an overlay-bearing
+/// [`HostFenceValidator`] rejects a session-tombstoned canonical
+/// outright, then consults `view.content_hash_for(canonical)`, which
+/// carries the **overlay** content hash for an overlay-bearing
 /// canonical and falls through to the base host's
 /// `FileArtifactStore`-derived hash for every untouched canonical —
 /// so a value's legacy whole-hash rail rooted on an overlay edit
-/// validates under the session that produced it. `ProjectGeneration`
-/// and ambient-lib facts are project-wide (overlay-invariant) and the
+/// validates under the session that produced it, while a rail rooted
+/// on a file the session deleted misses. `ProjectGeneration` and
+/// ambient-lib facts are project-wide (overlay-invariant) and the
 /// retained `host` reference covers them unchanged.
 ///
 /// This is the body of
@@ -559,11 +561,12 @@ pub(crate) fn dep_signature_valid_for_view(
 /// Used by cache revalidation and cold-build retry loops.
 ///
 /// View-aware binding (R17, R19):
-/// - **R17** — `HostFenceValidator` consults the supplied view's
-///   content hash before falling back to the host's
-///   `shallow_file_state`. Two concurrent sessions with conflicting
-///   overlays produce different validation outcomes because each
-///   carries a different view.
+/// - **R17** — `HostFenceValidator` rejects a session-tombstoned
+///   canonical, then consults the supplied view's content hash
+///   before falling back to the host's `shallow_file_state`. Two
+///   concurrent sessions with conflicting overlays (or one that
+///   deleted a file the other kept) produce different validation
+///   outcomes because each carries a different view.
 /// - **R19** — fact validation is the cache-correctness oracle; the
 ///   view is the concurrency-oracle's read substrate. The two
 ///   remain orthogonal — `StoreViewCompatToken` continues to drive
@@ -588,6 +591,20 @@ impl crate::completion_fence::FenceValidator for HostFenceValidator<'_> {
                 // consult the host's workspace view directly.
                 if canonical_id.starts_with("ambient:/") {
                     return self.validate_ambient_whole_hash(canonical_id, *expected);
+                }
+                // Session-deleted canonical: a tombstone is the
+                // explicit "the file is gone" signal. A `WholeHash`
+                // (or any content) dependency on it is INVALID — the
+                // session deleted the file. Reject BEFORE the
+                // base-host fallback: the base `shallow_file_state`
+                // still reports the pre-delete content (a session
+                // delete is an overlay, it never mutates the base
+                // host), so falling through would validate a
+                // dependency against a file the session deleted and a
+                // legacy dep-signature cache entry could reuse base
+                // results past the delete.
+                if self.view.is_tombstoned(canonical_id) {
+                    return false;
                 }
                 // Consult the view's content hash first. The view
                 // carries the overlay-aware content hash for overlay

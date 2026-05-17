@@ -539,4 +539,8 @@ impl<'a> SessionView for BoundSessionViewRef<'a> {
     fn overlay_canonicals(&self) -> Vec<String> {
         self.inner.overlay_canonicals()
     }
+
+    fn tombstoned_canonicals(&self) -> Vec<String> {
+        self.inner.tombstoned_canonicals()
+    }
 }

@@ -402,10 +402,21 @@ impl VerterHost {
         canonical: &str,
         view: &dyn crate::session_view::SessionView,
     ) -> Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis> {
-        // Tombstoned canonicals (overlay-Delete) report `None` for
-        // content hash AND source. Short-circuit the warm path: a
-        // tombstoned overlay does NOT have a meaningful component-meta
-        // result and must NOT collapse onto a base cache slot.
+        // Owner-canonical tombstone short-circuit: a canonical the
+        // session deleted has no meaningful component-meta result and
+        // must NOT collapse onto a base cache slot. `content_hash_for`
+        // returns `None` for a tombstone, but the `or_else` fallback
+        // below would then derive an `owner_whole_hash` from the base
+        // host's `shallow_file_state` (still reporting pre-delete
+        // content — a session delete is an overlay, it never mutates
+        // the base host), keying the warm lookup at the base slot.
+        // Reject before the fallback. The sole caller
+        // (`get_component_meta_via_view`) already guards the owner
+        // tombstone; this is defence-in-depth so the method honours
+        // its own contract independent of the caller.
+        if view.is_tombstoned(canonical) {
+            return None;
+        }
         self.provenance
             .view_aware_cache_key_lookups
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);

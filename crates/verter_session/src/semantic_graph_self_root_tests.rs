@@ -1861,3 +1861,286 @@ fn session_overlay_parse_fact_carrier_warm_validation() {
         }
     }
 }
+
+/// `execute_cooperative`'s warm-hit fast path rejects a warm entry
+/// rooted on a canonical the session has DELETED (overlay-Deleted).
+///
+/// Codex P2 #1: `HostStoreView::with_session_overlay` re-roots /
+/// removes per-canonical snapshots by iterating `overlay_canonicals()`
+/// — overlay-*source* keys only. A canonical the session tombstoned
+/// (deleted) but never re-upserted is absent from that set, so the
+/// tombstone branch never ran for it: the base `whole_hashes` /
+/// `file_facts` / `derived_hashes` snapshots survived in the
+/// validation view, and a warm `MemoEntry` rooted on the (now-deleted)
+/// base file still validated. The fix iterates
+/// [`SessionView::tombstoned_canonicals`] in addition to
+/// `overlay_canonicals()` and drops every per-canonical snapshot for a
+/// tombstoned canonical, so a strict validation rejects the entry.
+///
+/// The tombstone-bearing view is `OverlaidViewRef` — the sole
+/// `SessionView` impl that carries a tombstone set. The view here has
+/// an EMPTY overlay-source map and a tombstone for the probe canonical
+/// (the file was deleted, not re-upserted) — exactly the shape
+/// `MetaSession::with_overlay_view` produces for a `SessionOverlay::Delete`.
+///
+/// Discrimination per case:
+///
+/// - **deleted (`FileWholeHash` self-root)** — an entry self-rooted on
+///   the deleted file's base content hash, queried under the session
+///   that deleted it → **MISS** (`cold_ran` true). RED pre-fix:
+///   `with_session_overlay` skips the tombstone-only canonical, the
+///   base hash stays in `whole_hashes`, and
+///   `validates_self_root_whole_hash` accepts the base-rooted entry —
+///   a warm hit serving a deleted file. GREEN post-fix: `whole_hashes`
+///   no longer has the canonical, the strict self-root validator
+///   rejects, the cold build re-runs.
+/// - **deleted (`Parse` carrier)** — an entry whose carrier holds a
+///   real `Parse(SyntacticExportSet)` fact for the deleted canonical →
+///   **MISS**. RED pre-fix: `file_facts` keeps the base `FileFacts`
+///   snapshot, so `validates_parse_domain` matches the base parse-fact
+///   hash and the stale entry serves. GREEN post-fix: `file_facts` no
+///   longer has the canonical; `validates_parse_domain` rejects a real
+///   (non-zero) fact hash for an untracked file.
+/// - **sibling-not-deleted** — a DIFFERENT canonical, untouched by the
+///   session, with an entry self-rooted on ITS current content,
+///   queried under the same tombstone-bearing view → **warm HIT**.
+///   Proves the fix drops snapshots only for the tombstoned canonical
+///   — it is not a blanket reject of every entry under a session that
+///   deleted some file.
+#[test]
+fn session_tombstone_rejects_base_rooted_warm_entry() {
+    use crate::resolver_core::SessionResolverContext;
+    use crate::semantic_query::QueryResult;
+    use crate::session_view::{OverlaidViewRef, SessionView};
+    use rustc_hash::FxHashMap;
+
+    let deleted_canonical = "/sg_tombstone/probe.ts";
+    let sibling_canonical = "/sg_tombstone/sibling.ts";
+    let host = host();
+    // The probe file is alive on the base host — a warm entry was
+    // produced against this content before the session deleted it.
+    upsert(
+        &host,
+        deleted_canonical,
+        "export interface Probe { base: number; }\nexport const probe = 1;\n",
+    );
+    // A sibling file the session does NOT touch — its warm entries
+    // must still validate under the tombstone-bearing session.
+    upsert(
+        &host,
+        sibling_canonical,
+        "export interface Sibling { kept: string; }\nexport const sibling = 2;\n",
+    );
+    let deleted_base_hash = host
+        .ensure_indexed_ready(deleted_canonical)
+        .expect("deleted-file base IndexedReady must materialise")
+        .whole_hash;
+    let sibling_base_hash = host
+        .ensure_indexed_ready(sibling_canonical)
+        .expect("sibling-file base IndexedReady must materialise")
+        .whole_hash;
+    let host = Arc::new(host);
+
+    // `OverlaidViewRef` with an EMPTY overlay-source map and a single
+    // tombstone for the probe canonical — the session deleted the
+    // file and did not re-upsert it.
+    let overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();
+    let overlay_hashes: FxHashMap<String, crate::types::Hash16> = FxHashMap::default();
+    let mut overlay_tombstones: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    overlay_tombstones.insert(deleted_canonical.to_string());
+    let view = OverlaidViewRef::new(&host, &overlays, &overlay_hashes, &overlay_tombstones);
+    assert!(
+        view.is_tombstoned(deleted_canonical),
+        "fixture invariant: the view tombstones the probe canonical",
+    );
+    assert!(
+        !view.is_tombstoned(sibling_canonical),
+        "fixture invariant: the sibling canonical is NOT tombstoned",
+    );
+    assert!(
+        view.overlay_canonicals().is_empty(),
+        "fixture invariant: the view carries NO overlay-source keys — the \
+         file was deleted, not re-upserted. This is exactly why iterating \
+         only `overlay_canonicals()` misses the tombstone.",
+    );
+    assert_eq!(
+        view.tombstoned_canonicals(),
+        vec![deleted_canonical.to_string()],
+        "fixture invariant: the tombstone set reports the deleted canonical",
+    );
+
+    // The base parse fact for the deleted canonical's SyntacticExportSet
+    // — the carrier shape a cold build produced while the file was alive.
+    let base_ctx: &dyn ResolverContext = host.as_ref();
+    let deleted_parse_fact =
+        crate::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
+            base_ctx,
+            deleted_canonical,
+            deleted_base_hash,
+            FactKey::SyntacticExportSet,
+            FactLane::Semantic,
+        )
+        .expect("base SyntacticExportSet parse fact for the deleted file must resolve");
+    assert_ne!(
+        deleted_parse_fact.expected_hash, [0u8; 16],
+        "fixture invariant: the deleted file has a real (non-zero) \
+         SyntacticExportSet hash — a zero sentinel would make the \
+         parse-domain validator's untracked-accept window fire and the \
+         Parse-fact case would not discriminate",
+    );
+
+    // Publish a `MemoEntry` for `key` whose carrier is `facts`,
+    // self-rooted on `self_root`.
+    let publish = |graph: &SemanticGraphStore,
+                   key: &SemanticQueryKey,
+                   facts: Vec<FactVersionRef>,
+                   self_root: &str| {
+        let node = graph.intern_node(SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::String,
+        ));
+        let carrier =
+            ReadSetSignature::new(Arc::from(facts), Arc::from(Vec::new().into_boxed_slice()));
+        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(self_root)]);
+        let published = graph.publish_with_carrier_for_tests(
+            key.clone(),
+            QueryResult::Value(node),
+            carrier,
+            self_roots,
+        );
+        assert!(published > 0, "fixture invariant: the warm entry publishes");
+        node
+    };
+
+    let drive = |graph: &SemanticGraphStore, key: &SemanticQueryKey, ctx: &dyn ResolverContext| {
+        let mut cold_ran = false;
+        let recompute_node = graph.intern_node(SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::Number,
+        ));
+        let read = graph.execute_cooperative(
+            ctx,
+            key.clone(),
+            || {
+                graph.intern_node(SemanticNodeData::Opaque(
+                    crate::semantic_query::QueryError::Miss,
+                ))
+            },
+            || {
+                cold_ran = true;
+                (
+                    QueryResult::Value(recompute_node),
+                    Arc::from(Vec::new().into_boxed_slice()) as DepSignature,
+                )
+            },
+        );
+        (cold_ran, read.value, recompute_node)
+    };
+
+    // --- Case 1: deleted (FileWholeHash self-root) → MISS ----------
+    {
+        let graph = SemanticGraphStore::new();
+        let key = SemanticQueryKey::ResolveDecl(resolve_decl_key(deleted_canonical, "Probe"));
+        let _published = publish(
+            &graph,
+            &key,
+            vec![FactVersionRef::FileWholeHash {
+                canonical_id: deleted_canonical.to_string(),
+                hash: deleted_base_hash,
+            }],
+            deleted_canonical,
+        );
+        let session_ctx = SessionResolverContext::new(&host, &view);
+        let (cold_ran, value, recompute) = drive(&graph, &key, &session_ctx);
+        assert!(
+            cold_ran,
+            "deleted (FileWholeHash self-root): an entry self-rooted on the \
+             deleted file's base content hash, queried under the session that \
+             deleted the file, MUST MISS and re-run cold — the file is gone. \
+             RED pre-fix: `with_session_overlay` iterates only \
+             `overlay_canonicals()`, which is EMPTY for a delete-only session, \
+             so the tombstone branch never runs; the base hash survives in \
+             `whole_hashes` and `validates_self_root_whole_hash` accepts the \
+             base-rooted entry — a warm hit serving a file the session deleted.",
+        );
+        match value {
+            QueryResult::Value(node) => assert_eq!(
+                node, recompute,
+                "deleted (FileWholeHash self-root): the recomputed node must surface",
+            ),
+            other => panic!(
+                "deleted (FileWholeHash self-root): expected the recomputed Value, got {other:?}"
+            ),
+        }
+    }
+
+    // --- Case 2: deleted (Parse carrier) → MISS --------------------
+    {
+        let graph = SemanticGraphStore::new();
+        let key = SemanticQueryKey::ResolveDecl(resolve_decl_key(deleted_canonical, "Probe"));
+        let _published = publish(
+            &graph,
+            &key,
+            vec![
+                FactVersionRef::FileWholeHash {
+                    canonical_id: deleted_canonical.to_string(),
+                    hash: deleted_base_hash,
+                },
+                FactVersionRef::Parse(deleted_parse_fact.clone()),
+            ],
+            deleted_canonical,
+        );
+        let session_ctx = SessionResolverContext::new(&host, &view);
+        let (cold_ran, value, recompute) = drive(&graph, &key, &session_ctx);
+        assert!(
+            cold_ran,
+            "deleted (Parse carrier): an entry whose carrier holds a real \
+             Parse(SyntacticExportSet) fact for the deleted canonical MUST \
+             MISS. RED pre-fix: `with_session_overlay` skips the tombstone-only \
+             canonical, so `file_facts` keeps the deleted file's base \
+             `FileFacts` snapshot and `validates_parse_domain` matches the \
+             base parse-fact hash — the stale entry serves a deleted file.",
+        );
+        match value {
+            QueryResult::Value(node) => assert_eq!(
+                node, recompute,
+                "deleted (Parse carrier): the recomputed node must surface",
+            ),
+            other => {
+                panic!("deleted (Parse carrier): expected the recomputed Value, got {other:?}")
+            }
+        }
+    }
+
+    // --- Case 3: sibling-not-deleted → warm HIT --------------------
+    {
+        let graph = SemanticGraphStore::new();
+        let key = SemanticQueryKey::ResolveDecl(resolve_decl_key(sibling_canonical, "Sibling"));
+        let published = publish(
+            &graph,
+            &key,
+            vec![FactVersionRef::FileWholeHash {
+                canonical_id: sibling_canonical.to_string(),
+                hash: sibling_base_hash,
+            }],
+            sibling_canonical,
+        );
+        let session_ctx = SessionResolverContext::new(&host, &view);
+        let (cold_ran, value, _recompute) = drive(&graph, &key, &session_ctx);
+        assert!(
+            !cold_ran,
+            "sibling-not-deleted: a DIFFERENT canonical the session never \
+             touched, with an entry self-rooted on ITS current content, \
+             queried under the same tombstone-bearing view, MUST warm-HIT. \
+             The fix drops per-canonical snapshots ONLY for the tombstoned \
+             canonical — it is not a blanket reject of every entry under a \
+             session that deleted some other file.",
+        );
+        match value {
+            QueryResult::Value(node) => assert_eq!(
+                node, published,
+                "sibling-not-deleted: the warm hit surfaces the PUBLISHED node",
+            ),
+            other => panic!("sibling-not-deleted: expected the published Value, got {other:?}"),
+        }
+    }
+}
