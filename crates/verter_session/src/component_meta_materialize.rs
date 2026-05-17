@@ -440,57 +440,37 @@ impl Drop for MaterializeInFlightGuard {
 ///   so cooperative-admission publishes it.
 ///
 /// The single admission boundary for a materialiser compute closure.
-/// Converts a `(MaterializeOutcome, local_fence)` pair plus the
-/// observed materialise-scope into a [`ComputeAdmission`]:
+/// Converts a `(MaterializeOutcome, local_fence)` pair into a
+/// [`ComputeAdmission`]:
 ///
 /// - intrinsically non-cacheable outcome (`Recursive` / `Tainted` /
 ///   `Error`) → [`ComputeAdmission::ReturnOnly`].
 /// - valid `Value` / `Miss` outcome whose observed-root signature can
 ///   be built strictly → [`ComputeAdmission::Cacheable`].
 /// - valid `Value` / `Miss` outcome whose signature CANNOT be built
-///   strictly (the scope observation is missing, or the fence carries
-///   an unsound `RouteGeneration` dependency) → `ReturnOnly`. The
-///   value is still returned to every joiner; the shared cache stays
-///   empty so the next cold-miss recomputes.
+///   strictly (the fence carries an unsound `RouteGeneration`
+///   dependency, or a fence `WholeHash` conflicts with an observed
+///   base self-root) → `ReturnOnly`. The value is still returned to
+///   every joiner; the shared cache stays empty so the next cold-miss
+///   recomputes.
 ///
-/// `observed_scope` is the single tear-free
-/// [`MaterializeScopeObservation`] the compute closure established
-/// once at its top: its `whole_hash` is the seed pushed onto the fence
-/// AND the scope self-root in the signature, so the value and its
-/// signature root on one content identity (no current-content re-read
-/// at admission time). `base_origin_self_root` is the `base` node's
-/// declaration-origin file (`NodeScopeId::File`) when it is
-/// file-derived — a second self-root pinned to the `whole_hash` baked
-/// into the node's origin sidecar at intern time.
+/// `base_origin_self_root` is the `base` node's declaration-origin
+/// file (`NodeScopeId::File`) when it is file-derived — the entry's
+/// strict self-root, pinned to the `whole_hash` baked into the node's
+/// origin sidecar at intern time. The consumer materialise scope is
+/// NOT a self-root: a `MaterializeStructureDb` value's identity does
+/// not depend on which consumer reached it (R7 cross-owner reuse). If
+/// the scope IS read during compute, that read is observed naturally
+/// through the tracer / local-dep path and appears as an ordinary
+/// dependency fact in `local_fence`.
 fn finish_materialize_admission(
-    ctx: &dyn ResolverContext,
-    key: &MaterializeStructureCacheKey,
     outcome: MaterializeOutcome,
-    mut local_fence: Vec<(Arc<str>, DepVersion)>,
-    observed_scope: Option<&crate::resolver_core::MaterializeScopeObservation>,
+    local_fence: Vec<(Arc<str>, DepVersion)>,
     base_origin_self_root: Option<&(Arc<str>, crate::resolver_core::ResolverHash16)>,
 ) -> crate::cooperative_admission::ComputeAdmission<
     crate::semantic_query::CacheRead<MaterializeOutcome>,
     MaterializeStructureEntry,
 > {
-    // Seed the fence with the OBSERVED scope content version — the
-    // single `whole_hash` from `observed_scope`, NOT a current-content
-    // re-read. Seeding from a fresh re-read would root a stale value
-    // on post-edit content when an `upsert` lands in the publish race.
-    if let Some(observation) = observed_scope {
-        if !key.scope_canonical_id.as_ref().is_empty() {
-            let whole_hash = observation.whole_hash();
-            local_fence.push((
-                Arc::clone(&key.scope_canonical_id),
-                DepVersion::WholeHash(whole_hash),
-            ));
-            crate::component_meta_audit::observe_fence_entry(
-                ctx,
-                &key.scope_canonical_id,
-                &DepVersion::WholeHash(whole_hash),
-            );
-        }
-    }
     if !outcome.is_cacheable() {
         // Valid result but cannot be admitted to the cache (the
         // materialised outcome is intrinsically non-cacheable, e.g.
@@ -508,7 +488,7 @@ fn finish_materialize_admission(
         );
     }
     let legacy = dep_signature_from_fence(local_fence.clone());
-    match materialize_structure_read_set(&local_fence, observed_scope, base_origin_self_root) {
+    match materialize_structure_read_set(&local_fence, base_origin_self_root) {
         Some((facts, self_root_canonicals)) => {
             crate::cooperative_admission::ComputeAdmission::Cacheable(MaterializeStructureEntry {
                 outcome,
@@ -520,11 +500,12 @@ fn finish_materialize_admission(
         }
         None => {
             // The observed-root signature cannot be built strictly —
-            // the scope observation is missing or the fence carries an
-            // unsound `RouteGeneration` dependency. The materialised
-            // outcome is valid; route it through `ReturnOnly` so
-            // joiners observe it without admitting an entry that the
-            // warm-read validator could not soundly check.
+            // the fence carries an unsound `RouteGeneration` dependency
+            // or a fence `WholeHash` conflicts with the observed base
+            // self-root. The materialised outcome is valid; route it
+            // through `ReturnOnly` so joiners observe it without
+            // admitting an entry the warm-read validator could not
+            // soundly check.
             crate::cooperative_admission::ComputeAdmission::ReturnOnly(
                 crate::semantic_query::CacheRead {
                     value: outcome,
@@ -540,63 +521,54 @@ fn finish_materialize_admission(
 /// Build the observed-root fact signature + self-root canonical set
 /// for a `MaterializeStructureDb` entry — **provenance-pure**.
 ///
-/// The signature leads with one self-root `FileWholeHash` per observed
-/// self-root identity, then merges the fence facts as cross-file
-/// dependency facts. Self-roots:
+/// The signature leads with the `base` node's declaration-origin
+/// self-root `FileWholeHash` (when the base is file-derived), then
+/// merges the fence facts as cross-file dependency facts.
 ///
-/// - the materialise scope (`observed_scope`) — pinned to the single
-///   `IndexedReady.whole_hash` the compute closure observed, plus the
-///   scope's `SyntacticExportSet` parse fact pinned to the same
-///   version (recovered content-addressed; `None` refuses admission).
-/// - the `base` node's declaration-origin file
-///   (`base_origin_self_root`) — pinned to the `whole_hash` baked into
-///   the node's `NodeScopeId::File` origin at intern time.
+/// The single self-root is the `base` node's declaration-origin file
+/// (`base_origin_self_root`) — pinned to the `whole_hash` baked into
+/// the node's `NodeScopeId::File` origin at intern time. The consumer
+/// materialise scope is NOT a self-root: a `MaterializeStructureDb`
+/// value's identity does not depend on which consumer reached it (R7
+/// cross-owner reuse — N consumer scopes reaching the same
+/// `(base, scope_axis, mode)` share ONE entry). If the consumer scope
+/// IS read during compute, that read enters `local_fence` as an
+/// ordinary dependency fact through the normal tracer path.
+///
+/// A `Global`-origin base with no traced fence facts and no
+/// `base_origin_self_root` is admissible as a zero-self-root,
+/// zero-fact entry — a genuinely content-invariant materialisation.
 ///
 /// Returns `None` — refusing shared-cache admission — when:
 ///
-/// - `observed_scope` is `None` (no recoverable current scope
-///   artifact), or its `SyntacticExportSet` parse fact is `None`, or
-///   describes a canonical other than the keyed scope;
-/// - a fence entry names a self-root canonical with a `WholeHash` that
-///   disagrees with the observed self-root hash (a torn observation);
+/// - a fence entry names the base origin self-root canonical with a
+///   `WholeHash` that disagrees with the observed self-root hash (a
+///   torn observation);
 /// - a fence entry carries a `RouteGeneration` dependency (no
 ///   authoritative validating source — see [`fact_signature_from_fence`]).
 ///
 /// `ProjectGeneration` fence entries convert to
 /// `FactVersionRef::ProjectGeneration` (a project-shape change rejects
-/// the entry; a pure content edit does not over-invalidate).
+/// the entry; a pure content edit does not over-invalidate). A
+/// `ProjectGeneration` floor is NEVER synthesized — it is recorded
+/// only when the computation actually observed one.
 fn materialize_structure_read_set(
     local_fence: &[(Arc<str>, DepVersion)],
-    observed_scope: Option<&crate::resolver_core::MaterializeScopeObservation>,
     base_origin_self_root: Option<&(Arc<str>, crate::resolver_core::ResolverHash16)>,
 ) -> Option<crate::fact_signature_helpers::StructuralCarrierReadSet> {
     use crate::resolver_core::FactVersionRef;
 
     // Collapse observed self-roots into a per-canonical hash map; a
     // conflicting hash for the same canonical is a torn observation.
+    // The `base` node's declaration-origin file is the sole self-root.
     let mut self_root_hashes: rustc_hash::FxHashMap<Arc<str>, crate::types::Hash16> =
         rustc_hash::FxHashMap::default();
-    let observation = observed_scope?;
-    let scope_canonical: Arc<str> = Arc::clone(&observation.canonical_id);
-    let observed_scope_hash = observation.whole_hash();
-    self_root_hashes.insert(Arc::clone(&scope_canonical), observed_scope_hash);
-    // The scope's `SyntacticExportSet` parse fact must describe the
-    // keyed scope and be pinned to the SAME observed version.
-    let scope_export_set = observation.syntactic_export_set.clone()?;
-    if scope_export_set.canonical_id.as_str() != scope_canonical.as_ref() {
-        return None;
-    }
     if let Some((origin_canonical, origin_hash)) = base_origin_self_root {
-        match self_root_hashes.get(origin_canonical) {
-            Some(existing) if existing != origin_hash => return None,
-            _ => {
-                self_root_hashes.insert(Arc::clone(origin_canonical), *origin_hash);
-            }
-        }
+        self_root_hashes.insert(Arc::clone(origin_canonical), *origin_hash);
     }
 
     let mut facts: Vec<FactVersionRef> =
-        Vec::with_capacity(self_root_hashes.len() + 1 + local_fence.len());
+        Vec::with_capacity(self_root_hashes.len() + local_fence.len());
     // Lead with one self-root `FileWholeHash` per observed self-root.
     for (canonical, observed_hash) in &self_root_hashes {
         facts.push(FactVersionRef::FileWholeHash {
@@ -604,10 +576,6 @@ fn materialize_structure_read_set(
             hash: *observed_hash,
         });
     }
-    // The scope self-root's path-precise `SyntacticExportSet` parse
-    // fact, pinned to the same observed version (after the self-root
-    // FileWholeHash, mirroring `engine_fact_signature_for_materialize_memo`).
-    facts.push(FactVersionRef::Parse(scope_export_set));
 
     // Merge the fence facts as cross-file dependency facts. A fence
     // `WholeHash` for a self-root canonical is folded onto the
@@ -671,15 +639,15 @@ fn base_node_origin_self_root(
 ///
 /// The producer ([`materialize_structure_read_set`]) builds the
 /// entry's `facts` rail leading with one observed-hash self-root
-/// `FileWholeHash` per `self_root_canonicals` entry, followed by the
-/// scope's `SyntacticExportSet` parse fact. The traced set is the
+/// `FileWholeHash` per `self_root_canonicals` entry — the `base`
+/// node's declaration-origin file. The traced set is the
 /// `install_fact_tracer` scope's authoritative observation set — it
 /// catches transitively-bubbled facts the materialiser's `local_fence`
 /// (which merges only legacy dep-signature rails) can miss. This
-/// helper keeps the observed self-roots (and the scope parse fact)
-/// from the producer carrier, then merges the traced facts ON TOP —
-/// exactly the `semantic_graph_read_set_signature` discipline: a
-/// traced `FileWholeHash` for a self-root canonical is folded onto the
+/// helper keeps the observed self-roots from the producer carrier,
+/// then merges the traced facts ON TOP — exactly the
+/// `semantic_graph_read_set_signature` discipline: a traced
+/// `FileWholeHash` for a self-root canonical is folded onto the
 /// observed self-root (it MUST agree — a mismatch is a torn read), a
 /// traced `ProjectGeneration` is kept, every other traced fact is kept
 /// verbatim.
@@ -709,9 +677,10 @@ fn merge_traced_facts_into_materialize_carrier(
         }
     }
 
-    // Keep the producer carrier's self-root `FileWholeHash` facts and
-    // its scope `SyntacticExportSet` parse fact — these are the
-    // observed-version self-roots that lead the carrier.
+    // Keep ONLY the producer carrier's self-root `FileWholeHash` facts
+    // — the observed-version self-roots that lead the carrier. Every
+    // other producer fact (non-self-root dependency facts) is
+    // re-derived from the (superset) traced set below.
     let mut facts: Vec<FactVersionRef> =
         Vec::with_capacity(producer_facts.len() + traced_facts.len());
     for fact in producer_facts {
@@ -721,7 +690,6 @@ fn merge_traced_facts_into_materialize_carrier(
             {
                 facts.push(fact.clone());
             }
-            FactVersionRef::Parse(_) => facts.push(fact.clone()),
             // Non-self-root producer dependency facts are re-derived
             // from the (superset) traced set below — drop them here.
             _ => {}
@@ -881,24 +849,14 @@ pub(crate) fn materialize_component_meta_structure(
         let graph = ctx.project_type_store().semantic_graph();
         let mut local_fence: Vec<(Arc<str>, DepVersion)> = Vec::new();
 
-        // Establish ONE tear-free materialise-scope observation up
-        // front. Its `whole_hash` is the single content identity
-        // threaded into BOTH the fence scope-seed AND the entry's
-        // signature self-root, so the materialised value and its
-        // validation oracle root on one version — no current-content
-        // re-read races a concurrent `upsert` at admission time. An
-        // empty scope id (synthetic / test-only key) yields `None`,
-        // which makes `finish_materialize_admission` route the value
-        // through `ReturnOnly` rather than admitting an unrooted entry.
-        let observed_scope: Option<crate::resolver_core::MaterializeScopeObservation> =
-            if key_for_compute.scope_canonical_id.as_ref().is_empty() {
-                None
-            } else {
-                ctx.observe_materialize_scope(key_for_compute.scope_canonical_id.as_ref())
-            };
-        // The `base` node's declaration-origin file — a second
-        // self-root pinned to the `whole_hash` baked into the node's
-        // origin sidecar at intern time.
+        // The `base` node's declaration-origin file is the entry's
+        // sole self-root — pinned to the `whole_hash` baked into the
+        // node's origin sidecar at intern time. The consumer
+        // materialise scope is NOT a self-root (R7 cross-owner reuse):
+        // a `MaterializeStructureDb` value's identity does not depend
+        // on which consumer reached it. If the scope IS read during
+        // compute, that read enters `local_fence` as an ordinary
+        // dependency fact through the normal tracer path.
         let base_origin_self_root = base_node_origin_self_root(ctx, key_for_compute.base);
 
         // Test-only fact-injection hook. When the
@@ -947,7 +905,7 @@ pub(crate) fn materialize_component_meta_structure(
                     key_for_compute.scope_axis,
                     crate::component_meta_audit::MaterializeSkipReason::RegistryRouteCycleGuard,
                 );
-                return finish_materialize_admission(ctx, &key_for_compute, MaterializeOutcome::Value(key_for_compute.base), local_fence, observed_scope.as_ref(), base_origin_self_root.as_ref());
+                return finish_materialize_admission(MaterializeOutcome::Value(key_for_compute.base), local_fence, base_origin_self_root.as_ref());
             }
             // Package-ref guard on the actual root.
             if crate::meta_resolve::component_meta_ref_resolves_to_package_node(
@@ -959,7 +917,7 @@ pub(crate) fn materialize_component_meta_structure(
                     key_for_compute.scope_axis,
                     crate::component_meta_audit::MaterializeSkipReason::PackageRefTopLevel,
                 );
-                return finish_materialize_admission(ctx, &key_for_compute, MaterializeOutcome::Value(key_for_compute.base), local_fence, observed_scope.as_ref(), base_origin_self_root.as_ref());
+                return finish_materialize_admission(MaterializeOutcome::Value(key_for_compute.base), local_fence, base_origin_self_root.as_ref());
             }
 
             // Guards passed — let dispatch project the original
@@ -1003,7 +961,7 @@ pub(crate) fn materialize_component_meta_structure(
                     let body_id = match body_read.value {
                         QueryResult::Value(id) => id,
                         _ => {
-                            return finish_materialize_admission(ctx, &key_for_compute, MaterializeOutcome::Value(key_for_compute.base), local_fence, observed_scope.as_ref(), base_origin_self_root.as_ref());
+                            return finish_materialize_admission(MaterializeOutcome::Value(key_for_compute.base), local_fence, base_origin_self_root.as_ref());
                         }
                     };
                     // Step B: instantiate the builtin carrier on
@@ -1042,10 +1000,10 @@ pub(crate) fn materialize_component_meta_structure(
                     let projected_id = match projected.value {
                         QueryResult::Value(id) => id,
                         _ => {
-                            return finish_materialize_admission(ctx, &key_for_compute, MaterializeOutcome::Value(key_for_compute.base), local_fence, observed_scope.as_ref(), base_origin_self_root.as_ref());
+                            return finish_materialize_admission(MaterializeOutcome::Value(key_for_compute.base), local_fence, base_origin_self_root.as_ref());
                         }
                     };
-                    return finish_materialize_admission(ctx, &key_for_compute, MaterializeOutcome::Value(projected_id), local_fence, observed_scope.as_ref(), base_origin_self_root.as_ref());
+                    return finish_materialize_admission(MaterializeOutcome::Value(projected_id), local_fence, base_origin_self_root.as_ref());
                 }
                 RouteDemand::MemberPath(_) => {
                     // IndexedAccess projection is dispatch's
@@ -1092,7 +1050,7 @@ pub(crate) fn materialize_component_meta_structure(
                     key_for_compute.scope_axis,
                     crate::component_meta_audit::MaterializeSkipReason::RecursiveHelperCycleGuard,
                 );
-                return finish_materialize_admission(ctx, &key_for_compute, MaterializeOutcome::Value(key_for_compute.base), local_fence, observed_scope.as_ref(), base_origin_self_root.as_ref());
+                return finish_materialize_admission(MaterializeOutcome::Value(key_for_compute.base), local_fence, base_origin_self_root.as_ref());
             }
         }
 
@@ -1231,19 +1189,13 @@ pub(crate) fn materialize_component_meta_structure(
             }
         };
 
-        // Single admission boundary: seeds the fence with the
-        // OBSERVED scope `whole_hash`, then builds the observed-root
-        // signature. A non-cacheable outcome — or a signature that
-        // cannot be built strictly (missing scope observation /
-        // unsound `RouteGeneration`) — routes through `ReturnOnly`.
-        finish_materialize_admission(
-            ctx,
-            &key_for_compute,
-            outcome,
-            local_fence,
-            observed_scope.as_ref(),
-            base_origin_self_root.as_ref(),
-        )
+        // Single admission boundary: builds the observed-root
+        // signature from the `base` origin self-root + the traced
+        // fence facts. A non-cacheable outcome — or a signature that
+        // cannot be built strictly (an unsound `RouteGeneration` fence
+        // dependency, or a fence `WholeHash` conflicting with the base
+        // origin self-root) — routes through `ReturnOnly`.
+        finish_materialize_admission(outcome, local_fence, base_origin_self_root.as_ref())
     };
 
     let key_for_register = key.clone();
@@ -1280,14 +1232,14 @@ pub(crate) fn materialize_component_meta_structure(
                             // Merge the tracer's authoritative
                             // observation set ON TOP of the producer
                             // carrier's observed self-roots — the
-                            // self-roots and the scope parse fact lead,
-                            // the traced facts follow (deduped against
-                            // the self-roots). Replacing the rail
-                            // wholesale would drop the observed
-                            // self-roots the warm-read validator checks
-                            // strictly. A torn read (traced self-root
-                            // hash disagrees with the observed one)
-                            // routes the value through `ReturnOnly`.
+                            // base-origin self-root leads, the traced
+                            // facts follow (deduped against the
+                            // self-roots). Replacing the rail wholesale
+                            // would drop the observed self-roots the
+                            // warm-read validator checks strictly. A
+                            // torn read (traced self-root hash
+                            // disagrees with the observed one) routes
+                            // the value through `ReturnOnly`.
                             match merge_traced_facts_into_materialize_carrier(
                                 &entry.read_set_signature.facts,
                                 &entry.self_root_canonicals,

@@ -920,7 +920,10 @@ impl PreparedTargetDb {
         let live_counter = Arc::clone(&self.live_counter);
         // Removal-side counterpart of the `compute`-closure increment —
         // decrements when the substrate removes an already-published
-        // entry so the live counter tracks live entries.
+        // entry so the live counter tracks live entries. The cooperative
+        // substrate runs this on its own warm-hit stale-eviction path,
+        // so a lazily-evicted entry decrements `live_counter`
+        // symmetrically with the `compute`-closure increment.
         let live_counter_for_removal = Arc::clone(&self.live_counter);
         // The entry's `self_root_canonicals` (active scope + original
         // declaring canonical + final routed declaring canonical)
@@ -969,14 +972,30 @@ impl PreparedTargetDb {
     }
 
     pub fn invalidate_canonical(&self, canonical_id: &str) {
+        // Match an entry when `canonical_id` is the active scope, the
+        // original declaring canonical, OR a routed declaring file in
+        // the entry's `self_root_canonicals`. The cache key encodes only
+        // the first two; a `PreparedTarget` whose requested name
+        // re-exports through an intermediate module carries the final
+        // routed declaring canonical in `self_root_canonicals` only.
+        // Editing that third file must invalidate the entry — scanning
+        // the entry's own self-roots makes this invalidation complete
+        // (an entry missed here would later be rejected lazily by the
+        // generic validator path, which does not decrement this DB's
+        // `live_counter`).
         let keys: Vec<PreparedTargetCacheKey> = self
             .entries
             .iter()
             .filter_map(|entry| {
                 let key = entry.key();
-                if key.active_scope_canonical_id.as_ref() == canonical_id
+                let matches = key.active_scope_canonical_id.as_ref() == canonical_id
                     || key.decl_canonical_id.as_ref() == canonical_id
-                {
+                    || entry
+                        .value()
+                        .self_root_canonicals
+                        .iter()
+                        .any(|c| c.as_ref() == canonical_id);
+                if matches {
                     Some(entry.key().clone())
                 } else {
                     None
@@ -2632,9 +2651,13 @@ impl Default for RefCycleResultDb {
 /// Public hook to consult the BFS cache from
 /// `meta_resolve::ref_root_reaches_transitive_cycle_node`.
 ///
-/// Returns `Some(read)` on a generation-local fast hit OR a
-/// successful slow-path revalidation. Returns `None` on a true cache
-/// miss or a stale entry (the caller falls through to BFS compute).
+/// Delegates to [`RefCycleResultDb::peek`], a strict-validation read:
+/// every hit validates the entry's carrier against the live store view
+/// before returning — there is no generation-equal fast return that
+/// bypasses validation. Returns `Some(read)` only when a cached entry
+/// exists AND its strict self-root validation passes; returns `None` on
+/// a true cache miss or a stale entry (a stale entry is removed and the
+/// caller falls through to BFS compute).
 pub(crate) fn ref_cycle_db_peek(
     db: &RefCycleResultDb,
     id: &DeclIdentity,

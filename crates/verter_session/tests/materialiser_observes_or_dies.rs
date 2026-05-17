@@ -146,19 +146,19 @@ fn route_db_writes_record_fact_dep_signatures() {
     );
 }
 
-/// Sub-task E: every dispatch / sub-query in the materialiser cold-
-/// compute path MUST observe its consumed signature onto the active
-/// fact-read tracer via `observe_dep_signature` / `observe_fence_entry`.
+/// Every dispatch / sub-query in the materialiser cold-compute path
+/// MUST observe its consumed signature onto the active fact-read
+/// tracer, and the resulting cache entry MUST root on its observed
+/// facts.
 ///
-/// The arch-guard counts observe call sites in the materialiser and
-/// requires they cover every dispatch-family + every fence-push site.
-/// A regression below the threshold means a dispatch family or a
-/// scope-canonical seed push is missing its observe pairing — the
-/// fact-based tracer would record an incomplete signature and the
+/// The arch-guard counts the observe / tracer call sites in the
+/// materialiser. A regression below the threshold means a dispatch
+/// family is missing its observe pairing, or the cold-compute carrier
+/// is no longer re-based on the `install_fact_tracer` observation set —
+/// the fact-based tracer would record an incomplete signature and the
 /// strict admission guard would either refuse the resulting cache
-/// candidate (`admission_refused_count` increments) or admit a
-/// candidate that misses some of its real dependencies (silent
-/// staleness on later edits).
+/// candidate or admit a candidate that misses some of its real
+/// dependencies (silent staleness on later edits).
 #[test]
 fn materialiser_pipeline_observes_dep_signatures_on_every_dispatch_family() {
     let path = crates_dir()
@@ -186,24 +186,53 @@ fn materialiser_pipeline_observes_dep_signatures_on_every_dispatch_family() {
         observe_dep_count
     );
 
-    // Discrimination 2: the scope-canonical seed push observes onto
-    // the active fact-read tracer via `observe_fence_entry`. The
-    // materialiser's two former seed-push sites (`finish_cacheable` +
-    // the cold-compute closure tail) are consolidated into the single
-    // admission boundary `finish_materialize_admission`, which seeds
-    // the fence from the ONE tear-free `observe_materialize_scope`
-    // observation and observes that seed exactly once. The invariant —
-    // the scope-canonical whole_hash dependency is recorded on the
-    // tracer — is preserved; the call-site count is now exactly one.
-    let observe_fence_count = src.matches("observe_fence_entry(").count();
+    // Discrimination 2: the materialiser cold compute MUST run under an
+    // `install_fact_tracer` scope and re-base the published carrier on
+    // that scope's authoritative observation set via
+    // `merge_traced_facts_into_materialize_carrier`. The tracer scope is
+    // what records every transitively-bubbled fact the materialiser's
+    // legacy `local_fence` (whole-hash rails only) can miss; the merge
+    // folds the traced set onto the producer carrier's observed
+    // self-roots. A `MaterializeStructureDb` entry's identity does NOT
+    // depend on the consumer materialise scope (R7 cross-owner reuse),
+    // so the carrier is rooted on the `base` node's declaration-origin
+    // self-root plus the traced facts — NOT on a synthetic scope seed.
+    // Dropping the tracer scope or the carrier re-base would publish an
+    // entry whose signature misses its real dependencies.
+    let install_tracer_count = src.matches("install_fact_tracer").count();
     assert!(
-        observe_fence_count >= 1,
-        "the materialiser's single admission boundary \
-         `finish_materialize_admission` must observe the scope-canonical \
-         seed push via `observe_fence_entry(...)`. Got {} call sites — \
-         zero means the scope-canonical whole_hash dependency is not \
-         recorded on the active fact-read tracer; downstream staleness \
-         signals would miss owner-file edits.",
-        observe_fence_count
+        install_tracer_count >= 1,
+        "the materialiser cold compute MUST run under an \
+         `install_fact_tracer` scope so every transitively-bubbled fact \
+         is recorded on the fact-read tracer. Got {} call sites — zero \
+         means the cold compute observes no traced facts and the \
+         published cache entry would miss its real dependencies.",
+        install_tracer_count
+    );
+    let merge_traced_count = src
+        .matches("merge_traced_facts_into_materialize_carrier(")
+        .count();
+    assert!(
+        merge_traced_count >= 1,
+        "the materialiser MUST re-base the published `MaterializeStructureDb` carrier \
+         on the `install_fact_tracer` observation set via \
+         `merge_traced_facts_into_materialize_carrier(...)`. Got {} call sites — zero \
+         means the cold-compute carrier is not folded onto the traced facts, so the \
+         entry's signature would miss transitively-observed dependencies and serve \
+         stale after an edit to one of them.",
+        merge_traced_count
+    );
+
+    // Discrimination 3: the materialiser MUST root each entry on the
+    // `base` node's declaration-origin self-root — the load-bearing
+    // identity that replaced the (non-load-bearing) consumer-scope seed.
+    let base_origin_count = src.matches("base_node_origin_self_root").count();
+    assert!(
+        base_origin_count >= 1,
+        "the materialiser MUST root each `MaterializeStructureDb` entry on the `base` \
+         node's declaration-origin file via `base_node_origin_self_root(...)`. Got {} \
+         call sites — zero means the entry has no strict self-root and a content edit \
+         to the base declaration's file could not invalidate it.",
+        base_origin_count
     );
 }

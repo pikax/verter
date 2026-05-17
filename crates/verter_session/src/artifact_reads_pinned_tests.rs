@@ -421,3 +421,170 @@ fn indexed_for_current_content_pins_overlay_artifact_through_session_context() {
         "the overlay-pinned read must NOT surface the base artifact",
     );
 }
+
+/// `HostStoreView::build` route-fact provenance — a STALE `IndexedReady`
+/// retained for a canonical whose current content is route-owned-shallow
+/// MUST NOT publish its stale `Route` derived hash, and MUST NOT suppress
+/// the current route-owned-shallow `Route` fact.
+///
+/// `HostStoreView::build` snapshots `FileArtifactStore::snapshot_all()`,
+/// which returns every retained `IndexedReady` regardless of content
+/// hash. Once eager eviction is retired, a stale older-content
+/// `IndexedReady` can linger for a canonical whose CURRENT content is
+/// only carried by a `RouteOwnedShallowEntry`. A build that
+/// unconditionally trusts the snapshotted `IndexedReady` would publish
+/// the stale artifact's route surface as the canonical's `Route` derived
+/// fact AND mark the canonical indexed-covered — suppressing the current
+/// route-owned-shallow `Route` fact below. The view's `Route` hash would
+/// then disagree with `current_route_surface_hash()` (the production
+/// route-fact oracle, which is content-pinned and skips the stale
+/// indexed artifact) until the stale artifact is swept — a false stale
+/// miss for every route-dependent cache entry.
+///
+/// Discriminating fixture: `probe.ts` is materialised (real
+/// `IndexedReady` at the real content hash), then a synthetic STALE
+/// `IndexedReady` carrying a DIFFERENT file's shallow route surface is
+/// planted for it (`FileArtifactStore::insert` drains the real entry, so
+/// the store holds ONLY the stale candidate). A `RouteOwnedShallowEntry`
+/// for `probe.ts` is then materialised at the real current hash — the
+/// authoritative current route surface. The scheduler's content for
+/// `probe.ts` is never touched, so the tracked current whole hash stays
+/// at the real value while the lone retained `IndexedReady` is stale.
+///
+/// - **Pre-fix tree:** the build's indexed loop inserts the stale
+///   artifact's route surface as `derived_hashes[(probe, Route)]` and
+///   marks `probe` indexed-covered, so the route-owned-shallow loop
+///   skips it. The view's `Route` hash is the STALE surface and
+///   disagrees with `current_route_surface_hash()` — this test FAILS.
+/// - **Post-fix tree:** the indexed loop gates on
+///   `indexed.whole_hash == tracked`; the stale artifact is skipped, so
+///   the route-owned-shallow loop publishes the current route surface.
+///   The view's `Route` hash equals `current_route_surface_hash()`.
+#[test]
+fn host_store_view_route_fact_ignores_stale_indexed_when_current_is_route_owned() {
+    let probe = "/pinned/route_provenance_probe.ts";
+    // The current content of `probe.ts` — a resolvable route surface.
+    let (host, real_hash) = host_with_materialized_ts(
+        probe,
+        "export interface Current { current: number; }\nexport const current = 1;\n",
+    );
+    assert_ne!(
+        real_hash, STALE_HASH,
+        "fixture invariant: the real content hash must differ from the stale sentinel",
+    );
+
+    // The authoritative current route surface for `probe.ts` — derived
+    // from the live (current-content) shallow state. This is the hash a
+    // correct `HostStoreView` build must publish.
+    let current_route_surface = host
+        .current_route_surface_hash(probe)
+        .expect("probe declares a resolvable route surface → current_route_surface_hash is Some");
+
+    // A DONOR file with a DIFFERENT export surface. Its shallow state is
+    // harvested to give the planted stale `IndexedReady` a route surface
+    // that genuinely differs from `probe.ts`'s current one.
+    let donor = "/pinned/route_provenance_donor.ts";
+    upsert_donor_with_distinct_surface(&host, donor);
+    let donor_indexed = host
+        .project_type_store()
+        .indexed()
+        .get_any(donor)
+        .expect("donor IndexedReady must materialise");
+    let stale_route_surface =
+        crate::resolver_store::hash_route_surface(donor_indexed.shallow_state.as_ref());
+    assert_ne!(
+        stale_route_surface, current_route_surface,
+        "fixture invariant: the donor's route surface must differ from probe's current \
+         surface — otherwise the stale-vs-current Route hashes are indistinguishable",
+    );
+
+    // Plant a STALE `IndexedReady` for `probe.ts`: the real artifact's
+    // shape, but doctored to a content hash no real content produces AND
+    // carrying the DONOR's shallow route surface. `FileArtifactStore::insert`
+    // drains probe's real artifact, so the store retains ONLY this stale
+    // candidate while the scheduler still reports the real content hash.
+    let real_probe_indexed = host
+        .project_type_store()
+        .indexed()
+        .get_any(probe)
+        .expect("real probe IndexedReady must exist before planting the stale one");
+    let mut stale = (*real_probe_indexed).clone();
+    stale.whole_hash = STALE_HASH;
+    stale.route_hash = Some(STALE_HASH);
+    stale.import_route_hash = Some(STALE_HASH);
+    stale.shallow_state = Arc::clone(&donor_indexed.shallow_state);
+    host.project_type_store()
+        .indexed()
+        .insert(Arc::from(probe), Arc::new(stale));
+
+    // Materialise a `RouteOwnedShallowEntry` for `probe.ts` at its real
+    // current content hash — the authoritative current route surface.
+    // The route-owned producer publishes here because the only retained
+    // `IndexedReady` (the planted stale one) does not match the current
+    // content hash.
+    let route_owned = host
+        .ensure_route_owned_shallow_entry(probe)
+        .expect("route-owned-shallow entry must materialise for probe at the current hash");
+    assert_eq!(
+        route_owned.whole_hash, real_hash,
+        "fixture invariant: the route-owned-shallow entry is keyed by probe's real \
+         current content hash",
+    );
+
+    // Build the production `HostStoreView`.
+    let view = host.resolver_store_view();
+    let view_route_hash = view.derived_hash(probe, crate::resolver_core::DerivedFactKind::Route);
+
+    // Discriminating assertion: the view's `Route` derived hash must be
+    // the CURRENT route surface (from the route-owned-shallow entry),
+    // NOT the planted stale artifact's surface.
+    assert_eq!(
+        view_route_hash,
+        Some(current_route_surface),
+        "HostStoreView::build MUST publish the CURRENT route surface for a canonical \
+         whose only retained `IndexedReady` is stale — the route-owned-shallow entry is \
+         the current authority. A pre-fix build inserts the stale artifact's route \
+         surface (and suppresses the route-owned-shallow fallback via \
+         `indexed_route_canonicals`), so the view's Route hash is the stale surface.",
+    );
+    assert_ne!(
+        view_route_hash,
+        Some(stale_route_surface),
+        "HostStoreView::build MUST NOT publish the STALE `IndexedReady`'s route surface \
+         as the canonical's `Route` derived fact",
+    );
+    // The view's Route fact must agree with the production route-fact
+    // oracle — both must read the current route surface, not the stale
+    // artifact. A disagreement is a false stale miss for every
+    // route-dependent cache entry.
+    assert_eq!(
+        view_route_hash,
+        host.current_route_surface_hash(probe),
+        "HostStoreView::build's `Route` derived hash MUST agree with \
+         `current_route_surface_hash()` — the producer and the validator must observe \
+         one route surface for the canonical",
+    );
+}
+
+/// Upsert a route-only `.ts` donor whose export surface is deliberately
+/// distinct from the other fixtures in this file, so its hashed route
+/// surface differs from any current-content probe surface.
+fn upsert_donor_with_distinct_surface(host: &VerterHost, path: &str) {
+    let _ = host
+        .upsert(crate::UpsertRequest {
+            canonical_id: Some(path.to_string()),
+            input_id: path.to_string(),
+            source: Arc::from(
+                "export interface DonorAlpha { donorAlpha: string; }\n\
+                 export interface DonorBeta { donorBeta: boolean; }\n\
+                 export type DonorGamma = DonorAlpha | DonorBeta;\n\
+                 export const donorValue = 99;\n",
+            ),
+            file_kind: crate::FileKind::from_path(path),
+            aliases: Vec::new(),
+        })
+        .expect("donor upsert succeeds");
+    let _ = host
+        .ensure_indexed_ready(path)
+        .expect("donor IndexedReady must materialise");
+}

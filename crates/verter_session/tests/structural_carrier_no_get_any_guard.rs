@@ -74,7 +74,58 @@ fn extract_balanced_body<'a>(src: &'a str, needle: &str) -> &'a str {
 /// are a permissive multi-candidate read used as a fact / currentness
 /// oracle. `indexed().get_any` is the `FileArtifactStore` permissive
 /// read; `get_artifacts_any` is its raw-key sibling.
+///
+/// Each token is matched whitespace-insensitively around method-chain
+/// punctuation (see [`strip_punct_adjacent_whitespace`]) so a `rustfmt`
+/// reformat that breaks `indexed().get_any` across lines — e.g.
+/// `indexed()\n    .get_any` — cannot smuggle the banned read past a
+/// raw-substring scan.
 const BANNED: &[&str] = &["indexed().get_any", "get_artifacts_any"];
+
+/// Remove ASCII whitespace that is immediately adjacent to a method-chain
+/// punctuation character (`.`, `(`, `)`). A `rustfmt` reformat freely
+/// breaks a long call chain onto its own line — `indexed()\n.get_any` or
+/// `indexed() . get_any` — but the chain punctuation itself never moves.
+/// Collapsing only punctuation-adjacent whitespace re-joins the chain
+/// (`indexed().get_any`) WITHOUT joining whitespace-separated identifiers
+/// that are not part of one expression, so the scan stays both robust
+/// and free of cross-token false positives.
+fn strip_punct_adjacent_whitespace(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut idx = 0usize;
+    while idx < chars.len() {
+        let c = chars[idx];
+        if c.is_ascii_whitespace() {
+            let prev = out.chars().next_back();
+            // Look past this whitespace run to the next non-whitespace char.
+            let mut peek = idx;
+            while peek < chars.len() && chars[peek].is_ascii_whitespace() {
+                peek += 1;
+            }
+            let next = chars.get(peek).copied();
+            let punct = |ch: Option<char>| matches!(ch, Some('.') | Some('(') | Some(')'));
+            if punct(prev) || punct(next) {
+                // Drop the whole whitespace run — it borders chain punctuation.
+                idx = peek;
+                continue;
+            }
+            // Otherwise keep exactly one space (collapse the run).
+            out.push(' ');
+            idx = peek;
+            continue;
+        }
+        out.push(c);
+        idx += 1;
+    }
+    out
+}
+
+/// Whether `body` contains `banned` as a method call, tolerant of a
+/// `rustfmt` reformat that breaks the chain across lines.
+fn body_contains_banned(body: &str, banned: &str) -> bool {
+    strip_punct_adjacent_whitespace(body).contains(&strip_punct_adjacent_whitespace(banned))
+}
 
 /// Each D-owned producer / route-fact helper body MUST be free of the
 /// banned permissive reads.
@@ -121,7 +172,7 @@ fn structural_carrier_producers_use_no_permissive_get_any() {
         let body = extract_balanced_body(&src, item.signature);
         for banned in BANNED {
             assert!(
-                !body.contains(banned),
+                !body_contains_banned(body, banned),
                 "`{}` in `{}` MUST NOT call the permissive `{banned}` — a permissive \
                  multi-candidate read can surface a stale `IndexedReady` candidate, \
                  baking a stale content hash into a fact signature / route-fact oracle. \
@@ -143,7 +194,7 @@ fn get_any_scanner_discriminates() {
     let clean = "fn p() { let h = ctx.indexed_for_current_content(c).whole_hash; h }";
     for banned in BANNED {
         assert!(
-            !clean.contains(banned),
+            !body_contains_banned(clean, banned),
             "scanner self-test: a clean content-pinned body must contain no banned token",
         );
     }
@@ -153,7 +204,7 @@ fn get_any_scanner_discriminates() {
     let route_owned_get_any = "let e = self.route_owned_shallow().get_any(canonical);";
     for banned in BANNED {
         assert!(
-            !route_owned_get_any.contains(banned),
+            !body_contains_banned(route_owned_get_any, banned),
             "scanner self-test: `route_owned_shallow().get_any` must NOT be flagged — \
              only the `indexed()` artifact-store permissive read is banned",
         );
@@ -162,14 +213,42 @@ fn get_any_scanner_discriminates() {
     // A planted violation: an `indexed().get_any` read.
     let violating = "fn p() { let f = self.project_type_store.indexed().get_any(c); f }";
     assert!(
-        violating.contains("indexed().get_any"),
+        body_contains_banned(violating, "indexed().get_any"),
         "scanner self-test: an `indexed().get_any` read MUST be detected — if not, the \
          production guard above passes vacuously",
     );
     let violating_artifacts = "fn p() { let f = store.get_artifacts_any(&key); f }";
     assert!(
-        violating_artifacts.contains("get_artifacts_any"),
+        body_contains_banned(violating_artifacts, "get_artifacts_any"),
         "scanner self-test: a `get_artifacts_any` read MUST be detected",
+    );
+
+    // Whitespace robustness: a `rustfmt` reformat that breaks the
+    // `indexed().get_any` chain across lines — or inserts spaces around
+    // the chain punctuation — MUST still be detected. A raw-substring
+    // `contains` would miss every one of these.
+    let chain_broken =
+        "fn p() { let f = self.project_type_store\n            .indexed()\n            .get_any(c); f }";
+    assert!(
+        body_contains_banned(chain_broken, "indexed().get_any"),
+        "scanner self-test: a line-broken `indexed()\\n.get_any` chain MUST still be \
+         detected — the guard must be robust to a rustfmt reformat",
+    );
+    let chain_spaced = "fn p() { let f = store . indexed () . get_any (c); f }";
+    assert!(
+        body_contains_banned(chain_spaced, "indexed().get_any"),
+        "scanner self-test: an `indexed () . get_any` chain with spaces around the \
+         method-chain punctuation MUST still be detected",
+    );
+    // Negative robustness: punctuation-adjacent-whitespace stripping
+    // must NOT join two whitespace-separated identifiers into a false
+    // positive. `get_any` here is a bare identifier, not a chain off
+    // `indexed()`.
+    let not_a_chain = "fn p() { let indexed = lookup(); let get_any = other(); indexed; get_any }";
+    assert!(
+        !body_contains_banned(not_a_chain, "indexed().get_any"),
+        "scanner self-test: whitespace-separated identifiers that are not a method \
+         chain MUST NOT be joined into a false-positive match",
     );
 
     // Sanity: the scanned producers exist.

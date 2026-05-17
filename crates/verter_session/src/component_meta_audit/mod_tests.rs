@@ -230,10 +230,20 @@ fn component_meta_payload_accessor_returns_none_for_other_kinds() {
 /// return the published `RequestAuditRecord`. Fixture exercises:
 ///   - cross-file imported `interface` (forces `imported_root_proof`),
 ///   - multiple props (forces `materialize_structure_calls`),
+///   - a DIAMOND import graph — `Props` references two imported types
+///     (`FromA`, `FromB`) declared in two separate modules that BOTH
+///     re-export their declaration through the SAME shared base module
+///     (`/base.ts`). The shared base is therefore a route participant
+///     reached by two distinct import routes, so its whole-hash fact is
+///     observed/merged into the completion fence twice — the second
+///     merge is a redundant `(canonical, kind)` insert at the same
+///     version (the production `dep_signature_intern_hits` "intern
+///     hit"). The diamond makes the intern-hit a property of the import
+///     graph itself, independent of any single cache's self-rooting.
 ///   - which together force the substrate to: intern semantic
 ///     nodes (NodeArena push_impl shard locks), walk origins
 ///     under the completion fence (dep_signature merges), and
-///     re-merge already-observed origins (intern hits).
+///     re-merge an already-observed origin (intern hits).
 fn run_probe_request() -> RequestAuditRecord {
     let host = crate::VerterHost::new_standalone(crate::types::HostConfig {
         analysis_level: crate::types::AnalysisLevel::Full,
@@ -242,12 +252,38 @@ fn run_probe_request() -> RequestAuditRecord {
         ..crate::types::HostConfig::default()
     });
     let project = crate::meta::MetaProject::new(host);
+    // Shared base of the diamond — both `/a.ts` and `/b.ts` re-export
+    // their declaration through this module, so it is a route
+    // participant reached by two distinct routes.
+    project
+        .upsert_base(
+            "/base.ts",
+            r#"export interface FromA {
+  fromAMessage: string;
+}
+export interface FromB {
+  fromBLevel: number;
+}"#,
+        )
+        .unwrap();
+    // Left arm of the diamond — re-exports `FromA` from the shared base.
+    project
+        .upsert_base("/a.ts", "export { FromA } from './base'\n")
+        .unwrap();
+    // Right arm of the diamond — re-exports `FromB` from the shared base.
+    project
+        .upsert_base("/b.ts", "export { FromB } from './base'\n")
+        .unwrap();
+    // `Props` pulls one type from each arm of the diamond, so resolving
+    // it walks both routes — and both converge on `/base.ts`.
     project
         .upsert_base(
             "/types.ts",
-            r#"export interface Props {
-  message: string;
-  level: number;
+            r#"import type { FromA } from './a'
+import type { FromB } from './b'
+export interface Props {
+  fromA: FromA;
+  fromB: FromB;
   optional?: boolean;
 }"#,
         )

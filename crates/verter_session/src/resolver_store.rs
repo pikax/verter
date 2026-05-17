@@ -485,11 +485,27 @@ impl HostStoreView {
         // Snapshot FileArtifactStore entries into the store view.
         for (canonical_id, indexed) in host.project_type_store.indexed().snapshot_all() {
             let canonical_str = canonical_id.as_ref().to_owned();
-            view.whole_hashes
+            // The tracked current whole hash for this canonical: the
+            // value seeded earlier from `effective_file_state`, or
+            // `indexed.whole_hash` when no current state was tracked.
+            let tracked_whole_hash = *view
+                .whole_hashes
                 .entry(canonical_str.clone())
                 .or_insert(indexed.whole_hash);
-            // Insert Route fact from shallow state.
-            if indexed.shallow_state.has_resolvable_surface() {
+            // Insert the `Route` fact from shallow state — but ONLY
+            // when this `IndexedReady` is the current-content artifact
+            // (`indexed.whole_hash == tracked`). A stale `IndexedReady`
+            // retained in `snapshot_all()` for a canonical whose
+            // current content has only a route-owned-shallow entry
+            // would otherwise publish a stale route hash AND, via
+            // `indexed_route_canonicals`, suppress the current
+            // route-owned-shallow fallback below — leaving the view's
+            // `Route` derived hash disagreeing with
+            // `current_route_surface_hash()` until the stale artifact
+            // is swept.
+            if indexed.whole_hash == tracked_whole_hash
+                && indexed.shallow_state.has_resolvable_surface()
+            {
                 view.derived_hashes.insert(
                     (
                         canonical_str.clone(),

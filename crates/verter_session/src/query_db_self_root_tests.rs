@@ -1758,6 +1758,227 @@ fn prepared_target_db_self_root_sibling_edit_rejects_warm_entry() {
     );
 }
 
+/// `PreparedTargetDb::invalidate_canonical` must scan the entry's
+/// `self_root_canonicals` — a routed third declaring file is a
+/// load-bearing dependency the cache key never encodes.
+///
+/// A `PreparedTarget` entry whose requested name re-exports through an
+/// intermediate module to a third file carries that final routed
+/// declaring canonical in `self_root_canonicals`, while the cache key
+/// encodes only `(active_scope, decl_canonical)`. Editing the third
+/// file invalidates the entry's content dependency, so
+/// `invalidate_canonical(third_file)` MUST remove it.
+///
+/// Discriminating fixture: an entry is cold-published with
+/// `self_root_canonicals = [active_scope, decl_canonical, third_file]`
+/// — `third_file` is absent from the key. The entry's
+/// `fact_dep_signature` is empty, so it never goes stale on its own:
+/// the ONLY thing that can remove it is `invalidate_canonical`.
+///
+/// - **Pre-fix tree:** `invalidate_canonical`'s `filter_map` matches
+///   only `active_scope_canonical_id` / `decl_canonical_id`.
+///   `invalidate_canonical(third_file)` matches nothing, the entry
+///   survives, and `live_count()` stays `1` — this test FAILS.
+/// - **Post-fix tree:** the scan also matches an entry whose
+///   `self_root_canonicals` contains the canonical, so the entry is
+///   removed and `live_count()` is `0`.
+#[test]
+fn prepared_target_db_invalidate_canonical_scans_routed_self_root() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let active_scope = "/self_root_qdb/ptgt_inv_scope.ts";
+    let decl_canonical = "/self_root_qdb/ptgt_inv_decl.ts";
+    // The THIRD declaring file: the requested name's final routed
+    // declaration target, reached through a re-export hop. It is NOT in
+    // the `PreparedTargetCacheKey`.
+    let third_file = "/self_root_qdb/ptgt_inv_routed_decl.ts";
+    upsert(
+        &host,
+        active_scope,
+        "import { Probe } from './ptgt_inv_decl';\nexport type ReExport = Probe;\n",
+    );
+    upsert(
+        &host,
+        decl_canonical,
+        "export { Probe } from './ptgt_inv_routed_decl';\n",
+    );
+    upsert(&host, third_file, "export interface Probe { a: number; }\n");
+    host.ensure_indexed_ready(active_scope)
+        .expect("scope indexed");
+    host.ensure_indexed_ready(decl_canonical)
+        .expect("decl indexed");
+    host.ensure_indexed_ready(third_file)
+        .expect("routed decl indexed");
+
+    let ctx: &dyn ResolverContext = &host;
+    let db = host.project_type_store().prepared_target_db();
+    let key = prepared_target_key(active_scope, decl_canonical);
+
+    // Cold-publish. The entry's `self_root_canonicals` names the THIRD
+    // declaring file (the routed target) alongside the two keyed
+    // canonicals. The signature is empty so the entry never self-
+    // invalidates — only `invalidate_canonical` can remove it.
+    let primed = db
+        .get_or_compute(&key, ctx, || {
+            Some((
+                Some((Arc::<str>::from(third_file), Arc::<str>::from("Probe"))),
+                empty_fact_signature(),
+                Arc::from(vec![
+                    Arc::<str>::from(active_scope),
+                    Arc::<str>::from(decl_canonical),
+                    Arc::<str>::from(third_file),
+                ]),
+            ))
+        })
+        .expect("cold publish succeeds");
+    assert!(
+        primed.is_some(),
+        "fixture invariant: the cold publish stores the prepared target",
+    );
+    assert_eq!(
+        db.live_count(),
+        1,
+        "fixture invariant: exactly one PreparedTargetDb entry is live after the cold publish",
+    );
+
+    // Invalidate the THIRD declaring file — a file absent from the
+    // cache key but present in the entry's `self_root_canonicals`.
+    db.invalidate_canonical(third_file);
+
+    assert_eq!(
+        db.live_count(),
+        0,
+        "PreparedTargetDb::invalidate_canonical(third_file) MUST remove an entry whose \
+         `self_root_canonicals` names `third_file` — a routed declaring file is a \
+         load-bearing dependency the cache key never encodes. A pre-fix scan that \
+         matches only the keyed canonicals leaves the stale entry in the map.",
+    );
+    assert!(
+        db.peek(&key, ctx).is_none(),
+        "the entry rooted on the edited routed declaring file MUST NOT survive as a \
+         warm peek hit after `invalidate_canonical(third_file)`",
+    );
+}
+
+/// `PreparedTargetDb::live_counter` must not drift above the live entry
+/// count when a stale entry is evicted on the warm-read path.
+///
+/// `cooperative_get_or_insert` removes a stale already-published entry
+/// on its own warm-hit reject path, but with no removal hook — the
+/// publish-side `live_counter` increment (in the `compute` closure) is
+/// then unbalanced. `get_or_compute` resolves the warm hit itself so
+/// this Db owns the matching decrement.
+///
+/// Discriminating fixture: a fresh `PreparedTargetDb` with its OWN
+/// counter (isolated from the shared `component_meta_cache_live`
+/// aggregate). An entry is cold-published with the real producer
+/// signature ([`engine_fact_signature_for_prepared_target`]) so it
+/// validates at publish time and IS admitted. The keyed file is then
+/// edited through the skip-own-drain hook — the own-canonical drain
+/// does NOT proactively remove the entry, so it lingers stale. A second
+/// `get_or_compute` triggers the warm-read eviction; its compute returns
+/// `None` (no republish). The live counter must then equal
+/// `entries.len()`.
+///
+/// - **Pre-fix tree:** the helper's warm-reject `map.remove` drops the
+///   entry from the map (`entries.len() == 0`) but does NOT decrement
+///   `live_counter` (it stays `1`) — `live_counter != entries.len()`,
+///   so this test FAILS.
+/// - **Post-fix tree:** `get_or_compute` resolves the stale warm hit
+///   itself, removing the entry WITH a `fetch_sub`, so `live_counter`
+///   tracks `entries.len()` exactly.
+#[test]
+fn prepared_target_db_live_counter_does_not_drift_on_stale_eviction() {
+    use crate::component_meta_caches::PreparedTargetDb;
+    use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_prepared_target;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let keyed = "/self_root_qdb/ptgt_drift_keyed.ts";
+    upsert(&host, keyed, "export interface Probe { a: number; }\n");
+    host.ensure_indexed_ready(keyed).expect("keyed indexed");
+    let ctx: &dyn ResolverContext = &host;
+
+    // A fresh Db with its OWN counter, isolated from the shared
+    // `component_meta_cache_live` aggregate so the assertion observes
+    // exactly this Db's publish/evict bookkeeping.
+    let counter = Arc::new(AtomicU64::new(0));
+    let db = PreparedTargetDb::with_counter(Arc::clone(&counter));
+    let key = prepared_target_key(keyed, keyed);
+
+    // Cold-publish with the EXACT production producer signature, rooted
+    // on the keyed file's CURRENT observed hash — it validates at
+    // publish time, so the entry IS admitted.
+    let observed_keyed_hash = observed_whole_hash(ctx, keyed);
+    let owned = keyed.to_string();
+    let _ = db
+        .get_or_compute(&key, ctx, || {
+            let sig = engine_fact_signature_for_prepared_target(
+                ctx,
+                owned.as_str(),
+                "Probe",
+                observed_keyed_hash,
+                owned.as_str(),
+                "Probe",
+                observed_keyed_hash,
+                None,
+            )
+            .expect("provenance-pure signature builds — observed artifact present");
+            Some((
+                Some((Arc::<str>::from(keyed), Arc::<str>::from("Probe"))),
+                sig,
+                planted_self_root_canonicals(keyed),
+            ))
+        })
+        .expect("cold publish succeeds — keyed canonical tracked");
+    assert_eq!(
+        counter.load(Ordering::Relaxed),
+        1,
+        "fixture invariant: the cold publish incremented the live counter to 1",
+    );
+    assert_eq!(
+        db.live_count(),
+        1,
+        "fixture invariant: exactly one entry is live after the cold publish",
+    );
+
+    // Edit the keyed file through the skip-own-drain hook so the
+    // own-canonical drain does NOT proactively remove the entry — it
+    // lingers stale, to be evicted lazily on the next warm read.
+    upsert_skip_drain(
+        &host,
+        keyed,
+        "export interface Probe { a: number; b: string; }\n",
+    );
+
+    // Second call: the warm-read path observes the now-stale entry and
+    // evicts it. The compute returns `None` (no republish) so the only
+    // counter movement is the stale eviction.
+    let ctx2: &dyn ResolverContext = &host;
+    let mut cold_ran = false;
+    let _ = db.get_or_compute(&key, ctx2, || {
+        cold_ran = true;
+        None
+    });
+    assert!(
+        cold_ran,
+        "fixture invariant: the stale warm entry was rejected, so the cold path ran",
+    );
+
+    assert_eq!(
+        counter.load(Ordering::Relaxed),
+        db.live_count() as u64,
+        "PreparedTargetDb::live_counter MUST equal the live entry count after a stale \
+         entry is evicted on the warm-read path. A pre-fix tree leaves the counter at 1 \
+         while the map is empty — the warm-reject removal decremented nothing.",
+    );
+    assert_eq!(
+        counter.load(Ordering::Relaxed),
+        0,
+        "after the stale entry is evicted and the recompute republishes nothing, the \
+         live counter must be 0",
+    );
+}
+
 /// `MaterializeMemoDb` — producer-level self-root canary. The
 /// production producer is [`engine_fact_signature_for_materialize_memo`]
 /// (called by the materialize write-through). It is provenance-pure:
@@ -5034,26 +5255,150 @@ fn materialize_structure_db_untracked_self_root_rejects_warm_entry() {
     );
 }
 
+/// Intern a `base` `Object` node whose origin scope is a
+/// `NodeScopeId::File` for `canonical` at `canonical`'s CURRENT observed
+/// whole hash — the file-derived-base shape the materialiser roots via
+/// `base_node_origin_self_root`. The `base` identity is stable across an
+/// edit to `canonical` (the node id and the cache key never shift); the
+/// only thing that shifts is the file's `whole_hash` the entry's
+/// `base_origin_self_root` `FileWholeHash` records.
+fn intern_file_derived_object(
+    host: &VerterHost,
+    canonical: &str,
+) -> crate::semantic_query::SemanticNodeId {
+    use crate::semantic_query::{NodeScopeId, SemanticNodeData, SurfaceView};
+    let whole_hash = host
+        .shallow_file_state(canonical)
+        .map(|s| s.whole_hash)
+        .expect("file-derived base fixture: canonical must be tracked with a whole hash");
+    host.project_type_store()
+        .semantic_graph()
+        .intern_node_with_scope(
+            SemanticNodeData::Object(SurfaceView {
+                members: Arc::from(Vec::new().into_boxed_slice()),
+                call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                keyspace: None,
+                has_index_signature: false,
+            }),
+            NodeScopeId::File {
+                canonical_id: Arc::from(canonical),
+                whole_hash,
+                local_scope: None,
+            },
+        )
+}
+
 /// `MaterializeStructureDb` rejects a warm entry after a content edit
-/// to its materialise scope canonical — end-to-end through the
-/// production materialiser, under the skip-own-drain hook.
+/// to the `base` node's declaration-origin file — end-to-end through
+/// the production materialiser, under the skip-own-drain hook.
 ///
 /// Retry-item-2 unblock: the own-canonical drain currently drains
 /// `MaterializeStructureDb` on a same-canonical upsert. After the drain
-/// is removed, a same-canonical edit must still reject the warm entry
-/// via the carrier's strict self-root validation. This test edits the
-/// scope through `upsert_skipping_own_canonical_drain_for_tests` so the
-/// own-canonical drain does NOT mask the staleness, then asserts the
-/// warm `peek` misses. The `base` node is interned directly (Global
-/// scope) and is STABLE across the scope edit, so the cache key is
-/// unchanged — the only shifting fact is the scope's `FileWholeHash`.
+/// is removed, an edit to a file the materialisation actually depends
+/// on must still reject the warm entry on its own. The load-bearing
+/// dependency a `MaterializeStructureDb` value carries is the `base`
+/// node's `NodeScopeId::File` origin — recorded by the producer as a
+/// strict `base_origin_self_root`. This test interns a `base` whose
+/// origin scope is `NodeScopeId::File { canonical_id: edited_file }`,
+/// materialises + admits, then edits `edited_file` through
+/// `upsert_skipping_own_canonical_drain_for_tests` so the own-canonical
+/// drain does NOT mask the staleness, and asserts the warm `peek`
+/// misses. The `base` node id (hence the cache key) is STABLE across
+/// the edit — the only shifting fact is the `base` origin's
+/// `FileWholeHash`. (The materialise *scope* is NOT a strict self-root:
+/// it is non-load-bearing — see `..._unread_scope_edit_keeps_warm_entry`.)
 #[test]
-fn materialize_structure_db_scope_edit_rejects_warm_entry_under_skip_drain() {
+fn materialize_structure_db_base_origin_edit_rejects_warm_entry_under_skip_drain() {
     use crate::component_meta_materialize::{MaterializationScope, MaterializeStructureCacheKey};
     use crate::semantic_query::ProjectionMode;
 
     let host = VerterHost::new_standalone(HostConfig::default());
-    let scope = "/struct_carrier_qdb/ms_scope.ts";
+    let edited_file = "/struct_carrier_qdb/ms_base_origin.ts";
+    upsert(&host, edited_file, "export type Probe = { a: number };\n");
+    assert!(
+        host.ensure_indexed_ready(edited_file).is_some(),
+        "edited_file IndexedReady materialises",
+    );
+
+    let dispatch = host.semantic_dispatch();
+    // `base` origin scope is `NodeScopeId::File { edited_file }` at its
+    // current whole hash — the file-derived-base self-root.
+    let base = intern_file_derived_object(&host, edited_file);
+    let key = MaterializeStructureCacheKey {
+        scope_canonical_id: Arc::from(edited_file),
+        base,
+        scope_axis: MaterializationScope::TopLevel,
+        mode: ProjectionMode::Expanded,
+    };
+
+    // Cold build — publishes a warm entry self-rooted on the `base`
+    // node's declaration-origin file.
+    let _ = dispatch.materialize_surface(key.clone());
+    let db = host.project_type_store().materialize_structure_db();
+    assert!(
+        db.peek(&key, &host).is_some(),
+        "fixture invariant: the cold build admitted a warm MaterializeStructureDb entry \
+         self-rooted on the `base` node's declaration-origin file",
+    );
+
+    // Edit the `base` origin file through the skip-own-drain hook so the
+    // own-canonical drain does NOT remove the entry.
+    upsert_skip_drain(
+        &host,
+        edited_file,
+        "export type Probe = { a: string; b: number };\n",
+    );
+    assert!(
+        host.ensure_indexed_ready(edited_file).is_some(),
+        "edited_file IndexedReady re-materialises after the edit",
+    );
+
+    assert!(
+        db.peek(&key, &host).is_none(),
+        "MaterializeStructureDb::peek MUST reject the warm entry after a content edit to \
+         the `base` node's declaration-origin file — the entry's strict \
+         `base_origin_self_root` catches the shifted FileWholeHash even though the \
+         own-canonical drain was skipped. This is the property that makes deleting the \
+         own-canonical drain sound for a file-derived base: the carrier rejects an edit \
+         to a file the materialisation depends on, on its own.",
+    );
+}
+
+/// `MaterializeStructureDb` does NOT over-root on the non-load-bearing
+/// consumer materialise scope: an entry whose materialisation does not
+/// depend on a given consumer scope MUST survive a content edit to that
+/// scope (the warm `peek` still hits).
+///
+/// Discriminating property: the `base` is a `Global`-scoped `Object`
+/// (no `NodeScopeId::File` origin → no `base_origin_self_root`) with an
+/// empty surface (no traced facts). The consumer materialise scope is a
+/// SEPARATE file the materialisation never reads. The cache key excludes
+/// `scope_canonical_id` (R7 cross-owner reuse), so the cache key is
+/// stable across the scope edit.
+///
+/// - **Pre-fix tree:** `materialize_structure_read_set` seeds the
+///   consumer scope into `self_root_hashes` as a strict self-root
+///   `FileWholeHash` and pushes the scope's `SyntacticExportSet` parse
+///   fact. A content edit to the scope shifts that `FileWholeHash`, so
+///   strict `validate_with_self_roots` REJECTS the entry — the warm
+///   `peek` misses.
+/// - **Post-fix tree:** the consumer scope is not a self-root and
+///   contributes no fact. A `Global` base with no traced facts admits as
+///   a zero-self-root, zero-fact entry; a scope edit leaves the entry's
+///   signature untouched, so the warm `peek` still HITS.
+///
+/// This test FAILS against the pre-fix tree (the artificial scope
+/// self-root invalidates the warm entry) and PASSES post-fix. It is the
+/// direct discriminator for the P1 over-rooting removal.
+#[test]
+fn materialize_structure_db_unread_scope_edit_keeps_warm_entry() {
+    use crate::component_meta_materialize::{MaterializationScope, MaterializeStructureCacheKey};
+    use crate::semantic_query::ProjectionMode;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let scope = "/struct_carrier_qdb/ms_unread_scope.ts";
     upsert(&host, scope, "export const anchor = 1;\n");
     assert!(
         host.ensure_indexed_ready(scope).is_some(),
@@ -5061,6 +5406,10 @@ fn materialize_structure_db_scope_edit_rejects_warm_entry_under_skip_drain() {
     );
 
     let dispatch = host.semantic_dispatch();
+    // `base` is a Global-scoped empty Object — no `NodeScopeId::File`
+    // origin (no `base_origin_self_root`) and no members (no traced
+    // facts). The materialisation is genuinely content-invariant and
+    // does NOT depend on the consumer scope.
     let base = intern_global_object(&host);
     let key = MaterializeStructureCacheKey {
         scope_canonical_id: Arc::from(scope),
@@ -5069,17 +5418,18 @@ fn materialize_structure_db_scope_edit_rejects_warm_entry_under_skip_drain() {
         mode: ProjectionMode::Expanded,
     };
 
-    // Cold build — publishes a warm entry self-rooted on `scope`.
+    // Cold build — publishes a warm entry. Post-fix this entry carries
+    // no self-root and no fact (zero-self-root, zero-fact admission).
     let _ = dispatch.materialize_surface(key.clone());
     let db = host.project_type_store().materialize_structure_db();
     assert!(
         db.peek(&key, &host).is_some(),
-        "fixture invariant: the cold build admitted a warm MaterializeStructureDb entry \
-         self-rooted on the scope",
+        "fixture invariant: the cold build admitted a warm MaterializeStructureDb entry",
     );
 
-    // Edit the scope through the skip-own-drain hook so the
-    // own-canonical drain does NOT remove the entry.
+    // Edit the consumer scope through the skip-own-drain hook so the
+    // own-canonical drain does NOT remove the entry. The materialisation
+    // does not depend on the scope's content.
     upsert_skip_drain(
         &host,
         scope,
@@ -5091,12 +5441,13 @@ fn materialize_structure_db_scope_edit_rejects_warm_entry_under_skip_drain() {
     );
 
     assert!(
-        db.peek(&key, &host).is_none(),
-        "MaterializeStructureDb::peek MUST reject the warm entry after a content edit to \
-         its materialise scope canonical — the entry's strict scope self-root catches \
-         the shifted FileWholeHash even though the own-canonical drain was skipped. This \
-         is the property that makes deleting the own-canonical drain sound: the carrier \
-         rejects a same-canonical edit on its own.",
+        db.peek(&key, &host).is_some(),
+        "MaterializeStructureDb::peek MUST still serve the warm entry after a content \
+         edit to a consumer materialise scope the materialisation does NOT depend on — \
+         the consumer scope is non-load-bearing and is NOT a strict self-root. A tree \
+         that seeds the consumer scope as a strict self-root over-roots the entry and \
+         invalidates it on an edit the cached value never depended on, breaking R7 \
+         cross-owner reuse.",
     );
 }
 
