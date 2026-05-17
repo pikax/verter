@@ -64,7 +64,6 @@ use family::{
     carrier_facts_reference_canonical, dep_signature_references_canonical, family_and_slot,
     FamilyKey, FamilySlots, MemoEntry, ModeSlot,
 };
-pub(crate) use inflight::FORCE_COLD_ABORT_SWEEP;
 use inflight::{
     InflightEntry, InflightPanicGuard, RecursionStackGuard, IN_FLIGHT_ON_THIS_THREAD,
     MAX_INFLIGHT_RETRIES,
@@ -167,6 +166,27 @@ pub struct SemanticGraphStore {
     /// `execute_cooperative` to bucket owner vs joiner paths and held
     /// time on `MetaProvenance`.
     provenance: Option<Arc<crate::types::MetaProvenance>>,
+    /// Per-store test trigger for the cold-abort sweep path. When a test
+    /// sets this (via [`Self::test_force_cold_abort_sweep`]), the
+    /// cold-winner re-check in [`Self::warm_publish_one`] marks its own
+    /// in-flight entry `aborted = true` just before the TOCTOU
+    /// abort-check, simulating a concurrent canonical invalidation sweep
+    /// — driving `cold_aborts_swept` deterministically without racing a
+    /// real invalidation window.
+    ///
+    /// **Per-store scope (test hermeticity).** The flag lives on the
+    /// store the test drives, not in a process-global. Rust runs a test
+    /// binary's tests in parallel; a process-global trigger set by an
+    /// abort-forcing test would also abort an unrelated concurrent
+    /// test's `execute_cooperative` cold publish on its own store. A
+    /// per-store flag affects only the store it is set on, so no test
+    /// flipping the trigger can disturb a concurrent unrelated test.
+    ///
+    /// Default `false`. The production cold-publish path reads it once
+    /// per cold publish — a single relaxed atomic load on a path that
+    /// already takes the entries lock, so the cost is in the noise and
+    /// production cold-abort-sweep behaviour is unchanged.
+    force_cold_abort_sweep: std::sync::atomic::AtomicBool,
     /// Γ.B reverse index. For each canonical id,
     /// holds the set of `(family, slot)` pairs whose published
     /// dep_signature references it, paired with the dep_signature
@@ -2272,8 +2292,9 @@ impl SemanticGraphStore {
     /// releases; invalidation then evicts the fresh publish in its phase
     /// 1. Either interleaving leaves the slot empty post-invalidation.
     ///
-    /// Test-only forcing flag [`FORCE_COLD_ABORT_SWEEP`] simulates a
-    /// concurrent sweep without racing a real invalidation window.
+    /// Per-store test trigger [`Self::force_cold_abort_sweep`]
+    /// simulates a concurrent sweep without racing a real
+    /// invalidation window.
     fn warm_publish_one(
         &self,
         key: &SemanticQueryKey,
@@ -2311,10 +2332,12 @@ impl SemanticGraphStore {
         // this in-flight entry just before the TOCTOU re-check.
         // Deterministically drives the `cold_aborts_swept` counter
         // for counter-helper coverage tests without needing a racy
-        // real invalidation. The flag default `false` makes this
-        // branch a single relaxed atomic load on the cold-build
-        // path under normal traffic.
-        if FORCE_COLD_ABORT_SWEEP.load(Ordering::Relaxed) {
+        // real invalidation. The per-store flag default `false`
+        // makes this branch a single relaxed atomic load on the
+        // cold-build path under normal traffic, and — being
+        // per-store — it cannot bleed into a concurrent unrelated
+        // test's store (test hermeticity).
+        if self.force_cold_abort_sweep.load(Ordering::Relaxed) {
             inflight.state.lock().aborted = true;
         }
         // Atomic re-check under the entries lock — `state` is briefly
@@ -2803,21 +2826,49 @@ impl SemanticGraphStore {
         true
     }
 
-    /// Public test driver: set the `FORCE_COLD_ABORT_SWEEP` flag for
-    /// the duration of the returned guard so the next
-    /// `execute_cooperative` cold-build deterministically hits the
-    /// TOCTOU abort path. Used by integration tests in
-    /// `crates/verter_session/tests/` that drive the counter-helper
-    /// plumbing.
+    /// Test-only observability accessor: non-destructively read the
+    /// `Arc::strong_count` of the in-flight entry for `key`, or `0` if
+    /// the table has no entry.
     ///
-    /// The guard restores the flag to `false` on drop. Tests must
-    /// hold the guard for the duration of the `execute_cooperative`
-    /// call.
+    /// Joiner-retry tests use this to deterministically synchronise:
+    /// each caller of `execute_cooperative` clones the entry's `Arc`
+    /// (step 3: `table.entry(key).or_insert_with(...).clone()`). While
+    /// only the cold winner is mid-build, three references are live —
+    /// the table entry, the winner's `inflight` local, and the
+    /// `InflightPanicGuard`'s clone — so the count is `3`; an admitted
+    /// joiner raises it to `4`. Polling this to `> 3` replaces a
+    /// wall-clock `sleep` that races the joiner under parallel test
+    /// load (test hermeticity) — it never touches the entry's state,
+    /// so it cannot perturb the build it observes.
+    ///
+    /// `#[doc(hidden)]` and reached only through the `for_tests`
+    /// re-export shim, mirroring `test_trigger_inflight_abort`.
     #[doc(hidden)]
     #[must_use]
-    pub fn test_force_cold_abort_sweep() -> TestForceColdAbortGuard {
-        inflight::FORCE_COLD_ABORT_SWEEP.store(true, Ordering::SeqCst);
-        TestForceColdAbortGuard { _private: () }
+    pub fn test_inflight_strong_count(&self, key: &SemanticQueryKey) -> usize {
+        let table = self.inflight.lock();
+        table.get(key).map_or(0, Arc::strong_count)
+    }
+
+    /// Public test driver: set this store's per-store cold-abort
+    /// trigger for the duration of the returned guard so the next
+    /// `execute_cooperative` cold-build on **this store**
+    /// deterministically hits the TOCTOU abort path. Used by
+    /// integration tests in `crates/verter_session/tests/` that drive
+    /// the counter-helper plumbing.
+    ///
+    /// The trigger is scoped to the store the guard borrows — a test
+    /// forcing an abort affects only its own store, never a
+    /// concurrently-running unrelated test's store. The guard restores
+    /// the flag to `false` on drop. Tests must hold the guard for the
+    /// duration of the `execute_cooperative` call.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_force_cold_abort_sweep(&self) -> TestForceColdAbortGuard<'_> {
+        self.force_cold_abort_sweep.store(true, Ordering::SeqCst);
+        TestForceColdAbortGuard {
+            flag: &self.force_cold_abort_sweep,
+        }
     }
 }
 
@@ -2885,6 +2936,19 @@ pub fn test_trigger_inflight_abort(store: &SemanticGraphStore, key: &SemanticQue
     store.test_trigger_inflight_abort_impl(key)
 }
 
+/// Public test driver: read the in-flight entry's `Arc` strong count
+/// for `key` on `store`. Forwards to
+/// [`SemanticGraphStore::test_inflight_strong_count`] so joiner-retry
+/// tests deterministically poll for joiner admission instead of
+/// sleeping. See that method's docs for the strong-count contract
+/// (`3` while only the winner is mid-build, `4` once a joiner joins).
+#[doc(hidden)]
+#[allow(dead_code)]
+#[must_use]
+pub fn test_inflight_strong_count(store: &SemanticGraphStore, key: &SemanticQueryKey) -> usize {
+    store.test_inflight_strong_count(key)
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // Counter helpers (Decision #5: single helper, dual-target write)
 // ──────────────────────────────────────────────────────────────────────────
@@ -2950,18 +3014,21 @@ fn record_cold_abort_swept(stats: &AtomicSemanticGraphStats) {
 }
 
 /// RAII guard returned by
-/// [`SemanticGraphStore::test_force_cold_abort_sweep`]. Restores the
-/// `FORCE_COLD_ABORT_SWEEP` flag to `false` on drop so a panicking
-/// test does not leak the flag onto sibling tests sharing the same
-/// process.
+/// [`SemanticGraphStore::test_force_cold_abort_sweep`]. Borrows the
+/// driving store's per-store
+/// [`force_cold_abort_sweep`](SemanticGraphStore::force_cold_abort_sweep)
+/// flag and restores it to `false` on drop, so a panicking test does
+/// not leak the trigger onto a later `execute_cooperative` on the same
+/// store. The trigger never reaches another store, so sibling tests
+/// running in parallel are unaffected regardless.
 #[doc(hidden)]
-pub struct TestForceColdAbortGuard {
-    _private: (),
+pub struct TestForceColdAbortGuard<'a> {
+    flag: &'a std::sync::atomic::AtomicBool,
 }
 
-impl Drop for TestForceColdAbortGuard {
+impl Drop for TestForceColdAbortGuard<'_> {
     fn drop(&mut self) {
-        inflight::FORCE_COLD_ABORT_SWEEP.store(false, Ordering::SeqCst);
+        self.flag.store(false, Ordering::SeqCst);
     }
 }
 

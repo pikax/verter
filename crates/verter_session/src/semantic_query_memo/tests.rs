@@ -2697,19 +2697,39 @@ fn vue_macro_elements_nodes_do_not_populate_node_scope_sidecar() {
 // SemanticGraphStats counter extension
 // ──────────────────────────────────────────────────────────────────
 
-/// RAII guard that restores `FORCE_COLD_ABORT_SWEEP` to `false` on
-/// drop — panicking tests must not leak the flag onto sibling tests
-/// sharing the same process.
-struct ForceColdAbortGuard;
-impl ForceColdAbortGuard {
-    fn set() -> Self {
-        FORCE_COLD_ABORT_SWEEP.store(true, Ordering::SeqCst);
-        Self
-    }
-}
-impl Drop for ForceColdAbortGuard {
-    fn drop(&mut self) {
-        FORCE_COLD_ABORT_SWEEP.store(false, Ordering::SeqCst);
+/// Number of `Arc<InflightEntry>` strong references held while a cold
+/// winner is inside its build closure and **no** joiner has joined
+/// yet. The winner accounts for three: the in-flight table entry, the
+/// winner's own `inflight` local in `execute_cooperative`, and the
+/// `InflightPanicGuard`'s clone (created before the build closure
+/// runs). A joiner that is admitted clones the same `Arc`, raising the
+/// count to `WINNER_ONLY_INFLIGHT_REFS + 1`.
+const WINNER_ONLY_INFLIGHT_REFS: usize = 3;
+
+/// Block the calling (test) thread until a joiner has been admitted
+/// onto the in-flight entry for `key` on `store`.
+///
+/// Each `execute_cooperative` caller clones the entry's `Arc` (step 3
+/// of the dispatch loop). While only the cold winner is mid-build the
+/// strong count is [`WINNER_ONLY_INFLIGHT_REFS`]; it rises by one once
+/// a joiner has joined. Polling that count is a deterministic
+/// alternative to a wall-clock `sleep`, which races the joiner under
+/// parallel test load — if a joiner-retry test aborted the entry
+/// before the joiner joined, the joiner would become a fresh winner
+/// and never retry, intermittently failing the test.
+///
+/// The poll is bounded: it spins for at most ~10 s, then panics so a
+/// genuine hang fails loudly rather than blocking the suite forever.
+fn wait_for_joiner_admitted(store: &SemanticGraphStore, key: &SemanticQueryKey) {
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while store.test_inflight_strong_count(key) <= WINNER_ONLY_INFLIGHT_REFS {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for a joiner to be admitted onto the \
+             in-flight entry (strong count never exceeded {WINNER_ONLY_INFLIGHT_REFS})",
+        );
+        std::thread::sleep(Duration::from_millis(1));
     }
 }
 
@@ -2849,8 +2869,13 @@ fn semantic_graph_stats_inflight_aborted_retries_increments_on_retry_loop() {
         )
     });
 
-    // Give the joiner time to enter the wait.
-    thread::sleep(std::time::Duration::from_millis(50));
+    // Deterministically wait until the joiner has been admitted onto
+    // the winner's in-flight entry (its `Arc` clone raises the strong
+    // count to 3: winner-local + table + joiner). A wall-clock sleep
+    // here races the joiner under parallel test load — if the abort
+    // fired before the joiner joined, the joiner would become a fresh
+    // winner and never retry (test hermeticity).
+    wait_for_joiner_admitted(&store, &key);
 
     // Abort the joiner's wait — simulate invalidation's step 2
     // without requiring a matching warm slot.
@@ -2884,9 +2909,9 @@ fn semantic_graph_stats_inflight_aborted_retries_increments_on_retry_loop() {
 
 /// When the TOCTOU re-check observes `aborted = true` during the
 /// cold winner's publish, the warm publish is skipped and
-/// `cold_aborts_swept` increments. `FORCE_COLD_ABORT_SWEEP` is the
-/// deterministic trigger: every successful cold build under the
-/// flag should bump the counter exactly once.
+/// `cold_aborts_swept` increments. The per-store cold-abort trigger
+/// is the deterministic mechanism: every successful cold build under
+/// the trigger should bump the counter exactly once.
 #[test]
 fn semantic_graph_stats_cold_aborts_swept_increments_when_forced() {
     let host = ctx_host();
@@ -2896,7 +2921,7 @@ fn semantic_graph_stats_cold_aborts_swept_increments_when_forced() {
         name: Arc::from("Foo"),
     });
 
-    let _guard = ForceColdAbortGuard::set();
+    let _guard = store.test_force_cold_abort_sweep();
 
     let mut call_count = 0u32;
     let result = store.execute_cooperative(
@@ -2935,6 +2960,111 @@ fn semantic_graph_stats_cold_aborts_swept_increments_when_forced() {
         store.memo_entry_count(),
         0,
         "no warm slot may land when the sweep aborts the publish",
+    );
+}
+
+/// The cold-abort trigger is scoped to the store it is set on — it
+/// must NOT bleed into a concurrent cold build on a *different*
+/// store. Rust runs a test binary's tests in parallel; a
+/// process-global trigger would abort an unrelated test's
+/// `execute_cooperative` cold publish, silently emptying its memo.
+///
+/// Discriminating interleaving: `store_b`'s cold winner is parked
+/// inside its build closure (poised to publish). `store_a`'s trigger
+/// is then set and held across `store_b`'s release. When `store_b`'s
+/// `warm_publish_one` runs its TOCTOU abort-check, a per-store trigger
+/// leaves `store_b` untouched — `store_b` publishes and its memo holds
+/// one entry. A process-global trigger would abort `store_b`'s publish
+/// (memo empty, `cold_aborts_swept == 1`), failing this test.
+#[test]
+fn cold_abort_trigger_is_scoped_to_its_store_not_process_global() {
+    use std::sync::mpsc;
+    use std::thread;
+
+    let store_a = Arc::new(SemanticGraphStore::new());
+    let store_b = Arc::new(SemanticGraphStore::new());
+    let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        scope: scope("/w/dep.ts"),
+        name: Arc::from("Foo"),
+    });
+
+    let (tx_in_build, rx_in_build) = mpsc::channel::<()>();
+    let (tx_release, rx_release) = mpsc::channel::<()>();
+
+    // store_b's cold winner enters its build closure, signals, then
+    // parks until released — so its warm publish happens strictly
+    // AFTER store_a's trigger is set below.
+    let b_store = Arc::clone(&store_b);
+    let b_key = key.clone();
+    let b_thread = thread::spawn(move || {
+        let host = ctx_host();
+        b_store.execute_cooperative(
+            &host,
+            b_key,
+            || b_store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || {
+                tx_in_build.send(()).expect("store_b signal in_build");
+                rx_release.recv().expect("store_b await release");
+                let id = b_store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+                (QueryResult::Value(id), empty_signature())
+            },
+        )
+    });
+
+    // store_b is now parked mid-build, poised to publish.
+    rx_in_build.recv().expect("store_b entered build");
+
+    // Force the cold-abort trigger on store_a and HOLD it across
+    // store_b's publish. A process-global trigger would now also abort
+    // store_b's unrelated cold publish.
+    let _a_guard = store_a.test_force_cold_abort_sweep();
+
+    // Release store_b — its warm publish runs the TOCTOU abort-check
+    // while store_a's trigger is set.
+    tx_release.send(()).expect("release store_b");
+    let b_result = b_thread.join().expect("store_b joined");
+    assert!(
+        matches!(b_result.value, QueryResult::Value(_)),
+        "store_b's cold winner still returns its computed result",
+    );
+
+    // store_b's publish must NOT have been aborted by store_a's
+    // trigger: the slot is populated and store_b swept zero aborts.
+    assert_eq!(
+        store_b.memo_entry_count(),
+        1,
+        "store_b's cold publish must land — store_a's cold-abort \
+         trigger must not bleed into store_b (process-global leak)",
+    );
+    assert_eq!(
+        store_b.stats_snapshot().cold_aborts_swept,
+        0,
+        "store_b must observe zero cold-abort sweeps — store_a's \
+         per-store trigger must not reach store_b",
+    );
+
+    // store_a's own trigger is still scoped correctly: a cold build on
+    // store_a under the held guard IS aborted.
+    let a_host = ctx_host();
+    let a_result = store_a.execute_cooperative(
+        &a_host,
+        key,
+        || store_a.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+        || {
+            let id = store_a.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+            (QueryResult::Value(id), empty_signature())
+        },
+    );
+    assert!(matches!(a_result.value, QueryResult::Value(_)));
+    assert_eq!(
+        store_a.memo_entry_count(),
+        0,
+        "store_a's own cold publish IS aborted by its held trigger",
+    );
+    assert_eq!(
+        store_a.stats_snapshot().cold_aborts_swept,
+        1,
+        "store_a swept exactly one cold abort under its own trigger",
     );
 }
 
@@ -3383,7 +3513,7 @@ fn cold_abort_sweep_global_counter_increments_without_request_context() {
         name: Arc::from("Foo"),
     });
 
-    let _force_guard = SemanticGraphStore::test_force_cold_abort_sweep();
+    let _force_guard = store.test_force_cold_abort_sweep();
 
     let result = store.execute_cooperative(
         &host,
@@ -3436,8 +3566,8 @@ fn cold_abort_sweep_attributes_to_per_request_context() {
     let ctx = RequestContext::new(7, Arc::from("/c.vue"), false, None);
     let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
 
-    // Force the cold-abort sweep deterministically.
-    let _force_guard = SemanticGraphStore::test_force_cold_abort_sweep();
+    // Force the cold-abort sweep deterministically on this store.
+    let _force_guard = store.test_force_cold_abort_sweep();
 
     let result = store.execute_cooperative(
         &host,
@@ -3529,7 +3659,11 @@ fn inflight_aborted_retry_attributes_to_per_request_context() {
         )
     });
 
-    thread::sleep(std::time::Duration::from_millis(50));
+    // Deterministically wait until the joiner has joined the winner's
+    // in-flight entry before aborting — a wall-clock sleep races the
+    // joiner under parallel test load and would let it become a fresh
+    // winner that never retries (test hermeticity).
+    wait_for_joiner_admitted(&store, &key);
     let aborted = test_trigger_inflight_abort(&store, &key);
     assert!(aborted, "inflight entry must have been present to abort");
 

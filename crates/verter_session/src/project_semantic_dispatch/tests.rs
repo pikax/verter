@@ -6561,14 +6561,21 @@ fn shallow_instantiation_ref_substitutes_via_navigate() {
 // REGRESSION: warm-pass O(1) over InstantiationRef.
 //
 // A warm second-pass empty-path Shallow query over an InstantiationRef
-// base must NOT increment `SLOT_BINDING_EXPANDED_INSTANTIATE_CALLS`.
-// The cold pass populates the warm cache via an
-// `Instantiate { body_mode: Expanded }` dispatch (which the counter
-// observes); the warm pass reads the family memo and skips the build
-// path entirely.
+// base must be an O(1) family-memo hit — it must NOT re-run the build
+// path. The cold pass populates the warm cache; the warm pass reads
+// the family memo and skips the build entirely.
+//
+// Discrimination is via the **per-store** `SemanticGraphStore` hit /
+// miss counters (`stats_snapshot`), NOT the process-global
+// `SLOT_BINDING_EXPANDED_INSTANTIATE_CALLS`. Rust runs this binary's
+// tests in parallel; a concurrent unrelated test would tick that
+// global between two reads of it, intermittently failing the test.
+// The hit/miss counters live on this test's own store — peer
+// dispatches run against their own stores and cannot perturb them
+// (test hermeticity). A warm O(1) pass is a strict `hits` increment
+// with zero new `misses`.
 #[test]
 fn shallow_instantiation_ref_warm_pass_o1() {
-    use std::sync::atomic::Ordering;
     let host = host();
     upsert_ts(&host, "/w/wrap_warm.ts", "export type Foo<T> = { x: T }");
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -6579,18 +6586,37 @@ fn shallow_instantiation_ref_warm_pass_o1() {
         base: decl_identity(&host, "/w/wrap_warm.ts", "Foo"),
         args: Arc::from(vec![str_arg].into_boxed_slice()),
     });
-    // Cold pass populates the warm cache.
+
+    // Cold pass populates the warm cache: the empty-path `ProjectPath`
+    // query and the nested `Instantiate` it dispatches both miss and
+    // build.
     let _ = run_empty_path_shallow(&dispatch, inst_ref);
-    let baseline = crate::loop5_instrumentation::SLOT_BINDING_EXPANDED_INSTANTIATE_CALLS
-        .load(Ordering::Relaxed);
-    // Warm pass — must not increment the counter.
+    let after_cold = graph.stats_snapshot();
+    assert!(
+        after_cold.misses >= 1,
+        "cold pass must register at least one memo miss (sanity: the \
+         hit/miss counters are wired to this store's dispatch path)",
+    );
+
+    // Warm pass — every query it issues must be a family-memo hit, so
+    // `hits` strictly increases and `misses` does not move at all.
     let _ = run_empty_path_shallow(&dispatch, inst_ref);
-    let warm = crate::loop5_instrumentation::SLOT_BINDING_EXPANDED_INSTANTIATE_CALLS
-        .load(Ordering::Relaxed);
-    assert_eq!(
-        warm, baseline,
+    let after_warm = graph.stats_snapshot();
+    assert!(
+        after_warm.hits > after_cold.hits,
         "warm second-pass empty-path Shallow over InstantiationRef must \
-         not increment SLOT_BINDING_EXPANDED_INSTANTIATE_CALLS (O(1) cache hit)",
+         register at least one memo hit (O(1) cache hit); cold hits={}, \
+         warm hits={}",
+        after_cold.hits,
+        after_warm.hits,
+    );
+    assert_eq!(
+        after_warm.misses, after_cold.misses,
+        "warm second-pass empty-path Shallow over InstantiationRef must \
+         NOT register any new memo miss — a new miss means the build \
+         path re-ran instead of an O(1) cache hit (cold misses={}, warm \
+         misses={})",
+        after_cold.misses, after_warm.misses,
     );
 }
 
