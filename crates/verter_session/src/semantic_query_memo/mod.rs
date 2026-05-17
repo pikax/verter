@@ -1823,6 +1823,7 @@ impl SemanticGraphStore {
                 });
                 let dep_signature = state.dep_signature.clone().unwrap_or_else(empty_signature);
                 let graph_carrier = state.graph_carrier.clone();
+                let winner_self_roots = Arc::clone(&state.self_root_canonicals);
                 // Inherit the winner build's non-cacheability flag. A
                 // `cache_suppress` winner is non-cacheable (tracer
                 // overflow, pathological input, or an unrootable `None`
@@ -1841,6 +1842,56 @@ impl SemanticGraphStore {
                 // so the lock is released before any re-entrant observation
                 // from a nested tracer scope.
                 drop(state);
+
+                // View-validation gate. A follower joining this
+                // in-flight build is NOT guaranteed to be running
+                // under the same view as the winner: two requests can
+                // carry the same `SemanticQueryKey` while executing
+                // under different overlays (a base context and a
+                // session/overlay context, or two different overlays).
+                // Their results are NOT interchangeable — each must
+                // self-root-validate against its own content identity,
+                // exactly as a warm hit (`MemoEntry::validate`) does.
+                //
+                // Validate the winner's carrier against THIS follower's
+                // `ctx`. If the winner's carrier validates under the
+                // follower's view the coalesce is legitimate — proceed
+                // to bubble + return. If it does NOT validate (the
+                // winner ran under a different overlay; an overflow
+                // carrier; a self-root the follower's view no longer
+                // tracks) the follower MUST NOT return the winner's
+                // node: it forks and cold-recomputes for its own view.
+                //
+                // The fork removes the stale completed in-flight entry
+                // (iff it is still the SAME `Arc` the follower joined —
+                // a `ptr_eq` check; a third thread may already have
+                // retired it and started a fresh flight) so the loop's
+                // step 3 `table.entry(key)` creates a FRESH entry the
+                // follower claims as cold winner. Forward progress is
+                // deterministic: the follower does not re-join the same
+                // completed entry, and the loop's step 1 warm read
+                // (`get_validated`, validated under the follower's
+                // `ctx`) also misses the winner's published entry, so
+                // the follower runs its own cold build.
+                if let Some(ref carrier) = graph_carrier {
+                    if !carrier.validate_with_self_roots(ctx, &winner_self_roots) {
+                        self.stats
+                            .joiner_view_mismatch_forks
+                            .fetch_add(1, Ordering::Relaxed);
+                        {
+                            let mut table = self.inflight.lock();
+                            if table
+                                .get(&key)
+                                .is_some_and(|entry| Arc::ptr_eq(entry, &inflight))
+                            {
+                                table.remove(&key);
+                            }
+                        }
+                        drop(inflight);
+                        continue;
+                    }
+                }
+
                 // Bubble the winner's path-precise fact rail into the
                 // joiner thread's active tracer stack (if any). This
                 // ensures that an outer cold-compute scope that spawned
@@ -1852,7 +1903,9 @@ impl SemanticGraphStore {
                 // a suppressed child's transitive deps too.
                 // Abort-path guard: `state.aborted` was checked above; the
                 // `continue` path retries without reaching here, so we only
-                // bubble on the non-aborted joiner path.
+                // bubble on the non-aborted joiner path. The view-mismatch
+                // fork above also `continue`s without reaching here, so the
+                // bubble only carries a carrier the follower's view validated.
                 if let Some(ref carrier) = graph_carrier {
                     carrier.bubble_via_tls();
                 }
@@ -2092,6 +2145,17 @@ impl SemanticGraphStore {
                 // this so joiners awakened by an abort sweep re-enter
                 // dispatch rather than bubbling a stale carrier.
                 state.graph_carrier = Some(Box::new(broadcast_carrier.clone()));
+                // Publish the winner build's self-root canonicals so a
+                // cross-thread joiner can validate `graph_carrier`
+                // against ITS OWN view before reusing it. Two requests
+                // can carry the same `SemanticQueryKey` while running
+                // under different overlays; their results are NOT
+                // interchangeable. The joiner validates the winner's
+                // carrier strictly (self-roots through
+                // `validates_self_root_whole_hash`) under the
+                // follower's `ctx` — exactly as a warm hit
+                // (`MemoEntry::validate`) does — and forks if it fails.
+                state.self_root_canonicals = Arc::clone(&self_root_canonicals);
                 // Propagate the build's non-cacheability flag so a
                 // joiner returns the SAME `cache_suppress` the winner
                 // returns. Without this a joiner of a `cache_suppress`
@@ -2111,9 +2175,25 @@ impl SemanticGraphStore {
         //    entry — latch onto the stale completed flag and skip the
         //    cold rebuild. Future callers after invalidation must start
         //    a fresh flight under the new state of the world.
+        //
+        //    The remove is `ptr_eq`-guarded: a cross-view joiner that
+        //    failed this winner's carrier validation forks (see the
+        //    view-validation gate above), removes THIS winner's entry,
+        //    and may already have installed a FRESH `InflightEntry` for
+        //    the same key as a new cold winner. An unconditional
+        //    `remove` here would evict that fresh entry mid-build,
+        //    spawning a redundant concurrent cold build. The guard
+        //    removes only while the table still holds this winner's own
+        //    `Arc` — exactly the entry whose stale `completed` flag
+        //    step 7 exists to retire.
         {
             let mut table = self.inflight.lock();
-            table.remove(&key);
+            if table
+                .get(&key)
+                .is_some_and(|entry| Arc::ptr_eq(entry, &inflight))
+            {
+                table.remove(&key);
+            }
         }
         // `_inflight_stats_guard` decrements `in_flight_current` on
         // scope exit (here on the normal-return path, also on panic

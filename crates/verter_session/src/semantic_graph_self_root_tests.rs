@@ -2144,3 +2144,211 @@ fn session_tombstone_rejects_base_rooted_warm_entry() {
         }
     }
 }
+
+/// A warm `MemoEntry` whose carrier carries a **cross-file**
+/// (non-self-root) `FileWholeHash` dependency on a child canonical
+/// MISSES when the session has TOMBSTONED (deleted) that child.
+///
+/// Codex P2 #2: `HostStoreView::with_session_overlay` removes a
+/// tombstoned canonical from `whole_hashes`. The strict self-root
+/// validator (`validates_self_root_whole_hash`) then rejects an entry
+/// *self-rooted* on the deleted file — correct. But a plain cross-file
+/// `FileWholeHash` dependency fact routes through
+/// [`crate::resolver_core::StoreView::validates`], whose `FileWholeHash`
+/// arm keeps the lazy `None => true` "untracked → optimistically
+/// accept" rule (cross-file permissiveness). A tombstoned canonical,
+/// removed from `whole_hashes`, looks UNTRACKED to that arm — so a
+/// parent memo entry carrying a cross-file `FileWholeHash` on a
+/// session-deleted child still validated and served stale.
+///
+/// The fix records every tombstoned canonical in a dedicated
+/// `HostStoreView` tombstone set; `validates(FileWholeHash)` rejects a
+/// tombstoned canonical before the lazy untracked-accept rule.
+///
+/// Discrimination per case:
+///
+/// - **child-deleted** — a parent entry self-rooted on the LIVE parent
+///   canonical (NOT tombstoned, hash unchanged) whose carrier also
+///   holds a cross-file `FileWholeHash` for the child, queried under a
+///   session that tombstones ONLY the child → **MISS** (`cold_ran`
+///   true). RED pre-fix: the child's `FileWholeHash` hits the lazy
+///   `None => true` untracked-accept arm and the parent self-root
+///   validates strictly, so the stale parent entry serves a result
+///   depending on a deleted file. GREEN post-fix: the tombstone set
+///   makes `validates(FileWholeHash)` reject the tombstoned child, so
+///   the parent warm read misses and the cold build re-runs.
+/// - **child-kept** — the SAME parent entry shape, but the session
+///   tombstones a DIFFERENT (unrelated) canonical, leaving the child
+///   alive → **warm HIT**. Proves the rejection is scoped to the
+///   tombstoned canonical: a parent whose cross-file dependency is
+///   genuinely live still validates under a delete-bearing session.
+#[test]
+fn session_tombstone_rejects_cross_file_dependency_whole_hash() {
+    use crate::resolver_core::SessionResolverContext;
+    use crate::semantic_query::QueryResult;
+    use crate::session_view::OverlaidViewRef;
+    use rustc_hash::FxHashMap;
+
+    let parent_canonical = "/sg_tombstone_dep/parent.ts";
+    let child_canonical = "/sg_tombstone_dep/child.ts";
+    let unrelated_canonical = "/sg_tombstone_dep/unrelated.ts";
+    let host = host();
+    // The parent and child files are alive on the base host — a warm
+    // entry was produced against this content before the session
+    // deleted the child.
+    upsert(
+        &host,
+        parent_canonical,
+        "export interface Parent { p: number; }\nexport const parent = 1;\n",
+    );
+    upsert(
+        &host,
+        child_canonical,
+        "export interface Child { c: string; }\nexport const child = 2;\n",
+    );
+    upsert(&host, unrelated_canonical, "export const unrelated = 3;\n");
+    let parent_base_hash = host
+        .ensure_indexed_ready(parent_canonical)
+        .expect("parent-file base IndexedReady must materialise")
+        .whole_hash;
+    let child_base_hash = host
+        .ensure_indexed_ready(child_canonical)
+        .expect("child-file base IndexedReady must materialise")
+        .whole_hash;
+    let host = Arc::new(host);
+
+    // Publish a `MemoEntry` for `key` whose carrier holds the parent's
+    // self-root `FileWholeHash` PLUS a cross-file `FileWholeHash`
+    // dependency on `child` — `self_root_canonicals` lists ONLY the
+    // parent, so the child fact routes through the lazy `validates`
+    // path, not the strict self-root path.
+    let publish = |graph: &SemanticGraphStore, key: &SemanticQueryKey| {
+        let node = graph.intern_node(SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::String,
+        ));
+        let carrier = ReadSetSignature::new(
+            Arc::from(vec![
+                FactVersionRef::FileWholeHash {
+                    canonical_id: parent_canonical.to_string(),
+                    hash: parent_base_hash,
+                },
+                FactVersionRef::FileWholeHash {
+                    canonical_id: child_canonical.to_string(),
+                    hash: child_base_hash,
+                },
+            ]),
+            Arc::from(Vec::new().into_boxed_slice()),
+        );
+        // Self-root is the PARENT only — the child is a cross-file dep.
+        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(parent_canonical)]);
+        let published = graph.publish_with_carrier_for_tests(
+            key.clone(),
+            QueryResult::Value(node),
+            carrier,
+            self_roots,
+        );
+        assert!(published > 0, "fixture invariant: the warm entry publishes");
+        node
+    };
+
+    let drive = |graph: &SemanticGraphStore, key: &SemanticQueryKey, ctx: &dyn ResolverContext| {
+        let mut cold_ran = false;
+        let recompute_node = graph.intern_node(SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::Number,
+        ));
+        let read = graph.execute_cooperative(
+            ctx,
+            key.clone(),
+            || {
+                graph.intern_node(SemanticNodeData::Opaque(
+                    crate::semantic_query::QueryError::Miss,
+                ))
+            },
+            || {
+                cold_ran = true;
+                (
+                    QueryResult::Value(recompute_node),
+                    Arc::from(Vec::new().into_boxed_slice()) as DepSignature,
+                )
+            },
+        );
+        (cold_ran, read.value, recompute_node)
+    };
+
+    let overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();
+    let overlay_hashes: FxHashMap<String, crate::types::Hash16> = FxHashMap::default();
+
+    // --- Case 1: child-deleted → parent warm read MISSES -----------
+    {
+        let graph = SemanticGraphStore::new();
+        let key = SemanticQueryKey::ResolveDecl(resolve_decl_key(parent_canonical, "Parent"));
+        let _published = publish(&graph, &key);
+        let mut tombstones: std::collections::HashSet<String> = std::collections::HashSet::new();
+        tombstones.insert(child_canonical.to_string());
+        let view = OverlaidViewRef::new(&host, &overlays, &overlay_hashes, &tombstones);
+        assert!(
+            view.is_tombstoned(child_canonical),
+            "fixture invariant: the view tombstones the child canonical",
+        );
+        assert!(
+            !view.is_tombstoned(parent_canonical),
+            "fixture invariant: the parent canonical is NOT tombstoned",
+        );
+        let session_ctx = SessionResolverContext::new(&host, &view);
+        let (cold_ran, value, recompute) = drive(&graph, &key, &session_ctx);
+        assert!(
+            cold_ran,
+            "child-deleted: a parent entry self-rooted on the LIVE parent \
+             canonical whose carrier ALSO holds a cross-file `FileWholeHash` \
+             dependency on the child MUST MISS when the session deleted the \
+             child. RED pre-fix: the child fact routes through `validates`'s \
+             `FileWholeHash` arm; `with_session_overlay` removed the \
+             tombstoned child from `whole_hashes`, so the arm's lazy \
+             `None => true` untracked-accept fires and the stale parent \
+             entry serves a result depending on a deleted file. GREEN \
+             post-fix: the `HostStoreView` tombstone set makes \
+             `validates(FileWholeHash)` reject the tombstoned child.",
+        );
+        match value {
+            QueryResult::Value(node) => assert_eq!(
+                node, recompute,
+                "child-deleted: the recomputed node must surface, not the stale entry",
+            ),
+            other => panic!("child-deleted: expected the recomputed Value, got {other:?}"),
+        }
+    }
+
+    // --- Case 2: child-kept → parent warm read HITS ----------------
+    {
+        let graph = SemanticGraphStore::new();
+        let key = SemanticQueryKey::ResolveDecl(resolve_decl_key(parent_canonical, "Parent"));
+        let published = publish(&graph, &key);
+        // The session tombstones an UNRELATED canonical — the child
+        // dependency stays alive.
+        let mut tombstones: std::collections::HashSet<String> = std::collections::HashSet::new();
+        tombstones.insert(unrelated_canonical.to_string());
+        let view = OverlaidViewRef::new(&host, &overlays, &overlay_hashes, &tombstones);
+        assert!(
+            !view.is_tombstoned(child_canonical),
+            "fixture invariant: the child canonical is NOT tombstoned in case 2",
+        );
+        let session_ctx = SessionResolverContext::new(&host, &view);
+        let (cold_ran, value, _recompute) = drive(&graph, &key, &session_ctx);
+        assert!(
+            !cold_ran,
+            "child-kept: the SAME parent entry, under a session that \
+             tombstones a DIFFERENT (unrelated) canonical, MUST warm-HIT — \
+             the child dependency is genuinely live. The tombstone \
+             rejection is scoped to the tombstoned canonical, not a \
+             blanket reject of every cross-file `FileWholeHash` under a \
+             delete-bearing session.",
+        );
+        match value {
+            QueryResult::Value(node) => assert_eq!(
+                node, published,
+                "child-kept: the warm hit surfaces the PUBLISHED node",
+            ),
+            other => panic!("child-kept: expected the published Value, got {other:?}"),
+        }
+    }
+}

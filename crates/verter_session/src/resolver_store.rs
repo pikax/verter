@@ -115,6 +115,26 @@ pub struct HostStoreView {
     /// path-alias, SDK, workspace-folder, and project-graph changes
     /// (never on a pure file-content edit).
     project_generation: u64,
+    /// Canonicals the active session has TOMBSTONED (overlay-Deleted).
+    ///
+    /// [`Self::with_session_overlay`] drops a tombstoned canonical's
+    /// per-canonical snapshots from `whole_hashes` / `file_facts` /
+    /// `derived_hashes` (see [`Self::drop_tombstoned_canonical_snapshots`])
+    /// so the *strict* self-root validator rejects an entry self-rooted
+    /// on the deleted file. But that removal also makes the canonical
+    /// look UNTRACKED to the *lazy* [`StoreView::validates`]
+    /// `FileWholeHash` arm — whose untracked branch optimistically
+    /// returns `true` for a genuine cross-file dependency loaded after
+    /// the view snapshot. A tombstoned canonical is NOT a
+    /// genuinely-untracked dependency: it is a file the session
+    /// deleted, so any content dependency on it is invalid.
+    ///
+    /// This set keeps a tombstoned canonical distinguishable from a
+    /// genuinely-untracked one: the `FileWholeHash` / `DirectSource`
+    /// validator arms reject a tombstoned canonical before the lazy
+    /// untracked-accept rule. Empty on a base (non-session) view —
+    /// only `with_session_overlay` populates it.
+    tombstoned_canonicals: std::collections::HashSet<String>,
 }
 
 /// Structural key for snapshotting `ModuleAugmentationIndexShape`
@@ -148,6 +168,7 @@ impl Default for HostStoreView {
             env_hashes: crate::session_view::EnvHashes::default(),
             project_identity: crate::file_artifact_store::ProjectIdentity([0u8; 16]),
             project_generation: 0,
+            tombstoned_canonicals: std::collections::HashSet::new(),
         }
     }
 }
@@ -199,6 +220,16 @@ impl HostStoreView {
     /// rejects an untracked self-root; `validates_parse_domain` rejects
     /// a real fact hash for an untracked file; the `derived_hashes`
     /// validators reject an absent entry), so the consumer recomputes.
+    ///
+    /// The canonical is also recorded in [`Self::tombstoned_canonicals`].
+    /// Removal from `whole_hashes` alone makes the canonical look
+    /// *untracked* to the lazy [`StoreView::validates`] `FileWholeHash`
+    /// / `DirectSource` arms — whose untracked branch optimistically
+    /// accepts a genuine cross-file dependency loaded after the view
+    /// snapshot. A tombstoned canonical is a *deleted* file, not a
+    /// genuinely-untracked dependency, so a cross-file `FileWholeHash`
+    /// dependency on it MUST be rejected; the tombstone set lets
+    /// `validates` distinguish the two.
     fn drop_tombstoned_canonical_snapshots(&mut self, canonical: &str) {
         self.whole_hashes.remove(canonical);
         self.file_facts.remove(canonical);
@@ -209,6 +240,7 @@ impl HostStoreView {
         ] {
             self.derived_hashes.remove(&(canonical.to_owned(), kind));
         }
+        self.tombstoned_canonicals.insert(canonical.to_owned());
     }
 
     /// Re-root this view against a [`SessionView`]'s overlay so
@@ -863,6 +895,17 @@ impl crate::resolver_core::StoreView for HostStoreView {
     fn validates(&self, fact: &crate::resolver_core::FactVersionRef) -> bool {
         match fact {
             crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, hash } => {
+                // Session-tombstoned canonical: the file is DELETED in
+                // this session. A cross-file `FileWholeHash` dependency
+                // on a deleted file is invalid — reject before the lazy
+                // untracked-accept rule below. `with_session_overlay`
+                // removed the canonical from `whole_hashes`, so without
+                // this guard it would fall into the `None => true`
+                // untracked branch and a parent entry depending on the
+                // deleted file would still validate.
+                if self.tombstoned_canonicals.contains(canonical_id) {
+                    return false;
+                }
                 match self.whole_hashes.get(canonical_id) {
                     Some(current) => current == hash,
                     // File not tracked by this store view — it was loaded as a
@@ -880,6 +923,14 @@ impl crate::resolver_core::StoreView for HostStoreView {
                 hash,
             } => match kind {
                 crate::resolver_core::DerivedFactKind::DirectSource => {
+                    // `DirectSource` is a content-hash alias for
+                    // `FileWholeHash` (it reads `whole_hashes`) — apply
+                    // the same tombstone rejection so the
+                    // removal-makes-it-look-untracked window cannot be
+                    // re-exploited on the `DirectSource` rail.
+                    if self.tombstoned_canonicals.contains(canonical_id) {
+                        return false;
+                    }
                     match self.whole_hashes.get(canonical_id) {
                         Some(current) => current == hash,
                         // Untracked dependency file — accept (same reasoning
@@ -1311,189 +1362,17 @@ impl VerterHost {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::hash_import_route_targets;
-    use crate::types::DependencyResolution;
-    use rustc_hash::FxHashMap;
-
-    use crate::resolver_core::StoreView;
-
-    /// Files loaded as dependencies DURING resolution (after the store view
-    /// snapshot was taken) are not tracked in `whole_hashes`. The validated
-    /// cache must accept facts for these untracked files — otherwise every
-    /// access to a dependency falls through to the expensive permissive path.
-    #[test]
-    fn validates_accepts_untracked_file_whole_hash() {
-        let view = super::HostStoreView {
-            mutation_epoch: 1,
-            whole_hashes: FxHashMap::from_iter([("/src/Accordion.vue".to_string(), [1u8; 16])]),
-            ..Default::default()
-        };
-
-        // Tracked file with matching hash — should validate.
-        assert!(
-            view.validates(&crate::resolver_core::FactVersionRef::FileWholeHash {
-                canonical_id: "/src/Accordion.vue".to_string(),
-                hash: [1u8; 16],
-            })
-        );
-
-        // Tracked file with mismatching hash — should reject.
-        assert!(
-            !view.validates(&crate::resolver_core::FactVersionRef::FileWholeHash {
-                canonical_id: "/src/Accordion.vue".to_string(),
-                hash: [2u8; 16],
-            })
-        );
-
-        // Untracked dependency file — should accept (loaded after view snapshot).
-        assert!(
-            view.validates(&crate::resolver_core::FactVersionRef::FileWholeHash {
-                canonical_id: "/node_modules/vue/dist/vue.d.mts".to_string(),
-                hash: [42u8; 16],
-            }),
-            "untracked dependency files should be accepted by the store view"
-        );
-    }
-
-    /// DerivedFactHash::DirectSource for untracked files should be accepted
-    /// (same as FileWholeHash — it's a content-hash alias). Non-DirectSource
-    /// derived facts for untracked files should NOT be accepted — they are
-    /// invalidation signals (import routes, etc.) that must be explicitly
-    /// tracked to participate in validation.
-    #[test]
-    fn validates_derived_fact_hash_semantics() {
-        let view = super::HostStoreView {
-            mutation_epoch: 1,
-            whole_hashes: FxHashMap::default(),
-            ..Default::default()
-        };
-
-        // DirectSource for untracked file — should accept (content-hash alias).
-        assert!(
-            view.validates(&crate::resolver_core::FactVersionRef::DerivedFactHash {
-                canonical_id: "/node_modules/reka-ui/dist/index.d.ts".to_string(),
-                kind: crate::resolver_core::DerivedFactKind::DirectSource,
-                hash: [99u8; 16],
-            }),
-            "DirectSource for untracked file should be accepted"
-        );
-
-        // Route for untracked file — should NOT accept (invalidation signal).
-        assert!(
-            !view.validates(&crate::resolver_core::FactVersionRef::DerivedFactHash {
-                canonical_id: "/node_modules/reka-ui/dist/index.d.ts".to_string(),
-                kind: crate::resolver_core::DerivedFactKind::Route,
-                hash: [99u8; 16],
-            }),
-            "Route derived fact for untracked file should NOT be accepted"
-        );
-    }
-
-    /// Concurrent generations of the same key are distinguished by
-    /// per-candidate fact validation against the candidate's own
-    /// `fact_dep_signature` (see
-    /// `crates/verter_session/src/resolver_core/mod.rs`
-    /// `ValidatedFactCache` substrate). For untracked files, the
-    /// primary `validates` path accepts the cached hash because the
-    /// candidate was admitted from current workspace content.
-    #[test]
-    fn primary_validates_accepts_untracked_file_whole_hash() {
-        let view = super::HostStoreView {
-            mutation_epoch: 1,
-            whole_hashes: FxHashMap::from_iter([("/src/tracked.ts".to_string(), [1u8; 16])]),
-            ..Default::default()
-        };
-
-        // Tracked file — matches.
-        assert!(
-            view.validates(&crate::resolver_core::FactVersionRef::FileWholeHash {
-                canonical_id: "/src/tracked.ts".to_string(),
-                hash: [1u8; 16],
-            })
-        );
-
-        // Tracked file — mismatched hash rejected.
-        assert!(
-            !view.validates(&crate::resolver_core::FactVersionRef::FileWholeHash {
-                canonical_id: "/src/tracked.ts".to_string(),
-                hash: [2u8; 16],
-            })
-        );
-
-        // Untracked file — accepted (multi-candidate
-        // substrate relies on the candidate's own `fact_dep_signature`
-        // to discriminate concurrent generations).
-        assert!(
-            view.validates(&crate::resolver_core::FactVersionRef::FileWholeHash {
-                canonical_id: "/node_modules/vue/dist/vue.d.mts".to_string(),
-                hash: [42u8; 16],
-            }),
-            "untracked files are accepted by primary validation in the multi-candidate substrate"
-        );
-    }
-
-    #[test]
-    fn import_route_hash_ignores_lazy_promotion_to_same_effective_target() {
-        let lazy = FxHashMap::from_iter([(
-            "./types".to_string(),
-            DependencyResolution {
-                specifier: "./types".to_string(),
-                resolved_canonical_id: None,
-                possible_canonical_ids: vec![
-                    "/src/types.d.ts".to_string(),
-                    "/src/types.ts".to_string(),
-                ],
-            },
-        )]);
-        let promoted = FxHashMap::from_iter([(
-            "./types".to_string(),
-            DependencyResolution {
-                specifier: "./types".to_string(),
-                resolved_canonical_id: Some("/src/types.d.ts".to_string()),
-                possible_canonical_ids: vec![
-                    "/src/types.d.ts".to_string(),
-                    "/src/types.ts".to_string(),
-                ],
-            },
-        )]);
-
-        assert_eq!(
-            hash_import_route_targets(&lazy),
-            hash_import_route_targets(&promoted),
-            "lazy promotion to the same effective canonical target should not invalidate ImportRoute facts",
-        );
-    }
-
-    #[test]
-    fn import_route_hash_changes_when_effective_target_changes() {
-        let before = FxHashMap::from_iter([(
-            "./types".to_string(),
-            DependencyResolution {
-                specifier: "./types".to_string(),
-                resolved_canonical_id: None,
-                possible_canonical_ids: vec![
-                    "/src/types.d.ts".to_string(),
-                    "/src/types.ts".to_string(),
-                ],
-            },
-        )]);
-        let after = FxHashMap::from_iter([(
-            "./types".to_string(),
-            DependencyResolution {
-                specifier: "./types".to_string(),
-                resolved_canonical_id: Some("/src/types.ts".to_string()),
-                possible_canonical_ids: vec![
-                    "/src/types.d.ts".to_string(),
-                    "/src/types.ts".to_string(),
-                ],
-            },
-        )]);
-
-        assert_ne!(
-            hash_import_route_targets(&before),
-            hash_import_route_targets(&after),
-            "changing the effective canonical target must still invalidate ImportRoute facts",
-        );
+impl HostStoreView {
+    /// Test-only constructor: a view that tracks exactly the supplied
+    /// `whole_hashes` map and is otherwise [`HostStoreView::default`].
+    ///
+    /// `whole_hashes` is a private field, so the unit tests in the
+    /// sibling `resolver_store_tests` module cannot build the view via
+    /// a struct literal — they construct it through this helper.
+    pub(crate) fn with_whole_hashes_for_tests(whole_hashes: FxHashMap<String, Hash16>) -> Self {
+        Self {
+            whole_hashes,
+            ..Self::default()
+        }
     }
 }

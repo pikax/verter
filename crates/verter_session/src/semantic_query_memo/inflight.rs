@@ -44,6 +44,28 @@ pub(super) struct InflightState {
     /// `Box`ed to match `QueryBuildOutput::graph_carrier` and keep the
     /// in-flight state compact.
     pub(super) graph_carrier: Option<Box<crate::fact_signature_helpers::ReadSetSignature>>,
+    /// The winner build's **self-root canonicals** — the keyed (or
+    /// file-derived input) canonical(s) the winner's value depends on
+    /// for its own identity. Set by the winner alongside `completed`
+    /// and `graph_carrier`.
+    ///
+    /// A follower joining this in-flight build is NOT guaranteed to be
+    /// running under the same view as the winner: two requests can
+    /// carry the same [`SemanticQueryKey`] while executing under
+    /// different overlays (a base context and a session/overlay
+    /// context, or two different overlays). Their results are NOT
+    /// interchangeable — each must validate against its own content
+    /// identity. Before a follower bubbles + returns the winner's
+    /// carrier it validates `graph_carrier` against the FOLLOWER's
+    /// `ctx` via [`crate::fact_signature_helpers::ReadSetSignature::validate_with_self_roots`],
+    /// passing this set as the strict self-root canonicals — the same
+    /// validation a warm hit (`MemoEntry::validate`) performs. If the
+    /// winner's carrier validates under the follower's view the
+    /// coalesce is legitimate; if it does not, the follower forks and
+    /// cold-recomputes for its own view. Empty for a winner build with
+    /// no observable cold-compute pass (synthetic / test fixtures) —
+    /// validation then degrades to the plain carrier rails.
+    pub(super) self_root_canonicals: std::sync::Arc<[std::sync::Arc<str>]>,
     /// Walker diagnostics observed during the winner's cold build.
     /// Joiners read this alongside `completed` so warm-replay parity is
     /// preserved across cooperative-admission joins. Empty for non-
@@ -174,8 +196,21 @@ impl<'a> Drop for InflightPanicGuard<'a> {
             }
         }
         self.inflight.ready.notify_all();
+        // `ptr_eq`-guarded remove: only retire THIS guard's own
+        // in-flight entry. A cross-view joiner that forked may have
+        // installed a fresh `InflightEntry` for the same key; an
+        // unconditional remove would evict that fresh entry. (On the
+        // panic path the winner never published a `graph_carrier`, so
+        // a joiner cannot have forked off THIS build — but the guard
+        // stays `ptr_eq`-correct for defence in depth and parity with
+        // the normal-return step-7 retire.)
         let mut table = self.inflight_table.lock();
-        table.remove(&self.key);
+        if table
+            .get(&self.key)
+            .is_some_and(|entry| Arc::ptr_eq(entry, &self.inflight))
+        {
+            table.remove(&self.key);
+        }
     }
 }
 

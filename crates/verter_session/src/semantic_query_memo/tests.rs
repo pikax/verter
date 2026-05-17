@@ -3897,3 +3897,382 @@ fn execute_cooperative_batch_one_batch_entry_n_keys_k_admissions() {
         "execute_cooperative_batch is non-admission"
     );
 }
+
+/// Discriminating test: a cross-thread joiner that coalesced onto an
+/// in-flight build run under a DIFFERENT view does NOT receive the
+/// winner's node — it forks and cold-recomputes for its own view.
+///
+/// Codex P2 #1: the in-flight singleflight coalesces concurrent
+/// requests for the same [`SemanticQueryKey`]. But two requests can
+/// carry the same key while executing under different overlays — a
+/// base context and a session/overlay context. Their results are NOT
+/// interchangeable: each must be self-root-validated against its own
+/// content identity, exactly as a warm hit (`MemoEntry::validate`) is.
+/// Pre-fix the joiner branch bubbled + returned the winner's carrier
+/// WITHOUT validating it against the follower's `ctx`, so a follower
+/// received a node the winner computed against a different overlay.
+///
+/// Setup: a real file `/p2_1/keyed.ts` is upserted, giving it a base
+/// content hash. The winner runs `execute_cooperative` under the base
+/// host context and produces a `QueryBuildOutput` whose carrier
+/// self-roots on `/p2_1/keyed.ts` at its BASE hash. The follower runs
+/// the SAME key under a `SessionResolverContext` whose `OverlaidViewRef`
+/// overlays `/p2_1/keyed.ts` with a DIFFERENT content hash. The
+/// follower coalesces onto the winner's flight (`joined_waits >= 1`),
+/// then — because the winner's carrier self-root validates against the
+/// base hash, NOT the follower's overlay hash — the follower's join
+/// validation fails and it forks.
+///
+/// Discrimination:
+/// - Pre-fix: the follower returns the winner's node; its own build
+///   closure NEVER runs (`follower_cold_ran == false`).
+/// - Post-fix: the follower's join validation rejects the winner's
+///   mismatched carrier; the follower forks, its build closure runs
+///   (`follower_cold_ran == true`), and the follower's result is its
+///   OWN recompute node.
+#[test]
+fn cross_view_joiner_forks_when_winner_carrier_fails_follower_validation() {
+    use crate::fact_signature_helpers::ReadSetSignature;
+    use crate::resolver_core::{FactVersionRef, SessionResolverContext};
+    use crate::session_view::OverlaidViewRef;
+    use crate::{FileKind, UpsertRequest};
+    use rustc_hash::FxHashMap;
+    use std::collections::HashSet;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    let keyed_canonical = "/p2_1/keyed.ts";
+    let host = ctx_host();
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some(keyed_canonical.to_string()),
+            input_id: keyed_canonical.to_string(),
+            source: Arc::from(
+                "export interface Keyed { base: number; }\nexport const keyed = 1;\n",
+            ),
+            file_kind: FileKind::from_path(keyed_canonical),
+            aliases: Vec::new(),
+        })
+        .expect("upsert of the keyed file succeeds");
+    let base_hash = host
+        .ensure_indexed_ready(keyed_canonical)
+        .expect("keyed-file base IndexedReady must materialise")
+        .whole_hash;
+    let host = Arc::new(host);
+
+    let store = Arc::new(SemanticGraphStore::new());
+    let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        scope: scope(keyed_canonical),
+        name: Arc::from("Keyed"),
+    });
+
+    // The winner's carrier self-roots on the keyed canonical at its
+    // BASE content hash — the shape `semantic_graph_read_set_signature`
+    // produces for a cold build that observed the base file.
+    let winner_fact = FactVersionRef::FileWholeHash {
+        canonical_id: keyed_canonical.to_string(),
+        hash: base_hash,
+    };
+
+    let (tx_winner_in_build, rx_winner_in_build) = mpsc::channel::<()>();
+    let (tx_release_winner, rx_release_winner) = mpsc::channel::<()>();
+
+    let winner_store = Arc::clone(&store);
+    let winner_host = Arc::clone(&host);
+    let winner_key = key.clone();
+    let winner_fact_for_build = winner_fact.clone();
+    let winner = thread::spawn(move || {
+        let host: &dyn crate::resolver_core::ResolverContext = winner_host.as_ref();
+        winner_store.execute_cooperative(
+            host,
+            winner_key,
+            || winner_store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || {
+                tx_winner_in_build
+                    .send(())
+                    .expect("winner: signal in-build");
+                rx_release_winner
+                    .recv()
+                    .expect("winner: released by driver");
+                let id =
+                    winner_store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+                // Self-version-rooted carrier: one `FileWholeHash`
+                // self-root for the keyed canonical, plus the matching
+                // `self_root_canonicals` entry.
+                let carrier = ReadSetSignature::new(
+                    Arc::from(vec![winner_fact_for_build.clone()]),
+                    Arc::from(Vec::new().into_boxed_slice()),
+                );
+                crate::project_semantic_dispatch::walk::QueryBuildOutput {
+                    result: QueryResult::Value(id),
+                    dep_signature: Arc::from(Vec::new().into_boxed_slice()),
+                    walker_diagnostics: Vec::new(),
+                    cache_suppress: false,
+                    observed_self_roots: Vec::new(),
+                    graph_carrier: Some(Box::new(carrier)),
+                    self_root_canonicals: Arc::from([Arc::<str>::from(keyed_canonical)]),
+                    pending_prefix_backfills: Vec::new(),
+                }
+            },
+        )
+    });
+
+    rx_winner_in_build.recv().expect("winner entered build");
+
+    // The follower runs under a session whose overlay gives the keyed
+    // canonical a DIFFERENT content hash — the winner's base-rooted
+    // carrier must not validate under this view.
+    let follower_cold_ran = Arc::new(AtomicBool::new(false));
+    let follower_store = Arc::clone(&store);
+    let follower_host = Arc::clone(&host);
+    let follower_key = key.clone();
+    let follower_cold_flag = Arc::clone(&follower_cold_ran);
+    let follower = thread::spawn(move || {
+        // Overlay the keyed canonical with a different content hash.
+        // `with_session_overlay` re-roots `whole_hashes[keyed]` to this
+        // overlay hash, so the winner's base-hash self-root mismatches.
+        let overlay_hash: crate::types::Hash16 = [0xA5u8; 16];
+        assert_ne!(
+            overlay_hash, base_hash,
+            "fixture invariant: the overlay hash must differ from the base hash",
+        );
+        let mut overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();
+        overlays.insert(
+            keyed_canonical.to_string(),
+            Arc::from("export interface Keyed { overlaid: string; }\nexport const keyed = 2;\n"),
+        );
+        let mut overlay_hashes: FxHashMap<String, crate::types::Hash16> = FxHashMap::default();
+        overlay_hashes.insert(keyed_canonical.to_string(), overlay_hash);
+        let tombstones: HashSet<String> = HashSet::new();
+        let view = OverlaidViewRef::new(
+            follower_host.as_ref(),
+            &overlays,
+            &overlay_hashes,
+            &tombstones,
+        );
+        let session_ctx = SessionResolverContext::new(follower_host.as_ref(), &view);
+        let recompute_id =
+            follower_store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let cache_read = follower_store.execute_cooperative(
+            &session_ctx,
+            follower_key,
+            || follower_store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || {
+                follower_cold_flag.store(true, Ordering::SeqCst);
+                (
+                    QueryResult::Value(recompute_id),
+                    Arc::from(Vec::new().into_boxed_slice()),
+                )
+            },
+        );
+        (cache_read.value, recompute_id)
+    });
+
+    // Give the follower time to reach the cooperative wait branch
+    // BEFORE the winner publishes — this forces a real coalesce.
+    thread::sleep(Duration::from_millis(80));
+    tx_release_winner.send(()).expect("release winner");
+
+    let winner_read = winner.join().expect("winner joined");
+    let (follower_value, follower_recompute) = follower.join().expect("follower joined");
+
+    let snap = store.stats_snapshot();
+    assert!(
+        snap.joined_waits >= 1,
+        "the follower MUST have hit the cooperative wait branch \
+         (joined_waits={}); if this fails the follower never coalesced \
+         onto the winner's flight and the test does not exercise the \
+         cross-view join path at all.",
+        snap.joined_waits,
+    );
+
+    assert!(
+        follower_cold_ran.load(Ordering::SeqCst),
+        "the follower coalesced onto an in-flight build run under a \
+         DIFFERENT view (the winner ran under the base host; the follower \
+         runs under a session that overlays the keyed file with a \
+         different content hash). The winner's carrier self-roots on the \
+         BASE hash, so it MUST NOT validate under the follower's overlay \
+         view — the follower MUST fork and cold-recompute for its own \
+         view. Pre-fix the joiner branch bubbled + returned the winner's \
+         carrier without validating it against the follower's `ctx`, so \
+         the follower's build closure never ran (codex P2 #1).",
+    );
+
+    match follower_value {
+        QueryResult::Value(node) => assert_eq!(
+            node, follower_recompute,
+            "the follower's result MUST be its OWN recompute node — the \
+             winner's node was computed against a different overlay and is \
+             not interchangeable.",
+        ),
+        other => panic!("follower: expected the recomputed Value, got {other:?}"),
+    }
+
+    // The winner's own read is unaffected — it ran under the base view
+    // and returns its own node.
+    match winner_read.value {
+        QueryResult::Value(_) => {}
+        other => panic!("winner: expected a Value result, got {other:?}"),
+    }
+}
+
+/// Discriminating test: a cross-thread joiner that coalesced onto an
+/// in-flight build run under the SAME view DOES receive the winner's
+/// node — a legitimate coalesce is preserved.
+///
+/// This is the companion to
+/// [`cross_view_joiner_forks_when_winner_carrier_fails_follower_validation`]:
+/// it proves the join-path view validation added for codex P2 #1 does
+/// NOT force a fork on the common case where the winner and follower
+/// run under the same content identity. The winner's carrier
+/// self-roots on the keyed canonical; the follower runs the SAME key
+/// under the SAME base host context, so the winner's carrier validates
+/// under the follower's view and the coalesce stands.
+///
+/// Discrimination: if the join-path validation were over-broad (e.g.
+/// always forking, or mis-handling the self-root set), the follower's
+/// build closure would run (`follower_cold_ran == true`). A correct
+/// fix keeps the same-view coalesce: the follower's build closure does
+/// NOT run and the follower returns the winner's node.
+#[test]
+fn same_view_joiner_still_coalesces_onto_winner() {
+    use crate::fact_signature_helpers::ReadSetSignature;
+    use crate::resolver_core::FactVersionRef;
+    use crate::{FileKind, UpsertRequest};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    let keyed_canonical = "/p2_1_same/keyed.ts";
+    let host = ctx_host();
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some(keyed_canonical.to_string()),
+            input_id: keyed_canonical.to_string(),
+            source: Arc::from(
+                "export interface Keyed { base: number; }\nexport const keyed = 1;\n",
+            ),
+            file_kind: FileKind::from_path(keyed_canonical),
+            aliases: Vec::new(),
+        })
+        .expect("upsert of the keyed file succeeds");
+    let base_hash = host
+        .ensure_indexed_ready(keyed_canonical)
+        .expect("keyed-file base IndexedReady must materialise")
+        .whole_hash;
+    let host = Arc::new(host);
+
+    let store = Arc::new(SemanticGraphStore::new());
+    let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        scope: scope(keyed_canonical),
+        name: Arc::from("Keyed"),
+    });
+    let winner_fact = FactVersionRef::FileWholeHash {
+        canonical_id: keyed_canonical.to_string(),
+        hash: base_hash,
+    };
+
+    let (tx_winner_in_build, rx_winner_in_build) = mpsc::channel::<()>();
+    let (tx_release_winner, rx_release_winner) = mpsc::channel::<()>();
+
+    let winner_store = Arc::clone(&store);
+    let winner_host = Arc::clone(&host);
+    let winner_key = key.clone();
+    let winner_node = winner_store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let winner_fact_for_build = winner_fact.clone();
+    let winner = thread::spawn(move || {
+        let host: &dyn crate::resolver_core::ResolverContext = winner_host.as_ref();
+        winner_store.execute_cooperative(
+            host,
+            winner_key,
+            || winner_store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || {
+                tx_winner_in_build
+                    .send(())
+                    .expect("winner: signal in-build");
+                rx_release_winner
+                    .recv()
+                    .expect("winner: released by driver");
+                let carrier = ReadSetSignature::new(
+                    Arc::from(vec![winner_fact_for_build.clone()]),
+                    Arc::from(Vec::new().into_boxed_slice()),
+                );
+                crate::project_semantic_dispatch::walk::QueryBuildOutput {
+                    result: QueryResult::Value(winner_node),
+                    dep_signature: Arc::from(Vec::new().into_boxed_slice()),
+                    walker_diagnostics: Vec::new(),
+                    cache_suppress: false,
+                    observed_self_roots: Vec::new(),
+                    graph_carrier: Some(Box::new(carrier)),
+                    self_root_canonicals: Arc::from([Arc::<str>::from(keyed_canonical)]),
+                    pending_prefix_backfills: Vec::new(),
+                }
+            },
+        )
+    });
+
+    rx_winner_in_build.recv().expect("winner entered build");
+
+    let follower_cold_ran = Arc::new(AtomicBool::new(false));
+    let follower_store = Arc::clone(&store);
+    let follower_host = Arc::clone(&host);
+    let follower_key = key.clone();
+    let follower_cold_flag = Arc::clone(&follower_cold_ran);
+    let follower = thread::spawn(move || {
+        // SAME view as the winner — the plain base host context.
+        let host: &dyn crate::resolver_core::ResolverContext = follower_host.as_ref();
+        let recompute_id =
+            follower_store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let cache_read = follower_store.execute_cooperative(
+            host,
+            follower_key,
+            || follower_store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || {
+                follower_cold_flag.store(true, Ordering::SeqCst);
+                (
+                    QueryResult::Value(recompute_id),
+                    Arc::from(Vec::new().into_boxed_slice()),
+                )
+            },
+        );
+        cache_read.value
+    });
+
+    thread::sleep(Duration::from_millis(80));
+    tx_release_winner.send(()).expect("release winner");
+
+    let _winner_read = winner.join().expect("winner joined");
+    let follower_value = follower.join().expect("follower joined");
+
+    let snap = store.stats_snapshot();
+    assert!(
+        snap.joined_waits >= 1,
+        "the follower MUST have hit the cooperative wait branch \
+         (joined_waits={})",
+        snap.joined_waits,
+    );
+
+    assert!(
+        !follower_cold_ran.load(Ordering::SeqCst),
+        "the follower coalesced onto an in-flight build run under the \
+         SAME view (both threads use the plain base host context). The \
+         winner's carrier self-root validates under the follower's \
+         identical view, so the coalesce is legitimate — the follower \
+         MUST NOT fork. If the follower's build closure ran, the \
+         join-path view validation is over-broad and forks a valid \
+         same-view coalesce.",
+    );
+
+    match follower_value {
+        QueryResult::Value(node) => assert_eq!(
+            node, winner_node,
+            "same-view join: the follower MUST receive the WINNER's node \
+             — a legitimate coalesce returns the winner's result.",
+        ),
+        other => panic!("follower: expected the winner's Value, got {other:?}"),
+    }
+}

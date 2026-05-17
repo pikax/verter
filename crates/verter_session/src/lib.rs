@@ -195,6 +195,8 @@ mod project_type_store_tests;
 pub mod request_context;
 pub mod resolver_core;
 mod resolver_store;
+#[cfg(test)]
+mod resolver_store_tests;
 pub mod semantic_query;
 pub(crate) mod semantic_query_memo;
 pub(crate) mod session_runtime;
