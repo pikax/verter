@@ -566,6 +566,175 @@ fn host_store_view_route_fact_ignores_stale_indexed_when_current_is_route_owned(
     );
 }
 
+/// Companion to `host_store_view_route_fact_ignores_stale_indexed_when_current_is_route_owned`:
+/// the CURRENT `IndexedReady` exists but its shallow surface is NOT
+/// route-resolvable (the route export was removed by an edit), while a
+/// route-owned-shallow entry from a prior route-bearing version still
+/// LINGERS at the same content hash.
+///
+/// `HostStoreView::build`'s indexed loop must mark such a canonical in
+/// `indexed_route_canonicals` so the route-owned-shallow loop suppresses
+/// the lingering entry — a current `IndexedReady` is the route-surface
+/// authority for the canonical whether or not its surface is
+/// route-resolvable. The producer-side authority
+/// `current_route_surface_hash()` returns `None` (no route-owned-shallow
+/// fallback) the moment a current indexed artifact exists,
+/// route-resolvable or not; the store-view validator side must match, so
+/// the view ends up with NO `Route` derived fact for the canonical.
+///
+/// Discriminating fixture: `probe.ts` is materialised, then a synthetic
+/// CURRENT-content `IndexedReady` carrying a non-route-resolvable shallow
+/// surface (empty symbol/export inventory) is planted for it at the real
+/// content hash (`FileArtifactStore::insert` drains the real entry). A
+/// route-owned-shallow entry carrying a DONOR's route-bearing shallow
+/// surface is then published for `probe.ts` at the same real content
+/// hash — the lingering prior-version route-owned entry.
+///
+/// - **Pre-fix tree:** the indexed loop gates the
+///   `indexed_route_canonicals` mark on `has_resolvable_surface()`, so a
+///   current-but-non-route-resolvable `IndexedReady` does NOT mark the
+///   canonical. The route-owned-shallow loop therefore does not skip it
+///   and inserts the lingering route-owned `Route` hash into the view —
+///   the view carries a `Route` derived fact that `current_route_surface_hash()`
+///   (which returns `None`) cannot reproduce. This test FAILS.
+/// - **Post-fix tree:** the indexed loop marks the canonical in
+///   `indexed_route_canonicals` on `indexed.whole_hash == tracked` alone;
+///   the route-owned-shallow loop skips it, so the view has NO `Route`
+///   derived hash for it — agreeing with `current_route_surface_hash()`.
+#[test]
+fn host_store_view_suppresses_lingering_route_owned_hash_when_current_indexed_lacks_route_surface()
+{
+    let probe = "/pinned/route_suppression_probe.ts";
+    // The current content of `probe.ts` — a resolvable route surface.
+    let (host, real_hash) = host_with_materialized_ts(
+        probe,
+        "export interface Current { current: number; }\nexport const current = 1;\n",
+    );
+    assert_ne!(
+        real_hash, STALE_HASH,
+        "fixture invariant: the real content hash must differ from the stale sentinel",
+    );
+
+    // A DONOR file with a resolvable export surface. Its shallow state is
+    // harvested to give the lingering route-owned-shallow entry a genuine
+    // route-bearing surface (so the route-owned snapshot computes a
+    // `Some(route_hash)` the pre-fix view would publish).
+    let donor = "/pinned/route_suppression_donor.ts";
+    upsert_donor_with_distinct_surface(&host, donor);
+    let donor_indexed = host
+        .project_type_store()
+        .indexed()
+        .get_any(donor)
+        .expect("donor IndexedReady must materialise");
+    assert!(
+        donor_indexed.shallow_state.has_resolvable_surface(),
+        "fixture invariant: the donor surface must be route-resolvable so the \
+         lingering route-owned-shallow entry contributes a `Route` hash",
+    );
+    let lingering_route_surface =
+        crate::resolver_store::hash_route_surface(donor_indexed.shallow_state.as_ref());
+
+    // Plant a CURRENT-content `IndexedReady` for `probe.ts` whose shallow
+    // surface is NOT route-resolvable: clone the real artifact (so
+    // `whole_hash` stays at the real current content hash — this is the
+    // *current* indexed artifact, not a stale one) and swap in an empty
+    // shallow state. `has_resolvable_surface()` is then false, exactly the
+    // shape an edit that removes the file's last export would produce.
+    let real_probe_indexed = host
+        .project_type_store()
+        .indexed()
+        .get_any(probe)
+        .expect("real probe IndexedReady must exist before planting the current non-route one");
+    let non_route_shallow = {
+        use rustc_hash::{FxHashMap, FxHashSet};
+        crate::resolver_core::shallow_file_state::ShallowFileState {
+            whole_hash: real_hash,
+            exports: FxHashMap::default(),
+            wildcard_reexports: Vec::new(),
+            symbols: FxHashMap::default(),
+            value_symbols: FxHashMap::default(),
+            import_locals: FxHashSet::default(),
+            import_targets: FxHashMap::default(),
+            analysis: Arc::clone(&real_probe_indexed.shallow_state.analysis),
+        }
+    };
+    assert!(
+        !non_route_shallow.has_resolvable_surface(),
+        "fixture invariant: the planted current `IndexedReady` surface must NOT be \
+         route-resolvable — that is the scenario under test",
+    );
+    let mut current_non_route = (*real_probe_indexed).clone();
+    // `whole_hash` is kept at `real_hash` — the scheduler still tracks
+    // `real_hash`, so this artifact is the CURRENT-content indexed
+    // artifact (`indexed.whole_hash == tracked` in the view build), unlike
+    // the sibling test's deliberately-stale `STALE_HASH` artifact.
+    current_non_route.whole_hash = real_hash;
+    current_non_route.route_hash = None;
+    current_non_route.shallow_state = Arc::new(non_route_shallow);
+    host.project_type_store()
+        .indexed()
+        .insert(Arc::from(probe), Arc::new(current_non_route));
+
+    // The producer-side route-fact oracle: with a current `IndexedReady`
+    // whose surface is not route-resolvable, `current_route_surface_hash()`
+    // returns `None` and suppresses the route-owned-shallow fallback. The
+    // store-view build must agree.
+    assert_eq!(
+        host.current_route_surface_hash(probe),
+        None,
+        "fixture invariant: a current `IndexedReady` with a non-route-resolvable surface \
+         makes `current_route_surface_hash()` return `None` — the route-owned-shallow \
+         fallback is suppressed at the producer side",
+    );
+
+    // Plant a LINGERING route-owned-shallow entry for `probe.ts` at the
+    // real current content hash, carrying the donor's route-bearing
+    // shallow surface — the entry a prior route-bearing version of
+    // `probe.ts` left behind in `RouteOwnedShallowDb`.
+    let mut lingering =
+        crate::project_type_store::RouteOwnedShallowEntry::test_stub(Arc::from(probe));
+    lingering.whole_hash = real_hash;
+    lingering.shallow_state = Arc::clone(&donor_indexed.shallow_state);
+    host.project_type_store()
+        .route_owned_shallow()
+        .publish(Arc::from(probe), Arc::new(lingering));
+
+    // Build the production `HostStoreView`.
+    let view = host.resolver_store_view();
+    let view_route_hash = view.derived_hash(probe, crate::resolver_core::DerivedFactKind::Route);
+
+    // Discriminating assertion: the view must carry NO `Route` derived
+    // hash for `probe.ts`. A current `IndexedReady` exists, so the
+    // route-owned-shallow fallback must be suppressed; the indexed
+    // surface is not route-resolvable, so the indexed loop contributes no
+    // `Route` fact either.
+    assert_eq!(
+        view_route_hash, None,
+        "HostStoreView::build MUST NOT publish a `Route` derived fact for a canonical \
+         whose current `IndexedReady` has a non-route-resolvable surface — the lingering \
+         route-owned-shallow entry must be suppressed via `indexed_route_canonicals`. A \
+         pre-fix build gates that mark on `has_resolvable_surface()`, so the lingering \
+         route-owned `Route` hash leaks into the view.",
+    );
+    assert_ne!(
+        view_route_hash,
+        Some(lingering_route_surface),
+        "HostStoreView::build MUST NOT publish the LINGERING route-owned-shallow entry's \
+         route surface as the canonical's `Route` derived fact once a current \
+         `IndexedReady` exists",
+    );
+    // The view's `Route` fact (absent) must agree with the production
+    // route-fact oracle `current_route_surface_hash()` (also `None`) —
+    // producer and validator must observe one route-surface verdict.
+    assert_eq!(
+        view_route_hash,
+        host.current_route_surface_hash(probe),
+        "HostStoreView::build's `Route` derived hash MUST agree with \
+         `current_route_surface_hash()` — both must observe NO route surface for a \
+         canonical whose current `IndexedReady` removed it",
+    );
+}
+
 /// Upsert a route-only `.ts` donor whose export surface is deliberately
 /// distinct from the other fixtures in this file, so its hashed route
 /// surface differs from any current-content probe surface.

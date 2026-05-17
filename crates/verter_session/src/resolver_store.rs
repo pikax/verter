@@ -471,14 +471,18 @@ impl HostStoreView {
 
         // WASM-only: scheduler is unavailable on web; see CLAUDE.md "Scheduler as Sole Compile Authority".
 
-        // Canonicals whose current-content `IndexedReady` artifact
-        // contributed a `Route` derived fact below. The
-        // `route_owned_shallow` snapshot MUST NOT overwrite a `Route`
-        // hash sourced from a live current-content `IndexedReady`: the
-        // indexed artifact is the canonical route-surface authority,
-        // and a stale route-owned-shallow entry that lingers for the
-        // same canonical would publish a route hash a cold-compute
-        // observing the indexed surface could not reproduce.
+        // Canonicals that have a current-content `IndexedReady`
+        // artifact (`indexed.whole_hash == tracked`). The
+        // `route_owned_shallow` snapshot MUST NOT contribute a `Route`
+        // hash for any such canonical: the current-content indexed
+        // artifact is the sole route-surface authority, whether or not
+        // its surface is route-resolvable. A route-owned-shallow entry
+        // that lingers past an `IndexedReady` materialisation (the
+        // route-owned producer declines to publish a new entry once a
+        // content-matching `IndexedReady` exists, but a prior entry
+        // persists) would otherwise publish a route hash the producer
+        // authority `current_route_surface_hash` — which returns `None`
+        // as soon as a current indexed artifact exists — does not.
         let mut indexed_route_canonicals: rustc_hash::FxHashSet<String> =
             rustc_hash::FxHashSet::default();
 
@@ -492,28 +496,32 @@ impl HostStoreView {
                 .whole_hashes
                 .entry(canonical_str.clone())
                 .or_insert(indexed.whole_hash);
-            // Insert the `Route` fact from shallow state — but ONLY
-            // when this `IndexedReady` is the current-content artifact
-            // (`indexed.whole_hash == tracked`). A stale `IndexedReady`
-            // retained in `snapshot_all()` for a canonical whose
-            // current content has only a route-owned-shallow entry
-            // would otherwise publish a stale route hash AND, via
-            // `indexed_route_canonicals`, suppress the current
-            // route-owned-shallow fallback below — leaving the view's
-            // `Route` derived hash disagreeing with
-            // `current_route_surface_hash()` until the stale artifact
-            // is swept.
-            if indexed.whole_hash == tracked_whole_hash
-                && indexed.shallow_state.has_resolvable_surface()
-            {
-                view.derived_hashes.insert(
-                    (
-                        canonical_str.clone(),
-                        crate::resolver_core::DerivedFactKind::Route,
-                    ),
-                    hash_route_surface(&indexed.shallow_state),
-                );
+            // A current-content `IndexedReady` (`indexed.whole_hash ==
+            // tracked`) is the route-surface authority for this
+            // canonical. Mark it in `indexed_route_canonicals` so the
+            // route-owned-shallow loop below suppresses any lingering
+            // fallback entry — whether or not the indexed surface is
+            // route-resolvable: `current_route_surface_hash` returns
+            // `None` (no route-owned fallback) the moment a current
+            // indexed artifact exists, route-resolvable or not, and the
+            // store-view validator side must match. A stale
+            // `IndexedReady` retained in `snapshot_all()` (whose
+            // `whole_hash` no longer matches `tracked`) is NOT marked,
+            // so a canonical whose current content is route-owned-only
+            // still gets its route hash from the fallback loop. The
+            // `Route` derived fact itself is contributed only when the
+            // current indexed surface is route-resolvable.
+            if indexed.whole_hash == tracked_whole_hash {
                 indexed_route_canonicals.insert(canonical_str.clone());
+                if indexed.shallow_state.has_resolvable_surface() {
+                    view.derived_hashes.insert(
+                        (
+                            canonical_str.clone(),
+                            crate::resolver_core::DerivedFactKind::Route,
+                        ),
+                        hash_route_surface(&indexed.shallow_state),
+                    );
+                }
             }
             // The `ImportRoute` derived fact must reflect the
             // generation-current import-target surface. A file with
