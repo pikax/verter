@@ -166,6 +166,15 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 return projection;
             }
         }
+        // Observe the keyed canonical's content version ONCE here,
+        // before any surface value is computed — threaded into the
+        // provenance-pure signature builder by the publish helper so
+        // the published surface and its signature root on one content
+        // version.
+        let observed_keyed_hash = self
+            .ctx
+            .shallow_file_state(scope_canonical_id)
+            .map(|state| state.whole_hash);
         if substitutions.is_empty() {
             if let Some(prepared) = self.prepared_type_decl(scope_canonical_id, symbol_name) {
                 if let Some(default_substitutions) =
@@ -183,6 +192,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                             symbol_name,
                             substitutions,
                             &result,
+                            observed_keyed_hash,
                         );
                         self.prepared_surface_cache
                             .borrow_mut()
@@ -202,6 +212,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 symbol_name,
                 substitutions,
                 &cached,
+                observed_keyed_hash,
             );
             self.prepared_surface_cache
                 .borrow_mut()
@@ -239,6 +250,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             symbol_name,
             substitutions,
             &result,
+            observed_keyed_hash,
         );
         self.prepared_surface_cache
             .borrow_mut()
@@ -246,9 +258,16 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         result
     }
 
-    /// Step 3 closure helper: write-through to ctx-owned
-    /// PreparedSurfaceDb. Called after compute publishes a result so
-    /// the next request (or a concurrent reader) gets the warm hit.
+    /// Write-through to ctx-owned `PreparedSurfaceDb`. Called after
+    /// compute publishes a result so the next request (or a concurrent
+    /// reader) gets the warm hit.
+    ///
+    /// `observed_keyed_hash` is the keyed canonical
+    /// (`scope_canonical_id`)'s content version observed at the value
+    /// source — threaded into the provenance-pure signature builder so
+    /// the entry's self-root and parse facts root on that one observed
+    /// version rather than a current-content re-read. `?` on a `None`
+    /// observation or builder result refuses shared-cache admission.
     #[allow(dead_code)] // deletion in 5g per call-graph closure
     fn publish_prepared_surface_to_host_db(
         &self,
@@ -256,6 +275,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         symbol_name: &str,
         substitutions: &FxHashMap<String, TypeExpr>,
         result: &PreparedSurfaceProjection,
+        observed_keyed_hash: Option<crate::resolver_core::ResolverHash16>,
     ) {
         let arc_key =
             arc_prepared_surface_cache_key(scope_canonical_id, symbol_name, substitutions);
@@ -279,7 +299,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 ctx,
                 captured_canonical.as_str(),
                 captured_symbol.as_str(),
-            );
+                observed_keyed_hash?,
+            )?;
             Some((payload, fact_sig))
         });
     }
@@ -575,6 +596,18 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 return value;
             }
         }
+        // Observe the keyed canonical's content version ONCE here,
+        // before any member value is computed. Every
+        // `publish_prepared_member_to_host_db` call below threads this
+        // single observation into the provenance-pure signature
+        // builder so the published `ProjectedMember` and its fact
+        // signature root on exactly one `scope_canonical_id` content
+        // version. `None` (the canonical has no current shallow state)
+        // refuses shared-cache admission inside the publish helper.
+        let observed_keyed_hash = self
+            .ctx
+            .shallow_file_state(scope_canonical_id)
+            .map(|state| state.whole_hash);
         if substitutions.is_empty() {
             if let Some(prepared) = self.prepared_type_decl(scope_canonical_id, symbol_name) {
                 if let Some(default_substitutions) =
@@ -595,6 +628,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                             crate::resolver_core::cache_keys::PreparedMemberCacheKind::Requested,
                             substitutions,
                             &result,
+                            observed_keyed_hash,
                         );
                         self.prepared_member_cache
                             .borrow_mut()
@@ -618,6 +652,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 crate::resolver_core::cache_keys::PreparedMemberCacheKind::Requested,
                 substitutions,
                 &Some(cached.clone()),
+                observed_keyed_hash,
             );
             self.prepared_member_cache
                 .borrow_mut()
@@ -670,6 +705,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             crate::resolver_core::cache_keys::PreparedMemberCacheKind::Requested,
             substitutions,
             &result,
+            observed_keyed_hash,
         );
         self.prepared_member_cache
             .borrow_mut()
@@ -677,8 +713,28 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         result
     }
 
-    /// Step 3 closure helper: write-through to ctx-owned
-    /// PreparedMemberDb.
+    /// Write-through to ctx-owned `PreparedMemberDb`.
+    ///
+    /// `observed_keyed_hash` is the keyed canonical
+    /// (`scope_canonical_id`)'s content version observed at the value
+    /// source by the caller — threaded in here, NOT re-acquired. The
+    /// signature builder is provenance-pure: the entry's self-root
+    /// `FileWholeHash` and its `MemberPresence` / `Member` parse facts
+    /// all root on this one observed version, so the published
+    /// `ProjectedMember` value and its fact signature agree on exactly
+    /// one content identity. A current-content re-read here would open
+    /// a publish race — an `upsert` landing between the value-compute
+    /// and this write-through would root a stale member by a
+    /// fresh-looking current hash, and `revalidate_after_compute`
+    /// (fresh-vs-fresh) could not catch it.
+    ///
+    /// On a `None` `observed_keyed_hash` (the keyed canonical has no
+    /// current shallow state) or a `None` from the signature builder
+    /// (the observed version's parse-fact registry is unrecoverable),
+    /// the closure `?`-returns `None`, so the entry is NOT admitted to
+    /// the shared `PreparedMemberDb`. The freshly-computed value is
+    /// still returned to the caller by `project_prepared_requested_member_from_symbol`;
+    /// only the shared-cache admission is refused.
     pub(super) fn publish_prepared_member_to_host_db(
         &self,
         scope_canonical_id: &str,
@@ -687,6 +743,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         kind: crate::resolver_core::cache_keys::PreparedMemberCacheKind,
         substitutions: &FxHashMap<String, TypeExpr>,
         result: &Option<ProjectedMember>,
+        observed_keyed_hash: Option<crate::resolver_core::ResolverHash16>,
     ) {
         let arc_key = arc_prepared_member_cache_key(
             scope_canonical_id,
@@ -705,13 +762,17 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             // R28 path-precise: observe the exporter+member pair so
             // sibling-member edits in the same exporter keep the
             // consumer warm, and a body edit on the specific member
-            // invalidates it.
+            // invalidates it. The signature roots on the
+            // caller-observed keyed-canonical content version — never
+            // a current-content re-read. `?` on a `None` observation
+            // or builder result refuses shared-cache admission.
             let fact_sig = engine_fact_signature_for_canonical_member(
                 ctx,
                 captured_canonical.as_str(),
                 captured_symbol.as_str(),
                 captured_member.as_str(),
-            );
+                observed_keyed_hash?,
+            )?;
             Some((captured_value, fact_sig))
         });
     }
@@ -936,6 +997,24 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             }
         }
 
+        // Observe BOTH keyed canonicals' content versions ONCE here,
+        // before the value is resolved. `PreparedTargetCacheKey` is
+        // keyed on the active scope AND the declaring canonical, so
+        // both are self-roots. The provenance-pure signature builder
+        // roots each self-root on its own observed hash threaded in
+        // below — never a current-content re-read inside the closure.
+        // A `None` for either (the canonical has no current shallow
+        // state) refuses shared-cache admission; the resolved value is
+        // still returned to the caller from `resolved` below.
+        let observed_scope_hash = self
+            .ctx
+            .shallow_file_state(scope_canonical_id)
+            .map(|state| state.whole_hash);
+        let observed_decl_hash = self
+            .ctx
+            .shallow_file_state(prepared.root_identity.canonical_id.as_str())
+            .map(|state| state.whole_hash);
+
         let resolve_prepared_target =
             |this: &mut Self, canonical_source: String, resolved_name: String| {
                 let mut canonical_source = if canonical_source.is_empty() {
@@ -1015,7 +1094,16 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 // keyed on the active scope AND the declaring
                 // canonical (`root_identity.canonical_id`), so the
                 // signature roots both — a content edit to either file
-                // rejects the entry.
+                // rejects the entry. The signature builder is
+                // provenance-pure: each self-root roots on the
+                // content version observed for that keyed canonical at
+                // the value source (`observed_scope_hash` /
+                // `observed_decl_hash`), threaded in here — never a
+                // current-content re-read. `?` on a `None` observation
+                // (canonical has no current shallow state) or builder
+                // result refuses shared-cache admission; the resolved
+                // value is still returned to the caller from
+                // `resolved`.
                 //
                 // Re-route boundary: `resolve_prepared_target` (the
                 // closure above) can re-route `canonical_source` to a
@@ -1029,19 +1117,22 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 // third file is therefore not detected by this entry's
                 // signature. This is a pre-existing key-design
                 // boundary — the cache key never encoded the re-routed
-                // canonical — not a self-version-root regression. A
-                // future change that wants the re-routed declaring file
-                // to invalidate this entry must encode the re-routed
-                // canonical in `PreparedTargetCacheKey` (so it becomes a
-                // third self-root); widening the signature alone cannot
+                // canonical — not a publish-race regression, and is a
+                // known separate deferral. A future change that wants
+                // the re-routed declaring file to invalidate this
+                // entry must encode the re-routed canonical in
+                // `PreparedTargetCacheKey` (so it becomes a third
+                // self-root); widening the signature alone cannot
                 // close it without that key change.
                 let fact_sig = super::engine_fact_signature_for_prepared_target(
                     ctx,
                     captured_canonical.as_str(),
                     captured_target.as_str(),
+                    observed_scope_hash?,
                     captured_decl_canonical.as_str(),
                     captured_decl_symbol.as_str(),
-                );
+                    observed_decl_hash?,
+                )?;
                 Some((captured_value, fact_sig))
             });
         }

@@ -71,6 +71,17 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // Step 3 closure: route through ctx-owned ImportedRegistryDb.
         // The local RefCell view above is non-authoritative scratch; the
         // DashMap-backed DB is the authoritative cross-request cache.
+        //
+        // Observe the keyed canonical's content version ONCE here,
+        // before the value is computed. The signature builder is
+        // provenance-pure: it roots the entry's self-root on this
+        // observed hash, never a current-content re-read inside the
+        // closure. `None` (canonical has no current shallow state)
+        // refuses shared-cache admission below.
+        let observed_keyed_hash = self
+            .ctx
+            .shallow_file_state(canonical_id)
+            .map(|state| state.whole_hash);
         let arc_key = (
             std::sync::Arc::<str>::from(canonical_id),
             std::sync::Arc::<str>::from(exported_name),
@@ -83,13 +94,31 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 exported_name,
                 || self.allow_wildcard_route(),
             );
-            let fact_sig =
-                engine_fact_signature_for_exported_type(self.ctx, canonical_id, exported_name);
+            // `?` on a `None` observation refuses shared-cache
+            // admission — the computed value is still returned to the
+            // caller below from the cold-resolver fall-through.
+            let fact_sig = engine_fact_signature_for_exported_type(
+                self.ctx,
+                canonical_id,
+                exported_name,
+                observed_keyed_hash?,
+            )?;
             Some((computed, fact_sig))
         });
         let resolved: Option<ResolvedImportedRegistrySymbol> = match host_value {
             Some(opt_arc) => opt_arc.as_deref().cloned(),
-            None => None,
+            // `get_or_compute` returned `None` — the signature builder
+            // refused admission (no observed shallow state for the
+            // keyed canonical) or post-compute revalidation failed.
+            // Shared-cache admission is forgone; the value is still
+            // produced by re-running the cold resolver so the caller
+            // gets the correct result.
+            None => resolve_imported_registry_symbol_with_budget(
+                self.ctx,
+                canonical_id,
+                exported_name,
+                || self.allow_wildcard_route(),
+            ),
         };
         self.imported_registry_symbols
             .borrow_mut()
@@ -201,6 +230,18 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             return cached;
         }
         // Step 3 closure: route through ctx-owned DeclarationLookupDb.
+        //
+        // Observe the keyed canonical's content version ONCE here,
+        // before the value is computed. The signature builder is
+        // provenance-pure: it roots the entry's self-root on this
+        // observed hash, never a current-content re-read inside the
+        // closure. `None` (canonical has no current shallow state)
+        // refuses shared-cache admission; the `None` host-value arm
+        // below still produces the value via the cold resolver.
+        let observed_keyed_hash = self
+            .ctx
+            .shallow_file_state(canonical_source)
+            .map(|state| state.whole_hash);
         let arc_key = (
             std::sync::Arc::<str>::from(canonical_source),
             std::sync::Arc::<str>::from(requested_name),
@@ -213,8 +254,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     self.ctx
                         .resolve_type_declaration_for_dep(canonical_source, requested_name)
                 });
-            let fact_sig =
-                engine_fact_signature_for_exported_type(self.ctx, canonical_source, requested_name);
+            let fact_sig = engine_fact_signature_for_exported_type(
+                self.ctx,
+                canonical_source,
+                requested_name,
+                observed_keyed_hash?,
+            )?;
             Some((computed, fact_sig))
         });
         let declaration = match host_value {
@@ -273,6 +318,18 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             return cached;
         }
         // Step 3 closure: route through ctx-owned ResolvabilityDb.
+        //
+        // Observe the keyed canonical's content version ONCE here,
+        // before the value is computed. The signature builder is
+        // provenance-pure: it roots the entry's self-root on this
+        // observed hash, never a current-content re-read inside the
+        // closure. `None` (canonical has no current shallow state)
+        // refuses shared-cache admission; the `None` host-value arm
+        // below still produces the value by recomputing.
+        let observed_keyed_hash = self
+            .ctx
+            .shallow_file_state(source_key)
+            .map(|state| state.whole_hash);
         let arc_key = (
             std::sync::Arc::<str>::from(source_key),
             std::sync::Arc::<str>::from(exported_name),
@@ -285,11 +342,29 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 self.resolve_imported_registry_symbol(source_key, exported_name)
                     .is_some()
             };
-            let fact_sig =
-                engine_fact_signature_for_exported_type(self.ctx, source_key, exported_name);
+            let fact_sig = engine_fact_signature_for_exported_type(
+                self.ctx,
+                source_key,
+                exported_name,
+                observed_keyed_hash?,
+            )?;
             Some((computed, fact_sig))
         });
-        let resolved = host_value.unwrap_or(false);
+        // A `None` host-value means the signature builder refused
+        // admission (or post-compute revalidation failed). Shared-cache
+        // admission is forgone, but the boolean is still recomputed so
+        // the caller never sees a spurious `false`.
+        let resolved = match host_value {
+            Some(value) => value,
+            None => {
+                if self.prepared_type_decl(source_key, exported_name).is_some() {
+                    true
+                } else {
+                    self.resolve_imported_registry_symbol(source_key, exported_name)
+                        .is_some()
+                }
+            }
+        };
         self.resolvable.borrow_mut().insert(key, resolved);
         resolved
     }
@@ -307,20 +382,42 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
 
         // Step 3 closure: route through ctx-owned OwnerCollectionDb.
+        //
+        // Observe the keyed owner canonical's prepared decl AND its
+        // content version in ONE read via `observed_prepared_type_decl`
+        // — the value (`prepared.body`) and the entry's fact-signature
+        // self-root then root on exactly that one observed content
+        // version. The signature builder is provenance-pure: it never
+        // re-reads current content inside the closure. `None` (owner
+        // canonical has no current shallow state) refuses shared-cache
+        // admission; the `None` host-value arm below still produces
+        // the body by recomputing.
+        let observed = self.observed_prepared_type_decl(owner_canonical, name);
         let arc_key = (
             std::sync::Arc::<str>::from(owner_canonical),
             std::sync::Arc::<str>::from(name),
         );
         let host_db = self.ctx.project_type_store().owner_collection_db();
         let host_value = host_db.get_or_compute(&arc_key, self.ctx, || {
-            let computed = self
-                .prepared_type_decl(owner_canonical, name)
-                .map(|prepared| prepared.body.clone());
-            let fact_sig = engine_fact_signature_for_exported_type(self.ctx, owner_canonical, name);
+            let observed = observed.as_ref()?;
+            let computed = observed.decl.as_ref().map(|prepared| prepared.body.clone());
+            // Root the signature on the canonical AND content version
+            // the observation recorded — the value and the self-root
+            // then provably agree on one content identity.
+            let fact_sig = engine_fact_signature_for_exported_type(
+                self.ctx,
+                observed.canonical_id.as_str(),
+                name,
+                observed.whole_hash,
+            )?;
             Some((computed, fact_sig))
         });
         let body: Option<verter_type_expr::TypeExpr> = match host_value {
             Some(opt_arc) => opt_arc.map(|arc_expr| arc_expr.as_ref().clone()),
+            // The signature builder refused admission (or post-compute
+            // revalidation failed). Shared-cache admission is forgone;
+            // the body is still produced from a fresh prepared-decl
+            // read so the caller gets the correct result.
             None => self
                 .prepared_type_decl(owner_canonical, name)
                 .map(|prepared| prepared.body.clone()),
@@ -487,6 +584,45 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             });
         self.prepared_type_decls.insert(key, resolved.clone());
         resolved
+    }
+
+    /// Resolve a prepared type declaration AND observe `canonical_id`'s
+    /// content version at the same call.
+    ///
+    /// A query-identity cache producer whose value is built from a
+    /// `prepared_type_decl` read must root its fact signature on the
+    /// content version the value was actually built from — never a
+    /// later current-content re-read, which would let an `upsert`
+    /// landing in the publish-race window admit a stale value under a
+    /// fresh signature. This accessor returns the prepared decl
+    /// bundled with the keyed canonical's observed whole hash so the
+    /// producer threads ONE observation into both the value and the
+    /// signature builder.
+    ///
+    /// The observed hash is the `ShallowFileState::whole_hash` for
+    /// `canonical_id` — the same content-version oracle the prepared
+    /// decl's defining-file provenance and the materialise-memo
+    /// publish site observe. `whole_hash` is `None` when the canonical
+    /// has no current shallow state (unloaded / evicted); the producer
+    /// then refuses shared-cache admission. The `decl` field is
+    /// `Option` because a prepared decl may legitimately be absent for
+    /// a tracked canonical (the requested symbol does not exist), but
+    /// the absence is still rooted on the observed hash so a later
+    /// declaration is detected.
+    pub(crate) fn observed_prepared_type_decl(
+        &mut self,
+        canonical_id: &str,
+        symbol_name: &str,
+    ) -> Option<crate::resolver_core::component_meta_query_engine::ObservedPreparedTypeDecl> {
+        let decl = self.prepared_type_decl(canonical_id, symbol_name);
+        let whole_hash = self.ctx.shallow_file_state(canonical_id)?.whole_hash;
+        Some(
+            crate::resolver_core::component_meta_query_engine::ObservedPreparedTypeDecl {
+                decl,
+                canonical_id: canonical_id.to_string(),
+                whole_hash,
+            },
+        )
     }
 
     /// Single accessor returning the engine's resolver

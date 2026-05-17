@@ -477,6 +477,13 @@ fn prepared_target_db_declaring_canonical_edit_rejects_warm_entry() {
         );
     }
 
+    // Observe BOTH keyed canonicals' content versions at cold-publish
+    // time, exactly as the production producer does — the
+    // provenance-pure signature builder roots each self-root on its
+    // observed hash.
+    let observed_scope_hash = observed_whole_hash(ctx, active_scope);
+    let observed_decl_hash = observed_whole_hash(ctx, decl_canonical);
+
     // Cold-publish with the EXACT production producer signature — the
     // named helper `resolve_prepared_surface_target` calls.
     let scope_owned = active_scope.to_string();
@@ -487,9 +494,12 @@ fn prepared_target_db_declaring_canonical_edit_rejects_warm_entry() {
                 ctx,
                 scope_owned.as_str(),
                 "Probe",
+                observed_scope_hash,
                 decl_owned.as_str(),
                 "Probe",
-            );
+                observed_decl_hash,
+            )
+            .expect("provenance-pure signature builds — both observed artifacts present");
             Some((
                 Some((Arc::<str>::from(decl_canonical), Arc::<str>::from("stale"))),
                 sig,
@@ -747,6 +757,23 @@ fn materialized(
 
 fn empty_dep_signature() -> crate::semantic_query::DepSignature {
     Arc::from(Vec::<(Arc<str>, crate::semantic_query::DepVersion)>::new())
+}
+
+/// Observe `canonical`'s `ShallowFileState::whole_hash` — the
+/// content-version observation the provenance-pure query-cache
+/// producers thread into their fact-signature builders. Tests call
+/// this at cold-publish time to mirror the production producers, which
+/// observe the keyed canonical's content version once at the value
+/// source and thread it in.
+fn observed_whole_hash(ctx: &dyn ResolverContext, canonical: &str) -> [u8; 16] {
+    ctx.shallow_file_state(canonical)
+        .unwrap_or_else(|| {
+            panic!(
+                "fixture invariant: {canonical} must have current shallow state so its \
+                 observed whole hash is available"
+            )
+        })
+        .whole_hash
 }
 
 /// Observe `scope`'s `SyntacticExportSet` parse fact pinned to a
@@ -1086,10 +1113,19 @@ fn declaration_lookup_db_self_root_sibling_edit_rejects_warm_entry() {
     let db = host.project_type_store().declaration_db();
     let key = (Arc::<str>::from(c), Arc::<str>::from("Probe"));
 
+    // Observe the keyed canonical's content version at cold-publish
+    // time, exactly as the production producer does.
+    let observed_keyed_hash = observed_whole_hash(ctx, c);
     let owned = c.to_string();
     let primed = db
         .get_or_compute(&key, ctx, || {
-            let sig = engine_fact_signature_for_exported_type(ctx, owned.as_str(), "Probe");
+            let sig = engine_fact_signature_for_exported_type(
+                ctx,
+                owned.as_str(),
+                "Probe",
+                observed_keyed_hash,
+            )
+            .expect("provenance-pure signature builds — observed artifact present");
             Some((decl("stale", c), sig))
         })
         .expect("cold publish succeeds — keyed canonical tracked");
@@ -1142,10 +1178,19 @@ fn imported_registry_db_self_root_sibling_edit_rejects_warm_entry() {
     let db = host.project_type_store().imported_registry_db();
     let key = (Arc::<str>::from(c), Arc::<str>::from("Probe"));
 
+    // Observe the keyed canonical's content version at cold-publish
+    // time, exactly as the production producer does.
+    let observed_keyed_hash = observed_whole_hash(ctx, c);
     let owned = c.to_string();
     let _ = db
         .get_or_compute(&key, ctx, || {
-            let sig = engine_fact_signature_for_exported_type(ctx, owned.as_str(), "Probe");
+            let sig = engine_fact_signature_for_exported_type(
+                ctx,
+                owned.as_str(),
+                "Probe",
+                observed_keyed_hash,
+            )
+            .expect("provenance-pure signature builds — observed artifact present");
             Some((Some(imported_symbol(c, "stale")), sig))
         })
         .expect("cold publish succeeds");
@@ -1194,10 +1239,19 @@ fn resolvability_db_self_root_sibling_edit_rejects_warm_entry() {
     let db = host.project_type_store().resolvable_db();
     let key = (Arc::<str>::from(c), Arc::<str>::from("Probe"));
 
+    // Observe the keyed canonical's content version at cold-publish
+    // time, exactly as the production producer does.
+    let observed_keyed_hash = observed_whole_hash(ctx, c);
     let owned = c.to_string();
     let _ = db
         .get_or_compute(&key, ctx, || {
-            let sig = engine_fact_signature_for_exported_type(ctx, owned.as_str(), "Probe");
+            let sig = engine_fact_signature_for_exported_type(
+                ctx,
+                owned.as_str(),
+                "Probe",
+                observed_keyed_hash,
+            )
+            .expect("provenance-pure signature builds — observed artifact present");
             Some((false, sig))
         })
         .expect("cold publish succeeds");
@@ -1244,10 +1298,19 @@ fn owner_collection_db_self_root_sibling_edit_rejects_warm_entry() {
     let db = host.project_type_store().owner_collection_db();
     let key = (Arc::<str>::from(c), Arc::<str>::from("Probe"));
 
+    // Observe the keyed canonical's content version at cold-publish
+    // time, exactly as the production producer does.
+    let observed_keyed_hash = observed_whole_hash(ctx, c);
     let owned = c.to_string();
     let _ = db
         .get_or_compute(&key, ctx, || {
-            let sig = engine_fact_signature_for_exported_type(ctx, owned.as_str(), "Probe");
+            let sig = engine_fact_signature_for_exported_type(
+                ctx,
+                owned.as_str(),
+                "Probe",
+                observed_keyed_hash,
+            )
+            .expect("provenance-pure signature builds — observed artifact present");
             Some((
                 Some(TypeExpr::Unknown {
                     raw: "stale".to_string(),
@@ -1304,10 +1367,19 @@ fn prepared_surface_db_self_root_sibling_edit_rejects_warm_entry() {
     let db = host.project_type_store().prepared_surface_db();
     let key = prepared_surface_key(c);
 
+    // Observe the keyed canonical's content version at cold-publish
+    // time, exactly as the production producer does.
+    let observed_keyed_hash = observed_whole_hash(ctx, c);
     let owned = c.to_string();
     let _ = db
         .get_or_compute(&key, ctx, || {
-            let sig = engine_fact_signature_for_exported_type(ctx, owned.as_str(), "Probe");
+            let sig = engine_fact_signature_for_exported_type(
+                ctx,
+                owned.as_str(),
+                "Probe",
+                observed_keyed_hash,
+            )
+            .expect("provenance-pure signature builds — observed artifact present");
             Some((PreparedSurfacePayload::Empty, sig))
         })
         .expect("cold publish succeeds");
@@ -1351,10 +1423,19 @@ fn routed_expr_surface_db_self_root_sibling_edit_rejects_warm_entry() {
     let db = host.project_type_store().routed_expr_surface_db();
     let key = routed_expr_key(c);
 
+    // Observe the keyed canonical's content version at cold-publish
+    // time, exactly as the production producer does.
+    let observed_keyed_hash = observed_whole_hash(ctx, c);
     let owned = c.to_string();
     let _ = db
         .get_or_compute(&key, ctx, || {
-            let sig = engine_fact_signature_for_exported_type(ctx, owned.as_str(), "Probe");
+            let sig = engine_fact_signature_for_exported_type(
+                ctx,
+                owned.as_str(),
+                "Probe",
+                observed_keyed_hash,
+            )
+            .expect("provenance-pure signature builds — observed artifact present");
             Some((
                 TypeExpr::Unknown {
                     raw: "stale".to_string(),
@@ -1419,6 +1500,10 @@ fn prepared_target_db_self_root_sibling_edit_rejects_warm_entry() {
     let db = host.project_type_store().prepared_target_db();
     let key = prepared_target_key(c, c);
 
+    // Observe the keyed canonical's content version at cold-publish
+    // time — here the active scope and the declaring canonical are the
+    // same file, so one observation roots both self-roots.
+    let observed_keyed_hash = observed_whole_hash(ctx, c);
     let owned = c.to_string();
     let _ = db
         .get_or_compute(&key, ctx, || {
@@ -1426,9 +1511,12 @@ fn prepared_target_db_self_root_sibling_edit_rejects_warm_entry() {
                 ctx,
                 owned.as_str(),
                 "Probe",
+                observed_keyed_hash,
                 owned.as_str(),
                 "Probe",
-            );
+                observed_keyed_hash,
+            )
+            .expect("provenance-pure signature builds — observed artifact present");
             Some((Some((Arc::<str>::from(c), Arc::<str>::from("stale"))), sig))
         })
         .expect("cold publish succeeds");
@@ -1598,11 +1686,20 @@ fn prepared_member_db_self_root_sibling_edit_rejects_warm_entry() {
     let db = host.project_type_store().prepared_member_db();
     let key = prepared_member_key(c);
 
+    // Observe the keyed canonical's content version at cold-publish
+    // time, exactly as the production producer does.
+    let observed_keyed_hash = observed_whole_hash(ctx, c);
     let owned = c.to_string();
     let _ = db
         .get_or_compute(&key, ctx, || {
-            let sig =
-                engine_fact_signature_for_canonical_member(ctx, owned.as_str(), "Probe", "field");
+            let sig = engine_fact_signature_for_canonical_member(
+                ctx,
+                owned.as_str(),
+                "Probe",
+                "field",
+                observed_keyed_hash,
+            )
+            .expect("provenance-pure signature builds — observed artifact present");
             Some((Some(projected_member("stale")), sig))
         })
         .expect("cold publish succeeds");
@@ -2430,5 +2527,365 @@ fn materialize_memo_db_scope_export_set_canonical_mismatch_refuses_admission() {
          a Parse fact for the wrong file mis-roots the entry. A builder that pushes the \
          supplied parse fact without a canonical-equality guard emits a self-root \
          signature describing two different files.",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Provenance-pure publish-race discriminators — one per live query cache.
+//
+// Each test below drives the precise publish-race the provenance-pure
+// signature builders close: a query-cache producer that re-reads the keyed
+// canonical's CURRENT content hash at signature-build time roots a value on
+// post-edit content when an `upsert` lands between the value-compute and the
+// signature-build. `revalidate_after_compute` validates fresh-vs-fresh and
+// cannot catch it.
+//
+// Discrimination shape (deterministic, no artifact-survival dependency — the
+// upsert path drains every prior content version of a canonical from
+// `FileArtifactStore`, so a stale observed hash has no content-addressed
+// artifact):
+//
+//  1. Load the keyed canonical at content version `H1`; observe `H1`.
+//  2. Anchor non-vacuity: the producer signature builder called with
+//     `observed_hash = H1` while current == `H1` returns `Some` rooted on
+//     `H1`.
+//  3. Edit the keyed canonical through the skip-own-drain hook so current
+//     becomes a different `H2` (the prior `H1` artifact is drained).
+//  4. The producer signature builder called with the STALE `observed_hash =
+//     H1` MUST return `None` — the observed version's parse-fact registry is
+//     unrecoverable, so shared-cache admission is refused. A pre-fix builder
+//     that re-reads current content resolves `H2`'s registry and returns
+//     `Some` rooted on `H2` — this test FAILS against that body.
+//  5. The same builder called with the CURRENT `observed_hash = H2` returns
+//     `Some` rooted on `H2` — proving the step-4 `None` is specifically the
+//     stale-observation refusal, not a systematically broken builder.
+//
+// Reverting any of the three helpers to a current-content re-read flips every
+// test below RED at step 4.
+
+/// True iff `signature` carries a `FileWholeHash` self-root for
+/// `canonical` whose hash equals `expected`.
+fn signature_roots_whole_hash(
+    signature: &[FactVersionRef],
+    canonical: &str,
+    expected: [u8; 16],
+) -> bool {
+    signature.iter().any(|fact| {
+        matches!(
+            fact,
+            FactVersionRef::FileWholeHash { canonical_id, hash }
+                if canonical_id == canonical && *hash == expected
+        )
+    })
+}
+
+/// Load `canonical` at content version A and observe its whole hash;
+/// anchor that the four `(canonical, name)`-keyed producers'
+/// `engine_fact_signature_for_exported_type` signature builds for the
+/// observed-current case before any edit.
+fn load_and_observe_keyed(host: &VerterHost, canonical: &str) -> [u8; 16] {
+    upsert(host, canonical, &keyed_source_with_sibling("number"));
+    host.ensure_indexed_ready(canonical)
+        .expect("keyed canonical IndexedReady materialises")
+        .whole_hash
+}
+
+/// `ImportedRegistryDb`'s producer signature builder is
+/// provenance-pure: `resolve_imported_registry_symbol` observes the
+/// keyed canonical's content version at the value source and threads
+/// it into `engine_fact_signature_for_exported_type`. A STALE observed
+/// hash (the keyed canonical was edited after the observation) yields
+/// `None` — shared-cache admission is refused — where a pre-fix
+/// builder that re-reads current content roots the entry on the
+/// post-edit hash.
+#[test]
+fn imported_registry_db_signature_builder_is_provenance_pure() {
+    use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_exported_type;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let c = "/provenance_qdb/imported.ts";
+    let observed_h1 = load_and_observe_keyed(&host, c);
+    let ctx: &dyn ResolverContext = &host;
+
+    // Step 2 — anchor non-vacuity: observed == current builds `Some`
+    // rooted on `H1`.
+    let anchored = engine_fact_signature_for_exported_type(ctx, c, "Probe", observed_h1)
+        .expect("observed-current signature builds");
+    assert!(
+        signature_roots_whole_hash(&anchored, c, observed_h1),
+        "anchor: the signature for the observed-current case must root on H1",
+    );
+
+    // Step 3 — edit the keyed canonical so current becomes H2.
+    upsert_skip_drain(&host, c, &keyed_source_with_sibling("string"));
+    let current_h2 = host.ensure_indexed_ready(c).expect("re-indexed").whole_hash;
+    assert_ne!(
+        observed_h1, current_h2,
+        "the edit must shift the whole hash"
+    );
+
+    // Step 4 — the STALE observed hash refuses admission.
+    let ctx2: &dyn ResolverContext = &host;
+    assert!(
+        engine_fact_signature_for_exported_type(ctx2, c, "Probe", observed_h1).is_none(),
+        "ImportedRegistryDb's signature builder MUST return None for the STALE observed \
+         hash H1 after the keyed canonical was edited to H2 — the H1 parse-fact registry \
+         is drained, so shared-cache admission is refused. A pre-fix builder re-reads \
+         authoritative_current_content_hash, resolves H2's registry, and returns Some \
+         rooted on H2.",
+    );
+
+    // Step 5 — the CURRENT observed hash still builds, proving step 4
+    // is the stale-observation refusal, not a broken builder.
+    let current_sig = engine_fact_signature_for_exported_type(ctx2, c, "Probe", current_h2)
+        .expect("current-observed signature still builds");
+    assert!(
+        signature_roots_whole_hash(&current_sig, c, current_h2),
+        "the current-observed signature must root on H2 — confirming step 4's None is \
+         the stale-observation refusal",
+    );
+}
+
+/// `DeclarationLookupDb`'s producer signature builder is
+/// provenance-pure: `resolve_type_declaration` observes the keyed
+/// canonical's content version at the value source and threads it into
+/// `engine_fact_signature_for_exported_type`.
+#[test]
+fn declaration_lookup_db_signature_builder_is_provenance_pure() {
+    use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_exported_type;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let c = "/provenance_qdb/decl.ts";
+    let observed_h1 = load_and_observe_keyed(&host, c);
+    let ctx: &dyn ResolverContext = &host;
+
+    let anchored = engine_fact_signature_for_exported_type(ctx, c, "Probe", observed_h1)
+        .expect("observed-current signature builds");
+    assert!(
+        signature_roots_whole_hash(&anchored, c, observed_h1),
+        "anchor: the signature for the observed-current case must root on H1",
+    );
+
+    upsert_skip_drain(&host, c, &keyed_source_with_sibling("string"));
+    let current_h2 = host.ensure_indexed_ready(c).expect("re-indexed").whole_hash;
+    assert_ne!(
+        observed_h1, current_h2,
+        "the edit must shift the whole hash"
+    );
+
+    let ctx2: &dyn ResolverContext = &host;
+    assert!(
+        engine_fact_signature_for_exported_type(ctx2, c, "Probe", observed_h1).is_none(),
+        "DeclarationLookupDb's signature builder MUST return None for the STALE observed \
+         hash H1 after the keyed canonical was edited to H2. A pre-fix builder re-reads \
+         current content and returns Some rooted on H2.",
+    );
+
+    let current_sig = engine_fact_signature_for_exported_type(ctx2, c, "Probe", current_h2)
+        .expect("current-observed signature still builds");
+    assert!(
+        signature_roots_whole_hash(&current_sig, c, current_h2),
+        "the current-observed signature must root on H2",
+    );
+}
+
+/// `ResolvabilityDb`'s producer signature builder is provenance-pure:
+/// `can_resolve_registry_symbol` observes the keyed canonical's
+/// content version at the value source and threads it into
+/// `engine_fact_signature_for_exported_type`.
+#[test]
+fn resolvability_db_signature_builder_is_provenance_pure() {
+    use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_exported_type;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let c = "/provenance_qdb/resolvable.ts";
+    let observed_h1 = load_and_observe_keyed(&host, c);
+    let ctx: &dyn ResolverContext = &host;
+
+    let anchored = engine_fact_signature_for_exported_type(ctx, c, "Probe", observed_h1)
+        .expect("observed-current signature builds");
+    assert!(
+        signature_roots_whole_hash(&anchored, c, observed_h1),
+        "anchor: the signature for the observed-current case must root on H1",
+    );
+
+    upsert_skip_drain(&host, c, &keyed_source_with_sibling("string"));
+    let current_h2 = host.ensure_indexed_ready(c).expect("re-indexed").whole_hash;
+    assert_ne!(
+        observed_h1, current_h2,
+        "the edit must shift the whole hash"
+    );
+
+    let ctx2: &dyn ResolverContext = &host;
+    assert!(
+        engine_fact_signature_for_exported_type(ctx2, c, "Probe", observed_h1).is_none(),
+        "ResolvabilityDb's signature builder MUST return None for the STALE observed \
+         hash H1 after the keyed canonical was edited to H2. A pre-fix builder re-reads \
+         current content and returns Some rooted on H2.",
+    );
+
+    let current_sig = engine_fact_signature_for_exported_type(ctx2, c, "Probe", current_h2)
+        .expect("current-observed signature still builds");
+    assert!(
+        signature_roots_whole_hash(&current_sig, c, current_h2),
+        "the current-observed signature must root on H2",
+    );
+}
+
+/// `OwnerCollectionDb`'s producer signature builder is
+/// provenance-pure: `owner_collection_expr` observes the keyed owner
+/// canonical's prepared decl AND its content version in one
+/// `observed_prepared_type_decl` read, then threads the observed hash
+/// into `engine_fact_signature_for_exported_type`.
+#[test]
+fn owner_collection_db_signature_builder_is_provenance_pure() {
+    use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_exported_type;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let c = "/provenance_qdb/owner.ts";
+    let observed_h1 = load_and_observe_keyed(&host, c);
+    let ctx: &dyn ResolverContext = &host;
+
+    let anchored = engine_fact_signature_for_exported_type(ctx, c, "Probe", observed_h1)
+        .expect("observed-current signature builds");
+    assert!(
+        signature_roots_whole_hash(&anchored, c, observed_h1),
+        "anchor: the signature for the observed-current case must root on H1",
+    );
+
+    upsert_skip_drain(&host, c, &keyed_source_with_sibling("string"));
+    let current_h2 = host.ensure_indexed_ready(c).expect("re-indexed").whole_hash;
+    assert_ne!(
+        observed_h1, current_h2,
+        "the edit must shift the whole hash"
+    );
+
+    let ctx2: &dyn ResolverContext = &host;
+    assert!(
+        engine_fact_signature_for_exported_type(ctx2, c, "Probe", observed_h1).is_none(),
+        "OwnerCollectionDb's signature builder MUST return None for the STALE observed \
+         hash H1 after the keyed canonical was edited to H2. A pre-fix builder re-reads \
+         current content and returns Some rooted on H2.",
+    );
+
+    let current_sig = engine_fact_signature_for_exported_type(ctx2, c, "Probe", current_h2)
+        .expect("current-observed signature still builds");
+    assert!(
+        signature_roots_whole_hash(&current_sig, c, current_h2),
+        "the current-observed signature must root on H2",
+    );
+}
+
+/// `PreparedMemberDb`'s producer signature builder is provenance-pure:
+/// `project_prepared_requested_member_from_symbol` observes the keyed
+/// canonical's content version once at the value source and threads it
+/// (via `publish_prepared_member_to_host_db`) into
+/// `engine_fact_signature_for_canonical_member`. A STALE observed hash
+/// yields `None` — the `MemberPresence` / `Member` parse facts cannot
+/// be recovered for the drained content version.
+#[test]
+fn prepared_member_db_signature_builder_is_provenance_pure() {
+    use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_canonical_member;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let c = "/provenance_qdb/pmem.ts";
+    let observed_h1 = load_and_observe_keyed(&host, c);
+    let ctx: &dyn ResolverContext = &host;
+
+    // The keyed member is `Probe.a` — `keyed_source_with_sibling`
+    // declares `interface Probe { a: number; b: string; }`.
+    let anchored = engine_fact_signature_for_canonical_member(ctx, c, "Probe", "a", observed_h1)
+        .expect("observed-current signature builds");
+    assert!(
+        signature_roots_whole_hash(&anchored, c, observed_h1),
+        "anchor: the signature for the observed-current case must root on H1",
+    );
+
+    upsert_skip_drain(&host, c, &keyed_source_with_sibling("string"));
+    let current_h2 = host.ensure_indexed_ready(c).expect("re-indexed").whole_hash;
+    assert_ne!(
+        observed_h1, current_h2,
+        "the edit must shift the whole hash"
+    );
+
+    let ctx2: &dyn ResolverContext = &host;
+    assert!(
+        engine_fact_signature_for_canonical_member(ctx2, c, "Probe", "a", observed_h1).is_none(),
+        "PreparedMemberDb's signature builder MUST return None for the STALE observed \
+         hash H1 after the keyed canonical was edited to H2 — the H1 MemberPresence / \
+         Member parse-fact registry is drained. A pre-fix builder re-reads current \
+         content via parse_fact_ref and returns Some rooted on H2.",
+    );
+
+    let current_sig = engine_fact_signature_for_canonical_member(ctx2, c, "Probe", "a", current_h2)
+        .expect("current-observed signature still builds");
+    assert!(
+        signature_roots_whole_hash(&current_sig, c, current_h2),
+        "the current-observed signature must root on H2",
+    );
+}
+
+/// `PreparedTargetDb`'s producer signature builder is provenance-pure:
+/// `resolve_prepared_surface_target` observes BOTH keyed canonicals'
+/// content versions at the value source and threads them into
+/// `engine_fact_signature_for_prepared_target`. A STALE observed hash
+/// for either keyed canonical yields `None`.
+#[test]
+fn prepared_target_db_signature_builder_is_provenance_pure() {
+    use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_prepared_target;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let c = "/provenance_qdb/ptgt.ts";
+    let observed_h1 = load_and_observe_keyed(&host, c);
+    let ctx: &dyn ResolverContext = &host;
+
+    // Active scope and declaring canonical are the same file here, so
+    // one observation roots both self-roots.
+    let anchored = engine_fact_signature_for_prepared_target(
+        ctx,
+        c,
+        "Probe",
+        observed_h1,
+        c,
+        "Probe",
+        observed_h1,
+    )
+    .expect("observed-current signature builds");
+    assert!(
+        signature_roots_whole_hash(&anchored, c, observed_h1),
+        "anchor: the signature for the observed-current case must root on H1",
+    );
+
+    upsert_skip_drain(&host, c, &keyed_source_with_sibling("string"));
+    let current_h2 = host.ensure_indexed_ready(c).expect("re-indexed").whole_hash;
+    assert_ne!(
+        observed_h1, current_h2,
+        "the edit must shift the whole hash"
+    );
+
+    let ctx2: &dyn ResolverContext = &host;
+    assert!(
+        engine_fact_signature_for_prepared_target(
+            ctx2,
+            c,
+            "Probe",
+            observed_h1,
+            c,
+            "Probe",
+            observed_h1,
+        )
+        .is_none(),
+        "PreparedTargetDb's signature builder MUST return None for the STALE observed \
+         hash H1 after the keyed canonical was edited to H2. A pre-fix builder re-reads \
+         current content for both self-roots and returns Some rooted on H2.",
+    );
+
+    let current_sig = engine_fact_signature_for_prepared_target(
+        ctx2, c, "Probe", current_h2, c, "Probe", current_h2,
+    )
+    .expect("current-observed signature still builds");
+    assert!(
+        signature_roots_whole_hash(&current_sig, c, current_h2),
+        "the current-observed signature must root on H2",
     );
 }

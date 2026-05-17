@@ -223,3 +223,73 @@ fn family_a_warm_hit_uses_fact_validation() {
          got {bubble_count}"
     );
 }
+
+/// The three central fact-signature helpers
+/// (`fact_signature_for_exported_type`,
+/// `fact_signature_for_canonical_member`,
+/// `fact_signature_for_canonical_surface`) are **provenance-pure**:
+/// they root the keyed canonical on a caller-supplied observed content
+/// hash, never a current-content re-read. A current-content re-read
+/// inside a signature builder reopens the publish race — an `upsert`
+/// landing between a producer's value-compute and signature-build
+/// would root a stale value on post-edit content, which then
+/// validates on warm reads instead of missing.
+///
+/// This guard extracts each helper's function body and asserts it
+/// calls NONE of the current-content-reading primitives — any
+/// current-content re-read inside a signature builder MUST route
+/// through one of these:
+/// - `authoritative_current_content_hash` — the current-content
+///   whole-hash oracle (the source the deleted `self_root_fact`
+///   re-read helper used).
+/// - `current_file_facts` — the current-content parse-fact reader
+///   (the source the deleted `parse_fact_ref` re-read helper used).
+/// - `parse_fact_ref(` — the deleted current-content parse-fact
+///   builder (matched with its opening paren so it does not
+///   false-match the provenance-pure
+///   `parse_fact_ref_for_observed_current_content`).
+///
+/// Re-introducing any of these inside a signature builder flips this
+/// guard RED.
+#[test]
+fn central_fact_signature_helpers_are_provenance_pure() {
+    let src = read_session_source("fact_signature_helpers.rs");
+    const HELPERS: &[&str] = &[
+        "pub(crate) fn fact_signature_for_exported_type(",
+        "pub(crate) fn fact_signature_for_canonical_member(",
+        "pub(crate) fn fact_signature_for_canonical_surface(",
+    ];
+    // Each token, if present in a helper body, reopens the publish
+    // race. `parse_fact_ref(` is matched with its opening paren so it
+    // does not false-match `parse_fact_ref_for_observed_current_content`.
+    // `self_root_fact` is intentionally NOT listed: it is a deleted
+    // symbol, and any re-read in its shape MUST consult
+    // `authoritative_current_content_hash` — already banned below.
+    const FORBIDDEN: &[&str] = &[
+        "authoritative_current_content_hash",
+        "current_file_facts",
+        "parse_fact_ref(",
+    ];
+    for helper in HELPERS {
+        let start = src
+            .find(helper)
+            .unwrap_or_else(|| panic!("expected `{helper}` in fact_signature_helpers.rs"));
+        // The function body ends at the first `\n}` at column 0 after
+        // the signature — these helpers have no nested column-0 `}`.
+        let after = &src[start..];
+        let end = after
+            .find("\n}")
+            .unwrap_or_else(|| panic!("expected a column-0 function close for `{helper}`"));
+        let body = &after[..end];
+        for forbidden in FORBIDDEN {
+            assert!(
+                !body.contains(forbidden),
+                "`{helper}` MUST NOT call `{forbidden}` — it is a current-content read \
+                 and reopens the publish race the provenance-pure signature builders \
+                 close. Root the keyed canonical on the caller-supplied observed hash \
+                 and pin parse facts via `parse_fact_ref_for_observed_current_content` \
+                 instead. Body:\n{body}"
+            );
+        }
+    }
+}

@@ -147,18 +147,28 @@ pub(crate) const SEMANTIC_SURFACE_MEMBER: &str = "semanticSurfaceMember";
 /// member)` facts in the `Type` symbol space so the consumer
 /// invalidates ONLY when the named member's header or body changes;
 /// sibling-member edits in the same file keep the consumer warm.
+///
+/// The builder is **provenance-pure**: `observed_hash` is the keyed
+/// canonical's content version the producer's value was computed
+/// against, captured once at the value source. The self-root
+/// `FileWholeHash` and both parse facts are pinned to that observed
+/// version — the helper never re-reads current content. Returns
+/// `None` (refuse shared-cache admission) when the observed version's
+/// parse-fact registry cannot be recovered.
 pub(crate) fn engine_fact_signature_for_canonical_member(
     ctx: &dyn ResolverContext,
     canonical_id: &str,
     exporter: &str,
     member: &str,
-) -> std::sync::Arc<[crate::resolver_core::FactVersionRef]> {
+    observed_hash: crate::resolver_core::ResolverHash16,
+) -> Option<std::sync::Arc<[crate::resolver_core::FactVersionRef]>> {
     crate::fact_signature_helpers::fact_signature_for_canonical_member(
         ctx,
         canonical_id,
         exporter,
         member,
         verter_semantic::facts::registry::SymbolSpace::Type,
+        observed_hash,
     )
 }
 
@@ -168,16 +178,26 @@ pub(crate) fn engine_fact_signature_for_canonical_member(
 /// facts. The consumer invalidates when the type is added, removed,
 /// renamed, or when its member shape changes; editing a single
 /// member's body does NOT invalidate.
+///
+/// The builder is **provenance-pure**: `observed_hash` is the keyed
+/// canonical's content version the producer's value was computed
+/// against, captured once at the value source. The self-root
+/// `FileWholeHash` and all three parse facts are pinned to that
+/// observed version — the helper never re-reads current content.
+/// Returns `None` (refuse shared-cache admission) when the observed
+/// version's parse-fact registry cannot be recovered.
 pub(crate) fn engine_fact_signature_for_exported_type(
     ctx: &dyn ResolverContext,
     canonical_id: &str,
     type_name: &str,
-) -> std::sync::Arc<[crate::resolver_core::FactVersionRef]> {
+    observed_hash: crate::resolver_core::ResolverHash16,
+) -> Option<std::sync::Arc<[crate::resolver_core::FactVersionRef]>> {
     crate::fact_signature_helpers::fact_signature_for_exported_type(
         ctx,
         canonical_id,
         type_name,
         verter_semantic::facts::registry::SymbolSpace::Type,
+        observed_hash,
     )
 }
 
@@ -194,23 +214,85 @@ pub(crate) fn engine_fact_signature_for_exported_type(
 /// the declaring `(decl_canonical, decl_symbol)`. A content edit to
 /// either file shifts its self-root `FileWholeHash` and rejects the
 /// entry.
+///
+/// The builder is **provenance-pure**: `observed_active_scope_hash`
+/// and `observed_decl_hash` are the two keyed canonicals' content
+/// versions the producer's value was resolved against, captured once
+/// at the value source. Each `engine_fact_signature_for_exported_type`
+/// sub-signature is pinned to its own observed hash — the helper
+/// never re-reads current content. Returns `None` (refuse
+/// shared-cache admission) when either observed version's parse-fact
+/// registry cannot be recovered.
+///
+/// Re-route boundary (unchanged, separate deferral): when the
+/// requested name re-exports through an intermediate module the
+/// resolved value can name a THIRD declaring file that
+/// `PreparedTargetCacheKey` does not encode; that re-routed canonical
+/// is rooted by neither self-root here. Closing that gap requires
+/// encoding the re-routed canonical in the cache key — it is a known
+/// key-design boundary, not part of this provenance-purity fix.
 pub(crate) fn engine_fact_signature_for_prepared_target(
     ctx: &dyn ResolverContext,
     active_scope: &str,
     target_name: &str,
+    observed_active_scope_hash: crate::resolver_core::ResolverHash16,
     decl_canonical: &str,
     decl_symbol: &str,
-) -> std::sync::Arc<[crate::resolver_core::FactVersionRef]> {
+    observed_decl_hash: crate::resolver_core::ResolverHash16,
+) -> Option<std::sync::Arc<[crate::resolver_core::FactVersionRef]>> {
     let mut entries: Vec<crate::resolver_core::FactVersionRef> =
-        engine_fact_signature_for_exported_type(ctx, active_scope, target_name).to_vec();
+        engine_fact_signature_for_exported_type(
+            ctx,
+            active_scope,
+            target_name,
+            observed_active_scope_hash,
+        )?
+        .to_vec();
     if decl_canonical != active_scope || decl_symbol != target_name {
         entries.extend(
-            engine_fact_signature_for_exported_type(ctx, decl_canonical, decl_symbol)
-                .iter()
-                .cloned(),
+            engine_fact_signature_for_exported_type(
+                ctx,
+                decl_canonical,
+                decl_symbol,
+                observed_decl_hash,
+            )?
+            .iter()
+            .cloned(),
         );
     }
-    std::sync::Arc::from(entries)
+    Some(std::sync::Arc::from(entries))
+}
+
+/// A prepared type declaration bundled with the keyed canonical's
+/// observed content version.
+///
+/// The query-identity cache producers whose value is built from a
+/// `prepared_type_decl` read must root the published entry's fact
+/// signature on the content version the value was actually built
+/// from. Capturing the value and then re-reading the canonical's
+/// *current* content hash at signature-build time is a publish race:
+/// an `upsert` landing in that window admits a stale value under a
+/// fresh signature, and `revalidate_after_compute` (fresh-vs-fresh)
+/// cannot catch it.
+///
+/// `ComponentMetaQueryEngine::observed_prepared_type_decl` returns
+/// this wrapper so the producer threads ONE observation — the
+/// `whole_hash` baked here — into both the value and the
+/// provenance-pure signature builder. `decl` is `Option` because a
+/// prepared decl may legitimately be absent for a tracked canonical
+/// (the requested symbol does not exist); the absence is still rooted
+/// on `whole_hash` so a later declaration is detected.
+pub(crate) struct ObservedPreparedTypeDecl {
+    /// The prepared type declaration, or `None` when the requested
+    /// symbol is absent from the keyed canonical.
+    pub(crate) decl:
+        Option<std::sync::Arc<verter_semantic::analysis::type_solver::PreparedTypeDecl>>,
+    /// The keyed canonical the prepared decl was resolved for.
+    pub(crate) canonical_id: String,
+    /// The keyed canonical's `ShallowFileState::whole_hash` observed
+    /// at the value source — the content version both the value and
+    /// the fact signature root on.
+    pub(crate) whole_hash: crate::resolver_core::ResolverHash16,
 }
 
 /// Build the fact signature for a `MaterializeMemoDb` entry.

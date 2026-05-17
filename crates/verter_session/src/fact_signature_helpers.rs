@@ -37,9 +37,9 @@
 //! parse facts remain a refinement for cross-file consumers; the
 //! self-root below is the always-on same-file edit detector.
 //!
-//! ## Self-version rooting
+//! ## Self-version rooting (provenance-pure)
 //!
-//! Each of the three central helpers prepends a self-root
+//! Each of the three central helpers leads with a self-root
 //! `FactVersionRef::FileWholeHash` for the defining/key canonical it
 //! represents, then adds the path-precise parse facts above. The
 //! self-root is the whole-hash fact for the cache entry's OWN keyed
@@ -48,10 +48,25 @@
 //! [`validate_fact_signature_with_self_roots`] detects a
 //! same-canonical content edit and recomputes. The path-precise parse
 //! facts still gate sibling-edit reuse — the self-root augments them
-//! for correctness-first closure, it does not replace them. The
-//! self-root hash is sourced through the authoritative current-content
-//! oracle ([`ResolverContext::authoritative_current_content_hash`]),
-//! never the permissive `get_any` hash.
+//! for correctness-first closure, it does not replace them.
+//!
+//! The three central helpers are **provenance-pure**: they never
+//! consult the authoritative current-content oracle and never re-read
+//! current content. The keyed canonical's content identity is a
+//! caller-supplied `observed_hash` — the content version the
+//! producer's value was actually computed against, captured exactly
+//! once at the value source and threaded into the builder. Both the
+//! self-root `FileWholeHash` and every `Parse` fact are pinned to that
+//! observed version (`Parse` facts via
+//! [`parse_fact_ref_for_observed_current_content`], a content-addressed
+//! [`FileArtifactStore`](crate::file_artifact_store::FileArtifactStore)
+//! lookup). Re-reading the canonical's *current* hash inside a
+//! signature builder would open a publish race: an `upsert` landing
+//! between value-compute and signature-build would root a stale value
+//! by a fresh-looking current hash, which then validates on warm
+//! reads instead of missing. Each builder returns `None` — refusing
+//! shared-cache admission — when the observed version's parse-fact
+//! registry cannot be recovered.
 
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
@@ -245,59 +260,15 @@ fn zero_hash() -> Hash16 {
     [0u8; 16]
 }
 
-/// Recover the producer's hash for a parse-domain fact key on
-/// `canonical_id`. Returns `None` when the file has no `FileFacts`
-/// entry for its **current** content identity (truly absent file, or
-/// a content edit left only a stale artifact behind — the validator
-/// treats the missing fact as a miss).
-///
-/// Reads through [`ResolverContext::current_file_facts`], which pins
-/// the lookup on the canonical's authoritative current content hash.
-/// The permissive `FileArtifactStore::get_artifacts_any` is NOT used:
-/// it returns the latest cached registry regardless of content hash,
-/// so a fact hash sourced from a stale artifact would let the
-/// validator confirm a stale cache entry as valid once the upsert
-/// own-canonical drain is retired.
-fn lookup_parse_fact_hash(
-    ctx: &dyn ResolverContext,
-    canonical_id: &str,
-    key: &FactKey,
-    lane: FactLane,
-) -> Option<Hash16> {
-    let facts = ctx.current_file_facts(canonical_id)?;
-    let fact = facts.lookup(key)?;
-    Some(match lane {
-        FactLane::Semantic => fact.semantic_hash,
-        FactLane::Display => fact.display_hash,
-    })
-}
-
-/// Emit a `ParseFactRef` carrying the producer's current hash (or
-/// the zero sentinel when the fact is absent from the registry).
-fn parse_fact_ref(
-    ctx: &dyn ResolverContext,
-    canonical_id: &str,
-    key: FactKey,
-    lane: FactLane,
-) -> FactVersionRef {
-    let expected_hash =
-        lookup_parse_fact_hash(ctx, canonical_id, &key, lane).unwrap_or_else(zero_hash);
-    FactVersionRef::Parse(ParseFactRef {
-        canonical_id: canonical_id.to_string(),
-        key,
-        lane,
-        expected_hash,
-    })
-}
-
 /// Build a [`ParseFactRef`] for `(canonical_id, key, lane)` pinned to a
 /// caller-supplied **observed** content hash — a provenance-pure parse
 /// fact that records the file identity a producer actually observed,
 /// not whatever content is current at signature-build time.
 ///
-/// Unlike [`parse_fact_ref`] this does NOT consult
-/// [`ResolverContext::authoritative_current_content_hash`] or
-/// [`ResolverContext::current_file_facts`]. It performs a
+/// This does NOT consult
+/// [`ResolverContext::authoritative_current_content_hash`] and never
+/// reads whatever content is current at signature-build time. It
+/// performs a
 /// content-addressed [`FileArtifactStore`](crate::file_artifact_store::FileArtifactStore)
 /// lookup keyed on the passed `observed_content_hash`: the parse
 /// registry it reads is the one published for exactly that content
@@ -349,68 +320,48 @@ pub(crate) fn parse_fact_ref_for_observed_current_content(
     })
 }
 
-/// Build a `FileWholeHash` fact for `canonical_id` at its authoritative
-/// current content hash, or `None` when the canonical has no current
-/// content (unloaded / evicted at signature-build time).
-///
-/// The hash is sourced through the authoritative current-content oracle
-/// [`ResolverContext::authoritative_current_content_hash`] (the same
-/// oracle [`ResolverContext::current_file_facts`] pins on), never the
-/// permissive `get_any` hash: a hash sourced from a stale artifact
-/// would let the validator confirm a stale cache entry once the upsert
-/// own-canonical drain is retired.
-///
-/// This is the construction primitive for both a cache entry's
-/// *self-root* (the whole-hash of its OWN keyed canonical — see
-/// [`self_root_fact`]) and an *observed cross-file dependency*
-/// whole-hash. A cache entry that carries a `FileWholeHash` for a
-/// canonical it depends on detects a content edit to that canonical:
-/// any byte change shifts the whole hash and a warm read mismatches.
-pub(crate) fn current_content_whole_hash_fact(
-    ctx: &dyn ResolverContext,
-    canonical_id: &str,
-) -> Option<FactVersionRef> {
-    let hash = ctx.authoritative_current_content_hash(canonical_id)?;
-    Some(FactVersionRef::FileWholeHash {
-        canonical_id: canonical_id.to_string(),
-        hash,
-    })
-}
-
-/// Build a self-root `FileWholeHash` fact for `canonical_id` at its
-/// authoritative current content hash, or `None` when the canonical
-/// has no current content (unloaded / evicted at signature-build
-/// time).
+/// Emit a self-root `FileWholeHash` for `canonical_id` pinned to a
+/// caller-supplied **observed** content hash.
 ///
 /// A self-root is the whole-hash fact for a cache entry's OWN keyed
-/// canonical. Including it makes a cache entry detect a
-/// same-canonical content edit: any byte change to `canonical_id`
-/// shifts its whole hash, so a warm read that validates this fact
-/// strictly (via [`validate_fact_signature_with_self_roots`]) misses
-/// and recomputes. Thin alias of [`current_content_whole_hash_fact`]
-/// with a name that records the *self-root* role at the call site.
-fn self_root_fact(ctx: &dyn ResolverContext, canonical_id: &str) -> Option<FactVersionRef> {
-    current_content_whole_hash_fact(ctx, canonical_id)
+/// canonical. The hash is NOT re-read from current content: it is the
+/// content version the producer observed at the value source and
+/// threaded into the signature builder. Pinning the self-root to the
+/// observed version is what makes the value and its signature root on
+/// one content identity — a re-read of the canonical's *current* hash
+/// would root a stale value on post-edit content when an `upsert`
+/// lands in the publish race window.
+#[inline]
+fn observed_self_root_fact(canonical_id: &str, observed_hash: Hash16) -> FactVersionRef {
+    FactVersionRef::FileWholeHash {
+        canonical_id: canonical_id.to_string(),
+        hash: observed_hash,
+    }
 }
 
-/// Build a self-rooted, path-precise signature for a cache whose
+/// Build a provenance-pure, path-precise signature for a cache whose
 /// validity depends on a single MEMBER of an exporter type.
 ///
-/// The signature leads with a self-root `FileWholeHash` for
-/// `canonical_id`: any content edit to the declaring file shifts its
-/// whole hash and invalidates the entry. This is the correctness-first
-/// floor — a same-canonical edit is always detected.
-///
-/// It then adds the path-precise parse facts: the cold-compute reads
-/// the body of `member` declared inside the `exporter` type at
-/// `canonical_id`, so the signature observes BOTH
+/// The builder is **provenance-pure**: it never consults the
+/// authoritative current-content oracle and never re-reads current
+/// content. The keyed canonical's content identity is supplied by the
+/// caller as `observed_hash` — the content version the producer's
+/// value was actually computed against, captured once at the value
+/// source. The signature leads with a self-root `FileWholeHash` pinned
+/// to that observed hash, then adds the path-precise parse facts:
 /// `MemberPresence(exporter, member, space)` (header fact — bumps on
-/// add/remove/rename/kind-change) AND `Member(exporter, member,
-/// space)` (body fingerprint — bumps on body edit). Removing the
-/// named member drops both parse facts (the validator treats absence
-/// as a sentinel-hash mismatch). The parse facts remain a refinement
-/// for cross-file consumers and future member-precise invalidation;
-/// the self-root is the always-on same-file edit detector.
+/// add/remove/rename/kind-change) and `Member(exporter, member,
+/// space)` (body fingerprint — bumps on body edit). Both parse facts
+/// are content-addressed against `observed_hash` via
+/// [`parse_fact_ref_for_observed_current_content`] — they record the
+/// fact hashes live when the producer observed the file, not whatever
+/// is current at signature-build time.
+///
+/// Returns `None` when the observed version's parse-fact registry
+/// cannot be recovered (no content-addressed artifact for
+/// `(canonical_id, observed_hash)`). A `None` result refuses
+/// shared-cache admission — the caller still returns the
+/// freshly-computed value, it only forgoes the shared cache.
 ///
 /// Use this helper for caches keyed on `(canonical, exporter,
 /// member, space)` — e.g. `PreparedMemberDb`, slot-binding member
@@ -421,7 +372,8 @@ pub(crate) fn fact_signature_for_canonical_member(
     exporter: &str,
     member: &str,
     space: SymbolSpace,
-) -> Arc<[FactVersionRef]> {
+    observed_hash: Hash16,
+) -> Option<Arc<[FactVersionRef]>> {
     let exporter_name = InternedName::from(exporter);
     let member_name = InternedName::from(member);
     let presence_key = FactKey::MemberPresence {
@@ -434,42 +386,41 @@ pub(crate) fn fact_signature_for_canonical_member(
         name: member_name,
         space,
     };
-    // Prepend the self-root `FileWholeHash` for the declaring
-    // canonical so a same-canonical content edit invalidates the
-    // entry, then add the path-precise `MemberPresence` / `Member`
-    // parse facts.
-    let mut entries: Vec<FactVersionRef> = Vec::with_capacity(3);
-    if let Some(root) = self_root_fact(ctx, canonical_id) {
-        entries.push(root);
-    }
-    entries.push(parse_fact_ref(
-        ctx,
-        canonical_id,
-        presence_key,
-        FactLane::Semantic,
-    ));
-    entries.push(parse_fact_ref(
-        ctx,
-        canonical_id,
-        body_key,
-        FactLane::Semantic,
-    ));
-    Arc::from(entries)
+    // Lead with the observed-hash self-root `FileWholeHash`, then add
+    // the path-precise `MemberPresence` / `Member` parse facts pinned
+    // to the SAME observed content version.
+    let entries: Vec<FactVersionRef> = vec![
+        observed_self_root_fact(canonical_id, observed_hash),
+        FactVersionRef::Parse(parse_fact_ref_for_observed_current_content(
+            ctx,
+            canonical_id,
+            observed_hash,
+            presence_key,
+            FactLane::Semantic,
+        )?),
+        FactVersionRef::Parse(parse_fact_ref_for_observed_current_content(
+            ctx,
+            canonical_id,
+            observed_hash,
+            body_key,
+            FactLane::Semantic,
+        )?),
+    ];
+    Some(Arc::from(entries))
 }
 
-/// Build a self-rooted signature for a cache whose validity depends
-/// on the IDENTITY of a top-level type declared at `canonical_id` —
-/// the Family A producer pattern for caches keyed on `(canonical,
-/// type_name)`.
+/// Build a provenance-pure signature for a cache whose validity
+/// depends on the IDENTITY of a top-level type declared at
+/// `canonical_id` — the Family A producer pattern for caches keyed on
+/// `(canonical, type_name)`.
 ///
-/// The signature leads with a self-root `FileWholeHash` for
-/// `canonical_id`: any content edit to the declaring file shifts its
-/// whole hash and invalidates the entry (the correctness-first floor —
-/// a same-canonical edit is always detected).
-///
-/// It then adds the top-level-identity parse facts. The cold-compute
-/// consumes the declaration of `type_name` (its declaration shape and
-/// member list), so the signature observes:
+/// The builder is **provenance-pure**: it never consults the
+/// authoritative current-content oracle and never re-reads current
+/// content. The keyed canonical's content identity is supplied by the
+/// caller as `observed_hash` — the content version the producer's
+/// value was computed against, captured once at the value source. The
+/// signature leads with a self-root `FileWholeHash` pinned to that
+/// observed hash, then adds the top-level-identity parse facts:
 /// - `Export(name, space)` — present iff the type is exported under
 ///   that name.
 /// - `LocalDecl(name, space)` — present iff the type is declared
@@ -477,18 +428,19 @@ pub(crate) fn fact_signature_for_canonical_member(
 /// - `MemberShape(exporter=name, space)` — the ordered member list
 ///   fingerprint; bumps when members are added/removed/renamed.
 ///
-/// Editing one member's body changes `Member(name, m, space)` (not
-/// observed here) — but the self-root catches it for the same-file
-/// case, and cross-file member-precise invalidation routes through
-/// [`fact_signature_for_canonical_member`]. This helper covers caches
-/// whose validity is "the top-level type exists and has THIS
-/// member-shape".
+/// All three parse facts are content-addressed against `observed_hash`
+/// via [`parse_fact_ref_for_observed_current_content`].
+///
+/// Returns `None` when the observed version's parse-fact registry
+/// cannot be recovered. A `None` result refuses shared-cache admission
+/// — the caller still returns the freshly-computed value.
 pub(crate) fn fact_signature_for_exported_type(
     ctx: &dyn ResolverContext,
     canonical_id: &str,
     type_name: &str,
     space: SymbolSpace,
-) -> Arc<[FactVersionRef]> {
+    observed_hash: Hash16,
+) -> Option<Arc<[FactVersionRef]>> {
     let name = InternedName::from(type_name);
     let export_key = FactKey::Export {
         name: name.clone(),
@@ -502,72 +454,75 @@ pub(crate) fn fact_signature_for_exported_type(
         exporter: name,
         space,
     };
-    // Prepend the self-root `FileWholeHash` for the defining
-    // canonical so a same-canonical content edit invalidates the
-    // entry, then add the top-level-identity `Export` / `LocalDecl` /
-    // `MemberShape` parse facts.
-    let mut entries: Vec<FactVersionRef> = Vec::with_capacity(4);
-    if let Some(root) = self_root_fact(ctx, canonical_id) {
-        entries.push(root);
-    }
-    entries.push(parse_fact_ref(
-        ctx,
-        canonical_id,
-        export_key,
-        FactLane::Semantic,
-    ));
-    entries.push(parse_fact_ref(
-        ctx,
-        canonical_id,
-        local_decl_key,
-        FactLane::Semantic,
-    ));
-    entries.push(parse_fact_ref(
-        ctx,
-        canonical_id,
-        member_shape_key,
-        FactLane::Semantic,
-    ));
-    Arc::from(entries)
+    // Lead with the observed-hash self-root `FileWholeHash`, then add
+    // the top-level-identity `Export` / `LocalDecl` / `MemberShape`
+    // parse facts pinned to the SAME observed content version.
+    let entries: Vec<FactVersionRef> = vec![
+        observed_self_root_fact(canonical_id, observed_hash),
+        FactVersionRef::Parse(parse_fact_ref_for_observed_current_content(
+            ctx,
+            canonical_id,
+            observed_hash,
+            export_key,
+            FactLane::Semantic,
+        )?),
+        FactVersionRef::Parse(parse_fact_ref_for_observed_current_content(
+            ctx,
+            canonical_id,
+            observed_hash,
+            local_decl_key,
+            FactLane::Semantic,
+        )?),
+        FactVersionRef::Parse(parse_fact_ref_for_observed_current_content(
+            ctx,
+            canonical_id,
+            observed_hash,
+            member_shape_key,
+            FactLane::Semantic,
+        )?),
+    ];
+    Some(Arc::from(entries))
 }
 
-/// Build a self-rooted whole-canonical signature for a cache whose
-/// cold-compute reads the file's surface fingerprint (e.g. a
+/// Build a provenance-pure, whole-canonical signature for a cache
+/// whose cold-compute reads the file's surface fingerprint (e.g. a
 /// binding-walker that enumerates every export).
 ///
-/// The signature leads with a self-root `FileWholeHash` for
-/// `canonical_id` (any content edit to the keyed file invalidates the
-/// entry — the correctness-first floor), then observes
-/// `SyntacticExportSet`: adding or removing exports shifts that parse
-/// fact, which remains a refinement for cross-file consumers.
+/// The builder is **provenance-pure**: it never re-reads current
+/// content. The keyed canonical's content identity is supplied by the
+/// caller as `observed_hash` — the content version the value was
+/// computed against, captured once at the value source. The signature
+/// leads with a self-root `FileWholeHash` pinned to that observed
+/// hash, then observes the `SyntacticExportSet` parse fact
+/// content-addressed against the SAME observed version via
+/// [`parse_fact_ref_for_observed_current_content`]. Returns `None`
+/// when the observed version's parse-fact registry cannot be
+/// recovered, refusing shared-cache admission.
 ///
 /// Test-only: no production producer composes a whole-surface
-/// signature this way. A producer whose value was computed against a
-/// specific observed file version must pin its self-root and
-/// `SyntacticExportSet` parse fact to that observed content hash via
-/// [`parse_fact_ref_for_observed_current_content`] — re-reading the
-/// current content here would open a publish race. The
-/// `query_identity_self_root_substrate_tests` substrate suite
-/// exercises this helper to characterise the self-root prepend.
+/// signature this way. The `query_identity_self_root_substrate_tests`
+/// substrate suite exercises this helper to characterise the
+/// observed-hash self-root prepend.
 #[cfg(test)]
 pub(crate) fn fact_signature_for_canonical_surface(
     ctx: &dyn ResolverContext,
     canonical_id: &str,
-) -> Arc<[FactVersionRef]> {
-    // Prepend the self-root `FileWholeHash` for the keyed canonical so
-    // a same-canonical content edit invalidates the entry, then add
-    // the `SyntacticExportSet` surface parse fact.
-    let mut entries: Vec<FactVersionRef> = Vec::with_capacity(2);
-    if let Some(root) = self_root_fact(ctx, canonical_id) {
-        entries.push(root);
-    }
-    entries.push(parse_fact_ref(
-        ctx,
-        canonical_id,
-        FactKey::SyntacticExportSet,
-        FactLane::Semantic,
-    ));
-    Arc::from(entries)
+    observed_hash: Hash16,
+) -> Option<Arc<[FactVersionRef]>> {
+    // Lead with the observed-hash self-root `FileWholeHash`, then add
+    // the `SyntacticExportSet` surface parse fact pinned to the SAME
+    // observed content version.
+    let entries: Vec<FactVersionRef> = vec![
+        observed_self_root_fact(canonical_id, observed_hash),
+        FactVersionRef::Parse(parse_fact_ref_for_observed_current_content(
+            ctx,
+            canonical_id,
+            observed_hash,
+            FactKey::SyntacticExportSet,
+            FactLane::Semantic,
+        )?),
+    ];
+    Some(Arc::from(entries))
 }
 
 /// Empty signature constructor for cache entries published outside

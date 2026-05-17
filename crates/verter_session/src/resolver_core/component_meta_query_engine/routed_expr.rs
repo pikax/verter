@@ -282,6 +282,15 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             route: route.clone(),
         };
         // Step 3 closure: write-through to ctx-owned RoutedExprSurfaceDb.
+        //
+        // Observe the keyed canonical's content version ONCE here,
+        // before the closure runs — threaded into the provenance-pure
+        // signature builder so the entry's self-root roots on the
+        // observed version, never a current-content re-read.
+        let observed_keyed_hash = self
+            .ctx
+            .shallow_file_state(scope_canonical_id)
+            .map(|state| state.whole_hash);
         let arc_key =
             arc_routed_expr_surface_cache_key(scope_canonical_id, root_symbol, route.clone());
         let ctx = self.ctx;
@@ -294,12 +303,14 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             // root symbol `root_symbol` declared at `scope_canonical_id`
             // under the route. Observe top-level type identity so the
             // consumer invalidates on shape changes but not on
-            // unrelated member-body edits.
+            // unrelated member-body edits. `?` on a `None` observation
+            // or builder result refuses shared-cache admission.
             let fact_sig = engine_fact_signature_for_exported_type(
                 ctx,
                 captured_canonical.as_str(),
                 captured_root.as_str(),
-            );
+                observed_keyed_hash?,
+            )?;
             Some((captured_value, fact_sig))
         });
         self.routed_expr_surface_cache
@@ -1327,6 +1338,16 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             }
         }
 
+        // Observe the keyed canonical's content version ONCE here,
+        // before the member value is computed — threaded into the
+        // provenance-pure signature builder by the publish helper so
+        // the published member and its signature root on one content
+        // version.
+        let observed_keyed_hash = self
+            .ctx
+            .shallow_file_state(scope_canonical_id)
+            .map(|state| state.whole_hash);
+
         let visit_key = (scope_canonical_id.to_string(), symbol_name.to_string());
         if !visited.insert(visit_key.clone()) {
             return None;
@@ -1361,6 +1382,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             crate::resolver_core::cache_keys::PreparedMemberCacheKind::InheritedRoute,
             &FxHashMap::default(),
             &result,
+            observed_keyed_hash,
         );
         self.prepared_member_cache
             .borrow_mut()

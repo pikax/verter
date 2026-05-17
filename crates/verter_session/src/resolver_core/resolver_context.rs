@@ -196,48 +196,6 @@ pub(crate) trait ResolverContext: sealed::Sealed {
             .get_for_current_content(canonical, current_hash)
     }
 
-    /// Content-pinned [`FileFacts`](crate::file_artifact_store::FileFacts)
-    /// lookup — the single current-content fact-signature read path.
-    ///
-    /// Resolves the canonical's authoritative current content hash via
-    /// [`Self::authoritative_current_content_hash`] (no `get_any`
-    /// fallback; overlay-aware under `SessionResolverContext`) and
-    /// reads the file's parse-domain fact registry pinned to the full
-    /// current identity `(canonical, current_content_hash,
-    /// parse_env_hash, parser_version)`. Returns `None` when the
-    /// canonical has no authoritative current content hash OR when the
-    /// only cached artifact is a stale candidate for an older content
-    /// hash.
-    ///
-    /// Fact-signature construction MUST read a dependency's current
-    /// parse facts through here, NOT through the permissive
-    /// `FileArtifactStore::get_artifacts_any`. `get_artifacts_any`
-    /// returns the latest cached `FileArtifacts` regardless of content
-    /// hash; once the upsert-time own-canonical drain is retired a
-    /// stale artifact can linger past a content edit, and recording a
-    /// fact hash sourced from that stale registry would let the
-    /// validator later confirm a stale cache entry as valid. Pinning
-    /// the read to the authoritative current hash makes a same-content
-    /// edit a genuine miss instead.
-    ///
-    /// Defaulted so the base implementer ([`crate::VerterHost`]) and
-    /// the overlay-aware `SessionResolverContext` both inherit the
-    /// identical pinned-read body; only the hash source differs, and
-    /// that difference lives in
-    /// [`Self::authoritative_current_content_hash`].
-    fn current_file_facts(
-        &self,
-        canonical: &str,
-    ) -> Option<Arc<crate::file_artifact_store::FileFacts>> {
-        let current_hash = self.authoritative_current_content_hash(canonical)?;
-        let key =
-            crate::file_artifact_store::FileArtifactKey::legacy(Arc::from(canonical), current_hash);
-        self.project_type_store()
-            .indexed()
-            .get_artifacts(&key)
-            .map(|artifacts| Arc::clone(&artifacts.facts))
-    }
-
     fn resolver_store_view(&self) -> HostStoreView;
 
     fn project_type_store(&self) -> &Arc<ProjectTypeStore>;

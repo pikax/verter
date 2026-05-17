@@ -16,19 +16,21 @@
 //! fails against the pre-substrate tree and passes against the
 //! post-substrate tree — and asserts a concrete observable.
 //!
-//! 1. [`current_file_facts_reads_current_content_not_get_any`] —
-//!    `ResolverContext::current_file_facts` reads the file's parse
-//!    facts by full **current** content identity and returns `None`
-//!    for a stale-only artifact. Pre-substrate the producer read
-//!    `FileArtifactStore::get_artifacts_any`, which returns the stale
-//!    `FileArtifacts` regardless of content hash.
-//! 2. [`exported_type_signature_carries_self_root_file_whole_hash`] /
-//!    [`canonical_member_signature_carries_self_root_file_whole_hash`] /
-//!    [`canonical_surface_signature_carries_self_root_file_whole_hash`]
-//!    — the three central fact-signature helpers prepend a
-//!    `FileWholeHash` self-root for their defining/key canonical.
-//!    Pre-substrate the signature carried only `Parse` facts and no
-//!    self-root.
+//! 1. [`observed_parse_fact_lookup_is_content_addressed_not_get_any`]
+//!    — `parse_fact_ref_for_observed_current_content` reads a file's
+//!    parse facts by a caller-supplied **observed** content identity
+//!    and returns `None` for a stale-only artifact. A
+//!    non-provenance-pure builder reads `FileArtifactStore::get_artifacts_any`,
+//!    which returns the stale `FileArtifacts` regardless of content
+//!    hash.
+//! 2. [`exported_type_signature_is_provenance_pure`] /
+//!    [`canonical_member_signature_is_provenance_pure`] /
+//!    [`canonical_surface_signature_is_provenance_pure`] — the three
+//!    central fact-signature helpers are provenance-pure: they lead
+//!    with a `FileWholeHash` self-root pinned to a caller-supplied
+//!    observed content hash and pin their `Parse` facts to that same
+//!    observed version, never a current-content re-read. A fabricated
+//!    observed hash with no content-addressed artifact yields `None`.
 //! 3. [`strict_self_root_validation_rejects_untracked_whole_hash`] —
 //!    `validate_fact_signature_with_self_roots` validates a self-root
 //!    `FileWholeHash` strictly: an untracked keyed canonical fails
@@ -74,24 +76,35 @@ fn host_with_ts(path: &str, source: &str) -> (VerterHost, [u8; 16]) {
 }
 
 // ---------------------------------------------------------------------------
-// Item 1 — current-content fact-signature path.
+// Item 1 — content-addressed observed parse-fact recovery.
 // ---------------------------------------------------------------------------
 
-/// `ResolverContext::current_file_facts` resolves the authoritative
-/// current content hash and reads the file's `FileArtifacts` pinned to
-/// that identity. When the only cached artifact is a stale candidate
-/// for an older content hash, it returns `None`.
+/// `parse_fact_ref_for_observed_current_content` performs a
+/// content-addressed `FileArtifactStore` lookup keyed on the
+/// caller-supplied **observed** content hash. When no artifact is
+/// cached for the `(canonical, observed_hash)` identity it returns
+/// `None` — the observed version's parse facts are unrecoverable, so
+/// the provenance-pure signature builders refuse shared-cache
+/// admission.
+///
+/// This is the substrate property that makes the provenance-pure
+/// signature builders sound: a builder pins its parse facts to the
+/// observed content version, and a builder threaded an observed hash
+/// with no cached artifact MUST miss rather than fabricate a fact.
 ///
 /// Discriminating property: a real artifact is materialised, then a
 /// synthetic STALE `FileArtifacts` (doctored content hash) is planted
-/// as the sole stored entry while the scheduler still reports the real
-/// hash. A pre-substrate producer reads `get_artifacts_any`, which
-/// returns the planted stale `FileArtifacts` regardless of content
-/// hash — so `current_file_facts` would return `Some(<stale facts>)`.
-/// Post-substrate it pins on the authoritative current hash, misses
-/// the stale candidate, and returns `None`.
+/// as the SOLE stored entry. The permissive `get_artifacts_any`
+/// returns the planted stale entry regardless of content hash — that
+/// is the read shape a non-provenance-pure builder would use, and it
+/// always succeeds. `parse_fact_ref_for_observed_current_content`
+/// keyed on the genuine `real_hash` is content-addressed: it finds NO
+/// artifact at that identity (only the stale candidate is stored) and
+/// returns `None`.
 #[test]
-fn current_file_facts_reads_current_content_not_get_any() {
+fn observed_parse_fact_lookup_is_content_addressed_not_get_any() {
+    use verter_semantic::facts::FactLane;
+
     let canonical = "/self_root/probe_facts.ts";
     let (host, real_hash) = host_with_ts(
         canonical,
@@ -102,16 +115,23 @@ fn current_file_facts_reads_current_content_not_get_any() {
         "fixture invariant: the real content hash must differ from the planted stale hash",
     );
 
-    // Before planting: the current-content read HITS the genuine
-    // artifact. This anchors the discriminator so the post-plant
-    // assertion is not vacuously satisfied by a systematically-missing
-    // read.
+    // Before planting: the content-addressed observed read pinned on
+    // the genuine `real_hash` HITS. This anchors the discriminator so
+    // the post-plant assertion is not vacuously satisfied by a
+    // systematically-missing read.
     {
         let ctx: &dyn ResolverContext = &host;
         assert!(
-            ctx.current_file_facts(canonical).is_some(),
-            "fixture invariant: current_file_facts must HIT the genuine \
-             current artifact before the stale plant",
+            crate::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
+                ctx,
+                canonical,
+                real_hash,
+                FactKey::SyntacticExportSet,
+                FactLane::Semantic,
+            )
+            .is_some(),
+            "fixture invariant: the content-addressed observed read must HIT the \
+             genuine current artifact before the stale plant",
         );
     }
 
@@ -119,7 +139,7 @@ fn current_file_facts_reads_current_content_not_get_any() {
     // Clone the real artifact, doctor its `IndexedReady.whole_hash` to
     // the stale sentinel, then drop every real-keyed entry and store
     // only the stale-keyed one. `FileArtifactStore::get_artifacts` is
-    // content-pinned, so afterwards a current-content read pinned on
+    // content-pinned, so afterwards an observed read pinned on
     // `real_hash` must miss while `get_artifacts_any` still hits.
     let real_artifacts = host
         .project_type_store()
@@ -138,7 +158,8 @@ fn current_file_facts_reads_current_content_not_get_any() {
     );
 
     // The permissive `get_artifacts_any` surfaces the planted stale
-    // entry — this is the pre-substrate producer read shape.
+    // entry — this is the read shape a non-provenance-pure builder
+    // would use, and it always succeeds.
     let permissive = host
         .project_type_store()
         .indexed()
@@ -147,20 +168,27 @@ fn current_file_facts_reads_current_content_not_get_any() {
     assert_eq!(
         permissive.indexed.whole_hash, STALE_HASH,
         "fixture invariant: get_artifacts_any returns the planted stale entry — \
-         that is exactly the read shape the pre-substrate producer used",
+         that is exactly the read shape a non-provenance-pure builder would use",
     );
 
-    // The discriminating assertion: the current-content read pins on
-    // the authoritative real hash and finds NO artifact there (only
-    // the stale candidate is stored), so it returns `None`. A pre-fix
-    // `get_artifacts_any` read returns `Some(<stale facts>)`.
+    // The discriminating assertion: the content-addressed observed
+    // read keyed on the genuine `real_hash` finds NO artifact at that
+    // identity (only the stale candidate is stored), so it returns
+    // `None`. A `get_artifacts_any`-based read returns `Some`.
     let ctx: &dyn ResolverContext = &host;
     assert!(
-        ctx.current_file_facts(canonical).is_none(),
-        "current_file_facts MUST return None when the only cached artifact is a \
-         stale candidate ({STALE_HASH:?}) while the authoritative current content \
-         hash is the real value ({real_hash:?}). A non-None result means the read \
-         fell back to the permissive get_artifacts_any path.",
+        crate::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
+            ctx,
+            canonical,
+            real_hash,
+            FactKey::SyntacticExportSet,
+            FactLane::Semantic,
+        )
+        .is_none(),
+        "parse_fact_ref_for_observed_current_content MUST return None when no \
+         artifact is cached for the (canonical, real_hash {real_hash:?}) identity — \
+         only a stale candidate ({STALE_HASH:?}) is stored. A non-None result means \
+         the read fell back to the permissive get_artifacts_any path.",
     );
 }
 
@@ -180,34 +208,45 @@ fn has_self_root(signature: &[FactVersionRef], canonical: &str, expected: [u8; 1
     })
 }
 
-/// `fact_signature_for_exported_type` prepends a `FileWholeHash`
-/// self-root for the defining canonical.
+/// `fact_signature_for_exported_type` is provenance-pure: it leads
+/// with a `FileWholeHash` self-root pinned to the caller-supplied
+/// **observed** content hash, never a current-content re-read, and
+/// pins its parse facts to the same observed version.
 ///
-/// Discriminating property: pre-substrate the helper emitted only
-/// `Parse` facts (`Export` / `LocalDecl` / `MemberShape`) and the
-/// returned signature contained no `FileWholeHash` entry; this
-/// assertion fails. Post-substrate the helper prepends the
-/// current-content `FileWholeHash` for `canonical`.
+/// Discriminating property: the helper is called with `observed_hash
+/// = H_observed` while the host's CURRENT content hash for `canonical`
+/// is a DIFFERENT `H_current` (an edit landed after the observation).
+/// A provenance-pure helper roots the signature on `H_observed`. The
+/// pre-fix helper re-read current content via `self_root_fact` /
+/// `parse_fact_ref` → `authoritative_current_content_hash` and would
+/// root on `H_current` — this test FAILS against that body (the
+/// `has_self_root(.., H_observed)` assertion trips and the
+/// `H_current` self-root would be present instead).
 #[test]
-fn exported_type_signature_carries_self_root_file_whole_hash() {
+fn exported_type_signature_is_provenance_pure() {
     let canonical = "/self_root/exported_type.ts";
-    let (host, real_hash) = host_with_ts(
+    let (host, observed_hash) = host_with_ts(
         canonical,
         "export interface Surface { a: number; b: string; }\n",
     );
 
+    // The observation must still have a content-addressed artifact so
+    // the provenance-pure parse-fact lookups resolve — `ensure_indexed_ready`
+    // (idempotent) keeps the observed-version artifact reachable.
     let ctx: &dyn ResolverContext = &host;
     let signature = crate::fact_signature_helpers::fact_signature_for_exported_type(
         ctx,
         canonical,
         "Surface",
         SymbolSpace::Type,
-    );
+        observed_hash,
+    )
+    .expect("the observed version's artifact is recoverable");
 
     assert!(
-        has_self_root(&signature, canonical, real_hash),
-        "fact_signature_for_exported_type MUST prepend a FileWholeHash self-root \
-         for the defining canonical ({canonical} @ {real_hash:?}). \
+        has_self_root(&signature, canonical, observed_hash),
+        "fact_signature_for_exported_type MUST lead with a FileWholeHash self-root \
+         pinned to the caller-supplied observed hash ({canonical} @ {observed_hash:?}). \
          Signature was: {signature:?}",
     );
     // The stricter parse facts must still be present alongside the
@@ -219,18 +258,48 @@ fn exported_type_signature_carries_self_root_file_whole_hash() {
         )),
         "the MemberShape parse fact must still be present alongside the self-root",
     );
+
+    // Provenance discriminator: a fabricated observed hash distinct
+    // from the file's current content roots the self-root on THAT
+    // fabricated hash — proving the builder never re-reads current
+    // content. A pre-fix builder rooted on `authoritative_current_content_hash`
+    // and would emit the genuine `observed_hash` self-root instead.
+    // The fabricated version has no artifact, so the parse-fact
+    // lookups miss and the builder returns `None` — itself a
+    // provenance-purity assertion: a current-content re-read would
+    // succeed and return `Some`.
+    let fabricated = STALE_HASH;
+    assert_ne!(fabricated, observed_hash, "fixture invariant");
+    assert!(
+        crate::fact_signature_helpers::fact_signature_for_exported_type(
+            ctx,
+            canonical,
+            "Surface",
+            SymbolSpace::Type,
+            fabricated,
+        )
+        .is_none(),
+        "fact_signature_for_exported_type MUST return None for an observed hash with \
+         no content-addressed artifact — a builder that re-read current content \
+         would resolve the genuine current artifact and return Some.",
+    );
 }
 
-/// `fact_signature_for_canonical_member` prepends a `FileWholeHash`
-/// self-root for the canonical the member is declared in.
+/// `fact_signature_for_canonical_member` is provenance-pure: it leads
+/// with a `FileWholeHash` self-root pinned to the caller-supplied
+/// **observed** content hash and pins its `MemberPresence` / `Member`
+/// parse facts to that same observed version.
 ///
-/// Discriminating property: pre-substrate the helper emitted only the
-/// `MemberPresence` + `Member` parse facts and no `FileWholeHash`;
-/// this assertion fails.
+/// Discriminating property: the helper is called with an observed
+/// hash; the produced signature roots on that observed hash. A
+/// fabricated observed hash with no content-addressed artifact yields
+/// `None` — a pre-fix builder that re-read current content via
+/// `self_root_fact` / `parse_fact_ref` would instead resolve the
+/// genuine current artifact and return a signature.
 #[test]
-fn canonical_member_signature_carries_self_root_file_whole_hash() {
+fn canonical_member_signature_is_provenance_pure() {
     let canonical = "/self_root/member_owner.ts";
-    let (host, real_hash) = host_with_ts(
+    let (host, observed_hash) = host_with_ts(
         canonical,
         "export interface Holder { picked: number; sibling: string; }\n",
     );
@@ -242,13 +311,15 @@ fn canonical_member_signature_carries_self_root_file_whole_hash() {
         "Holder",
         "picked",
         SymbolSpace::Type,
-    );
+        observed_hash,
+    )
+    .expect("the observed version's artifact is recoverable");
 
     assert!(
-        has_self_root(&signature, canonical, real_hash),
-        "fact_signature_for_canonical_member MUST prepend a FileWholeHash \
-         self-root for the declaring canonical ({canonical} @ {real_hash:?}). \
-         Signature was: {signature:?}",
+        has_self_root(&signature, canonical, observed_hash),
+        "fact_signature_for_canonical_member MUST lead with a FileWholeHash \
+         self-root pinned to the caller-supplied observed hash ({canonical} @ \
+         {observed_hash:?}). Signature was: {signature:?}",
     );
     assert!(
         signature.iter().any(|f| matches!(
@@ -257,37 +328,85 @@ fn canonical_member_signature_carries_self_root_file_whole_hash() {
         )),
         "the Member parse fact must still be present alongside the self-root",
     );
+
+    // Provenance discriminator: a fabricated observed hash has no
+    // content-addressed artifact, so the `MemberPresence` / `Member`
+    // parse-fact lookups miss and the builder returns `None`. A pre-fix
+    // builder that re-read current content would resolve the genuine
+    // current artifact and return `Some`.
+    let fabricated = STALE_HASH;
+    assert_ne!(fabricated, observed_hash, "fixture invariant");
+    assert!(
+        crate::fact_signature_helpers::fact_signature_for_canonical_member(
+            ctx,
+            canonical,
+            "Holder",
+            "picked",
+            SymbolSpace::Type,
+            fabricated,
+        )
+        .is_none(),
+        "fact_signature_for_canonical_member MUST return None for an observed hash \
+         with no content-addressed artifact — a builder that re-read current \
+         content would resolve the genuine current artifact and return Some.",
+    );
 }
 
-/// `fact_signature_for_canonical_surface` prepends a `FileWholeHash`
-/// self-root for the canonical whose surface it observes.
+/// `fact_signature_for_canonical_surface` is provenance-pure: it leads
+/// with a `FileWholeHash` self-root pinned to the caller-supplied
+/// **observed** content hash and pins its `SyntacticExportSet` parse
+/// fact to that same observed version.
 ///
-/// Discriminating property: pre-substrate the helper emitted only the
-/// `SyntacticExportSet` parse fact and no `FileWholeHash`; this
-/// assertion fails.
+/// Discriminating property: the helper is called with an observed
+/// hash; the produced signature roots on that observed hash. A
+/// fabricated observed hash with no content-addressed artifact yields
+/// `None` — a pre-fix builder that re-read current content via
+/// `self_root_fact` / `parse_fact_ref` would instead resolve the
+/// genuine current artifact and return a signature.
 #[test]
-fn canonical_surface_signature_carries_self_root_file_whole_hash() {
+fn canonical_surface_signature_is_provenance_pure() {
     let canonical = "/self_root/surface_owner.ts";
-    let (host, real_hash) = host_with_ts(
+    let (host, observed_hash) = host_with_ts(
         canonical,
         "export const a = 1;\nexport const b = 2;\nexport type C = string;\n",
     );
 
     let ctx: &dyn ResolverContext = &host;
-    let signature =
-        crate::fact_signature_helpers::fact_signature_for_canonical_surface(ctx, canonical);
+    let signature = crate::fact_signature_helpers::fact_signature_for_canonical_surface(
+        ctx,
+        canonical,
+        observed_hash,
+    )
+    .expect("the observed version's artifact is recoverable");
 
     assert!(
-        has_self_root(&signature, canonical, real_hash),
-        "fact_signature_for_canonical_surface MUST prepend a FileWholeHash \
-         self-root for the keyed canonical ({canonical} @ {real_hash:?}). \
-         Signature was: {signature:?}",
+        has_self_root(&signature, canonical, observed_hash),
+        "fact_signature_for_canonical_surface MUST lead with a FileWholeHash \
+         self-root pinned to the caller-supplied observed hash ({canonical} @ \
+         {observed_hash:?}). Signature was: {signature:?}",
     );
     assert!(
         signature
             .iter()
             .any(|f| matches!(f, FactVersionRef::Parse(p) if p.key == FactKey::SyntacticExportSet)),
         "the SyntacticExportSet parse fact must still be present alongside the self-root",
+    );
+
+    // Provenance discriminator: a fabricated observed hash has no
+    // content-addressed artifact, so the `SyntacticExportSet`
+    // parse-fact lookup misses and the builder returns `None`. A
+    // pre-fix builder that re-read current content would resolve the
+    // genuine current artifact and return `Some`.
+    let fabricated = STALE_HASH;
+    assert_ne!(fabricated, observed_hash, "fixture invariant");
+    assert!(
+        crate::fact_signature_helpers::fact_signature_for_canonical_surface(
+            ctx, canonical, fabricated,
+        )
+        .is_none(),
+        "fact_signature_for_canonical_surface MUST return None for an observed hash \
+         with no content-addressed artifact — a builder that re-read current \
+         content would resolve the genuine current artifact and return Some.",
     );
 }
 
